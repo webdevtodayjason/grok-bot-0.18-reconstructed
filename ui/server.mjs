@@ -12,6 +12,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import path from "node:path";
 
 const GATEWAY = (process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:1340").replace(/\/+$/, "");
@@ -91,6 +92,32 @@ const server = createServer(async (req, res) => {
       const html = await readFile(path.join(HERE, "index.html"));
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       return res.end(html);
+    }
+    if (req.method === "GET" && url.pathname === "/clients") {
+      // The box is shared: the desktop app talks to this same gateway. Anyone driving
+      // it sees your writes. Count the sockets so the page can say so out loud.
+      const port = new URL(GATEWAY).port || "80";
+      // lsof truncates COMMAND to 9 chars ("Grok B"), so take the pids and ask ps.
+      const pids = await new Promise((resolve) => {
+        execFile("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:ESTABLISHED"], (err, out) => {
+          if (!out) return resolve([]);
+          const found = new Set();
+          for (const line of out.split("\n").slice(1)) {
+            const [cmd, pid] = line.split(/\s+/);
+            if (!pid || cmd?.startsWith("com.docke")) continue;
+            if (Number(pid) !== process.pid) found.add(pid);
+          }
+          resolve([...found]);
+        });
+      });
+      const peers = await Promise.all(pids.map((pid) => new Promise((resolve) => {
+        execFile("ps", ["-p", pid, "-o", "comm="], (err, out) => {
+          const path = (out ?? "").trim();
+          resolve(path ? (path.split("/").find((seg) => seg.endsWith(".app"))?.replace(/\.app$/, "") ?? path.split("/").pop()) : null);
+        });
+      })));
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ peers: [...new Set(peers.filter(Boolean))] }));
     }
     if (req.method === "GET" && url.pathname === "/health") {
       const upstream = await fetch(`${GATEWAY}/health`, { headers: upstreamHeaders() });

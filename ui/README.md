@@ -16,3 +16,11 @@ It reads that token from the local-docker connector's credential file
 `SAND_HOST_GATEWAY_URL` / `SAND_UI_PORT`.
 
 Loopback only. The token is in this process; do not bind it off-box.
+
+## The box is shared
+
+The desktop app connects to this same gateway. Whatever you create, prompt, or delete
+here lands in its roster too — one host, one set of agents. `GET /clients` resolves the
+pids on the gateway port to real app names (lsof truncates COMMAND to 9 chars, so
+`First Mate.app` shows up as `Grok B`; the endpoint asks `ps` instead), and the page
+shows a Shared box card whenever something else is attached.

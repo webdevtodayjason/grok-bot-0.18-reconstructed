@@ -223,6 +223,10 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
         border: 1px solid var(--edge); margin-bottom: 9px; }
 .tray .t { font-size: 13px; font-weight: 500; }
 .tray .d { font-size: 11.5px; color: var(--ink-2); margin-top: 4px; line-height: 1.45; }
+.scard.shared { border-color: rgba(232,163,61,.42); background: rgba(255,247,235,.50); }
+.scard.shared h3 { color: #9a6512; }
+.scard.shared .t { font-size: 13px; font-weight: 500; }
+.scard.shared .d { font-size: 11.5px; color: var(--ink-2); margin-top: 5px; line-height: 1.45; }
 
 /* ---- bottom status pill --------------------------------------------- */
 #status {
@@ -295,7 +299,7 @@ async function call(method, args = {}) {
 }
 
 const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
-                settings: null, selected: null, creating: false, confirmDelete: null,
+                settings: null, selected: null, creating: false, confirmDelete: null, peers: null,
                 events: [], channels: new Map() };
 
 async function refresh() {
@@ -304,6 +308,7 @@ async function refresh() {
     call("getForeverBoxStatus"), call("getBoxStoreStatus"), call("getHostSettings"),
   ]);
   Object.assign(state, { agents, trays, tasks, host, box, store, settings });
+  try { state.peers = (await (await fetch("/clients")).json()).peers; } catch { state.peers = null; }
   if (state.selected && !agents.some((a) => a.id === state.selected)) state.selected = null;
   render();
 }
@@ -454,6 +459,15 @@ const WATCHED = ["agents", "transcript", "subagents", "async-tasks", "tray", "ho
 function renderStack() {
   const s = $("#stack");
   s.innerHTML = "";
+
+  const others = (state.peers ?? []).filter((n) => !/^node$/i.test(n));
+  if (others.length) {
+    const w = el("div", "scard glass shared");
+    w.append(el("h3", null, "Shared box"));
+    w.append(el("div", "t", others.join(", ") + (others.length === 1 ? " is" : " are") + " on this gateway"));
+    w.append(el("div", "d", "Creating, prompting, or deleting here changes what they see. Same host, same roster."));
+    s.append(w);
+  }
 
   const box = el("div", "scard glass-dark");
   box.append(el("h3", null, "Box"));
