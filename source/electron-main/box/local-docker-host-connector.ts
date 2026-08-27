@@ -25,7 +25,22 @@ export const LOCAL_DOCKER_BOX_STORE_VOLUME = "grok-bot-local-vm-store";
 // so a container recreate silently signed the box out of everything. Give it a volume.
 export const LOCAL_DOCKER_CHROME_PROFILE_DIR = "/home/box/chrome-profile";
 export const LOCAL_DOCKER_CHROME_VOLUME = "grok-bot-local-vm-chrome";
-export const LOCAL_DOCKER_SCHEMA_VERSION = "8";
+// The OpenAI-compatible provider reads its endpoint from the environment, and
+// setBoxSecrets refuses SAND_-prefixed names, so these have to arrive as env at
+// create time. Forwarded rather than hardcoded: the endpoint is per-machine.
+export const LOCAL_DOCKER_FORWARDED_ENV = [
+  "SAND_OPENAI_COMPATIBLE_BASE_URL",
+  "SAND_OPENAI_COMPATIBLE_MODEL",
+  "SAND_OPENAI_COMPATIBLE_API_KEY",
+] as const;
+
+function forwardedEnvArgs(env: NodeJS.ProcessEnv): string[] {
+  return LOCAL_DOCKER_FORWARDED_ENV.flatMap((name) => {
+    const value = env[name]?.trim();
+    return value == null || value.length === 0 ? [] : ["--env", `${name}=${value}`];
+  });
+}
+export const LOCAL_DOCKER_SCHEMA_VERSION = "9";
 const READY_TIMEOUT_MS = 180_000;
 const OPTIONAL_CREDENTIAL_TIMEOUT_MS = 3_000;
 
@@ -217,6 +232,7 @@ async function ensureLocalDockerBox(settingsPath: string, inferenceCredential?: 
       "--platform", "linux/amd64", "--restart", "unless-stopped",
       "--env", "SAND_SUPERVISOR_ENABLED=1", "--env", "SAND_BOX_AUTO_UPDATE=0", "--env", "SAND_USE_EXISTING_BOX_EXEC_DAEMON=1", "--env", "SAND_TREE_SITTER_NODE_DEPS=/home/box/deps", "--env", "NODE_PATH=/home/box/deps", "--env", "SAND_GATEWAY_BIND_HOST=0.0.0.0", "--env", "SAND_HOST_PORT=1340", "--env", `SAND_GATEWAY_TOKEN=${token}`,
       "--env", "SAND_BOX_STORE_SYNC=1", "--env", `SAND_BOX_STORE_LOCAL_DIR=${LOCAL_DOCKER_BOX_STORE_DIR}`,
+      ...forwardedEnvArgs(process.env),
       ...(inferenceCredential == null ? [] : ["--env", "SAND_DEV_INFERENCE_TOKEN_FILE=/run/grok-bot/inference.json", "--env", `SAND_BACKEND_URL=${inferenceCredential.backendUrl}`]),
       "--publish", "127.0.0.1:1337:1337", "--publish", "127.0.0.1:1339:1339", "--publish", "127.0.0.1:1340:1340",
       "--publish", "127.0.0.1:6080:6080", "--publish", "127.0.0.1:6081:6081", "--publish", "127.0.0.1:8790:8790",
