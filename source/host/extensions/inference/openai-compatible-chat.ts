@@ -88,6 +88,82 @@ export function openAiCompatibleTools(definitions: readonly Loose[] | undefined)
   return tools.length === 0 ? undefined : tools;
 }
 
+/**
+ * Small local models pick the right tool and then get its arguments wrong: they invent property
+ * names ("message", "text", "userId", "format") and drop required ones. Measured on 2026-08-27,
+ * schema adherence falls apart somewhere between one and six declared tools, on every local model
+ * tried -- yet the same model answers correctly when the failing tool is the only one on the table.
+ *
+ * So when a call does not fit its schema, ask once more with just that tool and the specific
+ * problem. This is adapter work, not prompt tuning: the arguments are repaired against the
+ * schema the tool itself declared, and a call that still does not fit is passed through unchanged
+ * so the failure stays visible rather than being papered over.
+ */
+function schemaProblems(args: unknown, schema: unknown): string[] {
+  const shape = record(schema);
+  const value = record(args);
+  if (shape == null || value == null) return [];
+  const properties = record(shape.properties);
+  if (properties == null) return [];
+  const problems: string[] = [];
+  const required = Array.isArray(shape.required) ? shape.required.filter((name): name is string => typeof name === "string") : [];
+  for (const name of required) {
+    if (value[name] == null || (typeof value[name] === "string" && value[name].trim().length === 0)) {
+      problems.push(`required property "${name}" is missing`);
+    }
+  }
+  for (const name of Object.keys(value)) {
+    if (!(name in properties)) problems.push(`"${name}" is not a declared property`);
+  }
+  return problems;
+}
+
+async function repairToolCall(
+  options: OpenAiCompatibleOptions,
+  endpoint: string,
+  apiKey: string,
+  messages: readonly Loose[],
+  tool: OpenAiCompatibleTool,
+  call: PendingToolCall,
+  problems: readonly string[],
+): Promise<unknown | undefined> {
+  const body = {
+    model: options.model,
+    messages: [
+      ...messages,
+      { role: "assistant", tool_calls: [{ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } }] },
+      { role: "tool", tool_call_id: call.id, content: safeJson({
+        isError: true,
+        error: `Invalid arguments for ${call.name}: ${problems.join("; ")}. Call ${call.name} again using only its declared properties.`,
+        schema: tool.parameters,
+      }) },
+    ],
+    tools: [{ type: "function", function: { name: tool.name, ...(tool.description == null ? {} : { description: tool.description }), parameters: tool.parameters } }],
+    tool_choice: "auto",
+    stream: false,
+  };
+  const response = await options.fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "grok-bot-router/1",
+      ...(apiKey.length === 0 ? {} : { authorization: `Bearer ${apiKey}` }),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) return undefined;
+  const payload = record(await response.json().catch(() => null));
+  const choice = record(Array.isArray(payload?.choices) ? payload.choices[0] : null);
+  const message = record(choice?.message);
+  const calls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+  const repaired = record(calls[0]);
+  const fn = record(repaired?.function);
+  if (typeof fn?.arguments !== "string") return undefined;
+  let parsed: unknown;
+  try { parsed = fn.arguments.length > 0 ? JSON.parse(fn.arguments) : {}; } catch { return undefined; }
+  return schemaProblems(parsed, tool.parameters).length === 0 ? parsed : undefined;
+}
+
 async function responseError(response: Response, hasApiKey: boolean): Promise<Error> {
   let detail = "";
   try { detail = (await response.text()).slice(0, 4_096).trim(); } catch {}
@@ -255,6 +331,12 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
       for (const call of calls) {
         let args: unknown = {};
         try { args = call.arguments.length > 0 ? JSON.parse(call.arguments) : {}; } catch { args = {}; }
+        const selected = toolsByName.get(call.name);
+        const problems = selected == null ? [] : schemaProblems(args, selected.parameters);
+        if (selected != null && problems.length > 0) {
+          const repaired = await repairToolCall(options, endpoint, apiKey, messages, selected, call, problems);
+          if (repaired !== undefined) args = repaired;
+        }
         yield { type: "tool-call", toolCallId: call.id, toolName: call.name, args };
       }
       yield { type: "done", text, usage };

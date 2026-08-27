@@ -34,9 +34,18 @@ const call = async (method, args = {}) => {
   try { return JSON.parse(text); } catch { return text; }
 };
 
-const assistants = (entries) => entries.filter(
-  (e) => e.kind === "message" && e.role === "assistant" &&
-    typeof e.content === "string" && e.content.trim().length > 0);
+// An agent does not answer with assistant text -- SendMessage is its only voice, and the
+// transcript records that as kind "send-message" carrying the message body. Counting
+// assistant-role messages instead reports FAIL while the agent is in fact replying.
+const assistants = (entries) => entries.filter((e) => {
+  if (e.kind === "send-message") {
+    const content = e.message?.content;
+    return typeof content === "string" && content.trim().length > 0;
+  }
+  return e.kind === "message" && e.role === "assistant" &&
+    typeof e.content === "string" && e.content.trim().length > 0;
+});
+const say = (e) => e.kind === "send-message" ? e.message.content : e.content;
 
 const agents = await call("listAgents");
 if (agents.length === 0) throw new Error("no agents on the host to test with");
@@ -56,7 +65,7 @@ while (Date.now() < deadline) {
   await new Promise((r) => setTimeout(r, 3000));
   const found = assistants(await call("getAgentTranscript", { id: agent.id }));
   if (found.length > before) {
-    console.log(`\nPASS — assistant replied: ${JSON.stringify(found.at(-1).content.slice(0, 160))}`);
+    console.log(`\nPASS — agent replied: ${JSON.stringify(say(found.at(-1)).slice(0, 160))}`);
     process.exit(0);
   }
   const trays = await call("getTrays");
