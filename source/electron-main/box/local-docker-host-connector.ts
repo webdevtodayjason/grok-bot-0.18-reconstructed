@@ -19,7 +19,13 @@ export const LOCAL_DOCKER_OWNER_LABEL = "com.grok-bot.local-vm=1";
 // snapshots on a docker volume, so the box is durable without a hosted account.
 export const LOCAL_DOCKER_BOX_STORE_DIR = "/var/lib/sand-box-store";
 export const LOCAL_DOCKER_BOX_STORE_VOLUME = "grok-bot-local-vm-store";
-export const LOCAL_DOCKER_SCHEMA_VERSION = "7";
+// Chrome's profile carries every login the agents rely on, and forked desktops link
+// their own profiles to it. The upstream image assumes it sits on a persisted volume
+// ("chrome-profile lives on a persisted volume", start-sand-box) but nothing mounted it,
+// so a container recreate silently signed the box out of everything. Give it a volume.
+export const LOCAL_DOCKER_CHROME_PROFILE_DIR = "/home/box/chrome-profile";
+export const LOCAL_DOCKER_CHROME_VOLUME = "grok-bot-local-vm-chrome";
+export const LOCAL_DOCKER_SCHEMA_VERSION = "8";
 const READY_TIMEOUT_MS = 180_000;
 const OPTIONAL_CREDENTIAL_TIMEOUT_MS = 3_000;
 
@@ -201,6 +207,7 @@ async function ensureLocalDockerBox(settingsPath: string, inferenceCredential?: 
       "--publish", "127.0.0.1:6080:6080", "--publish", "127.0.0.1:6081:6081", "--publish", "127.0.0.1:8790:8790",
       "--volume", "grok-bot-local-vm-workspace:/workspace", "--volume", "grok-bot-local-vm-data:/home/box/sand-data",
       "--volume", `${LOCAL_DOCKER_BOX_STORE_VOLUME}:${LOCAL_DOCKER_BOX_STORE_DIR}`,
+      "--volume", `${LOCAL_DOCKER_CHROME_VOLUME}:${LOCAL_DOCKER_CHROME_PROFILE_DIR}`,
       "--mount", `type=bind,src=${hostBundle.path},dst=/home/box/sand-host/host-main.cjs,readonly`,
       "--mount", `type=bind,src=${dirname(hostBundle.boxExecDaemonPath)},dst=/home/box/box-exec-daemon,readonly`,
       ...(inferenceFile == null ? [] : ["--mount", `type=bind,src=${dirname(inferenceFile)},dst=/run/grok-bot,readonly`]),
