@@ -304,6 +304,13 @@ function openAiCompatibleExecutor(messages: readonly ProviderMessage[], invocati
         // can run SendMessage, which is the agent's only voice. Pass the call through in
         // the vocabulary tool-stream-executor already reads.
         if (event.type === "tool-call") {
+          // The runner starts the tool as soon as it sees a call and expects the arguments
+          // to arrive as a stream: a lone tool-call chunk only resolves its args when the
+          // stream closes, which is after dispatch, so the tool ran with {} every time.
+          // Emit the sequence a streaming provider emits and the args land before the call.
+          const argsText = typeof event.args === "string" ? event.args : JSON.stringify(event.args ?? {});
+          yield { type: "tool-call-streaming-start" as const, toolCallId: event.toolCallId, toolName: event.toolName };
+          yield { type: "tool-call-delta" as const, toolCallId: event.toolCallId, toolName: event.toolName, argsTextDelta: argsText };
           yield { type: "tool-call" as const, toolCallId: event.toolCallId, toolName: event.toolName, args: event.args };
           continue;
         }
