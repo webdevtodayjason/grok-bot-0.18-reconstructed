@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ops</title>
+<style>
+/* ponytail: one file, no build, no deps. Glass is backdrop-filter; the angled
+   dock is a CSS transform. Upgrade to a framework only if state outgrows this. */
+:root {
+  --ink:      #16181c;
+  --ink-2:    #5d626b;
+  --ink-3:    #8b9099;
+  --glass:    rgba(255,255,255,.26);
+  --glass-2:  rgba(255,255,255,.34);
+  --dark:     rgba(22,26,30,.50);
+  --hair:     rgba(255,255,255,.55);
+  --edge:     rgba(16,18,22,.08);
+  --live:     #34c46b;
+  --warn:     #e8a33d;
+  --danger:   #f2456a;
+  --r:        22px;
+  --r-sm:     14px;
+  --shadow:   0 18px 50px rgba(16,18,22,.16), 0 2px 8px rgba(16,18,22,.06);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font: 400 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  background: #b8c2cc;
+}
+/* Soft dusk-landscape ground. No external assets — the glass needs something with
+   real tonal range behind it, or backdrop-filter has nothing to refract. */
+#sky {
+  position: fixed; inset: -14%;
+  background:
+    radial-gradient(46% 34% at 18% 12%, #f6ead2 0%, rgba(246,234,210,0) 66%),
+    radial-gradient(38% 30% at 74% 6%,  #f3d9b6 0%, rgba(243,217,182,0) 62%),
+    radial-gradient(52% 42% at 92% 40%, #7ea3ad 0%, rgba(126,163,173,0) 64%),
+    radial-gradient(60% 40% at 8% 62%,  #46666f 0%, rgba(70,102,111,0) 60%),
+    radial-gradient(90% 56% at 52% 116%, #1e3b45 0%, rgba(30,59,69,0) 62%),
+    linear-gradient(176deg, #dfe7ea 0%, #b6c8ce 30%, #7f9aa3 56%, #47656f 80%, #26424c 100%);
+  filter: blur(58px) saturate(1.5);
+  transform: scale(1.10);
+  z-index: -2;
+}
+/* A soft ridge line, so the blur has an edge to bend. */
+#ridge {
+  position: fixed; inset: 42% -10% -14%; z-index: -2;
+  background: linear-gradient(172deg, rgba(28,52,60,0) 0%, rgba(28,52,60,.42) 38%, rgba(18,36,44,.68) 100%);
+  clip-path: polygon(0 34%, 14% 20%, 29% 31%, 43% 12%, 58% 27%, 72% 14%, 87% 26%, 100% 16%, 100% 100%, 0 100%);
+  filter: blur(34px);
+}
+#grain {
+  position: fixed; inset: 0; z-index: -1; opacity: .16; pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E");
+}
+
+.glass {
+  background: linear-gradient(168deg, rgba(255,255,255,.30) 0%, rgba(255,255,255,.10) 34%, rgba(255,255,255,.02) 100%), var(--glass);
+  backdrop-filter: blur(46px) saturate(2.0);
+  -webkit-backdrop-filter: blur(46px) saturate(2.0);
+  border: 1px solid var(--edge);
+  border-top-color: var(--hair);
+  border-radius: var(--r);
+  box-shadow: var(--shadow);
+}
+.glass-dark {
+  background: var(--dark);
+  backdrop-filter: blur(34px) saturate(1.5);
+  -webkit-backdrop-filter: blur(34px) saturate(1.5);
+  border: 1px solid rgba(255,255,255,.10);
+  border-top-color: rgba(255,255,255,.20);
+  border-radius: var(--r);
+  color: #eef0f2;
+  box-shadow: var(--shadow);
+}
+
+/* ---- shell ---------------------------------------------------------- */
+#shell {
+  position: fixed; inset: 22px 22px 30px;
+  display: grid;
+  grid-template-columns: 268px minmax(0,1fr) 292px;
+  gap: 20px;
+  padding-top: 74px;
+}
+
+/* ---- dock (top pill) ------------------------------------------------ */
+#dock {
+  position: fixed; top: 22px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 4px;
+  padding: 7px 9px; border-radius: 999px; z-index: 30;
+  background: rgba(255,255,255,.62);
+  backdrop-filter: blur(30px) saturate(1.8);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  border: 1px solid var(--edge); border-top-color: var(--hair);
+  box-shadow: var(--shadow);
+}
+#dock button {
+  font: inherit; font-size: 13.5px; color: var(--ink-2);
+  background: none; border: 0; cursor: pointer;
+  padding: 8px 15px; border-radius: 999px;
+  transition: background .18s, color .18s;
+}
+#dock button:hover { background: rgba(16,18,22,.06); color: var(--ink); }
+#dock button[aria-selected="true"] { background: rgba(16,18,22,.86); color: #fff; }
+#dock .sep { width: 1px; height: 20px; background: var(--edge); margin: 0 5px; }
+#dock .icon { font-size: 17px; padding: 6px 12px; line-height: 1; }
+
+/* ---- left rail: angled docked cards --------------------------------- */
+#rail { display: flex; flex-direction: column; gap: 13px; overflow-y: auto; overflow-x: hidden;
+        padding: 4px 6px 4px 34px; perspective: 1500px; perspective-origin: 0% 50%; }
+#rail::-webkit-scrollbar { width: 0; }
+.railhead { font-size: 10.5px; letter-spacing: .10em; text-transform: uppercase; color: rgba(255,255,255,.72);
+            text-shadow: 0 1px 2px rgba(16,18,22,.30); padding-left: 6px; margin-bottom: 2px; }
+/* Docked window cards: chrome bar + preview body, angled away from the viewer.
+   Hover straightens them, selection pops one flat and forward. */
+.card {
+  border-radius: var(--r-sm); cursor: pointer; text-align: left; width: 100%;
+  font: inherit; color: var(--ink); flex: 0 0 auto; overflow: hidden; padding: 0;
+  background: rgba(255,255,255,.30);
+  backdrop-filter: blur(22px) saturate(1.7);
+  -webkit-backdrop-filter: blur(22px) saturate(1.7);
+  border: 1px solid rgba(255,255,255,.30); border-top-color: rgba(255,255,255,.60);
+  box-shadow: 0 16px 34px rgba(14,26,32,.30);
+  transform: rotateY(26deg) translateZ(-40px) scale(.94);
+  transform-origin: left center;
+  transition: transform .46s cubic-bezier(.22,.9,.3,1), background .24s, box-shadow .46s;
+}
+.card:hover { transform: rotateY(12deg) translateZ(-6px) scale(.98); background: rgba(255,255,255,.44); }
+.card[aria-current="true"] {
+  transform: rotateY(0deg) translateZ(22px) scale(1);
+  background: rgba(255,255,255,.60);
+  border-color: rgba(255,255,255,.72);
+  box-shadow: 0 26px 54px rgba(14,26,32,.36);
+}
+.card .bar {
+  display: flex; align-items: center; gap: 7px; padding: 8px 11px;
+  background: rgba(255,255,255,.38); border-bottom: 1px solid rgba(255,255,255,.34);
+  font-size: 12.5px; font-weight: 500;
+}
+.card .bar .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .body { padding: 10px 11px 11px; }
+.card .sub { font-size: 11px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.card .prev { font-size: 11.5px; color: var(--ink-2); margin-top: 5px; line-height: 1.4;
+              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* Stand-in for a window thumbnail: content-shaped rules. */
+.card .skel { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.card .skel i { display: block; height: 4px; border-radius: 2px; background: rgba(16,18,22,.13); }
+.card .skel i:nth-child(2) { width: 78%; } .card .skel i:nth-child(3) { width: 54%; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); flex: 0 0 auto; }
+.dot.on { background: var(--live); box-shadow: 0 0 0 3px rgba(52,196,107,.22); }
+
+/* ---- center --------------------------------------------------------- */
+#stage { overflow-y: auto; padding: 2px; }
+#stage::-webkit-scrollbar { width: 0; }
+.panel { padding: 30px 32px; animation: pop .40s cubic-bezier(.22,.9,.3,1); }
+@keyframes pop {
+  from { opacity: 0; transform: perspective(1400px) rotateY(-7deg) translateX(-22px) scale(.975); }
+  to   { opacity: 1; transform: none; }
+}
+h1 { font-size: 40px; font-weight: 300; letter-spacing: -.026em; line-height: 1.12; }
+.lede { color: var(--ink-2); margin-top: 9px; font-size: 14.5px; max-width: 62ch; }
+h2 { font-size: 11px; letter-spacing: .10em; text-transform: uppercase; color: var(--ink-3); margin: 30px 0 13px; font-weight: 500; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px,1fr)); gap: 13px; margin-top: 24px; }
+.tile { border-radius: 17px; padding: 18px 19px; background: rgba(255,255,255,.22);
+        border: 1px solid rgba(255,255,255,.34); border-top-color: rgba(255,255,255,.62); }
+.tile .v { font-size: 34px; font-weight: 300; letter-spacing: -.03em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.tile .k { font-size: 12px; color: var(--ink-2); margin-top: 5px; }
+.tile.alert .v { color: var(--danger); }
+
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3);
+     font-weight: 500; text-align: right; padding: 0 0 9px; }
+th:first-child, td:first-child { text-align: left; }
+td { padding: 11px 0; font-size: 13.5px; text-align: right; border-top: 1px solid var(--edge); }
+tr.zero td { color: var(--ink-3); }
+td .prov { font-weight: 500; color: var(--ink); }
+.badge { display: inline-block; font-size: 10.5px; padding: 2px 8px; border-radius: 999px;
+         background: rgba(16,18,22,.075); color: var(--ink-2); margin-left: 7px; vertical-align: 1px; }
+.badge.live { background: rgba(52,196,107,.16); color: #1d7a44; }
+
+.row { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 22px; }
+.btn { font: inherit; font-size: 13.5px; cursor: pointer; padding: 9px 17px; border-radius: 999px;
+       background: rgba(16,18,22,.86); color: #fff; border: 0; transition: transform .14s, opacity .18s; }
+.btn:hover { transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+.btn.ghost { background: rgba(255,255,255,.55); color: var(--ink); border: 1px solid var(--edge); }
+.btn.danger { background: rgba(242,69,106,.14); color: #b3113a; }
+.btn:disabled { opacity: .4; cursor: default; transform: none; }
+input, textarea { font: inherit; font-size: 14px; width: 100%; color: var(--ink);
+  background: rgba(255,255,255,.55); border: 1px solid var(--edge); border-radius: 13px;
+  padding: 11px 14px; outline: none; resize: vertical; }
+input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba(255,255,255,.72); }
+.field { margin-top: 11px; }
+.field label { display: block; font-size: 11.5px; color: var(--ink-2); margin-bottom: 5px; }
+
+.kv { display: grid; grid-template-columns: 150px 1fr; gap: 9px 16px; font-size: 13.5px; margin-top: 6px; }
+.kv dt { color: var(--ink-2); }
+.kv dd { font-variant-numeric: tabular-nums; word-break: break-all; }
+.empty { color: var(--ink-3); font-size: 13.5px; padding: 18px 0; }
+
+/* ---- right stack ---------------------------------------------------- */
+#stack { display: flex; flex-direction: column; gap: 14px; overflow-y: auto; padding: 2px; }
+#stack::-webkit-scrollbar { width: 0; }
+.scard { padding: 17px 18px; }
+.scard h3 { font-size: 10.5px; letter-spacing: .10em; text-transform: uppercase;
+            color: rgba(255,255,255,.55); font-weight: 500; margin-bottom: 11px; }
+.scard.glass h3 { color: var(--ink-3); }
+.scard .big { font-size: 15px; font-weight: 400; }
+.scard .sm { font-size: 12px; color: rgba(255,255,255,.62); margin-top: 4px; }
+.chan { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 12.5px; color: rgba(255,255,255,.80); }
+.chan .tick { width: 17px; height: 17px; border-radius: 50%; flex: 0 0 auto;
+              border: 1px solid rgba(255,255,255,.24); display: grid; place-items: center;
+              font-size: 10px; color: transparent; transition: all .3s; }
+.chan.hit .tick { background: rgba(52,196,107,.22); border-color: rgba(52,196,107,.5); color: var(--live); }
+.chan .n { margin-left: auto; font-size: 11px; color: rgba(255,255,255,.42); font-variant-numeric: tabular-nums; }
+.tray { padding: 12px 13px; border-radius: var(--r-sm); background: rgba(255,255,255,.42);
+        border: 1px solid var(--edge); margin-bottom: 9px; }
+.tray .t { font-size: 13px; font-weight: 500; }
+.tray .d { font-size: 11.5px; color: var(--ink-2); margin-top: 4px; line-height: 1.45; }
+
+/* ---- bottom status pill --------------------------------------------- */
+#status {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; z-index: 30;
+  padding: 9px 18px 9px 14px; border-radius: 999px; font-size: 12.5px;
+  background: rgba(26,28,32,.62);
+  backdrop-filter: blur(28px) saturate(1.5);
+  -webkit-backdrop-filter: blur(28px) saturate(1.5);
+  border: 1px solid rgba(255,255,255,.12); color: rgba(255,255,255,.88);
+  box-shadow: var(--shadow);
+}
+#status .dot { width: 8px; height: 8px; }
+#status .meta { color: rgba(255,255,255,.50); font-variant-numeric: tabular-nums; }
+
+.log { font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 460px; overflow-y: auto; }
+.log div { padding: 5px 0; border-top: 1px solid var(--edge); display: flex; gap: 12px; }
+.log .ch { color: var(--ink); min-width: 158px; }
+.log .pl { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log .ts { color: var(--ink-3); margin-left: auto; flex: 0 0 auto; }
+</style>
+</head>
+<body>
+<div id="sky"></div><div id="ridge"></div><div id="grain"></div>
+
+<nav id="dock" role="tablist">
+  <button role="tab" data-view="overview" aria-selected="true">Overview</button>
+  <button role="tab" data-view="agents">Agents</button>
+  <button role="tab" data-view="router">Router</button>
+  <button role="tab" data-view="events">Events</button>
+  <span class="sep"></span>
+  <button class="icon" id="new-agent" title="New agent">+</button>
+</nav>
+
+<div id="shell">
+  <aside id="rail"><div class="railhead">Workers</div><div id="rail-list"></div></aside>
+  <main id="stage" class="glass"><div class="panel"><h1>Connecting…</h1></div></main>
+  <aside id="stack"></aside>
+</div>
+
+<div id="status">
+  <span class="dot" id="sse-dot"></span>
+  <span id="sse-text">connecting</span>
+  <span class="meta" id="sse-meta"></span>
+</div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const el = (t, c, x) => { const n = document.createElement(t); if (c) n.className = c; if (x != null) n.textContent = x; return n; };
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const num = (n) => (n ?? 0).toLocaleString();
+const compact = (n) => (n ?? 0) < 1000 ? String(n ?? 0) : (n / 1000 < 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + "k" : (n / 1e6).toFixed(1) + "M");
+const ago = (ms) => {
+  if (!ms) return "never";
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+};
+
+async function call(method, args = {}) {
+  const r = await fetch(`/api/${method}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args),
+  });
+  const text = await r.text();
+  let body; try { body = JSON.parse(text); } catch { body = text; }
+  if (!r.ok) throw new Error(body?.error ?? `${method} failed (${r.status})`);
+  return body;
+}
+
+const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
+                settings: null, selected: null, creating: false, confirmDelete: null,
+                events: [], channels: new Map() };
+
+async function refresh() {
+  const [agents, trays, tasks, host, box, store, settings] = await Promise.all([
+    call("listAgents"), call("getTrays"), call("getAsyncTasks"), call("getHostStatus"),
+    call("getForeverBoxStatus"), call("getBoxStoreStatus"), call("getHostSettings"),
+  ]);
+  Object.assign(state, { agents, trays, tasks, host, box, store, settings });
+  if (state.selected && !agents.some((a) => a.id === state.selected)) state.selected = null;
+  render();
+}
+
+/* ---- views ---------------------------------------------------------- */
+const views = {};
+
+views.overview = () => {
+  const running = state.agents.filter((a) => a.isRunning).length;
+  const groups = state.agents.filter((a) => a.isGroup).length;
+  const unread = state.agents.reduce((n, a) => n + (a.unreadCount || 0), 0);
+  const u = state.settings?.inferenceRouterUsage?.providers ?? {};
+  const reqs = Object.values(u).reduce((n, p) => n + (p.requests || 0), 0);
+  const toks = Object.values(u).reduce((n, p) => n + (p.inputTokens || 0) + (p.outputTokens || 0), 0);
+  return `
+    <h1>Ops</h1>
+    <p class="lede">Live view of the host gateway at <code>127.0.0.1:1340</code> — every number below
+      is read from it now, nothing cached and nothing mocked.</p>
+    <div class="tiles">
+      <div class="tile"><div class="v">${state.agents.length}</div><div class="k">Workers${groups ? ` · ${groups} group` : ""}</div></div>
+      <div class="tile"><div class="v">${running}</div><div class="k">Running</div></div>
+      <div class="tile${state.trays.length ? " alert" : ""}"><div class="v">${state.trays.length}</div><div class="k">Alerts</div></div>
+      <div class="tile"><div class="v">${state.tasks.length}</div><div class="k">Async tasks</div></div>
+      <div class="tile"><div class="v">${compact(toks)}</div><div class="k">Routed tokens</div></div>
+      <div class="tile"><div class="v">${unread}</div><div class="k">Unread</div></div>
+    </div>
+    <h2>Host</h2>
+    <dl class="kv">
+      <dt>Host version</dt><dd>${esc(state.host?.hostVersion)}${state.host?.hostUpdateAvailable
+        ? `<span class="badge">update ${esc(state.host?.latestHostVersion)} available</span>` : `<span class="badge live">current</span>`}</dd>
+      <dt>Busy</dt><dd>${state.host?.isBusy ? "yes" : "no"}</dd>
+      <dt>Capabilities</dt><dd>${(state.host?.capabilities ?? []).map(esc).join(", ") || "—"}</dd>
+      <dt>Forever box</dt><dd>${esc(state.box?.state)}${state.box?.vncUrl ? ` · ${esc(state.box.vncUrl)}` : ""}</dd>
+      <dt>Inference provider</dt><dd>${esc(state.settings?.inferenceProvider)}</dd>
+      <dt>Local tool permission</dt><dd>${esc(state.settings?.localToolPermission)}</dd>
+      <dt>Box store</dt><dd>${state.store?.durable ? "durable" : "not durable"} · ${num(state.store?.entryCount)} entries · ${num(state.store?.totalBytes)} bytes</dd>
+    </dl>`;
+};
+
+views.router = () => {
+  const providers = state.settings?.inferenceRouterUsage?.providers ?? {};
+  const rows = Object.entries(providers).map(([name, p]) => {
+    const idle = !p.requests;
+    return `<tr class="${idle ? "zero" : ""}">
+      <td><span class="prov">${esc(name)}</span>${name === state.settings?.inferenceProvider ? '<span class="badge live">active</span>' : ""}</td>
+      <td>${num(p.requests)}</td><td>${compact(p.inputTokens)}</td><td>${compact(p.outputTokens)}</td>
+      <td>${compact(p.cacheReadTokens)}</td><td>${compact(p.cacheWriteTokens)}</td>
+      <td>${p.lastUsedAt ? ago(p.lastUsedAt) : "never"}</td></tr>`;
+  }).join("");
+  return `
+    <h1>Inference router</h1>
+    <p class="lede">Per-provider spend recorded by the host. This is the panel that answers
+      "where did the tokens go" — route by agent role and the answer changes here first.</p>
+    <h2>Providers</h2>
+    <table><thead><tr><th>Provider</th><th>Requests</th><th>Input</th><th>Output</th>
+      <th>Cache read</th><th>Cache write</th><th>Last used</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7" class="empty">No providers registered.</td></tr>'}</tbody></table>`;
+};
+
+views.agents = () => {
+  if (state.creating) return `
+    <h1>New worker</h1>
+    <p class="lede">Minted on the host through <code>createAgent</code>. It appears in the dock
+      as soon as the roster event lands.</p>
+    <div class="field"><label>Name</label><input id="nw-name" placeholder="Ticket triage" autofocus></div>
+    <div class="field"><label>Description</label><input id="nw-desc" placeholder="What is this worker for?"></div>
+    <div class="row">
+      <button class="btn" onclick="createWorker(true)">Create &amp; kickstart</button>
+      <button class="btn ghost" onclick="createWorker(false)">Create only</button>
+      <button class="btn ghost" onclick="cancelCreate()">Cancel</button>
+    </div>`;
+  const a = state.agents.find((x) => x.id === state.selected);
+  if (!a) return `
+    <h1>Workers</h1>
+    <p class="lede">${state.agents.length} on the host. Pick one from the dock on the left,
+      or mint a new one with <b>+</b>.</p>
+    <div class="row"><button class="btn" onclick="newAgent()">New worker</button></div>`;
+  return `
+    <h1>${esc(a.name)}${a.isGroup ? '<span class="badge">group</span>' : ""}</h1>
+    <p class="lede">${esc(a.description) || "No description."}</p>
+    <div class="tiles">
+      <div class="tile"><div class="v">${a.isRunning ? "Run" : "Idle"}</div><div class="k">State</div></div>
+      <div class="tile"><div class="v">${a.unreadCount || 0}</div><div class="k">Unread</div></div>
+      <div class="tile"><div class="v">${a.memberIds?.length || 0}</div><div class="k">Members</div></div>
+    </div>
+    <h2>Send a prompt</h2>
+    <div class="field"><textarea id="prompt" rows="3" placeholder="Ask ${esc(a.name)} to do something…"></textarea></div>
+    <div class="row">
+      <button class="btn" onclick="sendPrompt('${a.id}')">Send</button>
+      <button class="btn ghost" onclick="kickstart('${a.id}')">Kickstart</button>
+      ${state.confirmDelete === a.id
+        ? `<button class="btn danger" onclick="removeAgent('${a.id}')">Really delete ${esc(a.name)}?</button>
+           <button class="btn ghost" onclick="cancelDelete()">Keep</button>`
+        : `<button class="btn danger" onclick="askDelete('${a.id}')">Delete</button>`}
+    </div>
+    <h2>Record</h2>
+    <dl class="kv">
+      <dt>ID</dt><dd>${esc(a.id)}</dd>
+      <dt>Origin</dt><dd>${esc(a.origin)}</dd>
+      <dt>Created</dt><dd>${new Date(a.createdAt).toLocaleString()}</dd>
+      <dt>Last activity</dt><dd>${a.lastActivityAt ? ago(a.lastActivityAt) : "none"}</dd>
+      <dt>Store</dt><dd>${esc(a.path)}</dd>
+      <dt>Notifications</dt><dd>${a.notificationsEnabled ? "on" : "off"}</dd>
+      <dt>Awaiting user</dt><dd>${a.awaitingUserResponse ? "yes" : "no"}</dd>
+    </dl>`;
+};
+
+views.events = () => `
+  <h1>Event stream</h1>
+  <p class="lede">Server-sent events relayed from <code>/events</code>. ${state.events.length} received
+    since this page loaded.</p>
+  <h2>Tail</h2>
+  <div class="log">${state.events.length ? state.events.map((e) => `<div>
+      <span class="ch">${esc(e.channel)}</span>
+      <span class="pl">${esc(e.summary)}</span>
+      <span class="ts">${e.at}</span></div>`).join("") : '<div class="empty">Waiting for the first event…</div>'}</div>`;
+
+/* ---- render --------------------------------------------------------- */
+function render() {
+  $("#stage").innerHTML = `<div class="panel">${views[state.view]()}</div>`;
+  renderRail();
+  renderStack();
+  document.querySelectorAll("#dock [role=tab]").forEach((b) =>
+    b.setAttribute("aria-selected", String(b.dataset.view === state.view)));
+}
+
+function renderRail() {
+  const list = $("#rail-list");
+  list.innerHTML = "";
+  if (!state.agents.length) { list.append(el("div", "railhead", "none yet")); return; }
+  for (const a of state.agents) {
+    const c = el("button", "card");
+    c.setAttribute("aria-current", String(a.id === state.selected));
+    const bar = el("div", "bar");
+    bar.append(el("span", "dot" + (a.isRunning ? " on" : "")), el("span", "nm", a.name));
+    if (a.unreadCount) bar.append(el("span", "badge", String(a.unreadCount)));
+    const body = el("div", "body");
+    body.append(el("div", "sub", `${a.isGroup ? "group · " : ""}${a.isRunning ? "running" : "idle"} · ${ago(a.lastActivityAt || a.updatedAt)}`));
+    if (a.lastMessagePreview) body.append(el("div", "prev", a.lastMessagePreview));
+    else { const sk = el("div", "skel"); sk.append(el("i"), el("i"), el("i")); body.append(sk); }
+    c.append(bar, body);
+    c.onclick = () => { state.selected = a.id; state.view = "agents"; render(); };
+    list.append(c);
+  }
+}
+
+const WATCHED = ["agents", "transcript", "subagents", "async-tasks", "tray", "host-settings", "forever-box", "workflows"];
+function renderStack() {
+  const s = $("#stack");
+  s.innerHTML = "";
+
+  const box = el("div", "scard glass-dark");
+  box.append(el("h3", null, "Box"));
+  box.append(el("div", "big", state.box?.state === "absent" ? "Local Docker VM" : `Forever box · ${state.box?.state}`));
+  box.append(el("div", "sm", `host ${state.host?.hostVersion ?? "?"}${state.host?.hostUpdateAvailable ? " · update available" : ""}`));
+  s.append(box);
+
+  const ch = el("div", "scard glass-dark");
+  ch.append(el("h3", null, "Live channels"));
+  for (const name of WATCHED) {
+    const n = state.channels.get(name) ?? 0;
+    const row = el("div", "chan" + (n ? " hit" : ""));
+    row.append(el("span", "tick", "✓"), el("span", null, name), el("span", "n", n ? String(n) : ""));
+    ch.append(row);
+  }
+  s.append(ch);
+
+  if (state.trays.length) {
+    const t = el("div", "scard glass");
+    t.append(el("h3", null, "Alerts"));
+    for (const tray of state.trays) {
+      const card = el("div", "tray");
+      card.append(el("div", "t", tray.title), el("div", "d", tray.detail));
+      t.append(card);
+    }
+    s.append(t);
+  }
+}
+
+/* ---- actions -------------------------------------------------------- */
+async function guard(fn) {
+  try { await fn(); await refresh(); }
+  catch (e) { alertLine(e.message); }
+}
+function alertLine(msg) {
+  $("#sse-meta").textContent = msg;
+  setTimeout(() => { $("#sse-meta").textContent = ""; }, 6000);
+}
+// ponytail: no prompt()/confirm() — native dialogs block the page and look nothing
+// like the rest of this. Inline form + two-click delete instead.
+window.newAgent = () => { state.creating = true; state.view = "agents"; render(); };
+window.cancelCreate = () => { state.creating = false; render(); };
+window.createWorker = (kickstart) => {
+  const name = $("#nw-name")?.value?.trim();
+  if (!name) { alertLine("a worker needs a name"); return; }
+  const description = $("#nw-desc")?.value?.trim() ?? "";
+  guard(async () => {
+    // createAgent answers {agent:{…}}, not a bare agent.
+    const made = await call("createAgent", { name, description, origin: "user", isKickstartRequested: kickstart });
+    const id = made?.agent?.id ?? made?.id;
+    state.creating = false;
+    if (id) { state.selected = id; state.view = "agents"; }
+  });
+};
+window.sendPrompt = (id) => {
+  const text = $("#prompt")?.value?.trim();
+  if (!text) return;
+  guard(() => call("sendPrompt", { agentId: id, prompt: text }));
+};
+window.kickstart = (id) => guard(() => call("kickstartAgent", { id }));
+window.askDelete = (id) => { state.confirmDelete = id; render(); };
+window.cancelDelete = () => { state.confirmDelete = null; render(); };
+window.removeAgent = (id) => {
+  guard(async () => {
+    await call("deleteAgent", { id });
+    state.selected = null; state.confirmDelete = null;
+  });
+};
+
+/* ---- SSE ------------------------------------------------------------ */
+function connect() {
+  const src = new EventSource("/events");
+  src.onopen = () => { $("#sse-dot").classList.add("on"); $("#sse-text").textContent = "live"; };
+  src.onerror = () => { $("#sse-dot").classList.remove("on"); $("#sse-text").textContent = "reconnecting"; };
+  src.onmessage = (ev) => {
+    let payload; try { payload = JSON.parse(ev.data); } catch { return; }
+    const channel = payload.channel ?? "unknown";
+    state.channels.set(channel, (state.channels.get(channel) ?? 0) + 1);
+    const body = payload.payload;
+    state.events.unshift({
+      channel,
+      summary: body == null ? "null" : typeof body === "object" ? JSON.stringify(body).slice(0, 180) : String(body),
+      at: new Date().toLocaleTimeString(),
+    });
+    state.events.length = Math.min(state.events.length, 200);
+    $("#sse-meta").textContent = channel;
+    if (["agents", "agent-upserted", "tray", "async-tasks", "host-settings", "forever-box"].includes(channel)) {
+      clearTimeout(connect.t);
+      connect.t = setTimeout(() => refresh().catch(() => {}), 320);
+    } else if (state.view === "events") render();
+    else renderStack();
+  };
+}
+
+/* ---- boot ----------------------------------------------------------- */
+document.querySelectorAll("#dock [role=tab]").forEach((b) =>
+  b.onclick = () => { state.view = b.dataset.view; render(); });
+$("#new-agent").onclick = () => window.newAgent();
+
+refresh()
+  .then(connect)
+  .catch((e) => { $("#stage").innerHTML = `<div class="panel"><h1>Gateway unreachable</h1>
+    <p class="lede">${esc(e.message)}</p>
+    <p class="lede">Is the box running? <code>docker ps --filter name=grok-bot-local-vm</code></p></div>`; });
+setInterval(() => refresh().catch(() => {}), 15000);
+</script>
+</body>
+</html>
