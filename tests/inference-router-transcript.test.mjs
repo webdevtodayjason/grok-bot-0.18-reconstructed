@@ -73,3 +73,23 @@ test("routed transcript rejects malformed rich text carriers", async () => {
     await loaded.dispose();
   }
 });
+
+test("routed transcript reloads every routed provider and still rejects unrouted ones", async () => {
+  const loaded = await loadModule();
+  try {
+    const row = (provider) => ({ provider, role: "user", content: "hello", id: "t1u", timestampMs: 123 });
+    const store = loaded.module.parseInferenceRouterTranscriptStore({
+      schemaVersion: 2,
+      agents: {
+        local: [row("openai-compatible")],
+        routed: [row("codex"), row("claude-code"), row("openrouter"), row("openai-compatible")],
+        unrouted: [row("cursor"), row("ollama"), row("")],
+      },
+    });
+    assert.deepEqual(store.agents.local.map((entry) => entry.provider), ["openai-compatible"]);
+    assert.deepEqual(store.agents.routed.map((entry) => entry.provider), ["codex", "claude-code", "openrouter", "openai-compatible"]);
+    assert.deepEqual(store.agents.unrouted, []);
+  } finally {
+    await loaded.dispose();
+  }
+});

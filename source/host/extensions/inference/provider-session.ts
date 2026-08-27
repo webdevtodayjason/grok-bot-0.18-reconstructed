@@ -13,6 +13,7 @@ import { getSandRootDir } from "../../host-paths.js";
 import { SandSettingsStore } from "../../../shared/node/settings/sand-settings-store.js";
 import { getBoxSecretsStorePath } from "../secrets/secrets-service.js";
 import { streamCodexDirectResponses, type CodexDirectTool } from "./codex-direct-responses.js";
+import { openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
 import type { LabelMessage, PromptExecutor } from "./sand-labeling.js";
 
 type Loose = Record<string, any>;
@@ -20,6 +21,21 @@ interface ProviderMessage extends LabelMessage { role: string; content: string |
 type RoutedProvider = Exclude<SandInferenceProvider, "cursor">;
 type UsageRecord = { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
 type RoutedToolExecutor = (tool: Loose, args: unknown, toolCallId: string) => Promise<unknown>;
+
+// The routed providers advertise the agent's tools to the model and then have nowhere
+// to run what it picks: every provider took `undefined` in the executor position, so the
+// first tool call ended the turn with "did not provide an executor". The coordinator
+// supplies one by dispatching executeRoutedMcpTool; the host, which serves that very
+// command, supplied nothing. createProviderPromptSession is called from five places, so
+// the host registers the executor once here rather than threading a parameter through
+// all of them. Unset outside the box (the coordinator passes its own explicitly).
+let hostRoutedToolExecutor: RoutedToolExecutor | undefined;
+export function setHostRoutedToolExecutor(executor: RoutedToolExecutor | undefined): void {
+  hostRoutedToolExecutor = executor;
+}
+export function getHostRoutedToolExecutor(): RoutedToolExecutor | undefined {
+  return hostRoutedToolExecutor;
+}
 
 const GROK_ROUTER_SYSTEM_PROMPT = [
   "You are Grok Bot, a warm, concise desktop assistant.",
@@ -254,17 +270,61 @@ function openRouterExecutor(messages: readonly ProviderMessage[], invocationId: 
   return { fullStream: result.fullStream, response: result.response, usage: result.usage, extendedUsage, providerMetadata: result.providerMetadata, invocationId: Promise.resolve(invocationId) };
 }
 
+function openAiCompatibleSettings(): OpenAiCompatibleSettings {
+  return resolveOpenAiCompatibleSettings(process.env, persistedSecrets());
+}
+
+function configuredOpenAiCompatibleModel(): string {
+  try { return openAiCompatibleSettings().model; } catch { return "openai-compatible"; }
+}
+
+function openAiCompatibleExecutor(messages: readonly ProviderMessage[], invocationId: string, definitions?: readonly Loose[], executeTool?: RoutedToolExecutor, onUsage?: (usage: UsageRecord) => void) {
+  const settings = openAiCompatibleSettings();
+  const usage = deferred<{ promptTokens: number; completionTokens: number; totalTokens: number }>();
+  const extendedUsage = deferred<{ inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; maxTokens: number }>();
+  const resultResponse = deferred<ReturnType<typeof response>>();
+  const metadata = deferred<Record<string, unknown>>();
+  const tools = openAiCompatibleTools(definitions);
+  const fullStream = (async function* () {
+    let text = "";
+    try {
+      for await (const event of streamOpenAiCompatibleChat({
+        fetch,
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+        apiKey: settings.apiKey,
+        instructions: GROK_ROUTER_SYSTEM_PROMPT,
+        input: messages.map(message => ({ role: message.role === "assistant" ? "assistant" : "user", content: typeof message.content === "string" ? message.content : JSON.stringify(message.content) })),
+        ...(tools == null ? {} : { tools }),
+        ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
+        maxSteps: tools == null ? 1 : 8,
+      })) {
+        if (event.type === "text-delta") { text += event.delta; yield { type: "text-delta" as const, textDelta: event.delta }; continue; }
+        const basic = { promptTokens: event.usage.inputTokens, completionTokens: event.usage.outputTokens, totalTokens: event.usage.inputTokens + event.usage.outputTokens };
+        onUsage?.(event.usage);
+        usage.resolve(basic);
+        extendedUsage.resolve({ ...event.usage, maxTokens: 0 });
+        metadata.resolve({ openaiCompatible: { baseUrl: settings.baseUrl, model: settings.model } });
+        resultResponse.resolve(response(text, invocationId, settings.model));
+      }
+    } catch (error) { usage.reject(error); extendedUsage.reject(error); metadata.reject(error); resultResponse.reject(error); throw error; }
+  })();
+  return { fullStream, response: resultResponse.promise, usage: usage.promise, extendedUsage: extendedUsage.promise, providerMetadata: metadata.promise, invocationId: Promise.resolve(invocationId) };
+}
+
 class ProviderPromptExecutor extends BasePromptExecutor<ProviderMessage> {
   constructor(readonly provider: RoutedProvider, initialMessages?: readonly ProviderMessage[], readonly onUsage?: (usage: UsageRecord) => void) { super(new BasePromptBuilder(initialMessages)); }
   stream(_ctx: unknown, invocationId = crypto.randomUUID(), definitions?: readonly Loose[]) {
-    if (this.provider === "codex") return codexExecutor(this.getMessages(), invocationId, definitions, undefined, this.onUsage);
+    const execute = hostRoutedToolExecutor;
+    if (this.provider === "codex") return codexExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
     if (this.provider === "claude-code") return claudeExecutor(this.getMessages(), invocationId, this.onUsage);
-    return openRouterExecutor(this.getMessages(), invocationId, definitions, undefined, this.onUsage);
+    if (this.provider === "openai-compatible") return openAiCompatibleExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
+    return openRouterExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
   }
 }
 
 export function createProviderPromptSession(provider: RoutedProvider): { getModelId(): string; getExecutor(state?: unknown): PromptExecutor } {
-  const modelId = provider === "codex" ? configuredCodexModel() : provider === "claude-code" ? "claude-code" : process.env.SAND_OPENROUTER_MODEL?.trim() || "openai/gpt-5.2";
+  const modelId = provider === "codex" ? configuredCodexModel() : provider === "claude-code" ? "claude-code" : provider === "openai-compatible" ? configuredOpenAiCompatibleModel() : process.env.SAND_OPENROUTER_MODEL?.trim() || "openai/gpt-5.2";
   return { getModelId: () => modelId, getExecutor: state => new ProviderPromptExecutor(provider, Array.isArray(state) ? state as ProviderMessage[] : undefined, usage => recordRoutedUsage(provider, usage)) };
 }
 
@@ -280,7 +340,9 @@ export async function runRoutedProviderText(provider: RoutedProvider, messages: 
     ? codexExecutor(messages, invocationId, options?.tools, options?.executeTool, onUsage)
     : provider === "claude-code"
       ? claudeExecutor(messages, invocationId, onUsage, options?.mcpServerUrl)
-      : openRouterExecutor(messages, invocationId, options?.tools, options?.executeTool, onUsage);
+      : provider === "openai-compatible"
+        ? openAiCompatibleExecutor(messages, invocationId, options?.tools, options?.executeTool, onUsage)
+        : openRouterExecutor(messages, invocationId, options?.tools, options?.executeTool, onUsage);
   let text = "";
   for await (const event of result.fullStream) {
     if (event.type === "text-delta" && typeof event.textDelta === "string") {

@@ -78,7 +78,11 @@ export const hostProductionBindingInventorySpecs = Object.freeze([
 const classifications = new Set(["recovered-source", "generated-source", "third-party", "native"]);
 const localSourceClassifications = new Set(["recovered-source", "generated-source"]);
 const accessKinds = new Set(["value", "call"]);
-const builtinSet = new Set(builtinModules.flatMap(module => [module, module.replace(/^node:/, ""), `node:${module.replace(/^node:/, "")}`]));
+// node:sqlite is a real builtin the storage layer imports, but Node keeps experimental
+// builtins out of module.builtinModules, so the externals guard below rejected it as an
+// undeclared import and no host bundle could be produced. Add it back explicitly.
+const EXPERIMENTAL_BUILTINS = ["sqlite"];
+const builtinSet = new Set([...builtinModules, ...EXPERIMENTAL_BUILTINS].flatMap(module => [module, module.replace(/^node:/, ""), `node:${module.replace(/^node:/, "")}`]));
 const scriptPath = fileURLToPath(import.meta.url);
 
 async function assembleLocalExecProductionEvidence() {

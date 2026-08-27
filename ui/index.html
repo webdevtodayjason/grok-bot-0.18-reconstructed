@@ -243,7 +243,27 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
 #status .dot { width: 8px; height: 8px; }
 #status .meta { color: rgba(255,255,255,.50); font-variant-numeric: tabular-nums; }
 
-.msg { display: flex; gap: 11px; padding: 12px 0; border-top: 1px solid var(--edge); }
+/* Springy arrival: a new row lifts in from below and overshoots slightly, which
+   pushes the rows above it up — the "alive" feel, done with one keyframe rather
+   than a physics lib. Only rows the page has not seen before animate. */
+.msg { display: flex; gap: 11px; padding: 12px 0; border-top: 1px solid var(--edge);
+       transform-origin: 50% 100%; }
+.msg.enter { animation: spring-in .52s cubic-bezier(.34, 1.42, .58, 1) backwards; }
+@keyframes spring-in {
+  0%   { opacity: 0; transform: translateY(16px) scale(.965); }
+  55%  { opacity: 1; transform: translateY(-3px) scale(1.008); }
+  100% { opacity: 1; transform: none; }
+}
+/* Tool and status rows flip up on their bottom edge instead of fading. */
+.msg.flip.enter { animation: flip-up .46s cubic-bezier(.3, 1.5, .55, 1) backwards; }
+@keyframes flip-up {
+  0%   { opacity: 0; transform: perspective(700px) rotateX(-72deg) translateY(10px); }
+  60%  { opacity: 1; transform: perspective(700px) rotateX(6deg); }
+  100% { opacity: 1; transform: none; }
+}
+.msg.enter:nth-last-child(2) { animation-delay: .04s; }
+.msg.enter:nth-last-child(3) { animation-delay: .08s; }
+@media (prefers-reduced-motion: reduce) { .msg.enter { animation: none; } }
 .msg .who { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
             color: var(--ink-3); min-width: 62px; padding-top: 2px; }
 .msg .txt { font-size: 14.5px; white-space: pre-wrap; word-break: break-word; }
@@ -307,7 +327,7 @@ async function call(method, args = {}) {
 }
 
 const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
-                settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null,
+                settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(),
                 events: [], channels: new Map() };
 
 async function refresh() {
@@ -436,16 +456,22 @@ function renderTranscript(agent) {
   const entries = (state.transcript ?? []).filter((e) => e.kind === "message");
   if (entries.length === 0 && failures.length === 0)
     return '<div class="empty">Nothing yet. Send a prompt below.</div>';
-  const rows = entries.map((e) => `<div class="msg${e.isStreaming ? " streaming" : ""}">
+  const isNew = (key) => !state.seen.has(key);
+  const rows = entries.map((e) => `<div class="msg${e.isStreaming ? " streaming" : ""}${isNew(e.id) ? " enter" : ""}">
       <span class="who">${esc(e.role)}</span>
       <span class="txt">${esc(typeof e.content === "string" ? e.content : JSON.stringify(e.content))}</span>
     </div>`).join("");
   // A failed run leaves no assistant message at all — without this the page just
   // looks like the send vanished.
-  const errs = failures.map((t) => `<div class="msg err">
+  const errs = failures.map((t) => `<div class="msg err flip${isNew(t.id) ? " enter" : ""}">
       <span class="who">failed</span>
       <span class="txt">${esc(t.title)} — ${esc(t.detail)}</span>
     </div>`).join("");
+  // Mark after building the markup, so the same row never animates twice.
+  queueMicrotask(() => {
+    for (const e of entries) state.seen.add(e.id);
+    for (const t of failures) state.seen.add(t.id);
+  });
   return `<div class="log">${rows}${errs}</div>`;
 }
 

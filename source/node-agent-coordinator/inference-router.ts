@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { runRoutedProviderText } from "../host/extensions/inference/provider-session.js";
-import type { SandInferenceProvider } from "../shared/inference-router.js";
+import { SAND_INFERENCE_PROVIDERS, type SandInferenceProvider } from "../shared/inference-router.js";
 import { SandSettingsStore } from "../shared/node/settings/sand-settings-store.js";
 import { createRoutedMcpBridge } from "./routed-mcp-bridge.js";
 
@@ -20,6 +20,9 @@ type StoredEntry = {
 type Store = { readonly schemaVersion: 2; readonly agents: Readonly<Record<string, readonly StoredEntry[]>> };
 
 const EMPTY_STORE: Store = { schemaVersion: 2, agents: {} };
+// Persisted rows only ever carry routed providers, so derive the accepted set from the
+// shared registry instead of restating it here and stranding every new provider's history.
+const ROUTED_PROVIDERS: readonly string[] = SAND_INFERENCE_PROVIDERS.filter(provider => provider !== "cursor");
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value != null && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -34,7 +37,7 @@ export function parseInferenceRouterTranscriptStore(value: unknown): Store {
     const entries: StoredEntry[] = [];
     for (const raw of rawEntries) {
       const row = asRecord(raw);
-      if (row == null || !["codex", "claude-code", "openrouter"].includes(String(row.provider)) || !["user", "assistant"].includes(String(row.role)) || typeof row.content !== "string" || typeof row.id !== "string" || typeof row.timestampMs !== "number" || (row.clientNonce !== undefined && typeof row.clientNonce !== "string") || (row.richText !== undefined && typeof row.richText !== "string")) continue;
+      if (row == null || !ROUTED_PROVIDERS.includes(String(row.provider)) || !["user", "assistant"].includes(String(row.role)) || typeof row.content !== "string" || typeof row.id !== "string" || typeof row.timestampMs !== "number" || (row.clientNonce !== undefined && typeof row.clientNonce !== "string") || (row.richText !== undefined && typeof row.richText !== "string")) continue;
       if (row.reactions !== undefined && (!Array.isArray(row.reactions) || row.reactions.some(reaction => asRecord(reaction) == null || typeof asRecord(reaction)!.emoji !== "string" || typeof asRecord(reaction)!.by !== "string"))) continue;
       entries.push(row as unknown as StoredEntry);
     }

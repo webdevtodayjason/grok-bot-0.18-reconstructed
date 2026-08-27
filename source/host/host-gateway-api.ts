@@ -1,4 +1,5 @@
 
+import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
 import {
   parseCoordinatorAgentThreadRequest,
   parseCoordinatorTranscriptWindowRequest,
@@ -161,6 +162,19 @@ export function createHostGatewayApi(
       toolCallId: args.toolCallId,
     });
   };
+
+  // The routed providers had no way to run a tool the model picked. executeRoutedMcpTool
+  // is exactly that capability and it already lives here, so hand it to them. Registered
+  // where it is defined rather than rebuilt inside the inference extension, which does not
+  // receive the mcp extension in its context.
+  setHostRoutedToolExecutor(async (tool: any, args: unknown, toolCallId: string) =>
+    await executeRoutedMcpTool({
+      providerIdentifier: tool?.providerIdentifier,
+      name: tool?.name,
+      toolName: tool?.toolName,
+      args,
+      toolCallId,
+    }));
 
   return {
     getTranscript: () => method(manager, "ensureLoaded")(),
