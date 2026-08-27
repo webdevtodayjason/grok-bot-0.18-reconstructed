@@ -1,3 +1,4 @@
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -284,7 +285,46 @@ function openAiCompatibleExecutor(messages: readonly ProviderMessage[], invocati
   const extendedUsage = deferred<{ inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; maxTokens: number }>();
   const resultResponse = deferred<ReturnType<typeof response>>();
   const metadata = deferred<Record<string, unknown>>();
-  const tools = openAiCompatibleTools(definitions);
+/**
+ * Tool parameters arrive as whatever the tool declared, and Grok Bot's own tools declare Zod
+ * schemas -- SendMessage is `objectSchema.superRefine(...)`. A Zod object does not serialize to
+ * anything a model can read, so the request carried an empty shape and the model invented its
+ * arguments: {"message": "..."} where SendMessage requires {type, content}. Every call then
+ * failed validation and the turn had nothing to say.
+ *
+ * Converted here rather than inside the transport: the transport is loaded as a data: URL
+ * module by its tests, which cannot resolve a bare specifier like zod-to-json-schema.
+ */
+function stripSchemaArtifacts(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(stripSchemaArtifacts);
+  const { $schema: _s, default: _d, definitions: _defs, markdownDescription: _m, additionalProperties: _a, ...rest } = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(rest)) result[key] = stripSchemaArtifacts(child);
+  return result;
+}
+
+function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): readonly Loose[] | undefined {
+  if (definitions == null) return undefined;
+  return definitions.map(definition => {
+    const raw = definition.inputSchema ?? definition.parameters;
+    if (raw == null) return definition;
+    const candidate = raw as { readonly _def?: unknown; readonly safeParse?: unknown; readonly jsonSchema?: unknown };
+    // The agent toolset wraps schemas with the AI SDK's jsonSchema() helper, so `parameters`
+    // is {jsonSchema: {...}} rather than a schema. Sent as-is the model sees an object with
+    // no type and no properties, and invents argument names -- {message}, {recipient, text} --
+    // none of which SendMessage accepts. Unwrap first, then convert Zod if that is what it is.
+    if (candidate.jsonSchema != null) {
+      return { ...definition, inputSchema: undefined, parameters: stripSchemaArtifacts(candidate.jsonSchema) };
+    }
+    const isZod = typeof candidate.safeParse === "function" || candidate._def !== undefined;
+    if (!isZod) return definition;
+    try { return { ...definition, inputSchema: undefined, parameters: stripSchemaArtifacts(zodToJsonSchema(raw as Parameters<typeof zodToJsonSchema>[0])) }; }
+    catch { return definition; }
+  });
+}
+
+  const tools = openAiCompatibleTools(withJsonSchemaParameters(definitions));
   const fullStream = (async function* () {
     let text = "";
     try {
