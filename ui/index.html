@@ -130,13 +130,18 @@ body {
   transform-origin: left center;
   transition: transform .46s cubic-bezier(.22,.9,.3,1), background .24s, box-shadow .46s;
 }
-.card:hover { transform: rotateY(12deg) translateZ(-6px) scale(.98); background: rgba(255,255,255,.44); }
+/* Hover lifts the card toward the reader and straightens it; selection keeps a residual
+   angle so the rail still reads as a stack of windows rather than a flat list -- with one
+   worker on the host, flattening the selected card made the whole rail look like nothing. */
+.card:hover { transform: rotateY(9deg) translateZ(16px) translateX(6px) scale(1.02);
+  background: rgba(255,255,255,.50); box-shadow: 0 24px 48px rgba(14,26,32,.34); }
 .card[aria-current="true"] {
-  transform: rotateY(0deg) translateZ(22px) scale(1);
-  background: rgba(255,255,255,.60);
+  transform: rotateY(11deg) translateZ(10px) scale(1);
+  background: rgba(255,255,255,.56);
   border-color: rgba(255,255,255,.72);
-  box-shadow: 0 26px 54px rgba(14,26,32,.36);
+  box-shadow: 0 22px 46px rgba(14,26,32,.32);
 }
+.card[aria-current="true"]:hover { transform: rotateY(6deg) translateZ(22px) translateX(6px) scale(1.02); }
 .card .bar {
   display: flex; align-items: center; gap: 7px; padding: 8px 11px;
   background: rgba(255,255,255,.38); border-bottom: 1px solid rgba(255,255,255,.34);
@@ -155,9 +160,25 @@ body {
 .dot.on { background: var(--live); box-shadow: 0 0 0 3px rgba(52,196,107,.22); }
 
 /* ---- center --------------------------------------------------------- */
-#stage { overflow-y: auto; padding: 2px; }
+#stage { overflow: hidden; padding: 2px; display: flex; }
 #stage::-webkit-scrollbar { width: 0; }
-.panel { padding: 30px 32px; }
+.panel { padding: 30px 32px; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.panel::-webkit-scrollbar { width: 0; }
+/* An agent is a conversation with a composer nailed to the bottom -- the transcript
+   scrolls behind it. Sending must never require scrolling to find the button. */
+.agent-view { flex: 1; min-height: 0; display: flex; flex-direction: column; margin: -30px -32px; }
+.agent-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 32px 8px; }
+.agent-scroll::-webkit-scrollbar { width: 0; }
+.composer { flex: 0 0 auto; padding: 14px 32px 20px;
+  background: linear-gradient(to top, rgba(255,255,255,.30), rgba(255,255,255,.10) 70%, transparent);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.composer .row { margin-top: 10px; }
+details.record { margin-top: 26px; }
+details.record summary { cursor: pointer; font-size: 11px; letter-spacing: .10em;
+  text-transform: uppercase; color: var(--ink-3); list-style: none; }
+details.record summary::-webkit-details-marker { display: none; }
+details.record summary::before { content: "▸ "; }
+details.record[open] summary::before { content: "▾ "; }
 .panel.anim { animation: pop .40s cubic-bezier(.22,.9,.3,1); }
 @keyframes pop {
   from { opacity: 0; transform: perspective(1400px) rotateY(-7deg) translateX(-22px) scale(.975); }
@@ -255,9 +276,9 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
    Separation is space and surface. The only rule in the whole stage is the chat
    divider, and it carries the collapse control. */
 .stage-col { display: flex; flex-direction: column; justify-content: center;
-             min-height: 420px; gap: 18px; }
+             min-height: 100%; gap: 12px; }
 
-.bubble { align-self: flex-end; max-width: 74%; background: rgba(255,255,255,.34);
+.bubble { align-self: flex-end; max-width: 68%; background: rgba(255,255,255,.34);
   border: 1px solid rgba(255,255,255,.40); border-radius: 15px; padding: 11px 14px 7px;
   backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5); }
 .bubble .txt { font-size: 14.5px; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
@@ -444,94 +465,39 @@ views.agents = () => {
     <p class="lede">${state.agents.length} on the host. Pick one from the dock on the left,
       or mint a new one with <b>+</b>.</p>
     <div class="row"><button class="btn" onclick="newAgent()">New worker</button></div>`;
-  return `
-    <h1>${esc(a.name)}${a.isGroup ? '<span class="badge">group</span>' : ""}</h1>
-    <p class="lede">${esc(a.description) || "No description."}</p>
-    <div class="tiles">
-      <div class="tile"><div class="v">${a.isRunning ? "Run" : "Idle"}</div><div class="k">State</div></div>
-      <div class="tile"><div class="v">${a.unreadCount || 0}</div><div class="k">Unread</div></div>
-      <div class="tile"><div class="v">${a.memberIds?.length || 0}</div><div class="k">Members</div></div>
-      <div class="tile"><div class="v" style="font-size:19px">${esc(state.settings?.inferenceProvider ?? "?")}</div><div class="k">Routed via</div></div>
+  return `<div class="agent-view">
+    <div class="agent-scroll">
+      ${renderStage(a)}
     </div>
-    ${renderStage(a)}
-    <h2>Send a prompt</h2>
-    <div class="field"><textarea id="prompt" rows="3" placeholder="Ask ${esc(a.name)} to do something…"></textarea></div>
-    <div class="row">
-      ${a.isRunning
-        ? `<span class="btn run" title="The gateway has no command to stop a run, so this reports rather than controls">Running</span>`
-        : `<button class="btn" onclick="sendPrompt('${a.id}')">Send</button>
-           <button class="btn ghost" onclick="kickstart('${a.id}')">Kickstart</button>`}
-      ${state.confirmDelete === a.id
-        ? `<button class="btn danger" onclick="removeAgent('${a.id}')">Really delete ${esc(a.name)}?</button>
-           <button class="btn ghost" onclick="cancelDelete()">Keep</button>`
-        : `<button class="btn danger" onclick="askDelete('${a.id}')">Delete</button>`}
+    <div class="composer">
+      <textarea id="prompt" rows="2" placeholder="Ask ${esc(a.name)} to do something…"></textarea>
+      <div class="row">
+        ${a.isRunning
+          ? `<span class="btn run" title="The gateway serves no command to stop a run, so this reports rather than controls">Running</span>`
+          : `<button class="btn" onclick="sendPrompt('${a.id}')">Send</button>
+             <button class="btn ghost" onclick="kickstart('${a.id}')">Kickstart</button>`}
+        ${state.confirmDelete === a.id
+          ? `<button class="btn danger" onclick="removeAgent('${a.id}')">Really delete ${esc(a.name)}?</button>
+             <button class="btn ghost" onclick="cancelDelete()">Keep</button>`
+          : `<button class="btn ghost" onclick="askDelete('${a.id}')">Delete</button>`}
+      </div>
     </div>
-    <h2>Record</h2>
+  </div>`;
+}
+
+// The record is for whoever is debugging the host, not for the person talking to a worker.
+function renderRecord(a) {
+  return `<details class="record"><summary>Record</summary>
     <dl class="kv">
+      <dt>Name</dt><dd>${esc(a.name)}${a.isGroup ? " (group)" : ""}</dd>
+      <dt>Routed via</dt><dd>${esc(state.settings?.inferenceProvider ?? "?")}</dd>
       <dt>ID</dt><dd>${esc(a.id)}</dd>
       <dt>Origin</dt><dd>${esc(a.origin)}</dd>
       <dt>Created</dt><dd>${new Date(a.createdAt).toLocaleString()}</dd>
       <dt>Last activity</dt><dd>${a.lastActivityAt ? ago(a.lastActivityAt) : "none"}</dd>
       <dt>Store</dt><dd>${esc(a.path)}</dd>
-      <dt>Notifications</dt><dd>${a.notificationsEnabled ? "on" : "off"}</dd>
-      <dt>Awaiting user</dt><dd>${a.awaitingUserResponse ? "yes" : "no"}</dd>
-    </dl>`;
-};
-
-// An agent speaks only through SendMessage, so the transcript records its replies as
-// entries of kind "send-message". The prompt side is kind "message" with role "user".
-const saidBy = (e) => e.kind === "send-message" ? "agent" : e.role === "user" ? "user" : "other";
-const bodyOf = (e) => e.kind === "send-message"
-  ? (typeof e.message?.content === "string" ? e.message.content : "")
-  : (typeof e.content === "string" ? e.content : JSON.stringify(e.content ?? ""));
-
-const clockOf = (ms) => ms
-  ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
-  : "";
-
-// Rotates as the wait lengthens, the way warmwind does. Never "Loading", never a bare spinner.
-const WAIT_LABELS = ["Reflecting quietly…", "Still processing…", "Reasoning carefully…"];
-
-function renderStage(agent) {
-  const failures = state.trays.filter((t) => t.agentId === agent.id && t.kind === "error");
-  const entries = (state.transcript ?? []).filter((e) => e.kind === "send-message" || e.kind === "message");
-  const fresh = (key) => state.seen.has(key) ? "" : " arrive";
-
-  if (entries.length === 0 && failures.length === 0 && !agent.isRunning) {
-    return `<div class="stage-col"><div class="empty-stage">Nothing yet — send ${esc(agent.name)} a prompt below.</div></div>`;
-  }
-
-  // Conversation above the divider, work below it: the split is the one rule on the stage.
-  const talk = entries.map((e) => {
-    const who = saidBy(e);
-    const text = bodyOf(e);
-    if (!text.trim()) return "";
-    return `<div class="bubble${fresh(e.id)}"${who === "agent" ? ' style="align-self:flex-start;background:rgba(26,28,32,.30);border-color:rgba(255,255,255,.16)"' : ""}>
-        <div class="txt"${who === "agent" ? ' style="color:#f2f4f6"' : ""}>${esc(text)}</div>
-        <div class="when">${esc(clockOf(e.timestampMs))}</div>
-      </div>`;
-  }).join("");
-
-  const working = agent.isRunning ? `<div class="think arrive">
-      <div class="label"><i></i>${esc(WAIT_LABELS[Math.min(state.waitTick, WAIT_LABELS.length - 1)])}</div>
-      ${state.thinking ? `<div class="stream">${esc(state.thinking)}</div>` : ""}
-    </div>` : "";
-
-  // A failed run leaves no reply at all, so without this the send appears to vanish.
-  const broken = failures.map((t) => `<div class="block err${fresh(t.id)}">
-      <div class="glyph">⚠</div><h3>${esc(t.title)}</h3><p>${esc(t.detail)}</p>
-    </div>`).join("");
-
-  queueMicrotask(() => {
-    for (const e of entries) state.seen.add(e.id);
-    for (const t of failures) state.seen.add(t.id);
-  });
-
-  return `<div class="stage-col">
-      ${talk}
-      ${talk && (working || broken) ? '<div class="split"><button onclick="toggleTalk()" title="Collapse">⌃</button></div>' : ""}
-      ${working}${broken}
-    </div>`;
+      <dt>Unread</dt><dd>${a.unreadCount || 0}</dd>
+    </dl></details>`;
 }
 
 views.events = () => `
