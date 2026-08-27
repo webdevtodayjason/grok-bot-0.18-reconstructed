@@ -27,6 +27,7 @@ export type OpenAiCompatibleSettings = {
 
 export type OpenAiCompatibleEvent =
   | { readonly type: "text-delta"; readonly delta: string }
+  | { readonly type: "tool-call"; readonly toolCallId: string; readonly toolName: string; readonly args: unknown }
   | { readonly type: "done"; readonly text: string; readonly usage: OpenAiCompatibleUsage };
 
 export type OpenAiCompatibleOptions = {
@@ -246,7 +247,19 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
       yield { type: "done", text, usage };
       return;
     }
-    if (options.executeTool == null) throw new Error("The OpenAI-compatible endpoint requested a tool but Grok Bot did not provide an executor.");
+    if (options.executeTool == null) {
+      // No inline executor means the caller owns the tool loop -- which is the agent
+      // runner, and the only place tools like SendMessage can run at all, since they
+      // need the live turn. Surface the calls and let it drive the next step; running
+      // them here against a narrower executor is how a turn ends up silent.
+      for (const call of calls) {
+        let args: unknown = {};
+        try { args = call.arguments.length > 0 ? JSON.parse(call.arguments) : {}; } catch { args = {}; }
+        yield { type: "tool-call", toolCallId: call.id, toolName: call.name, args };
+      }
+      yield { type: "done", text, usage };
+      return;
+    }
     messages = [
       ...messages,
       { role: "assistant", content: stepText.length === 0 ? null : stepText, tool_calls: calls.map(call => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })) },

@@ -300,6 +300,13 @@ function openAiCompatibleExecutor(messages: readonly ProviderMessage[], invocati
         maxSteps: tools == null ? 1 : 8,
       })) {
         if (event.type === "text-delta") { text += event.delta; yield { type: "text-delta" as const, textDelta: event.delta }; continue; }
+        // The runner owns the tool loop: it holds the turn, so it is the only thing that
+        // can run SendMessage, which is the agent's only voice. Pass the call through in
+        // the vocabulary tool-stream-executor already reads.
+        if (event.type === "tool-call") {
+          yield { type: "tool-call" as const, toolCallId: event.toolCallId, toolName: event.toolName, args: event.args };
+          continue;
+        }
         const basic = { promptTokens: event.usage.inputTokens, completionTokens: event.usage.outputTokens, totalTokens: event.usage.inputTokens + event.usage.outputTokens };
         onUsage?.(event.usage);
         usage.resolve(basic);
@@ -318,7 +325,10 @@ class ProviderPromptExecutor extends BasePromptExecutor<ProviderMessage> {
     const execute = hostRoutedToolExecutor;
     if (this.provider === "codex") return codexExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
     if (this.provider === "claude-code") return claudeExecutor(this.getMessages(), invocationId, this.onUsage);
-    if (this.provider === "openai-compatible") return openAiCompatibleExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
+    // Deliberately no inline executor here: on the runner path tool calls belong to the
+    // runner. Handing this one the routed-MCP executor made "did not provide an executor"
+    // disappear while leaving every SendMessage unrunnable, so the turn finished silent.
+    if (this.provider === "openai-compatible") return openAiCompatibleExecutor(this.getMessages(), invocationId, definitions, undefined, this.onUsage);
     return openRouterExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
   }
 }

@@ -194,20 +194,28 @@ test("fragmented tool calls are reassembled, executed and fed back into the turn
   } finally { await server.close(); }
 });
 
-test("a tool call without an executor and a truncated stream both fail closed", async () => {
+test("a tool call without an executor is surfaced, and a truncated stream fails closed", async () => {
   const { streamOpenAiCompatibleChat } = await loadTransport();
+  // No inline executor means the caller owns the tool loop. On the agent path that
+  // caller is the runner, which is the only thing that can run SendMessage. Throwing
+  // here used to strand the turn; the calls must come out instead.
   const server = await serveOpenAiCompatible(() => TOOL_TURN);
   try {
-    await assert.rejects(async () => {
-      for await (const _event of streamOpenAiCompatibleChat({
-        fetch,
-        baseUrl: server.baseUrl,
-        model: "qwen3-coder:30b",
-        instructions: "Use connected tools",
-        input: [{ role: "user", content: "latest email" }],
-        tools: [{ name: "gmail_search", parameters: { type: "object" }, source: GMAIL_TOOL_DEFINITION }]
-      })) {}
-    }, /did not provide an executor/);
+    const events = [];
+    for await (const event of streamOpenAiCompatibleChat({
+      fetch,
+      baseUrl: server.baseUrl,
+      model: "qwen3-coder:30b",
+      instructions: "Use connected tools",
+      input: [{ role: "user", content: "latest email" }],
+      tools: [{ name: "gmail_search", parameters: { type: "object" }, source: GMAIL_TOOL_DEFINITION }]
+    })) events.push(event);
+    const calls = events.filter(event => event.type === "tool-call");
+    assert.equal(calls.length, 1, "the tool call should reach the caller");
+    assert.equal(calls[0].toolName, "gmail_search");
+    assert.ok(typeof calls[0].toolCallId === "string" && calls[0].toolCallId.length > 0);
+    assert.deepEqual(calls[0].args, { query: "newer_than:1d" }, "args reassembled across delta chunks");
+    assert.equal(events.at(-1).type, "done", "the step should still finish");
   } finally { await server.close(); }
 
   const truncated = createServer((_request, response) => {
