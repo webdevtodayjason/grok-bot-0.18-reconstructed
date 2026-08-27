@@ -192,6 +192,13 @@ td .prov { font-weight: 500; color: var(--ink); }
 .btn:active { transform: translateY(0); }
 .btn.ghost { background: rgba(255,255,255,.55); color: var(--ink); border: 1px solid var(--edge); }
 .btn.danger { background: rgba(242,69,106,.14); color: #b3113a; }
+/* One slot, two identities: composer when it is your turn, running when it is not.
+   Warmwind's third identity is a pause, which needs a stop command the gateway does not
+   have -- so this reports state rather than pretending to control it. */
+.btn.run { background: #e8446a; color: #fff; min-width: 128px; letter-spacing: .06em;
+  display: inline-block; text-align: center; cursor: default;
+  box-shadow: 0 0 0 4px rgba(232,68,106,.16); animation: run-in .25s ease-out backwards; }
+@keyframes run-in { from { min-width: 260px; opacity: .55; background: #241016; } }
 .btn:disabled { opacity: .4; cursor: default; transform: none; }
 input, textarea { font: inherit; font-size: 14px; width: 100%; color: var(--ink);
   background: rgba(255,255,255,.55); border: 1px solid var(--edge); border-radius: 13px;
@@ -243,34 +250,52 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
 #status .dot { width: 8px; height: 8px; }
 #status .meta { color: rgba(255,255,255,.50); font-variant-numeric: tabular-nums; }
 
-/* Springy arrival: a new row lifts in from below and overshoots slightly, which
-   pushes the rows above it up — the "alive" feel, done with one keyframe rather
-   than a physics lib. Only rows the page has not seen before animate. */
-.msg { display: flex; gap: 11px; padding: 12px 0; border-top: 1px solid var(--edge);
-       transform-origin: 50% 100%; }
-.msg.enter { animation: spring-in .52s cubic-bezier(.34, 1.42, .58, 1) backwards; }
-@keyframes spring-in {
-  0%   { opacity: 0; transform: translateY(16px) scale(.965); }
-  55%  { opacity: 1; transform: translateY(-3px) scale(1.008); }
-  100% { opacity: 1; transform: none; }
-}
-/* Tool and status rows flip up on their bottom edge instead of fading. */
-.msg.flip.enter { animation: flip-up .46s cubic-bezier(.3, 1.5, .55, 1) backwards; }
-@keyframes flip-up {
-  0%   { opacity: 0; transform: perspective(700px) rotateX(-72deg) translateY(10px); }
-  60%  { opacity: 1; transform: perspective(700px) rotateX(6deg); }
-  100% { opacity: 1; transform: none; }
-}
-.msg.enter:nth-last-child(2) { animation-delay: .04s; }
-.msg.enter:nth-last-child(3) { animation-delay: .08s; }
-@media (prefers-reduced-motion: reduce) { .msg.enter { animation: none; } }
-.msg .who { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
-            color: var(--ink-3); min-width: 62px; padding-top: 2px; }
-.msg .txt { font-size: 14.5px; white-space: pre-wrap; word-break: break-word; }
-.msg.err .txt { color: #b3113a; }
-.msg.err .who { color: var(--danger); }
-.streaming .txt::after { content: "▍"; opacity: .5; }
-.log { font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 460px; overflow-y: auto; }
+/* Measured off the warmwind recording at 24.54 fps (one frame = 41ms):
+   cards fade, they do not spring — width never changes and the corner travels ~15px.
+   Separation is space and surface. The only rule in the whole stage is the chat
+   divider, and it carries the collapse control. */
+.stage-col { display: flex; flex-direction: column; justify-content: center;
+             min-height: 420px; gap: 18px; }
+
+.bubble { align-self: flex-end; max-width: 74%; background: rgba(255,255,255,.34);
+  border: 1px solid rgba(255,255,255,.40); border-radius: 15px; padding: 11px 14px 7px;
+  backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5); }
+.bubble .txt { font-size: 14.5px; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+.bubble .when { font-size: 10.5px; color: var(--ink-3); text-align: right; margin-top: 4px;
+                font-variant-numeric: tabular-nums; }
+
+/* the one divider, with the collapse control sitting on it */
+.split { position: relative; height: 1px; background: var(--edge); margin: 4px 0 2px; }
+.split button { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--edge); cursor: pointer;
+  background: rgba(26,28,32,.55); color: #fff; font-size: 11px; line-height: 1;
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+
+/* thinking: fixed-height window that eats its own top */
+.think .label { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--ink-2); }
+.think .label i { width: 13px; height: 13px; border-radius: 50%; flex: 0 0 auto;
+  border: 2px solid var(--ink-3); border-top-color: transparent; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.think .stream { margin-top: 10px; max-height: 132px; overflow: hidden; font-size: 13.5px;
+  line-height: 1.6; color: var(--ink-2); white-space: pre-wrap;
+  mask-image: linear-gradient(to bottom, transparent 0, #000 34px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 34px); }
+
+/* result card — fade in, 280ms, no scale, no overshoot */
+.block { background: rgba(255,255,255,.30); border: 1px solid rgba(255,255,255,.38);
+  border-radius: 17px; padding: 19px 21px;
+  backdrop-filter: blur(26px) saturate(1.6); -webkit-backdrop-filter: blur(26px) saturate(1.6); }
+.block .glyph { font-size: 15px; color: var(--ink-2); margin-bottom: 9px; }
+.block h3 { font-size: 20px; font-weight: 600; letter-spacing: -.015em; }
+.block p { font-size: 14.5px; color: var(--ink-2); margin-top: 7px; }
+.block.err h3 { color: #b3113a; }
+.arrive { animation: fade-in .28s ease-out backwards; }
+@keyframes fade-in { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .arrive { animation: none; } }
+
+.empty-stage { text-align: center; color: var(--ink-3); font-size: 14px; }
+
+.log { font:.log { font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 460px; overflow-y: auto; }
 .log div { padding: 5px 0; border-top: 1px solid var(--edge); display: flex; gap: 12px; }
 .log .ch { color: var(--ink); min-width: 158px; }
 .log .pl { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -328,6 +353,7 @@ async function call(method, args = {}) {
 
 const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
                 settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(),
+                thinking: "", waitTick: 0, talkOpen: true,
                 events: [], channels: new Map() };
 
 async function refresh() {
@@ -427,13 +453,14 @@ views.agents = () => {
       <div class="tile"><div class="v">${a.memberIds?.length || 0}</div><div class="k">Members</div></div>
       <div class="tile"><div class="v" style="font-size:19px">${esc(state.settings?.inferenceProvider ?? "?")}</div><div class="k">Routed via</div></div>
     </div>
-    <h2>Transcript</h2>
-    ${renderTranscript(a)}
+    ${renderStage(a)}
     <h2>Send a prompt</h2>
     <div class="field"><textarea id="prompt" rows="3" placeholder="Ask ${esc(a.name)} to do something…"></textarea></div>
     <div class="row">
-      <button class="btn" onclick="sendPrompt('${a.id}')">Send</button>
-      <button class="btn ghost" onclick="kickstart('${a.id}')">Kickstart</button>
+      ${a.isRunning
+        ? `<span class="btn run" title="The gateway has no command to stop a run, so this reports rather than controls">Running</span>`
+        : `<button class="btn" onclick="sendPrompt('${a.id}')">Send</button>
+           <button class="btn ghost" onclick="kickstart('${a.id}')">Kickstart</button>`}
       ${state.confirmDelete === a.id
         ? `<button class="btn danger" onclick="removeAgent('${a.id}')">Really delete ${esc(a.name)}?</button>
            <button class="btn ghost" onclick="cancelDelete()">Keep</button>`
@@ -451,28 +478,60 @@ views.agents = () => {
     </dl>`;
 };
 
-function renderTranscript(agent) {
+// An agent speaks only through SendMessage, so the transcript records its replies as
+// entries of kind "send-message". The prompt side is kind "message" with role "user".
+const saidBy = (e) => e.kind === "send-message" ? "agent" : e.role === "user" ? "user" : "other";
+const bodyOf = (e) => e.kind === "send-message"
+  ? (typeof e.message?.content === "string" ? e.message.content : "")
+  : (typeof e.content === "string" ? e.content : JSON.stringify(e.content ?? ""));
+
+const clockOf = (ms) => ms
+  ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+  : "";
+
+// Rotates as the wait lengthens, the way warmwind does. Never "Loading", never a bare spinner.
+const WAIT_LABELS = ["Reflecting quietly…", "Still processing…", "Reasoning carefully…"];
+
+function renderStage(agent) {
   const failures = state.trays.filter((t) => t.agentId === agent.id && t.kind === "error");
-  const entries = (state.transcript ?? []).filter((e) => e.kind === "message");
-  if (entries.length === 0 && failures.length === 0)
-    return '<div class="empty">Nothing yet. Send a prompt below.</div>';
-  const isNew = (key) => !state.seen.has(key);
-  const rows = entries.map((e) => `<div class="msg${e.isStreaming ? " streaming" : ""}${isNew(e.id) ? " enter" : ""}">
-      <span class="who">${esc(e.role)}</span>
-      <span class="txt">${esc(typeof e.content === "string" ? e.content : JSON.stringify(e.content))}</span>
+  const entries = (state.transcript ?? []).filter((e) => e.kind === "send-message" || e.kind === "message");
+  const fresh = (key) => state.seen.has(key) ? "" : " arrive";
+
+  if (entries.length === 0 && failures.length === 0 && !agent.isRunning) {
+    return `<div class="stage-col"><div class="empty-stage">Nothing yet — send ${esc(agent.name)} a prompt below.</div></div>`;
+  }
+
+  // Conversation above the divider, work below it: the split is the one rule on the stage.
+  const talk = entries.map((e) => {
+    const who = saidBy(e);
+    const text = bodyOf(e);
+    if (!text.trim()) return "";
+    return `<div class="bubble${fresh(e.id)}"${who === "agent" ? ' style="align-self:flex-start;background:rgba(26,28,32,.30);border-color:rgba(255,255,255,.16)"' : ""}>
+        <div class="txt"${who === "agent" ? ' style="color:#f2f4f6"' : ""}>${esc(text)}</div>
+        <div class="when">${esc(clockOf(e.timestampMs))}</div>
+      </div>`;
+  }).join("");
+
+  const working = agent.isRunning ? `<div class="think arrive">
+      <div class="label"><i></i>${esc(WAIT_LABELS[Math.min(state.waitTick, WAIT_LABELS.length - 1)])}</div>
+      ${state.thinking ? `<div class="stream">${esc(state.thinking)}</div>` : ""}
+    </div>` : "";
+
+  // A failed run leaves no reply at all, so without this the send appears to vanish.
+  const broken = failures.map((t) => `<div class="block err${fresh(t.id)}">
+      <div class="glyph">⚠</div><h3>${esc(t.title)}</h3><p>${esc(t.detail)}</p>
     </div>`).join("");
-  // A failed run leaves no assistant message at all — without this the page just
-  // looks like the send vanished.
-  const errs = failures.map((t) => `<div class="msg err flip${isNew(t.id) ? " enter" : ""}">
-      <span class="who">failed</span>
-      <span class="txt">${esc(t.title)} — ${esc(t.detail)}</span>
-    </div>`).join("");
-  // Mark after building the markup, so the same row never animates twice.
+
   queueMicrotask(() => {
     for (const e of entries) state.seen.add(e.id);
     for (const t of failures) state.seen.add(t.id);
   });
-  return `<div class="log">${rows}${errs}</div>`;
+
+  return `<div class="stage-col">
+      ${talk}
+      ${talk && (working || broken) ? '<div class="split"><button onclick="toggleTalk()" title="Collapse">⌃</button></div>' : ""}
+      ${working}${broken}
+    </div>`;
 }
 
 views.events = () => `
@@ -497,7 +556,8 @@ function signature() {
     state.trays.map((t) => [t.id, t.title]), state.tasks.length,
     state.host, state.box, state.store, state.settings?.inferenceProvider,
     state.settings?.inferenceRouterUsage,
-    state.transcript?.map((e) => [e.id, e.content, e.isStreaming]),
+    state.transcript?.map((e) => [e.id, e.content, e.message?.content, e.isStreaming]),
+    state.thinking, state.waitTick, state.talkOpen,
     state.view === "events" ? state.events.length : 0,
   ]);
 }
@@ -614,6 +674,7 @@ window.sendPrompt = (id) => {
   guard(() => call("sendPrompt", { agentId: id, prompt: text }));
 };
 window.kickstart = (id) => guard(() => call("kickstartAgent", { id }));
+window.toggleTalk = () => { state.talkOpen = !state.talkOpen; render(true); };
 window.askDelete = (id) => { state.confirmDelete = id; render(); };
 window.cancelDelete = () => { state.confirmDelete = null; render(); };
 window.removeAgent = (id) => {
@@ -659,6 +720,13 @@ refresh()
     <p class="lede">${esc(e.message)}</p>
     <p class="lede">Is the box running? <code>docker ps --filter name=grok-bot-local-vm</code></p></div>`; });
 setInterval(() => refresh().catch(() => {}), 15000);
+
+// The label escalates while a run is in flight, and resets the moment it settles.
+setInterval(() => {
+  const busy = state.agents.some((agent) => agent.id === state.selected && agent.isRunning);
+  if (!busy) { if (state.waitTick !== 0 || state.thinking) { state.waitTick = 0; state.thinking = ""; render(true); } return; }
+  if (state.waitTick < 2) { state.waitTick += 1; render(true); }
+}, 9000);
 </script>
 </body>
 </html>
