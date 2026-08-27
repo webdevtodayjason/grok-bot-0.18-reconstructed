@@ -38,12 +38,49 @@ export function getHostRoutedToolExecutor(): RoutedToolExecutor | undefined {
   return hostRoutedToolExecutor;
 }
 
+/**
+ * On the agent path the model is not addressing the user directly: plain assistant text is a
+ * private scratchpad and SendMessage is the only thing the user ever sees. Telling it to
+ * "respond directly in natural language" -- which the router prompt does, correctly, for the
+ * coordinator's one-shot text calls -- guarantees a silent turn.
+ */
+const GROK_AGENT_SYSTEM_PROMPT = [
+  "You are Grok Bot, a warm, concise desktop assistant.",
+  "The user cannot see your plain replies. Your assistant text is a private scratchpad.",
+  "SendMessage is your only voice: a reply counts only once it is inside a SendMessage call.",
+  "To answer, call SendMessage with type set to \"text\" and content set to what you want to say.",
+  "The tools supplied with this request are Grok Bot's already-connected plugins and accounts. Use them when relevant instead of claiming a plugin is unavailable.",
+].join("\n");
+
 const GROK_ROUTER_SYSTEM_PROMPT = [
   "You are Grok Bot, a warm, concise desktop assistant.",
   "You are running inside Grok Bot, not inside Codex CLI or Claude Code.",
   "The tools supplied with this request are Grok Bot's already-connected plugins and accounts. Use them whenever they are relevant instead of claiming that a plugin is unavailable or asking the user to reconnect it.",
   "Never ask for an API key for an already-connected plugin. Respond directly to the user in natural language after completing any necessary tool calls.",
 ].join("\n");
+
+/**
+ * The routed system prompt tells the model to "respond directly to the user in natural
+ * language", which is right for the coordinator's one-shot text calls and exactly wrong on
+ * the agent path: there, plain assistant text is a private scratchpad and SendMessage is the
+ * agent's only voice. Worse, injecting it replaced the turn's own system prompt -- the one
+ * that explains that -- and every system message was being remapped to `user`, so the model
+ * was told to do the one thing that produces silence.
+ *
+ * Keep system messages as system, and only fall back to the router prompt when the
+ * conversation carries no instructions of its own.
+ */
+function conversationInput(messages: readonly ProviderMessage[], hasSendMessage = false): { input: { role: string; content: string }[]; instructions: string } {
+  const mapped = messages.map(message => ({
+    role: message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user",
+    content: typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+  }));
+  const own = mapped.filter(message => message.role === "system" && message.content.trim().length > 0).map(message => message.content);
+  return {
+    input: mapped.filter(message => message.role !== "system"),
+    instructions: own.length > 0 ? own.join("\n\n") : hasSendMessage ? GROK_AGENT_SYSTEM_PROMPT : GROK_ROUTER_SYSTEM_PROMPT,
+  };
+}
 
 function recordRoutedUsage(provider: RoutedProvider, usage: UsageRecord): void {
   new SandSettingsStore(join(getSandRootDir(), "settings.json")).recordInferenceUsage(provider, usage);
@@ -197,8 +234,8 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
         endpoint: "https://chatgpt.com/backend-api/codex/responses",
         model,
         ...(configuredCodexReasoningEffort() == null ? {} : { reasoningEffort: configuredCodexReasoningEffort()! }),
-        instructions: GROK_ROUTER_SYSTEM_PROMPT,
-        input: messages.map(message => ({ role: message.role === "assistant" ? "assistant" : "user", content: typeof message.content === "string" ? message.content : JSON.stringify(message.content) })),
+        instructions: conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions,
+        input: conversationInput(messages).input,
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
         maxSteps: tools == null ? 1 : 8,
@@ -333,8 +370,8 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
         baseUrl: settings.baseUrl,
         model: settings.model,
         apiKey: settings.apiKey,
-        instructions: GROK_ROUTER_SYSTEM_PROMPT,
-        input: messages.map(message => ({ role: message.role === "assistant" ? "assistant" : "user", content: typeof message.content === "string" ? message.content : JSON.stringify(message.content) })),
+        instructions: conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions,
+        input: conversationInput(messages).input,
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
         maxSteps: tools == null ? 1 : 8,
