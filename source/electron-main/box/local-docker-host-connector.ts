@@ -85,6 +85,21 @@ async function readOrCreateToken(settingsPath: string): Promise<string> {
   return token;
 }
 
+// start-sand-box launches the window router through `setsid`, then records `$!` --
+// the wrapper pid, which has already exited by the time the supervisor reads it. The
+// supervisor sees a dead pid, restarts the router, and the replacement dies on
+// EADDRINUSE because the original still holds the port. That repeats forever.
+// Its own restarts record the right pid, so correcting the file once is enough.
+// Best-effort: a failure here costs a restart storm in a log, never the box.
+async function repairForkRouterPid(): Promise<void> {
+  const script =
+    'p=$(ss -lptnH "sport = :1339" 2>/dev/null | grep -oE "pid=[0-9]+" | head -1 | cut -d= -f2); ' +
+    'f=/tmp/sand-desktop/shared/fork-router.pid; ' +
+    '[ -n "$p" ] && [ -f "$f" ] && ! kill -0 "$(cat "$f")" 2>/dev/null && printf %s "$p" > "$f"; ' +
+    'exit 0';
+  await runDocker(["exec", LOCAL_DOCKER_BOX_CONTAINER, "sh", "-lc", script]);
+}
+
 async function gatewayReady(token: string): Promise<boolean> {
   try {
     const response = await fetch(`${LOCAL_DOCKER_GATEWAY_URL}/health`, {
@@ -218,7 +233,10 @@ async function ensureLocalDockerBox(settingsPath: string, inferenceCredential?: 
   }
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await gatewayReady(token)) return { baseUrl: LOCAL_DOCKER_GATEWAY_URL, token };
+    if (await gatewayReady(token)) {
+      await repairForkRouterPid();
+      return { baseUrl: LOCAL_DOCKER_GATEWAY_URL, token };
+    }
     const state = await inspectContainer();
     if (!state.running) {
       const logs = await runDocker(["logs", "--tail", "80", LOCAL_DOCKER_BOX_CONTAINER]);
