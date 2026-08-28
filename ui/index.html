@@ -173,6 +173,8 @@ body {
   background: linear-gradient(to top, rgba(255,255,255,.30), rgba(255,255,255,.10) 70%, transparent);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
 .composer .row { margin-top: 10px; }
+.who-answers { font-size: 11.5px; color: var(--ink-3); margin-bottom: 7px; }
+.who-answers b { color: var(--ink-2); font-weight: 600; }
 details.record { margin-top: 26px; }
 details.record summary { cursor: pointer; font-size: 11px; letter-spacing: .10em;
   text-transform: uppercase; color: var(--ink-3); list-style: none; }
@@ -373,7 +375,7 @@ async function call(method, args = {}) {
 }
 
 const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
-                settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(),
+                settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(), draft: "", model: null,
                 thinking: "", waitTick: 0, talkOpen: true,
                 events: [], channels: new Map() };
 
@@ -384,6 +386,7 @@ async function refresh() {
   ]);
   Object.assign(state, { agents, trays, tasks, host, box, store, settings });
   try { state.peers = (await (await fetch("/clients")).json()).peers; } catch { state.peers = null; }
+  try { state.model = await (await fetch("/model")).json(); } catch { state.model = null; }
   // getAgentTranscript takes {id}, not {agentId} — the mismatch answers with
   // "Invalid Sand agent id: undefined" rather than an empty list.
   state.transcript = state.selected == null ? null
@@ -470,6 +473,9 @@ views.agents = () => {
       ${renderStage(a)}
     </div>
     <div class="composer">
+      <div class="who-answers">${state.model?.model
+        ? `Answering: <b>${esc(state.model.model)}</b>${state.model.endpoint ? ` · ${esc(state.model.endpoint.replace(/^https?:\/\//, "").replace(/\/v1$/, ""))}` : ""}`
+        : `Routed via ${esc(state.settings?.inferenceProvider ?? "?")}`}</div>
       <textarea id="prompt" rows="2" placeholder="Ask ${esc(a.name)} to do something…"></textarea>
       <div class="row">
         ${a.isRunning
@@ -534,11 +540,12 @@ function render(force) {
   lastSig = sig; lastView = state.view; lastSelected = state.selected;
 
   const stage = $("#stage");
-  const draft = $("#prompt")?.value ?? "";
+  const draft = $("#prompt")?.value ?? state.draft ?? "";
   const scrolled = stage.scrollTop;
   stage.innerHTML = `<div class="panel${animate ? " anim" : ""}">${views[state.view]()}</div>`;
   const box = $("#prompt");
   if (box != null && draft.length > 0) box.value = draft;
+  state.draft = draft;
   if (!animate) stage.scrollTop = scrolled;
 
   renderRail();
@@ -635,12 +642,17 @@ window.createWorker = (kickstart) => {
   });
 };
 window.sendPrompt = (id) => {
-  const text = $("#prompt")?.value?.trim();
+  const box = $("#prompt");
+  const text = box?.value?.trim();
   if (!text) return;
+  // Clear before the round trip: the draft is carried across repaints on purpose, so
+  // without this your message stays in the box after it has already been sent.
+  if (box) box.value = "";
+  state.draft = "";
   guard(() => call("sendPrompt", { agentId: id, prompt: text }));
 };
 window.kickstart = (id) => guard(() => call("kickstartAgent", { id }));
-window.toggleTalk = () => { state.talkOpen = !state.talkOpen; render(true); };
+window.toggleTalk = () => { state.talkOpen = !state.talkOpen; render(); };
 window.askDelete = (id) => { state.confirmDelete = id; render(); };
 window.cancelDelete = () => { state.confirmDelete = null; render(); };
 window.removeAgent = (id) => {
@@ -690,8 +702,8 @@ setInterval(() => refresh().catch(() => {}), 15000);
 // The label escalates while a run is in flight, and resets the moment it settles.
 setInterval(() => {
   const busy = state.agents.some((agent) => agent.id === state.selected && agent.isRunning);
-  if (!busy) { if (state.waitTick !== 0 || state.thinking) { state.waitTick = 0; state.thinking = ""; render(true); } return; }
-  if (state.waitTick < 2) { state.waitTick += 1; render(true); }
+  if (!busy) { if (state.waitTick !== 0 || state.thinking) { state.waitTick = 0; state.thinking = ""; render(); } return; }
+  if (state.waitTick < 2) { state.waitTick += 1; render(); }
 }, 9000);
 </script>
 </body>

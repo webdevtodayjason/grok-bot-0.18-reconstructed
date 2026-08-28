@@ -119,6 +119,25 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ peers: [...new Set(peers.filter(Boolean))] }));
     }
+    if (req.method === "GET" && url.pathname === "/model") {
+      // The gateway reports which provider is routed but never which model answers, and
+      // "openai-compatible" is not something you can hold a conversation with. The box
+      // carries the answer in its environment.
+      const model = await new Promise((resolve) => {
+        execFile("docker", ["inspect", "grok-bot-local-vm", "--format",
+          "{{range .Config.Env}}{{println .}}{{end}}"], (err, out) => {
+          if (err != null && !out) return resolve(null);
+          const line = out.split("\n").find((l) => l.startsWith("SAND_OPENAI_COMPATIBLE_MODEL="));
+          const host = out.split("\n").find((l) => l.startsWith("SAND_OPENAI_COMPATIBLE_BASE_URL="));
+          resolve({
+            model: line ? line.split("=")[1] : null,
+            endpoint: host ? host.slice("SAND_OPENAI_COMPATIBLE_BASE_URL=".length) : null,
+          });
+        });
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(model ?? {}));
+    }
     if (req.method === "GET" && url.pathname === "/health") {
       const upstream = await fetch(`${GATEWAY}/health`, { headers: upstreamHeaders() });
       const text = await upstream.text();
