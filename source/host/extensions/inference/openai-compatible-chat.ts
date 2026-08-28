@@ -290,6 +290,11 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
         model: options.model,
         messages,
         ...(declaredTools == null ? {} : { tools: declaredTools, tool_choice: "auto" }),
+        // Reasoning models burn the whole budget thinking unless told not to, and the switch
+        // lives here rather than at the top level, where it is silently ignored.
+        ...(process.env.SAND_OPENAI_COMPATIBLE_THINKING?.trim() === "1"
+          ? {}
+          : { chat_template_kwargs: { enable_thinking: false } }),
         stream: true,
         stream_options: { include_usage: true },
       }),

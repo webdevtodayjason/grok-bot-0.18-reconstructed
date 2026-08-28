@@ -70,14 +70,64 @@ const GROK_ROUTER_SYSTEM_PROMPT = [
  * Keep system messages as system, and only fall back to the router prompt when the
  * conversation carries no instructions of its own.
  */
-function conversationInput(messages: readonly ProviderMessage[], hasSendMessage = false): { input: { role: string; content: string }[]; instructions: string } {
-  const mapped = messages.map(message => ({
-    role: message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user",
-    content: typeof message.content === "string" ? message.content : JSON.stringify(message.content),
-  }));
+/**
+ * A turn's messages carry content as an array of parts, so JSON.stringify-ing them sent the
+ * model its own transcript as Vercel-shaped JSON: every user turn arrived as
+ * `[{"type":"text","text":"..."}]` and every assistant turn as the literal string `[]`.
+ * Shown that pattern often enough, the model reproduces it -- answering with a JSON array of
+ * tool-call objects as plain text instead of calling a tool. Verified on Nemotron: the same
+ * request with tools and tool_choice returns a structured tool_calls array when the history is
+ * plain text, and prose imitating the transcript when it is not.
+ *
+ * Flatten the parts to text, carry real tool calls in the field built for them, and drop turns
+ * that flatten to nothing rather than teaching the model that assistants reply with "[]".
+ */
+function asRecord(value: unknown): Loose | null {
+  return typeof value === "object" && value != null && !Array.isArray(value) ? value as Loose : null;
+}
+function stringifyArgs(value: unknown): string {
+  try { return JSON.stringify(value) ?? "{}"; } catch { return "{}"; }
+}
+
+function flattenParts(content: unknown): { text: string; toolCalls: Loose[] } {
+  if (typeof content === "string") return { text: content, toolCalls: [] };
+  if (!Array.isArray(content)) {
+    const single = asRecord(content);
+    const text = typeof single?.text === "string" ? single.text : "";
+    return { text, toolCalls: [] };
+  }
+  const text: string[] = [];
+  const toolCalls: Loose[] = [];
+  for (const raw of content) {
+    const part = asRecord(raw);
+    if (part == null) continue;
+    if (typeof part.text === "string" && part.text.length > 0) { text.push(part.text); continue; }
+    if (part.type === "tool-call" && typeof part.toolName === "string") {
+      toolCalls.push({
+        id: typeof part.toolCallId === "string" ? part.toolCallId : `call_${toolCalls.length}`,
+        type: "function",
+        function: { name: part.toolName, arguments: stringifyArgs(part.args ?? {}) },
+      });
+    }
+  }
+  return { text: text.join("\n"), toolCalls };
+}
+
+function conversationInput(messages: readonly ProviderMessage[], hasSendMessage = false): { input: Loose[]; instructions: string } {
+  const mapped = messages.map(message => {
+    const role = message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user";
+    const { text, toolCalls } = flattenParts(message.content);
+    return { role, content: text, toolCalls };
+  });
   const own = mapped.filter(message => message.role === "system" && message.content.trim().length > 0).map(message => message.content);
+  const input = mapped
+    .filter(message => message.role !== "system")
+    .filter(message => message.content.trim().length > 0 || message.toolCalls.length > 0)
+    .map(message => message.toolCalls.length > 0
+      ? { role: message.role, content: message.content.length > 0 ? message.content : null, tool_calls: message.toolCalls }
+      : { role: message.role, content: message.content });
   return {
-    input: mapped.filter(message => message.role !== "system"),
+    input,
     instructions: own.length > 0 ? own.join("\n\n") : hasSendMessage ? GROK_AGENT_SYSTEM_PROMPT : GROK_ROUTER_SYSTEM_PROMPT,
   };
 }
