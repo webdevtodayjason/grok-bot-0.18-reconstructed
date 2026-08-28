@@ -89,15 +89,15 @@ function stringifyArgs(value: unknown): string {
   try { return JSON.stringify(value) ?? "{}"; } catch { return "{}"; }
 }
 
-function flattenParts(content: unknown): { text: string; toolCalls: Loose[] } {
-  if (typeof content === "string") return { text: content, toolCalls: [] };
+function flattenParts(content: unknown): { text: string; toolCalls: Loose[]; results: Loose[] } {
+  if (typeof content === "string") return { text: content, toolCalls: [], results: [] };
   if (!Array.isArray(content)) {
     const single = asRecord(content);
-    const text = typeof single?.text === "string" ? single.text : "";
-    return { text, toolCalls: [] };
+    return { text: typeof single?.text === "string" ? single.text : "", toolCalls: [], results: [] };
   }
   const text: string[] = [];
   const toolCalls: Loose[] = [];
+  const results: Loose[] = [];
   for (const raw of content) {
     const part = asRecord(raw);
     if (part == null) continue;
@@ -108,26 +108,48 @@ function flattenParts(content: unknown): { text: string; toolCalls: Loose[] } {
         type: "function",
         function: { name: part.toolName, arguments: stringifyArgs(part.args ?? {}) },
       });
+      continue;
+    }
+    // A tool result is its own message with the id of the call it answers. Folded into the
+    // previous user turn it reads as the user narrating tool output back at the model, which
+    // is why the model kept saying the conversation had been interrupted.
+    if (part.type === "tool-result") {
+      results.push({
+        role: "tool",
+        tool_call_id: typeof part.toolCallId === "string" ? part.toolCallId : "",
+        content: typeof part.result === "string" ? part.result : stringifyArgs(part.result ?? ""),
+      });
     }
   }
-  return { text: text.join("\n"), toolCalls };
+  return { text: text.join("\n"), toolCalls, results };
 }
 
 function conversationInput(messages: readonly ProviderMessage[], hasSendMessage = false): { input: Loose[]; instructions: string } {
   const mapped = messages.map(message => {
-    const role = message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user";
-    const { text, toolCalls } = flattenParts(message.content);
-    return { role, content: text, toolCalls };
+    const role = message.role === "assistant" ? "assistant"
+      : message.role === "system" ? "system"
+      : message.role === "tool" ? "tool" : "user";
+    const { text, toolCalls, results } = flattenParts(message.content);
+    return { role, content: text, toolCalls, results };
   });
   const own = mapped.filter(message => message.role === "system" && message.content.trim().length > 0).map(message => message.content);
-  const input = mapped
-    .filter(message => message.role !== "system")
-    .filter(message => message.content.trim().length > 0 || message.toolCalls.length > 0)
-    .map(message => message.toolCalls.length > 0
-      ? { role: message.role, content: message.content.length > 0 ? message.content : null, tool_calls: message.toolCalls }
-      : { role: message.role, content: message.content });
+
+  const input: Loose[] = [];
+  for (const message of mapped) {
+    if (message.role === "system") continue;
+    if (message.role === "tool") { input.push(...message.results); continue; }
+    if (message.toolCalls.length > 0) {
+      input.push({ role: message.role, content: message.content.length > 0 ? message.content : null, tool_calls: message.toolCalls });
+      continue;
+    }
+    if (message.content.trim().length > 0) input.push({ role: message.role, content: message.content });
+  }
+  // A tool result whose call never made it into the request is rejected by the server, so
+  // only keep results that answer a call actually present above them.
+  const offered = new Set(input.flatMap(m => Array.isArray(m.tool_calls) ? m.tool_calls.map((c: Loose) => c.id) : []));
+  const cleaned = input.filter(m => m.role !== "tool" || offered.has(m.tool_call_id));
   return {
-    input,
+    input: cleaned,
     instructions: own.length > 0 ? own.join("\n\n") : hasSendMessage ? GROK_AGENT_SYSTEM_PROMPT : GROK_ROUTER_SYSTEM_PROMPT,
   };
 }
