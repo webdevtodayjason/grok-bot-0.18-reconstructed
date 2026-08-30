@@ -251,6 +251,8 @@ td .prov { font-weight: 500; color: var(--ink); }
 .btn:active { transform: translateY(0); }
 .btn.ghost { background: rgba(255,255,255,.55); color: var(--ink); border: 1px solid var(--edge); }
 .btn.danger { background: rgba(242,69,106,.14); color: #b3113a; }
+.opt { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+.opt input { width: auto; }
 .badge.down { background: rgba(242,69,106,.16); color: #b3113a; }
 .badge.warn { background: rgba(232,163,61,.20); color: #8a5a08; }
 /* One slot, two identities: composer when it is your turn, running when it is not.
@@ -429,6 +431,7 @@ select:focus, .trig input:focus { border-color: rgba(16,18,22,.30); }
   <button role="tab" data-view="agents">Agents</button>
   <button role="tab" data-view="router">Router</button>
   <button role="tab" data-view="events">Events</button>
+    <button role="tab" data-view="settings">Settings</button>
   <span class="sep"></span>
   <button class="icon" id="new-agent" title="New agent">+</button>
 </nav>
@@ -539,6 +542,50 @@ views.overview = () => {
       <dt>Local tool permission</dt><dd>${esc(state.settings?.localToolPermission)}</dd>
       <dt>Box store</dt><dd>${state.store?.durable ? "durable" : "not durable"} · ${num(state.store?.entryCount)} entries · ${num(state.store?.totalBytes)} bytes</dd>
     </dl>`;
+};
+
+views.settings = () => {
+  const s = state.settings;
+  if (s == null) return `<h1>Settings</h1><div class="empty">Reading…</div>`;
+  const choose = (key, value, options) => `<select onchange="setSetting('${key}', this.value)">` +
+    options.map(([v, l]) => `<option value="${v}"${String(v) === String(value) ? " selected" : ""}>${esc(l)}</option>`)
+      .join("") + "</select>";
+  const toggle = (key, value, label) =>
+    `<label class="opt"><input type="checkbox" ${value ? "checked" : ""}
+      onchange="setSetting('${key}', this.checked)"> ${esc(label)}</label>`;
+  return `
+    <h1>Settings</h1>
+    <p class="lede">Host settings, read and written live through the gateway. These belong to the
+      host, so every worker on it sees the change.</p>
+
+    <h2>Permission</h2>
+    <div class="deskrow"><div><b>Local tool permission</b>
+      <div class="sub">Whether a worker may run tools on this machine without asking first.</div></div>
+      ${choose("localToolPermission", s.localToolPermission,
+        [["ask", "Ask every time"], ["allow", "Always allow"], ["deny", "Never allow"]])}</div>
+    <div class="deskrow"><div><b>Auto review</b>
+      <div class="sub">Have the host review a worker's risky actions before they run.</div></div>
+      ${toggle("autoReviewEnabled", s.autoReviewInstructions?.isEnabled, "Enabled")}</div>
+    <div class="deskrow"><div><b>WebAuthn proxy</b>
+      <div class="sub">Lets a worker complete a passkey prompt through you.</div></div>
+      ${toggle("webauthnProxyEnabled", s.webauthnProxyEnabled, "Enabled")}</div>
+
+    <h2>Notifications</h2>
+    <div class="deskrow"><div><b>Desktop notifications</b>
+      <div class="sub">At most ${num(s.notifications?.maxPerWindow ?? 0)} per
+        ${Math.round((s.notifications?.windowMs ?? 0) / 60000)} minutes.</div></div>
+      ${toggle("notificationsEnabled", s.notifications?.isEnabled, "Enabled")}</div>
+
+    <h2>Inference</h2>
+    <div class="deskrow"><div><b>Provider</b>
+      <div class="sub">Which family answers. The endpoint for
+        <code>openai-compatible</code> is chosen under Router.</div></div>
+      ${choose("inferenceProvider", s.inferenceProvider,
+        [["openai-compatible", "openai-compatible (your own hardware)"], ["cursor", "cursor"],
+         ["claude-code", "claude-code"], ["codex", "codex"], ["openrouter", "openrouter"]])}</div>
+    <div class="deskrow"><div><b>Time zone</b>
+      <div class="sub">What a worker means by "tomorrow".</div></div>
+      <span class="sub">${esc(s.userTimeZoneOverride ?? s.userTimeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)}</span></div>`;
 };
 
 views.router = () => {
@@ -893,14 +940,39 @@ function renderPersona(agent) {
 
 // One container, one X display: every worker draws on the same screen. Saying so beats
 // implying each has a private one.
+// vnc_lite.html is noVNC without its control bar -- the strip down the left side is that bar,
+// and there is no parameter to hide it on the full client. This is the interactive view: click
+// and type into it and you are driving the box's Chrome, not watching a recording.
+const DESKTOP_URL = "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1";
 function renderDesktop() {
-  return `<p class="lede">The box's screen, live. One display, shared by every worker on this
-      host — what you see here is whatever is driving Chrome right now.</p>
-    <iframe class="deskframe" title="Box desktop"
-      src="http://127.0.0.1:6080/vnc.html?autoconnect=1&amp;resize=scale&amp;reconnect=1"></iframe>
-    <div class="row"><a class="btn ghost" href="http://127.0.0.1:6080/vnc.html?autoconnect=1&amp;resize=scale"
-      target="_blank" rel="noopener">Open full size</a></div>`;
+  return `<p class="lede">The box's screen, live and interactive — click into it and you are
+      driving. One display, shared by every worker on this host.</p>
+    <div id="deskmount"></div>
+    <div class="row">
+      <button class="btn ghost" onclick="popDesktop()">Full screen</button>
+      <a class="btn ghost" href="${DESKTOP_URL}" target="_blank" rel="noopener">New window</a>
+    </div>`;
 }
+// The iframe is created once and re-parented, never re-created: a fresh element means a fresh
+// VNC handshake, which is what made the desktop reconnect on every repaint.
+let desktopFrame = null;
+function mountDesktop() {
+  const mount = $("#deskmount");
+  if (mount == null) return;
+  if (desktopFrame == null) {
+    desktopFrame = el("iframe", "deskframe");
+    desktopFrame.title = "Box desktop";
+    desktopFrame.allow = "clipboard-read; clipboard-write";
+    desktopFrame.src = DESKTOP_URL;
+  }
+  if (desktopFrame.parentElement !== mount) mount.append(desktopFrame);
+}
+window.popDesktop = () => {
+  const frame = desktopFrame;
+  if (frame == null) return;
+  if (document.fullscreenElement != null) return void document.exitFullscreen();
+  frame.requestFullscreen?.().catch(() => alertLine("this browser refused full screen"));
+};
 
 const sectionBody = (id, agent) =>
   id === "persona" ? renderPersona(agent)
@@ -963,6 +1035,7 @@ function renderRail() {
       const body = el("div", "sect-body");
       body.innerHTML = sectionBody(id, open);
       wrap.append(body);
+      if (id === "desktop") queueMicrotask(mountDesktop);
     }
     list.append(wrap);
   }
@@ -1374,6 +1447,14 @@ window.dropRoutine = (id, automationId) => {
 };
 
 // Memory
+// Host settings are a flat patch; two of them live one level down.
+window.setSetting = (key, value) => guard(() => call("setHostSettings",
+  key === "autoReviewEnabled"
+    ? { autoReviewInstructions: { ...(state.settings?.autoReviewInstructions ?? {}), isEnabled: value } }
+  : key === "notificationsEnabled"
+    ? { notifications: { ...(state.settings?.notifications ?? {}), isEnabled: value } }
+  : { [key]: value }));
+
 window.reloadEndpoints = () => guard(async () => {
   state.endpoints = await (await fetch("/endpoints")).json();
 });
