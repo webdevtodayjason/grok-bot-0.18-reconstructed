@@ -318,6 +318,32 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
 - Auth-needed vs auth-free is per-plugin; a not-yet-authed plugin sits installed with a
   "Needs auth / Reopen" chip rather than failing.
 
+**Video 5 — the approval card, fired live (170s):**
+- Card anatomy, inline in the conversation:
+  `⚠ Allow Grok Bot and all Bots to run commands on your local computer?` /
+  `MacBook-Pro.local` / "This applies to Grok Bot and every Bot. It can always be changed
+  in Settings." / expandable **› Show the command** / **[Always allow] [Allow once]
+  [Never]** / dismissable ×. After allowing, a status ribbon divider appears in the
+  transcript: "Grok Bot can run commands on your computer."
+- **Precedence lesson, demonstrated:** saved Always-allow auto-review rules keep matching
+  even after the master execution setting flips to "Ask every time" — writes sailed
+  through card-less until the leftover rules were deleted. The bot knew this and said so.
+- **The bot orchestrated its own permission test**: wrote grok-bot-approval-test.txt to
+  the Desktop, diagnosed why no card fired, told the operator exactly which two settings
+  to flip, asked to be pinged, fired again. Working out loud at its best.
+- **Settings deep-links inside bot prose**: "⚙ Execution on Local Computer" and
+  "⚙ Auto-review" render as chips with a hover card ("Settings · Computer — … → Show me
+  in Settings") that opens the exact settings row. Operator: "I love the fact that you can
+  link internal settings with the cogwheel settings links." (Our plumbing:
+  `send-message-shaping.ts`, `listener-connect-cards.ts` — unread, Wave 1/2.)
+- **Threaded replies**: replying to a specific bot message quotes it above the composer,
+  the exchange indents under the quoted message, and jumping to it flashes the original.
+- Security Key setting sighted: "Use hardware security keys … (such as a YubiKey) … You'll
+  be asked to approve each use" — the `webauthnProxyEnabled` surface.
+- Gateway commands that must carry all this (Wave 2 targets): `resolveLocalToolPermission`,
+  `resolveAutoReviewApproval`, `respondToWidget`, `promptAcceptanceStatus`,
+  `sand-permission-request.ts`.
+
 Raw narration transcripts and full frame sets live in the session scratchpad (`vid1/`,
 `vid2/`); scratchpads die with the session, so anything load-bearing is written here.
 Requested next recordings: Plugins (covers connectors), then the config area.
