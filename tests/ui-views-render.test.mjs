@@ -38,7 +38,7 @@ async function loadUi() {
   const js = /<script>([\s\S]*)<\/script>/.exec(html)[1];
   const { document, EventSource } = stubDom();
   const win = { addEventListener() {}, location: { origin: "http://127.0.0.1:7777" } };
-  const exports = "return { views, state, renderRoutines, renderChannels, renderKnows, renderStage, renderRecord, editorHtml };";
+  const exports = "return { views, state, renderRoutines, renderChannels, renderKnows, renderStage, editorHtml, SECTIONS, sectionBody, sectionCount, renderPersona, renderDesktop };";
   return new Function("window", "document", "EventSource", "fetch", "setInterval", "setTimeout", "self",
     `${js}\n${exports}`)(win, document, EventSource, async () => ({ ok: true, json: async () => ({}), text: async () => "" }),
       () => 0, () => 0, win);
@@ -52,7 +52,7 @@ function seed(state, over = {}) {
     agents: [AGENT], trays: [], tasks: [], host: { version: "x" }, box: null, store: null,
     settings: { inferenceProvider: "openai-compatible" }, selected: null, creating: false,
     transcript: [], channels: null, integrations: null, routines: [], memories: [], subagents: [],
-    picked: new Set(), seen: new Set(), editor: null, desk: "talk", ...over,
+    picked: new Set(), seen: new Set(), editor: null, section: null, model: null, ...over,
   });
 }
 
@@ -64,21 +64,28 @@ test("every top-level view renders with an empty host", async () => {
   }
 });
 
-test("every desk tab renders, and only Talk carries the composer", async () => {
+test("every rail section renders for the open worker", async () => {
   const ui = await loadUi();
-  for (const desk of ["talk", "channels", "routines", "knows"]) {
-    seed(ui.state, { selected: "a1", desk });
-    const html = ui.views.agents();
-    assert.match(html, new RegExp(`aria-selected="true" onclick="setDesk\\('${desk}'\\)`), `${desk} tab did not open`);
-    // The composer belongs to the conversation. On the other tabs there is nothing to say
-    // into it, and content scrolled away behind it.
-    assert.equal(/class="composer"/.test(html), desk === "talk", `${desk}: composer in the wrong place`);
+  for (const [id] of ui.SECTIONS) {
+    seed(ui.state, { selected: "a1", section: id });
+    assert.equal(typeof ui.sectionBody(id, AGENT), "string", `${id} section did not render`);
+    assert.equal(typeof ui.sectionCount(id, AGENT), "string", `${id} count did not render`);
   }
+});
+
+test("the stage is only ever the conversation, composer included", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1", section: "routines" });
+  const html = ui.views.agents();
+  // The composer used to hide on three of four tabs. With the surfaces in the rail there is
+  // no tab it can be wrong on -- the stage is the conversation, always.
+  assert.match(html, /class="composer"/);
+  assert.doesNotMatch(html, /desktabs/, "the desk tabs were retired into the rail");
 });
 
 test("Return sends and Shift+Return does not", async () => {
   const ui = await loadUi();
-  seed(ui.state, { selected: "a1", desk: "talk" });
+  seed(ui.state, { selected: "a1" });
   const html = ui.views.agents();
   assert.match(html, /event\.key === 'Enter' && !event\.shiftKey/);
   assert.match(html, /event\.preventDefault\(\); sendPrompt\('a1'\)/);
@@ -86,7 +93,7 @@ test("Return sends and Shift+Return does not", async () => {
 
 test("the conversation renders prompts and replies, and a failed run", async () => {
   const ui = await loadUi();
-  seed(ui.state, { selected: "a1", desk: "talk",
+  seed(ui.state, { selected: "a1",
     transcript: [
       { id: "m1", kind: "message", role: "user", content: "status?", timestampMs: 1 },
       { id: "m2", kind: "send-message", message: { content: "all clear" }, timestampMs: 2 },
@@ -100,16 +107,24 @@ test("the conversation renders prompts and replies, and a failed run", async () 
 
 test("the routine editor renders for a new routine and for an existing one", async () => {
   const ui = await loadUi();
-  seed(ui.state, { selected: "a1", desk: "routines",
+  seed(ui.state, { selected: "a1", section: "routines",
     editor: { agentId: "a1", automationId: null, name: "", prompt: "", isEnabled: true,
       triggers: [], menu: "schedule", problems: null, error: null } });
-  assert.match(ui.views.agents(), /Add trigger/);
+  assert.match(ui.sectionBody("routines", AGENT), /Add trigger/);
   ui.state.editor.triggers = [{ type: "cron", schedule: "30 3 * * 1-5" },
     { type: "github", repo: "titanium/clientsync", events: ["ci-failed"], ciBranch: "main" },
     { type: "slack", channel: "#alerts", match: { kind: "keyword", keyword: "outage" } }];
   ui.state.editor.menu = null;
-  const html = ui.views.agents();
+  const html = ui.sectionBody("routines", AGENT);
   assert.match(html, /Add another/);
   assert.match(html, /titanium\/clientsync/);
   assert.match(html, /outage/);
+});
+
+test("a background repaint does not rebuild the rail under a half-typed routine", async () => {
+  const ui = await loadUi();
+  // The editor moved into the rail, so the rail is now what a poll must not redraw. Reading
+  // the guard directly beats asserting on a DOM this stub does not really have.
+  const html = await readFile(path.join(repoRoot, "ui/index.html"), "utf8");
+  assert.match(html, /if \(state\.editor == null \|\| force \|\| \$\("#editor"\) == null\) renderRail\(\);/);
 });

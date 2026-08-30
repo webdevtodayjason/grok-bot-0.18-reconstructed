@@ -84,6 +84,7 @@ body {
   position: fixed; inset: 22px 22px 30px;
   display: grid;
   grid-template-columns: 268px minmax(0,1fr) 292px;
+  transition: grid-template-columns .44s cubic-bezier(.22,.9,.3,1);
   gap: 20px;
   padding-top: 74px;
 }
@@ -111,6 +112,29 @@ body {
 #dock .icon { font-size: 17px; padding: 6px 12px; line-height: 1; }
 
 /* ---- left rail: angled docked cards --------------------------------- */
+/* An open section needs room the roster never did, so the rail takes it and gives it back. */
+#shell.wide { grid-template-columns: 432px minmax(0,1fr) 292px; }
+.sect { border-radius: var(--r-sm); flex: 0 0 auto; overflow: hidden;
+  background: rgba(255,255,255,.26); border: 1px solid rgba(255,255,255,.34);
+  backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  animation: fade-in .26s ease-out backwards; }
+.sect.open { background: rgba(255,255,255,.46); border-color: rgba(255,255,255,.58); }
+.sect-head { display: flex; align-items: center; gap: 9px; width: 100%; font: inherit;
+  font-size: 12.5px; cursor: pointer; border: 0; background: none; color: var(--ink);
+  padding: 11px 13px; text-align: left; }
+.sect-head .nm { font-weight: 500; }
+.sect-head .count { margin-left: auto; font-size: 10.5px; color: var(--ink-3);
+  font-variant-numeric: tabular-nums; }
+.sect-head .chev { color: var(--ink-3); transition: transform .26s; flex: 0 0 auto; }
+.sect.open .sect-head .chev { transform: rotate(90deg); }
+.sect-body { padding: 4px 14px 15px; border-top: 1px solid rgba(255,255,255,.34); }
+.sect-body .lede { font-size: 12.5px; margin-top: 9px; max-width: none; }
+.sect-body .deskrow { padding: 10px 12px; gap: 10px; }
+.sect-body .kv { grid-template-columns: 104px 1fr; font-size: 12px; gap: 7px 12px; }
+.sect-body .editor { padding: 0; background: none; border: 0; margin-top: 12px; }
+.deskframe { width: 100%; height: 320px; border: 0; border-radius: 12px; margin-top: 11px;
+  background: rgba(16,18,22,.34); }
+
 #rail { display: flex; flex-direction: column; gap: 13px; overflow-y: auto; overflow-x: hidden;
         padding: 4px 6px 4px 34px; perspective: 1500px; perspective-origin: 0% 50%; }
 #rail::-webkit-scrollbar { width: 0; }
@@ -332,10 +356,6 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
   background: rgba(255,255,255,.26); border: 1px solid rgba(255,255,255,.34);
   border-radius: 13px; padding: 13px 16px; margin-top: 10px; }
 .deskrow .sub { font-size: 12px; color: var(--ink-2); margin-top: 3px; }
-.desktabs { display: flex; gap: 6px; margin: 2px 0 16px; flex-wrap: wrap; }
-.desktabs button { font: inherit; font-size: 13px; cursor: pointer; border: 1px solid var(--edge);
-  background: rgba(255,255,255,.30); color: var(--ink-2); padding: 6px 14px; border-radius: 999px; }
-.desktabs button[aria-selected="true"] { background: rgba(16,18,22,.84); color: #fff; border-color: transparent; }
 .empty-stage { text-align: center; color: var(--ink-3); font-size: 14px; }
 /* ---- trigger stack -------------------------------------------------- */
 /* The host accepts a group of up to 8 trigger members per routine, so "when to run" is a
@@ -439,7 +459,7 @@ async function call(method, args = {}) {
 
 const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
                 settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(), draft: "", model: null,
-                picked: new Set(), desk: "talk", channels: null, editor: null, integrations: null, routines: null, memories: null, subagents: null,
+                picked: new Set(), section: null, channels: null, editor: null, integrations: null, routines: null, memories: null, subagents: null,
                 thinking: "", waitTick: 0, talkOpen: true,
                 events: [], eventCounts: new Map() };
 
@@ -543,21 +563,11 @@ views.agents = () => {
     <p class="lede">${state.agents.length} on the host. Pick one from the dock on the left,
       or mint a new one with <b>+</b>.</p>
     <div class="row"><button class="btn" onclick="newAgent()">New worker</button></div>`;
-  const desk = state.desk ?? "talk";
-  const tab = (id, label) => `<button aria-selected="${desk === id}" onclick="setDesk('${id}')">${label}</button>`;
-  const panel = desk === "channels" ? renderChannels(a)
-    : desk === "routines" ? renderRoutines(a)
-    : desk === "knows" ? renderKnows(a)
-    : renderStage(a);
   return `<div class="agent-view">
     <div class="agent-scroll">
-      <div class="desktabs">
-        ${tab("talk", "Talk")}${tab("channels", "Listens on")}${tab("routines", "Routines")}${tab("knows", "Knows")}
-      </div>
-      ${panel}
-      ${desk === "talk" ? renderRecord(a) : ""}
+      ${renderStage(a)}
     </div>
-    ${desk !== "talk" ? "" : `<div class="composer">
+    <div class="composer">
       <div class="who-answers">${state.model?.model
         ? `Answering: <b>${esc(state.model.model)}</b>${state.model.endpoint ? ` · ${esc(state.model.endpoint.replace(/^https?:\/\//, "").replace(/\/v1$/, ""))}` : ""}`
         : `Routed via ${esc(state.settings?.inferenceProvider ?? "?")}`}</div>
@@ -573,7 +583,7 @@ views.agents = () => {
              <button class="btn ghost" onclick="cancelDelete()">Keep</button>`
           : `<button class="btn ghost" onclick="askDelete('${a.id}')">Delete</button>`}
       </div>
-    </div>`}
+    </div>
   </div>`;
 }
 
@@ -726,7 +736,7 @@ let lastSig = null, lastView = null, lastSelected = null;
 function signature() {
   return JSON.stringify([
     state.view, state.selected, state.creating, state.confirmDelete, state.peers,
-    [...state.picked].sort(), state.desk, state.channels, state.routines, state.memories, state.subagents,
+    [...state.picked].sort(), state.section, state.channels, state.routines, state.memories, state.subagents,
     state.agents.map((a) => [a.id, a.name, a.isRunning, a.unreadCount, a.lastActivityAt, a.lastMessagePreview]),
     state.trays.map((t) => [t.id, t.title]), state.tasks.length,
     state.host, state.box, state.store, state.settings?.inferenceProvider,
@@ -761,43 +771,127 @@ function render(force) {
     if (now != null) now.scrollTop = animate || atEnd ? now.scrollHeight : scrolled;
   }
 
-  renderRail();
+  $("#shell").classList.toggle("wide", state.section != null);
+  // The routine editor lives in the rail now, so the rail is what must hold still while a
+  // field is half typed. Its own edits come through render(true).
+  if (state.editor == null || force || $("#editor") == null) renderRail();
   renderStack();
   renderConvene();
   document.querySelectorAll("#dock [role=tab]").forEach((b) =>
     b.setAttribute("aria-selected", String(b.dataset.view === state.view)));
 }
 
+// A worker's surfaces belong under the worker, not in tabs over the conversation. Opening one
+// takes the rail: the other cards step aside, its own sections stack beneath it, and clicking
+// the card again puts the roster back. The stage stays what it always should have been -- the
+// conversation, with a composer that is never in the wrong place.
+const SECTIONS = [["persona", "Persona"], ["channels", "Listens on"], ["routines", "Routines"],
+  ["knows", "Knows"], ["desktop", "Desktop"]];
+
+function sectionCount(id, agent) {
+  if (id === "routines") return String((state.routines ?? []).length || "");
+  if (id === "knows") {
+    const n = (state.memories ?? []).length + (state.subagents ?? []).length;
+    return n ? String(n) : "";
+  }
+  if (id === "channels") {
+    const live = (state.channels?.connections ?? []).filter((c) => c.isConnected).length;
+    return live ? String(live) : "none";
+  }
+  if (id === "desktop") return "shared";
+  return agent.isGroup ? "group" : "";
+}
+
+function renderPersona(agent) {
+  const members = (agent.memberIds ?? []).map((id) =>
+    state.agents.find((a) => a.id === id)?.name ?? id);
+  return `<p class="lede">${esc(agent.description || "No description — it answers from the host's own instructions.")}</p>
+    <dl class="kv">
+      <dt>Name</dt><dd>${esc(agent.name)}</dd>
+      ${agent.title ? `<dt>Title</dt><dd>${esc(agent.title)}</dd>` : ""}
+      <dt>Kind</dt><dd>${agent.isGroup ? `group of ${members.length}` : "individual"}</dd>
+      ${members.length ? `<dt>Members</dt><dd>${esc(members.join(", "))}</dd>` : ""}
+      <dt>Answering</dt><dd>${esc(state.model?.model ?? state.settings?.inferenceProvider ?? "?")}</dd>
+      <dt>Origin</dt><dd>${esc(agent.origin)}</dd>
+      <dt>Created</dt><dd>${new Date(agent.createdAt).toLocaleString()}</dd>
+      <dt>Last activity</dt><dd>${agent.lastActivityAt ? ago(agent.lastActivityAt) : "none"}</dd>
+      <dt>Unread</dt><dd>${agent.unreadCount || 0}</dd>
+      <dt>ID</dt><dd>${esc(agent.id)}</dd>
+      <dt>Store</dt><dd>${esc(agent.path)}</dd>
+    </dl>`;
+}
+
+// One container, one X display: every worker draws on the same screen. Saying so beats
+// implying each has a private one.
+function renderDesktop() {
+  return `<p class="lede">The box's screen, live. One display, shared by every worker on this
+      host — what you see here is whatever is driving Chrome right now.</p>
+    <iframe class="deskframe" title="Box desktop"
+      src="http://127.0.0.1:6080/vnc.html?autoconnect=1&amp;resize=scale&amp;reconnect=1"></iframe>
+    <div class="row"><a class="btn ghost" href="http://127.0.0.1:6080/vnc.html?autoconnect=1&amp;resize=scale"
+      target="_blank" rel="noopener">Open full size</a></div>`;
+}
+
+const sectionBody = (id, agent) =>
+  id === "persona" ? renderPersona(agent)
+  : id === "channels" ? renderChannels(agent)
+  : id === "routines" ? renderRoutines(agent)
+  : id === "knows" ? renderKnows(agent)
+  : renderDesktop();
+
+function agentCard(a) {
+  const c = el("button", "card");
+  c.setAttribute("aria-current", String(a.id === state.selected));
+  if (state.picked.has(a.id)) c.classList.add("picked");
+  const bar = el("div", "bar");
+  bar.append(el("span", "dot" + (a.isRunning ? " on" : "")), el("span", "nm", a.name));
+  if (a.unreadCount) bar.append(el("span", "badge", String(a.unreadCount)));
+  const body = el("div", "body");
+  body.append(el("div", "sub", `${a.isGroup ? "group · " : ""}${a.isRunning ? "running" : "idle"} · ${ago(a.lastActivityAt || a.updatedAt)}`));
+  if (a.isGroup) body.append(el("div", "members",
+    `${a.memberIds?.length ?? 0} member${(a.memberIds?.length ?? 0) === 1 ? "" : "s"}`));
+  if (a.lastMessagePreview) body.append(el("div", "prev", a.lastMessagePreview));
+  else { const sk = el("div", "skel"); sk.append(el("i"), el("i"), el("i")); body.append(sk); }
+  c.append(bar, body);
+  // Selection is the verb: one is a 1:1, several is a huddle, and the same card again closes
+  // the drawer -- so the way out is the way in.
+  c.onclick = (event) => {
+    if (event.metaKey || event.ctrlKey) {
+      state.picked.has(a.id) ? state.picked.delete(a.id) : state.picked.add(a.id);
+      render(true);
+      return;
+    }
+    state.picked.clear();
+    const closing = state.selected === a.id;
+    state.selected = closing ? null : a.id;
+    state.section = null;
+    state.editor = null;
+    state.view = "agents";
+    render(true);
+  };
+  return c;
+}
+
 function renderRail() {
   const list = $("#rail-list");
   list.innerHTML = "";
   if (!state.agents.length) { list.append(el("div", "railhead", "none yet")); return; }
-  for (const a of state.agents) {
-    const c = el("button", "card");
-    c.setAttribute("aria-current", String(a.id === state.selected));
-    if (state.picked.has(a.id)) c.classList.add("picked");
-    const bar = el("div", "bar");
-    bar.append(el("span", "dot" + (a.isRunning ? " on" : "")), el("span", "nm", a.name));
-    if (a.unreadCount) bar.append(el("span", "badge", String(a.unreadCount)));
-    const body = el("div", "body");
-    body.append(el("div", "sub", `${a.isGroup ? "group · " : ""}${a.isRunning ? "running" : "idle"} · ${ago(a.lastActivityAt || a.updatedAt)}`));
-    if (a.isGroup) body.append(el("div", "members",
-      `${a.memberIds?.length ?? 0} member${(a.memberIds?.length ?? 0) === 1 ? "" : "s"}`));
-    if (a.lastMessagePreview) body.append(el("div", "prev", a.lastMessagePreview));
-    else { const sk = el("div", "skel"); sk.append(el("i"), el("i"), el("i")); body.append(sk); }
-    c.append(bar, body);
-    // Selection is the verb: one is a 1:1, several is a huddle. Cmd/ctrl-click picks
-    // without leaving the conversation you are in.
-    c.onclick = (event) => {
-      if (event.metaKey || event.ctrlKey) {
-        state.picked.has(a.id) ? state.picked.delete(a.id) : state.picked.add(a.id);
-        render();
-        return;
-      }
-      state.picked.clear();
-      state.selected = a.id; state.view = "agents"; render();
-    };
-    list.append(c);
+  const open = state.agents.find((a) => a.id === state.selected);
+  for (const a of open ? [open] : state.agents) list.append(agentCard(a));
+  if (open == null) return;
+  for (const [id, label] of SECTIONS) {
+    const isOpen = state.section === id;
+    const wrap = el("div", "sect" + (isOpen ? " open" : ""));
+    const head = el("button", "sect-head");
+    head.append(el("span", "nm", label), el("span", "count", sectionCount(id, open)), el("span", "chev", "›"));
+    head.onclick = () => { state.section = isOpen ? null : id; if (!isOpen) state.editor = null; render(true); };
+    wrap.append(head);
+    if (isOpen) {
+      const body = el("div", "sect-body");
+      body.innerHTML = sectionBody(id, open);
+      wrap.append(body);
+    }
+    list.append(wrap);
   }
 }
 
@@ -1184,7 +1278,6 @@ window.broadcast = () => {
     state.picked.clear();
   });
 };
-window.setDesk = (id) => { state.desk = id; render(); };
 
 // Channels. The token never touches this page: the host hands back the platform's own
 // authorisation URL, the human approves there, and the channel binds on the host side.
