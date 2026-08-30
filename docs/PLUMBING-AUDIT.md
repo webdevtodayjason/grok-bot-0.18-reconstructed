@@ -262,6 +262,41 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
   Schedules concentrate at the manager; workers stay message-driven. That is the pattern the
   manager's-desk UI should make natural, not fight.
 
+**Video 3 — plugins / connectors / skills / MCP, plus the config area (355s):**
+- **A plugin is a bundle: MCP server + skills + connectors + accounts + per-tool toggles
+  + setup values.** GitHub plugin detail: View Source ↗ / Uninstall; **Accounts** with
+  labels and multi-account ("+ Add Another Account", Authorize); **Tools: 47 of 47
+  enabled** with a per-tool switch each; **Setup Values** (Edit Values); **Connectors: 1**.
+  Featured entries say it outright: Notion is "Notion Skills + Notion MCP server packaged
+  as a Cursor plugin"; Slack is "Slack MCP server…".
+- **The marketplace is the Claude Code plugin ecosystem.** His own CC plugins surface as
+  Team plugins: ponytail, titanium-toolkit, claude-mem, hookify, plugin-dev, coderabbit,
+  codex (3 skills listed), document-skills. Header: "21 installed · 12 private". Categories:
+  Featured / Team / Agent Orchestration / Canvas / Customer Support / Data Analytics /
+  Design / Documents & Files / Finance & Legal / Inbox & Collaboration / Infrastructure /
+  MCP / Payments / Productivity / Research / Sales / Scheduling.
+- **Skills a Bot saves become private plugins**: "Dark-web client notify — Created
+  locally", "GDAP audit and plan — Created locally", "Operate Atera". The save-as-skill
+  flow and the plugin surface are one system.
+- Install = Add, or setup-values-first (HubSpot asks Client ID/Secret from "Development →
+  MCP Auth Apps"). Installed list shows per-plugin status: Connected, or **Error** in red
+  (Railway). "Create Plugin" is itself a marketplace plugin.
+- **Config area (came free in this video):** Settings modal with General / Computer /
+  Usage & Billing / Updates. Bot section: timezone auto-detect, **Auto-review** toggle and
+  **natural-language per-action rules** — "When Grok Bot wants to: [text] It should:
+  Allow automatically | Ask first", plus a live rules table (e.g. "Allow CDP
+  Runtime.evaluate calls to read page state", "Allow shell commands to post SHORT hot
+  ticket re-lights…") each with edit/delete. Footer: "These rules apply only to you.
+  Built-in safety checks always apply." Security Key section below. Computer tab: current
+  computer name + "Execution on this computer … Always allow" dropdown. Account menu:
+  update banner, Weekly usage %, iOS app, Settings, About, Help Center, Send Feedback,
+  Log out.
+- **Our plumbing already models nearly all of this** (Wave 2 must confirm reach):
+  `settings-service.ts` carries `autoReviewInstructions.{allowInstructions,blockInstructions}`
+  (the NL rules lists), `mcpBoxServers`, `mcpDisabledToolsByServerId` (per-tool toggles),
+  `mcpCustomInstructionsByServerId`; `extensions/mcp/{mcp-service,plugin-skills,
+  skill-publish,production}.ts` and the `sand-auto-review*.ts` runner files exist unread.
+
 Raw narration transcripts and full frame sets live in the session scratchpad (`vid1/`,
 `vid2/`); scratchpads die with the session, so anything load-bearing is written here.
 Requested next recordings: Plugins (covers connectors), then the config area.
