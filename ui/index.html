@@ -255,6 +255,30 @@ td .prov { font-weight: 500; color: var(--ink); }
 .opt input { width: auto; }
 .badge.down { background: rgba(242,69,106,.16); color: #b3113a; }
 .badge.warn { background: rgba(232,163,61,.20); color: #8a5a08; }
+/* A subagent's life in one glance: running pulses, done is calm green, error is red. */
+.pill { font-size: 10.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px;
+  letter-spacing: .02em; flex: 0 0 auto; }
+.pill.running { background: rgba(52,196,107,.16); color: #1c7a41;
+  box-shadow: 0 0 0 0 rgba(52,196,107,.45); animation: pulse 1.6s ease-out infinite; }
+.pill.done { background: rgba(52,196,107,.14); color: #1c7a41; }
+.pill.error { background: rgba(242,69,106,.15); color: #b3113a; }
+.pill.queued, .pill.pending { background: rgba(139,144,153,.18); color: var(--ink-2); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52,196,107,.4); }
+  70% { box-shadow: 0 0 0 6px rgba(52,196,107,0); } 100% { box-shadow: 0 0 0 0 rgba(52,196,107,0); } }
+@media (prefers-reduced-motion: reduce) { .pill.running { animation: none; } }
+/* Routine run history: a thin ledger under each routine. */
+.runs { margin-top: 8px; padding-left: 2px; display: flex; flex-direction: column; gap: 3px; }
+.runlog { display: flex; align-items: center; gap: 9px; font-size: 11.5px; color: var(--ink-2);
+  font-variant-numeric: tabular-nums; }
+.runlog .g { flex: 0 0 auto; width: 13px; text-align: center; }
+.runlog .g.ok { color: var(--live); } .runlog .g.err { color: var(--danger); }
+.runlog .dur { margin-left: auto; color: var(--ink-3); }
+/* The working line — the manager's "someone is on it right now". */
+.working-line { display: flex; align-items: center; gap: 9px; font-size: 12.5px;
+  color: var(--ink-2); margin: 2px 0 12px; }
+.working-line .beat { width: 7px; height: 7px; border-radius: 50%; background: var(--live);
+  box-shadow: 0 0 0 0 rgba(52,196,107,.5); animation: pulse 1.5s ease-out infinite; }
+.card.busy .dot.on { animation: pulse 1.5s ease-out infinite; }
 /* One slot, two identities: composer when it is your turn, running when it is not.
    Warmwind's third identity is a pause, which needs a stop command the gateway does not
    have -- so this reports state rather than pretending to control it. */
@@ -710,6 +734,17 @@ function markdown(raw) {
   }).join("");
 }
 
+// A subagent reports running | done | error; anything else is treated as queued.
+const subStatus = (raw) => {
+  const v = String(raw ?? "").toLowerCase();
+  return v === "running" || v === "done" || v === "error" ? v : "queued";
+};
+const runGlyph = (status) => status === "ok" || status === "success" || status === "completed"
+  ? { g: "✓", cls: "ok" } : status === "running" || status === "started"
+  ? { g: "•", cls: "" } : { g: "✕", cls: "err" };
+const dur = (a, b) => (a == null || b == null) ? "" :
+  (b - a < 1000 ? `${b - a}ms` : `${((b - a) / 1000).toFixed(1)}s`);
+
 const clockOf = (ms) => ms
   ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
   : "";
@@ -738,6 +773,11 @@ function renderStage(agent) {
       </div>`;
   }).join("");
 
+  const runningSubs = (state.subagents ?? []).filter((x) => subStatus(x.status) === "running");
+  const workingLine = agent.isRunning
+    ? `<div class="working-line"><span class="beat"></span><span>${esc(agent.name)} is working${
+        runningSubs.length ? ` · ${runningSubs.length} subagent${runningSubs.length === 1 ? "" : "s"} running` : ""}…</span></div>`
+    : "";
   const working = agent.isRunning ? `<div class="think arrive">
       <div class="label"><i></i>${esc(WAIT_LABELS[Math.min(state.waitTick, WAIT_LABELS.length - 1)])}</div>
       ${state.thinking ? `<div class="stream">${esc(state.thinking)}</div>` : ""}
@@ -754,6 +794,7 @@ function renderStage(agent) {
   });
 
   return `<div class="stage-col">
+      ${workingLine}
       ${talk}
       ${talk && (working || broken) ? '<div class="split"><button onclick="toggleTalk()" title="Collapse">⌃</button></div>' : ""}
       ${working}${broken}
@@ -798,18 +839,30 @@ function renderChannels(agent) {
 
 function renderRoutines(agent) {
   const list = Array.isArray(state.routines) ? state.routines : [];
-  const rows = list.map((r) => `<div class="deskrow">
-      <div><b>${esc(r.name)}</b>
-        <div class="sub">${esc(r.triggerDescription || r.schedule || "no trigger")}${
-          r.nextRunAt ? ` · next ${new Date(r.nextRunAt).toLocaleString()}` : ""}${
-          r.lastRunAt ? ` · last ${ago(r.lastRunAt)}` : " · never run"}</div></div>
-      <div class="row" style="margin:0">
-        <button class="btn ghost" onclick="openRoutine('${agent.id}','${r.id}')">Edit</button>
-        <button class="btn ghost" onclick="runRoutine('${agent.id}','${r.id}')">Run now</button>
-        <button class="btn ghost" onclick="toggleRoutine('${agent.id}','${r.id}',${!r.isEnabled})">${r.isEnabled ? "Pause" : "Resume"}</button>
-        <button class="btn ghost" onclick="dropRoutine('${agent.id}','${r.id}')">Delete</button>
+  const rows = list.map((r) => {
+    const runs = Array.isArray(r.runs) ? r.runs.slice(-5).reverse() : [];
+    const history = runs.map((run) => {
+      const { g, cls } = runGlyph(run.status);
+      return `<div class="runlog"><span class="g ${cls}">${g}</span>
+        <span>${esc(run.trigger === "manual" ? "test run" : run.trigger ?? "run")} · ${ago(run.startedAt)}</span>
+        <span class="dur">${esc(dur(run.startedAt, run.finishedAt))}</span></div>`;
+    }).join("");
+    return `<div class="deskrow" style="flex-direction:column;align-items:stretch">
+      <div class="row" style="margin:0;justify-content:space-between;align-items:flex-start">
+        <div><b>${esc(r.name)}</b>${r.isEnabled === false ? ' <span class="pill queued">paused</span>' : ""}
+          <div class="sub">${esc(r.triggerDescription || r.schedule || "no trigger")}${
+            r.nextRunAt ? ` · next ${new Date(r.nextRunAt).toLocaleString()}` : ""}${
+            r.lastRunAt ? ` · last ${ago(r.lastRunAt)}` : " · never run"}</div></div>
+        <div class="row" style="margin:0">
+          <button class="btn ghost" onclick="openRoutine('${agent.id}','${r.id}')">Edit</button>
+          <button class="btn ghost" onclick="runRoutine('${agent.id}','${r.id}')">Test run</button>
+          <button class="btn ghost" onclick="toggleRoutine('${agent.id}','${r.id}',${!r.isEnabled})">${r.isEnabled ? "Pause" : "Resume"}</button>
+          <button class="btn ghost" onclick="dropRoutine('${agent.id}','${r.id}')">Delete</button>
+        </div>
       </div>
-    </div>`).join("");
+      ${history ? `<div class="runs">${history}</div>` : '<div class="runs"><div class="runlog"><span class="g">·</span><span>no runs yet</span></div></div>'}
+    </div>`;
+  }).join("");
   return `<p class="lede">What ${esc(agent.name)} does without being asked. A worker you have to
     remember to poke is a toy; one on a schedule is staff.</p>
     ${rows || '<div class="empty">No routines yet.</div>'}
@@ -825,14 +878,21 @@ function renderKnows(agent) {
       <div><div class="sub" style="color:var(--ink)">${esc(typeof m === "string" ? m : m.content ?? JSON.stringify(m))}</div></div>
       ${m.id ? `<button class="btn ghost" onclick="forget('${agent.id}','${m.id}')">Forget</button>` : ""}
     </div>`).join("");
-  const subRows = subs.map((sub) => `<div class="deskrow">
-      <div><b>${esc(sub.name ?? sub.id ?? "subagent")}</b>
-        <div class="sub">${esc(sub.status ?? "")}</div></div></div>`).join("");
+  const ordered = [...subs].sort((a, b) => (b.startedAtMs ?? 0) - (a.startedAtMs ?? 0));
+  const subRows = ordered.map((sub) => {
+    const st = subStatus(sub.status);
+    return `<div class="deskrow">
+      <div><b>${esc(sub.subagentType ?? sub.name ?? "subagent")}</b>
+        <div class="sub">${esc(sub.title ?? sub.id ?? "")}${
+          sub.startedAtMs ? ` · ${ago(sub.startedAtMs)}` : ""}</div></div>
+      <span class="pill ${st}">${st}</span></div>`;
+  }).join("");
+  const working = ordered.filter((sub) => subStatus(sub.status) === "running").length;
   return `<p class="lede">What ${esc(agent.name)} remembers about you, and what it handed off.
     A worker whose memory you cannot inspect is one you cannot trust.</p>
     <h2>Memory</h2>${memRows || '<div class="empty">Nothing remembered yet.</div>'}
     ${mem.length ? `<div class="row"><button class="btn ghost" onclick="forgetAll('${agent.id}')">Clear all memory</button></div>` : ""}
-    <h2>Delegated</h2>${subRows || '<div class="empty">Nothing delegated.</div>'}`;
+    <h2>Delegated${working ? ` · ${working} working` : ""}</h2>${subRows || '<div class="empty">Nothing delegated.</div>'}`;
 }
 
 views.events = () => `
@@ -908,6 +968,8 @@ const SECTIONS = [["persona", "Persona"], ["channels", "Listens on"], ["routines
 function sectionCount(id, agent) {
   if (id === "routines") return String((state.routines ?? []).length || "");
   if (id === "knows") {
+    const working = (state.subagents ?? []).filter((x) => subStatus(x.status) === "running").length;
+    if (working) return `${working} ●`;
     const n = (state.memories ?? []).length + (state.subagents ?? []).length;
     return n ? String(n) : "";
   }
@@ -985,6 +1047,7 @@ function agentCard(a) {
   const c = el("button", "card");
   c.setAttribute("aria-current", String(a.id === state.selected));
   if (state.picked.has(a.id)) c.classList.add("picked");
+  if (a.isRunning) c.classList.add("busy");
   const bar = el("div", "bar");
   bar.append(el("span", "dot" + (a.isRunning ? " on" : "")), el("span", "nm", a.name));
   if (a.unreadCount) bar.append(el("span", "badge", String(a.unreadCount)));

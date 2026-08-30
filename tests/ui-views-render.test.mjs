@@ -38,7 +38,7 @@ async function loadUi() {
   const js = /<script>([\s\S]*)<\/script>/.exec(html)[1];
   const { document, EventSource } = stubDom();
   const win = { addEventListener() {}, location: { origin: "http://127.0.0.1:7777" } };
-  const exports = "return { views, state, renderRoutines, renderChannels, renderKnows, renderStage, editorHtml, SECTIONS, sectionBody, sectionCount, renderPersona, renderDesktop, TRIGGER_KINDS };";
+  const exports = "return { views, state, renderRoutines, renderChannels, renderKnows, renderStage, editorHtml, SECTIONS, sectionBody, sectionCount, renderPersona, renderDesktop, TRIGGER_KINDS, subStatus };";
   return new Function("window", "document", "EventSource", "fetch", "setInterval", "setTimeout", "self",
     `${js}\n${exports}`)(win, document, EventSource, async () => ({ ok: true, json: async () => ({}), text: async () => "" }),
       () => 0, () => 0, win);
@@ -207,4 +207,58 @@ test("switching view fetches that view's data instead of rendering stale state",
   // so opening them showed "Nothing yet" / "Reading…" over data that existed.
   const dock = /b\.onclick = \(\) => \{[\s\S]*?\}\);/.exec(html)[0];
   assert.match(dock, /void refresh\(\)/, "the dock must refetch on view change");
+});
+
+test("routines show a run ledger with per-run result glyphs", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1", section: "routines", routines: [
+    { id: "r1", name: "Nightly sweep", schedule: "0 3 * * *", isEnabled: true, lastRunAt: 2,
+      runs: [
+        { id: "x1", trigger: "manual", startedAt: 1000, finishedAt: 12000, status: "ok" },
+        { id: "x2", trigger: "cron", startedAt: 100, finishedAt: 200, status: "error" },
+      ] },
+  ] });
+  const html = ui.sectionBody("routines", AGENT);
+  assert.match(html, /Nightly sweep/);
+  assert.match(html, /Test run/);              // the manual-run control is labelled as a test run
+  assert.match(html, /class="g ok">✓/);        // the ok run renders a check
+  assert.match(html, /class="g err">✕/);       // the errored run renders a cross
+  assert.match(html, /11\.0s/);                 // duration derived from start/finish
+});
+
+test("a routine with no runs says so rather than lying", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1", section: "routines",
+    routines: [{ id: "r1", name: "Fresh", schedule: "0 3 * * *", isEnabled: true, runs: [] }] });
+  assert.match(ui.sectionBody("routines", AGENT), /no runs yet/);
+});
+
+test("delegated subagents render with a live status pill, newest first", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1", section: "knows", subagents: [
+    { subagentId: "s1", subagentType: "generalPurpose", title: "compute a hash", status: "done", startedAtMs: 100 },
+    { subagentId: "s2", subagentType: "computerUse", title: "open a site", status: "running", startedAtMs: 200 },
+  ] });
+  const html = ui.sectionBody("knows", AGENT);
+  assert.match(html, /class="pill running">running/);
+  assert.match(html, /class="pill done">done/);
+  assert.match(html, /Delegated · 1 working/);
+  // newest (s2, startedAtMs 200) sorts above older (s1)
+  assert.ok(html.indexOf("open a site") < html.indexOf("compute a hash"), "not newest-first");
+});
+
+test("an unknown subagent status falls back to queued, never blank", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1", section: "knows",
+    subagents: [{ subagentId: "s1", subagentType: "x", title: "t", status: "weird", startedAtMs: 1 }] });
+  assert.match(ui.sectionBody("knows", AGENT), /class="pill queued">queued/);
+});
+
+test("the stage names who is working, and its subagents", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1", subagents: [
+    { subagentId: "s1", subagentType: "generalPurpose", title: "t", status: "running", startedAtMs: 1 }] });
+  ui.state.agents = [{ ...AGENT, isRunning: true }];
+  const html = ui.views.agents();
+  assert.match(html, /Atera Triage is working · 1 subagent running…/);
 });
