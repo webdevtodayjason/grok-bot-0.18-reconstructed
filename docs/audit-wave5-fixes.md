@@ -35,6 +35,15 @@
     session; Next: trace the handler at host-gateway-api.ts:433; Proof: the command
     returns 200 and `scripts/verify-routine-run.mjs` passes without its error-tolerance.
 
+12. **Per-agent provider/model routing (operator ask, 2026-08-30)** — "set a provider and
+    a specific model to a specific sub-agent." Hooks already in the plumbing:
+    `settings-service.ts:33` exposes `agentDefaultModel` + `computerUseModel`, the Task
+    schema takes a per-dispatch `model` slug, and the relay owns the endpoint catalog.
+    Design: seniority-as-routing — each agent (and subagent type) resolves to a catalog
+    endpoint; chief on the big model, cheap workers on small ones. Owner: a future
+    contract after plugins/OAuth; Proof: two agents answering from two different
+    endpoints in one conversation.
+
 ## Did not verify
 - Estimates are judgment, not measurements. Items 1–2 carry wire-verifiable acceptance
   (a Task dispatch that runs; computerUse in the enum) — hold any fix session to those.
