@@ -344,6 +344,25 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
   `resolveAutoReviewApproval`, `respondToWidget`, `promptAcceptanceStatus`,
   `sand-permission-request.ts`.
 
+**Video 6 — the masked secret request, end to end (218s):**
+- The bot explained its own secret model on camera, three paths: (1) connector sign-in —
+  "I pop a connect card, you authorize in place, and the token never hits the transcript";
+  (2) raw API token — "I send a masked field instead. That value goes straight into that
+  connector's credential file. I only learn that you submitted it"; (3) console logins —
+  "stay on my computer: you fill them from 1Password, including 2FA. I never see the
+  password." Not a generic vault: a masked field is **tied to a connector + field name**.
+- The card, live (after the bot looked up the real connector and field itself —
+  "Connector is Context7, field is `CONTEXT7_API_KEY`. Don't paste the key in chat."):
+  `Context7 API key` / "Paid Context7 key so lookups use your account, not the default." /
+  masked input / **[Save securely]** / "🔒 Stored securely, never shown to your Bot."
+  On submit it flips to **✓ Saved — "Saved securely and kept private."**
+- **The bot then verified the secret took effect**: "Key's in. Checking that Context7
+  actually picked it up." → "Connector shows connected, but a test lookup still hit the
+  free quota. Restarting it so it can pick up the key." Closing the loop on a credential
+  without ever seeing it.
+- Plumbing map: `sand-secret-request.ts` (the tool that emits the card) and the gateway's
+  `submitSecret(entryId, value, agentId)` both exist in our source — Wave 2 confirms reach.
+
 Raw narration transcripts and full frame sets live in the session scratchpad (`vid1/`,
 `vid2/`); scratchpads die with the session, so anything load-bearing is written here.
 Requested next recordings: Plugins (covers connectors), then the config area.
