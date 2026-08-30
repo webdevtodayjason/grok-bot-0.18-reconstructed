@@ -203,6 +203,58 @@ Operator note: real-Grok-Bot screenshots were offered and requested (routine edi
 approval card, widget, Agent Computer + takeover, group chat, Settings→Plugins). Attach
 them to Wave 4 when they arrive.
 
+## 6b. Wave 4 evidence — real-product walkthroughs (2026-08-30, operator screen recordings)
+
+Two narrated recordings of the operator's live Grok Bot deployment, dissected with
+`scripts/dissect-video.sh`. These are ground truth for Wave 4; frames legible at full res.
+
+**Video 1 — chief/desktop/routines tour (219s):**
+- **Per-agent screens are real and central.** Each Bot's right rail shows *its own* live
+  screen thumbnail + *its own* routines list ("Chief of Staff's screen" vs "Awesome3D Dev's
+  screen", the latter with one paused routine). Thumbnail → hover **Open** → full-window
+  interactive desktop (he drove Chrome and a Terminal, `box@cursor:/workspace`, Debian-ish,
+  copy/paste works; desktop is minimal: file manager + console). Right rail toggles via a
+  computer icon in the conversation header.
+- **Teach a task** button lives in the desktop view's top bar. Operator: "I click this
+  button and it'll start recording. I can narrate and go through a scenario… and it will
+  turn that into a routine." Narrated recording → automation. (Our plumbing:
+  `teach-recording/teach-recording-service.ts`.)
+- Conversation: task cards (Done badge, "View PR ↗", "Open in Cursor"); bot-to-bot chatter
+  collapses to "5 messages with ◆ 2 Bots" rows that **expand on click** into the inter-bot
+  conversation; inline code chips; per-Bot settings panel (name, label, description, avatar
+  with Bot/Generate-AI/Upload/Reset tabs, notifications toggle, **Share as template**).
+- Routine rows read as name + humanized schedule; detail panel has **Test run**, Active
+  toggle, Delete, and **run history with per-run rows + checkmarks** ("Last Friday at
+  7:22 AM ✓"). Operator: bots are "very interactive in making their own routines all the
+  time, and they're always active."
+
+**Video 2 — creating a routine (240s):**
+- **Routines are created conversationally, by the agent itself.** Operator asked Atera
+  Agent in chat for an hourly weekday ticket watch; the agent named it, wrote its own
+  safety-scoped instruction (read-only; no Passwords/API/secrets pages; no
+  assign/close/comment; tight output list; cc Chief of Staff; "do not change the tickets"),
+  materialized "hourly 8:28–6:28" as removable concrete times, emitted **"Created routine ◉"
+  / "Updated routine ◉"** transcript chips, and confirmed in prose with a live pre-check
+  ("Nothing named Brashear in Atera right now… which is what we want"). Plumbing hook:
+  `sand-state-tool.ts` (`update_state`, cronTrigger) — whether it reaches the local model
+  path is a Wave 2/3 question.
+- **Webhook triggers are minted server-side on save:** fields show "Loading…" then fill
+  with `POST to https://api2.cursor.sh/automations/webh…`, a `crsr_…` key, and an
+  `Authorization: Bearer` header. Production use: "Atera new-ticket dispatch — When a
+  webhook fires." Local equivalent = relay mints URL + feeds the gateway event path
+  (Wave 5 candidate).
+- Trigger picker parity: same 8-item menu (incl. Webhook), same Linear
+  created/status/end-of-cycle + projects/teams fields, Advanced = Months / Days / Times
+  list. Chief's production routines span cron, Slack mention/keyword, GitHub PR events,
+  and webhook — the full stack in daily use.
+- Missing from our UI (now known targets): Test run, per-run history rows, "Agent is
+  working" status line, "Message from Chief of Staff" attribution on bot-to-bot rows,
+  unread "16 new messages" pill, expandable bot-to-bot rows, routine created/updated chips.
+
+Raw narration transcripts and full frame sets live in the session scratchpad (`vid1/`,
+`vid2/`); scratchpads die with the session, so anything load-bearing is written here.
+Requested next recordings: Plugins (covers connectors), then the config area.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole
