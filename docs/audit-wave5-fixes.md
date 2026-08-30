@@ -44,6 +44,12 @@
     contract after plugins/OAuth; Proof: two agents answering from two different
     endpoints in one conversation.
 
+13. **Group member turns: accept text-shaped tool calls, or route members to a stronger
+    tool model** — Nemotron under one persona deterministically hand-writes the
+    SendMessage call as text and the room drops it (full verdict:
+    `docs/audit-group-round.md`). Prompt nudge measured ineffective. Owner: next group
+    session; converges with #12; Proof: Atera answers a roll call in the room.
+
 ## Did not verify
 - Estimates are judgment, not measurements. Items 1–2 carry wire-verifiable acceptance
   (a Task dispatch that runs; computerUse in the enum) — hold any fix session to those.
