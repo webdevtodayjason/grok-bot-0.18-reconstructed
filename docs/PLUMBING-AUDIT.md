@@ -363,6 +363,31 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
 - Plumbing map: `sand-secret-request.ts` (the tool that emits the card) and the gateway's
   `submitSecret(entryId, value, agentId)` both exist in our source — Wave 2 confirms reach.
 
+**Video 7 — group chat (393s):**
+- **Groups are "Channels"** (# icon). Create: + → New Channel → name + bot checkbox
+  search, picks become removable chips → Create. He built "MSP Team" with six members
+  live. Group rail: **Members** (avatars, hover → Remove, + Add Member) and the group's
+  own **Routines** list with Create Routine — a group is an agent here too, matching our
+  `isGroup`/`memberIds` model exactly.
+- **Turn-taking is serialized rounds.** Roll call: "Chief of Staff is working…" → "here"
+  → "Atera Agent is working…" → "here" → "ClientSync Tester is working…" — one bot at a
+  time, in order. The operator had already noticed ("you take turns and seem to do it in
+  rounds"). Maps to `group-chat.ts` GROUP_CHAT_TAG_PREFIX turn prompts in our source.
+- **Bots @-mention each other as chips** and self-organize ownership: "🔶Titanium
+  Marketing can say if that is the brief. 🔶Product Story owns the one-liners." The
+  marketing channel produced a real converged brief ("No SEO rewrite. One product row on
+  the MSP homepage. That is the brief.") with self-imposed approval boundaries ("Draft
+  only. Git when you name it." / "The row stays honest until you say otherwise.") — and
+  took a 🙏 reaction gracefully.
+- Messages carry colored sender labels above bubbles; threaded replies work in groups;
+  group settings panel has avatar (Generate/Upload), name, description.
+- **Command palette**: global search with kind chips All / Messages / Bots / Channels /
+  Files / Links / Routines / Actions — Actions rows are settings deep-links (Chat
+  Settings, Settings: General/Computer/…, Plugins, Theme).
+- Masked-field epilogue (precision worth keeping): the popup wrote a **channel
+  credential**; the bot explained it does NOT inject into the docs plugin's setup values,
+  and offered the reinstall-with-setup-field path — two distinct secret stores, named.
+
 Raw narration transcripts and full frame sets live in the session scratchpad (`vid1/`,
 `vid2/`); scratchpads die with the session, so anything load-bearing is written here.
 Requested next recordings: Plugins (covers connectors), then the config area.
