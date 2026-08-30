@@ -203,7 +203,7 @@ body {
 /* An agent is a conversation with a composer nailed to the bottom -- the transcript
    scrolls behind it. Sending must never require scrolling to find the button. */
 .agent-view { flex: 1; min-height: 0; display: flex; flex-direction: column; margin: -30px -32px; }
-.agent-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 32px 8px; }
+.agent-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 32px 20px; }
 .agent-scroll::-webkit-scrollbar { width: 0; }
 .composer { flex: 0 0 auto; padding: 14px 32px 20px;
   background: linear-gradient(to top, rgba(255,255,255,.30), rgba(255,255,255,.10) 70%, transparent);
@@ -319,6 +319,12 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
 .bubble { align-self: flex-end; max-width: 68%; background: rgba(255,255,255,.34);
   border: 1px solid rgba(255,255,255,.40); border-radius: 15px; padding: 11px 14px 7px;
   backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5); }
+.bubble .txt p + p, .bubble .txt p + ul, .bubble .txt p + ol,
+.bubble .txt ul + p, .bubble .txt ol + p { margin-top: 8px; }
+.bubble .txt ul, .bubble .txt ol { padding-left: 20px; }
+.bubble .txt li { margin: 2px 0; }
+.bubble .txt code { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(16,18,22,.10); padding: 1px 5px; border-radius: 5px; }
 .bubble .txt { font-size: 14.5px; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
 .bubble .when { font-size: 10.5px; color: var(--ink-3); text-align: right; margin-top: 4px;
                 font-variant-numeric: tabular-nums; }
@@ -599,6 +605,25 @@ const bodyOf = (e) => e.kind === "send-message"
   ? (typeof e.message?.content === "string" ? e.message.content : "")
   : (typeof e.content === "string" ? e.content : JSON.stringify(e.content ?? ""));
 
+// ponytail: bold, italic, code, bullets, paragraphs. No library, no parser -- the day a worker
+// needs tables or images, take a real one. esc() runs FIRST so no markup can survive from the
+// model's text into the DOM.
+function markdown(raw) {
+  const inline = (t) => esc(t)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>");
+  const blocks = String(raw ?? "").split(/\n{2,}/);
+  return blocks.map((block) => {
+    const lines = block.split("\n");
+    if (lines.every((l) => /^\s*[-*+]\s+/.test(l) || !l.trim()))
+      return `<ul>${lines.filter((l) => l.trim()).map((l) => `<li>${inline(l.replace(/^\s*[-*+]\s+/, ""))}</li>`).join("")}</ul>`;
+    if (lines.every((l) => /^\s*\d+[.)]\s+/.test(l) || !l.trim()))
+      return `<ol>${lines.filter((l) => l.trim()).map((l) => `<li>${inline(l.replace(/^\s*\d+[.)]\s+/, ""))}</li>`).join("")}</ol>`;
+    return `<p>${lines.map(inline).join("<br>")}</p>`;
+  }).join("");
+}
+
 const clockOf = (ms) => ms
   ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
   : "";
@@ -612,7 +637,8 @@ function renderStage(agent) {
   const fresh = (key) => state.seen.has(key) ? "" : " arrive";
 
   if (entries.length === 0 && failures.length === 0 && !agent.isRunning) {
-    return `<div class="stage-col"><div class="empty-stage">Nothing yet — send ${esc(agent.name)} a prompt below.</div></div>`;
+    return `<div class="stage-col"><div class="empty-stage">${state.transcript == null
+      ? "" : `Nothing yet — send ${esc(agent.name)} a prompt below.`}</div></div>`;
   }
 
   // Conversation above the divider, work below it: the split is the one rule on the stage.
@@ -621,7 +647,7 @@ function renderStage(agent) {
     const text = bodyOf(e);
     if (!text.trim()) return "";
     return `<div class="bubble${fresh(e.id)}"${who === "agent" ? ' style="align-self:flex-start;background:rgba(26,28,32,.30);border-color:rgba(255,255,255,.16)"' : ""}>
-        <div class="txt"${who === "agent" ? ' style="color:#f2f4f6"' : ""}>${esc(text)}</div>
+        <div class="txt"${who === "agent" ? ' style="color:#f2f4f6"' : ""}>${markdown(text)}</div>
         <div class="when">${esc(clockOf(e.timestampMs))}</div>
       </div>`;
   }).join("");
@@ -872,7 +898,10 @@ function agentCard(a) {
     state.section = null;
     state.editor = null;
     state.view = "agents";
+    state.transcript = null;
+    state.channels = state.routines = state.memories = state.subagents = null;
     render(true);
+    if (!closing) void refresh();
   };
   return c;
 }

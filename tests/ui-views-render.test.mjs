@@ -149,3 +149,31 @@ test("the trigger menu stays in the flow, where a mouse can reach it", async () 
   assert.ok(body.indexOf("On a schedule") < body.indexOf("Every hour"), "submenu is misplaced");
   assert.ok(body.indexOf("Every hour") < body.indexOf("Slack message"), "submenu must nest, not float");
 });
+
+test("a worker's markdown renders, and its text cannot inject markup", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1",
+    transcript: [{ id: "m1", kind: "send-message", timestampMs: 1, message: { content:
+      "Here is the list:\n\n- **File work** — read/edit code\n- Use `npm test`\n\nAnything else?" } }] });
+  const html = ui.views.agents();
+  assert.match(html, /<li><b>File work<\/b> — read\/edit code<\/li>/);
+  assert.match(html, /<code>npm test<\/code>/);
+  assert.match(html, /<p>Anything else\?<\/p>/);
+
+  // Model output is not trusted input: escaping runs before any decoration.
+  ui.state.transcript = [{ id: "m2", kind: "send-message", timestampMs: 1,
+    message: { content: "<img src=x onerror=alert(1)> **bold**" } }];
+  const unsafe = ui.views.agents();
+  assert.doesNotMatch(unsafe, /<img/);
+  assert.match(unsafe, /&lt;img src=x onerror=alert\(1\)&gt; <b>bold<\/b>/);
+});
+
+test("an unfetched transcript is not reported as an empty one", async () => {
+  const ui = await loadUi();
+  // null = not fetched yet, [] = genuinely empty. Claiming "Nothing yet" over a conversation
+  // that has history is worse than showing nothing for one network round trip.
+  seed(ui.state, { selected: "a1", transcript: null });
+  assert.doesNotMatch(ui.views.agents(), /Nothing yet/);
+  seed(ui.state, { selected: "a1", transcript: [] });
+  assert.match(ui.views.agents(), /Nothing yet/);
+});
