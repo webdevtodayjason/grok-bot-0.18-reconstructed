@@ -555,6 +555,7 @@ views.agents = () => {
         ${tab("talk", "Talk")}${tab("channels", "Listens on")}${tab("routines", "Routines")}${tab("knows", "Knows")}
       </div>
       ${panel}
+      ${desk === "talk" ? renderRecord(a) : ""}
     </div>
     <div class="composer">
       <div class="who-answers">${state.model?.model
@@ -573,6 +574,62 @@ views.agents = () => {
       </div>
     </div>
   </div>`;
+}
+
+// An agent speaks only through SendMessage, so the transcript records its replies as
+// entries of kind "send-message". The prompt side is kind "message" with role "user".
+const saidBy = (e) => e.kind === "send-message" ? "agent" : e.role === "user" ? "user" : "other";
+const bodyOf = (e) => e.kind === "send-message"
+  ? (typeof e.message?.content === "string" ? e.message.content : "")
+  : (typeof e.content === "string" ? e.content : JSON.stringify(e.content ?? ""));
+
+const clockOf = (ms) => ms
+  ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+  : "";
+
+// Rotates as the wait lengthens, the way warmwind does. Never "Loading", never a bare spinner.
+const WAIT_LABELS = ["Reflecting quietly…", "Still processing…", "Reasoning carefully…"];
+
+function renderStage(agent) {
+  const failures = state.trays.filter((t) => t.agentId === agent.id && t.kind === "error");
+  const entries = (state.transcript ?? []).filter((e) => e.kind === "send-message" || e.kind === "message");
+  const fresh = (key) => state.seen.has(key) ? "" : " arrive";
+
+  if (entries.length === 0 && failures.length === 0 && !agent.isRunning) {
+    return `<div class="stage-col"><div class="empty-stage">Nothing yet — send ${esc(agent.name)} a prompt below.</div></div>`;
+  }
+
+  // Conversation above the divider, work below it: the split is the one rule on the stage.
+  const talk = entries.map((e) => {
+    const who = saidBy(e);
+    const text = bodyOf(e);
+    if (!text.trim()) return "";
+    return `<div class="bubble${fresh(e.id)}"${who === "agent" ? ' style="align-self:flex-start;background:rgba(26,28,32,.30);border-color:rgba(255,255,255,.16)"' : ""}>
+        <div class="txt"${who === "agent" ? ' style="color:#f2f4f6"' : ""}>${esc(text)}</div>
+        <div class="when">${esc(clockOf(e.timestampMs))}</div>
+      </div>`;
+  }).join("");
+
+  const working = agent.isRunning ? `<div class="think arrive">
+      <div class="label"><i></i>${esc(WAIT_LABELS[Math.min(state.waitTick, WAIT_LABELS.length - 1)])}</div>
+      ${state.thinking ? `<div class="stream">${esc(state.thinking)}</div>` : ""}
+    </div>` : "";
+
+  // A failed run leaves no reply at all, so without this the send appears to vanish.
+  const broken = failures.map((t) => `<div class="block err${fresh(t.id)}">
+      <div class="glyph">⚠</div><h3>${esc(t.title)}</h3><p>${esc(t.detail)}</p>
+    </div>`).join("");
+
+  queueMicrotask(() => {
+    for (const e of entries) state.seen.add(e.id);
+    for (const t of failures) state.seen.add(t.id);
+  });
+
+  return `<div class="stage-col">
+      ${talk}
+      ${talk && (working || broken) ? '<div class="split"><button onclick="toggleTalk()" title="Collapse">⌃</button></div>' : ""}
+      ${working}${broken}
+    </div>`;
 }
 
 // The record is for whoever is debugging the host, not for the person talking to a worker.
