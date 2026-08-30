@@ -177,3 +177,26 @@ test("an unfetched transcript is not reported as an empty one", async () => {
   seed(ui.state, { selected: "a1", transcript: [] });
   assert.match(ui.views.agents(), /Nothing yet/);
 });
+
+test("no worker reply can talk the renderer into emitting live markup", async () => {
+  const html = await readFile(path.join(repoRoot, "ui/index.html"), "utf8");
+  const js = /<script>([\s\S]*)<\/script>/.exec(html)[1];
+  const mod = new Function(`${js.slice(js.indexOf("const esc ="), js.indexOf("const clockOf"))};
+    return { markdown };`)();
+  // A worker reads web pages, Slack threads and PR comments, so its reply is
+  // attacker-influenceable in the general case. markdown() concatenates into innerHTML, which is
+  // only safe because esc() runs first and the tags it emits are fixed strings with no attributes.
+  const payloads = ["<img src=x onerror=alert(1)>", "<script>alert(1)</script>",
+    "**<b onclick=evil()>bold</b>**", "`<iframe src=//evil>`", "<svg/onload=alert(1)>",
+    "- <a href=\"javascript:x\">item</a>", "\"><img src=x onerror=alert(1)>",
+    "**a** <div style=\"position:fixed;inset:0\">overlay</div>"];
+  const allowed = new Set(["p", "br", "ul", "ol", "li", "b", "i", "code"]);
+  for (const payload of payloads) {
+    const out = mod.markdown(payload);
+    const leaked = [...out.matchAll(/<\/?([a-z][a-z0-9]*)\b[^>]*>/gi)]
+      .map((m) => m[1].toLowerCase()).filter((t) => !allowed.has(t));
+    assert.deepEqual(leaked, [], `${payload} leaked ${leaked.join(", ")}`);
+    // The emitted tags never carry attributes, so there is nowhere for a handler to land.
+    assert.doesNotMatch(out, /<(?:p|br|ul|ol|li|b|i|code)\s[^>]*>/i, `${payload} produced an attribute`);
+  }
+});
