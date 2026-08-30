@@ -38,7 +38,7 @@ async function loadUi() {
   const js = /<script>([\s\S]*)<\/script>/.exec(html)[1];
   const { document, EventSource } = stubDom();
   const win = { addEventListener() {}, location: { origin: "http://127.0.0.1:7777" } };
-  const exports = "return { views, state, renderRoutines, renderChannels, renderKnows, renderStage, editorHtml, SECTIONS, sectionBody, sectionCount, renderPersona, renderDesktop };";
+  const exports = "return { views, state, renderRoutines, renderChannels, renderKnows, renderStage, editorHtml, SECTIONS, sectionBody, sectionCount, renderPersona, renderDesktop, TRIGGER_KINDS };";
   return new Function("window", "document", "EventSource", "fetch", "setInterval", "setTimeout", "self",
     `${js}\n${exports}`)(win, document, EventSource, async () => ({ ok: true, json: async () => ({}), text: async () => "" }),
       () => 0, () => 0, win);
@@ -127,4 +127,25 @@ test("a background repaint does not rebuild the rail under a half-typed routine"
   // the guard directly beats asserting on a DOM this stub does not really have.
   const html = await readFile(path.join(repoRoot, "ui/index.html"), "utf8");
   assert.match(html, /if \(state\.editor == null \|\| force \|\| \$\("#editor"\) == null\) renderRail\(\);/);
+});
+
+test("the trigger menu stays in the flow, where a mouse can reach it", async () => {
+  const ui = await loadUi();
+  const html = await readFile(path.join(repoRoot, "ui/index.html"), "utf8");
+  // A floated menu was clipped by `.sect { overflow: hidden }` in a rail with 14px of scroll
+  // travel: five of seven items were unclickable, and two landed on the section header beneath,
+  // collapsing Routines and discarding a half-filled editor. Keep it in the flow.
+  const rule = /\.trigmenu \{[^}]*\}/.exec(html)[0];
+  assert.doesNotMatch(rule, /position:\s*(absolute|fixed)/);
+  assert.doesNotMatch(/\.trigmenu \.sub2 \{[^}]*\}/.exec(html)[0], /position:\s*(absolute|fixed)/);
+
+  // Every kind must be present and reachable as its own button.
+  seed(ui.state, { selected: "a1", section: "routines",
+    editor: { agentId: "a1", automationId: null, name: "", prompt: "", isEnabled: true,
+      triggers: [], menu: "schedule", problems: null, error: null } });
+  const body = ui.sectionBody("routines", AGENT);
+  for (const [, label] of ui.TRIGGER_KINDS) assert.ok(body.includes(label), `${label} missing`);
+  // The schedule submenu opens under the row that opens it, not over the items below it.
+  assert.ok(body.indexOf("On a schedule") < body.indexOf("Every hour"), "submenu is misplaced");
+  assert.ok(body.indexOf("Every hour") < body.indexOf("Slack message"), "submenu must nest, not float");
 });
