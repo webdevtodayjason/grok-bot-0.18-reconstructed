@@ -297,6 +297,27 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
   `mcpCustomInstructionsByServerId`; `extensions/mcp/{mcp-service,plugin-skills,
   skill-publish,production}.ts` and the `sand-auto-review*.ts` runner files exist unread.
 
+**Video 4 — installing a plugin, the full auth lifecycle (136s):**
+- Add → toast **"✓ Added Granola and 3 skills"** → detail shows Accounts "default —
+  **Needs auth** [Authenticate]".
+- Authenticate opens the **user's own system browser** at the vendor's hosted MCP auth
+  (`mcp-auth.granola.ai/authorization_session…`) → vendor sign-in (SSO/Google/Microsoft) →
+  Google account chooser → consent screen "**Cursor** would like access to your account"
+  → redirect to **`localhost:8767/callback?code=…&state=…`** → "Authorization complete!
+  You can close this tab." → app flips the account to **Connected**.
+  The desktop app runs a local OAuth callback server on **:8767**. Our gateway's
+  `completeMcpOAuth` is a stub (`host-gateway-api.ts`, `async () => undefined`) — the
+  callback server lived in the Electron main, so a local re-implementation belongs in the
+  relay (Wave 5 candidate).
+- After connect: **Tools 6 of 6 enabled** (Query granola meetings, List meetings, List
+  meeting folders, Get meetings, Get meeting transcript, Get account info), per-tool
+  toggles; Connectors: 1 ("granola"); Skills: 3, each with claude-code-style activation
+  guidance ("granola-context — …Use when someone asks about a past discussion…").
+- Context7 installs with **no auth step** — Connected immediately, 2 tools, 1 skill
+  ("context7-mcp — …Activates for set…"). Install counter ticked 22 → 24 across the video.
+- Auth-needed vs auth-free is per-plugin; a not-yet-authed plugin sits installed with a
+  "Needs auth / Reopen" chip rather than failing.
+
 Raw narration transcripts and full frame sets live in the session scratchpad (`vid1/`,
 `vid2/`); scratchpads die with the session, so anything load-bearing is written here.
 Requested next recordings: Plugins (covers connectors), then the config area.
