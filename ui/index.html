@@ -337,8 +337,51 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
   background: rgba(255,255,255,.30); color: var(--ink-2); padding: 6px 14px; border-radius: 999px; }
 .desktabs button[aria-selected="true"] { background: rgba(16,18,22,.84); color: #fff; border-color: transparent; }
 .empty-stage { text-align: center; color: var(--ink-3); font-size: 14px; }
+/* ---- trigger stack -------------------------------------------------- */
+/* The host accepts a group of up to 8 trigger members per routine, so "when to run" is a
+   list you build, not a field you fill. Every kind below round-trips through the gateway
+   unchanged; webhook is the one warmwind offers that this host has no receiver for. */
+.editor { background: rgba(255,255,255,.30); border: 1px solid rgba(255,255,255,.42);
+  border-radius: var(--r-sm); padding: 17px 19px 19px; margin-top: 12px; }
+.editor h4 { font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink-2); font-weight: 600; margin: 17px 0 6px; }
+.editor h4:first-child { margin-top: 0; }
+.trigstack { border: 1px solid var(--edge); border-radius: 13px; padding: 8px;
+  background: rgba(255,255,255,.20); }
+.trig { display: flex; flex-wrap: wrap; align-items: center; gap: 7px;
+  background: rgba(255,255,255,.44); border: 1px solid var(--edge);
+  border-radius: 11px; padding: 9px 11px; margin-bottom: 7px; }
+.trig .mark { font-size: 12px; width: 16px; text-align: center; color: var(--ink-2); flex: 0 0 auto; }
+.trig .lbl { font-size: 12.5px; color: var(--ink-2); }
+.trig .x { margin-left: auto; cursor: pointer; border: 0; background: none; line-height: 1;
+  color: var(--ink-3); font: inherit; font-size: 17px; padding: 0 3px; }
+.trig .x:hover { color: var(--danger); }
+.trig.bad { border-color: rgba(242,69,106,.50); background: rgba(242,69,106,.07); }
+.trig .why { flex-basis: 100%; font-size: 11.5px; color: #b3113a; }
+select, .trig input { font: inherit; font-size: 13px; width: auto; -webkit-appearance: none;
+  background: rgba(255,255,255,.66); border: 1px solid var(--edge);
+  border-radius: 9px; padding: 6px 9px; color: var(--ink); outline: none; }
+select:focus, .trig input:focus { border-color: rgba(16,18,22,.30); }
+.trig input.wide { min-width: 168px; }
+.trig input.num { width: 76px; }
+.addtrig { position: relative; }
+.addtrig > button { font: inherit; font-size: 13px; cursor: pointer; border: 0;
+  background: none; color: var(--ink-2); padding: 7px 5px; }
+.addtrig > button:hover { color: var(--ink); }
+.trigmenu { position: absolute; z-index: 30; top: 100%; left: 0; min-width: 236px;
+  background: rgba(26,29,34,.90); backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid rgba(255,255,255,.13); border-radius: 16px; padding: 7px;
+  box-shadow: 0 22px 60px rgba(10,12,15,.42); }
+.trigmenu button { display: flex; align-items: center; gap: 12px; width: 100%;
+  font: inherit; font-size: 13.5px; cursor: pointer; border: 0; background: none;
+  color: rgba(255,255,255,.93); padding: 9px 11px; border-radius: 10px; text-align: left; }
+.trigmenu button:hover, .trigmenu button[aria-expanded="true"] { background: rgba(255,255,255,.11); }
+.trigmenu .mark { width: 17px; text-align: center; color: rgba(255,255,255,.62); }
+.trigmenu .more { margin-left: auto; color: rgba(255,255,255,.42); }
+.trigmenu .sub2 { position: absolute; top: -1px; right: calc(100% + 7px); min-width: 168px; }
 
-.log { font:.log { font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 460px; overflow-y: auto; }
+
+.log { font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 460px; overflow-y: auto; }
 .log div { padding: 5px 0; border-top: 1px solid var(--edge); display: flex; gap: 12px; }
 .log .ch { color: var(--ink); min-width: 158px; }
 .log .pl { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -396,9 +439,9 @@ async function call(method, args = {}) {
 
 const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
                 settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(), draft: "", model: null,
-                picked: new Set(), desk: "talk", channels: null, integrations: null, routines: null, memories: null, subagents: null,
+                picked: new Set(), desk: "talk", channels: null, editor: null, integrations: null, routines: null, memories: null, subagents: null,
                 thinking: "", waitTick: 0, talkOpen: true,
-                events: [], channels: new Map() };
+                events: [], eventCounts: new Map() };
 
 async function refresh() {
   const [agents, trays, tasks, host, box, store, settings] = await Promise.all([
@@ -576,6 +619,7 @@ function renderRoutines(agent) {
           r.nextRunAt ? ` · next ${new Date(r.nextRunAt).toLocaleString()}` : ""}${
           r.lastRunAt ? ` · last ${ago(r.lastRunAt)}` : " · never run"}</div></div>
       <div class="row" style="margin:0">
+        <button class="btn ghost" onclick="openRoutine('${agent.id}','${r.id}')">Edit</button>
         <button class="btn ghost" onclick="runRoutine('${agent.id}','${r.id}')">Run now</button>
         <button class="btn ghost" onclick="toggleRoutine('${agent.id}','${r.id}',${!r.isEnabled})">${r.isEnabled ? "Pause" : "Resume"}</button>
         <button class="btn ghost" onclick="dropRoutine('${agent.id}','${r.id}')">Delete</button>
@@ -584,7 +628,9 @@ function renderRoutines(agent) {
   return `<p class="lede">What ${esc(agent.name)} does without being asked. A worker you have to
     remember to poke is a toy; one on a schedule is staff.</p>
     ${rows || '<div class="empty">No routines yet.</div>'}
-    <div class="row"><button class="btn" onclick="newRoutine('${agent.id}')">New routine</button></div>`;
+    ${state.editor?.agentId === agent.id
+      ? `<div class="editor" id="editor">${editorHtml()}</div>`
+      : `<div class="row"><button class="btn" onclick="openRoutine('${agent.id}',null)">New routine</button></div>`}`;
 }
 
 function renderKnows(agent) {
@@ -628,7 +674,7 @@ function signature() {
     state.host, state.box, state.store, state.settings?.inferenceProvider,
     state.settings?.inferenceRouterUsage,
     state.transcript?.map((e) => [e.id, e.content, e.message?.content, e.isStreaming]),
-    state.thinking, state.waitTick, state.talkOpen,
+    state.thinking, state.waitTick, state.talkOpen, state.editor?.automationId ?? state.editor?.agentId ?? null,
     state.view === "events" ? state.events.length : 0,
   ]);
 }
@@ -639,13 +685,17 @@ function render(force) {
   lastSig = sig; lastView = state.view; lastSelected = state.selected;
 
   const stage = $("#stage");
-  const draft = $("#prompt")?.value ?? state.draft ?? "";
-  const scrolled = stage.scrollTop;
-  stage.innerHTML = `<div class="panel${animate ? " anim" : ""}">${views[state.view]()}</div>`;
-  const box = $("#prompt");
-  if (box != null && draft.length > 0) box.value = draft;
-  state.draft = draft;
-  if (!animate) stage.scrollTop = scrolled;
+  // While the routine editor is open it owns the stage: a background poll must not rebuild
+  // the form out from under a half-typed field. Its own edits call render(true).
+  if (state.editor == null || force || $("#editor") == null) {
+    const draft = $("#prompt")?.value ?? state.draft ?? "";
+    const scrolled = stage.scrollTop;
+    stage.innerHTML = `<div class="panel${animate ? " anim" : ""}">${views[state.view]()}</div>`;
+    const box = $("#prompt");
+    if (box != null && draft.length > 0) box.value = draft;
+    state.draft = draft;
+    if (!animate) stage.scrollTop = scrolled;
+  }
 
   renderRail();
   renderStack();
@@ -728,7 +778,7 @@ function renderStack() {
   const ch = el("div", "scard glass-dark");
   ch.append(el("h3", null, "Live channels"));
   for (const name of WATCHED) {
-    const n = state.channels.get(name) ?? 0;
+    const n = state.eventCounts.get(name) ?? 0;
     const row = el("div", "chan" + (n ? " hit" : ""));
     row.append(el("span", "tick", "✓"), el("span", null, name), el("span", "n", n ? String(n) : ""));
     ch.append(row);
@@ -746,6 +796,273 @@ function renderStack() {
     s.append(t);
   }
 }
+
+/* ---- routine editor -------------------------------------------------- */
+// A routine's trigger is a group of up to 8 members, so "when to run" is a stack you build.
+// Each kind below was probed against the live gateway and round-trips unchanged. Warmwind
+// also offers Webhook; this host has no receiver for one, so it is absent rather than
+// present-and-dead.
+const TRIGGER_KINDS = [
+  ["cron", "On a schedule", "◷"], ["slack", "Slack message", "◆"], ["github", "Git event", "◐"],
+  ["microsoftTeams", "Teams message", "▣"], ["linear", "Linear issue", "◗"],
+  ["sentry", "Sentry alert", "▲"], ["pagerduty", "PagerDuty incident", "◈"],
+];
+const SCHEDULES = [["hourly", "Every hour"], ["daily", "Every day"], ["weekdays", "Weekdays"],
+  ["weekly", "Every week"], ["monthly", "Every month"], ["interval", "Interval"], ["advanced", "Advanced…"]];
+const DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const UNITS = [["s", "seconds"], ["m", "minutes"], ["h", "hours"], ["d", "days"]];
+const GITHUB_EVENTS = [["pr-opened", "Opened"], ["pr-pushed", "Updated"], ["pr-merged", "Merged"],
+  ["review-requested", "Review requested"], ["review-approved", "Review approved"],
+  ["review-changes-requested", "Changes requested"], ["review-commented", "Review commented"],
+  ["pr-comment", "PR comment"], ["inline-review-comment", "Inline review comment"],
+  ["review-thread-resolved", "Thread resolved"], ["review-thread-unresolved", "Thread reopened"],
+  ["issue-assigned", "Issue assigned"], ["ci-passed", "CI passed"], ["ci-failed", "CI failed"]];
+const SLACK_MATCHES = [["message", "New messages"], ["mention", "When @mentioned"],
+  ["keyword", "Keyword match"], ["reaction", "A reaction"]];
+const LINEAR_EVENTS = [["issueCreated", "Issue created"], ["statusChanged", "Issue status changed"],
+  ["endOfCycle", "End of cycle"]];
+const SENTRY_EVENTS = [["issueCreated", "Created"], ["issueResolved", "Resolved"], ["issueAssigned", "Assigned"],
+  ["issueArchived", "Archived"], ["issueUnresolved", "Unresolved"], ["issueAny", "Any issue event"]];
+const PAGERDUTY_EVENTS = [["incidentTriggered", "Triggered"], ["incidentAcknowledged", "Acknowledged"],
+  ["incidentResolved", "Resolved"], ["incidentEscalated", "Escalated"], ["incidentAny", "Any incident event"]];
+const isCiEvent = (kind) => kind === "ci-passed" || kind === "ci-failed";
+
+function blankTrigger(kind) {
+  if (kind === "cron") return { type: "cron", schedule: "0 9 * * *" };
+  if (kind === "slack") return { type: "slack", channel: "*", match: { kind: "message" } };
+  if (kind === "github") return { type: "github", repo: "", events: ["pr-opened"] };
+  if (kind === "microsoftTeams") return { type: "microsoftTeams", tenantId: "", teamId: "", teamIds: [],
+    channelIds: [], messageContains: "", messageContainsIsRegex: false, blockUnauthenticatedTeamsUsers: false };
+  if (kind === "linear") return { type: "linear", event: { case: "issueCreated" }, projectIds: [], teamIds: [] };
+  if (kind === "sentry") return { type: "sentry", event: { case: "issueCreated" }, projectIds: [] };
+  return { type: "pagerduty", event: { case: "incidentTriggered" }, serviceIds: [] };
+}
+
+// The cron string is the only thing the host stores, so the friendly shapes are read back
+// out of it rather than kept beside it — an edit here and an edit in the file agree.
+function readSchedule(raw) {
+  const s = String(raw ?? "").trim(), base = { hour: 9, min: 0, dow: 1, dom: 1, n: "30", unit: "m", raw: s };
+  const every = /^@every\s+(\d+)\s*([smhd])$/i.exec(s);
+  if (every) return { ...base, shape: "interval", n: every[1], unit: every[2].toLowerCase() };
+  const f = s.split(/\s+/), num = (v) => /^\d{1,2}$/.test(v);
+  if (f.length === 5 && num(f[0]) && f[3] === "*") {
+    const min = Number(f[0]);
+    if (f[1] === "*" && f[2] === "*" && f[4] === "*") return { ...base, shape: "hourly", min };
+    if (num(f[1])) {
+      const hour = Number(f[1]);
+      if (f[2] === "*" && f[4] === "*") return { ...base, shape: "daily", min, hour };
+      if (f[2] === "*" && f[4] === "1-5") return { ...base, shape: "weekdays", min, hour };
+      if (f[2] === "*" && num(f[4])) return { ...base, shape: "weekly", min, hour, dow: Number(f[4]) % 7 };
+      if (num(f[2]) && f[4] === "*") return { ...base, shape: "monthly", min, hour, dom: Number(f[2]) };
+    }
+  }
+  return { ...base, shape: "advanced" };
+}
+function buildSchedule(v) {
+  if (v.shape === "hourly") return `${v.min} * * * *`;
+  if (v.shape === "daily") return `${v.min} ${v.hour} * * *`;
+  if (v.shape === "weekdays") return `${v.min} ${v.hour} * * 1-5`;
+  if (v.shape === "weekly") return `${v.min} ${v.hour} * * ${v.dow}`;
+  if (v.shape === "monthly") return `${v.min} ${v.hour} ${v.dom} * *`;
+  if (v.shape === "interval") return `@every ${v.n}${v.unit}`;
+  return v.raw;
+}
+
+// The host drops a malformed trigger member silently — the routine saves with one fewer
+// listener and nothing says so. Catching it here is the difference between a typo and a
+// routine that quietly never fires.
+function triggerProblem(t) {
+  if (t.type === "cron") {
+    const s = String(t.schedule ?? "").trim();
+    if (!s) return "needs a schedule";
+    if (!/^@every\s+\d+\s*[smhd]$/i.test(s) && s.split(/\s+/).length !== 5) return "not a cron expression";
+    return null;
+  }
+  if (t.type === "github") {
+    if (!/^[^\s/]+\/[^\s/]+$/.test(String(t.repo).trim())) return "needs owner/repo";
+    if (!t.events.length) return "pick an event";
+    if (t.events.some(isCiEvent) && !String(t.ciBranch ?? "").trim()) return "CI events need a branch";
+    return null;
+  }
+  if (t.type === "slack") {
+    if (!String(t.channel).trim()) return "needs a channel, or * for anywhere";
+    if (t.match.kind === "keyword" && !String(t.match.keyword ?? "").trim()) return "needs a keyword";
+    return null;
+  }
+  if (t.type === "microsoftTeams") {
+    if (!String(t.tenantId).trim()) return "needs a tenant id";
+    if (!String(t.teamId).trim()) return "needs a team id";
+  }
+  return null;
+}
+
+const idList = (v) => String(v).split(/[,\s]+/).filter(Boolean);
+function applyTrig(t, key, val) {
+  if (key.startsWith("cron.")) {
+    const f = key.slice(5);
+    // The Advanced box IS the schedule. Routing it through readSchedule/buildSchedule threw
+    // the typing away whenever the old value still parsed as one of the drawn shapes.
+    if (f === "raw") { t.schedule = val; return; }
+    const v = readSchedule(t.schedule);
+    if (f === "time") { const [h, m] = String(val).split(":"); v.hour = Number(h) || 0; v.min = Number(m) || 0; }
+    else if (f === "shape" || f === "n" || f === "unit") v[f] = val;
+    else v[f] = Number(val);
+    t.schedule = buildSchedule(v);
+    return;
+  }
+  if (key === "match") t.match = val === "keyword" ? { kind: "keyword", keyword: "" } : { kind: val };
+  else if (key === "keyword") t.match = { kind: "keyword", keyword: val };
+  else if (key === "event") t.event = val === "statusChanged" ? { case: val, statusIds: [] }
+    : val === "endOfCycle" ? { case: val, cycleIds: [] } : { case: val };
+  else if (key === "events") t.events = [val];
+  else if (key === "ids") t[t.type === "pagerduty" ? "serviceIds" : "projectIds"] = idList(val);
+  else if (key === "teamIds") t.teamIds = idList(val);
+  else if (key === "userAllowlist") {
+    const users = idList(val);
+    if (users.length) t.userAllowlist = users; else delete t.userAllowlist;
+  } else t[key] = val;
+}
+
+function trigRow(t, i) {
+  const sel = (key, opts, cur) => `<select onchange="trigPick(${i},'${key}',this.value)">` +
+    opts.map(([v, l]) => `<option value="${esc(v)}"${String(v) === String(cur) ? " selected" : ""}>${esc(l)}</option>`)
+      .join("") + "</select>";
+  const txt = (key, cur, ph, cls = "") =>
+    `<input class="${cls}" value="${esc(cur ?? "")}" placeholder="${esc(ph)}" oninput="trigSet(${i},'${key}',this.value)">`;
+  const lbl = (s) => `<span class="lbl">${s}</span>`;
+
+  if (t.type === "cron") {
+    const v = readSchedule(t.schedule);
+    const time = `<input type="time" value="${String(v.hour).padStart(2, "0")}:${String(v.min).padStart(2, "0")}"
+      onchange="trigSet(${i},'cron.time',this.value)">`;
+    const num = (f, val, min, max) => `<input class="num" type="number" min="${min}" max="${max}" value="${val}"
+      onchange="trigSet(${i},'cron.${f}',this.value)">`;
+    const body =
+      v.shape === "hourly" ? `${lbl("at minute")}${num("min", v.min, 0, 59)}`
+      : v.shape === "weekly" ? `${lbl("on")}${sel("cron.dow", DOW.map((d, n) => [n, d]), v.dow)}${lbl("at")}${time}`
+      : v.shape === "monthly" ? `${lbl("on day")}${num("dom", v.dom, 1, 31)}${lbl("at")}${time}`
+      : v.shape === "interval" ? `${lbl("every")}<input class="num" type="number" min="1" value="${esc(v.n)}"
+          oninput="trigSet(${i},'cron.n',this.value)">${sel("cron.unit", UNITS, v.unit)}`
+      : v.shape === "advanced" ? txt("cron.raw", t.schedule, "0 9 * * 1-5", "wide")
+      : `${lbl("at")}${time}`;
+    return sel("cron.shape", SCHEDULES, v.shape) + body;
+  }
+  if (t.type === "slack") {
+    return sel("match", SLACK_MATCHES, t.match.kind) + lbl("in") + txt("channel", t.channel, "#channel or *") +
+      (t.match.kind === "keyword" ? lbl("containing") + txt("keyword", t.match.keyword, "Any text") : "");
+  }
+  if (t.type === "github") {
+    return sel("events", GITHUB_EVENTS, t.events[0]) + lbl("in") + txt("repo", t.repo, "owner/repo", "wide") +
+      (t.events.some(isCiEvent) ? lbl("on") + txt("ciBranch", t.ciBranch, "branch") : "") +
+      lbl("from") + txt("userAllowlist", (t.userAllowlist ?? []).join(", "), "Anyone");
+  }
+  if (t.type === "microsoftTeams") {
+    return lbl("tenant") + txt("tenantId", t.tenantId, "tenant id") + lbl("team") + txt("teamId", t.teamId, "team id") +
+      lbl("containing") + txt("messageContains", t.messageContains, "Any text");
+  }
+  if (t.type === "linear") {
+    return sel("event", LINEAR_EVENTS, t.event.case) + lbl("in") + txt("ids", t.projectIds.join(", "), "All projects") +
+      lbl("for") + txt("teamIds", t.teamIds.join(", "), "All teams");
+  }
+  if (t.type === "sentry") {
+    return sel("event", SENTRY_EVENTS, t.event.case) + lbl("in") + txt("ids", t.projectIds.join(", "), "All projects");
+  }
+  return sel("event", PAGERDUTY_EVENTS, t.event.case) + lbl("in") + txt("ids", t.serviceIds.join(", "), "All services");
+}
+
+function trigMenu() {
+  const e = state.editor;
+  const rest = TRIGGER_KINDS.slice(1)
+    .map(([k, l, m]) => `<button onclick="addTrigger('${k}')"><span class="mark">${m}</span>${l}</button>`).join("");
+  const sub = e.menu === "schedule"
+    ? `<div class="trigmenu sub2">${SCHEDULES.map(([s, l]) => `<button onclick="addSchedule('${s}')">${l}</button>`).join("")}</div>`
+    : "";
+  return `<div class="trigmenu">${sub}
+    <button aria-expanded="${e.menu === "schedule"}" onclick="openScheduleMenu()">
+      <span class="mark">◷</span>On a schedule<span class="more">›</span></button>${rest}</div>`;
+}
+
+function editorHtml() {
+  const e = state.editor;
+  const rows = e.triggers.map((t, i) => {
+    const mark = TRIGGER_KINDS.find(([k]) => k === t.type)?.[2] ?? "•";
+    const why = e.problems?.[i];
+    return `<div class="trig${why ? " bad" : ""}"><span class="mark">${mark}</span>${trigRow(t, i)}
+      <button class="x" title="Remove" onclick="dropTrigger(${i})">×</button>
+      ${why ? `<div class="why">${esc(why)}</div>` : ""}</div>`;
+  }).join("");
+  return `<h4>Name</h4>
+    <input value="${esc(e.name)}" placeholder="Nightly ticket sweep" oninput="editSet('name',this.value)">
+    <h4>What it should do each run</h4>
+    <textarea rows="3" placeholder="Sweep open tickets and summarise anything untouched for 48h"
+      oninput="editSet('prompt',this.value)">${esc(e.prompt)}</textarea>
+    <h4>When to run</h4>
+    <div class="trigstack">${rows}
+      <div class="addtrig">
+        <button onclick="toggleTrigMenu()">＋ ${e.triggers.length ? "Add another" : "Add trigger"}</button>
+        ${e.menu ? trigMenu() : ""}
+      </div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn" onclick="saveRoutine()">${e.automationId ? "Save changes" : "Create routine"}</button>
+      <button class="btn ghost" onclick="closeRoutine()">Cancel</button>
+      ${e.error ? `<span class="sub" style="color:#b3113a">${esc(e.error)}</span>` : ""}
+    </div>`;
+}
+// The editor owns its own subtree: re-rendering only this keeps focus in a half-typed field.
+function renderEditor() {
+  const host = $("#editor");
+  if (host != null) host.innerHTML = editorHtml();
+}
+
+const triggerMembers = (t) => t == null ? []
+  : t.type === "group" ? t.listeners.map((m) => JSON.parse(JSON.stringify(m)))
+  : [JSON.parse(JSON.stringify(t))];
+
+window.openRoutine = (agentId, automationId) => {
+  const r = (state.routines ?? []).find((x) => x.id === automationId);
+  state.editor = { agentId, automationId: automationId ?? null, name: r?.name ?? "", prompt: r?.prompt ?? "",
+    isEnabled: r?.isEnabled ?? true, triggers: triggerMembers(r?.trigger), menu: null, problems: null, error: null };
+  render(true);
+};
+window.closeRoutine = () => { state.editor = null; render(true); };
+window.editSet = (key, value) => { state.editor[key] = value; };
+window.trigSet = (i, key, value) => applyTrig(state.editor.triggers[i], key, value);
+window.trigPick = (i, key, value) => { applyTrig(state.editor.triggers[i], key, value); renderEditor(); };
+window.dropTrigger = (i) => { state.editor.triggers.splice(i, 1); state.editor.problems = null; renderEditor(); };
+window.toggleTrigMenu = () => { state.editor.menu = state.editor.menu ? null : "root"; renderEditor(); };
+window.openScheduleMenu = () => {
+  state.editor.menu = state.editor.menu === "schedule" ? "root" : "schedule";
+  renderEditor();
+};
+window.addTrigger = (kind) => pushTrigger(blankTrigger(kind));
+window.addSchedule = (shape) => pushTrigger({ type: "cron", schedule: buildSchedule({ ...readSchedule("0 9 * * *"), shape }) });
+function pushTrigger(trigger) {
+  const e = state.editor;
+  e.menu = null;
+  // TRIGGER_MAX_GROUP_LISTENERS: the host keeps the first 8 and drops the rest without a word.
+  if (e.triggers.length >= 8) e.error = "eight triggers is the host's limit";
+  else e.triggers.push(trigger);
+  renderEditor();
+}
+window.saveRoutine = () => {
+  const e = state.editor;
+  e.problems = e.triggers.map(triggerProblem);
+  e.error = !e.name.trim() ? "name it"
+    : !e.prompt.trim() ? "say what it should do"
+    : !e.triggers.length ? "add at least one trigger"
+    : e.problems.some(Boolean) ? "fix the flagged triggers" : null;
+  if (e.error) return renderEditor();
+  const trigger = e.triggers.length === 1 ? e.triggers[0] : { type: "group", listeners: e.triggers };
+  const spec = { name: e.name.trim(), prompt: e.prompt.trim(), trigger, isEnabled: e.isEnabled };
+  const { agentId, automationId } = e;
+  guard(async () => {
+    await (automationId
+      ? call("updateAgentAutomation", { id: agentId, automationId, spec })
+      : call("createAgentAutomation", { id: agentId, spec }));
+    state.editor = null;
+  });
+};
 
 /* ---- actions -------------------------------------------------------- */
 async function guard(fn) {
@@ -816,20 +1133,7 @@ window.linkChannel = (id, platform) => guard(async () => {
 });
 window.unlinkChannel = (id, platform) => guard(() => call("disconnectChannel", { id, platform }));
 
-// Routines. cron is the trigger a manager actually wants; slack and github triggers need a
-// channel connected first, so they are not offered until one is.
-window.newRoutine = (id) => {
-  const name = prompt("Routine name", "Hourly check");
-  if (!name?.trim()) return;
-  const schedule = prompt("Cron schedule", "0 * * * *");
-  if (!schedule?.trim()) return;
-  const instruction = prompt("What should it do each run?");
-  if (!instruction?.trim()) return;
-  guard(() => call("createAgentAutomation", {
-    id,
-    spec: { name, prompt: instruction, trigger: { type: "cron", schedule }, isEnabled: true },
-  }));
-};
+// Routines. The editor below builds the trigger stack; see renderEditor.
 window.runRoutine = (id, automationId) => guard(() => call("runAgentAutomationNow", { id, automationId }));
 window.toggleRoutine = (id, automationId, isEnabled) =>
   guard(() => call("setAgentAutomationEnabled", { id, automationId, isEnabled }));
@@ -874,7 +1178,7 @@ function connect() {
   src.onmessage = (ev) => {
     let payload; try { payload = JSON.parse(ev.data); } catch { return; }
     const channel = payload.channel ?? "unknown";
-    state.channels.set(channel, (state.channels.get(channel) ?? 0) + 1);
+    state.eventCounts.set(channel, (state.eventCounts.get(channel) ?? 0) + 1);
     const body = payload.payload;
     state.events.unshift({
       channel,
