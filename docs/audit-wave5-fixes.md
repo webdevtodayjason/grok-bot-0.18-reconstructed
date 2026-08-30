@@ -1,10 +1,10 @@
 # Wave 5 — Ranked fixes (owner: next build session; nothing here was built in the audit)
 
-1. **Unbreak Task dispatch** — reconcile schema-time vs execution-time `subagentConfigs`
+1. ~~DONE 2026-08-30 (`1a8d2cc`)~~ **Unbreak Task dispatch** — reconcile schema-time vs execution-time `subagentConfigs`
    (closure wiring around `turn-agent-composition.ts:1690-1723`; error at
    `task-subagent-preparation.ts:494`). Unlocks generalPurpose subagents; P1's direct fix.
    Est: half-day incl. a wire-verified dispatch.
-2. **Report the desktop to composition** — make the local connector satisfy
+2. ~~DONE 2026-08-30 (`1a8d2cc` — configs supplied directly; desktop gate bypassed at the same site)~~ **Report the desktop to composition** — make the local connector satisfy
    `remoteBoxHasDesktop && getRemoteBoxAvailable()` (`turn-agent-composition.ts:1695`).
    Unlocks computerUse in Task's enum → desktop work, and is prerequisite to teach-a-task
    and per-agent screens. Est: 1–2 days (connector + verify against the box's real X/noVNC).
