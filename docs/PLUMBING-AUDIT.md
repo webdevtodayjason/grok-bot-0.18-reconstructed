@@ -388,6 +388,34 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
   credential**; the bot explained it does NOT inject into the docs plugin's setup values,
   and offered the reinstall-with-setup-field path — two distinct secret stores, named.
 
+**Video 8 — teach-a-task, with the upstream prompt itself (160s + pasted artifact):**
+- The operator captured the **verbatim learn-from-demonstration workflow prompt** — the
+  only upstream orchestration prompt we hold in full. Preserved at
+  `docs/upstream-teach-prompt.md`. Headlines: skills are written with **`update_state`
+  (target "workflow")** and link as `sand-workflow:<id>`; a **`watchVideo` subagent**
+  takes ≤15MB video attachments (lossless 12MB segment splits); a filesystem queue at
+  `/workspace/teach-sessions/queues/<scope>/` with flock claims and 12h leases; read-only
+  browser-evidence cross-check (DevTools `/json/list` + a *copy* of History sqlite, with
+  explicit never-drive-Chrome rules); and the closing law: "**Execution and delegation
+  are owned by the parent system prompt**" — direct confirmation the parent prompt exists
+  and skills must not encode harness mechanics.
+- The prompt is inspectable in-product: `learn-from-demonstration — Managed by Cursor`
+  appears as a workflow with editable Name/Description/**Instructions** — that field is
+  where the operator copied it from. Cursor ships managed workflows beside user ones.
+- **The prompt ran on camera, beat for beat.** Recording UI: title bar "Marketing
+  Channels is watching and learning" + red timer. On stop, a card lands: "The recording
+  is finished. Learn the task from it. [⚙ Learn from demonstration]". The agent then
+  narrated the numbered steps live: "Watching the demo now. **Claiming the recording
+  first.**" (step 0) → "Got a 76-second recording. **Checking two frames** before I watch
+  the whole thing." (step 1) → "Frames look real. **You signed into PressLoom**, then it
+  started analyzing a site. Watching the full clip now." (step 2) — note the credential
+  handled exactly per the sensitive-info rule: named as a sign-in, never transcribed.
+- Graceful cancel: "Disregard that, it was a bad lesson" → "Canceling that one. I will
+  not save a skill from it. Recreate whenever you are ready." Sidebar preview: "Dropped.
+  Waiting on the new recording."
+- The demo itself ran on the **agent's own screen** (Marketing Channels's screen
+  thumbnail mirrored it) — teach recordings are per-agent-screen captures.
+
 Raw narration transcripts and full frame sets live in the session scratchpad (`vid1/`,
 `vid2/`); scratchpads die with the session, so anything load-bearing is written here.
 Requested next recordings: Plugins (covers connectors), then the config area.
