@@ -262,3 +262,32 @@ test("the stage names who is working, and its subagents", async () => {
   const html = ui.views.agents();
   assert.match(html, /Atera Triage is working · 1 subagent running…/);
 });
+
+test("room messages carry sender labels; 1:1 messages do not", async () => {
+  const ui = await loadUi();
+  const entries = [
+    { id: "m1", kind: "message", role: "user", content: "roll call", timestampMs: 1 },
+    { id: "m2", kind: "send-message", timestampMs: 2, author: { id: "x1", name: "Chief of staff" },
+      message: { content: "here" } },
+  ];
+  seed(ui.state, { selected: "a1", transcript: entries });
+  ui.state.agents = [{ ...AGENT, isGroup: true, memberIds: ["x1", "x2"] }];
+  assert.match(ui.views.agents(), /class="by">Chief of staff</);
+  // Same entries in a 1:1: label suppressed.
+  seed(ui.state, { selected: "a1", transcript: entries });
+  assert.doesNotMatch(ui.views.agents(), /class="by"/);
+});
+
+test("the members panel lists members with Remove and offers Add rows", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1", section: "members" });
+  const group = { ...AGENT, isGroup: true, memberIds: ["m1"] };
+  ui.state.agents = [group,
+    { ...AGENT, id: "m1", name: "Atera Triage" },
+    { ...AGENT, id: "m2", name: "Chief of staff" }];
+  const html = ui.sectionBody("members", group);
+  assert.match(html, /Atera Triage/);
+  assert.match(html, /addMember\('a1','m2'\)/);
+  // The last member cannot be removed -- a group needs at least one.
+  assert.doesNotMatch(html, /dropMember/);
+});

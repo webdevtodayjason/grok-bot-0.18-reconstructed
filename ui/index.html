@@ -276,6 +276,8 @@ td .prov { font-weight: 500; color: var(--ink); }
 /* The working line — the manager's "someone is on it right now". */
 .working-line { display: flex; align-items: center; gap: 9px; font-size: 12.5px;
   color: var(--ink-2); margin: 2px 0 12px; }
+.by { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; color: var(--ink-2);
+  margin: 2px 0 -4px 4px; align-self: flex-start; }
 .working-line .beat { width: 7px; height: 7px; border-radius: 50%; background: var(--live);
   box-shadow: 0 0 0 0 rgba(52,196,107,.5); animation: pulse 1.5s ease-out infinite; }
 .card.busy .dot.on { animation: pulse 1.5s ease-out infinite; }
@@ -763,11 +765,17 @@ function renderStage(agent) {
   }
 
   // Conversation above the divider, work below it: the split is the one rule on the stage.
+  // In a room every agent-side entry carries an author; label the speaker like the real
+  // product does. In a 1:1 the author is the agent itself, so the label would be noise.
+  const authors = new Set(entries.map((e) => e.author?.id).filter(Boolean));
+  const labelled = agent.isGroup || authors.size > 1;
   const talk = entries.map((e) => {
     const who = saidBy(e);
     const text = bodyOf(e);
     if (!text.trim()) return "";
-    return `<div class="bubble${fresh(e.id)}"${who === "agent" ? ' style="align-self:flex-start;background:rgba(26,28,32,.30);border-color:rgba(255,255,255,.16)"' : ""}>
+    const label = labelled && who === "agent" && e.author?.name
+      ? `<div class="by">${esc(e.author.name)}</div>` : "";
+    return `${label}<div class="bubble${fresh(e.id)}"${who === "agent" ? ' style="align-self:flex-start;background:rgba(26,28,32,.30);border-color:rgba(255,255,255,.16)"' : ""}>
         <div class="txt"${who === "agent" ? ' style="color:#f2f4f6"' : ""}>${markdown(text)}</div>
         <div class="when">${esc(clockOf(e.timestampMs))}</div>
       </div>`;
@@ -962,8 +970,8 @@ function render(force) {
 // takes the rail: the other cards step aside, its own sections stack beneath it, and clicking
 // the card again puts the roster back. The stage stays what it always should have been -- the
 // conversation, with a composer that is never in the wrong place.
-const SECTIONS = [["persona", "Persona"], ["channels", "Listens on"], ["routines", "Routines"],
-  ["knows", "Knows"], ["desktop", "Desktop"]];
+const SECTIONS = [["persona", "Persona"], ["members", "Members"], ["channels", "Listens on"],
+  ["routines", "Routines"], ["knows", "Knows"], ["desktop", "Desktop"]];
 
 function sectionCount(id, agent) {
   if (id === "routines") return String((state.routines ?? []).length || "");
@@ -978,6 +986,7 @@ function sectionCount(id, agent) {
     return live ? String(live) : "none";
   }
   if (id === "desktop") return "shared";
+  if (id === "members") return String((agent.memberIds ?? []).length || "");
   return agent.isGroup ? "group" : "";
 }
 
@@ -1036,7 +1045,30 @@ window.popDesktop = () => {
   frame.requestFullscreen?.().catch(() => alertLine("this browser refused full screen"));
 };
 
+// Membership is the group's roster: current members with Remove, and every other individual
+// as an Add row. Both write through setGroupMembers with the full new list.
+function renderMembers(agent) {
+  if (!agent.isGroup) return `<p class="lede">Only a group has members. Cmd-click workers in
+    the rail and convene a huddle to make one.</p>`;
+  const ids = agent.memberIds ?? [];
+  const byId = new Map(state.agents.map((a) => [a.id, a]));
+  const rows = ids.map((id) => `<div class="deskrow">
+      <div><b>${esc(byId.get(id)?.name ?? id)}</b>
+        <div class="sub">${esc(byId.get(id)?.description ?? "")}</div></div>
+      ${ids.length > 1 ? `<button class="btn ghost" onclick="dropMember('${agent.id}','${id}')">Remove</button>` : ""}
+    </div>`).join("");
+  const candidates = state.agents.filter((a) => !a.isGroup && !ids.includes(a.id));
+  const adds = candidates.map((a) => `<div class="deskrow">
+      <div><b>${esc(a.name)}</b><div class="sub">${esc(a.description ?? "")}</div></div>
+      <button class="btn ghost" onclick="addMember('${agent.id}','${a.id}')">Add</button>
+    </div>`).join("");
+  return `<p class="lede">Who is in this room. Rounds go one member at a time, in order.</p>
+    ${rows || '<div class="empty">No members.</div>'}
+    ${adds ? `<h2>Add a member</h2>${adds}` : ""}`;
+}
+
 const sectionBody = (id, agent) =>
+  id === "members" ? renderMembers(agent) :
   id === "persona" ? renderPersona(agent)
   : id === "channels" ? renderChannels(agent)
   : id === "routines" ? renderRoutines(agent)
@@ -1528,6 +1560,16 @@ window.useEndpoint = (id) => guard(async () => {
   if (!res.ok) throw new Error(body?.error ?? "could not switch");
   alertLine(`now answering with ${body.using} — takes effect on the next message`);
   state.endpoints = await (await fetch("/endpoints")).json();
+});
+
+window.addMember = (groupId, agentId) => guard(async () => {
+  const group = state.agents.find((a) => a.id === groupId);
+  await call("setGroupMembers", { id: groupId, memberAgentIds: [...(group?.memberIds ?? []), agentId] });
+});
+window.dropMember = (groupId, agentId) => guard(async () => {
+  const group = state.agents.find((a) => a.id === groupId);
+  await call("setGroupMembers", { id: groupId,
+    memberAgentIds: (group?.memberIds ?? []).filter((x) => x !== agentId) });
 });
 
 window.forget = (id, memoryId) => guard(() => call("deleteAgentMemory", { id, memoryId }));
