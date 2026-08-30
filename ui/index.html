@@ -156,6 +156,18 @@ body {
 .card .skel { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
 .card .skel i { display: block; height: 4px; border-radius: 2px; background: rgba(16,18,22,.13); }
 .card .skel i:nth-child(2) { width: 78%; } .card .skel i:nth-child(3) { width: 54%; }
+.card.picked { outline: 2px solid var(--live); outline-offset: 2px; }
+.card .members { font-size: 10.5px; color: var(--ink-3); margin-top: 3px; }
+/* Convene bar: appears only when more than one worker is picked. */
+#convene { position: fixed; left: 50%; bottom: 78px; transform: translateX(-50%); z-index: 40;
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 999px;
+  background: rgba(26,28,32,.72); color: #fff; border: 1px solid rgba(255,255,255,.14);
+  backdrop-filter: blur(26px) saturate(1.5); -webkit-backdrop-filter: blur(26px) saturate(1.5);
+  box-shadow: var(--shadow); animation: fade-in .24s ease-out backwards; }
+#convene .n { font-size: 13px; color: rgba(255,255,255,.72); }
+#convene button { font: inherit; font-size: 13px; cursor: pointer; border: 0; border-radius: 999px;
+  padding: 7px 15px; background: #fff; color: #16181c; }
+#convene button.ghost { background: rgba(255,255,255,.14); color: #fff; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); flex: 0 0 auto; }
 .dot.on { background: var(--live); box-shadow: 0 0 0 3px rgba(52,196,107,.22); }
 
@@ -316,6 +328,14 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
 @keyframes fade-in { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .arrive { animation: none; } }
 
+.deskrow { display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  background: rgba(255,255,255,.26); border: 1px solid rgba(255,255,255,.34);
+  border-radius: 13px; padding: 13px 16px; margin-top: 10px; }
+.deskrow .sub { font-size: 12px; color: var(--ink-2); margin-top: 3px; }
+.desktabs { display: flex; gap: 6px; margin: 2px 0 16px; flex-wrap: wrap; }
+.desktabs button { font: inherit; font-size: 13px; cursor: pointer; border: 1px solid var(--edge);
+  background: rgba(255,255,255,.30); color: var(--ink-2); padding: 6px 14px; border-radius: 999px; }
+.desktabs button[aria-selected="true"] { background: rgba(16,18,22,.84); color: #fff; border-color: transparent; }
 .empty-stage { text-align: center; color: var(--ink-3); font-size: 14px; }
 
 .log { font:.log { font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 460px; overflow-y: auto; }
@@ -376,6 +396,7 @@ async function call(method, args = {}) {
 
 const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
                 settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(), draft: "", model: null,
+                picked: new Set(), desk: "talk", channels: null, integrations: null, routines: null, memories: null, subagents: null,
                 thinking: "", waitTick: 0, talkOpen: true,
                 events: [], channels: new Map() };
 
@@ -391,6 +412,17 @@ async function refresh() {
   // "Invalid Sand agent id: undefined" rather than an empty list.
   state.transcript = state.selected == null ? null
     : await call("getAgentTranscript", { id: state.selected }).catch(() => null);
+  if (state.selected != null) {
+    const id = state.selected;
+    const [channels, integrations, routines, memories, subagents] = await Promise.all([
+      call("getAgentChannels", { id }).catch(() => null),
+      call("getListenerIntegrations").catch(() => null),
+      call("getAgentAutomations", { id }).catch(() => null),
+      call("getAgentMemories", { id }).catch(() => null),
+      call("getSubagents", { id }).catch(() => null),
+    ]);
+    Object.assign(state, { channels, integrations, routines, memories, subagents });
+  }
   if (state.selected && !agents.some((a) => a.id === state.selected)) state.selected = null;
   render();
 }
@@ -468,9 +500,18 @@ views.agents = () => {
     <p class="lede">${state.agents.length} on the host. Pick one from the dock on the left,
       or mint a new one with <b>+</b>.</p>
     <div class="row"><button class="btn" onclick="newAgent()">New worker</button></div>`;
+  const desk = state.desk ?? "talk";
+  const tab = (id, label) => `<button aria-selected="${desk === id}" onclick="setDesk('${id}')">${label}</button>`;
+  const panel = desk === "channels" ? renderChannels(a)
+    : desk === "routines" ? renderRoutines(a)
+    : desk === "knows" ? renderKnows(a)
+    : renderStage(a);
   return `<div class="agent-view">
     <div class="agent-scroll">
-      ${renderStage(a)}
+      <div class="desktabs">
+        ${tab("talk", "Talk")}${tab("channels", "Listens on")}${tab("routines", "Routines")}${tab("knows", "Knows")}
+      </div>
+      ${panel}
     </div>
     <div class="composer">
       <div class="who-answers">${state.model?.model
@@ -506,6 +547,63 @@ function renderRecord(a) {
     </dl></details>`;
 }
 
+
+// ---- the desk: where a worker listens, what it does unattended, what it knows ----
+
+function renderChannels(agent) {
+  const available = state.integrations?.integrations ?? [];
+  const connected = state.channels?.connections ?? [];
+  if (available.length === 0) return '<p class="lede">The host advertises no channel platforms.</p>';
+  const rows = available.map((platform) => {
+    const live = connected.some((c) => c.platform === platform.platform) || platform.isConnected;
+    return `<div class="deskrow">
+      <div><b>${esc(platform.platform)}</b>
+        <div class="sub">${live ? "listening" : `not connected · ${esc(platform.state ?? "idle")}`}</div></div>
+      ${live
+        ? `<button class="btn ghost" onclick="unlinkChannel('${agent.id}','${esc(platform.platform)}')">Disconnect</button>`
+        : `<button class="btn ghost" onclick="linkChannel('${agent.id}','${esc(platform.platform)}')">Connect…</button>`}
+    </div>`;
+  }).join("");
+  return `<p class="lede">Where ${esc(agent.name)} listens. Connecting opens the platform's own
+    authorisation page — this page never sees the token.</p>${rows}`;
+}
+
+function renderRoutines(agent) {
+  const list = Array.isArray(state.routines) ? state.routines : [];
+  const rows = list.map((r) => `<div class="deskrow">
+      <div><b>${esc(r.name)}</b>
+        <div class="sub">${esc(r.triggerDescription || r.schedule || "no trigger")}${
+          r.nextRunAt ? ` · next ${new Date(r.nextRunAt).toLocaleString()}` : ""}${
+          r.lastRunAt ? ` · last ${ago(r.lastRunAt)}` : " · never run"}</div></div>
+      <div class="row" style="margin:0">
+        <button class="btn ghost" onclick="runRoutine('${agent.id}','${r.id}')">Run now</button>
+        <button class="btn ghost" onclick="toggleRoutine('${agent.id}','${r.id}',${!r.isEnabled})">${r.isEnabled ? "Pause" : "Resume"}</button>
+        <button class="btn ghost" onclick="dropRoutine('${agent.id}','${r.id}')">Delete</button>
+      </div>
+    </div>`).join("");
+  return `<p class="lede">What ${esc(agent.name)} does without being asked. A worker you have to
+    remember to poke is a toy; one on a schedule is staff.</p>
+    ${rows || '<div class="empty">No routines yet.</div>'}
+    <div class="row"><button class="btn" onclick="newRoutine('${agent.id}')">New routine</button></div>`;
+}
+
+function renderKnows(agent) {
+  const mem = Array.isArray(state.memories) ? state.memories : [];
+  const subs = Array.isArray(state.subagents) ? state.subagents : [];
+  const memRows = mem.map((m) => `<div class="deskrow">
+      <div><div class="sub" style="color:var(--ink)">${esc(typeof m === "string" ? m : m.content ?? JSON.stringify(m))}</div></div>
+      ${m.id ? `<button class="btn ghost" onclick="forget('${agent.id}','${m.id}')">Forget</button>` : ""}
+    </div>`).join("");
+  const subRows = subs.map((sub) => `<div class="deskrow">
+      <div><b>${esc(sub.name ?? sub.id ?? "subagent")}</b>
+        <div class="sub">${esc(sub.status ?? "")}</div></div></div>`).join("");
+  return `<p class="lede">What ${esc(agent.name)} remembers about you, and what it handed off.
+    A worker whose memory you cannot inspect is one you cannot trust.</p>
+    <h2>Memory</h2>${memRows || '<div class="empty">Nothing remembered yet.</div>'}
+    ${mem.length ? `<div class="row"><button class="btn ghost" onclick="forgetAll('${agent.id}')">Clear all memory</button></div>` : ""}
+    <h2>Delegated</h2>${subRows || '<div class="empty">Nothing delegated.</div>'}`;
+}
+
 views.events = () => `
   <h1>Event stream</h1>
   <p class="lede">Server-sent events relayed from <code>/events</code>. ${state.events.length} received
@@ -524,6 +622,7 @@ let lastSig = null, lastView = null, lastSelected = null;
 function signature() {
   return JSON.stringify([
     state.view, state.selected, state.creating, state.confirmDelete, state.peers,
+    [...state.picked].sort(), state.desk, state.channels, state.routines, state.memories, state.subagents,
     state.agents.map((a) => [a.id, a.name, a.isRunning, a.unreadCount, a.lastActivityAt, a.lastMessagePreview]),
     state.trays.map((t) => [t.id, t.title]), state.tasks.length,
     state.host, state.box, state.store, state.settings?.inferenceProvider,
@@ -550,6 +649,7 @@ function render(force) {
 
   renderRail();
   renderStack();
+  renderConvene();
   document.querySelectorAll("#dock [role=tab]").forEach((b) =>
     b.setAttribute("aria-selected", String(b.dataset.view === state.view)));
 }
@@ -561,17 +661,48 @@ function renderRail() {
   for (const a of state.agents) {
     const c = el("button", "card");
     c.setAttribute("aria-current", String(a.id === state.selected));
+    if (state.picked.has(a.id)) c.classList.add("picked");
     const bar = el("div", "bar");
     bar.append(el("span", "dot" + (a.isRunning ? " on" : "")), el("span", "nm", a.name));
     if (a.unreadCount) bar.append(el("span", "badge", String(a.unreadCount)));
     const body = el("div", "body");
     body.append(el("div", "sub", `${a.isGroup ? "group · " : ""}${a.isRunning ? "running" : "idle"} · ${ago(a.lastActivityAt || a.updatedAt)}`));
+    if (a.isGroup) body.append(el("div", "members",
+      `${a.memberIds?.length ?? 0} member${(a.memberIds?.length ?? 0) === 1 ? "" : "s"}`));
     if (a.lastMessagePreview) body.append(el("div", "prev", a.lastMessagePreview));
     else { const sk = el("div", "skel"); sk.append(el("i"), el("i"), el("i")); body.append(sk); }
     c.append(bar, body);
-    c.onclick = () => { state.selected = a.id; state.view = "agents"; render(); };
+    // Selection is the verb: one is a 1:1, several is a huddle. Cmd/ctrl-click picks
+    // without leaving the conversation you are in.
+    c.onclick = (event) => {
+      if (event.metaKey || event.ctrlKey) {
+        state.picked.has(a.id) ? state.picked.delete(a.id) : state.picked.add(a.id);
+        render();
+        return;
+      }
+      state.picked.clear();
+      state.selected = a.id; state.view = "agents"; render();
+    };
     list.append(c);
   }
+}
+
+// A huddle is a room, not a gesture: a group is an agent with isGroup and a member list,
+// so one convened on Tuesday still holds its history on Friday.
+function renderConvene() {
+  document.getElementById("convene")?.remove();
+  if (state.picked.size < 2) return;
+  const bar = el("div");
+  bar.id = "convene";
+  bar.append(el("span", "n", `${state.picked.size} picked`));
+  const huddle = el("button", null, "Huddle");
+  huddle.onclick = () => window.huddle();
+  const shout = el("button", "ghost", "Broadcast");
+  shout.onclick = () => window.broadcast();
+  const clear = el("button", "ghost", "Clear");
+  clear.onclick = () => { state.picked.clear(); render(); };
+  bar.append(huddle, shout, clear);
+  document.body.append(bar);
 }
 
 const WATCHED = ["agents", "transcript", "subagents", "async-tasks", "tray", "host-settings", "forever-box", "workflows"];
@@ -652,6 +783,79 @@ window.sendPrompt = (id) => {
   guard(() => call("sendPrompt", { agentId: id, prompt: text }));
 };
 window.kickstart = (id) => guard(() => call("kickstartAgent", { id }));
+window.huddle = () => {
+  const members = [...state.picked];
+  const names = state.agents.filter(a => members.includes(a.id)).map(a => a.name);
+  const name = prompt(`Name this huddle (${names.join(", ")})`, names.slice(0, 2).join(" + "));
+  if (!name) return;
+  guard(async () => {
+    const made = await call("createGroup", { name, description: "", memberAgentIds: members });
+    state.picked.clear();
+    const id = made?.agent?.id ?? made?.id;
+    if (id) { state.selected = id; state.view = "agents"; }
+  });
+};
+window.broadcast = () => {
+  const message = prompt(`Broadcast to ${state.picked.size} workers`);
+  if (!message?.trim()) return;
+  guard(async () => {
+    await call("broadcastToAgents", { targets: [...state.picked], message });
+    state.picked.clear();
+  });
+};
+window.setDesk = (id) => { state.desk = id; render(); };
+
+// Channels. The token never touches this page: the host hands back the platform's own
+// authorisation URL, the human approves there, and the channel binds on the host side.
+window.linkChannel = (id, platform) => guard(async () => {
+  const answer = await call("getListenerConnectUrl", { platform });
+  const url = answer?.url;
+  if (!url) { alertLine(`${platform} returned no connect url`); return; }
+  window.open(url, "_blank", "noopener");
+  alertLine(`approve ${platform} in the tab that opened, then refresh`);
+});
+window.unlinkChannel = (id, platform) => guard(() => call("disconnectChannel", { id, platform }));
+
+// Routines. cron is the trigger a manager actually wants; slack and github triggers need a
+// channel connected first, so they are not offered until one is.
+window.newRoutine = (id) => {
+  const name = prompt("Routine name", "Hourly check");
+  if (!name?.trim()) return;
+  const schedule = prompt("Cron schedule", "0 * * * *");
+  if (!schedule?.trim()) return;
+  const instruction = prompt("What should it do each run?");
+  if (!instruction?.trim()) return;
+  guard(() => call("createAgentAutomation", {
+    id,
+    spec: { name, prompt: instruction, trigger: { type: "cron", schedule }, isEnabled: true },
+  }));
+};
+window.runRoutine = (id, automationId) => guard(() => call("runAgentAutomationNow", { id, automationId }));
+window.toggleRoutine = (id, automationId, isEnabled) =>
+  guard(() => call("setAgentAutomationEnabled", { id, automationId, isEnabled }));
+window.dropRoutine = (id, automationId) => {
+  if (!confirmOnce(`drop-${automationId}`)) return;
+  guard(() => call("deleteAgentAutomation", { id, automationId }));
+};
+
+// Memory
+window.forget = (id, memoryId) => guard(() => call("deleteAgentMemory", { id, memoryId }));
+window.forgetAll = (id) => {
+  if (!confirmOnce(`forget-${id}`)) return;
+  guard(() => call("clearAgentMemories", { id }));
+};
+
+// One-shot confirm without a blocking dialog: the second click inside 4s commits.
+const pendingConfirm = new Map();
+function confirmOnce(key) {
+  const now = performance.now();
+  const armed = pendingConfirm.get(key);
+  if (armed != null && now - armed < 4000) { pendingConfirm.delete(key); return true; }
+  pendingConfirm.set(key, now);
+  alertLine("click again to confirm");
+  return false;
+}
+
 window.toggleTalk = () => { state.talkOpen = !state.talkOpen; render(); };
 window.askDelete = (id) => { state.confirmDelete = id; render(); };
 window.cancelDelete = () => { state.confirmDelete = null; render(); };
