@@ -1,0 +1,40 @@
+{
+ "type": "object",
+ "properties": {
+  "description": {
+   "type": "string",
+   "description": "A short, user-friendly title for the subagent. This appears in the UI as the subagent's name. Make it concrete and distinct, consider recent titles to avoid reuse. For resumed subagents which you are prompting to work on a separate task, give an updated description based on the latest work the subagent is performing. (Do not rename if the subagent is continuing work on the same high-level task.)"
+  },
+  "prompt": {
+   "type": "string",
+   "description": "The task for the agent to perform"
+  },
+  "model": {
+   "type": "string",
+   "description": "Optional model slug for this agent. If provided, it must resolve to one of the available model slugs. If omitted, the subagent uses the same model as the parent agent. Do not pass if resume field is set (prior model will be used). Only choose an explicit model when the user directly requests it."
+  },
+  "resume": {
+   "type": "string",
+   "description": "Optional agent ID to resume from. If provided, sends a follow-up message to the agent after it has completed. Requests to a currently running asynchronous agent fail; wait for completion before resuming."
+  },
+  "subagent_type": {
+   "type": "string",
+   "description": "Subagent type to use for this task. Must be one of: generalPurpose, computerUse."
+  },
+  "file_attachments": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   },
+   "description": "Optional array of file paths to images or videos to pass to video-review subagents. Files are read and attached to the subagent's context. Use to forward relevant media (e.g. images sent by user) to subagents."
+  },
+  "run_in_background": {
+   "type": "boolean",
+   "description": "Run the agent in the background (returns output_file path to check later). If this is false, you will be blocked until the agent completes. When true, the background subagent will send a notification when it completes."
+  }
+ },
+ "required": [
+  "description",
+  "prompt"
+ ]
+}

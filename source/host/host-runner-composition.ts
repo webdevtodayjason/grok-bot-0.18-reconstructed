@@ -1,4 +1,7 @@
 import { dirname } from "node:path";
+import { createSandExecutorSubagentConfig } from "./sand-multitask.js";
+import { SubagentType, SubagentTypeCustom } from "../packages/proto/generated/agent/v1/subagents_pb.js";
+import { createSandComputerUseSubagentConfig } from "./runner/tools/sand-computer-use-subagent.js";
 import { TranscriptMirrorOffloadPool } from "./agent-isolation/transcript-mirror-offload.js";
 import type {
   CreateProductionRunnerRunStep,
@@ -2300,9 +2303,31 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         cloudAgent: "off",
         subagentLaunch: "off",
       };
+      // An empty list here is a Task tool that can only fail: the schema still advertises
+      // generalPurpose (task-tool-schema.ts:101 falls back to it), while execution resolves
+      // against THIS list and throws "No subagent types are available."
+      // (task-subagent-preparation.ts:494). Offer what the local box can actually run.
       const baseTurn: TurnToolsetTurnInput = {
         autoReviewModes,
-        subagentConfigs: [],
+        subagentConfigs: [
+          {
+            // The executor factory carries the right description and shape; the name is
+            // generalPurpose so the schema default and the resolver's preferred lookup
+            // (GENERAL_PURPOSE_SUBAGENT_TYPE) both land on it.
+            ...createSandExecutorSubagentConfig(),
+            subagent_type: new SubagentType({
+              type: { case: "custom", value: new SubagentTypeCustom({ name: "generalPurpose" }) },
+            }),
+            permissionMode: 0,
+          },
+          {
+            ...createSandComputerUseSubagentConfig({ browserUseOffered: false }),
+            subagent_type: new SubagentType({
+              type: { case: "custom", value: new SubagentTypeCustom({ name: "computerUse" }) },
+            }),
+            permissionMode: 0,
+          },
+        ],
       };
       const staticModelId = process.env.SAND_AGENT_MODEL ?? DEFAULT_SAND_MODEL;
       const lazyToolHost = () => createProductionTurnToolsetHost({
@@ -2453,7 +2478,13 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                     summaryArchives: [],
                     turnTimings: [],
                   },
-                  productionTurnRunShell: undefined,
+                  // The reconstruction never recovered the original turn engine's
+                  // createRunStep, so a child stripped of the run shell has NO turn path at
+                  // all: SandAgentRunner.run() hits `runStep == null` and returns undefined,
+                  // which surfaces as "production subagent result is not bound". Give the
+                  // child the same production run shell the parent runs on; its own
+                  // conversationId/transcriptId keep its turns distinct.
+                  productionTurnRunShell: runnerOptions.productionTurnRunShell,
                 });
                 bindSessionOwnedRunner(child);
                 ownedRunners.add(child);
