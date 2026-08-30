@@ -29,6 +29,12 @@
 10. **Group UI depth** — sender labels, member management, serialized-round status in our
     dashboard, building on the wired host model. Est: 1 day.
 
+11. **`runAgentAutomationNow` returns 500 ("Cannot read properties of undefined (reading
+    'mapped')") while the run itself starts and completes fine** — found during the
+    visibility round, host-side, reproducible on every manual run. Owner: next host
+    session; Next: trace the handler at host-gateway-api.ts:433; Proof: the command
+    returns 200 and `scripts/verify-routine-run.mjs` passes without its error-tolerance.
+
 ## Did not verify
 - Estimates are judgment, not measurements. Items 1–2 carry wire-verifiable acceptance
   (a Task dispatch that runs; computerUse in the enum) — hold any fix session to those.
