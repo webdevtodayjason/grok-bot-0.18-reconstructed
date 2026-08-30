@@ -64,13 +64,24 @@ test("every top-level view renders with an empty host", async () => {
   }
 });
 
-test("every desk tab renders for a selected worker", async () => {
+test("every desk tab renders, and only Talk carries the composer", async () => {
   const ui = await loadUi();
   for (const desk of ["talk", "channels", "routines", "knows"]) {
     seed(ui.state, { selected: "a1", desk });
     const html = ui.views.agents();
-    assert.match(html, /Atera Triage/, `${desk} tab lost the worker`);
+    assert.match(html, new RegExp(`aria-selected="true" onclick="setDesk\\('${desk}'\\)`), `${desk} tab did not open`);
+    // The composer belongs to the conversation. On the other tabs there is nothing to say
+    // into it, and content scrolled away behind it.
+    assert.equal(/class="composer"/.test(html), desk === "talk", `${desk}: composer in the wrong place`);
   }
+});
+
+test("Return sends and Shift+Return does not", async () => {
+  const ui = await loadUi();
+  seed(ui.state, { selected: "a1", desk: "talk" });
+  const html = ui.views.agents();
+  assert.match(html, /event\.key === 'Enter' && !event\.shiftKey/);
+  assert.match(html, /event\.preventDefault\(\); sendPrompt\('a1'\)/);
 });
 
 test("the conversation renders prompts and replies, and a failed run", async () => {

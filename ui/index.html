@@ -557,11 +557,12 @@ views.agents = () => {
       ${panel}
       ${desk === "talk" ? renderRecord(a) : ""}
     </div>
-    <div class="composer">
+    ${desk !== "talk" ? "" : `<div class="composer">
       <div class="who-answers">${state.model?.model
         ? `Answering: <b>${esc(state.model.model)}</b>${state.model.endpoint ? ` · ${esc(state.model.endpoint.replace(/^https?:\/\//, "").replace(/\/v1$/, ""))}` : ""}`
         : `Routed via ${esc(state.settings?.inferenceProvider ?? "?")}`}</div>
-      <textarea id="prompt" rows="2" placeholder="Ask ${esc(a.name)} to do something…"></textarea>
+      <textarea id="prompt" rows="2" placeholder="Ask ${esc(a.name)} to do something…"
+        onkeydown="if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendPrompt('${a.id}'); }"></textarea>
       <div class="row">
         ${a.isRunning
           ? `<span class="btn run" title="The gateway serves no command to stop a run, so this reports rather than controls">Running</span>`
@@ -572,7 +573,7 @@ views.agents = () => {
              <button class="btn ghost" onclick="cancelDelete()">Keep</button>`
           : `<button class="btn ghost" onclick="askDelete('${a.id}')">Delete</button>`}
       </div>
-    </div>
+    </div>`}
   </div>`;
 }
 
@@ -746,12 +747,18 @@ function render(force) {
   // the form out from under a half-typed field. Its own edits call render(true).
   if (state.editor == null || force || $("#editor") == null) {
     const draft = $("#prompt")?.value ?? state.draft ?? "";
-    const scrolled = stage.scrollTop;
+    const prior = $(".agent-scroll") ?? $(".panel");
+    const scrolled = prior?.scrollTop ?? 0;
+    // Within a screenful of the end counts as reading the newest, so a fresh reply follows the
+    // reader down. Scrolled up in the history, they stay where they were.
+    const atEnd = prior == null ||
+      prior.scrollHeight - prior.scrollTop - prior.clientHeight < 120;
     stage.innerHTML = `<div class="panel${animate ? " anim" : ""}">${views[state.view]()}</div>`;
     const box = $("#prompt");
     if (box != null && draft.length > 0) box.value = draft;
     state.draft = draft;
-    if (!animate) stage.scrollTop = scrolled;
+    const now = $(".agent-scroll") ?? $(".panel");
+    if (now != null) now.scrollTop = animate || atEnd ? now.scrollHeight : scrolled;
   }
 
   renderRail();
