@@ -251,6 +251,17 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
   working" status line, "Message from Chief of Staff" attribution on bot-to-bot rows,
   unread "16 new messages" pill, expandable bot-to-bot rows, routine created/updated chips.
 
+**Video 2 narration, three additions the frames could not show:**
+- **Screens go dormant with their Bot.** "It doesn't always stay active… if they're dormant,
+  I think their screen goes dormant." Per-agent screens are lifecycle-bound to activity —
+  matches the fork-window claim/release machinery (`box-windows.ts`), not a static allocation.
+- Operator reads the webhook plumbing the same way we do: "it looks like it's going through
+  cursor to do that; that's probably built in."
+- **Routine density is org design:** "the reason Chief has so many is because Chief is
+  pretty much telling other people what to do, so they don't have to have a routine."
+  Schedules concentrate at the manager; workers stay message-driven. That is the pattern the
+  manager's-desk UI should make natural, not fight.
+
 Raw narration transcripts and full frame sets live in the session scratchpad (`vid1/`,
 `vid2/`); scratchpads die with the session, so anything load-bearing is written here.
 Requested next recordings: Plugins (covers connectors), then the config area.
