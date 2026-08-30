@@ -1,0 +1,13 @@
+{
+  "endpoints": [
+    { "id": "spark4-nemotron", "name": "Spark 4 · Nemotron 3.5 Lightning 30B",
+      "baseUrl": "http://100.72.9.84:8000/v1",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "apiKey": "" },
+    { "id": "m3-glm", "name": "M3 Studio · GLM",
+      "baseUrl": "http://100.84.108.16:4000/v1", "model": "glm-m3", "apiKey": "" },
+    { "id": "m3-qwen", "name": "M3 Studio · Qwen 3.8",
+      "baseUrl": "http://100.84.108.16:4000/v1", "model": "qwen3.8", "apiKey": "" },
+    { "id": "dell-qwen32b", "name": "Dell R750 · Ollama qwen2.5:32b",
+      "baseUrl": "http://100.110.83.82:11434/v1", "model": "qwen2.5:32b", "apiKey": "" }
+  ]
+}

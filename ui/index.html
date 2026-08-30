@@ -251,6 +251,8 @@ td .prov { font-weight: 500; color: var(--ink); }
 .btn:active { transform: translateY(0); }
 .btn.ghost { background: rgba(255,255,255,.55); color: var(--ink); border: 1px solid var(--edge); }
 .btn.danger { background: rgba(242,69,106,.14); color: #b3113a; }
+.badge.down { background: rgba(242,69,106,.16); color: #b3113a; }
+.badge.warn { background: rgba(232,163,61,.20); color: #8a5a08; }
 /* One slot, two identities: composer when it is your turn, running when it is not.
    Warmwind's third identity is a pause, which needs a stop command the gateway does not
    have -- so this reports state rather than pretending to control it. */
@@ -470,7 +472,7 @@ async function call(method, args = {}) {
 
 const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
                 settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(), draft: "", model: null,
-                picked: new Set(), section: null, channels: null, editor: null, integrations: null, routines: null, memories: null, subagents: null,
+                picked: new Set(), section: null, channels: null, editor: null, endpoints: null, integrations: null, routines: null, memories: null, subagents: null,
                 thinking: "", waitTick: 0, talkOpen: true,
                 events: [], eventCounts: new Map() };
 
@@ -482,6 +484,9 @@ async function refresh() {
   Object.assign(state, { agents, trays, tasks, host, box, store, settings });
   try { state.peers = (await (await fetch("/clients")).json()).peers; } catch { state.peers = null; }
   try { state.model = await (await fetch("/model")).json(); } catch { state.model = null; }
+  if (state.view === "router") {
+    try { state.endpoints = await (await fetch("/endpoints")).json(); } catch { state.endpoints = null; }
+  }
   // getAgentTranscript takes {id}, not {agentId} — the mismatch answers with
   // "Invalid Sand agent id: undefined" rather than an empty list.
   state.transcript = state.selected == null ? null
@@ -550,11 +555,45 @@ views.router = () => {
     <h1>Inference router</h1>
     <p class="lede">Per-provider spend recorded by the host. This is the panel that answers
       "where did the tokens go" — route by agent role and the answer changes here first.</p>
+    ${renderEndpoints()}
     <h2>Providers</h2>
     <table><thead><tr><th>Provider</th><th>Requests</th><th>Input</th><th>Output</th>
       <th>Cache read</th><th>Cache write</th><th>Last used</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="7" class="empty">No providers registered.</td></tr>'}</tbody></table>`;
 };
+
+// Which model answers is an operator decision. It used to live only in the container's
+// environment, which meant it could only be changed by rebuilding the box -- so nobody but a
+// builder could change it. The host also resolves it from box-secrets.json and re-reads that
+// file on every request, so choosing here takes effect on the next message.
+function renderEndpoints() {
+  const data = state.endpoints;
+  if (data == null) return `<h2>Endpoints</h2><div class="empty">Reading…</div>`;
+  const live = data.live ?? {};
+  const rows = (data.endpoints ?? []).map((e) => {
+    const h = e.health ?? {};
+    const inUse = e.baseUrl === live.baseUrl && e.model === live.model;
+    const state_ = !h.reachable ? `<span class="badge down">${esc(h.detail ?? "down")}</span>`
+      : h.serves === false ? `<span class="badge warn">up, no such model</span>`
+      : `<span class="badge live">up · ${h.ms}ms</span>`;
+    return `<div class="deskrow">
+      <div><b>${esc(e.name)}</b>${inUse ? '<span class="badge live">in use</span>' : ""}
+        <div class="sub">${esc(e.model)} · ${esc(e.baseUrl)}</div></div>
+      <div class="row" style="margin:0">${state_}
+        ${inUse ? "" : `<button class="btn ghost" onclick="useEndpoint('${esc(e.id)}')"
+          ${h.reachable ? "" : "disabled title='nothing is answering there'"}>Use this</button>`}</div>
+    </div>`;
+  }).join("");
+  return `<h2>Endpoints</h2>
+    <p class="lede">Where inference goes. Each row is probed live against its own
+      <code>/v1/models</code>, so "up" means it answered just now.</p>
+    ${data.pinned ? `<div class="block err"><h3>Pinned by the container</h3>
+      <p>The box was started with <code>SAND_OPENAI_COMPATIBLE_*</code> in its environment, and the
+      host reads environment before this list — so choosing below is recorded but will not take
+      effect. Recreate the box without those variables to hand this switch over.</p></div>` : ""}
+    ${rows || '<div class="empty">No endpoints saved yet.</div>'}
+    <div class="row"><button class="btn ghost" onclick="reloadEndpoints()">Re-probe</button></div>`;
+}
 
 views.agents = () => {
   if (state.creating) return `
@@ -773,7 +812,7 @@ function signature() {
     state.host, state.box, state.store, state.settings?.inferenceProvider,
     state.settings?.inferenceRouterUsage,
     state.transcript?.map((e) => [e.id, e.content, e.message?.content, e.isStreaming]),
-    state.thinking, state.waitTick, state.talkOpen, state.editor?.automationId ?? state.editor?.agentId ?? null,
+    state.thinking, state.waitTick, state.talkOpen, state.endpoints, state.editor?.automationId ?? state.editor?.agentId ?? null,
     state.view === "events" ? state.events.length : 0,
   ]);
 }
@@ -1335,6 +1374,18 @@ window.dropRoutine = (id, automationId) => {
 };
 
 // Memory
+window.reloadEndpoints = () => guard(async () => {
+  state.endpoints = await (await fetch("/endpoints")).json();
+});
+window.useEndpoint = (id) => guard(async () => {
+  const res = await fetch("/endpoints/use", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body?.error ?? "could not switch");
+  alertLine(`now answering with ${body.using} — takes effect on the next message`);
+  state.endpoints = await (await fetch("/endpoints")).json();
+});
+
 window.forget = (id, memoryId) => guard(() => call("deleteAgentMemory", { id, memoryId }));
 window.forgetAll = (id) => {
   if (!confirmOnce(`forget-${id}`)) return;
@@ -1389,7 +1440,13 @@ function connect() {
 
 /* ---- boot ----------------------------------------------------------- */
 document.querySelectorAll("#dock [role=tab]").forEach((b) =>
-  b.onclick = () => { state.view = b.dataset.view; render(); });
+  b.onclick = () => {
+    // Switching view has to go and get that view's data. Rendering from whatever the last poll
+    // happened to hold is how a panel ends up saying "Reading…" forever.
+    state.view = b.dataset.view;
+    render(true);
+    void refresh();
+  });
 $("#new-agent").onclick = () => window.newAgent();
 
 refresh()

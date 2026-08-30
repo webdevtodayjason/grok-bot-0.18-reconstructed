@@ -10,10 +10,59 @@
 //   SAND_HOST_GATEWAY_TOKEN  optional; sent as Bearer when set
 //   SAND_UI_PORT             listen port, default 7777
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
+
+// Which model answers is an OPERATOR decision, not a rebuild. The host resolves it from
+// process.env first and /home/box/sand-data/box-secrets.json second, and it re-reads that file
+// with readFileSync on every single request -- so writing it takes effect on the next message,
+// with no restart and no container recreate. The gateway's own setBoxSecrets refuses
+// SAND_-prefixed names, which is why this writes the file directly instead of going through it.
+const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
+const SECRETS_PATH = "/home/box/sand-data/box-secrets.json";
+const ENDPOINTS_FILE = path.join(path.dirname(new URL(import.meta.url).pathname), "endpoints.json");
+const PROVIDER_KEYS = ["SAND_OPENAI_COMPATIBLE_BASE_URL", "SAND_OPENAI_COMPATIBLE_MODEL",
+  "SAND_OPENAI_COMPATIBLE_API_KEY"];
+
+const dockerOut = (args) => new Promise((resolve) =>
+  execFile("docker", args, { maxBuffer: 8 << 20 }, (err, out) => resolve(err != null && !out ? null : out)));
+
+const readSecrets = async () => {
+  const raw = await dockerOut(["exec", BOX, "cat", SECRETS_PATH]);
+  try { return JSON.parse(raw).secrets ?? {}; } catch { return {}; }
+};
+// Merge, never replace: this file is also where the operator's real secrets live.
+async function writeSecrets(next) {
+  const body = JSON.stringify({ version: 1, secrets: next });
+  return new Promise((resolve, reject) => {
+    const child = execFile("docker", ["exec", "-i", BOX, "sh", "-c", `cat > ${SECRETS_PATH}`],
+      (err) => (err ? reject(err) : resolve()));
+    child.stdin.end(body);
+  });
+}
+const readCatalog = async () => {
+  try { return JSON.parse(await readFile(ENDPOINTS_FILE, "utf8")); } catch { return { endpoints: [] }; }
+};
+
+// A saved endpoint is only useful if it is actually up, so say so rather than implying it.
+async function probe(endpoint) {
+  const started = Date.now();
+  try {
+    const res = await fetch(`${endpoint.baseUrl.replace(/\/+$/, "")}/models`,
+      { signal: AbortSignal.timeout(6000),
+        headers: endpoint.apiKey ? { authorization: `Bearer ${endpoint.apiKey}` } : {} });
+    if (!res.ok) return { reachable: false, detail: `HTTP ${res.status}`, ms: Date.now() - started };
+    const body = await res.json();
+    const models = (body?.data ?? []).map((m) => m.id);
+    return { reachable: true, ms: Date.now() - started, models,
+      serves: endpoint.model ? models.includes(endpoint.model) : null };
+  } catch (error) {
+    return { reachable: false, ms: Date.now() - started,
+      detail: error?.name === "TimeoutError" ? "timed out" : "no answer" };
+  }
+}
 
 const GATEWAY = (process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:1340").replace(/\/+$/, "");
 // ponytail: the local-docker connector writes this token in plaintext (0600) next to
@@ -118,6 +167,52 @@ const server = createServer(async (req, res) => {
       })));
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ peers: [...new Set(peers.filter(Boolean))] }));
+    }
+    // The operator's endpoint list, what is live right now, and whether each one answers.
+    if (req.method === "GET" && url.pathname === "/endpoints") {
+      const [catalog, secrets, envOut] = await Promise.all([
+        readCatalog(), readSecrets(),
+        dockerOut(["inspect", BOX, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]),
+      ]);
+      const envOf = (key) => (envOut ?? "").split("\n")
+        .find((l) => l.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
+      // env beats the secrets file in the host's own resolver, so an env value pins the
+      // endpoint and nothing chosen here can take effect until the box is recreated without it.
+      const pinned = PROVIDER_KEYS.some((k) => envOf(k) != null);
+      const live = { baseUrl: envOf(PROVIDER_KEYS[0]) ?? secrets[PROVIDER_KEYS[0]] ?? null,
+        model: envOf(PROVIDER_KEYS[1]) ?? secrets[PROVIDER_KEYS[1]] ?? null };
+      const endpoints = await Promise.all((catalog.endpoints ?? []).map(async (e) =>
+        ({ ...e, apiKey: e.apiKey ? "set" : "", health: await probe(e) })));
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ endpoints, live, pinned,
+        pinnedBy: pinned ? "container env — recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin" : null }));
+    }
+    // Save the catalog the operator edits in the browser.
+    if (req.method === "POST" && url.pathname === "/endpoints") {
+      const next = JSON.parse(await readBody(req) || "{}");
+      if (!Array.isArray(next.endpoints)) return fail(res, 400, "endpoints must be an array");
+      const current = await readCatalog();
+      // A key the browser never received back comes in as "set"; keep the stored one.
+      const merged = next.endpoints.map((e) => ({ ...e,
+        apiKey: e.apiKey === "set"
+          ? (current.endpoints ?? []).find((c) => c.id === e.id)?.apiKey ?? "" : (e.apiKey ?? "") }));
+      await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints: merged }, null, 2));
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ saved: merged.length }));
+    }
+    // Point the host at one of them. Takes effect on the next message.
+    if (req.method === "POST" && url.pathname === "/endpoints/use") {
+      const { id } = JSON.parse(await readBody(req) || "{}");
+      const catalog = await readCatalog();
+      const chosen = (catalog.endpoints ?? []).find((e) => e.id === id);
+      if (chosen == null) return fail(res, 404, `no endpoint named ${id}`);
+      const secrets = await readSecrets();
+      await writeSecrets({ ...secrets,
+        SAND_OPENAI_COMPATIBLE_BASE_URL: chosen.baseUrl,
+        SAND_OPENAI_COMPATIBLE_MODEL: chosen.model,
+        ...(chosen.apiKey ? { SAND_OPENAI_COMPATIBLE_API_KEY: chosen.apiKey } : {}) });
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ using: chosen.name, health: await probe(chosen) }));
     }
     if (req.method === "GET" && url.pathname === "/model") {
       // The gateway reports which provider is routed but never which model answers, and

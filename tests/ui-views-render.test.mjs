@@ -200,3 +200,11 @@ test("no worker reply can talk the renderer into emitting live markup", async ()
     assert.doesNotMatch(out, /<(?:p|br|ul|ol|li|b|i|code)\s[^>]*>/i, `${payload} produced an attribute`);
   }
 });
+
+test("switching view fetches that view's data instead of rendering stale state", async () => {
+  const html = await readFile(path.join(repoRoot, "ui/index.html"), "utf8");
+  // Both the transcript and the endpoint list were rendered from whatever the last poll held,
+  // so opening them showed "Nothing yet" / "Reading…" over data that existed.
+  const dock = /b\.onclick = \(\) => \{[\s\S]*?\}\);/.exec(html)[0];
+  assert.match(dock, /void refresh\(\)/, "the dock must refetch on view change");
+});
