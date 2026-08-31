@@ -103,8 +103,10 @@
 
       <footer class="control-shelf">
         <div class="workspace-list" id="workspace-list" aria-label="Open rooms"></div>
+        <div class="attachment-tray" id="attachment-tray" hidden></div>
         <form class="composer" id="composer">
           <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachment">＋</button>
+          <input id="composer-file" type="file" multiple hidden />
           <label class="sr-only" for="message-input">Message the selected room</label>
           <input id="message-input" name="message" autocomplete="off" placeholder="Ask MSP Team…" />
           <button class="send-button" type="submit"><span>➤</span> Send</button>

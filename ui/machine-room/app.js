@@ -1201,9 +1201,13 @@
   elements.composer.addEventListener("submit", (event) => {
     event.preventDefault();
     const text = elements.messageInput.value.trim();
-    if (!text) return;
+    const ready = pendingAttachments.filter((a) => a.path);
+    if (!text && ready.length === 0) return;
+    if (pendingAttachments.some((a) => a.pending)) { showToast("Still uploading — one moment."); return; }
     const context = { ...activeContext() };
-    adapter.sendMessage(context, text);
+    adapter.sendMessage(context, text, ready);
+    pendingAttachments = [];
+    renderAttachmentTray();
     elements.messageInput.value = "";
     // Demo-only. Against a live gateway the worker answers for itself and this would talk over it.
     if (!window.__machineRoomLive) simulateReply(context, text);
@@ -1256,7 +1260,55 @@
   });
   document.getElementById("notifications-button").addEventListener("click", () => openPanel("Recent activity", "Unread", notificationsPanel()));
   document.getElementById("room-menu").addEventListener("click", () => simplePanel("context"));
-  document.getElementById("composer-plus").addEventListener("click", () => simplePanel("attachments"));
+  // Files staged for the next message. Uploaded on pick, so the send is instant and a failed
+  // upload is reported while the operator is still looking at the picker.
+  let pendingAttachments = [];
+
+  function renderAttachmentTray() {
+    const tray = document.getElementById("attachment-tray");
+    if (!tray) return;
+    tray.hidden = pendingAttachments.length === 0;
+    tray.innerHTML = pendingAttachments.map((a, i) =>
+      `<span class="tag">▱ ${escapeHtml(a.name)}${a.pending ? " · uploading…" : ""}<button class="member-remove" type="button" data-drop-attachment="${i}" aria-label="Remove ${escapeHtml(a.name)}">×</button></span>`).join("");
+  }
+
+  document.getElementById("composer-plus").addEventListener("click", () => {
+    if (activeContext().kind !== "worker") { showToast("Attach a file in a direct conversation — a room has no attachment store."); return; }
+    document.getElementById("composer-file").click();
+  });
+
+  document.getElementById("attachment-tray").addEventListener("click", (event) => {
+    const drop = event.target.closest("[data-drop-attachment]");
+    if (!drop) return;
+    pendingAttachments.splice(Number(drop.dataset.dropAttachment), 1);
+    renderAttachmentTray();
+  });
+
+  document.getElementById("composer-file").addEventListener("change", async (event) => {
+    const context = activeContext();
+    const files = [...(event.target.files ?? [])];
+    event.target.value = "";
+    for (const file of files) {
+      // The host reads attachments back in 8MB chunks; refuse anything larger here rather than
+      // after a long base64 round trip that fails at the far end.
+      if (file.size > 8 * 1024 * 1024) { showToast(`${file.name} is larger than 8MB — the host will not take it.`); continue; }
+      const entry = { name: file.name, path: null, pending: true };
+      pendingAttachments.push(entry);
+      renderAttachmentTray();
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        const stored = await adapter.uploadAttachment(context.id, file.name, btoa(binary));
+        entry.path = stored.path;
+        entry.pending = false;
+      } catch (error) {
+        pendingAttachments = pendingAttachments.filter((a) => a !== entry);
+        showToast(`Could not attach ${file.name}: ${error.message}`);
+      }
+      renderAttachmentTray();
+    }
+  });
   document.getElementById("open-desktop").addEventListener("click", () => openDesktop("browser"));
   elements.scheduleButton.addEventListener("click", renderRoutinesPanel);
   document.getElementById("teach-button").addEventListener("click", openTeachMode);

@@ -481,11 +481,21 @@
         return snapshot;
       },
 
-      sendMessage(input, text) {
+      // uploadAttachment { filename, bytesBase64, agentId } -> { path }. Note the lowercase
+      // argument names; the gateway answers 200 to the wrong ones and stores nothing.
+      uploadAttachment(agentId, filename, bytesBase64) {
+        return call("uploadAttachment", { filename, bytesBase64, agentId }).then((answer) => {
+          if (!answer?.path) throw new Error("the host stored no path for that file");
+          return { path: answer.path, name: filename };
+        });
+      },
+
+      sendMessage(input, text, attachments = []) {
         const context = typeof input === "object" ? { kind: input.kind, id: input.id } : state.activeContext;
         const clean = String(text || "").trim();
         const r = record(context);
-        if (!r || !clean) return null;
+        // A message carrying only files is still a message worth sending.
+        if (!r || (!clean && attachments.length === 0)) return null;
         r.messages.push({
           id: `local-${Date.now()}`, authorId: "you", authorName: "You",
           type: "text", text: clean, time: timeOf(Date.now()),
@@ -495,7 +505,13 @@
         awaiting.set(keyOf(context), wait);
         r.messages.push({ id: wait.id, authorId: wait.authorId, authorName: wait.authorName, type: "working", text: "", time: "" });
         const snapshot = emit("message:created", { context });
-        call("sendPrompt", { agentId: context.id, prompt: clean })
+        call("sendPrompt", {
+          agentId: context.id,
+          prompt: clean,
+          ...(attachments.length
+            ? { attachmentPaths: attachments.map((a) => a.path), attachmentNames: attachments.map((a) => a.name) }
+            : {}),
+        })
           .then(() => reloadActive())
           .catch((error) => {
             // We know it failed. Leaving the dots up for five minutes turns a known failure into
