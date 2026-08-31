@@ -5,12 +5,20 @@
 // produced an assistant entry with non-empty content; exit 1 means the turn ran and
 // wrote nothing, which is the condition this exists to catch.
 //
-// Usage: node scripts/verify-local-turn.mjs [--timeout-ms 120000]
+// Usage: node scripts/verify-local-turn.mjs [--timeout-ms 120000] [--rounds 5]
+//
+// A single round proves a turn can work. --rounds proves it keeps working: the silent turn
+// this exists to catch is intermittent, and one green run is exactly how it stays hidden.
 import { readFileSync } from "node:fs";
 
 const GATEWAY = process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:1340";
-const TIMEOUT_MS = Number.parseInt(
-  process.argv[process.argv.indexOf("--timeout-ms") + 1] ?? "120000", 10);
+// indexOf returns -1 when the flag is absent, and argv[0] is the node binary -- so the old form
+// parsed a path into NaN, and every wait fell through instantly and reported a silent turn.
+const flag = (name, fallback) => (process.argv.includes(name)
+  ? process.argv[process.argv.indexOf(name) + 1]
+  : fallback);
+const TIMEOUT_MS = Number.parseInt(flag("--timeout-ms", "120000"), 10);
+const ROUNDS = Math.max(1, Number.parseInt(flag("--rounds", "1"), 10));
 
 function token() {
   const explicit = process.env.SAND_HOST_GATEWAY_TOKEN?.trim();
@@ -51,29 +59,42 @@ const agents = await call("listAgents");
 if (agents.length === 0) throw new Error("no agents on the host to test with");
 const agent = agents[0];
 const settings = await call("getHostSettings");
-const before = assistants(await call("getAgentTranscript", { id: agent.id })).length;
 
 console.log(`agent    ${agent.name} (${agent.id})`);
 console.log(`provider ${settings.inferenceProvider}`);
-console.log(`assistant entries before: ${before}`);
+console.log(`rounds   ${ROUNDS}`);
 
 await call("openAgent", { id: agent.id }).catch(() => {});
-await call("sendPrompt", { agentId: agent.id, prompt: "Reply with a short greeting." });
 
-const deadline = Date.now() + TIMEOUT_MS;
-while (Date.now() < deadline) {
-  await new Promise((r) => setTimeout(r, 3000));
-  const found = assistants(await call("getAgentTranscript", { id: agent.id }));
-  if (found.length > before) {
-    console.log(`\nPASS — agent replied: ${JSON.stringify(say(found.at(-1)).slice(0, 160))}`);
-    process.exit(0);
+let failed = 0;
+for (let round = 1; round <= ROUNDS; round += 1) {
+  const before = assistants(await call("getAgentTranscript", { id: agent.id })).length;
+  await call("sendPrompt", { agentId: agent.id, prompt: `Round ${round}: reply with a short greeting.` });
+
+  const deadline = Date.now() + TIMEOUT_MS;
+  let answered = false;
+  while (Date.now() < deadline && !answered) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const found = assistants(await call("getAgentTranscript", { id: agent.id }));
+    if (found.length > before) {
+      console.log(`  PASS  round ${round} — ${JSON.stringify(say(found.at(-1)).slice(0, 110))}`);
+      answered = true;
+      break;
+    }
+    const trays = await call("getTrays");
+    const failure = trays.find((t) => t.agentId === agent.id && t.kind === "error");
+    if (failure != null) {
+      console.error(`  FAIL  round ${round} — turn errored: ${failure.title} — ${failure.detail}`);
+      failed += 1;
+      answered = true;
+      break;
+    }
   }
-  const trays = await call("getTrays");
-  const failure = trays.find((t) => t.agentId === agent.id && t.kind === "error");
-  if (failure != null) {
-    console.error(`\nFAIL — turn errored: ${failure.title} — ${failure.detail}`);
-    process.exit(1);
+  if (!answered) {
+    console.error(`  FAIL  round ${round} — silent: no assistant entry in ${TIMEOUT_MS}ms and no error raised`);
+    failed += 1;
   }
 }
-console.error(`\nFAIL — turn produced no assistant entry within ${TIMEOUT_MS}ms and raised no error.`);
-process.exit(1);
+
+console.log(`\n${failed === 0 ? "OK" : `${failed}/${ROUNDS} FAILED`}`);
+process.exit(failed === 0 ? 0 : 1);
