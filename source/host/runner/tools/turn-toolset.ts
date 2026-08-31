@@ -45,8 +45,17 @@ import {
 import {
   createComputerTool,
   createScreenshotTool,
+  describeOutcome,
   type ComputerToolDependencies,
 } from "./sand-computer-tool.js";
+import { createZodAgentTool, withSafeParsedArgs } from "../../../packages/agent/tools/common.js";
+import { ToolCall } from "../../../packages/proto/generated/agent/v1/agent_pb.js";
+import {
+  ComputerUseToolCall,
+  ComputerUseError as ComputerUseErrorMessage,
+  ComputerUseResult as ComputerUseResultMessage,
+  ComputerUseSuccess as ComputerUseSuccessMessage,
+} from "../../../packages/proto/generated/agent/v1/computer_use_tool_pb.js";
 import {
   createSandBrowserTools,
   type BrowserDriverDependencies,
@@ -918,16 +927,82 @@ export function createTurnMcpMetaToolFactory(
   };
 }
 
+/**
+ * `createComputerTool` / `createScreenshotTool` are INNER tools: `execute(raw, meta)` returning a
+ * plain `{ result: { case, value } }`, with `render(result)`. The Agent engine speaks a different
+ * contract entirely -- `execute(context, interactionHandler, argsStream, metadata)` returning a
+ * protobuf, `render(ctx, result, props)`, and a `serializeError` producing a real
+ * `agent.v1.ToolCall` carrier. The reconstruction kept the inner tools and lost the adapter
+ * between them, so the tool parsed the *context object* as its arguments and every call died on
+ * `action: received undefined`. That read like the model omitting a required field; in fact the
+ * arguments never reached the tool. `createZodAgentTool` + `withSafeParsedArgs` is the same
+ * bridge every engine-native tool (WebSearch, Task, Shell) is built on.
+ */
+function toComputerUseMessage(inner: unknown): ComputerUseResultMessage {
+  const outcome = (inner as { readonly result?: { readonly case?: string; readonly value?: unknown } } | null)?.result;
+  if (outcome?.case === "success") {
+    const value = (outcome.value ?? {}) as { readonly screenshot?: string; readonly screenshotPath?: string; readonly log?: string };
+    return new ComputerUseResultMessage({ result: { case: "success", value: new ComputerUseSuccessMessage({
+      ...(value.screenshot == null ? {} : { screenshot: value.screenshot }),
+      ...(value.screenshotPath == null ? {} : { screenshotPath: value.screenshotPath }),
+      ...(value.log == null ? {} : { log: value.log }),
+    }) } });
+  }
+  const error = (outcome?.value as { readonly error?: string } | undefined)?.error;
+  return new ComputerUseResultMessage({ result: { case: "error", value: new ComputerUseErrorMessage({
+    error: error ?? "the computer action returned no result",
+  }) } });
+}
+
+function computerUseCarrier(result: ComputerUseResultMessage): ToolCall {
+  return new ToolCall({ tool: { case: "computerUseToolCall", value: new ComputerUseToolCall({ result }) } });
+}
+
+function adaptInnerComputerTool<T extends {
+  readonly name: string;
+  readonly id?: string;
+  readonly parameters: Parameters<typeof withSafeParsedArgs>[0];
+  execute(raw: unknown, meta: Record<string, unknown>): Promise<unknown>;
+}>(tool: T, operation: "computer" | "screenshot"): TurnTool {
+  return createZodAgentTool(tool.id ?? "OPENAI_COMPUTER_USE", {
+    name: tool.name,
+    descriptionGenerator: () => operation === "screenshot"
+      ? "Capture your box's desktop and return the image, so you can see what is on screen before acting on it."
+      : [
+        "Drive your box's desktop: screenshot, click, move, drag, type, key, scroll, wait.",
+        "Coordinates are screen pixels from the top-left of the desktop. Every call returns a fresh",
+        "screenshot, so take one first and act on what you actually see rather than where you expect",
+        "things to be. Chain follow-up actions with `then` when they depend on the same screen state.",
+      ].join(" "),
+    parameters: tool.parameters as never,
+    execute: withSafeParsedArgs(
+      tool.parameters,
+      async (ctx, _interactionHandler, args, meta) => toComputerUseMessage(
+        await tool.execute(args, { context: ctx, toolCallId: meta?.toolCallId ?? "" }),
+      ),
+      computerUseCarrier(new ComputerUseResultMessage()),
+    ),
+    render: (_ctx: unknown, result: ComputerUseResultMessage) => ({
+      content: describeOutcome(result as never, operation),
+    }),
+    serializeError: (error: unknown) => computerUseCarrier(new ComputerUseResultMessage({
+      result: { case: "error", value: new ComputerUseErrorMessage({
+        error: error instanceof Error ? error.message : String(error),
+      }) },
+    })),
+  }) as unknown as TurnTool;
+}
+
 export function createTurnComputerToolFactory(
   input: TurnComputerToolFactoryInput,
 ): () => TurnTool {
-  return () => asTurnTool(createComputerTool(input.dependencies));
+  return () => adaptInnerComputerTool(createComputerTool(input.dependencies), "computer");
 }
 
 export function createTurnScreenshotToolFactory(
   input: TurnComputerToolFactoryInput,
 ): () => TurnTool {
-  return () => asTurnTool(createScreenshotTool(input.dependencies));
+  return () => adaptInnerComputerTool(createScreenshotTool(input.dependencies), "screenshot");
 }
 
 export function createTurnBrowserToolFactory(
