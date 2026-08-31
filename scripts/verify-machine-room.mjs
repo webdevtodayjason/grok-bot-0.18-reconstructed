@@ -43,10 +43,18 @@ async function api(method, args = {}) {
 }
 
 // The window the operator is actually looking at, asked of X rather than of our own code.
-async function activeWindowClass() {
+// Each worker now has its own X display, so "the active window" is only meaningful against the
+// display that worker was actually given. The UI puts the display in the noVNC token.
+async function activeWindowClass(display = DISPLAY) {
   const script = `w=$(xdotool getactivewindow 2>/dev/null) && xprop -id $w WM_CLASS 2>/dev/null | sed 's/.*= //'`;
-  const { stdout } = await exec("docker", ["exec", "-e", `DISPLAY=${DISPLAY}`, BOX, "sh", "-c", script]);
+  const { stdout } = await exec("docker", ["exec", "-e", `DISPLAY=${display}`, BOX, "sh", "-c", script]);
   return stdout.trim();
+}
+
+async function displayOfOpenSurface(page) {
+  const src = await page.evaluate(() => document.querySelector("iframe[data-box-vnc]")?.getAttribute("src") ?? "");
+  const token = /token%3D(\d+)/i.exec(src)?.[1] ?? /token=(\d+)/i.exec(src)?.[1];
+  return token ? `:${token}` : ":1";
 }
 
 async function loadPlaywright() {
@@ -161,14 +169,17 @@ if (want("--surfaces")) {
   step("Browser and Terminal each show what they claim, five times each way");
   const EXPECT = { browser: "Google-chrome", terminal: "Xfce4-terminal" };
   await page.click('[data-capability="browser"]').catch(() => {});
-  await page.waitForTimeout(2000);
+  // Allocating a screen for an agent that has never had one takes about ten seconds.
+  await page.waitForTimeout(22000);
+  const display = await displayOfOpenSurface(page);
+  console.log(`  (this worker's screen is ${display})`);
 
   for (let round = 1; round <= 5; round += 1) {
     for (const surface of ["browser", "terminal"]) {
       await page.click(`[data-desktop-app="${surface}"]`);
-      await page.waitForTimeout(4500);
+      await page.waitForTimeout(surface === "browser" ? 20000 : 8000);
       let cls = "";
-      try { cls = await activeWindowClass(); } catch (error) { cls = `(x query failed: ${error.message})`; }
+      try { cls = await activeWindowClass(display); } catch (error) { cls = `(x query failed: ${error.message})`; }
       if (cls.includes(EXPECT[surface])) pass(`round ${round} ${surface}`, cls);
       else fail(`round ${round} ${surface}`, `active window is ${cls || "(none)"}, expected ${EXPECT[surface]}`);
     }

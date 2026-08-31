@@ -930,29 +930,49 @@
 
   // One iframe, reused. Asking the relay to put the app on the box's display is fire-and-forget:
   // if it is already running the launch is a no-op, and the view shows whatever is really there.
-  const BOX_VNC = "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1";
+  // One iframe, reused. noVNC re-runs its whole handshake when the element is replaced, which is
+  // what made the old desktop reconnect on every repaint.
+  let mountedDesktop = null;
+
   function mountBoxSurface(app, caption) {
-    fetch("/box/launch", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ app }),
-    }).catch(() => {});
-    // The launch is fire-and-forget by necessity, so confirm separately rather than assuming. A
-    // pane showing an empty desktop with no word about why is how this hid for a whole evening.
-    window.setTimeout(async () => {
-      try {
-        const state = await (await fetch(`/box/surface?app=${encodeURIComponent(app)}`)).json();
-        const caption = elements.desktopWindow.querySelector("[data-box-caption]");
-        if (!state.present && caption) caption.textContent = `${app} did not start on the box — the view below is whatever else is running.`;
-      } catch { /* the check is a courtesy; never let it break the pane */ }
-    }, 16_000);
-    const existing = elements.desktopWindow.querySelector("iframe[data-box-vnc]");
-    if (existing) {
-      elements.desktopWindow.querySelector("[data-box-caption]").textContent = caption;
-      return;
-    }
-    // noVNC's own status strip ("Connected to ... / Send CtrlAltDel") is its chrome, not ours, and
-    // it cannot be styled from here across origins. Clip it: the frame is pulled up by exactly the
-    // strip's height inside a hidden-overflow box, so the screen starts at the top of the panel.
-    elements.desktopWindow.innerHTML = `<div class="desktop-browser" style="display:flex;flex-direction:column;height:100%"><div class="browser-toolbar" style="flex:0 0 auto"><div class="browser-address" data-box-caption>${escapeHtml(caption)}</div></div><div style="flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${BOX_VNC}" title="Live view of the box" style="position:absolute;top:-30px;left:0;width:100%;height:calc(100% + 30px);border:0"></iframe></div></div>`;
+    const context = activeContext();
+    const record = contextRecord();
+    // A room has no screen of its own; its members do. Fall back to the lead member's.
+    const agentId = context.kind === "worker" ? context.id : (record?.memberIds ?? [])[0] ?? null;
+
+    const paint = (frameUrl, display, shared) => {
+      const line = shared
+        ? `${caption} — shared screen, every agent on this box sees it`
+        : `${caption} — ${escapeHtml(contextName())}'s own screen (display :${display})`;
+      const existing = elements.desktopWindow.querySelector("iframe[data-box-vnc]");
+      if (existing && mountedDesktop === frameUrl) {
+        elements.desktopWindow.querySelector("[data-box-caption]").innerHTML = line;
+      } else {
+        mountedDesktop = frameUrl;
+        elements.desktopWindow.innerHTML = `<div class="desktop-browser" style="display:flex;flex-direction:column;height:100%"><div class="browser-toolbar" style="flex:0 0 auto"><div class="browser-address" data-box-caption>${line}</div></div><div style="flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${escapeHtml(frameUrl)}" title="Live view of the box" style="position:absolute;top:-30px;left:0;width:100%;height:calc(100% + 30px);border:0"></iframe></div></div>`;
+      }
+      // Put the app on THAT display, not on the shared one.
+      fetch(`/box/launch?display=${encodeURIComponent(display)}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ app }),
+      }).catch(() => {});
+      window.setTimeout(async () => {
+        try {
+          const state = await (await fetch(`/box/surface?app=${encodeURIComponent(app)}&display=${encodeURIComponent(display)}`)).json();
+          const el = elements.desktopWindow.querySelector("[data-box-caption]");
+          if (!state.present && el) el.textContent = `${app} did not start on this screen — what you see is whatever else is running on it.`;
+        } catch { /* the check is a courtesy; never let it break the pane */ }
+      }, 16_000);
+    };
+
+    if (!agentId) { paint("http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1", 1, true); return; }
+
+    elements.desktopWindow.innerHTML = `<div class="empty-state">Opening ${escapeHtml(contextName())}'s screen… the first time takes about ten seconds while the host allocates one.</div>`;
+    mountedDesktop = null;
+    adapter.ensureDesktop(agentId)
+      .then((desk) => paint(desk.url, desk.display, desk.shared))
+      .catch((error) => {
+        elements.desktopWindow.innerHTML = `<div class="empty-state">Could not open a screen for ${escapeHtml(contextName())}: ${escapeHtml(error.message)}</div>`;
+      });
   }
 
   function renderDesktop(appName) {

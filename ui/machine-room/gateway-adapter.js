@@ -591,6 +591,28 @@
           });
       },
 
+      // Each agent gets its own X display. The host has been assigning them all along --
+      // /home/box/.sand-window-assignments.json maps agentId to a fork index, websockify on 6081
+      // routes by that index as its token, and 6080 is the shared seat on :1. ensureForeverBox
+      // allocates one if the agent has never had a screen (about 13s cold) and returns its URL.
+      ensureDesktop(agentId) {
+        if (!agentId) return Promise.reject(new Error("an agent is required"));
+        return call("ensureForeverBox", { id: agentId }).then((status) => {
+          const url = status?.vncUrl ?? "";
+          // The websockify token IS the display number, so one parse gives both the frame to show
+          // and the display to launch apps on.
+          const token = /token%3D(\d+)/i.exec(url)?.[1] ?? /token=(\d+)/i.exec(url)?.[1] ?? null;
+          return {
+            state: status?.state ?? "unknown",
+            display: token ? Number(token) : 1,
+            // vnc_lite has no toolbar to clip; vnc.html carries a full control bar.
+            url: url ? url.replace("/vnc.html", "/vnc_lite.html") + "&autoconnect=1&resize=scale&reconnect=1"
+                     : "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1",
+            shared: !token,
+          };
+        });
+      },
+
       setRunPaused(paused) {
         // Presentation only: this pauses the operator's view of the desktop, not the worker.
         state.desktop.paused = Boolean(paused);

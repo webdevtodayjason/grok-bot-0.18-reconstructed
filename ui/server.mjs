@@ -152,10 +152,12 @@ const server = createServer(async (req, res) => {
       const CLASSES = { browser: "Google-chrome", terminal: "Xfce4-terminal" };
       const cls = CLASSES[url.searchParams.get("app")];
       if (!cls) return fail(res, 400, "unknown app");
+      const surfaceDisplay = /^[1-9][0-9]?$/.test(String(url.searchParams.get("display") ?? ""))
+        ? `:${url.searchParams.get("display")}` : ":1";
       const script = `for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${cls}"' && echo present && break; done`;
       const { execFile } = await import("node:child_process");
       const present = await new Promise((resolve) => {
-        execFile("docker", ["exec", "-e", "DISPLAY=:1", BOX, "sh", "-c", script], (error, stdout) =>
+        execFile("docker", ["exec", "-e", `DISPLAY=${surfaceDisplay}`, BOX, "sh", "-c", script], (error, stdout) =>
           resolve(!error && String(stdout).includes("present")));
       });
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -171,32 +173,56 @@ const server = createServer(async (req, res) => {
       // Chrome needs its own profile dir or it just attaches to whatever instance already exists
       // and opens no window on this display at all.
       const APPS = {
-        browser: { cls: "Google-chrome", cmd: "google-chrome --no-sandbox --disable-dev-shm-usage --disable-gpu --no-first-run --disable-session-crashed-bubble --user-data-dir=/tmp/machine-room-chrome --start-maximized about:blank" },
+        browser: { cls: "Google-chrome", cmd: "google-chrome --no-sandbox --disable-dev-shm-usage --disable-gpu --no-first-run --disable-session-crashed-bubble --user-data-dir=/tmp/machine-room-chrome-DISPLAYNUM --start-maximized about:blank" },
         terminal: { cls: "Xfce4-terminal", cmd: "xfce4-terminal --maximize" },
       };
       let app;
       try { app = JSON.parse(await readBody(req))?.app; } catch { app = null; }
       const spec = APPS[app];
       if (!spec) return fail(res, 400, `unknown app: ${app}`);
+      // The display is interpolated into a shell command, so it is validated as a small integer
+      // and nothing else. :1 is the shared seat; the host allocates forks from :2 upward.
+      const display = /^[1-9][0-9]?$/.test(String(url.searchParams.get("display") ?? ""))
+        ? `:${url.searchParams.get("display")}` : ":1";
+      const cmd = spec.cmd.replace("DISPLAYNUM", display.replace(":", ""));
       const script = [
         `win=$(for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do`,
         `  xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${spec.cls}"' && echo $w && break;`,
         `done)`,
         `if [ -n "$win" ]; then xdotool windowactivate $win;`,
-        `else setsid ${spec.cmd} >/dev/null 2>&1 & sleep 12;`,
+        `else setsid ${cmd} >/dev/null 2>&1 & sleep 12;`,
         `  for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do`,
         `    xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${spec.cls}"' && xdotool windowactivate $w && break;`,
         `  done; fi`,
       // Joined with newlines: a space put `done)` and `if` on one line, which sh rejects.
       ].join("\n");
-      // Detached, and the wait lives inside the container. A non-detached `docker exec` tears down
-      // its whole process tree when the shell exits, which killed Chrome three seconds into a
-      // ten-second startup -- the launch looked fine and left no window behind.
-      const { spawn } = await import("node:child_process");
-      const child = spawn("docker", ["exec", "-d", "-e", "DISPLAY=:1", BOX, "sh", "-c", script], { stdio: "ignore" });
+      const { spawn, execFile } = await import("node:child_process");
+
+      // Two different jobs wearing one route. Raising a window that already exists takes about a
+      // fifth of a second, so it is done synchronously and the caller knows it landed -- doing it
+      // detached let a switch answer before the raise, and the next surface check caught the
+      // previous window still on top. Only a cold start needs the detached path, because a
+      // non-detached docker exec tears down its own process tree when the shell exits, which
+      // killed Chrome three seconds into a ten-second startup.
+      const findScript = `for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${spec.cls}"' && echo $w && break; done`;
+      const existing = await new Promise((resolve) => {
+        execFile("docker", ["exec", "-e", `DISPLAY=${display}`, BOX, "sh", "-c", findScript],
+          (error, stdout) => resolve(error ? "" : String(stdout).trim()));
+      });
+
+      if (existing) {
+        await new Promise((resolve) => {
+          execFile("docker", ["exec", "-e", `DISPLAY=${display}`, BOX, "xdotool", "windowactivate", existing],
+            () => resolve());
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ launched: app, raised: true }));
+      }
+
+      const child = spawn("docker", ["exec", "-d", "-e", `DISPLAY=${display}`, BOX, "sh", "-c", script], { stdio: "ignore" });
       child.on("error", () => {});
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify({ launched: app }));
+      return res.end(JSON.stringify({ launched: app, raised: false }));
     }
 
     // The Machine Room frontend is a vendored handoff: many files, and the rule from its README
