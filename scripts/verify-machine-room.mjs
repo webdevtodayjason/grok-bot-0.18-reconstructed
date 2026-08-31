@@ -46,7 +46,18 @@ async function api(method, args = {}) {
 // Each worker now has its own X display, so "the active window" is only meaningful against the
 // display that worker was actually given. The UI puts the display in the noVNC token.
 async function activeWindowClass(display = DISPLAY) {
-  const script = `w=$(xdotool getactivewindow 2>/dev/null) && xprop -id $w WM_CLASS 2>/dev/null | sed 's/.*= //'`;
+  // getactivewindow fails outright when nothing has focus yet -- a freshly built session with only
+  // the dock on it has no active window at all. Fall back to the topmost entry in the client list,
+  // which is what "the surface you asked for is the one in front" actually means.
+  const script = [
+    `w=$(xdotool getactivewindow 2>/dev/null)`,
+    `if [ -n "$w" ]; then xprop -id $w WM_CLASS 2>/dev/null | sed 's/.*= //'; exit 0; fi`,
+    `last=""`,
+    `for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do`,
+    `  last=$(xprop -id $w WM_CLASS 2>/dev/null | sed 's/.*= //')`,
+    `done`,
+    `printf '%s' "$last"`,
+  ].join("\n");
   const { stdout } = await exec("docker", ["exec", "-e", `DISPLAY=${display}`, BOX, "sh", "-c", script]);
   return stdout.trim();
 }
