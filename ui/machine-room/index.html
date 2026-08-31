@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en" data-theme="dusk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Standalone spatial multi-agent frontend prototype." />
+    <title>Machine Room — Frontend Prototype</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="motion.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell" id="app-shell">
+      <div class="ambient-backdrop" aria-hidden="true"></div>
+      <div class="ambient-vignette" aria-hidden="true"></div>
+
+      <header class="window-bar">
+        <div class="window-identity" aria-label="Machine Room prototype">
+          <div class="traffic-lights" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <strong>Machine Room</strong>
+          <a class="prototype-badge" href="components.html">component guide</a>
+        </div>
+
+        <nav class="capability-dock" aria-label="Capabilities">
+          <span class="capability-scope" id="capability-scope">MSP Team tools</span>
+          <button class="capability-button is-contextual" type="button" data-capability="files" data-capability-scope="context" aria-label="Open files for the current context">
+            <span class="capability-icon">▱</span><span>Files</span>
+          </button>
+          <button class="capability-button is-contextual" type="button" data-capability="browser" data-capability-scope="context" aria-label="Open browser for the current context">
+            <span class="capability-icon">◎</span><span>Browser</span>
+          </button>
+          <button class="capability-button is-contextual" type="button" data-capability="routines" data-capability-scope="context" aria-label="Manage routines for the current context">
+            <span class="capability-icon">◷</span><span>Routines</span>
+          </button>
+          <span class="capability-divider" aria-hidden="true"></span>
+          <button class="capability-button is-global" type="button" data-capability="plugins" data-capability-scope="global" aria-label="Manage global plugins">
+            <span class="capability-icon">✦</span><span>Plugins</span>
+          </button>
+          <button class="capability-button is-global" type="button" data-capability="add" data-capability-scope="global" aria-label="Create worker or room">
+            <span class="capability-icon">＋</span><span>Add</span>
+          </button>
+        </nav>
+
+        <div class="window-actions">
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="Toggle atmosphere">◐</button>
+          <button class="icon-button" id="settings-button" type="button" aria-label="Open settings">⚙</button>
+        </div>
+      </header>
+
+      <main class="stage" id="stage">
+        <section class="worker-roster" id="worker-roster" aria-label="Workers and rooms">
+          <div class="roster-heading">
+            <div class="roster-tabs" role="tablist" aria-label="Browse workers or rooms">
+              <button class="roster-tab is-active" id="workers-tab" type="button" role="tab" aria-selected="true" data-roster-tab="workers">Workers</button>
+              <button class="roster-tab" id="rooms-tab" type="button" role="tab" aria-selected="false" data-roster-tab="rooms">Rooms</button>
+            </div>
+            <button class="quiet-button" id="hide-roster" type="button">Hide</button>
+          </div>
+          <div class="worker-stack" id="worker-stack" role="tabpanel" aria-labelledby="workers-tab"></div>
+        </section>
+
+        <section class="conversation-space" aria-labelledby="room-title">
+          <header class="room-capsule">
+            <div>
+              <strong id="room-title">MSP Team</strong>
+              <span id="room-subtitle">3 members · ready</span>
+            </div>
+            <div class="participant-cluster" id="participant-cluster" aria-label="Room participants"></div>
+            <button class="icon-button compact" id="room-menu" type="button" aria-label="Room actions">•••</button>
+          </header>
+
+          <div class="transcript" id="transcript" aria-live="polite"></div>
+
+          <button class="new-activity-button" id="new-activity" type="button" hidden>
+            New activity <span>↓</span>
+          </button>
+        </section>
+
+        <aside class="context-space" aria-label="Current conversation context">
+          <section class="context-island room-island" id="context-card"></section>
+
+          <section class="context-island now-island" aria-labelledby="now-heading">
+            <div class="island-heading">
+              <div><span class="spark">＋</span><strong id="now-heading">Now</strong></div>
+              <button class="icon-button compact" id="dismiss-now" type="button" aria-label="Dismiss current activity">×</button>
+            </div>
+            <div class="now-content">
+              <div class="progress-orbit" aria-hidden="true"><span></span></div>
+              <div>
+                <strong id="routine-title">Weekday ticket review</strong>
+                <p id="routine-worker">Atera Triage is working</p>
+                <small id="routine-meta">Started moments ago</small>
+              </div>
+            </div>
+          </section>
+
+          <button class="desktop-capsule" id="open-desktop" type="button">
+            <span class="desktop-symbol">▣</span>
+            <span><strong id="desktop-capsule-title">Desktop</strong><small id="desktop-capsule-scope">MSP Team · shared</small></span>
+            <span class="capsule-chevron">⌄</span>
+          </button>
+        </aside>
+      </main>
+
+      <footer class="control-shelf">
+        <div class="workspace-list" id="workspace-list" aria-label="Open rooms"></div>
+        <form class="composer" id="composer">
+          <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachment">＋</button>
+          <label class="sr-only" for="message-input">Message the selected room</label>
+          <input id="message-input" name="message" autocomplete="off" placeholder="Ask MSP Team…" />
+          <button class="mic-button" type="button" aria-label="Voice input">◉</button>
+          <button class="send-button" type="submit"><span>➤</span> Send</button>
+        </form>
+        <div class="shelf-utilities">
+          <button class="icon-button notification-button" id="notifications-button" type="button" aria-label="Notifications">♧<span class="notification-dot"></span></button>
+          <button class="icon-button" id="people-button" type="button" aria-label="People">♙</button>
+          <button class="icon-button" id="shelf-settings" type="button" aria-label="Settings">⚙</button>
+          <button class="schedule-ring" id="schedule-button" type="button" aria-label="Next scheduled routine">
+            <span><strong id="next-routine-countdown">2h 14m</strong><small id="next-routine-label">next routine</small></span>
+          </button>
+        </div>
+      </footer>
+    </div>
+
+    <dialog class="panel-dialog" id="panel-dialog" aria-labelledby="panel-title">
+      <div class="dialog-frame">
+        <header class="dialog-header">
+          <div>
+            <span class="dialog-eyebrow" id="panel-eyebrow">Capability</span>
+            <h2 id="panel-title">Panel</h2>
+          </div>
+          <button class="dialog-close" type="button" data-close-dialog aria-label="Close">×</button>
+        </header>
+        <div class="dialog-body" id="panel-content"></div>
+      </div>
+    </dialog>
+
+    <dialog class="desktop-dialog" id="desktop-dialog" aria-labelledby="desktop-title">
+      <div class="desktop-frame">
+        <header class="desktop-header">
+          <div>
+            <span class="dialog-eyebrow">Shared computer</span>
+            <h2 id="desktop-title">Atera Triage’s desktop</h2>
+          </div>
+          <div class="desktop-header-actions">
+            <button class="secondary-button" id="teach-button" type="button">● Teach this task</button>
+            <button class="dialog-close" type="button" data-close-desktop aria-label="Close desktop">×</button>
+          </div>
+        </header>
+        <div class="desktop-workspace">
+          <nav class="app-previews" id="app-previews" aria-label="Open desktop applications">
+            <button class="app-preview active" data-desktop-app="browser" type="button"><span>Browser</span><small>Context7</small></button>
+            <button class="app-preview" data-desktop-app="files" type="button"><span>Files</span><small>Reports</small></button>
+            <button class="app-preview" data-desktop-app="sheets" type="button"><span>Sheets</span><small>Ticket audit</small></button>
+          </nav>
+          <section class="desktop-window" id="desktop-window"></section>
+          <aside class="action-timeline">
+            <span class="dialog-eyebrow">Current run</span>
+            <strong>Weekday ticket review</strong>
+            <ol id="desktop-timeline"></ol>
+          </aside>
+        </div>
+        <footer class="desktop-footer">
+          <span class="desktop-live"><span class="status-dot working"></span> Atera Triage is working</span>
+          <button class="secondary-button" id="pause-run" type="button">Pause</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog class="teach-dialog" id="teach-dialog" aria-labelledby="teach-title">
+      <div class="teach-frame">
+        <header>
+          <div><span class="record-dot"></span><strong id="teach-title">Atera Triage is watching and learning</strong></div>
+          <time id="teach-timer">00:00</time>
+        </header>
+        <div class="teach-canvas">
+          <div class="teach-browser">
+            <div class="browser-chrome"><span></span><span></span><span></span><div>app.atera.com/tickets</div></div>
+            <div class="ticket-demo">
+              <h3>Open tickets</h3>
+              <p>Demonstrate the task naturally. The agent will review the recording before creating a skill.</p>
+              <div class="fake-ticket"><span>VPN connectivity</span><b>High</b></div>
+              <div class="fake-ticket"><span>Backup warning</span><b>Review</b></div>
+            </div>
+          </div>
+        </div>
+        <footer>
+          <span>Recording is local to this worker session.</span>
+          <button class="danger-button" id="finish-teach" type="button">■ Finish recording</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="adapter.js"></script>
+    <script src="gateway-adapter.js"></script>
+    <script>
+      // app.js builds its adapter synchronously, so the gateway is read first and app.js is
+      // loaded after. If the gateway is unreachable the demo adapter runs and the page still
+      // comes up -- with a visible mark, so a demo is never mistaken for the live machine.
+      window.__bootMachineRoom().then(() => {
+        if (!window.__machineRoomLive) document.documentElement.dataset.demo = "true";
+        const script = document.createElement("script");
+        script.src = "app.js";
+        document.body.appendChild(script);
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en" data-theme="dusk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Warmwind Machine Room component and interaction guide." />
+    <title>Warmwind Machine Room — Component Guide</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="motion.css" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="components.css" />
+  </head>
+  <body class="component-guide">
+    <main class="guide-shell">
+      <nav class="guide-nav" aria-label="Component guide navigation">
+        <a href="index.html"><strong>← Machine Room</strong></a>
+        <div class="guide-nav-links"><a href="#tokens">Tokens</a><a href="#contexts">Contexts</a><a href="#workers">Workers</a><a href="#messages">Messages</a><a href="#trust">Trust</a></div>
+      </nav>
+
+      <header class="guide-hero">
+        <div><span class="guide-eyebrow">Frontend handoff · v1</span><h1>Warmwind, with a machine inside.</h1><p>The interface is a living stage, not a dashboard grid. Grok Bot’s behavioral power stays intact, while persistent chrome gives way to floating people, conversations, context, and tools that appear only when invoked.</p></div>
+        <aside class="guide-principle"><strong>Context rule</strong><span>An agent is a direct conversation, not a one-person room. A room is a group chat. Each owns its own files, browser state, and routines.</span></aside>
+      </header>
+
+      <section class="guide-section" id="tokens">
+        <div class="guide-section-header"><div><span class="guide-eyebrow">Foundation</span><h2>Color tokens</h2></div><p>Warm cream marks the operator. Cool translucent ink holds machine state. Accent colors identify workers and capability boundaries—not decoration.</p></div>
+        <div class="token-grid">
+          <article class="color-token"><div class="color-token-swatch" style="--swatch:#0f151a"></div><div class="color-token-copy"><strong>Ink 950</strong><code>--ink-950</code></div></article>
+          <article class="color-token"><div class="color-token-swatch" style="--swatch:#23323a"></div><div class="color-token-copy"><strong>Ink 800</strong><code>--ink-800</code></div></article>
+          <article class="color-token"><div class="color-token-swatch" style="--swatch:#f6eee2"></div><div class="color-token-copy"><strong>Cream 100</strong><code>--cream-100</code></div></article>
+          <article class="color-token"><div class="color-token-swatch" style="--swatch:#31b6b8"></div><div class="color-token-copy"><strong>Teal 500</strong><code>--teal-500</code></div></article>
+          <article class="color-token"><div class="color-token-swatch" style="--swatch:#8b69ea"></div><div class="color-token-copy"><strong>Violet 500</strong><code>--violet-500</code></div></article>
+          <article class="color-token"><div class="color-token-swatch" style="--swatch:#e7a23c"></div><div class="color-token-copy"><strong>Amber 500</strong><code>--amber-500</code></div></article>
+        </div>
+      </section>
+
+      <section class="guide-section" id="contexts">
+        <div class="guide-section-header"><div><span class="guide-eyebrow">Product model</span><h2>Context ownership</h2></div><p>The visible shell changes from one source of truth: the active agent or room. Global capabilities never pretend to belong to that context.</p></div>
+        <div class="trust-grid">
+          <article class="panel-card"><div class="panel-card-header"><span class="panel-card-icon">♙</span><span class="status-pill">direct</span></div><h3>Agent</h3><p>One operator-to-agent transcript. Agent profile, model, files, browser, desktop, and agent routines appear on the right and in the contextual dock.</p><div class="tag-list"><span class="tag">Files</span><span class="tag">Browser</span><span class="tag">Routines</span></div></article>
+          <article class="panel-card"><div class="panel-card-header"><span class="panel-card-icon">◌</span><span class="status-pill">group chat</span></div><h3>Room</h3><p>A truthful multi-agent roster with shared conversation, files, browser state, and room routines. Members can be added or removed.</p><div class="tag-list"><span class="tag">Members</span><span class="tag">Shared files</span><span class="tag">Room routines</span></div></article>
+        </div>
+        <pre class="guide-code">contextual: Files · Browser · Routines
+global:     Plugins · Add
+
+activeContext = { kind: "worker" | "room", id }</pre>
+      </section>
+
+      <section class="guide-section" id="workers">
+        <div class="guide-section-header"><div><span class="guide-eyebrow">Presence</span><h2>Worker cards</h2></div><p>Workers remain visible as people. A pulse communicates live work; accent is identity; the short line answers “what are they doing now?”</p></div>
+        <div class="component-stage">
+          <div class="worker-stack">
+            <button class="worker-card is-active" type="button" data-status="working" style="--accent:#8b69ea"><img class="worker-avatar" src="assets/avatar-chief.svg" alt="Chief of Staff" /><span class="worker-copy"><span class="worker-name"><i class="status-dot working"></i>Chief of Staff</span><span class="worker-status">Coordinating cross-team execution</span></span><span class="voice-meter"><i></i><i></i><i></i><i></i></span></button>
+            <button class="worker-card" type="button" data-status="ready" style="--accent:#31b6b8"><img class="worker-avatar" src="assets/avatar-atera.svg" alt="Atera Triage" /><span class="worker-copy"><span class="worker-name"><i class="status-dot ready"></i>Atera Triage</span><span class="worker-status">Ready for the next task</span></span><span class="voice-meter"><i></i><i></i><i></i><i></i></span></button>
+          </div>
+          <pre class="guide-code">status = ready | working | attention
+
+working:
+  dot pulses
+  short activity line is live
+  card retains stable identity accent
+
+active:
+  selected direct agent, or
+  room lead in a group conversation</pre>
+        </div>
+      </section>
+
+      <section class="guide-section" id="messages">
+        <div class="guide-section-header"><div><span class="guide-eyebrow">Conversation</span><h2>Messages</h2></div><p>Conversation stays readable without becoming a rigid “chat app” column. Width follows content; avatars and labels make group turns unambiguous.</p></div>
+        <div class="component-chat">
+          <article class="message-row is-user"><div class="message-block"><div class="message-meta"><strong>You</strong><time>5:35 PM</time></div><div class="message-bubble"><p>Review the overnight tickets and surface anything urgent.</p><span class="message-status">✓✓</span></div></div></article>
+          <article class="message-row"><img class="message-avatar" src="assets/avatar-chief.svg" alt="" /><div class="message-block"><div class="message-meta"><strong>Chief of Staff</strong><time>5:36 PM</time></div><div class="message-bubble"><p>On it. I’ve delegated triage to Atera and I’ll consolidate the result here.</p></div></div></article>
+        </div>
+      </section>
+
+      <section class="guide-section" id="trust">
+        <div class="guide-section-header"><div><span class="guide-eyebrow">Human gates</span><h2>Trust cards</h2></div><p>Approval and secret entry are visually related but semantically different. An approval becomes transcript history; a credential must never become conversation data.</p></div>
+        <div class="trust-grid">
+          <article class="inline-card"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>Connect Context7 ⓘ</strong><small>Use the saved connector credential for this task.</small></span></div><div class="inline-card-actions"><button class="card-action primary" type="button">✓ Allow once</button><button class="card-action" type="button">↗ Always allow</button></div></article>
+          <article class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Secure value required</strong><small>Scoped to Atera · API key. It never enters chat or model context.</small></div></div><div class="field"><label>API key</label><input type="password" value="demonstration-only" readonly /><span class="field-hint">Production: pass directly to the native secure bridge.</span></div></article>
+        </div>
+      </section>
+
+      <section class="guide-section" id="motion">
+        <div class="guide-section-header"><div><span class="guide-eyebrow">Behavior</span><h2>Motion grammar</h2></div><p>Motion explains state: presence pulses, new work floats into place, and teaching uses a clear recording signal. Reduced-motion preferences are respected.</p></div>
+        <div class="motion-row"><div class="motion-sample"><div class="motion-orbit"><span></span></div><div><strong>Working</strong><small>1.4–1.6s quiet pulse</small></div></div><div class="motion-sample"><span class="record-dot"></span><div><strong>Teaching</strong><small>Explicit recording boundary</small></div></div><div class="motion-sample"><span class="status-pill success">✓ 2.6s</span><div><strong>Completed</strong><small>Stable receipt, no celebration loop</small></div></div></div>
+      </section>
+
+      <section class="guide-section" id="assets">
+        <div class="guide-section-header"><div><span class="guide-eyebrow">Local files</span><h2>Asset inventory</h2></div><p>Every visual ships locally. Avatars are SVGs, the scenic plate is SVG, and the exact approved design is retained only as a reference—not composited into the application.</p></div>
+        <div class="asset-strip"><div class="asset-person"><img src="assets/avatar-chief.svg" alt="Chief" /><div><strong>Chief of Staff</strong><small>avatar-chief.svg</small></div></div><div class="asset-person"><img src="assets/avatar-atera.svg" alt="Atera" /><div><strong>Atera Triage</strong><small>avatar-atera.svg</small></div></div><div class="asset-person"><img src="assets/avatar-marketing.svg" alt="Marketing" /><div><strong>Marketing Channels</strong><small>avatar-marketing.svg</small></div></div><div class="asset-person"><img src="assets/avatar-clientsync.svg" alt="ClientSync" /><div><strong>ClientSync Tester</strong><small>avatar-clientsync.svg</small></div></div></div>
+      </section>
+    </main>
+  </body>
+</html>

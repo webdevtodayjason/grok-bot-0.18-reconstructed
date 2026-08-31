@@ -1,0 +1,77 @@
+:root {
+  color-scheme: dark;
+
+  /* Approved board palette */
+  --ink-950: #0f151a;
+  --ink-900: #182127;
+  --ink-850: #1d282f;
+  --ink-800: #23323a;
+  --ink-700: #343b42;
+  --stone-500: #6b727a;
+  --stone-300: #a4a5a6;
+  --cream-100: #f6eee2;
+  --cream-50: #fffaf2;
+  --teal-500: #31b6b8;
+  --teal-300: #7fe3dc;
+  --green-500: #67cf86;
+  --amber-500: #e7a23c;
+  --magenta-500: #e25e96;
+  --violet-500: #8b69ea;
+  --danger-500: #ff6f72;
+
+  --text-primary: rgba(255, 255, 255, 0.94);
+  --text-secondary: rgba(233, 239, 239, 0.68);
+  --text-tertiary: rgba(233, 239, 239, 0.46);
+  --text-dark: #172027;
+
+  --glass-strong: rgba(17, 25, 30, 0.82);
+  --glass-medium: rgba(22, 31, 36, 0.66);
+  --glass-soft: rgba(31, 42, 47, 0.46);
+  --glass-pale: rgba(246, 238, 226, 0.92);
+  --glass-edge: rgba(255, 255, 255, 0.18);
+  --glass-edge-soft: rgba(255, 255, 255, 0.1);
+
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+  --radius-pill: 999px;
+
+  --shadow-small: 0 8px 22px rgba(4, 10, 13, 0.24);
+  --shadow-medium: 0 18px 50px rgba(4, 10, 13, 0.34);
+  --shadow-large: 0 30px 90px rgba(4, 10, 13, 0.5);
+  --inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+
+  --blur-soft: 16px;
+  --blur-medium: 24px;
+  --blur-large: 42px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  --font-ui: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --ease-standard: cubic-bezier(0.2, 0.75, 0.25, 1);
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 140ms;
+  --duration-standard: 260ms;
+  --duration-slow: 480ms;
+}
+
+[data-theme="mist"] {
+  --glass-strong: rgba(245, 244, 239, 0.9);
+  --glass-medium: rgba(242, 241, 236, 0.74);
+  --glass-soft: rgba(238, 239, 235, 0.55);
+  --text-primary: rgba(18, 26, 31, 0.94);
+  --text-secondary: rgba(30, 39, 43, 0.68);
+  --text-tertiary: rgba(30, 39, 43, 0.48);
+  --glass-edge: rgba(255, 255, 255, 0.68);
+  color-scheme: light;
+}

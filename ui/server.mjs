@@ -142,6 +142,23 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       return res.end(html);
     }
+    // The Machine Room frontend is a vendored handoff: many files, and the rule from its README
+    // is that the DOM and event layer stay untouched. So it gets served as a directory rather
+    // than inlined, and the only file this repo authors inside it is the gateway adapter.
+    if (req.method === "GET" && url.pathname.startsWith("/machine-room")) {
+      const rel = url.pathname === "/machine-room" || url.pathname === "/machine-room/"
+        ? "index.html"
+        : url.pathname.slice("/machine-room/".length);
+      const file = path.resolve(HERE, "machine-room", rel);
+      // Resolve first, then check: a path that escapes the directory never reaches readFile.
+      if (!file.startsWith(path.join(HERE, "machine-room") + path.sep)) return fail(res, 403, "outside the frontend directory");
+      const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".md": "text/plain; charset=utf-8" };
+      try {
+        const bytes = await readFile(file);
+        res.writeHead(200, { "content-type": types[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-store" });
+        return res.end(bytes);
+      } catch { return fail(res, 404, `not found: ${url.pathname}`); }
+    }
     if (req.method === "GET" && url.pathname === "/clients") {
       // The box is shared: the desktop app talks to this same gateway. Anyone driving
       // it sees your writes. Count the sockets so the page can say so out loud.

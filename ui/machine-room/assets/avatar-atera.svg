@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Atera Triage">
+  <defs><linearGradient id="g" x1=".2" y1="0" x2=".8" y2="1"><stop stop-color="#ad6dff"/><stop offset="1" stop-color="#5730b8"/></linearGradient></defs>
+  <rect width="64" height="64" rx="20" fill="#171827"/>
+  <path d="M32 8c8 9 18 19 18 32 0 10-7 16-18 16S14 50 14 40C14 27 24 17 32 8z" fill="url(#g)"/>
+  <circle cx="26" cy="38" r="2.7" fill="#171827"/><circle cx="38" cy="38" r="2.7" fill="#171827"/>
+  <path d="M30 44h4" stroke="#171827" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

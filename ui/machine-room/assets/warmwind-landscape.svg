@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Warm mountain valley at dusk</title>
+  <desc id="desc">An abstract atmospheric landscape in warm amber and cool slate tones, designed as a quiet backdrop for the Machine Room interface.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#33454f"/>
+      <stop offset=".36" stop-color="#657279"/>
+      <stop offset=".64" stop-color="#b4936d"/>
+      <stop offset="1" stop-color="#28383e"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="28%" cy="35%" r="45%">
+      <stop offset="0" stop-color="#fff4d6" stop-opacity=".92"/>
+      <stop offset=".17" stop-color="#f1c98b" stop-opacity=".58"/>
+      <stop offset=".48" stop-color="#c69563" stop-opacity=".15"/>
+      <stop offset="1" stop-color="#94785f" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#718087"/>
+      <stop offset="1" stop-color="#3c5159"/>
+    </linearGradient>
+    <linearGradient id="mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4c5d61"/>
+      <stop offset="1" stop-color="#1f3238"/>
+    </linearGradient>
+    <linearGradient id="near" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a3b3d"/>
+      <stop offset="1" stop-color="#101b1f"/>
+    </linearGradient>
+    <linearGradient id="water" x1="0" y1="0" x2="1" y2=".7">
+      <stop offset="0" stop-color="#806d58" stop-opacity=".62"/>
+      <stop offset=".42" stop-color="#334f57" stop-opacity=".88"/>
+      <stop offset="1" stop-color="#1e343c"/>
+    </linearGradient>
+    <filter id="blur24"><feGaussianBlur stdDeviation="24"/></filter>
+    <filter id="blur8"><feGaussianBlur stdDeviation="8"/></filter>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#sky)"/>
+  <rect width="1600" height="1000" fill="url(#sun)"/>
+
+  <g opacity=".42" filter="url(#blur24)" fill="#fff1d5">
+    <ellipse cx="430" cy="272" rx="310" ry="72"/>
+    <ellipse cx="260" cy="345" rx="270" ry="54"/>
+    <ellipse cx="752" cy="218" rx="275" ry="47"/>
+  </g>
+
+  <path d="M0 608L112 531l102 53 111-116 84 62 150-205 83 155 91-82 119 173 112-88 84 71 134-185 105 157 95-75 140 157v238H0z" fill="url(#far)" opacity=".78"/>
+  <path d="M0 710l175-147 99 80 127-115 116 105 93-71 130 127 122-110 113 86 129-121 104 116 117-96 175 119v210H0z" fill="url(#mid)" opacity=".92"/>
+  <path d="M518 679c206-4 322 31 470 44 203 18 363-36 612-20v297H443c30-85 34-201 75-321z" fill="url(#water)"/>
+  <path d="M0 738l152-53 126 51 108-80 111 55 115-34 55 102 102 63 72 158H0z" fill="url(#near)"/>
+  <path d="M1600 658l-113-52-121 48-103-78-107 98-101 14-97 90-85 222h727z" fill="url(#near)"/>
+
+  <g fill="#152528" opacity=".8">
+    <path d="M0 844c121-38 237-23 333 18 94 40 157 74 274 138H0z"/>
+    <path d="M1600 820c-154-19-269 22-344 64-60 33-98 74-129 116h473z"/>
+  </g>
+  <g stroke="#a78a61" stroke-opacity=".28" fill="none" stroke-width="2" filter="url(#blur8)">
+    <path d="M795 740c133 14 245 8 343-6 92-13 171-13 253-5"/>
+    <path d="M752 768c161 11 286 4 399-14 83-13 152-11 224-3"/>
+    <path d="M704 805c149 1 279-6 410-27 98-16 176-11 247 2"/>
+  </g>
+  <rect width="1600" height="1000" fill="#09212a" opacity=".08"/>
+</svg>

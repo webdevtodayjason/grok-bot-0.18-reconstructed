@@ -479,6 +479,66 @@ judged without a live renderer fighting back. Published at
 `https://artifacts.semfreak.dev/a/grok-bot-reconstructed/mock-2eb3180f/`. It is the design source
 for the port onto `ui/index.html`; it is not wired to anything and must not be.
 
+## 6d. The Machine Room frontend (vendored handoff, wired 2026-08-30)
+
+The operator built and supplied `warmwind-agent-frontend-handoff-v2`: a framework-free frontend
+carrying the approved design, our own vocabulary (Workers, Rooms, Machine Room), and — the part
+that made it adoptable in an evening — an explicit adapter seam that deliberately invents no
+gateway endpoint names. It supersedes `ui/mock.html`, which is deleted; one design source only.
+
+**Where it lives.** Vendored verbatim at `ui/machine-room/`. `app.js`, `adapter.js` and every
+stylesheet are byte-identical to the handoff, per its README. This repo authors exactly two
+things inside that directory: `gateway-adapter.js`, and a five-line boot loader in `index.html`
+that reads the gateway before `app.js` constructs its adapter.
+
+**How it binds.** `gateway-adapter.js` loads after `adapter.js` and takes over the
+`createDemoAdapter` factory `app.js` already calls, so no view code changed. The demo factory is
+kept as `createDemoAdapterOffline`, and if the gateway is unreachable the page still comes up on
+demo data with `data-demo="true"` stamped on `<html>` — a demo is never mistaken for the machine.
+
+| Adapter method | Real gateway |
+| --- | --- |
+| `getSnapshot` / `subscribe` | `listAgents` + `getAgentTranscript` + SSE `/events` |
+| `selectContext` | `getAgentTranscript` + `getAgentAutomations` for that context |
+| `sendMessage` | `sendPrompt` |
+| `addWorker` / `addRoom` | `createAgent` / `createGroup` |
+| `addMember` / `removeMember` | `setGroupMembers` |
+| `runRoutine` | `runAgentAutomationNow` |
+| `setRunPaused` | local only — pauses the operator's view, not the worker |
+
+**What is honestly unwired.** `submitSecret`, `setPluginState`, `togglePluginTool`,
+`decideApproval`, `setModel`, `setAutoReview`, `startTeaching`, `finishTeaching`. Each writes a
+line into the transcript saying so instead of reporting success. `submitSecret` refuses outright:
+telling someone a credential was stored when it was not is worse than any missing feature. These
+map to work the operator paused (plugins/OAuth) or that is already ranked (per-worker model
+routing, Wave 5 #12).
+
+**Two bugs found and fixed while binding, both worth remembering.**
+1. `sendPrompt` takes `agentId`, not `id` — the same trap `getAgentTranscript` sets. The wrong key
+   is accepted and answered, so the prompt vanishes with no error to notice. Symptom: the UI looks
+   fine and the gateway transcript never grows.
+2. `app.js` ships `simulateReply`, a demo affordance that writes a plausible worker answer 1.15s
+   after send. Against real data that is the UI putting words in a worker's mouth. Since `app.js`
+   stays unchanged, the refusal lives in the adapter: `addMessage` accepts the operator's own echo
+   and the transient "working" bubble, and drops any text attributed to a worker.
+
+**Run it.**
+
+```
+pkill -f "node ui/server.mjs"
+SAND_PROFILE_DIRS=/Users/sem/orca/workspaces/grok-bot-0.18-reconstructed/gb-leaked/.cache/firstmate-profile/sand-data \
+  nohup node ui/server.mjs > /tmp/ui-server.log 2>&1 &
+open http://127.0.0.1:7777/machine-room/
+```
+
+Without `SAND_PROFILE_DIRS` the relay starts and logs `(no auth)`, every gateway call answers 401,
+and the page silently falls back to demo data. Check the first two lines of the log.
+
+**Verified on the wire, not by inspection.** Typed the probe into the real composer, pressed
+Enter, and Atera Triage answered "Atera Triage is live." at 10:06 PM through SSE — real roster,
+real transcript timestamps, real routine countdown ("Nightly ticket sweep, in 9h 58m"), zero page
+errors.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole

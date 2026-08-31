@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Coro Agent">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ff7262"/><stop offset="1" stop-color="#b51c58"/></linearGradient></defs>
+  <rect width="64" height="64" rx="20" fill="#2b151b"/>
+  <path d="M9 33c6-10 14-15 23-15s17 5 23 15c-6 9-14 14-23 14S15 42 9 33z" fill="url(#g)"/>
+  <circle cx="32" cy="33" r="9" fill="#32151f"/><circle cx="32" cy="33" r="4" fill="#ffd8cf"/>
+</svg>

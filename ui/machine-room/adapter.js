@@ -1,0 +1,318 @@
+/*
+ * Warmwind frontend adapter contract
+ * ----------------------------------
+ * A context is either { kind: "worker", id } for a direct agent conversation,
+ * or { kind: "room", id } for a multi-agent group chat. Rooms never represent
+ * direct messages. Files, browser sessions, and routines resolve through the
+ * active context; plugins and creation remain global.
+ *
+ * SECURITY: submitSecret receives a credential only long enough to hand it to
+ * a secure native bridge. This demo intentionally discards the value. A real
+ * adapter must never add it to messages, application state, analytics, or logs.
+ */
+(function attachAdapter(global) {
+  "use strict";
+
+  function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function uid(prefix) {
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  }
+
+  function timeLabel() {
+    return new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(new Date());
+  }
+
+  function normalizeContext(contextOrKind, maybeId) {
+    if (typeof contextOrKind === "object" && contextOrKind) {
+      return { kind: contextOrKind.kind, id: contextOrKind.id };
+    }
+    return { kind: contextOrKind, id: maybeId };
+  }
+
+  function sameContext(left, right) {
+    return Boolean(left && right && left.kind === right.kind && left.id === right.id);
+  }
+
+  function createDemoAdapter(initialState) {
+    const state = clone(initialState);
+    const listeners = new Set();
+    const timers = new Set();
+
+    function emit(type, detail) {
+      const event = { type, detail: clone(detail || {}), snapshot: clone(state) };
+      listeners.forEach((listener) => listener(event));
+      return event.snapshot;
+    }
+
+    function workerById(workerId) {
+      return state.workers.find((worker) => worker.id === workerId);
+    }
+
+    function roomById(roomId) {
+      return state.rooms.find((room) => room.id === roomId);
+    }
+
+    function pluginById(pluginId) {
+      return state.plugins.find((plugin) => plugin.id === pluginId);
+    }
+
+    function contextExists(context) {
+      return context.kind === "worker" ? Boolean(workerById(context.id)) : context.kind === "room" ? Boolean(roomById(context.id)) : false;
+    }
+
+    function contextRecord(context) {
+      return context.kind === "worker" ? workerById(context.id) : roomById(context.id);
+    }
+
+    function contextMessages(context) {
+      const record = contextRecord(context);
+      return record ? record.messages : null;
+    }
+
+    function ensureOpenContext(context) {
+      state.openContexts = state.openContexts || [];
+      if (!state.openContexts.some((item) => sameContext(item, context))) state.openContexts.push(clone(context));
+    }
+
+    function addTimer(callback, delay) {
+      const timer = global.setTimeout(() => {
+        timers.delete(timer);
+        callback();
+      }, delay);
+      timers.add(timer);
+      return timer;
+    }
+
+    return {
+      getSnapshot() {
+        return clone(state);
+      },
+
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+
+      destroy() {
+        timers.forEach((timer) => global.clearTimeout(timer));
+        timers.clear();
+        listeners.clear();
+      },
+
+      selectContext(contextOrKind, maybeId) {
+        const context = normalizeContext(contextOrKind, maybeId);
+        if (!contextExists(context)) return clone(state);
+        state.activeContext = context;
+        ensureOpenContext(context);
+        return emit("context:selected", { context });
+      },
+
+      sendMessage(contextInput, text) {
+        const context = normalizeContext(contextInput);
+        const messages = contextMessages(context);
+        const cleanText = String(text || "").trim();
+        if (!messages || !cleanText) return null;
+        const message = {
+          id: uid("message"),
+          authorId: "you",
+          authorName: "You",
+          type: "text",
+          text: cleanText,
+          time: timeLabel(),
+          status: "sent",
+        };
+        messages.push(message);
+        emit("message:created", { context, message });
+        return clone(message);
+      },
+
+      addMessage(contextInput, message) {
+        const context = normalizeContext(contextInput);
+        const messages = contextMessages(context);
+        if (!messages) return null;
+        const completeMessage = {
+          id: message.id || uid("message"),
+          time: message.time || timeLabel(),
+          type: "text",
+          ...clone(message),
+        };
+        messages.push(completeMessage);
+        emit("message:created", { context, message: completeMessage });
+        return clone(completeMessage);
+      },
+
+      removeMessage(contextInput, messageId) {
+        const context = normalizeContext(contextInput);
+        const record = contextRecord(context);
+        if (!record) return clone(state);
+        record.messages = record.messages.filter((message) => message.id !== messageId);
+        return emit("message:removed", { context, messageId });
+      },
+
+      setWorkerStatus(workerId, status, statusText) {
+        const worker = workerById(workerId);
+        if (!worker) return clone(state);
+        worker.status = status;
+        worker.statusText = statusText;
+        return emit("worker:status", { workerId, status, statusText });
+      },
+
+      decideApproval(contextInput, messageId, decision) {
+        const context = normalizeContext(contextInput);
+        const messages = contextMessages(context);
+        const message = messages && messages.find((item) => item.id === messageId);
+        if (!message || message.type !== "approval") return clone(state);
+        message.decision = decision;
+        return emit("approval:decided", { context, messageId, decision });
+      },
+
+      addMember(roomId, workerId) {
+        const room = roomById(roomId);
+        if (!room || !workerById(workerId) || room.memberIds.includes(workerId)) return clone(state);
+        room.memberIds.push(workerId);
+        return emit("room:member-added", { roomId, workerId });
+      },
+
+      removeMember(roomId, workerId) {
+        const room = roomById(roomId);
+        if (!room) return clone(state);
+        room.memberIds = room.memberIds.filter((id) => id !== workerId);
+        return emit("room:member-removed", { roomId, workerId });
+      },
+
+      addWorker(worker) {
+        const nextWorker = {
+          id: worker.id || uid("worker"),
+          name: worker.name || "New worker",
+          role: worker.role || "General purpose",
+          status: "ready",
+          statusText: "Ready",
+          avatar: worker.avatar || "assets/avatar-coro.svg",
+          accent: worker.accent || "#31b6b8",
+          model: worker.model || state.models.default,
+          files: [],
+          browser: { label: "New session", url: "about:blank" },
+          messages: [],
+        };
+        state.workers.push(nextWorker);
+        const context = { kind: "worker", id: nextWorker.id };
+        state.activeContext = context;
+        ensureOpenContext(context);
+        emit("worker:created", { worker: nextWorker, context });
+        return clone(nextWorker);
+      },
+
+      addRoom(room) {
+        const nextRoom = {
+          id: room.id || uid("room"),
+          name: room.name || "New room",
+          memberIds: Array.from(new Set(room.memberIds || [])),
+          accent: room.accent || "#8b69ea",
+          files: [],
+          browser: { label: "Shared browser", url: "about:blank" },
+          messages: [],
+        };
+        state.rooms.push(nextRoom);
+        const context = { kind: "room", id: nextRoom.id };
+        state.activeContext = context;
+        ensureOpenContext(context);
+        emit("room:created", { room: nextRoom, context });
+        return clone(nextRoom);
+      },
+
+      runRoutine(routineId) {
+        const routine = state.routines.find((item) => item.id === routineId);
+        if (!routine || routine.status === "running") return Promise.resolve(clone(routine));
+        const performerId = routine.delegatedToId || routine.coordinatorId || (routine.scope.kind === "worker" ? routine.scope.id : null);
+        const performer = workerById(performerId);
+        routine.status = "running";
+        routine.lastRun = { status: "running", startedAt: Date.now() };
+        if (performer) {
+          performer.status = "working";
+          performer.statusText = routine.name;
+        }
+        emit("routine:started", { routineId, scope: routine.scope, performerId });
+
+        return new Promise((resolve) => {
+          addTimer(() => {
+            const seconds = Math.floor(1.2 + Math.random() * 1.8);
+            routine.status = "ready";
+            routine.lastRun = { status: "passed", duration: `${seconds}.${Math.floor(Math.random() * 9)}s` };
+            if (performer) {
+              performer.status = "ready";
+              performer.statusText = "Ready for the next task";
+            }
+            emit("routine:completed", {
+              routineId,
+              scope: routine.scope,
+              performerId,
+              duration: routine.lastRun.duration,
+            });
+            resolve(clone(routine));
+          }, 1150);
+        });
+      },
+
+      setPluginState(pluginId, status) {
+        const plugin = pluginById(pluginId);
+        if (!plugin) return clone(state);
+        plugin.status = status;
+        return emit("plugin:state", { pluginId, status });
+      },
+
+      togglePluginTool(pluginId, toolId) {
+        const plugin = pluginById(pluginId);
+        const tool = plugin && plugin.tools.find((item) => item.id === toolId);
+        if (!tool) return clone(state);
+        tool.enabled = !tool.enabled;
+        return emit("plugin:tool-toggled", { pluginId, toolId, enabled: tool.enabled });
+      },
+
+      submitSecret(pluginId, fieldName, secretValue) {
+        const plugin = pluginById(pluginId);
+        const received = typeof secretValue === "string" && secretValue.length > 0;
+        secretValue = "";
+        if (!plugin || !received) return { accepted: false };
+        plugin.status = "connected";
+        plugin.connectedField = fieldName;
+        emit("secret:accepted", { pluginId, fieldName, accepted: true });
+        return { accepted: true };
+      },
+
+      setModel(workerId, modelId) {
+        const worker = workerById(workerId);
+        if (!worker || !state.models.available.some((model) => model.id === modelId)) return clone(state);
+        worker.model = modelId;
+        return emit("model:changed", { workerId, modelId });
+      },
+
+      setAutoReview(enabled, rule) {
+        state.settings.autoReview.enabled = Boolean(enabled);
+        if (typeof rule === "string") state.settings.autoReview.rule = rule;
+        return emit("settings:auto-review", clone(state.settings.autoReview));
+      },
+
+      startTeaching(workerId) {
+        state.teaching = { active: true, workerId, startedAt: Date.now() };
+        return emit("teaching:started", { workerId });
+      },
+
+      finishTeaching() {
+        if (!state.teaching.active) return clone(state);
+        const workerId = state.teaching.workerId;
+        state.teaching = { active: false, workerId: null, startedAt: null };
+        return emit("teaching:finished", { workerId });
+      },
+
+      setRunPaused(paused) {
+        state.desktop.paused = Boolean(paused);
+        return emit("desktop:pause", { paused: state.desktop.paused });
+      },
+    };
+  }
+
+  global.createDemoAdapter = createDemoAdapter;
+})(window);
