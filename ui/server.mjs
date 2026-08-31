@@ -160,8 +160,20 @@ const server = createServer(async (req, res) => {
         execFile("docker", ["exec", "-e", `DISPLAY=${surfaceDisplay}`, BOX, "sh", "-c", script], (error, stdout) =>
           resolve(!error && String(stdout).includes("present")));
       });
+      // Also report whether the display has ANY desktop session. Fork displays on this box image
+      // come up with an X server but no window manager (xfwm4 dies on "Xfconf could not be
+      // initialized"), so an empty screen is a broken session rather than an idle one -- and the
+      // difference is the whole message the operator needs.
+      // Count only the hex window ids after the "#". _NET_CLIENT_LIST is set by the window
+      // manager, so "not found" means no WM on that display at all -- which is the fork-display
+      // failure on this box image, and it must not be counted as three windows.
+      const anyScript = `xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //' | tr ',' '\n' | grep -c '0x' || true`;
+      const windows = await new Promise((resolve) => {
+        execFile("docker", ["exec", "-e", `DISPLAY=${surfaceDisplay}`, BOX, "sh", "-c", anyScript],
+          (error, stdout) => resolve(error ? 0 : Number(String(stdout).trim()) || 0));
+      });
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ app: url.searchParams.get("app"), present }));
+      return res.end(JSON.stringify({ app: url.searchParams.get("app"), present, windows, hasSession: windows > 0 }));
     }
 
     if (req.method === "POST" && url.pathname === "/box/launch") {

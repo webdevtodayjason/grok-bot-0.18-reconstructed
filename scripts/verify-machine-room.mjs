@@ -170,8 +170,9 @@ if (want("--surfaces")) {
   // box-chrome sets its own WM_CLASS; the raw binary is deliberately not used.
   const EXPECT = { browser: "box-chrome", terminal: "Xfce4-terminal" };
   await page.click('[data-capability="browser"]').catch(() => {});
-  // Allocating a screen for an agent that has never had one takes about ten seconds.
-  await page.waitForTimeout(22000);
+  // Allocating a screen takes about ten seconds, a cold box-chrome another ten, and the session
+  // health check sits in front of both. The first round is the slow one; the rest are raises.
+  await page.waitForTimeout(30000);
   const display = await displayOfOpenSurface(page);
   console.log(`  (this worker's screen is ${display})`);
 

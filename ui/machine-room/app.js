@@ -1065,12 +1065,30 @@
       }, 16_000);
     };
 
-    if (!agentId) { paint("http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1", 1, true); return; }
+    const SHARED = "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1";
+    if (!agentId) { paint(SHARED, 1, true); return; }
 
     elements.desktopWindow.innerHTML = `<div class="empty-state">Opening ${escapeHtml(contextName())}'s screen… the first time takes about ten seconds while the host allocates one.</div>`;
     mountedDesktop = null;
     adapter.ensureDesktop(agentId)
-      .then((desk) => paint(desk.url, desk.display, desk.shared))
+      .then(async (desk) => {
+        // A private display can exist with no desktop session on it: on this box image the fork
+        // displays come up with an X server but no window manager. That renders as an empty grey
+        // rectangle, which reads as "the UI is broken" rather than "this screen has no session".
+        // Say which it is, and show the screen that does work rather than nothing.
+        if (!desk.shared) {
+          try {
+            const health = await (await fetch(`/box/surface?app=${encodeURIComponent(app)}&display=${encodeURIComponent(desk.display)}`)).json();
+            if (health && health.hasSession === false) {
+              paint(SHARED, 1, true);
+              const el = elements.desktopWindow.querySelector("[data-box-caption]");
+              if (el) el.textContent = `${contextName()}'s own screen (display :${desk.display}) has no desktop session — showing the shared screen instead.`;
+              return;
+            }
+          } catch { /* if the check fails, prefer the agent's own screen */ }
+        }
+        paint(desk.url, desk.display, desk.shared);
+      })
       .catch((error) => {
         elements.desktopWindow.innerHTML = `<div class="empty-state">Could not open a screen for ${escapeHtml(contextName())}: ${escapeHtml(error.message)}</div>`;
       });
