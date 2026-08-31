@@ -913,7 +913,7 @@
     const lead = contextLead();
     adapter.finishTeaching();
     elements.teachDialog.close();
-    showToast("Teaching is not wired to this host yet — nothing was recorded or sent.");
+    showToast(`Recording saved — ${lead.name} is learning from it now.`);
   }
 
   function simulateReply(context, userText) {

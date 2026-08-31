@@ -290,22 +290,45 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/model") {
       // The gateway reports which provider is routed but never which model answers, and
-      // "openai-compatible" is not something you can hold a conversation with. The box
-      // carries the answer in its environment.
-      const model = await new Promise((resolve) => {
-        execFile("docker", ["inspect", "grok-bot-local-vm", "--format",
+      // "openai-compatible" is not something you can hold a conversation with.
+      //
+      // The host resolves process.env first and box-secrets.json second, and this has to resolve
+      // the same way or it reports on a different machine than the one answering. Since the box
+      // was recreated to unpin the endpoint, the env vars are gone and every answer lives in the
+      // file -- so reading env alone returned nulls, and every worker was labelled "default".
+      const fromEnv = await new Promise((resolve) => {
+        execFile("docker", ["inspect", BOX, "--format",
           "{{range .Config.Env}}{{println .}}{{end}}"], (err, out) => {
-          if (err != null && !out) return resolve(null);
-          const line = out.split("\n").find((l) => l.startsWith("SAND_OPENAI_COMPATIBLE_MODEL="));
-          const host = out.split("\n").find((l) => l.startsWith("SAND_OPENAI_COMPATIBLE_BASE_URL="));
+          if (err != null && !out) return resolve({});
+          const pick = (name) => {
+            const line = out.split("\n").find((l) => l.startsWith(`${name}=`));
+            return line ? line.slice(name.length + 1) : null;
+          };
           resolve({
-            model: line ? line.split("=")[1] : null,
-            endpoint: host ? host.slice("SAND_OPENAI_COMPATIBLE_BASE_URL=".length) : null,
+            model: pick("SAND_OPENAI_COMPATIBLE_MODEL"),
+            endpoint: pick("SAND_OPENAI_COMPATIBLE_BASE_URL"),
           });
         });
       });
-      res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify(model ?? {}));
+      const fromFile = await new Promise((resolve) => {
+        execFile("docker", ["exec", BOX, "cat", SECRETS_PATH], (err, out) => {
+          if (err != null) return resolve({});
+          try {
+            const secrets = JSON.parse(out)?.secrets ?? {};
+            resolve({
+              model: secrets.SAND_OPENAI_COMPATIBLE_MODEL ?? null,
+              endpoint: secrets.SAND_OPENAI_COMPATIBLE_BASE_URL ?? null,
+            });
+          } catch { resolve({}); }
+        });
+      });
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({
+        model: fromEnv.model || fromFile.model || null,
+        endpoint: fromEnv.endpoint || fromFile.endpoint || null,
+        // Which source won, because "why does it say that" is the next question every time.
+        source: fromEnv.model ? "container env" : fromFile.model ? "box-secrets.json" : "unset",
+      }));
     }
     if (req.method === "GET" && url.pathname === "/health") {
       const upstream = await fetch(`${GATEWAY}/health`, { headers: upstreamHeaders() });

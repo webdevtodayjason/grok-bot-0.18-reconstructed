@@ -169,8 +169,11 @@
       name: a.name ?? "Untitled",
       role: a.isGroup ? "Group chat" : "Worker",
       ...statusOf(a),
-      // Real face first; the vendored SVGs are only the fallback for an agent with no avatar.
-      avatar: a.avatarDataUrl || `/avatars/${a.id}`,
+      // Real face when the host has one. It does not on this box -- no avatarDataUrl, no colour,
+      // no shape -- and /avatars/<id> 404s, so pointing at it just broke every image. The vendored
+      // SVGs are placeholders, but the mapping is a stable hash of the id, so a worker keeps the
+      // same face across reloads rather than swapping faces with its neighbour.
+      avatar: a.avatarDataUrl || pick(AVATARS, a.id),
       accent: pick(ACCENTS, a.id),
       model: models?.default ?? "default",
       files: [],
@@ -195,8 +198,13 @@
     const loaded = await loadContext(active, first.name);
     first.messages = loaded.messages;
 
+    const teaching = await call("getTeachRecordingStatus").catch(() => null);
+
     return {
       ...seed,
+      teaching: teaching?.state === "recording"
+        ? { active: true, workerId: teaching.agentId, startedAt: teaching.startedAtMs, maxDurationMs: teaching.maxDurationMs }
+        : seed.teaching,
       activeContext: active,
       openContexts: [active],
       workers, rooms,
@@ -446,8 +454,44 @@
       decideApproval() { return notWired("Approval cards"); },
       setModel() { return notWired("Per-worker model routing"); },
       setAutoReview() { return notWired("Auto-review rules"); },
-      startTeaching() { return notWired("Teaching from a demonstration"); },
-      finishTeaching() { return notWired("Teaching from a demonstration"); },
+      startTeaching(workerId) {
+        const id = workerId ?? state.activeContext?.id;
+        const worker = state.workers.find((w) => w.id === id);
+        if (!worker) return clone(state);
+        state.teaching = { active: true, workerId: id, startedAt: Date.now() };
+        const snapshot = emit("teaching:started", { workerId: id });
+        call("startTeachRecording", { agentId: id })
+          .then((status) => {
+            // Trust the host's clock, not ours: the elapsed time an operator reads has to be the
+            // recording's, or a ten-minute cap arrives sooner than the timer says it will.
+            state.teaching = {
+              active: status?.state === "recording",
+              workerId: status?.agentId ?? id,
+              startedAt: status?.startedAtMs ?? Date.now(),
+              maxDurationMs: status?.maxDurationMs ?? null,
+            };
+            emit("teaching:started", { workerId: id });
+          })
+          .catch((error) => {
+            state.teaching = { active: false, workerId: null, startedAt: null };
+            emit("teaching:finished", { workerId: id });
+            notWired(`Recording could not start: ${error.message}`);
+          });
+        return snapshot;
+      },
+
+      finishTeaching(save = true) {
+        const id = state.teaching?.workerId ?? state.activeContext?.id;
+        state.teaching = { active: false, workerId: null, startedAt: null };
+        const snapshot = emit("teaching:finished", { workerId: id });
+        if (!id) return snapshot;
+        // save:true is what queues demo.mp4 and dispatches the learning prompt. The agent's reply
+        // arrives through the transcript like any other turn, so nothing is fabricated here.
+        call("stopTeachRecording", { agentId: id, save })
+          .then(() => reloadActive())
+          .catch((error) => notWired(`Recording could not be saved: ${error.message}`));
+        return snapshot;
+      },
 
       // The view layer calls these directly for local echo; keep them local.
       addMessage(context, message) {
