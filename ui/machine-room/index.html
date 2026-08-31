@@ -114,7 +114,7 @@
           <button class="send-button" type="submit"><span>➤</span> Send</button>
         </form>
         <div class="shelf-utilities">
-          <button class="icon-button notification-button" id="notifications-button" type="button" aria-label="Notifications">♧<span class="notification-dot"></span></button>
+          <button class="icon-button notification-button" id="notifications-button" type="button" aria-label="Notifications">♧</button>
           <button class="icon-button" id="people-button" type="button" aria-label="People">♙</button>
           <button class="icon-button" id="shelf-settings" type="button" aria-label="Settings">⚙</button>
           <button class="schedule-ring" id="schedule-button" type="button" aria-label="Next scheduled routine">
@@ -151,15 +151,15 @@
         </header>
         <div class="desktop-workspace">
           <nav class="app-previews" id="app-previews" aria-label="Open desktop applications">
-            <button class="app-preview active" data-desktop-app="browser" type="button"><span>Browser</span><small>Context7</small></button>
-            <button class="app-preview" data-desktop-app="files" type="button"><span>Files</span><small>Reports</small></button>
-            <button class="app-preview" data-desktop-app="sheets" type="button"><span>Sheets</span><small>Ticket audit</small></button>
+            <button class="app-preview active" data-desktop-app="browser" type="button"><span>Browser</span><small>Live view of the box</small></button>
+            <button class="app-preview" data-desktop-app="files" type="button"><span>Files</span><small>Not wired yet</small></button>
+            <button class="app-preview" data-desktop-app="sheets" type="button"><span>Sheets</span><small>Not wired yet</small></button>
             <button class="app-preview" data-desktop-app="terminal" type="button"><span>Terminal</span><small>Shell on the box</small></button>
           </nav>
           <section class="desktop-window" id="desktop-window"></section>
           <aside class="action-timeline">
             <span class="dialog-eyebrow">Current run</span>
-            <strong>Weekday ticket review</strong>
+            <strong id="desktop-run-name">No run in progress</strong>
             <ol id="desktop-timeline"></ol>
           </aside>
         </div>

@@ -795,7 +795,7 @@
       const options = state.models.available.map((model) => `<option value="${escapeHtml(model.id)}" ${worker.model === model.id ? "selected" : ""}>${escapeHtml(model.name)} · ${escapeHtml(model.provider)}</option>`).join("");
       return `<div class="setting-row"><div><strong>${escapeHtml(worker.name)}</strong><small>${escapeHtml(worker.role)}</small></div><select class="model-select" data-model-worker="${escapeHtml(worker.id)}" aria-label="Model for ${escapeHtml(worker.name)}">${options}</select></div>`;
     }).join("");
-    return `<div class="panel-intro"><p>Model routing and review policy are global operator controls. Routine ownership remains attached to individual agents and rooms.</p><span class="status-pill success">Router online</span></div><div class="settings-list"><section class="settings-section"><h3>Per-agent model routing</h3><p>Changes apply on the next agent turn.</p>${rows}</section><section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>Keep external writes and irreversible actions behind a human gate.</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Review rule</label><textarea id="auto-review-rule" rows="3">${escapeHtml(state.settings.autoReview.rule)}</textarea></div><div class="form-actions"><button class="primary-button" type="button" data-save-review>Save rule</button></div></section></div>`;
+    return `<div class="panel-intro"><p>Model routing and review policy are global operator controls. Routine ownership remains attached to individual agents and rooms.</p><span class="status-pill">Router status unknown</span></div><div class="settings-list"><section class="settings-section"><h3>Per-agent model routing</h3><p>Changes apply on the next agent turn.</p>${rows}</section><section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>Not wired to this host. There is no policy gate on this box — every tool an agent holds runs without review.</small></div><span class="status-pill">unwired</span></div></section></div>`;
   }
 
   function addPanel() {
@@ -851,7 +851,14 @@
       // rebuilding it on every render is what made the old desktop reconnect on every repaint.
       mountBoxSurface("browser", `Browser session on ${record.name}'s computer.`);
     }
-    elements.desktopTimeline.innerHTML = state.desktop.timeline.map((item) => `<li class="${item.status === "pending" ? "is-pending" : ""}">${escapeHtml(item.label)}</li>`).join("");
+    const runName = document.getElementById("desktop-run-name");
+    const working = lead && lead.status === "working";
+    if (runName) runName.textContent = working ? `${lead.name} is working` : "No run in progress";
+    // The host does not expose per-step run progress, so inventing four ticks would be the same
+    // fiction as the fixture it replaced. Say what is known: working, or not.
+    elements.desktopTimeline.innerHTML = working
+      ? `<li>Started — no step detail from this host</li>`
+      : `<li class="is-pending">Nothing running for this worker</li>`;
     elements.pauseRun.textContent = state.desktop.paused ? "Resume" : "Pause";
   }
 
@@ -883,9 +890,7 @@
     const lead = contextLead();
     adapter.finishTeaching();
     elements.teachDialog.close();
-    adapter.addMessage(context, { authorId: "you", authorName: "You", type: "text", text: "The recording is finished. Learn the task from it.", status: "sent" });
-    adapter.addMessage(context, { authorId: lead.id, authorName: lead.name, type: "skill", text: "I’ve attached the recording to a new skill draft.", title: "Task learned from screen recording", description: `Analyzing actions and decision points inside ${contextName()}.` });
-    showToast(`Recording handed to ${lead.name} as a skill draft`);
+    showToast("Teaching is not wired to this host yet — nothing was recorded or sent.");
   }
 
   function simulateReply(context, userText) {
@@ -1023,7 +1028,8 @@
     const context = { ...activeContext() };
     adapter.sendMessage(context, text);
     elements.messageInput.value = "";
-    simulateReply(context, text);
+    // Demo-only. Against a live gateway the worker answers for itself and this would talk over it.
+    if (!window.__machineRoomLive) simulateReply(context, text);
   });
 
   elements.rosterList.addEventListener("click", (event) => {

@@ -79,3 +79,21 @@ html[data-theme="mist"][data-bg] .app-shell {
 @media (prefers-reduced-motion: reduce) {
   .bg-swatch { transition: none; }
 }
+
+/* Demo fallback. gateway-adapter sets data-demo on the root when hydration fails; nothing rendered
+   it, so losing the gateway produced a healthier-looking app than having one. Everything below is
+   fixture data, and the operator has to be told before they trust a single number on the screen. */
+html[data-demo="true"] body::before {
+  content: "DEMO DATA — the gateway is unreachable. Nothing on this screen is real.";
+  position: fixed;
+  z-index: 9999;
+  inset: 0 0 auto 0;
+  padding: 7px 16px;
+  font: 600 12px/1.4 system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  text-align: center;
+  color: #2b0a10;
+  background: #ff4d6a;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.4);
+}
+html[data-demo="true"] .app-shell { outline: 2px solid #ff4d6a; outline-offset: -2px; }

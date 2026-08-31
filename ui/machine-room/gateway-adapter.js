@@ -75,7 +75,7 @@
       delegatedToId: null,
       trigger: a.trigger?.summary ?? a.summary ?? "On a schedule",
       instruction: a.prompt ?? a.instruction ?? "",
-      status: a.enabled === false ? "paused" : "ready",
+      status: a.isEnabled === false ? "paused" : "ready",
       nextRunAt: a.nextRunAt ?? null,
       lastRun: a.runs?.length
         ? { status: a.runs[a.runs.length - 1].status ?? "passed", duration: "" }
@@ -152,7 +152,8 @@
       name: a.name ?? "Untitled",
       role: a.isGroup ? "Group chat" : "Worker",
       ...statusOf(a),
-      avatar: pick(AVATARS, a.id),
+      // Real face first; the vendored SVGs are only the fallback for an agent with no avatar.
+      avatar: a.avatarDataUrl || `/avatars/${a.id}`,
       accent: pick(ACCENTS, a.id),
       model: seed.models?.default ?? "default",
       files: [],
@@ -360,9 +361,11 @@
         const startedMs = Date.now();
         return call("runAgentAutomationNow", { id: agentId, automationId })
           .then(() => {
-            const seconds = ((Date.now() - startedMs) / 1000).toFixed(1);
+            // Dispatched is all we know. The gateway accepts the run and returns; it does not
+            // report the outcome here, so claiming "passed" invents a result -- and the elapsed
+            // time would be the latency of the POST, not the duration of the work.
             routine.status = "ready";
-            routine.lastRun = { status: "passed", duration: `${seconds}s` };
+            routine.lastRun = { status: "dispatched", duration: "" };
             emit("routine:completed", { routineId });
             void reloadActive();
             return clone(routine);
@@ -397,7 +400,10 @@
         const target = context ?? state.activeContext;
         const r = record(target);
         if (!r) return null;
-        const fabricated = message.type === "text" && message.authorId && message.authorId !== "you";
+        // Anything attributed to a worker is fiction unless it came off the wire. The type does
+        // not matter: a "skill" card and a "routine-result" card lie exactly as loudly as text,
+        // and both slipped through when this checked for text alone.
+        const fabricated = message.authorId && message.authorId !== "you" && message.type !== "working";
         if (fabricated) return null;
         // One set of dots, whoever asked for them. Hand back the bubble already hanging so the
         // caller's later removal is aimed at a message this adapter is willing to defend.
