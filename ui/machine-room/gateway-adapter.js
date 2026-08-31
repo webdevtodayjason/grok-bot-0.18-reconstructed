@@ -61,9 +61,42 @@
       .filter((m) => m.text);
   }
 
+  // Agents the host is currently raising an error tray for. Rebuilt each pass, never accumulated:
+  // a tray the operator cleared has to stop colouring the roster.
+  const attentionIds = new Set();
+
   function statusOf(agent) {
     if (agent.isRunning) return { status: "working", statusText: "Working now" };
+    // The third real state the old operator UI has and this one discarded: blocked on you.
+    if (agent.awaitingUserResponse || attentionIds.has(agent.id)) {
+      return {
+        status: "attention",
+        statusText: agent.awaitingUserResponse ? "Waiting on you" : "The last turn failed",
+      };
+    }
     return { status: "ready", statusText: agent.description || "Ready for the next task" };
+  }
+
+  // The automation record carries triggerDescription, schedule, isEnabled, lastRunAt and a runs[]
+  // array that is NEWEST FIRST. Reading runs[length - 1] reports the oldest run as the latest, and
+  // the status vocabulary is "ok", not the demo's "passed".
+  const RUN_OK = new Set(["ok", "success", "completed", "passed"]);
+
+  function lastRunOf(automation) {
+    const runs = Array.isArray(automation.runs) ? automation.runs : [];
+    if (runs.length === 0) return null;
+    const newest = runs.reduce((best, run) =>
+      (run.startedAt ?? 0) > (best.startedAt ?? 0) ? run : best, runs[0]);
+    const ms = Number(newest.finishedAt) - Number(newest.startedAt);
+    return {
+      // Report the host's own word when it is not one we recognise, rather than mapping an unknown
+      // outcome onto "passed" and telling the operator a run succeeded.
+      status: RUN_OK.has(newest.status) ? "passed" : (newest.status ?? "unknown"),
+      // A real measured duration: the host stamps both ends of the run.
+      duration: Number.isFinite(ms) && ms >= 0 ? `${(ms / 1000).toFixed(1)}s` : "",
+      at: newest.finishedAt ?? newest.startedAt ?? null,
+      trigger: newest.trigger ?? null,
+    };
   }
 
   function routinesOf(list, scope) {
@@ -73,13 +106,11 @@
       scope,
       coordinatorId: scope.id,
       delegatedToId: null,
-      trigger: a.trigger?.summary ?? a.summary ?? "On a schedule",
+      trigger: a.triggerDescription ?? a.trigger?.summary ?? a.summary ?? "On a schedule",
       instruction: a.prompt ?? a.instruction ?? "",
       status: a.isEnabled === false ? "paused" : "ready",
       nextRunAt: a.nextRunAt ?? null,
-      lastRun: a.runs?.length
-        ? { status: a.runs[a.runs.length - 1].status ?? "passed", duration: "" }
-        : null,
+      lastRun: lastRunOf(a),
     }));
   }
 
@@ -132,15 +163,9 @@
     workers: [], rooms: [], routines: [], plugins: [],
     models: { default: "default", available: [] },
     settings: { autoReview: { enabled: false, allow: [], block: [] }, localToolPermission: null, reachable: false },
-    desktop: {
-      paused: false,
-      timeline: [
-        { label: "Opened the active context", status: "done" },
-        { label: "Loaded shared working state", status: "done" },
-        { label: "Reviewing the current task", status: "active" },
-        { label: "Return outcome to conversation", status: "pending" },
-      ],
-    },
+    // desktop.timeline used to carry four hardcoded steps describing a run nobody started.
+    // renderDesktop builds an honest list from real state now.
+    desktop: { paused: false, timeline: [] },
     teaching: { active: false, workerId: null, startedAt: null },
   };
 
@@ -162,7 +187,8 @@
     const shape = (a) => ({
       id: a.id,
       name: a.name ?? "Untitled",
-      role: a.isGroup ? "Group chat" : "Worker",
+      // The host's own per-agent role field. Empty is the honest answer when it is unset.
+      role: (typeof a.title === "string" && a.title.trim()) || (a.isGroup ? "Group chat" : "not set"),
       ...statusOf(a),
       // Real face when the host has one. It does not on this box -- no avatarDataUrl, no colour,
       // no shape -- and /avatars/<id> 404s, so pointing at it just broke every image. The vendored
@@ -175,6 +201,8 @@
       browser: { label: `${a.name} desktop`, url: "" },
       messages: [],
       lastActivityAt: a.lastActivityAt ?? 0,
+      unread: Number(a.unreadCount) || 0,
+      preview: typeof a.lastMessagePreview === "string" ? a.lastMessagePreview : "",
     });
 
     const workers = agents.filter((a) => !a.isGroup).map(shape);
@@ -193,6 +221,9 @@
     const loaded = await loadContext(active, first.name);
     first.messages = loaded.messages;
 
+    // One call covers every agent. Fetching per-context left every other row showing zero
+    // routines and no next run, which reads as "nothing scheduled" rather than "not loaded".
+    const everyAutomation = await call("listAllAutomations").catch(() => null);
     const teaching = await call("getTeachRecordingStatus").catch(() => null);
     const hostSettings = await call("getHostSettings").catch(() => null);
 
@@ -215,7 +246,13 @@
       activeContext: active,
       openContexts: [active],
       workers, rooms,
-      routines: loaded.routines,
+      routines: Array.isArray(everyAutomation) && everyAutomation.length
+        ? everyAutomation.flatMap((entry) => {
+            const owner = agents.find((a) => a.id === entry.agentId);
+            if (!owner) return [];
+            return routinesOf([entry.automation], { kind: owner.isGroup ? "room" : "worker", id: owner.id });
+          })
+        : loaded.routines,
       plugins: pluginsOf(integrations),
       models,
     };
@@ -247,7 +284,7 @@
       const r = record(state.activeContext);
       if (r) r.messages.push({
         id: `unwired-${Date.now()}`, authorId: "system", authorName: "Machine Room",
-        type: "text", text: `${what} is not wired to the gateway yet.`, time: timeOf(Date.now()),
+        type: "system", text: `${what} is not wired to the gateway yet.`, time: timeOf(Date.now()),
       });
       return emit("message:created", { context: state.activeContext });
     }
@@ -280,6 +317,8 @@
         target.status = next.status;
         target.statusText = next.statusText;
         target.lastActivityAt = a.lastActivityAt ?? target.lastActivityAt;
+        target.unread = Number(a.unreadCount) || 0;
+        target.preview = typeof a.lastMessagePreview === "string" ? a.lastMessagePreview : target.preview;
         if (a.isGroup) target.memberIds = a.memberIds ?? target.memberIds;
       }
     }
@@ -290,6 +329,8 @@
     async function reloadTrays() {
       const trays = await call("getTrays").catch(() => null);
       if (!Array.isArray(trays)) return;
+      attentionIds.clear();
+      for (const t of trays) if (t.kind === "error" && t.agentId) attentionIds.add(t.agentId);
       for (const tray of trays) {
         if (tray.kind !== "error" || reportedTrays.has(tray.id)) continue;
         reportedTrays.add(tray.id);
@@ -297,8 +338,6 @@
           ?? state.rooms.find((r) => r.id === tray.agentId);
         if (!owner) continue;
         awaiting.delete(keyOf({ kind: owner.memberIds ? "room" : "worker", id: owner.id }));
-        owner.status = "attention";
-        owner.statusText = tray.title ?? "The last turn failed";
         owner.messages.push({
           id: `tray-${tray.id}`, authorId: "system", authorName: "Machine Room", type: "text",
           text: `That turn failed: ${tray.title ?? "error"}${tray.detail ? ` — ${tray.detail}` : ""}`,
@@ -308,8 +347,10 @@
     }
 
     async function reloadActive() {
-      await reloadRoster();
+      // Trays first: reloadRoster stamps every status through statusOf, which needs the tray set
+      // already current. The other order let the roster paint over attention on every tick.
       await reloadTrays();
+      await reloadRoster();
       const r = record(state.activeContext);
       if (!r) return;
       const loaded = await loadContext(state.activeContext, r.name);
@@ -374,45 +415,74 @@
         const snapshot = emit("message:created", { context });
         call("sendPrompt", { agentId: context.id, prompt: clean })
           .then(() => reloadActive())
-          .catch((error) => notWired(`Sending failed: ${error.message}`));
+          .catch((error) => {
+            // We know it failed. Leaving the dots up for five minutes turns a known failure into
+            // an apparent silence, which is the harder thing to diagnose.
+            awaiting.delete(keyOf(context));
+            r.messages = r.messages.filter((m) => m.id !== wait.id);
+            r.status = "attention";
+            r.statusText = "The last message did not reach the gateway";
+            notWired(`Sending failed: ${error.message}`);
+          });
         return snapshot;
       },
 
       addWorker(worker) {
         const name = worker?.name?.trim();
-        if (!name) return clone(state);
-        call("createAgent", { name, description: worker.role ?? "" })
-          .then(() => hydrate(state)).then((next) => { state = next; emit("worker:created", { name }); })
-          .catch((error) => notWired(`Creating a worker failed: ${error.message}`));
-        return clone(state);
+        if (!name) return Promise.reject(new Error("a name is required"));
+        return call("createAgent", { name, description: worker.role ?? "" })
+          .then(async (result) => {
+            state = await hydrate(state);
+            emit("worker:created", { name });
+            return result?.agent ?? { name };
+          })
+          .catch((error) => { notWired(`Creating a worker failed: ${error.message}`); throw error; });
       },
 
       addRoom(room) {
         const name = room?.name?.trim();
-        if (!name) return clone(state);
-        call("createGroup", { name, description: "", memberAgentIds: room.memberIds ?? [] })
-          .then(() => hydrate(state)).then((next) => { state = next; emit("room:created", { name }); })
-          .catch((error) => notWired(`Creating a room failed: ${error.message}`));
-        return clone(state);
+        if (!name) return Promise.reject(new Error("a name is required"));
+        // An empty "first member" select used to send memberAgentIds:[null], which the gateway
+        // answers 200 to and then has a room with a member that is not an agent.
+        const memberAgentIds = (room.memberIds ?? []).filter((id) => typeof id === "string" && id.length > 0);
+        return call("createGroup", { name, description: "", memberAgentIds })
+          .then(async (result) => {
+            state = await hydrate(state);
+            emit("room:created", { name });
+            return result?.agent ?? { name };
+          })
+          .catch((error) => { notWired(`Creating a room failed: ${error.message}`); throw error; });
       },
 
       addMember(roomId, workerId) {
         const room = state.rooms.find((r) => r.id === roomId);
         if (!room || room.memberIds.includes(workerId)) return clone(state);
+        const before = [...room.memberIds];
         const memberIds = [...room.memberIds, workerId];
         room.memberIds = memberIds;
         const snapshot = emit("room:member-added", { roomId, workerId });
-        call("setGroupMembers", { id: roomId, memberAgentIds: memberIds }).catch((error) => notWired(`Adding a member failed: ${error.message}`));
+        call("setGroupMembers", { id: roomId, memberAgentIds: memberIds }).catch((error) => {
+          room.memberIds = before;
+          emit("room:member-added", { roomId, workerId });
+          notWired(`Adding a member failed: ${error.message}`);
+        });
         return snapshot;
       },
 
       removeMember(roomId, workerId) {
         const room = state.rooms.find((r) => r.id === roomId);
         if (!room) return clone(state);
+        // A room with no members takes no turns. The old operator UI refuses the same way.
+        if (room.memberIds.length <= 1) return notWired("A room needs at least one member");
+        const before = [...room.memberIds];
         const memberIds = room.memberIds.filter((id) => id !== workerId);
         room.memberIds = memberIds;
         const snapshot = emit("room:member-removed", { roomId, workerId });
-        call("setGroupMembers", { id: roomId, memberAgentIds: memberIds }).catch((error) => notWired(`Removing a member failed: ${error.message}`));
+        call("setGroupMembers", { id: roomId, memberAgentIds: memberIds }).catch((error) => {
+          room.memberIds = before;
+          emit("room:member-removed", { roomId, workerId });
+          notWired(`Removing a member failed: ${error.message}`);
+        });
         return snapshot;
       },
 
@@ -436,6 +506,14 @@
             routine.status = "ready";
             routine.lastRun = { status: "dispatched", duration: "" };
             emit("routine:completed", { routineId });
+            // Read the outcome back rather than assuming one: the host records status and both
+            // timestamps, so a moment later the card can show what really happened.
+            void call("getAgentAutomations", { id: agentId })
+              .then((list) => {
+                const fresh = (list ?? []).find((a) => a.id === automationId);
+                if (fresh) { routine.lastRun = lastRunOf(fresh); emit("routine:completed", { routineId }); }
+              })
+              .catch(() => {});
             void reloadActive();
             return clone(routine);
           })

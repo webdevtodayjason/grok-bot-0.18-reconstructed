@@ -556,7 +556,7 @@
     const routineCount = routinesForContext({ kind: "room", id: room.id }).length;
     return `<button class="worker-card room-card${selected ? " is-active" : ""}" type="button" data-context-kind="room" data-context-id="${escapeHtml(room.id)}" style="--accent:${escapeHtml(room.accent)}" aria-pressed="${selected}">
       ${roomAvatarsMarkup(room)}
-      <span class="worker-copy"><span class="worker-name"><i class="status-dot ready"></i>${escapeHtml(room.name)}</span><span class="worker-status">${room.memberIds.length} workers · ${routineCount} ${routineCount === 1 ? "routine" : "routines"}</span></span>
+      <span class="worker-copy"><span class="worker-name"><i class="status-dot ${statusClass(room.status)}"></i>${escapeHtml(room.name)}</span><span class="worker-status">${room.memberIds.length} workers · ${routineCount} ${routineCount === 1 ? "routine" : "routines"}</span></span>
       <span class="room-count">›</span>
     </button>`;
   }
@@ -600,7 +600,7 @@
     const routineCount = routinesForContext({ kind: "room", id: room.id }).length;
     const memberRows = members.map((worker) => `<div class="member-row">${avatarMarkup(worker, "member-avatar")}<span>${escapeHtml(worker.name)}</span><button class="member-remove" type="button" data-remove-member="${escapeHtml(worker.id)}" aria-label="Remove ${escapeHtml(worker.name)}">×</button></div>`).join("");
     return `<div class="context-profile">
-      <div class="island-heading"><div><span class="status-dot success"></span><strong>Room</strong></div><button class="icon-button compact" type="button" data-context-menu aria-label="Room options">•••</button></div>
+      <div class="island-heading"><div><span class="status-dot ${statusClass(room.status)}"></span><strong>Room</strong></div><button class="icon-button compact" type="button" data-context-menu aria-label="Room options">•••</button></div>
       <p class="context-room-name">${escapeHtml(room.name)}</p>
       <div class="member-list">${memberRows}</div>
       <button class="text-action" type="button" data-context-action="members"><span>＋</span> Add member</button>
@@ -641,7 +641,7 @@
     const author = workerById(message.authorId);
     const isWorking = message.type === "working";
     const body = isWorking ? `<div class="typing-dots" aria-label="${escapeHtml(message.authorName)} is working"><i></i><i></i><i></i></div>` : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
-    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? avatarMarkup(author, "message-avatar") : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}${isUser && message.status ? `<span class="message-status">${message.status === "read" ? "✓✓" : "✓"}</span>` : ""}</div></div></article>`;
+    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? avatarMarkup(author, "message-avatar") : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div></div></article>`;
   }
 
   function renderTranscript(keepScroll) {
@@ -746,8 +746,11 @@
       const coordinator = workerById(routine.coordinatorId);
       const delegate = workerById(routine.delegatedToId);
       const running = routine.status === "running";
-      const lastResult = routine.lastRun && routine.lastRun.status === "passed" ? `<div class="run-result">✓ Last run passed · ${escapeHtml(routine.lastRun.duration)}</div>` : routine.lastRun ? `<div class="run-result">● Running now…</div>` : "";
-      return `<article class="routine-card"><div><div class="routine-header"><h3>${escapeHtml(routine.name)}</h3><span class="status-pill ${running ? "working" : "success"}">${running ? "running" : "ready"}</span></div><p>${escapeHtml(routine.instruction)}</p><div class="routine-meta"><span class="tag">◷ ${escapeHtml(routine.trigger)}</span><span class="tag">attached · ${escapeHtml(routineScopeLabel(routine))}</span>${coordinator ? `<span class="tag">coordinates · ${escapeHtml(coordinator.name)}</span>` : ""}${delegate ? `<span class="tag">runs as · ${escapeHtml(delegate.name)}</span>` : ""}</div>${routine.nextRunAt ? `<div class="run-result">Next run in ${escapeHtml(formatCountdown(routine.nextRunAt))}</div>` : ""}${lastResult}</div><div><button class="primary-button" type="button" data-run-routine="${escapeHtml(routine.id)}" ${running ? "disabled" : ""}>${running ? "Running…" : "Test run"}</button></div></article>`;
+      const RUN_LABEL = { passed: "✓ Last run succeeded", running: "● Running now…", failed: "✕ Last run failed", dispatched: "→ Dispatched · outcome not reported yet", unknown: "· Last run outcome not reported" };
+      const lastResult = routine.lastRun
+        ? `<div class="run-result">${escapeHtml(RUN_LABEL[routine.lastRun.status] ?? RUN_LABEL.unknown)}${routine.lastRun.duration ? ` · ${escapeHtml(routine.lastRun.duration)}` : ""}</div>`
+        : `<div class="run-result">Never run</div>`;
+      return `<article class="routine-card"><div><div class="routine-header"><h3>${escapeHtml(routine.name)}</h3><span class="status-pill ${running ? "working" : routine.status === "paused" ? "" : "success"}">${escapeHtml(running ? "running" : routine.status)}</span></div><p>${escapeHtml(routine.instruction)}</p><div class="routine-meta"><span class="tag">◷ ${escapeHtml(routine.trigger)}</span><span class="tag">attached · ${escapeHtml(routineScopeLabel(routine))}</span>${coordinator ? `<span class="tag">coordinates · ${escapeHtml(coordinator.name)}</span>` : ""}${delegate ? `<span class="tag">runs as · ${escapeHtml(delegate.name)}</span>` : ""}</div>${routine.nextRunAt ? `<div class="run-result">Next run in ${escapeHtml(formatCountdown(routine.nextRunAt))}</div>` : ""}${lastResult}</div><div><button class="primary-button" type="button" data-run-routine="${escapeHtml(routine.id)}" ${running ? "disabled" : ""}>${running ? "Running…" : "Test run"}</button></div></article>`;
     }).join("") : `<div class="empty-state"><div><strong>No routines attached to ${escapeHtml(name)}</strong><p>Create one here and it will belong to this ${context.kind === "worker" ? "agent" : "room"}—not to the whole system.</p></div></div>`;
     return `<div class="panel-intro"><p>These routines belong only to <strong>${escapeHtml(name)}</strong>. ${context.kind === "room" ? "A room routine can coordinate several members and delegate its execution step." : "An agent routine runs in this agent’s own context."}</p><button class="secondary-button" type="button" data-create-routine>＋ New routine</button></div><div class="routine-list">${cards}</div>`;
   }
@@ -771,6 +774,17 @@
     return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>Global account</span><span>${escapeHtml(plugin.category)}</span></div>${account}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span><span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span></div><div class="plugin-list">${tools}</div></section><section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${skills}</div></section></div>`;
   }
 
+  function notificationsPanel() {
+    const rows = [...state.workers, ...state.rooms]
+      .filter((r) => (r.unread ?? 0) > 0)
+      .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0))
+      .map((r) => `<button class="context-action-row" type="button" data-context-kind="${escapeHtml(r.memberIds ? "room" : "worker")}" data-context-id="${escapeHtml(r.id)}"><span><strong>${escapeHtml(r.name)}</strong><small>${escapeHtml(r.preview || "No preview from the host")}</small></span><b>${r.unread}</b></button>`)
+      .join("");
+    return rows
+      ? `<div class="panel-intro"><p>Unread counts as the host reports them. Nothing here is generated by this UI.</p></div><div class="context-detail-list">${rows}</div>`
+      : `<div class="empty-state">Nothing unread. This is the host's own unread count — there is no separate notification feed on this gateway.</div>`;
+  }
+
   function renderPluginsPanel() {
     const selected = state.plugins.find((plugin) => plugin.id === selectedPluginId) || state.plugins[0];
     // This host reports its connectors through getListenerIntegrations, and a box with none
@@ -783,7 +797,7 @@
     }
     selectedPluginId = selected.id;
     const nav = state.plugins.map((plugin) => `<button class="plugin-nav-button${plugin.id === selected.id ? " is-active" : ""}" type="button" data-plugin-id="${escapeHtml(plugin.id)}"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><span><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.category)}</small></span><span class="status-dot ${plugin.status === "connected" ? "success" : plugin.status === "installed" ? "attention" : ""}"></span></button>`).join("");
-    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar"><input class="search-input" type="search" placeholder="Find a capability…" aria-label="Find a capability" />${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>`);
+    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>`);
   }
 
   function agentProfilePanel(worker) {
@@ -847,7 +861,7 @@
     // noVNC's own status strip ("Connected to ... / Send CtrlAltDel") is its chrome, not ours, and
     // it cannot be styled from here across origins. Clip it: the frame is pulled up by exactly the
     // strip's height inside a hidden-overflow box, so the screen starts at the top of the panel.
-    elements.desktopWindow.innerHTML = `<div class="desktop-browser" style="display:flex;flex-direction:column;height:100%"><div class="browser-toolbar" style="flex:0 0 auto"><div class="browser-controls">‹ › ↻</div><div class="browser-address" data-box-caption>${escapeHtml(caption)}</div><span>⋮</span></div><div style="flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${BOX_VNC}" title="Live view of the box" style="position:absolute;top:-30px;left:0;width:100%;height:calc(100% + 30px);border:0"></iframe></div></div>`;
+    elements.desktopWindow.innerHTML = `<div class="desktop-browser" style="display:flex;flex-direction:column;height:100%"><div class="browser-toolbar" style="flex:0 0 auto"><div class="browser-address" data-box-caption>${escapeHtml(caption)}</div></div><div style="flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${BOX_VNC}" title="Live view of the box" style="position:absolute;top:-30px;left:0;width:100%;height:calc(100% + 30px);border:0"></iframe></div></div>`;
   }
 
   function renderDesktop(appName) {
@@ -869,7 +883,7 @@
       // Browser and Terminal are the live box, not a drawing of one. noVNC re-runs its whole
       // handshake whenever the element is replaced, so the frame is mounted once and left alone;
       // rebuilding it on every render is what made the old desktop reconnect on every repaint.
-      mountBoxSurface("browser", `Browser session on ${record.name}'s computer.`);
+      mountBoxSurface("browser", "Live view of the box's shared display :1.");
     }
     const runName = document.getElementById("desktop-run-name");
     const working = lead && lead.status === "working";
@@ -957,6 +971,12 @@
   function handlePanelClick(event) {
     const target = event.target.closest("button");
     if (!target) return;
+    // Rows in the unread panel carry a context; clicking one should take you there.
+    if (target.dataset.contextKind && target.dataset.contextId) {
+      selectContext(target.dataset.contextKind, target.dataset.contextId);
+      elements.panelDialog.close();
+      return;
+    }
     if (target.dataset.pluginId) {
       selectedPluginId = target.dataset.pluginId;
       renderPluginsPanel();
@@ -976,13 +996,12 @@
         return null;
       }).then((routine) => {
         if (!routine) return;
-        adapter.addMessage(context, { authorId: routine.coordinatorId || routine.delegatedToId, authorName: (workerById(routine.coordinatorId || routine.delegatedToId) || {}).name || contextName(), type: "routine-result", text: `Tested ${routine.name}.`, title: routine.name, duration: routine.lastRun.duration });
         if (elements.panelDialog.open) renderRoutinesPanel();
-        showToast(`✓ ${routine.name} passed in ${routine.lastRun.duration}`);
+        showToast(`${routine.name} dispatched — the outcome appears on the card when the host reports it.`);
       });
       renderRoutinesPanel();
     } else if (target.hasAttribute("data-create-routine")) {
-      showToast(`New routine will be attached to ${contextName()}`);
+      showToast("Creating a routine from here is not built yet — the host command exists (createAgentAutomation), the form does not.");
     } else if (target.dataset.manageMember && activeContext().kind === "room") {
       if (target.dataset.memberAction === "add") adapter.addMember(activeContext().id, target.dataset.manageMember);
       else adapter.removeMember(activeContext().id, target.dataset.manageMember);
@@ -997,7 +1016,7 @@
     } else if (target.hasAttribute("data-open-context-browser")) {
       openDesktop("browser");
     } else if (target.hasAttribute("data-demo-action")) {
-      showToast("This control is mapped in the handoff adapter");
+      showToast("Not built. Nothing was sent to the gateway.");
     }
   }
 
@@ -1025,17 +1044,17 @@
       }
     } else if (form.hasAttribute("data-add-worker")) {
       const data = new FormData(form);
-      const worker = adapter.addWorker({ name: data.get("name"), role: data.get("role") });
-      rosterMode = "workers";
-      elements.panelDialog.close();
-      showToast(`${worker.name} created with a direct conversation`);
+      Promise.resolve(adapter.addWorker({ name: data.get("name"), role: data.get("role") }))
+        .then((worker) => { rosterMode = "workers"; elements.panelDialog.close(); showToast(`${worker.name} created with a direct conversation`); })
+        .catch((error) => showToast(`Could not create that agent: ${error.message}`));
     } else if (form.hasAttribute("data-add-room")) {
       const data = new FormData(form);
-      const room = adapter.addRoom({ name: data.get("name"), memberIds: [data.get("memberId")] });
-      rosterMode = "rooms";
-      elements.panelDialog.close();
-      showToast(`${room.name} room created`);
+      const memberId = data.get("memberId");
+      Promise.resolve(adapter.addRoom({ name: data.get("name"), memberIds: memberId ? [memberId] : [] }))
+        .then((room) => { rosterMode = "rooms"; elements.panelDialog.close(); showToast(`${room.name} room created`); })
+        .catch((error) => showToast(`Could not create that room: ${error.message}`));
     }
+
   }
 
   adapter.subscribe((event) => {
@@ -1100,7 +1119,7 @@
     if (activeContext().kind === "room") openPanel("Room roster", `${contextName()} members`, membersPanel());
     else openPanel("Agent details", contextName(), agentProfilePanel(contextRecord()));
   });
-  document.getElementById("notifications-button").addEventListener("click", () => simplePanel("notifications"));
+  document.getElementById("notifications-button").addEventListener("click", () => openPanel("Recent activity", "Unread", notificationsPanel()));
   document.getElementById("room-menu").addEventListener("click", () => simplePanel("context"));
   document.getElementById("composer-plus").addEventListener("click", () => simplePanel("attachments"));
   document.getElementById("open-desktop").addEventListener("click", () => openDesktop("browser"));
