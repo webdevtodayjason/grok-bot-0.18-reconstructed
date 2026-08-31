@@ -89,3 +89,14 @@ const hydrated = await hydrateSourcePayloadFromRuntime(runtimeApp);
 console.log(`Runtime ready: ${cachedRuntimeApp}`);
 console.log(`Checksum-pinned source payload ready: ${hydrated.destination} (${hydrated.sha256})`);
 console.log("The checksum-pinned app supplies only the Electron shell, ABI-matched native dependencies, and explicitly documented build fallbacks.");
+
+// The vendored deps arrive with their own test suites, written for tape and jest. A bare
+// `node --test` at the repo root discovers them and reports three dozen failures that belong to
+// other people's code -- which is how a team learns to ignore a red suite. Nothing imports a
+// dependency's tests at runtime, so they go.
+const { execFileSync } = await import("node:child_process");
+try {
+  execFileSync(process.execPath, [new URL("prune-vendored-tests.mjs", import.meta.url).pathname], { stdio: "inherit" });
+} catch (error) {
+  console.warn(`Could not prune vendored test suites: ${error.message}`);
+}
