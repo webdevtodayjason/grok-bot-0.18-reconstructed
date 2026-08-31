@@ -616,8 +616,23 @@
     elements.contextCard.innerHTML = context.kind === "worker" ? agentContextCard(record) : roomContextCard(record);
   }
 
+  // Agents write markdown. Splitting on newlines and escaping delivered every bullet as a literal
+  // asterisk and every code span wrapped in backticks -- a morning of reading agent output in
+  // source form. This is the renderer the old operator UI already uses, which escapes FIRST and
+  // only then adds the handful of tags it recognises, so nothing an agent says can inject markup.
   function paragraphMarkup(text) {
-    return String(text || "").split("\n").map((line) => `<p>${escapeHtml(line)}</p>`).join("");
+    const inline = (t) => escapeHtml(t)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>");
+    return String(text ?? "").split(/\n{2,}/).map((block) => {
+      const lines = block.split("\n");
+      if (lines.every((l) => /^\s*[-*+]\s+/.test(l) || !l.trim()))
+        return `<ul>${lines.filter((l) => l.trim()).map((l) => `<li>${inline(l.replace(/^\s*[-*+]\s+/, ""))}</li>`).join("")}</ul>`;
+      if (lines.every((l) => /^\s*\d+[.)]\s+/.test(l) || !l.trim()))
+        return `<ol>${lines.filter((l) => l.trim()).map((l) => `<li>${inline(l.replace(/^\s*\d+[.)]\s+/, ""))}</li>`).join("")}</ol>`;
+      return `<p>${lines.map(inline).join("<br>")}</p>`;
+    }).join("");
   }
 
   function approvalMarkup(message) {
@@ -768,7 +783,8 @@
     const tools = plugin.tools.map((tool) => `<div class="tool-row"><div><strong>${escapeHtml(tool.name)}</strong><small>${escapeHtml(tool.description)}</small></div><button class="switch" type="button" data-toggle-tool="${escapeHtml(tool.id)}" aria-label="Toggle ${escapeHtml(tool.name)}" aria-pressed="${tool.enabled}"></button></div>`).join("");
     const skills = plugin.skills.map((skill) => `<span class="tag">✦ ${escapeHtml(skill)}</span>`).join("");
     let account;
-    if (plugin.status === "available") account = `<button class="primary-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Install package</button>`;
+    if (plugin.status === "available") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>Opens ${escapeHtml(plugin.name)}'s own authorisation page. The credential is exchanged there and stored by the host — it never passes through this page.</small></div></div><div class="form-actions"><button class="primary-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Connect ${escapeHtml(plugin.name)}</button></div></div>`;
+    else if (plugin.status === "installed") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Awaiting authorisation</strong><small>Finish approving ${escapeHtml(plugin.name)} in the tab that opened, then reopen this panel.</small></div></div></div>`;
     else if (plugin.status === "installed") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Secure value required</strong><small>Scoped to ${escapeHtml(plugin.name)} · ${escapeHtml(plugin.secretField)}. It never enters chat or model context.</small></div></div><form data-secret-form="${escapeHtml(plugin.id)}"><div class="field"><label for="secret-${escapeHtml(plugin.id)}">${escapeHtml(plugin.secretField)}</label><input id="secret-${escapeHtml(plugin.id)}" name="secret" type="password" autocomplete="off" required placeholder="Enter securely" /><span class="field-hint">Standalone demo: the entered value is immediately discarded.</span></div><div class="form-actions"><button class="primary-button" type="submit">Connect account</button></div></form></div>`;
     else account = `<div class="demo-note"><strong>${escapeHtml(plugin.account || "Connected account")}</strong><br />The connector holds the credential globally. Contexts receive enabled capabilities, never the key.</div>`;
     return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>Global account</span><span>${escapeHtml(plugin.category)}</span></div>${account}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span><span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span></div><div class="plugin-list">${tools}</div></section><section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${skills}</div></section></div>`;
@@ -792,7 +808,7 @@
     // explanation -- an empty capability set is a normal state, not an error.
     if (!selected) {
       openPanel("Global capabilities", "Plugins, connectors & skills",
-        `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill">none installed</span></div><div class="empty-state">No connectors are installed on this host yet. Installing and connecting them is not wired to this gateway.</div>`);
+        `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill">none installed</span></div><div class="empty-state">This host reports no connectors. When it has some, connecting one opens that platform\u2019s own authorisation page.</div>`);
       return;
     }
     selectedPluginId = selected.id;
@@ -981,7 +997,7 @@
       selectedPluginId = target.dataset.pluginId;
       renderPluginsPanel();
     } else if (target.dataset.installPlugin) {
-      adapter.setPluginState(target.dataset.installPlugin, "installed");
+      adapter.setPluginState(target.dataset.installPlugin, "connect");
       selectedPluginId = target.dataset.installPlugin;
       renderPluginsPanel();
       showToast("Plugin installed globally. Connect its account to enable tools.");

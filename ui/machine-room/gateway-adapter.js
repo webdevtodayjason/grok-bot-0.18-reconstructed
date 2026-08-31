@@ -534,7 +534,35 @@
 
       // -- No backend behind these yet. They say so rather than pretending. ------------------
       submitSecret() { return notWired("The secure credential bridge"); },
-      setPluginState() { return notWired("Installing and connecting plugins"); },
+      setPluginState(pluginId, status) {
+        const plugin = state.plugins.find((p) => p.id === pluginId);
+        if (!plugin) return clone(state);
+        const platform = plugin.id;
+        if (status === "available" || status === "disconnect") {
+          call("disconnectChannel", { platform })
+            .then(() => hydrate(state)).then((next) => { state = next; emit("plugin:state", { pluginId, status: "available" }); })
+            .catch((error) => notWired(`Disconnecting ${plugin.name} failed: ${error.message}`));
+          return clone(state);
+        }
+        // The credential never reaches this page. The host returns the platform's own consent URL,
+        // the operator approves there, and the channel binds host-side -- which is why this opens
+        // a tab rather than collecting anything.
+        call("getListenerConnectUrl", { platform })
+          .then((answer) => {
+            const url = answer?.url;
+            if (!url) return notWired(`${plugin.name} returned no connect URL`);
+            global.open(url, "_blank", "noopener");
+            const r = record(state.activeContext);
+            if (r) r.messages.push({
+              id: `connect-${Date.now()}`, authorId: "system", authorName: "Machine Room", type: "system",
+              text: `Approve ${plugin.name} in the tab that just opened. The connection completes on the host, not here.`,
+              time: timeOf(Date.now()),
+            });
+            emit("plugin:state", { pluginId, status: "connecting" });
+          })
+          .catch((error) => notWired(`Connecting ${plugin.name} failed: ${error.message}`));
+        return clone(state);
+      },
       togglePluginTool() { return notWired("Per-tool permissions"); },
       decideApproval() { return notWired("Approval cards"); },
       setModel() { return notWired("Per-worker model routing"); },
