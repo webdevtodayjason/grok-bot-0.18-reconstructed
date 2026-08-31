@@ -179,9 +179,15 @@ if (want("--surfaces")) {
   for (let round = 1; round <= 5; round += 1) {
     for (const surface of ["browser", "terminal"]) {
       await page.click(`[data-desktop-app="${surface}"]`);
-      await page.waitForTimeout(surface === "browser" ? 20000 : 8000);
+      // Poll rather than guess. A cold box-chrome takes ten seconds or more while a raise is
+      // instant, so any fixed sleep is either flaky or slow; this is both correct and quick.
       let cls = "";
-      try { cls = await activeWindowClass(display); } catch (error) { cls = `(x query failed: ${error.message})`; }
+      const deadline = Date.now() + 40000;
+      for (;;) {
+        try { cls = await activeWindowClass(display); } catch (error) { cls = `(x query failed: ${error.message})`; }
+        if (cls.includes(EXPECT[surface]) || Date.now() > deadline) break;
+        await page.waitForTimeout(2000);
+      }
       if (cls.includes(EXPECT[surface])) pass(`round ${round} ${surface}`, cls);
       else fail(`round ${round} ${surface}`, `active window is ${cls || "(none)"}, expected ${EXPECT[surface]}`);
     }

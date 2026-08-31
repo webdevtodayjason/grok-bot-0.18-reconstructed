@@ -704,9 +704,23 @@ Two distinct causes, found by working down the stack. Everything below was measu
    died. Xfconf cannot connect, `xfwm4` exits with "Xfconf could not be initialized", no window
    manager is left, and `_NET_CLIENT_LIST` on `:2`/`:3` reads "not found" while `:1` is fine.
 
-   **The upstream fix** is in `start-window`: treat a display as healthy only if it also has a
-   window manager (`_NET_CLIENT_LIST` present), not merely a live X server. That file lives in the
-   box image, not in this repo.
+   **Fixed, in the box.** `scripts/box-patches/apply-start-window-fix.sh` adds a `session_alive`
+   check to `start-window` and, when X is up without a session, tears down **only that display** so
+   the bringup path runs again. Verified: a fork with a dead session logs "X is up but the session
+   is dead; rebuilding" and comes back with a real desktop, and after a container restart a single
+   `ensureForeverBox` self-repairs it. The patch survives `docker restart` but **not** a recreate,
+   so re-run the script after `recreate-box.sh`; the original is kept beside it as
+   `start-window.original`.
+
+   One trap inside the fix worth remembering: `xprop` exits **0** even when it prints "not found",
+   so the exit code proves nothing and the check has to grep the output. The first version of this
+   patch passed on every display and repaired nothing.
+
+   **This did not make computer use work.** With the fork desktop healthy, box-chrome running on
+   that screen, and the image path fixed, a `computerUse` subagent still completes without driving
+   anything and the worker still answers "the last desktop run didn't return a title". There is a
+   third cause, not yet found. What is now ruled out: the missing image path, the browser instance,
+   the fork desktop session, the router, the fork daemons, and shared-desktop mode.
 
    **Repair procedure, until then:** `docker restart grok-bot-local-vm` rebuilds every session
    cleanly. Do **not** try to tear down one display by hand — deleting `/tmp/.X11-unix/X3` takes
