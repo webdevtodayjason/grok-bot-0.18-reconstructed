@@ -44,8 +44,11 @@
     contract after plugins/OAuth; Proof: two agents answering from two different
     endpoints in one conversation.
 
-13. **Group member turns: accept text-shaped tool calls, or route members to a stronger
-    tool model** — Nemotron under one persona deterministically hand-writes the
+13. **CONFIRMED 2026-08-30 evening: on a frontier model the silence vanishes** — with the
+    box switched to Grok 4.6 (xAI), Atera answered the identical roll call in 25s
+    ("Atera Triage: here."). The remaining work is per-agent routing (#12) so members can
+    run frontier while solo turns stay local. Original framing: accept text-shaped tool
+    calls, or route members to a stronger tool model** — Nemotron under one persona deterministically hand-writes the
     SendMessage call as text and the room drops it (full verdict:
     `docs/audit-group-round.md`). Prompt nudge measured ineffective. Owner: next group
     session; converges with #12; Proof: Atera answers a roll call in the room.
