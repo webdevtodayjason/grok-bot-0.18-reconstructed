@@ -109,6 +109,9 @@ if (want("--assert-no-silent-mocks")) {
     "Recording is local to this worker session.", "skill draft", "recording attached",
     "review required", "Task learned from screen recording",
     "The recording is finished. Learn the task from it.",
+    // fabricated desktop surfaces (found by hand after the audit-derived list passed)
+    "Review current state", "Return outcome", "working sheet",
+    "Private agent working files.", "Files shared with this room.",
     // demo model names
     "Nemotron Super", "GLM 4.7", "Qwen 3.5",
   ];
