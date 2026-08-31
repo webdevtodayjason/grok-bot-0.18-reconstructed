@@ -420,6 +420,65 @@ Raw narration transcripts and full frame sets live in the session scratchpad (`v
 `vid2/`); scratchpads die with the session, so anything load-bearing is written here.
 Requested next recordings: Plugins (covers connectors), then the config area.
 
+## 6c. Warmwind teardown — the frontend reference (2026-08-30, `Warmwind.mp4`, 319s)
+
+Supplied after the coherence critique, to answer "what does elegant actually look like here."
+Dissected with `scripts/dissect-video.sh`; narration in the operator's own words.
+
+**The structural finding, which invalidated the first coherence pass.** Warmwind is not a
+dashboard with panels. It is **one canvas**: a single rounded surface, inset from the window,
+filled edge to edge with a photograph. Small glass objects float at the canvas edges; the middle
+is deliberately left open for whatever the worker is doing. The first coherence pass built five
+boxes in a CSS grid and darkened them, which is why it had dead space no colour change could fix
+— a grid has to fill itself, a canvas does not.
+
+**The parts, by position.**
+- **Top centre** — a white dock pill hanging off the canvas edge: connected app icons plus a "+".
+  Signed-out apps are greyscaled, never badged red.
+- **Left edge** — a vertical stack of window thumbnails (Files, Gmail Webversion, Google Chrome,
+  Wind Sheets), each a small titled card with a live screenshot. These are the windows open on the
+  worker's computer. Clicking one brings it up full size in the middle.
+- **Middle** — free. Holds whichever of three things is true: the finished report, the app the
+  worker is driving, or nothing but wallpaper. The conversation floats over it in a ~460px centred
+  column, masked so older turns fade upward rather than scrolling under a hard edge.
+- **Right edge** — two narrow dark-glass cards: schedule state (with the pause control) and the
+  plan, whose steps sit on a hairline rail with green checks and the app icon each step touches.
+- **Canvas corners** — `History` bottom-left, `Hide chat ⌄` bottom-centre.
+- **Below the canvas** — the worker bar on the app's own light ground: `+ New worker`, worker
+  pills, and in the centre either the composer or the stop control.
+
+**"Hide chat" is the answer to the desktop problem.** Dismissing the chat un-dims the wallpaper
+and the desktop comes forward, sharp and full size. The desktop was never a thumbnail in a panel;
+it is the ground the whole product stands on. Ours is a live VNC frame, so the same move works
+verbatim: blurred and darkened behind the conversation, sharp and interactive when dismissed.
+
+**Colour.** The entire product is white and black glass over a photograph — with exactly **one**
+saturated colour, a hot pink, spent only on the stop control for a running worker. Its presence
+alone reads the state from across the room. Nothing else competes.
+
+**Contrast, which is what the operator flagged.** Text over a photograph gets its own ground: the
+reading column sits on a soft dark scrim, and body copy carries a faint text-shadow. The dark
+glass is for anything that must stay legible over a bright desktop; the light glass is for things
+the eye should read as lifted toward it. Direction of conversation is encoded as *material* (dark
+= worker, light = you), not as colour, so it survives any wallpaper.
+
+**Motion** — the operator replayed the launch three times to make the point. Everything builds in:
+opacity plus a small rise and scale, staggered ~55ms, with the right-hand cards springing in from
+the edge on a slight overshoot. Nothing slides, nothing bounces hard. Thinking is a plain line of
+text with a three-dot shimmer — *"Reasoning carefully…"* — not a card, because it is the worker
+being quiet rather than a system event.
+
+**Onboarding worth stealing later.** Creating a worker asks "Choose an intelligence level" —
+Lite / Balanced / Pro, each with a price per hour. That is model selection stated as capability
+and cost rather than model names, and it is the natural home for the per-agent provider+model
+routing already queued as Wave 5 #12.
+
+**Where this landed.** `ui/mock.html` — a standalone static mock of all four states (idle,
+operating, background, completed) with no gateway, SSE or tests attached, so the design can be
+judged without a live renderer fighting back. Published at
+`https://artifacts.semfreak.dev/a/grok-bot-reconstructed/mock-2eb3180f/`. It is the design source
+for the port onto `ui/index.html`; it is not wired to anything and must not be.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole
