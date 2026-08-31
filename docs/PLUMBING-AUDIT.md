@@ -693,7 +693,27 @@ Two distinct causes, found by working down the stack. Everything below was measu
    images, so no turn that works today changes. Eight tests in
    `tests/openai-compatible-images.test.mjs`.
 
-2. **The fork window's desktop session does not come up.** Still open. The X display exists
+2. **The fork window's desktop session does not come up.** Still open, and now diagnosed to the
+   line. `start-desktop.sh` does relaunch D-Bus correctly when it runs: as root it removes
+   `${BOX_USER_XDG_DIR}/dbus-session-address` and re-launches. The problem is that it never runs
+   again. `start-window` short-circuits on `if display_alive && daemon_alive; then ... exit 0`, and
+   **an Xvfb that survived a box restart counts as alive** — so after a restart the display is up,
+   the session under it is dead, and nothing ever repairs it. Measured on the fork:
+   `/tmp/xdg-runtime-box-3/dbus-session-address` points at `/tmp/dbus-D43YLAu6jZ`, the socket file
+   still exists, and connecting to it gives **Connection refused** — a stale address whose daemon
+   died. Xfconf cannot connect, `xfwm4` exits with "Xfconf could not be initialized", no window
+   manager is left, and `_NET_CLIENT_LIST` on `:2`/`:3` reads "not found" while `:1` is fine.
+
+   **The upstream fix** is in `start-window`: treat a display as healthy only if it also has a
+   window manager (`_NET_CLIENT_LIST` present), not merely a live X server. That file lives in the
+   box image, not in this repo.
+
+   **Repair procedure, until then:** `docker restart grok-bot-local-vm` rebuilds every session
+   cleanly. Do **not** try to tear down one display by hand — deleting `/tmp/.X11-unix/X3` takes
+   out the socket directory for `:1` and `:2` as well, leaving three Xvfb processes running that
+   nothing can connect to. A restart is the recovery from that too.
+
+   Original evidence retained: The X display exists
    (`/tmp/.X11-unix/X3`), the assignment is persisted, the fork router routes correctly (404 with
    the owner token, 403 without — so auth and routing both work), and the fork exec daemons listen
    on 14002/14003. But `_NET_CLIENT_LIST` on `:3` is **empty** — no window manager, no dock, no
