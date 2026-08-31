@@ -495,7 +495,7 @@ select:focus-visible {
   background: var(--amber-500);
 }
 
-.worker-card[data-status="working"] .room-card {
+.room-card {
   grid-template-columns: 58px minmax(0, 1fr) 18px;
 }
 

@@ -103,7 +103,10 @@ html[data-demo="true"] .app-shell { outline: 2px solid #ff4d6a; outline-offset: 
 .teach-live { width: 100%; height: 100%; min-height: 320px; border-radius: 10px; overflow: hidden; background: #0b0f13; }
 
 /* Files staged for the next message, shown above the composer so nothing is sent unnoticed. */
-.attachment-tray { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 6px; }
+/* `display:flex` beats the `hidden` attribute, so the empty tray still claimed a cell in the
+   shelf's three-column grid -- pushing the composer into column 3 and wrapping the utility
+   icons and next-routine ring onto an invisible second row. Only lay it out when shown. */
+.attachment-tray:not([hidden]) { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 6px; }
 .attachment-tray .tag { display: inline-flex; align-items: center; gap: 6px; }
 
 /* Agents answer in markdown; the renderer emits real elements, so they need somewhere to land.

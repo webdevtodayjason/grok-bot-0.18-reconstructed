@@ -1050,7 +1050,7 @@
         elements.desktopWindow.querySelector("[data-box-caption]").innerHTML = line;
       } else {
         mountedDesktop = frameUrl;
-        elements.desktopWindow.innerHTML = `<div class="desktop-browser" style="display:flex;flex-direction:column;height:100%"><div class="browser-toolbar" style="flex:0 0 auto"><div class="browser-address" data-box-caption>${line}</div></div><div style="flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${escapeHtml(frameUrl)}" title="Live view of the box" style="position:absolute;top:-30px;left:0;width:100%;height:calc(100% + 30px);border:0"></iframe></div></div>`;
+        elements.desktopWindow.innerHTML = `<div class="desktop-browser" style="display:flex;flex-direction:column;height:100%"><div class="browser-toolbar" style="flex:0 0 auto"><div class="browser-address" data-box-caption>${line}</div></div><div style="flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${escapeHtml(frameUrl)}" title="Live view of the box" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe></div></div>`;
       }
       // Put the app on THAT display, not on the shared one.
       fetch(`/box/launch?display=${encodeURIComponent(display)}`, {

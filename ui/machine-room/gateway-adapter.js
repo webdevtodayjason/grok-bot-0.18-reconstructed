@@ -654,9 +654,12 @@
           return {
             state: status?.state ?? "unknown",
             display: token ? Number(token) : 1,
-            // vnc_lite has no toolbar to clip; vnc.html carries a full control bar.
-            url: url ? url.replace("/vnc.html", "/vnc_lite.html") + "&autoconnect=1&resize=scale&reconnect=1"
-                     : "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1",
+            // Keep the host's own vnc.html. vnc_lite ignores resize=scale, so the framebuffer
+            // rendered at the desktop's native size inside a smaller iframe and you saw the
+            // top-left corner of the screen with the rest cropped away. The full client scales
+            // to fit and keeps its control bar collapsed, which is what the real product shows.
+            url: url ? url + "&autoconnect=1&resize=scale&reconnect=1&bell=0"
+                     : "http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale&reconnect=1&bell=0",
             shared: !token,
           };
         });
