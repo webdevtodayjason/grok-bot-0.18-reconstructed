@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="motion.css" />
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="backgrounds.css" />
   </head>
   <body>
     <div class="app-shell" id="app-shell">
@@ -20,7 +21,6 @@
             <span></span><span></span><span></span>
           </div>
           <strong>Machine Room</strong>
-          <a class="prototype-badge" href="components.html">component guide</a>
         </div>
 
         <nav class="capability-dock" aria-label="Capabilities">
@@ -205,6 +205,11 @@
         if (!window.__machineRoomLive) document.documentElement.dataset.demo = "true";
         const script = document.createElement("script");
         script.src = "app.js";
+        script.onload = () => {
+          const picker = document.createElement("script");
+          picker.src = "backgrounds.js";
+          document.body.appendChild(picker);
+        };
         document.body.appendChild(script);
       });
     </script>

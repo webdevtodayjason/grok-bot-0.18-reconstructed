@@ -150,7 +150,7 @@
     const shape = (a) => ({
       id: a.id,
       name: a.name ?? "Untitled",
-      role: a.description || (a.isGroup ? "Group chat" : "Worker"),
+      role: a.isGroup ? "Group chat" : "Worker",
       ...statusOf(a),
       avatar: pick(AVATARS, a.id),
       accent: pick(ACCENTS, a.id),

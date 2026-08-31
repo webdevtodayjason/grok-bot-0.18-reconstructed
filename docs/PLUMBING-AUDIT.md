@@ -529,6 +529,22 @@ routing, Wave 5 #12).
    the demo timer while a wait is genuinely open. Measured: dots up at t+1s, still up at t+4s,
    gone at t+6s as the real reply rendered.
 
+**Backgrounds.** `backgrounds.js` + `backgrounds.css`, loaded after `app.js` so they can hang
+their own listeners on the settings buttons and append a section to the panel once it is filled.
+Six operator-supplied plates live in `assets/backgrounds/` as WebP at 1920px with 320px thumbs --
+204KB for all six, down from 8.9MB of PNG. Selection and uploads are kept in `localStorage`:
+uploads are downscaled in a canvas first, capped against the quota, and the panel says out loud
+that they stay in this browser. There is no upload endpoint, and inventing one would mean writing
+operator files into a served directory. Scoped to `html[data-bg]`, so with nothing chosen the
+handoff's own plate ships untouched.
+
+**One fix in `styles.css`** (so "byte-identical" now means `app.js` and `adapter.js` only):
+`.context-detail-row strong` asks for an ellipsis but a flex child defaults to `min-width:auto`,
+so it cannot shrink past its own text and widens the whole card instead. Surfaced as Chief's
+agent panel running off-screen while Atera's was fine. Root cause was also ours: the adapter was
+putting an agent's `description` -- a whole job brief -- into the one-word `Role` field. Role is a
+label again; the description still shows as the line under the name.
+
 **Run it.**
 
 ```

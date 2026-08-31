@@ -955,6 +955,9 @@ select:focus-visible {
 
 .context-detail-row strong {
   overflow: hidden;
+  /* Integration fix: without min-width:0 a flex child cannot shrink past its own text, so the
+     ellipsis above never engages and a long value widens the card instead. */
+  min-width: 0;
   color: var(--text-secondary);
   font-size: 9px;
   font-weight: 550;
