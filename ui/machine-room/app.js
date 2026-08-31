@@ -620,20 +620,48 @@
   // asterisk and every code span wrapped in backticks -- a morning of reading agent output in
   // source form. This is the renderer the old operator UI already uses, which escapes FIRST and
   // only then adds the handful of tags it recognises, so nothing an agent says can inject markup.
-  function paragraphMarkup(text) {
-    const inline = (t) => escapeHtml(t)
+  // Escaped FIRST, so these patterns only ever match text the model wrote. Nothing here can
+  // introduce a tag the escape did not already remove.
+  function inlineMarkup(line) {
+    return escapeHtml(line)
       .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-      .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>");
-    return String(text ?? "").split(/\n{2,}/).map((block) => {
-      const lines = block.split("\n");
-      if (lines.every((l) => /^\s*[-*+]\s+/.test(l) || !l.trim()))
-        return `<ul>${lines.filter((l) => l.trim()).map((l) => `<li>${inline(l.replace(/^\s*[-*+]\s+/, ""))}</li>`).join("")}</ul>`;
-      if (lines.every((l) => /^\s*\d+[.)]\s+/.test(l) || !l.trim()))
-        return `<ol>${lines.filter((l) => l.trim()).map((l) => `<li>${inline(l.replace(/^\s*\d+[.)]\s+/, ""))}</li>`).join("")}</ol>`;
-      return `<p>${lines.map(inline).join("<br>")}</p>`;
-    }).join("");
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
   }
+
+  function paragraphMarkup(text) {
+    // Line by line, not block by block. The block form required EVERY line in a paragraph to be a
+    // bullet, so an agent that writes a lead sentence and then a list -- which is how they all
+    // write -- got the whole thing rendered as literal dashes.
+    const lines = String(text || "").split("\n");
+    let html = "";
+    let list = null;
+    const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
+    for (const raw of lines) {
+      const line = raw.trimEnd();
+      const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
+      const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+      const heading = /^\s{0,3}(#{1,4})\s+(.*)$/.exec(line);
+      if (bullet) {
+        if (list !== "ul") { closeList(); html += "<ul>"; list = "ul"; }
+        html += `<li>${inlineMarkup(bullet[1])}</li>`;
+      } else if (numbered) {
+        if (list !== "ol") { closeList(); html += "<ol>"; list = "ol"; }
+        html += `<li>${inlineMarkup(numbered[1])}</li>`;
+      } else if (heading) {
+        closeList();
+        html += `<p class="message-heading"><strong>${inlineMarkup(heading[2])}</strong></p>`;
+      } else if (!line.trim()) {
+        closeList();
+      } else {
+        closeList();
+        html += `<p>${inlineMarkup(line)}</p>`;
+      }
+    }
+    closeList();
+    return html;
+  }
+
 
   const DECISION_ACTIONS = {
     "auto-review": [["approved", "✓ Approve", true], ["denied", "✕ Deny", false]],

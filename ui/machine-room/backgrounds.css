@@ -105,3 +105,22 @@ html[data-demo="true"] .app-shell { outline: 2px solid #ff4d6a; outline-offset: 
 /* Files staged for the next message, shown above the composer so nothing is sent unnoticed. */
 .attachment-tray { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 6px; }
 .attachment-tray .tag { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Agents answer in markdown; the renderer emits real elements, so they need somewhere to land.
+   Without these a bulleted briefing takes the browser default indent and pushes out of the bubble. */
+.message-bubble ul,
+.message-bubble ol { margin: 6px 0; padding-left: 20px; }
+.message-bubble li { margin: 2px 0; }
+.message-bubble li::marker { color: rgba(255, 255, 255, 0.45); }
+.message-bubble code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  font: 0.92em ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(255, 255, 255, 0.10);
+}
+.message-bubble p + p,
+.message-bubble p + ul,
+.message-bubble p + ol,
+.message-bubble ul + p,
+.message-bubble ol + p { margin-top: 6px; }
+.message-bubble .message-heading { margin-top: 8px; }
