@@ -790,6 +790,43 @@
     return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>Global account</span><span>${escapeHtml(plugin.category)}</span></div>${account}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span><span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span></div><div class="plugin-list">${tools}</div></section><section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${skills}</div></section></div>`;
   }
 
+  // The relay holds the endpoint catalogue and probes each one; the box holds which is in use.
+  // Both are read here rather than assumed, so the panel cannot claim a model the box is not on.
+  function fillEndpoints() {
+    const select = elements.panelContent.querySelector("#endpoint-select");
+    const current = elements.panelContent.querySelector("#endpoint-current");
+    const health = elements.panelContent.querySelector("#endpoint-health");
+    if (!select) return;
+    Promise.all([
+      fetch("/endpoints").then((r) => r.json()).catch(() => ({ endpoints: [] })),
+      fetch("/model").then((r) => r.json()).catch(() => ({})),
+    ]).then(([catalog, live]) => {
+      const list = catalog.endpoints ?? [];
+      select.innerHTML = list.map((e) => {
+        const on = live.model && e.model === live.model;
+        const reach = e.health?.reachable ? "" : " · unreachable";
+        return `<option value="${escapeHtml(e.id)}" ${on ? "selected" : ""}>${escapeHtml(e.name)}${escapeHtml(reach)}</option>`;
+      }).join("") || `<option value="">No endpoints configured</option>`;
+      if (current) current.textContent = live.model
+        ? `${live.model} · ${live.endpoint ?? "unknown host"} (from ${live.source ?? "unknown"})`
+        : "The box reports no model. Agents cannot answer until one is set.";
+      if (health) {
+        const chosen = list.find((e) => live.model && e.model === live.model);
+        health.textContent = chosen ? (chosen.health?.reachable ? `${chosen.health.ms}ms` : "unreachable") : "unknown";
+        health.className = `status-pill${chosen?.health?.reachable ? " success" : ""}`;
+      }
+    });
+    select.onchange = () => {
+      const id = select.value;
+      if (!id) return;
+      if (current) current.textContent = "Switching…";
+      fetch("/endpoints/use", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) })
+        .then((r) => r.json())
+        .then((answer) => { showToast(`Now answering through ${answer.using ?? id}`); fillEndpoints(); })
+        .catch((error) => showToast(`Could not switch endpoint: ${error.message}`));
+    };
+  }
+
   function notificationsPanel() {
     const rows = [...state.workers, ...state.rooms]
       .filter((r) => (r.unread ?? 0) > 0)
@@ -832,11 +869,11 @@
   }
 
   function settingsPanel() {
-    const rows = state.workers.map((worker) => {
-      const options = state.models.available.map((model) => `<option value="${escapeHtml(model.id)}" ${worker.model === model.id ? "selected" : ""}>${escapeHtml(model.name)} · ${escapeHtml(model.provider)}</option>`).join("");
-      return `<div class="setting-row"><div><strong>${escapeHtml(worker.name)}</strong><small>${escapeHtml(worker.role)}</small></div><select class="model-select" data-model-worker="${escapeHtml(worker.id)}" aria-label="Model for ${escapeHtml(worker.name)}">${options}</select></div>`;
-    }).join("");
-    return `<div class="panel-intro"><p>Model routing and review policy are global operator controls. Routine ownership remains attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Per-agent model routing</h3><p>Changes apply on the next agent turn.</p>${rows}</section><section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section></div>`;
+    // Per-agent routing does not exist on this host: updateAgent takes only name, description and
+    // title, and the model is resolved globally from box-secrets.json on every request. A picker
+    // per worker promised something the machine cannot do. One endpoint, switchable, is the truth.
+    const rows = `<div class="setting-row"><div><strong>Endpoint</strong><small>Every worker and every subagent on this box answers through this one. Switching takes effect on the next turn.</small></div><select class="model-select" id="endpoint-select" aria-label="Inference endpoint"><option value="">Loading…</option></select></div><div class="setting-row"><div><strong>Currently answering</strong><small id="endpoint-current">Reading from the box…</small></div><span class="status-pill" id="endpoint-health">…</span></div>`;
+    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section><section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section></div>`;
   }
 
   function addPanel() {
@@ -1129,8 +1166,8 @@
   elements.panelContent.addEventListener("change", handlePanelChange);
   elements.panelContent.addEventListener("submit", handlePanelSubmit);
 
-  document.getElementById("settings-button").addEventListener("click", () => openPanel("Global router & policy", "Operator settings", settingsPanel()));
-  document.getElementById("shelf-settings").addEventListener("click", () => openPanel("Global router & policy", "Operator settings", settingsPanel()));
+  document.getElementById("settings-button").addEventListener("click", () => { openPanel("Global router & policy", "Operator settings", settingsPanel()); fillEndpoints(); });
+  document.getElementById("shelf-settings").addEventListener("click", () => { openPanel("Global router & policy", "Operator settings", settingsPanel()); fillEndpoints(); });
   document.getElementById("people-button").addEventListener("click", () => {
     if (activeContext().kind === "room") openPanel("Room roster", `${contextName()} members`, membersPanel());
     else openPanel("Agent details", contextName(), agentProfilePanel(contextRecord()));
