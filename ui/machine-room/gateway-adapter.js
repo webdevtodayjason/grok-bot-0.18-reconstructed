@@ -244,7 +244,46 @@
       r.messages.push({ id: wait.id, authorId: wait.authorId, authorName: wait.authorName, type: "working", text: "", time: "" });
     }
 
+    async function reloadRoster() {
+      const agents = await call("listAgents").catch(() => null);
+      if (!agents) return;
+      for (const a of agents) {
+        const target = (a.isGroup ? state.rooms : state.workers).find((x) => x.id === a.id);
+        if (!target) continue;
+        const next = statusOf(a);
+        target.status = next.status;
+        target.statusText = next.statusText;
+        target.lastActivityAt = a.lastActivityAt ?? target.lastActivityAt;
+        if (a.isGroup) target.memberIds = a.memberIds ?? target.memberIds;
+      }
+    }
+
+    // A failed turn used to leave no trace in this UI at all: the transcript simply never grew.
+    // The host records it as an error tray, so read those and say so in the conversation.
+    const reportedTrays = new Set();
+    async function reloadTrays() {
+      const trays = await call("getTrays").catch(() => null);
+      if (!Array.isArray(trays)) return;
+      for (const tray of trays) {
+        if (tray.kind !== "error" || reportedTrays.has(tray.id)) continue;
+        reportedTrays.add(tray.id);
+        const owner = state.workers.find((w) => w.id === tray.agentId)
+          ?? state.rooms.find((r) => r.id === tray.agentId);
+        if (!owner) continue;
+        awaiting.delete(keyOf({ kind: owner.memberIds ? "room" : "worker", id: owner.id }));
+        owner.status = "attention";
+        owner.statusText = tray.title ?? "The last turn failed";
+        owner.messages.push({
+          id: `tray-${tray.id}`, authorId: "system", authorName: "Machine Room", type: "text",
+          text: `That turn failed: ${tray.title ?? "error"}${tray.detail ? ` — ${tray.detail}` : ""}`,
+          time: timeOf(Date.now()),
+        });
+      }
+    }
+
     async function reloadActive() {
+      await reloadRoster();
+      await reloadTrays();
       const r = record(state.activeContext);
       if (!r) return;
       const loaded = await loadContext(state.activeContext, r.name);
@@ -267,6 +306,10 @@
         pending = setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, 400);
       };
     } catch { /* no stream: the UI still works, it just will not update on its own */ }
+
+    // Heartbeat. The stream is the fast path; this is what keeps status honest when nothing is
+    // being said -- the same 15s cadence the old operator UI settled on.
+    setInterval(() => { void reloadActive().catch(() => {}); }, 15_000);
 
     return {
       getSnapshot: () => clone(state),

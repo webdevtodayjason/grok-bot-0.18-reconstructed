@@ -770,6 +770,14 @@
 
   function renderPluginsPanel() {
     const selected = state.plugins.find((plugin) => plugin.id === selectedPluginId) || state.plugins[0];
+    // This host reports its connectors through getListenerIntegrations, and a box with none
+    // returns an empty list. Reaching for plugins[0] threw and left the panel blank with no
+    // explanation -- an empty capability set is a normal state, not an error.
+    if (!selected) {
+      openPanel("Global capabilities", "Plugins, connectors & skills",
+        `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill">none installed</span></div><div class="empty-state">No connectors are installed on this host yet. Installing and connecting them is not wired to this gateway.</div>`);
+      return;
+    }
     selectedPluginId = selected.id;
     const nav = state.plugins.map((plugin) => `<button class="plugin-nav-button${plugin.id === selected.id ? " is-active" : ""}" type="button" data-plugin-id="${escapeHtml(plugin.id)}"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><span><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.category)}</small></span><span class="status-dot ${plugin.status === "connected" ? "success" : plugin.status === "installed" ? "attention" : ""}"></span></button>`).join("");
     openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar"><input class="search-input" type="search" placeholder="Find a capability…" aria-label="Find a capability" />${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>`);
@@ -859,7 +867,10 @@
     elements.desktopTimeline.innerHTML = working
       ? `<li>Started — no step detail from this host</li>`
       : `<li class="is-pending">Nothing running for this worker</li>`;
-    elements.pauseRun.textContent = state.desktop.paused ? "Resume" : "Pause";
+    // Naming it honestly: this hides the view, it does not stop the worker. There is no host
+    // command to halt a turn in flight, and a button labelled Pause promises exactly that.
+    elements.pauseRun.textContent = state.desktop.paused ? "Resume view" : "Pause view";
+    elements.pauseRun.title = "Pauses this view only. The worker keeps running — this host has no command to stop a turn.";
   }
 
   function openDesktop(appName) {

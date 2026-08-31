@@ -87,12 +87,29 @@ if (want("--assert-no-silent-mocks")) {
 
   // Names and labels that exist only in the handoff's seed. If the page is live and any of these
   // are on screen, the operator is being shown fiction with the same weight as fact.
+  // Sourced from the 64-agent audit's MOCK verdicts (docs/audit-ui-truth-table.md), not from
+  // memory. A hand-written list is exactly how a mock survives its own regression test.
   const SEEDED = [
+    // demo roster and its fixtures
     "Marketing Channels", "ClientSync Tester", "MSP Team", "Finance close",
+    "Lead orchestrator", "Service desk specialist", "Campaign operator", "Regression specialist",
     "team-brief.md", "delegation-map.json", "ticket-audit.csv", "regression-report.json",
-    "overnight-summary.pdf", "client-digest.md", "campaign-calendar.csv",
-    "Context7", "Ticket audit", "Reports",
+    "overnight-summary.pdf", "client-digest.md", "campaign-calendar.csv", "priority-notes.md",
+    // fabricated run narrative
     "Weekday ticket review", "Morning command brief", "Weekly digest draft",
+    "Opened the active context", "Loaded shared working state", "Reviewing the current task",
+    "Return outcome to conversation", "Changes appear in this context",
+    // fabricated approvals and connectors
+    "Connect Context7", "Use the saved connector credential for this task.",
+    "Connected through the host listener.", "Context7", "Ticket audit", "Reports",
+    // fabricated safety and status
+    "Keep external writes and irreversible actions behind a human gate.",
+    "Router online", "Thinking through your request", "Started moments ago",
+    // fabricated teaching
+    "Recording is local to this worker session.", "skill draft", "recording attached",
+    "review required", "Task learned from screen recording",
+    "The recording is finished. Learn the task from it.",
+    // demo model names
     "Nemotron Super", "GLM 4.7", "Qwen 3.5",
   ];
   const body = await page.evaluate(() => document.body.innerText);
@@ -100,15 +117,39 @@ if (want("--assert-no-silent-mocks")) {
   if (found.length === 0) pass("no seed strings on the main view");
   else fail("seed strings rendered as real data", found.join(", "));
 
-  // The desktop dialog carries its own labels.
+  // Every panel, not just whichever happened to be open. A mock hiding one click deep is still a
+  // mock the operator will read as fact.
+  for (const capability of ["files", "browser", "routines", "plugins", "add"]) {
+    await page.click(`[data-capability="${capability}"]`).catch(() => {});
+    await page.waitForTimeout(1600);
+    const text = await page.evaluate(() =>
+      [...document.querySelectorAll("dialog[open]")].map((d) => d.innerText).join("\n"));
+    const hits = SEEDED.filter((seed) => text.includes(seed));
+    if (hits.length === 0) pass(`no seed strings behind ${capability}`);
+    else fail(`seed strings behind ${capability}`, hits.join(", "));
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(500);
+  }
+
+  // Settings stands alone; the teach button lives inside the desktop dialog, so that has to be
+  // open first or the click just times out against a hidden control.
+  await page.click("#settings-button").catch(() => {});
+  await page.waitForTimeout(1200);
+  await page.keyboard.press("Escape").catch(() => {});
+  await page.waitForTimeout(400);
   await page.click('[data-capability="browser"]').catch(() => {});
-  await page.waitForTimeout(1500);
-  const desk = await page.evaluate(() => document.getElementById("desktop-dialog")?.innerText ?? "");
-  const deskFound = SEEDED.filter((s) => desk.includes(s));
-  if (deskFound.length === 0) pass("no seed strings in the desktop dialog");
-  else fail("seed strings in the desktop dialog", deskFound.join(", "));
-  await page.click("[data-close-desktop]").catch(() => {});
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(1800);
+  for (const [label, selector] of [["settings", "#settings-button"], ["teach", "#teach-button"]]) {
+    await page.click(selector).catch(() => {});
+    await page.waitForTimeout(1400);
+    const text = await page.evaluate(() =>
+      [...document.querySelectorAll("dialog[open]")].map((d) => d.innerText).join("\n"));
+    const hits = SEEDED.filter((seed) => text.includes(seed));
+    if (hits.length === 0) pass(`no seed strings behind ${label}`);
+    else fail(`seed strings behind ${label}`, hits.join(", "));
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(500);
+  }
 }
 
 // ---------------------------------------------------------------- surfaces
