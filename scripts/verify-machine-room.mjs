@@ -167,7 +167,8 @@ if (want("--assert-no-silent-mocks")) {
 
 if (want("--surfaces")) {
   step("Browser and Terminal each show what they claim, five times each way");
-  const EXPECT = { browser: "Google-chrome", terminal: "Xfce4-terminal" };
+  // box-chrome sets its own WM_CLASS; the raw binary is deliberately not used.
+  const EXPECT = { browser: "box-chrome", terminal: "Xfce4-terminal" };
   await page.click('[data-capability="browser"]').catch(() => {});
   // Allocating a screen for an agent that has never had one takes about ten seconds.
   await page.waitForTimeout(22000);

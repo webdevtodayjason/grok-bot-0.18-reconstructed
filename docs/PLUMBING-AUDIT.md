@@ -675,6 +675,42 @@ per-run `startedAt`/`finishedAt` give a real measured duration.
 **There is no per-worker directory.** Every worker's Shell runs in one shared `/workspace`
 (`EXEC_DAEMON_CWD`). The only per-agent file record is the transcript's attachment entries.
 
+**Computer use: root-caused, half-fixed, and the remaining half is named.** The operator's report
+— "the agent says it is going to do something and never comes back" — reproduces exactly: ask a
+worker to open a page on its computer and it dispatches `computerUse`, the subagent reports
+`done` in seconds, nothing is driven, and the agent honestly answers "the first pass didn't return
+a title" and dispatches again, in a loop.
+
+Two distinct causes, found by working down the stack. Everything below was measured, not inferred.
+
+1. **The provider could not send an image at all.** `openai-compatible-chat.ts` had zero image
+   handling — no `image_url`, no base64 — and `executeToolCalls` JSON-stringified every tool
+   result. A screenshot comes back as `{kind:"image", text, imageB64}`, so the model received a
+   megabyte of base64 **text** and had nothing it could see. **Fixed:** images are lifted out of
+   the tool result and follow as a `role:"user"` message with `image_url` parts, which is the shape
+   every OpenAI-compatible vision endpoint takes; the base64 is stripped from the tool message so
+   it is not sent twice. Blast radius is exactly the broken path — only computer-use results carry
+   images, so no turn that works today changes. Eight tests in
+   `tests/openai-compatible-images.test.mjs`.
+
+2. **The fork window's desktop session does not come up.** Still open. The X display exists
+   (`/tmp/.X11-unix/X3`), the assignment is persisted, the fork router routes correctly (404 with
+   the owner token, 403 without — so auth and routing both work), and the fork exec daemons listen
+   on 14002/14003. But `_NET_CLIENT_LIST` on `:3` is **empty** — no window manager, no dock, no
+   Chrome — and `/tmp/xfwm4:3.log` reads `xfwm4-CRITICAL: Xfconf could not be initialized`. So the
+   session bringup fails on the fork displays while `:1` is fine. That is a box-image problem, not
+   host code.
+
+Ruled out along the way, so nobody re-checks them: shared-desktop mode is ON
+(`SAND_USE_EXISTING_BOX_EXEC_DAEMON=1` → `standalone=false` → `sharedDesktop=true`); the runner and
+the forever-box share one box instance (`const remoteBox = foreverBox.box`); the window router is
+alive (the EADDRINUSE lines in its log are failed *duplicate* launches after the first bound);
+`box-chrome --sand-prepare` runs clean and opens CDP on 9222+N.
+
+**Launch `box-chrome`, never the raw binary.** `box-reference-docs.ts:26` says so explicitly, and
+it matters: the raw binary came up on the right screen with a different profile and no debug port,
+so the operator watched one browser while the agent tried to drive another.
+
 **Run it.**
 
 ```

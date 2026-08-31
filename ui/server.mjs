@@ -149,7 +149,7 @@ const server = createServer(async (req, res) => {
     // Did the window actually appear? The launch is detached and cannot report, so the UI asks
     // afterwards instead of trusting a 200 that only ever meant "the request was accepted".
     if (req.method === "GET" && url.pathname === "/box/surface") {
-      const CLASSES = { browser: "Google-chrome", terminal: "Xfce4-terminal" };
+      const CLASSES = { browser: "box-chrome", terminal: "Xfce4-terminal" };
       const cls = CLASSES[url.searchParams.get("app")];
       if (!cls) return fail(res, 400, "unknown app");
       const surfaceDisplay = /^[1-9][0-9]?$/.test(String(url.searchParams.get("display") ?? ""))
@@ -173,7 +173,13 @@ const server = createServer(async (req, res) => {
       // Chrome needs its own profile dir or it just attaches to whatever instance already exists
       // and opens no window on this display at all.
       const APPS = {
-        browser: { cls: "Google-chrome", cmd: "google-chrome --no-sandbox --disable-dev-shm-usage --disable-gpu --no-first-run --disable-session-crashed-bubble --user-data-dir=/tmp/machine-room-chrome-DISPLAYNUM --start-maximized about:blank" },
+        // box-chrome, never the raw binary. The box's own launcher derives the display, uses the
+        // profile the agent's computer-use tooling expects (/home/box/chrome-profile-N) and opens
+        // the CDP port at 9222+N that the agent drives it through. A raw google-chrome came up on
+        // the right screen with a different profile and no debug port, so the operator watched one
+        // browser while the agent tried to drive another -- which is why a computerUse subagent
+        // reported "done" having navigated nothing.
+        browser: { cls: "box-chrome", cmd: "box-chrome about:blank" },
         terminal: { cls: "Xfce4-terminal", cmd: "xfce4-terminal --maximize" },
       };
       let app;
@@ -184,7 +190,7 @@ const server = createServer(async (req, res) => {
       // and nothing else. :1 is the shared seat; the host allocates forks from :2 upward.
       const display = /^[1-9][0-9]?$/.test(String(url.searchParams.get("display") ?? ""))
         ? `:${url.searchParams.get("display")}` : ":1";
-      const cmd = spec.cmd.replace("DISPLAYNUM", display.replace(":", ""));
+      const cmd = spec.cmd;
       const script = [
         `win=$(for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do`,
         `  xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${spec.cls}"' && echo $w && break;`,

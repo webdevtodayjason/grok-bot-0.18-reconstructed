@@ -251,8 +251,61 @@ function requestTools(tools: readonly OpenAiCompatibleTool[] | undefined): Loose
   return tools.map(tool => ({ type: "function", function: { name: tool.name, ...(tool.description == null ? {} : { description: tool.description }), parameters: tool.parameters } }));
 }
 
+/**
+ * A screenshot in a tool result reaches the model as a picture, not as a base64 string.
+ *
+ * Tool results were unconditionally JSON-stringified, so a computerUse screenshot -- which comes
+ * back as `{kind:"image", text, imageB64}` -- arrived as a megabyte of base64 TEXT. The model had
+ * nothing it could see, so every computerUse subagent finished immediately having driven nothing,
+ * reported "done", and the agent honestly said the pass returned no result and dispatched again.
+ *
+ * The OpenAI tool-message role cannot carry an image, so the picture follows as a user message,
+ * which is the shape every OpenAI-compatible vision endpoint accepts. The base64 is stripped from
+ * the tool message itself -- sending it twice would double an already large payload.
+ *
+ * Blast radius is exactly the broken path: only computer-use tool results carry images, so an
+ * endpoint with no vision support sees no change on any turn that works today.
+ */
+const IMAGE_BYTES_MAX = 6_000_000;
+
+function imagePartsFrom(value: unknown): Array<{ b64: string; mediaType: string }> {
+  if (value == null || typeof value !== "object") return [];
+  const record = value as Loose;
+  const found: Array<{ b64: string; mediaType: string }> = [];
+  const push = (b64: unknown, mediaType: unknown) => {
+    if (typeof b64 !== "string" || b64.length === 0) return;
+    if (b64.length > IMAGE_BYTES_MAX) return;
+    found.push({ b64, mediaType: typeof mediaType === "string" && mediaType.startsWith("image/") ? mediaType : "image/png" });
+  };
+  push(record.imageB64, record.mediaType);
+  if (record.image != null && typeof record.image === "object") {
+    const image = record.image as Loose;
+    push(image.base64 ?? image.imageB64 ?? image.data, image.mediaType ?? image.mimeType);
+  }
+  if (Array.isArray(record.content)) {
+    for (const part of record.content) {
+      if (part != null && typeof part === "object") {
+        const item = part as Loose;
+        push(item.imageB64 ?? item.base64 ?? item.data, item.mediaType ?? item.mimeType);
+      }
+    }
+  }
+  return found;
+}
+
+function withoutImageBytes(value: unknown): unknown {
+  if (value == null || typeof value !== "object") return value;
+  const { imageB64: _b64, ...rest } = value as Loose;
+  if (rest.image != null && typeof rest.image === "object") {
+    const { base64: _a, data: _d, imageB64: _i, ...imageRest } = rest.image as Loose;
+    return { ...rest, image: imageRest };
+  }
+  return rest;
+}
+
 async function executeToolCalls(calls: readonly PendingToolCall[], toolsByName: ReadonlyMap<string, OpenAiCompatibleTool>, executeTool: NonNullable<OpenAiCompatibleOptions["executeTool"]>): Promise<Loose[]> {
   const results: Loose[] = [];
+  const images: Array<{ b64: string; mediaType: string }> = [];
   for (const call of calls) {
     const result = (output: string): Loose => ({ role: "tool", tool_call_id: call.id, name: call.name, content: output });
     const selected = toolsByName.get(call.name);
@@ -260,8 +313,22 @@ async function executeToolCalls(calls: readonly PendingToolCall[], toolsByName: 
     let args: unknown = {};
     try { args = call.arguments.trim().length > 0 ? JSON.parse(call.arguments) : {}; }
     catch { results.push(result(safeJson({ isError: true, error: "Tool arguments were not valid JSON." }))); continue; }
-    try { results.push(result(safeJson(await executeTool(selected, args, call.id)))); }
+    try {
+      const output = await executeTool(selected, args, call.id);
+      const parts = imagePartsFrom(output);
+      images.push(...parts);
+      results.push(result(safeJson(parts.length === 0 ? output : withoutImageBytes(output))));
+    }
     catch (error) { results.push(result(safeJson({ isError: true, error: error instanceof Error ? error.message : String(error) }))); }
+  }
+  if (images.length > 0) {
+    results.push({
+      role: "user",
+      content: [
+        { type: "text", text: images.length === 1 ? "Screenshot from the tool call above." : `${images.length} screenshots from the tool calls above.` },
+        ...images.map(image => ({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.b64}` } })),
+      ],
+    });
   }
   return results;
 }
