@@ -320,7 +320,7 @@
       addRoom(room) {
         const name = room?.name?.trim();
         if (!name) return clone(state);
-        call("createGroup", { name, memberIds: room.memberIds ?? [] })
+        call("createGroup", { name, description: "", memberAgentIds: room.memberIds ?? [] })
           .then(() => hydrate(state)).then((next) => { state = next; emit("room:created", { name }); })
           .catch((error) => notWired(`Creating a room failed: ${error.message}`));
         return clone(state);
@@ -332,7 +332,7 @@
         const memberIds = [...room.memberIds, workerId];
         room.memberIds = memberIds;
         const snapshot = emit("room:member-added", { roomId, workerId });
-        call("setGroupMembers", { id: roomId, memberIds }).catch((error) => notWired(`Adding a member failed: ${error.message}`));
+        call("setGroupMembers", { id: roomId, memberAgentIds: memberIds }).catch((error) => notWired(`Adding a member failed: ${error.message}`));
         return snapshot;
       },
 
@@ -342,22 +342,38 @@
         const memberIds = room.memberIds.filter((id) => id !== workerId);
         room.memberIds = memberIds;
         const snapshot = emit("room:member-removed", { roomId, workerId });
-        call("setGroupMembers", { id: roomId, memberIds }).catch((error) => notWired(`Removing a member failed: ${error.message}`));
+        call("setGroupMembers", { id: roomId, memberAgentIds: memberIds }).catch((error) => notWired(`Removing a member failed: ${error.message}`));
         return snapshot;
       },
 
       runRoutine(routineId) {
+        // The view awaits this and reads lastRun.duration off what it resolves with, so the
+        // duration is measured rather than invented -- a routine that took nine seconds should
+        // not report the demo's cheerful 2.2s.
         const routine = state.routines.find((r) => r.id === routineId);
-        if (!routine) return clone(state);
-        // Routine ids are namespaced by scope here so two workers can hold the same automation
-        // name; the gateway wants the bare id back.
+        if (!routine) return Promise.resolve(null);
+        // Routine ids are namespaced by scope so two workers can hold the same automation name;
+        // the gateway wants the bare id back.
         const [agentId, automationId] = routineId.split("::");
         routine.status = "running";
-        const snapshot = emit("routine:started", { routineId });
-        call("runAgentAutomationNow", { id: agentId, automationId })
-          .then(() => { routine.status = "ready"; routine.lastRun = { status: "passed", duration: "" }; emit("routine:completed", { routineId }); })
-          .catch((error) => { routine.status = "ready"; notWired(`Test run failed: ${error.message}`); });
-        return snapshot;
+        emit("routine:started", { routineId });
+        const startedMs = Date.now();
+        return call("runAgentAutomationNow", { id: agentId, automationId })
+          .then(() => {
+            const seconds = ((Date.now() - startedMs) / 1000).toFixed(1);
+            routine.status = "ready";
+            routine.lastRun = { status: "passed", duration: `${seconds}s` };
+            emit("routine:completed", { routineId });
+            void reloadActive();
+            return clone(routine);
+          })
+          .catch((error) => {
+            routine.status = "ready";
+            routine.lastRun = { status: "failed", duration: "" };
+            emit("routine:completed", { routineId });
+            notWired(`${routine.name} could not run: ${error.message}`);
+            throw error;
+          });
       },
 
       setRunPaused(paused) {

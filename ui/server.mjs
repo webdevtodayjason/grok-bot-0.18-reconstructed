@@ -142,6 +142,29 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       return res.end(html);
     }
+    // Put an app on the box's X display so the VNC view has something to show. Strictly two
+    // fixed commands, no operator string ever reaches a shell, and the relay only listens on
+    // loopback -- the box is already the agent's sandbox, but that is no reason to hand a
+    // browser tab arbitrary exec on it.
+    if (req.method === "POST" && url.pathname === "/box/launch") {
+      const LAUNCH = {
+        browser: ["google-chrome", "--no-sandbox", "--start-maximized", "--no-first-run", "--disable-session-crashed-bubble"],
+        terminal: ["xfce4-terminal", "--maximize"],
+      };
+      let app;
+      try { app = JSON.parse(await readBody(req))?.app; } catch { app = null; }
+      const argv = LAUNCH[app];
+      if (!argv) return fail(res, 400, `unknown app: ${app}`);
+      const { spawn } = await import("node:child_process");
+      // setsid so the app outlives this exec; DISPLAY=:0 is the display noVNC serves on 6080.
+      const child = spawn("docker", [
+        "exec", "-d", "-e", "DISPLAY=:1", BOX, "setsid", ...argv,
+      ], { stdio: "ignore" });
+      child.on("error", () => {});
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ launched: app }));
+    }
+
     // The Machine Room frontend is a vendored handoff: many files, and the rule from its README
     // is that the DOM and event layer stay untouched. So it gets served as a directory rather
     // than inlined, and the only file this repo authors inside it is the gateway adapter.

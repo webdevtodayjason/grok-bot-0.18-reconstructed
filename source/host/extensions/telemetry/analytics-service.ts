@@ -65,9 +65,15 @@ export function withAutomationRunAnalytics<T extends TelemetryService>(
     return (...args: Parameters<Method>): ReturnType<Method> =>
       telemetry[name](...args) as ReturnType<Method>;
   };
-  const reportAutomationRun = telemetry.reportAutomationRun as unknown as (
-    report: AutomationRunAnalyticsReport,
-  ) => unknown;
+  // Every sibling goes through forward(), which calls telemetry[name](...) and so keeps `this`.
+  // This one was captured as a bare reference, so the method ran detached and `this.mapped` was
+  // undefined -- surfacing as a 500 on runAgentAutomationNow, i.e. every manual routine run.
+  const reportAutomationRun = (report: AutomationRunAnalyticsReport): unknown =>
+    (
+      telemetry.reportAutomationRun as unknown as (
+        report: AutomationRunAnalyticsReport,
+      ) => unknown
+    ).call(telemetry, report);
 
   return {
     startTurn: forward("startTurn"),

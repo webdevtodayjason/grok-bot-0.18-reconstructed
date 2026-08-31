@@ -545,6 +545,38 @@ agent panel running off-screen while Atera's was fine. Root cause was also ours:
 putting an agent's `description` -- a whole job brief -- into the one-word `Role` field. Role is a
 label again; the description still shows as the line under the name.
 
+**The desktop is real now.** `Browser` and `Terminal` in the desktop dialog mount one noVNC frame
+against the box's display `:1` (`127.0.0.1:6080`, which serves x11vnc on rfbport 5900). The frame
+is mounted once and reused when you switch surfaces -- replacing the element re-runs the whole RFB
+handshake, which is what made the old desktop reconnect on every repaint. noVNC's own status strip
+is clipped by pulling the frame up inside a hidden-overflow box, since it cannot be styled across
+origins. `POST /box/launch` puts an app on that display through a **two-command allowlist**
+(`google-chrome`, `xfce4-terminal`); no operator string ever reaches a shell, and the relay is
+loopback-only. Launch is fire-and-forget: if the app is already running, Chrome just says
+"Opening in existing browser session" and the view shows what is really there.
+
+**What the box actually looks like inside** (probed, worth keeping): displays `:1` and `:2`, each
+with its own `x11vnc` (rfbports 5900 and 5902). `websockify` on **6081** routes by token from
+`/tmp/sand-novnc-tokens.d/` (a file per display), while **6080** serves display `:1` directly.
+So per-agent desktops are native to the box -- but the gateway exposes no agent-to-display
+mapping, so the UI shows `:1` today. Wiring per-agent views is a matter of surfacing that mapping,
+not of building anything new. `wmctrl` is not installed; use `xdotool` to list windows.
+
+**Wave 5 #11 closed: `runAgentAutomationNow` 500.** `analytics-service.ts` forwards ~30 telemetry
+methods through `forward(name)`, which calls `telemetry[name](...)` and so keeps `this`.
+`reportAutomationRun` alone was captured as a bare reference, so the method ran detached, `this`
+was undefined, and `this.mapped` threw -- surfacing as a 500 on every manual routine run. Fixed by
+calling it on `telemetry`; rebuilt and restarted, the call now answers 200.
+
+**Wiring verified through the UI, not by inspection.** `addWorker` -> `createAgent`, `addRoom` ->
+`createGroup`, `addMember`/`removeMember` -> `setGroupMembers`, `runRoutine` ->
+`runAgentAutomationNow`. Finding: `createGroup` and `setGroupMembers` take **`memberAgentIds`**,
+not `memberIds` -- the third instance of this family of trap, and the gateway answers 200 to the
+wrong key, so rooms were created empty and roster edits silently did nothing. Also `runRoutine`
+must return a **Promise resolving to the routine** (the view reads `lastRun.duration` off it); the
+adapter now measures the real elapsed time instead of reporting the demo's invented 2.2s, and
+`app.js` gained the error arm it never had, so a failed run says so instead of throwing.
+
 **Run it.**
 
 ```

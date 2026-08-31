@@ -812,6 +812,24 @@
     openPanel(copy[0], copy[1], `<div class="panel-card"><h3>${escapeHtml(copy[1])}</h3><p>${escapeHtml(copy[2])}</p><div class="form-actions"><button class="primary-button" type="button" data-demo-action>Continue in prototype</button></div></div>`);
   }
 
+  // One iframe, reused. Asking the relay to put the app on the box's display is fire-and-forget:
+  // if it is already running the launch is a no-op, and the view shows whatever is really there.
+  const BOX_VNC = "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1";
+  function mountBoxSurface(app, caption) {
+    fetch("/box/launch", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ app }),
+    }).catch(() => {});
+    const existing = elements.desktopWindow.querySelector("iframe[data-box-vnc]");
+    if (existing) {
+      elements.desktopWindow.querySelector("[data-box-caption]").textContent = caption;
+      return;
+    }
+    // noVNC's own status strip ("Connected to ... / Send CtrlAltDel") is its chrome, not ours, and
+    // it cannot be styled from here across origins. Clip it: the frame is pulled up by exactly the
+    // strip's height inside a hidden-overflow box, so the screen starts at the top of the panel.
+    elements.desktopWindow.innerHTML = `<div class="desktop-browser"><div class="browser-toolbar"><div class="browser-controls">‹ › ↻</div><div class="browser-address" data-box-caption>${escapeHtml(caption)}</div><span>⋮</span></div><div style="flex:1;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${BOX_VNC}" title="Live view of the box" style="position:absolute;top:-30px;left:0;width:100%;height:calc(100% + 30px);border:0"></iframe></div></div>`;
+  }
+
   function renderDesktop(appName) {
     activeDesktopApp = appName || activeDesktopApp;
     const context = activeContext();
@@ -825,8 +843,13 @@
       elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} files</h3><p>${context.kind === "worker" ? "Private agent working files." : "Files shared with this room."}</p></div><span class="status-pill">${context.kind === "worker" ? "agent" : "room"} context</span></div><div class="file-grid">${files}</div></div>`;
     } else if (activeDesktopApp === "sheets") {
       elements.desktopWindow.innerHTML = `<div class="sheets-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} working sheet</h3><p>Changes appear in this context’s run timeline.</p></div><span class="status-pill success">saved</span></div><div class="sheet-grid"><div class="sheet-row"><span>#</span><span>Task</span><span>Owner</span><span>Status</span></div><div class="sheet-row"><span>1</span><span>Review current state</span><span>${escapeHtml(lead ? lead.name : "Chief")}</span><span>Active</span></div><div class="sheet-row"><span>2</span><span>Return outcome</span><span>${escapeHtml(record.name)}</span><span>Queued</span></div></div></div>`;
+    } else if (activeDesktopApp === "terminal") {
+      mountBoxSurface("terminal", "A shell on the box this worker uses.");
     } else {
-      elements.desktopWindow.innerHTML = `<div class="desktop-browser"><div class="browser-toolbar"><div class="browser-controls">‹ › ↻</div><div class="browser-address">${escapeHtml(record.browser.url)}</div><span>⋮</span></div><div class="browser-page"><div class="browser-page-head"><div><h3>${escapeHtml(record.browser.label)}</h3><p>${context.kind === "worker" ? `Browser session owned by ${escapeHtml(record.name)}.` : `Shared browser state for ${escapeHtml(record.name)}.`}</p></div><span class="status-pill ${context.kind === "room" ? "working" : "success"}">${context.kind === "room" ? "shared" : "private"}</span></div><table class="ticket-table"><thead><tr><th>Work item</th><th>Context</th><th>Priority</th><th>Status</th></tr></thead><tbody><tr><td>Current request</td><td>${escapeHtml(record.name)}</td><td class="priority-review">Review</td><td>In progress</td></tr><tr><td>Return outcome</td><td>Conversation</td><td>Normal</td><td>Queued</td></tr></tbody></table></div></div>`;
+      // Browser and Terminal are the live box, not a drawing of one. noVNC re-runs its whole
+      // handshake whenever the element is replaced, so the frame is mounted once and left alone;
+      // rebuilding it on every render is what made the old desktop reconnect on every repaint.
+      mountBoxSurface("browser", `Browser session on ${record.name}'s computer.`);
     }
     elements.desktopTimeline.innerHTML = state.desktop.timeline.map((item) => `<li class="${item.status === "pending" ? "is-pending" : ""}">${escapeHtml(item.label)}</li>`).join("");
     elements.pauseRun.textContent = state.desktop.paused ? "Resume" : "Pause";
@@ -920,7 +943,11 @@
     } else if (target.dataset.runRoutine) {
       const context = activeContext();
       const routineId = target.dataset.runRoutine;
-      adapter.runRoutine(routineId).then((routine) => {
+      adapter.runRoutine(routineId).catch((error) => {
+        showToast(`Could not run that routine: ${error.message}`);
+        return null;
+      }).then((routine) => {
+        if (!routine) return;
         adapter.addMessage(context, { authorId: routine.coordinatorId || routine.delegatedToId, authorName: (workerById(routine.coordinatorId || routine.delegatedToId) || {}).name || contextName(), type: "routine-result", text: `Tested ${routine.name}.`, title: routine.name, duration: routine.lastRun.duration });
         if (elements.panelDialog.open) renderRoutinesPanel();
         showToast(`✓ ${routine.name} passed in ${routine.lastRun.duration}`);
