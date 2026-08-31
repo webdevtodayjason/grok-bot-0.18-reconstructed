@@ -716,11 +716,39 @@ Two distinct causes, found by working down the stack. Everything below was measu
    so the exit code proves nothing and the check has to grep the output. The first version of this
    patch passed on every display and repaired nothing.
 
-   **This did not make computer use work.** With the fork desktop healthy, box-chrome running on
-   that screen, and the image path fixed, a `computerUse` subagent still completes without driving
-   anything and the worker still answers "the last desktop run didn't return a title". There is a
-   third cause, not yet found. What is now ruled out: the missing image path, the browser instance,
-   the fork desktop session, the router, the fork daemons, and shared-desktop mode.
+   **This did not make computer use work — but the third cause is now found, by measurement.** A
+   temporary wire tap on `streamOpenAiCompatibleChat` logged the tool list of every request. The
+   result is unambiguous: **every turn is offered the same 26 tools, and not one of them is a
+   computer tool.**
+
+   ```
+   AddMcpServer, AuthenticateMcpServer, AwaitShell, CreateAgent, ExternalAwaitShell, ExternalRead,
+   ExternalShell, GetMcpServerStatus, GetPlugin, InstallPlugin, ReactToMessage, Read,
+   RestartMcpServers, SearchPlugins, SendMessage, SendToAgent, SetMcpInstructions, Shell, Task,
+   TodoWrite, UninstallMcpServer, UninstallPlugin, UpdateAgent, WebFetch, WebSearch, update_state
+   ```
+
+   No `Screenshot`, no `Computer`. So a `computerUse` subagent is asked to drive a desktop with no
+   means to do it; it answers conversationally ("I'll take a screenshot of the desktop and describe
+   what's on it"), returns that string, and is marked `done`. The parent reads an acknowledgement
+   where it expected a result, says the pass returned nothing, and dispatches again. That loop is
+   the whole of "the agent says it will do something and never comes back".
+
+   **This is not subagent-specific.** The main agent's turns carry the same 26 tools. Whatever is
+   broken is broken for everyone, which makes it one break rather than three.
+
+   The pieces all exist: `runner/tools/sand-computer-tool.ts:239` defines the `Screenshot` tool
+   (`id: "OPENAI_COMPUTER_USE"`), `turn-toolset.ts` wires `createComputerToolInputs` /
+   `createScreenshotToolInputs`, and `host-runner-composition.ts:1020` builds
+   `createComputerToolDependencies` inside a `projection`. The tools only appear when
+   `props.createComputerToolDependencies !== undefined` (`turn-agent-composition.ts:352`), so the
+   break is that this projection never reaches the turn props. **That is the next thing to fix, and
+   it is the only thing between here and a working computer-use agent.**
+
+   Two subagent facts worth keeping, both measured: children **do** run turns and **do** call the
+   model (a `generalPurpose` child returned "I'll send exactly that."), and parent and child share
+   the same system-prompt prefix, so requests can only be told apart by their first user message —
+   which is what made an earlier reading of this log wrong.
 
    **Repair procedure, until then:** `docker restart grok-bot-local-vm` rebuilds every session
    cleanly. Do **not** try to tear down one display by hand — deleting `/tmp/.X11-unix/X3` takes
