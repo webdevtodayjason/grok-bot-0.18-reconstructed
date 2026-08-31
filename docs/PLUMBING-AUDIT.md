@@ -637,6 +637,44 @@ MOCK verdicts, not written from memory -- a hand-kept list is how a mock survive
   while a shell syntax error meant nothing launched. `GET /box/surface?app=` now reports whether
   the window is actually present, and the pane says so when it is not.
 
+**The gateway registers 122 commands, and the first audit was wrong about several.** It claimed no
+approval command, no policy engine, no capture path and no way to connect a connector. All four
+were false, and acting on those claims made me label real capabilities "not wired" — a false
+"unwired" misleads exactly as much as a false "working". `source/host/gateway-protocol.ts` is the
+allowlist; read it before believing any absence claim.
+
+Commands that turned out to be real and are now used: `listAllAutomations`, `getHostSettings` /
+`setHostSettings` (a live `autoReviewInstructions` policy plus `localToolPermission`),
+`startTeachRecording` / `stopTeachRecording` / `getTeachRecordingStatus` (a real ffmpeg recorder),
+`resolveAutoReviewApproval` / `resolveLocalToolPermission` / `respondToWidget`,
+`getListenerConnectUrl` / `disconnectChannel`, `uploadAttachment`, `createAgentAutomation`,
+`ensureForeverBox`, `dismissTray`.
+
+**Per-agent displays were there all along.** `SharedDesktopSandBox.assignWindow(agentId)` hands
+each agent a fork index from 2 up and persists it to `/home/box/.sand-window-assignments.json`;
+x11vnc serves one per display; websockify on 6081 routes by that index **as its token**, so the
+token IS the display number. `ensureForeverBox {id}` returns that agent's `vncUrl`, allocating one
+in ~10s if the agent has never had a screen. 6080 is the shared seat on `:1`. Chrome needs
+`--user-data-dir` per display or the second instance attaches to the first and opens no window.
+
+**Per-agent models do not exist.** `updateAgent` accepts only `{name, description, title}`; there
+is no `agentDefaultModel`; `computerUseModel` is global; and `resolveOpenAiCompatibleSettings`
+takes no agent argument. One endpoint serves the whole box, switchable via the relay's
+`/endpoints/use`. Do not plan a per-worker model feature without host work in the inference path.
+
+**Approval entries carry no `.content`.** `auto-review-approval`, `local-tool-permission` and
+`widget` all arrive as `send-message` entries whose payload is `message.approval` / `message.ask` /
+`message.widget`. Any transcript reader that keys on `message.content` drops them, and the agent
+blocks forever with nothing on screen. Resolution vocabularies: `approved|denied` for auto-review
+(`runner/sand-auto-review.ts:9`), `allow-once|deny|always|never` for a local tool.
+
+**Automation payload facts.** `runs[]` is **newest-first**; success is `"ok"`, not `"passed"`;
+`triggerDescription` is the human string; `isEnabled` (not `enabled`) gates it; `lastRunAt` and the
+per-run `startedAt`/`finishedAt` give a real measured duration.
+
+**There is no per-worker directory.** Every worker's Shell runs in one shared `/workspace`
+(`EXEC_DAEMON_CWD`). The only per-agent file record is the transcript's attachment entries.
+
 **Run it.**
 
 ```
