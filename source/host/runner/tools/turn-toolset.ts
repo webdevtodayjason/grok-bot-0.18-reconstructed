@@ -72,6 +72,7 @@ import {
   type WebFetchToolDependencies,
 } from "../../../packages/agent/tools/core/web-fetch.js";
 import { createToolCallExecutionTimeoutError } from "../../../packages/agent/tools/common.js";
+import { serializeError as serializeGenericToolError } from "../../../packages/agent/tools/task-client.js";
 import {
   createAwaitTool,
   type AwaitToolOptions,
@@ -805,6 +806,18 @@ function isTurnTool<T extends object>(value: T): value is T & TurnTool {
 function asTurnTool<T extends object>(value: T): T & TurnTool {
   if (!isTurnTool(value)) {
     throw new TypeError("turn tool factory returned an invalid tool");
+  }
+  /**
+   * The host tools are plain objects and six of them (Computer, the browser pair, file transfer,
+   * box help, MCP management, subagent management) never defined `serializeError`. That method is
+   * called from `executeToolResultOrError`'s CATCH block, so a tool that threw for any reason had
+   * its real failure replaced by `tool.serializeError is not a function` -- the reporting path
+   * destroyed the very error it existed to report, and a computerUse subagent surfaced only as
+   * status "error" with nothing to read. Keep a tool's own serializer when it has one; otherwise
+   * preserve the message rather than crashing the turn.
+   */
+  if (typeof (value as { readonly serializeError?: unknown }).serializeError !== "function") {
+    return Object.assign(value, { serializeError: serializeGenericToolError }) as T & TurnTool;
   }
   return value;
 }

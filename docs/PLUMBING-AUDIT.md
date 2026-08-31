@@ -822,6 +822,43 @@ Enter, and Atera Triage answered "Atera Triage is live." at 10:06 PM through SSE
 real transcript timestamps, real routine countdown ("Nightly ticket sweep, in 9h 58m"), zero page
 errors.
 
+## 6g. Computer use — how it actually works (root-caused 2026-08-31)
+
+**The main agent never touches the desktop.** `turn-toolset.ts` pushes the `Computer` tool only
+when `host.isComputerUseSubagent && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()`, and
+`Browser` only under `isBrowserUseSubagent`. Chief's job is to dispatch `Task` with
+`subagent_type: "computerUse"` (registered in `host-runner-composition.ts`, described by
+`sand-computer-use-subagent.ts`); that child is the only thing given hands. Only one may run at a
+time — they share the single screen — and it runs headless, so on a password/2FA/captcha it stops
+and reports back for `request_box_help`.
+
+Three reconstruction defects stacked on top of each other, each hiding the next:
+
+1. **No provider entry** (fixed `bae7f7a`) — `Computer`/`Screenshot` had no
+   `create*ToolInputs`, so every turn fell through to `props.createComputerToolDependencies`,
+   which the Agent engine never sets. Built per turn from `props.resourceAccessor` instead.
+2. **`isComputerUseSubagent` hardcoded `false`** at every composition site, and children reused
+   *the parent's* run shell — so the toolHost was built once, with the parent's flags, and the
+   gate above could never pass. The shell is now a factory (`makeRunShell(subagentKind)`) and the
+   child gets its own. A computerUse child now declares **9 tools including `Computer`**
+   (`Shell, Read, AwaitShell, External*, WebSearch, WebFetch, Computer`) versus the parent's 27.
+3. **Six host tools never defined `serializeError`** (Computer, the browser pair, file transfer,
+   box help, MCP management, subagent management). It is called from `executeToolResultOrError`'s
+   **catch block**, so any throw was replaced by `tool.serializeError is not a function` — the
+   reporting path destroyed the error it existed to report, and the subagent surfaced only as
+   status `error` with nothing to read. `asTurnTool` now supplies a fallback.
+
+**What remains is model capability, not plumbing.** With the chain open, the local model calls
+`Computer` and omits the required `action`, failing zod parse. The declared JSON Schema is
+correct (the `action` enum is right there), and the provider's `repairToolCall` retry exists for
+exactly this. Worth re-testing against a stronger endpoint before any further host work.
+
+**Known defect, owned:** the `asTurnTool` fallback returns a task-shaped `ToolCall`, but
+`renderToolResultOrError` calls `tool.render(ctx, output.result, props)` and the computer tool's
+`describeOutcome` expects a `ComputerUseResult` — so a Computer *error* now raises
+`Cannot read properties of undefined (reading 'case')`. Next action: give
+`sand-computer-tool.ts` its own `serializeError` returning a computer-shaped result. Owner: Claude.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole

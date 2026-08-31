@@ -2401,14 +2401,23 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         ],
       };
       const staticModelId = process.env.SAND_AGENT_MODEL ?? DEFAULT_SAND_MODEL;
-      const lazyToolHost = () => createProductionTurnToolsetHost({
+      /**
+       * These three flags were reconstructed as literal `false`, which made the desktop
+       * unreachable by design: `turn-toolset` only pushes the Computer tool when
+       * `isComputerUseSubagent` is true, so a real computerUse subagent was still built
+       * without hands. The runner already carries the answer -- a child is built with
+       * `isSubagent: true` and the dispatched `subagentType` -- so derive from that.
+       */
+      const normalizeSubagentKind = (value: string | undefined): string | undefined =>
+        typeof value === "string" ? value.replace(/[-_ ]/g, "").toLowerCase() : undefined;
+      const lazyToolHost = (shellSubagentKind?: string) => createProductionTurnToolsetHost({
         turn: baseTurn,
         factoryProvider: createTurnToolsetFactoryProvider(hostDependencies()),
-        isSubagentRunner: false,
+        isSubagentRunner: shellSubagentKind !== undefined,
         isSharedRoomRunner: isSharedRoomTurn,
         isBoxScopedSubagent: false,
-        isComputerUseSubagent: false,
-        isBrowserUseSubagent: false,
+        isComputerUseSubagent: normalizeSubagentKind(shellSubagentKind) === "computeruse",
+        isBrowserUseSubagent: normalizeSubagentKind(shellSubagentKind) === "browseruse",
         isSystemPromptOverridden: typeof overrides.systemPrompt === "string",
         remoteBoxHasDesktop: true,
         getConversationId: () => session.id,
@@ -2435,7 +2444,12 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         }
         throw new TypeError("production Agent conversation state is not bound");
       };
-      runnerOptions.productionTurnRunShell = createProductionTurnRunShellHostInput({
+      /**
+       * One shell per runner identity. A child previously reused the parent's shell, so its turns
+       * were built with the parent's toolHost -- which is why a real computerUse subagent still
+       * came back without the Computer tool and answered in prose.
+       */
+      const makeRunShell = (shellSubagentKind?: string) => createProductionTurnRunShellHostInput({
         createAgentOwnerInput: ({ requestId, runOptions, context, cancelThisRun, emitUpdate }) => {
           if (session.agentStore == null || typeof session.agentStore.getBlobStore !== "function") {
             throw new TypeError("production Agent blob store is not bound");
@@ -2555,7 +2569,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                   // which surfaces as "production subagent result is not bound". Give the
                   // child the same production run shell the parent runs on; its own
                   // conversationId/transcriptId keep its turns distinct.
-                  productionTurnRunShell: runnerOptions.productionTurnRunShell,
+                  productionTurnRunShell: makeRunShell(args.subagentType),
                 });
                 bindSessionOwnedRunner(child);
                 ownedRunners.add(child);
@@ -2612,14 +2626,14 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             blobStore: getAgentBlobStore(
               session.agentStore as Parameters<typeof getAgentBlobStore>[0],
             ),
-            toolHost: lazyToolHost(),
+            toolHost: lazyToolHost(shellSubagentKind),
             turn,
             staticConfig: {
               modelId: staticModelId,
               agentTokenLimit: 200_000,
               conversationId: session.id,
               isBoxScopedSubagent: false,
-              isSubagentRunner: false,
+              isSubagentRunner: shellSubagentKind !== undefined,
               isSharedRoomRunner: isSharedRoomTurn,
               sandSendMessageDeliveryOwed: method(experiments, "isSendMessageDeliveryOwedEnabled")?.() ?? false,
               systemPromptGenerator: () => productionSystemPromptAssembly?.getSystemPrompt() ?? DEFAULT_SAND_SYSTEM_PROMPT,
@@ -2673,6 +2687,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           : { lastReactionApplied: () => hooks.transport.lastReactionApplied?.() === true }),
         cancelThisRun: () => {},
       });
+      runnerOptions.productionTurnRunShell = makeRunShell();
     }
 
     if (deps.createRunStep != null && runnerOptions.productionTurnRunShell === undefined) {
