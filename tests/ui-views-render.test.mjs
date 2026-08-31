@@ -38,7 +38,7 @@ async function loadUi() {
   const js = /<script>([\s\S]*)<\/script>/.exec(html)[1];
   const { document, EventSource } = stubDom();
   const win = { addEventListener() {}, location: { origin: "http://127.0.0.1:7777" } };
-  const exports = "return { views, state, renderRoutines, renderChannels, renderKnows, renderStage, editorHtml, SECTIONS, sectionBody, sectionCount, renderPersona, renderDesktop, TRIGGER_KINDS, subStatus };";
+  const exports = "return { views, state, renderRoutines, renderChannels, renderKnows, renderStage, editorHtml, SECTIONS, sectionBody, sectionCount, renderPersona, renderTopbar, TRIGGER_KINDS, subStatus };";
   return new Function("window", "document", "EventSource", "fetch", "setInterval", "setTimeout", "self",
     `${js}\n${exports}`)(win, document, EventSource, async () => ({ ok: true, json: async () => ({}), text: async () => "" }),
       () => 0, () => 0, win);
@@ -73,14 +73,21 @@ test("every rail section renders for the open worker", async () => {
   }
 });
 
-test("the stage is only ever the conversation, composer included", async () => {
+test("primary surfaces carry no wiring vocabulary or raw identifiers", async () => {
   const ui = await loadUi();
-  seed(ui.state, { selected: "a1", section: "routines" });
-  const html = ui.views.agents();
-  // The composer used to hide on three of four tabs. With the surfaces in the rail there is
-  // no tab it can be wrong on -- the stage is the conversation, always.
-  assert.match(html, /class="composer"/);
-  assert.doesNotMatch(html, /desktabs/, "the desk tabs were retired into the rail");
+  seed(ui.state, { selected: "a1", section: "persona",
+    transcript: [{ id: "m1", kind: "message", role: "user", content: "hi", timestampMs: 1 }] });
+  const primary = [
+    ui.sectionBody("persona", AGENT),
+    ui.sectionBody("routines", AGENT),
+    ui.sectionBody("knows", AGENT),
+    ui.renderStage(AGENT),
+  ].join("\n");
+  // The wiring words and raw identifiers live in the Operator Console, never the workspace.
+  for (const banned of [/gateway/i, /\bhost\b/i, /\bbox\b/i, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i,
+    /\/home\/box/, /NaNd ago/, /store\.db/]) {
+    assert.doesNotMatch(primary, banned, String(banned));
+  }
 });
 
 test("Return sends and Shift+Return does not", async () => {
@@ -126,7 +133,9 @@ test("a background repaint does not rebuild the rail under a half-typed routine"
   // The editor moved into the rail, so the rail is now what a poll must not redraw. Reading
   // the guard directly beats asserting on a DOM this stub does not really have.
   const html = await readFile(path.join(repoRoot, "ui/index.html"), "utf8");
-  assert.match(html, /if \(state\.editor == null \|\| force \|\| \$\("#editor"\) == null\) renderRail\(\);/);
+  // The editor lives in the plan rail now; the stage+plan block is what must hold still.
+  const guarded = /if \(state\.editor == null \|\| force \|\| \$\("#editor"\) == null\) \{[\s\S]*?renderPlan\(worker\);[\s\S]*?\}/;
+  assert.match(html, guarded);
 });
 
 test("the trigger menu stays in the flow, where a mouse can reach it", async () => {
@@ -205,8 +214,9 @@ test("switching view fetches that view's data instead of rendering stale state",
   const html = await readFile(path.join(repoRoot, "ui/index.html"), "utf8");
   // Both the transcript and the endpoint list were rendered from whatever the last poll held,
   // so opening them showed "Nothing yet" / "Reading…" over data that existed.
-  const dock = /b\.onclick = \(\) => \{[\s\S]*?\}\);/.exec(html)[0];
-  assert.match(dock, /void refresh\(\)/, "the dock must refetch on view change");
+  // The dock is gone; selecting a worker card is the navigation now, and it must refetch.
+  const click = /c\.onclick = \(event\) => \{[\s\S]*?\};/.exec(html)[0];
+  assert.match(click, /void refresh\(\)/, "selecting a worker must refetch its data");
 });
 
 test("routines show a run ledger with per-run result glyphs", async () => {
@@ -258,8 +268,7 @@ test("the stage names who is working, and its subagents", async () => {
   const ui = await loadUi();
   seed(ui.state, { selected: "a1", subagents: [
     { subagentId: "s1", subagentType: "generalPurpose", title: "t", status: "running", startedAtMs: 1 }] });
-  ui.state.agents = [{ ...AGENT, isRunning: true }];
-  const html = ui.views.agents();
+  const html = ui.renderStage({ ...AGENT, isRunning: true });
   assert.match(html, /Atera Triage is working · 1 subagent running…/);
 });
 
@@ -271,11 +280,10 @@ test("room messages carry sender labels; 1:1 messages do not", async () => {
       message: { content: "here" } },
   ];
   seed(ui.state, { selected: "a1", transcript: entries });
-  ui.state.agents = [{ ...AGENT, isGroup: true, memberIds: ["x1", "x2"] }];
-  assert.match(ui.views.agents(), /class="by">Chief of staff</);
+  assert.match(ui.renderStage({ ...AGENT, isGroup: true, memberIds: ["x1", "x2"] }), /class="by">Chief of staff</);
   // Same entries in a 1:1: label suppressed.
   seed(ui.state, { selected: "a1", transcript: entries });
-  assert.doesNotMatch(ui.views.agents(), /class="by"/);
+  assert.doesNotMatch(ui.renderStage(AGENT), /class="by"/);
 });
 
 test("the members panel lists members with Remove and offers Add rows", async () => {
@@ -290,4 +298,15 @@ test("the members panel lists members with Remove and offers Add rows", async ()
   assert.match(html, /addMember\('a1','m2'\)/);
   // The last member cannot be removed -- a group needs at least one.
   assert.doesNotMatch(html, /dropMember/);
+});
+
+test("the topbar survives every shape getListenerIntegrations really returns", async () => {
+  const ui = await loadUi();
+  for (const shape of [null, [], [{ platform: "slack", isConnected: false }],
+    { platforms: [{ platform: "github", isConnected: true }] }, { connections: [] }, {}]) {
+    seed(ui.state, { selected: "a1" });
+    ui.state.integrations = shape;
+    // Must not throw -- a thrown renderer used to freeze the whole page silently.
+    ui.renderTopbar();
+  }
 });

@@ -79,61 +79,142 @@ body {
   box-shadow: var(--shadow);
 }
 
-/* ---- shell ---------------------------------------------------------- */
-#shell {
-  position: fixed; inset: 22px 22px 30px;
-  display: grid;
-  grid-template-columns: 268px minmax(0,1fr) 292px;
-  transition: grid-template-columns .44s cubic-bezier(.22,.9,.3,1);
-  gap: 20px;
-  padding-top: 74px;
+/* ---- the workspace: three material levels ---------------------------
+   L1 atmosphere: the dusk gradient behind everything.
+   L2 shell: the dark slate workspace every scene sits in -- the anchor.
+   L3 glass: pale elevated cards for controls and highlights ONLY. */
+:root {
+  --shell:      rgba(16, 24, 29, .78);
+  --shell-2:    rgba(20, 30, 36, .66);
+  --shell-edge: rgba(255,255,255,.085);
+  --shell-ink:  #e9edf0;
+  --shell-ink2: #9fb0b8;
+  --shell-ink3: #6b7c85;
+  --glass-hi:   rgba(255,255,255,.92);
+  --accent:     #57d9a3;
+  --attention:  #ffb454;
 }
-
-/* ---- dock (top pill) ------------------------------------------------ */
-#dock {
-  position: fixed; top: 22px; left: 50%; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 4px;
-  padding: 7px 9px; border-radius: 999px; z-index: 30;
-  background: rgba(255,255,255,.62);
-  backdrop-filter: blur(30px) saturate(1.8);
-  -webkit-backdrop-filter: blur(30px) saturate(1.8);
-  border: 1px solid var(--edge); border-top-color: var(--hair);
-  box-shadow: var(--shadow);
+#workspace {
+  position: fixed; inset: 14px; display: grid; gap: 12px;
+  grid-template-rows: 52px minmax(0,1fr) 148px;
+  grid-template-areas: "top" "scene" "deck";
 }
-#dock button {
-  font: inherit; font-size: 13.5px; color: var(--ink-2);
-  background: none; border: 0; cursor: pointer;
-  padding: 8px 15px; border-radius: 999px;
-  transition: background .18s, color .18s;
+#topbar {
+  grid-area: top; display: flex; align-items: center; gap: 14px; padding: 0 18px;
+  background: var(--shell); border: 1px solid var(--shell-edge); border-radius: 16px;
+  backdrop-filter: blur(28px) saturate(1.3); -webkit-backdrop-filter: blur(28px) saturate(1.3);
+  color: var(--shell-ink); box-shadow: 0 18px 50px rgba(8,14,18,.35);
 }
-#dock button:hover { background: rgba(16,18,22,.06); color: var(--ink); }
-#dock button[aria-selected="true"] { background: rgba(16,18,22,.86); color: #fff; }
-#dock .sep { width: 1px; height: 20px; background: var(--edge); margin: 0 5px; }
-#dock .icon { font-size: 17px; padding: 6px 12px; line-height: 1; }
-
+#topbar .word { font-weight: 650; letter-spacing: .01em; font-size: 14.5px; }
+#topbar .apps { display: flex; gap: 8px; margin-left: 10px; }
+#topbar .app { display: flex; align-items: center; gap: 7px; font-size: 12px;
+  color: var(--shell-ink2); background: rgba(255,255,255,.05);
+  border: 1px solid var(--shell-edge); border-radius: 999px; padding: 5px 12px; }
+#topbar .app .on { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+#topbar .app .off { width: 6px; height: 6px; border-radius: 50%; background: var(--shell-ink3); }
+#topbar .grow { flex: 1; }
+#topbar .sys { font: inherit; font-size: 12.5px; cursor: pointer; color: var(--shell-ink2);
+  background: none; border: 1px solid var(--shell-edge); border-radius: 999px; padding: 6px 14px; }
+#topbar .sys:hover { color: var(--shell-ink); background: rgba(255,255,255,.06); }
+#scene {
+  grid-area: scene; display: grid; gap: 12px; min-height: 0;
+  grid-template-columns: 300px minmax(0,1fr) 316px;
+}
+.shellcol {
+  background: var(--shell-2); border: 1px solid var(--shell-edge); border-radius: 18px;
+  backdrop-filter: blur(26px) saturate(1.25); -webkit-backdrop-filter: blur(26px) saturate(1.25);
+  color: var(--shell-ink); min-height: 0; overflow-y: auto; padding: 16px;
+  box-shadow: 0 18px 50px rgba(8,14,18,.30);
+}
+.shellcol::-webkit-scrollbar { width: 0; }
+.shellcol h3 { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--shell-ink3); margin: 18px 0 8px; }
+.shellcol h3:first-child { margin-top: 0; }
+#surfaces { grid-area: auto; }
+#stage { display: flex; flex-direction: column; min-height: 0;
+  background: var(--shell); border: 1px solid var(--shell-edge); border-radius: 18px;
+  backdrop-filter: blur(26px) saturate(1.25); -webkit-backdrop-filter: blur(26px) saturate(1.25);
+  box-shadow: 0 22px 60px rgba(8,14,18,.38); overflow: hidden; color: var(--shell-ink); }
+#deck { grid-area: deck; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+#deck .cards { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 0; }
+#deck .cards::-webkit-scrollbar { height: 0; }
+/* Command bar: the one place you talk. Elevated glass over the dark deck. */
+#command {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--glass-hi); border-radius: 16px; padding: 9px 10px 9px 18px;
+  box-shadow: 0 16px 44px rgba(8,14,18,.35);
+}
+#command input { flex: 1; font: inherit; font-size: 14.5px; border: 0; outline: none;
+  background: none; color: var(--ink); }
+#command .who { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+#command button { font: inherit; font-size: 13.5px; cursor: pointer; border: 0;
+  border-radius: 999px; padding: 9px 18px; background: #16181c; color: #fff; }
+#command button:disabled { opacity: .35; }
+/* Operator Console: full overlay, dark, where the wiring lives. */
+#console { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center;
+  justify-content: center; background: rgba(8,12,15,.55); backdrop-filter: blur(8px); }
+#console[hidden] { display: none; }
+#console .sheet { width: min(980px, 92vw); height: min(680px, 88vh); display: flex;
+  flex-direction: column; background: #171d21; border: 1px solid var(--shell-edge);
+  border-radius: 20px; color: var(--shell-ink); box-shadow: 0 40px 120px rgba(0,0,0,.5);
+  overflow: hidden; }
+#console .bar { display: flex; align-items: center; gap: 6px; padding: 14px 18px;
+  border-bottom: 1px solid var(--shell-edge); }
+#console .bar .ttl { font-weight: 650; margin-right: 12px; }
+#console .bar button { font: inherit; font-size: 12.5px; cursor: pointer; color: var(--shell-ink2);
+  background: none; border: 1px solid transparent; border-radius: 999px; padding: 6px 13px; }
+#console .bar button[aria-selected="true"] { background: rgba(255,255,255,.09); color: var(--shell-ink); }
+#console .bar .x { margin-left: auto; font-size: 16px; }
+#console .body { flex: 1; overflow-y: auto; padding: 22px 26px; }
+#console .body h1 { font-size: 19px; } 
+#console .body, #console .body .lede, #console .body td, #console .body dd,
+#console .body dt { color: var(--shell-ink2); }
+#console .body h1, #console .body h2, #console .body b, #console .body .v { color: var(--shell-ink); }
+#console .body .deskrow { background: rgba(255,255,255,.045); border-color: var(--shell-edge); }
+#console .body input, #console .body select, #console .body textarea {
+  background: rgba(255,255,255,.07); color: var(--shell-ink); border-color: var(--shell-edge); }
+/* Worker header: the person at the desk. */
+#stage .whead { display: flex; align-items: center; gap: 14px; padding: 16px 22px 14px;
+  border-bottom: 1px solid var(--shell-edge); flex: 0 0 auto; }
+#stage .whead .face { width: 42px; height: 42px; border-radius: 13px; display: flex;
+  align-items: center; justify-content: center; font-weight: 700; font-size: 17px;
+  background: linear-gradient(135deg, #2b6b57, #57d9a3); color: #06130d; flex: 0 0 auto; }
+#stage .whead .idn .nm { font-weight: 650; font-size: 15.5px; }
+#stage .whead .idn .role { font-size: 12px; color: var(--shell-ink2); max-width: 52ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#stage .whead .st { margin-left: auto; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--shell-ink2); flex: 0 0 auto; }
+#stage .whead .st .pill { font-size: 10.5px; }
+.pill.ready { background: rgba(255,255,255,.09); color: var(--shell-ink2); }
+.pill.working { background: rgba(87,217,163,.16); color: var(--accent);
+  box-shadow: 0 0 0 0 rgba(87,217,163,.4); animation: pulse 1.6s ease-out infinite; }
+.pill.attention { background: rgba(255,180,84,.16); color: var(--attention); }
+.pill.scheduled { background: rgba(255,255,255,.07); color: var(--shell-ink2); }
 /* ---- left rail: angled docked cards --------------------------------- */
 /* An open section needs room the roster never did, so the rail takes it and gives it back. */
 #shell.wide { grid-template-columns: 432px minmax(0,1fr) 292px; }
 .sect { border-radius: var(--r-sm); flex: 0 0 auto; overflow: hidden;
-  background: rgba(255,255,255,.26); border: 1px solid rgba(255,255,255,.34);
+  background: rgba(255,255,255,.04); border: 1px solid var(--shell-edge);
   backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5);
   animation: fade-in .26s ease-out backwards; }
-.sect.open { background: rgba(255,255,255,.46); border-color: rgba(255,255,255,.58); }
+.sect.open { background: rgba(255,255,255,.07); border-color: rgba(255,255,255,.16); }
 .sect-head { display: flex; align-items: center; gap: 9px; width: 100%; font: inherit;
-  font-size: 12.5px; cursor: pointer; border: 0; background: none; color: var(--ink);
+  font-size: 12.5px; cursor: pointer; border: 0; background: none; color: var(--shell-ink);
   padding: 11px 13px; text-align: left; }
 .sect-head .nm { font-weight: 500; }
-.sect-head .count { margin-left: auto; font-size: 10.5px; color: var(--ink-3);
+.sect-head .count { margin-left: auto; font-size: 10.5px; color: var(--shell-ink3);
   font-variant-numeric: tabular-nums; }
-.sect-head .chev { color: var(--ink-3); transition: transform .26s; flex: 0 0 auto; }
+.sect-head .chev { color: var(--shell-ink3); transition: transform .26s; flex: 0 0 auto; }
 .sect.open .sect-head .chev { transform: rotate(90deg); }
-.sect-body { padding: 4px 14px 15px; border-top: 1px solid rgba(255,255,255,.34); }
+.sect-body { padding: 4px 14px 15px; border-top: 1px solid var(--shell-edge); }
 .sect-body .lede { font-size: 12.5px; margin-top: 9px; max-width: none; }
 .sect-body .deskrow { padding: 10px 12px; gap: 10px; }
 .sect-body .kv { grid-template-columns: 104px 1fr; font-size: 12px; gap: 7px 12px; }
 .sect-body .editor { padding: 0; background: none; border: 0; margin-top: 12px; }
-.deskframe { width: 100%; height: 320px; border: 0; border-radius: 12px; margin-top: 11px;
-  background: rgba(16,18,22,.34); }
+.deskframe { width: 1280px; height: 800px; border: 0;
+  transform: scale(0.209); transform-origin: top left; margin-top: -6px; }
+#deskwrap { height: 162px; overflow: hidden; border-radius: 12px; margin-top: 4px;
+  background: rgba(0,0,0,.35); border: 1px solid var(--shell-edge); }
 
 #rail { display: flex; flex-direction: column; gap: 13px; overflow-y: auto; overflow-x: hidden;
         padding: 4px 6px 4px 34px; perspective: 1500px; perspective-origin: 0% 50%; }
@@ -143,41 +224,42 @@ body {
 /* Docked window cards: chrome bar + preview body, angled away from the viewer.
    Hover straightens them, selection pops one flat and forward. */
 .card {
-  border-radius: var(--r-sm); cursor: pointer; text-align: left; width: 100%;
+  border-radius: var(--r-sm); cursor: pointer; text-align: left; width: 236px; min-width: 236px;
   font: inherit; color: var(--ink); flex: 0 0 auto; overflow: hidden; padding: 0;
-  background: rgba(255,255,255,.30);
-  backdrop-filter: blur(22px) saturate(1.7);
-  -webkit-backdrop-filter: blur(22px) saturate(1.7);
-  border: 1px solid rgba(255,255,255,.30); border-top-color: rgba(255,255,255,.60);
-  box-shadow: 0 16px 34px rgba(14,26,32,.30);
-  transform: rotateY(26deg) translateZ(-40px) scale(.94);
-  transform-origin: left center;
+  background: var(--shell);
+  color: var(--shell-ink);
+  backdrop-filter: blur(22px) saturate(1.3);
+  -webkit-backdrop-filter: blur(22px) saturate(1.3);
+  border: 1px solid var(--shell-edge);
+  box-shadow: 0 14px 30px rgba(8,14,18,.30);
+  transform: none;
+  transform-origin: center bottom;
   transition: transform .46s cubic-bezier(.22,.9,.3,1), background .24s, box-shadow .46s;
 }
 /* Hover lifts the card toward the reader and straightens it; selection keeps a residual
    angle so the rail still reads as a stack of windows rather than a flat list -- with one
    worker on the host, flattening the selected card made the whole rail look like nothing. */
-.card:hover { transform: rotateY(9deg) translateZ(16px) translateX(6px) scale(1.02);
+.card:hover { transform: translateY(-3px);
   background: rgba(255,255,255,.50); box-shadow: 0 24px 48px rgba(14,26,32,.34); }
 .card[aria-current="true"] {
-  transform: rotateY(11deg) translateZ(10px) scale(1);
-  background: rgba(255,255,255,.56);
-  border-color: rgba(255,255,255,.72);
+  transform: translateY(-3px);
+  background: var(--glass-hi);
+  color: var(--ink);
+  border-color: rgba(255,255,255,.85);
   box-shadow: 0 22px 46px rgba(14,26,32,.32);
 }
-.card[aria-current="true"]:hover { transform: rotateY(6deg) translateZ(22px) translateX(6px) scale(1.02); }
+.card[aria-current="true"]:hover { transform: translateY(-4px); }
 .card .bar {
-  display: flex; align-items: center; gap: 7px; padding: 8px 11px;
-  background: rgba(255,255,255,.38); border-bottom: 1px solid rgba(255,255,255,.34);
-  font-size: 12.5px; font-weight: 500;
+  display: flex; align-items: center; gap: 7px; padding: 9px 12px 3px;
+  font-size: 12.5px; font-weight: 600;
 }
 .card .bar .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .body { padding: 10px 11px 11px; }
-.card .sub { font-size: 11px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.card .prev { font-size: 11.5px; color: var(--ink-2); margin-top: 5px; line-height: 1.4;
+.card .sub { font-size: 11px; color: inherit; opacity: .62; font-variant-numeric: tabular-nums; }
+.card .prev { font-size: 11.5px; color: inherit; opacity: .7; margin-top: 5px; line-height: 1.4;
               display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 /* Stand-in for a window thumbnail: content-shaped rules. */
-.card .skel { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.card .skel { display: none; }
 .card .skel i { display: block; height: 4px; border-radius: 2px; background: rgba(16,18,22,.13); }
 .card .skel i:nth-child(2) { width: 78%; } .card .skel i:nth-child(3) { width: 54%; }
 .card.picked { outline: 2px solid var(--live); outline-offset: 2px; }
@@ -198,7 +280,7 @@ body {
 /* ---- center --------------------------------------------------------- */
 #stage { overflow: hidden; padding: 2px; display: flex; }
 #stage::-webkit-scrollbar { width: 0; }
-.panel { padding: 30px 32px; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.panel { padding: 26px 30px; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; color: var(--shell-ink); }
 .panel::-webkit-scrollbar { width: 0; }
 /* An agent is a conversation with a composer nailed to the bottom -- the transcript
    scrolls behind it. Sending must never require scrolling to find the button. */
@@ -223,7 +305,7 @@ details.record[open] summary::before { content: "▾ "; }
   to   { opacity: 1; transform: none; }
 }
 h1 { font-size: 40px; font-weight: 300; letter-spacing: -.026em; line-height: 1.12; }
-.lede { color: var(--ink-2); margin-top: 9px; font-size: 14.5px; max-width: 62ch; }
+.lede { color: var(--shell-ink2); margin-top: 9px; font-size: 14.5px; max-width: 62ch; }
 h2 { font-size: 11px; letter-spacing: .10em; text-transform: uppercase; color: var(--ink-3); margin: 30px 0 13px; font-weight: 500; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px,1fr)); gap: 13px; margin-top: 24px; }
@@ -268,15 +350,15 @@ td .prov { font-weight: 500; color: var(--ink); }
 @media (prefers-reduced-motion: reduce) { .pill.running { animation: none; } }
 /* Routine run history: a thin ledger under each routine. */
 .runs { margin-top: 8px; padding-left: 2px; display: flex; flex-direction: column; gap: 3px; }
-.runlog { display: flex; align-items: center; gap: 9px; font-size: 11.5px; color: var(--ink-2);
+.runlog { display: flex; align-items: center; gap: 9px; font-size: 11.5px; color: var(--shell-ink2);
   font-variant-numeric: tabular-nums; }
 .runlog .g { flex: 0 0 auto; width: 13px; text-align: center; }
 .runlog .g.ok { color: var(--live); } .runlog .g.err { color: var(--danger); }
 .runlog .dur { margin-left: auto; color: var(--ink-3); }
 /* The working line — the manager's "someone is on it right now". */
 .working-line { display: flex; align-items: center; gap: 9px; font-size: 12.5px;
-  color: var(--ink-2); margin: 2px 0 12px; }
-.by { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; color: var(--ink-2);
+  color: var(--shell-ink2); margin: 2px 0 12px; }
+.by { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; color: var(--shell-ink2);
   margin: 2px 0 -4px 4px; align-self: flex-start; }
 .working-line .beat { width: 7px; height: 7px; border-radius: 50%; background: var(--live);
   box-shadow: 0 0 0 0 rgba(52,196,107,.5); animation: pulse 1.5s ease-out infinite; }
@@ -297,56 +379,11 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
 .field label { display: block; font-size: 11.5px; color: var(--ink-2); margin-bottom: 5px; }
 
 .kv { display: grid; grid-template-columns: 150px 1fr; gap: 9px 16px; font-size: 13.5px; margin-top: 6px; }
-.kv dt { color: var(--ink-2); }
+.kv dt { color: var(--shell-ink3); }
 .kv dd { font-variant-numeric: tabular-nums; word-break: break-all; }
-.empty { color: var(--ink-3); font-size: 13.5px; padding: 18px 0; }
+.empty { color: var(--shell-ink3); font-size: 13.5px; padding: 18px 0; }
 
-/* ---- right stack ---------------------------------------------------- */
-#stack { display: flex; flex-direction: column; gap: 14px; overflow-y: auto; padding: 2px; }
-#stack::-webkit-scrollbar { width: 0; }
-.scard { padding: 17px 18px; }
-.scard h3 { font-size: 10.5px; letter-spacing: .10em; text-transform: uppercase;
-            color: rgba(255,255,255,.55); font-weight: 500; margin-bottom: 11px; }
-.scard.glass h3 { color: var(--ink-3); }
-.scard .big { font-size: 15px; font-weight: 400; }
-.scard .sm { font-size: 12px; color: rgba(255,255,255,.62); margin-top: 4px; }
-.chan { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 12.5px; color: rgba(255,255,255,.80); }
-.chan .tick { width: 17px; height: 17px; border-radius: 50%; flex: 0 0 auto;
-              border: 1px solid rgba(255,255,255,.24); display: grid; place-items: center;
-              font-size: 10px; color: transparent; transition: all .3s; }
-.chan.hit .tick { background: rgba(52,196,107,.22); border-color: rgba(52,196,107,.5); color: var(--live); }
-.chan .n { margin-left: auto; font-size: 11px; color: rgba(255,255,255,.42); font-variant-numeric: tabular-nums; }
-.tray { padding: 12px 13px; border-radius: var(--r-sm); background: rgba(255,255,255,.42);
-        border: 1px solid var(--edge); margin-bottom: 9px; }
-.tray .t { font-size: 13px; font-weight: 500; }
-.tray .d { font-size: 11.5px; color: var(--ink-2); margin-top: 4px; line-height: 1.45; }
-.scard.shared { border-color: rgba(232,163,61,.42); background: rgba(255,247,235,.50); }
-.scard.shared h3 { color: #9a6512; }
-.scard.shared .t { font-size: 13px; font-weight: 500; }
-.scard.shared .d { font-size: 11.5px; color: var(--ink-2); margin-top: 5px; line-height: 1.45; }
-
-/* ---- bottom status pill --------------------------------------------- */
-#status {
-  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 10px; z-index: 30;
-  padding: 9px 18px 9px 14px; border-radius: 999px; font-size: 12.5px;
-  background: rgba(26,28,32,.62);
-  backdrop-filter: blur(28px) saturate(1.5);
-  -webkit-backdrop-filter: blur(28px) saturate(1.5);
-  border: 1px solid rgba(255,255,255,.12); color: rgba(255,255,255,.88);
-  box-shadow: var(--shadow);
-}
-#status .dot { width: 8px; height: 8px; }
-#status .meta { color: rgba(255,255,255,.50); font-variant-numeric: tabular-nums; }
-
-/* Measured off the warmwind recording at 24.54 fps (one frame = 41ms):
-   cards fade, they do not spring — width never changes and the corner travels ~15px.
-   Separation is space and surface. The only rule in the whole stage is the chat
-   divider, and it carries the collapse control. */
-.stage-col { display: flex; flex-direction: column; justify-content: center;
-             min-height: 100%; gap: 12px; }
-
-.bubble { align-self: flex-end; max-width: 68%; background: rgba(255,255,255,.34);
+.bubble { align-self: flex-end; max-width: 68%; color: var(--ink); background: var(--glass-hi);
   border: 1px solid rgba(255,255,255,.40); border-radius: 15px; padding: 11px 14px 7px;
   backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5); }
 .bubble .txt p + p, .bubble .txt p + ul, .bubble .txt p + ol,
@@ -389,9 +426,9 @@ input:focus, textarea:focus { border-color: rgba(16,18,22,.30); background: rgba
 @media (prefers-reduced-motion: reduce) { .arrive { animation: none; } }
 
 .deskrow { display: flex; align-items: center; justify-content: space-between; gap: 14px;
-  background: rgba(255,255,255,.26); border: 1px solid rgba(255,255,255,.34);
+  background: rgba(255,255,255,.05); border: 1px solid var(--shell-edge); color: var(--shell-ink);
   border-radius: 13px; padding: 13px 16px; margin-top: 10px; }
-.deskrow .sub { font-size: 12px; color: var(--ink-2); margin-top: 3px; }
+.deskrow .sub { font-size: 12px; color: var(--shell-ink2); margin-top: 3px; }
 .empty-stage { text-align: center; color: var(--ink-3); font-size: 14px; }
 /* ---- trigger stack -------------------------------------------------- */
 /* The host accepts a group of up to 8 trigger members per routine, so "when to run" is a
@@ -452,26 +489,35 @@ select:focus, .trig input:focus { border-color: rgba(16,18,22,.30); }
 <body>
 <div id="sky"></div><div id="ridge"></div><div id="grain"></div>
 
-<nav id="dock" role="tablist">
-  <button role="tab" data-view="overview" aria-selected="true">Overview</button>
-  <button role="tab" data-view="agents">Agents</button>
-  <button role="tab" data-view="router">Router</button>
-  <button role="tab" data-view="events">Events</button>
-    <button role="tab" data-view="settings">Settings</button>
-  <span class="sep"></span>
-  <button class="icon" id="new-agent" title="New agent">+</button>
-</nav>
-
-<div id="shell">
-  <aside id="rail"><div class="railhead">Workers</div><div id="rail-list"></div></aside>
-  <main id="stage" class="glass"><div class="panel"><h1>Connecting…</h1></div></main>
-  <aside id="stack"></aside>
+<div id="workspace">
+  <header id="topbar"></header>
+  <div id="scene">
+    <aside id="surfaces" class="shellcol"></aside>
+    <main id="stage"></main>
+    <aside id="plan" class="shellcol"></aside>
+  </div>
+  <footer id="deck">
+    <div class="cards" id="rail-list"></div>
+    <div id="command">
+      <span class="who" id="command-who"></span>
+      <input id="prompt" placeholder="Ask your worker to do something…" autocomplete="off">
+      <button id="command-send">Send</button>
+    </div>
+  </footer>
 </div>
 
-<div id="status">
-  <span class="dot" id="sse-dot"></span>
-  <span id="sse-text">connecting</span>
-  <span class="meta" id="sse-meta"></span>
+<div id="console" hidden>
+  <div class="sheet">
+    <div class="bar">
+      <span class="ttl">Operator Console</span>
+      <button data-tab="computer">Computer</button>
+      <button data-tab="routing">Routing</button>
+      <button data-tab="activity">Activity</button>
+      <button data-tab="settings">Settings</button>
+      <button class="x" onclick="closeConsole()">✕</button>
+    </div>
+    <div class="body" id="console-body"></div>
+  </div>
 </div>
 
 <script>
@@ -481,14 +527,21 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const num = (n) => (n ?? 0).toLocaleString();
 const compact = (n) => (n ?? 0) < 1000 ? String(n ?? 0) : (n / 1000 < 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + "k" : (n / 1e6).toFixed(1) + "M");
 const ago = (ms) => {
-  if (!ms) return "never";
-  const s = Math.round((Date.now() - ms) / 1000);
-  if (s < 60) return s + "s ago";
-  if (s < 3600) return Math.round(s / 60) + "m ago";
-  if (s < 86400) return Math.round(s / 3600) + "h ago";
-  return Math.round(s / 86400) + "d ago";
+  if (!Number.isFinite(ms) || ms <= 0) return "—";
+  const sec = Math.round((Date.now() - ms) / 1000);
+  if (sec < 60) return sec + "s ago";
+  if (sec < 3600) return Math.round(sec / 60) + "m ago";
+  if (sec < 86400) return Math.round(sec / 3600) + "h ago";
+  return Math.round(sec / 86400) + "d ago";
 };
+const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
+                settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(), draft: "", model: null,
+                picked: new Set(), section: null, channels: null, editor: null, endpoints: null, console: null, integrations: null, routines: null, memories: null, subagents: null,
+                thinking: "", waitTick: 0, talkOpen: true,
+                events: [], eventCounts: new Map() };
 
+
+// ---- restored definitions (lost in the coherence-pass surgery) ----
 async function call(method, args = {}) {
   const r = await fetch(`/api/${method}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args),
@@ -499,11 +552,6 @@ async function call(method, args = {}) {
   return body;
 }
 
-const state = { view: "overview", agents: [], trays: [], tasks: [], host: null, box: null, store: null,
-                settings: null, selected: null, creating: false, confirmDelete: null, peers: null, transcript: null, seen: new Set(), draft: "", model: null,
-                picked: new Set(), section: null, channels: null, editor: null, endpoints: null, integrations: null, routines: null, memories: null, subagents: null,
-                thinking: "", waitTick: 0, talkOpen: true,
-                events: [], eventCounts: new Map() };
 
 async function refresh() {
   const [agents, trays, tasks, host, box, store, settings] = await Promise.all([
@@ -720,6 +768,17 @@ const bodyOf = (e) => e.kind === "send-message"
 // ponytail: bold, italic, code, bullets, paragraphs. No library, no parser -- the day a worker
 // needs tables or images, take a real one. esc() runs FIRST so no markup can survive from the
 // model's text into the DOM.
+// One human vocabulary for what a worker is up to. The wiring words live in the console.
+function humanStatus(a) {
+  if (a.isRunning) return { key: "working", label: "Working" };
+  if (a.awaitingUserResponse || state.trays.some((t) => t.agentId === a.id))
+    return { key: "attention", label: "Needs attention" };
+  const soon = (state.selected === a.id ? (state.routines ?? []) : [])
+    .filter((r) => r.isEnabled !== false && r.nextRunAt).sort((x, y) => x.nextRunAt - y.nextRunAt)[0];
+  if (soon) return { key: "scheduled", label: `Scheduled · ${new Date(soon.nextRunAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}` };
+  return { key: "ready", label: "Ready" };
+}
+
 function markdown(raw) {
   const inline = (t) => esc(t)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
@@ -761,7 +820,7 @@ function renderStage(agent) {
 
   if (entries.length === 0 && failures.length === 0 && !agent.isRunning) {
     return `<div class="stage-col"><div class="empty-stage">${state.transcript == null
-      ? "" : `Nothing yet — send ${esc(agent.name)} a prompt below.`}</div></div>`;
+      ? "…" : `Nothing yet — ask ${esc(agent.name)} for something below.`}</div></div>`;
   }
 
   // Conversation above the divider, work below it: the split is the one rule on the stage.
@@ -871,12 +930,11 @@ function renderRoutines(agent) {
       ${history ? `<div class="runs">${history}</div>` : '<div class="runs"><div class="runlog"><span class="g">·</span><span>no runs yet</span></div></div>'}
     </div>`;
   }).join("");
-  return `<p class="lede">What ${esc(agent.name)} does without being asked. A worker you have to
-    remember to poke is a toy; one on a schedule is staff.</p>
+  return `<p class="lede">What ${esc(agent.name)} does without being asked.</p>
     ${rows || '<div class="empty">No routines yet.</div>'}
     ${state.editor?.agentId === agent.id
       ? `<div class="editor" id="editor">${editorHtml()}</div>`
-      : `<div class="row"><button class="btn" onclick="openRoutine('${agent.id}',null)">New routine</button></div>`}`;
+      : `<div class="row"><button class="btn" onclick="openRoutine('${agent.id}',null)">New workflow</button></div>`}`;
 }
 
 function renderKnows(agent) {
@@ -927,51 +985,179 @@ function signature() {
     state.host, state.box, state.store, state.settings?.inferenceProvider,
     state.settings?.inferenceRouterUsage,
     state.transcript?.map((e) => [e.id, e.content, e.message?.content, e.isStreaming]),
-    state.thinking, state.waitTick, state.talkOpen, state.endpoints, state.editor?.automationId ?? state.editor?.agentId ?? null,
+    state.thinking, state.waitTick, state.talkOpen, state.endpoints, state.console, state.editor?.automationId ?? state.editor?.agentId ?? null,
     state.view === "events" ? state.events.length : 0,
   ]);
 }
 function render(force) {
   const sig = signature();
   if (!force && sig === lastSig) return;
-  const animate = state.view !== lastView || state.selected !== lastSelected;
+  try { renderInner(force, sig); }
+  catch (error) {
+    // One broken renderer must never mute the whole page: forget the signature so the
+    // next tick retries, and say what broke instead of freezing silently.
+    lastSig = null;
+    console.error("render failed:", error);
+    alertLine(`Display error: ${error?.message ?? error}`);
+  }
+}
+function renderInner(force, sig) {
+  const animate = state.selected !== lastSelected;
   lastSig = sig; lastView = state.view; lastSelected = state.selected;
 
-  const stage = $("#stage");
-  // While the routine editor is open it owns the stage: a background poll must not rebuild
-  // the form out from under a half-typed field. Its own edits call render(true).
-  if (state.editor == null || force || $("#editor") == null) {
-    const draft = $("#prompt")?.value ?? state.draft ?? "";
-    const prior = $(".agent-scroll") ?? $(".panel");
-    const scrolled = prior?.scrollTop ?? 0;
-    // Within a screenful of the end counts as reading the newest, so a fresh reply follows the
-    // reader down. Scrolled up in the history, they stay where they were.
-    const atEnd = prior == null ||
-      prior.scrollHeight - prior.scrollTop - prior.clientHeight < 120;
-    stage.innerHTML = `<div class="panel${animate ? " anim" : ""}">${views[state.view]()}</div>`;
-    const box = $("#prompt");
-    if (box != null && draft.length > 0) box.value = draft;
-    state.draft = draft;
-    const now = $(".agent-scroll") ?? $(".panel");
-    if (now != null) now.scrollTop = animate || atEnd ? now.scrollHeight : scrolled;
+  // A workspace has someone at the desk by default: auto-select the most recent worker.
+  if (state.selected == null && state.agents.length) {
+    state.selected = state.agents[0].id;
+    queueMicrotask(() => refresh().catch(() => {}));
   }
+  const worker = state.agents.find((a) => a.id === state.selected) ?? null;
 
-  $("#shell").classList.toggle("wide", state.section != null);
-  // The routine editor lives in the rail now, so the rail is what must hold still while a
-  // field is half typed. Its own edits come through render(true).
-  if (state.editor == null || force || $("#editor") == null) renderRail();
-  renderStack();
+  renderTopbar();
+  renderSurfaces(worker);
+  if (state.editor == null || force || $("#editor") == null) {
+    const scroller = $(".agent-scroll");
+    const scrolled = scroller?.scrollTop ?? 0;
+    const atEnd = scroller == null ||
+      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
+    renderStageWorker(worker, animate);
+    const now = $(".agent-scroll");
+    if (now != null) now.scrollTop = animate || atEnd ? now.scrollHeight : scrolled;
+    renderPlan(worker);
+  }
+  renderRail();
   renderConvene();
-  document.querySelectorAll("#dock [role=tab]").forEach((b) =>
-    b.setAttribute("aria-selected", String(b.dataset.view === state.view)));
+  renderConsole();
+  const who = $("#command-who");
+  if (who) who.textContent = worker ? `to ${worker.name}` : "";
+}
+
+function renderTopbar() {
+  const bar = $("#topbar");
+  const raw = state.integrations;
+  const ints = Array.isArray(raw) ? raw
+    : Array.isArray(raw?.platforms) ? raw.platforms
+    : Array.isArray(raw?.connections) ? raw.connections
+    : [];
+  const chips = [
+    `<span class="app"><span class="on"></span>Computer</span>`,
+    ...ints.map((i) => `<span class="app"><span class="${i.isConnected ? "on" : "off"}"></span>${esc(i.platform)}</span>`),
+  ].join("");
+  const working = state.agents.filter((a) => a.isRunning).length;
+  bar.innerHTML = `<span class="word">Machine Room</span>
+    <div class="apps">${chips}</div>
+    <div class="grow"></div>
+    ${working ? `<span class="app"><span class="on"></span>${working} working</span>` : ""}
+    <button class="sys" onclick="openConsole('computer')">⚙ System</button>`;
+}
+
+function renderSurfaces(worker) {
+  const col = $("#surfaces");
+  col.innerHTML = `<h3>Computer</h3>
+    <div id="deskwrap"><div id="deskmount"></div></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost" onclick="popDesktop()">Full screen</button>
+    </div>
+    <h3>On the computer</h3>
+    <div class="deskrow"><div><b>Chrome</b><div class="sub">shared browser, signed-in sessions persist</div></div></div>`;
+  mountDesktop();
+}
+
+function renderStageWorker(worker, animate) {
+  const stage = $("#stage");
+  const draft = $("#prompt")?.value ?? state.draft ?? "";
+  if (worker == null) {
+    stage.innerHTML = `<div class="panel"><h1>No workers yet</h1>
+      <p class="lede">Create your first worker and give it a job.</p>
+      <div class="row"><button class="btn" onclick="newAgent()">New worker</button></div></div>`;
+    return;
+  }
+  if (state.creating) {
+    stage.innerHTML = `<div class="panel"><h1>New worker</h1>
+      <div class="field"><label>Name</label><input id="nw-name" placeholder="Ticket triage" autofocus></div>
+      <div class="field"><label>What is their job?</label><input id="nw-desc" placeholder="Own the weekly account-health review…"></div>
+      <div class="row">
+        <button class="btn" onclick="createWorker(true)">Create &amp; brief</button>
+        <button class="btn ghost" onclick="createWorker(false)">Create only</button>
+        <button class="btn ghost" onclick="cancelCreate()">Cancel</button>
+      </div></div>`;
+    return;
+  }
+  const st = humanStatus(worker);
+  stage.innerHTML = `
+    <div class="whead">
+      <div class="face">${esc((worker.name || "?").trim()[0].toUpperCase())}</div>
+      <div class="idn"><div class="nm">${esc(worker.name)}${worker.isGroup ? " · Room" : ""}</div>
+        <div class="role">${esc(worker.description || (worker.isGroup ? `${(worker.memberIds ?? []).length} workers in this room` : "No job description yet"))}</div></div>
+      <div class="st"><span class="pill ${st.key}">${esc(st.label)}</span></div>
+    </div>
+    <div class="agent-scroll${animate ? " anim" : ""}">${renderStage(worker)}</div>`;
+  const box = $("#prompt");
+  if (box != null && draft.length > 0) box.value = draft;
+  state.draft = draft;
+}
+
+function renderPlan(worker) {
+  const col = $("#plan");
+  if (worker == null) { col.innerHTML = ""; return; }
+  const subs = (state.subagents ?? []).slice().sort((a, b) => (b.startedAtMs ?? 0) - (a.startedAtMs ?? 0));
+  const running = subs.filter((x) => subStatus(x.status) === "running");
+  const needs = state.trays.filter((t) => t.agentId === worker.id);
+  const steps = subs.slice(0, 4).map((x) => {
+    const stx = subStatus(x.status);
+    return `<div class="deskrow"><div><b>${esc(x.subagentType ?? "task")}</b>
+      <div class="sub">${esc((x.title ?? "").slice(0, 70))}</div></div>
+      <span class="pill ${stx === "running" ? "working" : stx === "done" ? "done" : stx === "error" ? "error" : "scheduled"}">${stx}</span></div>`;
+  }).join("");
+  const outcome = worker.lastMessagePreview
+    ? `<div class="deskrow"><div><div class="sub" style="color:var(--shell-ink)">${esc(worker.lastMessagePreview.slice(0, 140))}</div>
+       <div class="sub">${ago(worker.lastActivityAt)}</div></div></div>` : "";
+  const sections = SECTIONS.map(([id, label]) => {
+    const isOpen = state.section === id;
+    return `<div class="sect${isOpen ? " open" : ""}">
+      <button class="sect-head" onclick="toggleSection('${id}')">
+        <span class="nm">${label}</span><span class="count">${esc(sectionCount(id, worker))}</span>
+        <span class="chev">›</span></button>
+      ${isOpen ? `<div class="sect-body">${sectionBody(id, worker)}</div>` : ""}
+    </div>`;
+  }).join("");
+  col.innerHTML = `
+    ${needs.length ? `<h3>Needs you</h3>${needs.map((t) => `<div class="deskrow" style="border-color:rgba(255,180,84,.4)"><div><b>${esc(t.title)}</b><div class="sub">${esc(t.detail ?? "")}</div></div></div>`).join("")}` : ""}
+    ${running.length || steps ? `<h3>Steps</h3>${steps || ""}` : ""}
+    ${outcome ? `<h3>Latest outcome</h3>${outcome}` : ""}
+    <h3>About this worker</h3>
+    ${sections}`;
+}
+
+window.toggleSection = (id) => {
+  state.section = state.section === id ? null : id;
+  if (state.section !== "routines") state.editor = null;
+  render(true);
+};
+
+// ---------- Operator Console: where the wiring lives ----------
+window.openConsole = (tab) => { state.console = tab ?? "computer"; render(true); };
+window.closeConsole = () => { state.console = null; render(true); };
+function renderConsole() {
+  const overlay = $("#console");
+  if (state.console == null) { overlay.hidden = true; return; }
+  overlay.hidden = false;
+  overlay.querySelectorAll(".bar [data-tab]").forEach((b) => {
+    b.setAttribute("aria-selected", String(b.dataset.tab === state.console));
+    b.onclick = () => openConsole(b.dataset.tab);
+  });
+  const body = $("#console-body");
+  body.innerHTML = state.console === "routing" ? views.router()
+    : state.console === "activity" ? views.events()
+    : state.console === "settings" ? views.settings()
+    : views.overview();
 }
 
 // A worker's surfaces belong under the worker, not in tabs over the conversation. Opening one
 // takes the rail: the other cards step aside, its own sections stack beneath it, and clicking
 // the card again puts the roster back. The stage stays what it always should have been -- the
 // conversation, with a composer that is never in the wrong place.
-const SECTIONS = [["persona", "Persona"], ["members", "Members"], ["channels", "Listens on"],
-  ["routines", "Routines"], ["knows", "Knows"], ["desktop", "Desktop"]];
+const SECTIONS = [["persona", "Profile"], ["members", "Members"], ["channels", "Listens on"],
+  ["routines", "Workflows"], ["knows", "Knows"]];
 
 function sectionCount(id, agent) {
   if (id === "routines") return String((state.routines ?? []).length || "");
@@ -992,40 +1178,27 @@ function sectionCount(id, agent) {
 
 function renderPersona(agent) {
   const members = (agent.memberIds ?? []).map((id) =>
-    state.agents.find((a) => a.id === id)?.name ?? id);
-  return `<p class="lede">${esc(agent.description || "No description — it answers from the host's own instructions.")}</p>
+    state.agents.find((a) => a.id === id)?.name ?? "worker");
+  return `<p class="lede">${esc(agent.description || "No job description yet — give this worker a role.")}</p>
     <dl class="kv">
-      <dt>Name</dt><dd>${esc(agent.name)}</dd>
-      ${agent.title ? `<dt>Title</dt><dd>${esc(agent.title)}</dd>` : ""}
-      <dt>Kind</dt><dd>${agent.isGroup ? `group of ${members.length}` : "individual"}</dd>
+      <dt>Kind</dt><dd>${agent.isGroup ? `Room of ${members.length}` : "Worker"}</dd>
       ${members.length ? `<dt>Members</dt><dd>${esc(members.join(", "))}</dd>` : ""}
-      <dt>Answering</dt><dd>${esc(state.model?.model ?? state.settings?.inferenceProvider ?? "?")}</dd>
-      <dt>Origin</dt><dd>${esc(agent.origin)}</dd>
-      <dt>Created</dt><dd>${new Date(agent.createdAt).toLocaleString()}</dd>
-      <dt>Last activity</dt><dd>${agent.lastActivityAt ? ago(agent.lastActivityAt) : "none"}</dd>
-      <dt>Unread</dt><dd>${agent.unreadCount || 0}</dd>
-      <dt>ID</dt><dd>${esc(agent.id)}</dd>
-      <dt>Store</dt><dd>${esc(agent.path)}</dd>
-    </dl>`;
+      <dt>Answering</dt><dd>${esc(state.model?.model ?? "routed")}</dd>
+      <dt>Last active</dt><dd>${ago(agent.lastActivityAt)}</dd>
+    </dl>
+    <div class="row" style="margin-top:14px">
+      ${state.confirmDelete === agent.id
+        ? `<button class="btn danger" onclick="removeAgent('${agent.id}')">Really remove ${esc(agent.name)}?</button>
+           <button class="btn ghost" onclick="cancelDelete()">Keep</button>`
+        : `<button class="btn ghost" onclick="askDelete('${agent.id}')">Remove worker</button>`}
+    </div>`;
 }
 
 // One container, one X display: every worker draws on the same screen. Saying so beats
 // implying each has a private one.
-// vnc_lite.html is noVNC without its control bar -- the strip down the left side is that bar,
-// and there is no parameter to hide it on the full client. This is the interactive view: click
-// and type into it and you are driving the box's Chrome, not watching a recording.
-const DESKTOP_URL = "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1";
-function renderDesktop() {
-  return `<p class="lede">The box's screen, live and interactive — click into it and you are
-      driving. One display, shared by every worker on this host.</p>
-    <div id="deskmount"></div>
-    <div class="row">
-      <button class="btn ghost" onclick="popDesktop()">Full screen</button>
-      <a class="btn ghost" href="${DESKTOP_URL}" target="_blank" rel="noopener">New window</a>
-    </div>`;
-}
 // The iframe is created once and re-parented, never re-created: a fresh element means a fresh
 // VNC handshake, which is what made the desktop reconnect on every repaint.
+const DESKTOP_URL = "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1";
 let desktopFrame = null;
 function mountDesktop() {
   const mount = $("#deskmount");
@@ -1073,7 +1246,7 @@ const sectionBody = (id, agent) =>
   : id === "channels" ? renderChannels(agent)
   : id === "routines" ? renderRoutines(agent)
   : id === "knows" ? renderKnows(agent)
-  : renderDesktop();
+  : renderPersona(agent);
 
 function agentCard(a) {
   const c = el("button", "card");
@@ -1084,9 +1257,9 @@ function agentCard(a) {
   bar.append(el("span", "dot" + (a.isRunning ? " on" : "")), el("span", "nm", a.name));
   if (a.unreadCount) bar.append(el("span", "badge", String(a.unreadCount)));
   const body = el("div", "body");
-  body.append(el("div", "sub", `${a.isGroup ? "group · " : ""}${a.isRunning ? "running" : "idle"} · ${ago(a.lastActivityAt || a.updatedAt)}`));
+  body.append(el("div", "sub", `${a.isGroup ? "Room · " : ""}${a.isRunning ? "Working" : "Ready"} · ${ago(a.lastActivityAt || a.updatedAt)}`));
   if (a.isGroup) body.append(el("div", "members",
-    `${a.memberIds?.length ?? 0} member${(a.memberIds?.length ?? 0) === 1 ? "" : "s"}`));
+    `${a.memberIds?.length ?? 0} worker${(a.memberIds?.length ?? 0) === 1 ? "" : "s"} in this room`));
   if (a.lastMessagePreview) body.append(el("div", "prev", a.lastMessagePreview));
   else { const sk = el("div", "skel"); sk.append(el("i"), el("i"), el("i")); body.append(sk); }
   c.append(bar, body);
@@ -1099,15 +1272,14 @@ function agentCard(a) {
       return;
     }
     state.picked.clear();
-    const closing = state.selected === a.id;
-    state.selected = closing ? null : a.id;
+    if (state.selected === a.id) return;
+    state.selected = a.id;
     state.section = null;
     state.editor = null;
-    state.view = "agents";
     state.transcript = null;
     state.channels = state.routines = state.memories = state.subagents = null;
     render(true);
-    if (!closing) void refresh();
+    void refresh();
   };
   return c;
 }
@@ -1115,25 +1287,14 @@ function agentCard(a) {
 function renderRail() {
   const list = $("#rail-list");
   list.innerHTML = "";
-  if (!state.agents.length) { list.append(el("div", "railhead", "none yet")); return; }
-  const open = state.agents.find((a) => a.id === state.selected);
-  for (const a of open ? [open] : state.agents) list.append(agentCard(a));
-  if (open == null) return;
-  for (const [id, label] of SECTIONS) {
-    const isOpen = state.section === id;
-    const wrap = el("div", "sect" + (isOpen ? " open" : ""));
-    const head = el("button", "sect-head");
-    head.append(el("span", "nm", label), el("span", "count", sectionCount(id, open)), el("span", "chev", "›"));
-    head.onclick = () => { state.section = isOpen ? null : id; if (!isOpen) state.editor = null; render(true); };
-    wrap.append(head);
-    if (isOpen) {
-      const body = el("div", "sect-body");
-      body.innerHTML = sectionBody(id, open);
-      wrap.append(body);
-      if (id === "desktop") queueMicrotask(mountDesktop);
-    }
-    list.append(wrap);
-  }
+  for (const a of state.agents) list.append(agentCard(a));
+  if (!state.agents.length) list.append(el("div", "railhead", "no workers yet"));
+  const plus = el("button", "card");
+  plus.style.cssText = "min-width:120px;width:120px;display:flex;align-items:center;justify-content:center;font-size:26px;color:var(--ink-2)";
+  plus.textContent = "+";
+  plus.title = "New worker";
+  plus.onclick = () => window.newAgent();
+  list.append(plus);
 }
 
 // A huddle is a room, not a gesture: a group is an agent with isGroup and a member list,
@@ -1155,46 +1316,6 @@ function renderConvene() {
 }
 
 const WATCHED = ["agents", "transcript", "subagents", "async-tasks", "tray", "host-settings", "forever-box", "workflows"];
-function renderStack() {
-  const s = $("#stack");
-  s.innerHTML = "";
-
-  const others = (state.peers ?? []).filter((n) => !/^node$/i.test(n));
-  if (others.length) {
-    const w = el("div", "scard glass shared");
-    w.append(el("h3", null, "Shared box"));
-    w.append(el("div", "t", others.join(", ") + (others.length === 1 ? " is" : " are") + " on this gateway"));
-    w.append(el("div", "d", "Creating, prompting, or deleting here changes what they see. Same host, same roster."));
-    s.append(w);
-  }
-
-  const box = el("div", "scard glass-dark");
-  box.append(el("h3", null, "Box"));
-  box.append(el("div", "big", state.box?.state === "absent" ? "Local Docker VM" : `Forever box · ${state.box?.state}`));
-  box.append(el("div", "sm", `host ${state.host?.hostVersion ?? "?"}${state.host?.hostUpdateAvailable ? " · update available" : ""}`));
-  s.append(box);
-
-  const ch = el("div", "scard glass-dark");
-  ch.append(el("h3", null, "Live channels"));
-  for (const name of WATCHED) {
-    const n = state.eventCounts.get(name) ?? 0;
-    const row = el("div", "chan" + (n ? " hit" : ""));
-    row.append(el("span", "tick", "✓"), el("span", null, name), el("span", "n", n ? String(n) : ""));
-    ch.append(row);
-  }
-  s.append(ch);
-
-  if (state.trays.length) {
-    const t = el("div", "scard glass");
-    t.append(el("h3", null, "Alerts"));
-    for (const tray of state.trays) {
-      const card = el("div", "tray");
-      card.append(el("div", "t", tray.title), el("div", "d", tray.detail));
-      t.append(card);
-    }
-    s.append(t);
-  }
-}
 
 /* ---- routine editor -------------------------------------------------- */
 // A routine's trigger is a group of up to 8 members, so "when to run" is a stack you build.
@@ -1470,8 +1591,17 @@ async function guard(fn) {
   catch (e) { alertLine(e.message); }
 }
 function alertLine(msg) {
-  $("#sse-meta").textContent = msg;
-  setTimeout(() => { $("#sse-meta").textContent = ""; }, 6000);
+  let t = $("#toast");
+  if (t == null) {
+    t = el("div"); t.id = "toast";
+    t.style.cssText = "position:fixed;left:50%;bottom:178px;transform:translateX(-50%);" +
+      "background:rgba(23,29,33,.92);color:#e9edf0;border:1px solid rgba(255,255,255,.12);" +
+      "padding:10px 18px;border-radius:999px;font-size:13px;z-index:70;backdrop-filter:blur(18px)";
+    document.body.append(t);
+  }
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(alertLine._t);
+  alertLine._t = setTimeout(() => { t.hidden = true; }, 6000);
 }
 // ponytail: no prompt()/confirm() — native dialogs block the page and look nothing
 // like the rest of this. Inline form + two-click delete instead.
@@ -1602,8 +1732,8 @@ window.removeAgent = (id) => {
 /* ---- SSE ------------------------------------------------------------ */
 function connect() {
   const src = new EventSource("/events");
-  src.onopen = () => { $("#sse-dot").classList.add("on"); $("#sse-text").textContent = "live"; };
-  src.onerror = () => { $("#sse-dot").classList.remove("on"); $("#sse-text").textContent = "reconnecting"; };
+  src.onopen = () => { state.live = true; };
+  src.onerror = () => { state.live = false; };
   src.onmessage = (ev) => {
     let payload; try { payload = JSON.parse(ev.data); } catch { return; }
     const channel = payload.channel ?? "unknown";
@@ -1615,29 +1745,24 @@ function connect() {
       at: new Date().toLocaleTimeString(),
     });
     state.events.length = Math.min(state.events.length, 200);
-    $("#sse-meta").textContent = channel;
     if (["agents", "agent-upserted", "tray", "async-tasks", "host-settings", "forever-box"].includes(channel)) {
       clearTimeout(connect.t);
       connect.t = setTimeout(() => refresh().catch(() => {}), 320);
-    } else if (state.view === "events") render();
-    else renderStack();
+    } else render();
   };
 }
 
 /* ---- boot ----------------------------------------------------------- */
-document.querySelectorAll("#dock [role=tab]").forEach((b) =>
-  b.onclick = () => {
-    // Switching view has to go and get that view's data. Rendering from whatever the last poll
-    // happened to hold is how a panel ends up saying "Reading…" forever.
-    state.view = b.dataset.view;
-    render(true);
-    void refresh();
-  });
-$("#new-agent").onclick = () => window.newAgent();
+$("#command-send").onclick = () => { if (state.selected) sendPrompt(state.selected); };
+$("#prompt").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && state.selected) {
+    event.preventDefault(); sendPrompt(state.selected);
+  }
+});
 
 refresh()
   .then(connect)
-  .catch((e) => { $("#stage").innerHTML = `<div class="panel"><h1>Gateway unreachable</h1>
+  .catch((e) => { $("#stage").innerHTML = `<div class="panel"><h1>Something broke</h1>
     <p class="lede">${esc(e.message)}</p>
     <p class="lede">Is the box running? <code>docker ps --filter name=grok-bot-local-vm</code></p></div>`; });
 setInterval(() => refresh().catch(() => {}), 15000);
