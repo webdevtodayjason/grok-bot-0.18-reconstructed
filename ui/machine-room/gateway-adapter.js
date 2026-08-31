@@ -669,7 +669,12 @@
       },
 
       // -- No backend behind these yet. They say so rather than pretending. ------------------
-      submitSecret() { return notWired("The secure credential bridge"); },
+      submitSecret() {
+        // submitSecret exists and works; it answers a request the HOST raised, keyed by entryId.
+        // A connector card has no such request, so there is nothing to answer -- and this UI
+        // should never be the thing carrying a credential anyway.
+        return notWired("Answering a host secret request — the host asks by entryId and this UI has no request to answer");
+      },
       setPluginState(pluginId, status) {
         const plugin = state.plugins.find((p) => p.id === pluginId);
         if (!plugin) return clone(state);
@@ -699,7 +704,11 @@
           .catch((error) => notWired(`Connecting ${plugin.name} failed: ${error.message}`));
         return clone(state);
       },
-      togglePluginTool() { return notWired("Per-tool permissions"); },
+      togglePluginTool() {
+        // This host reports no per-tool breakdown for a connector, so there is nothing to grant
+        // or revoke here. The gate that does exist is the review policy in Settings.
+        return notWired("Per-tool permissions — this host reports no tool list for a connector");
+      },
       // Every argument name and resolution string below was read from host source, not guessed:
       // resolveAutoReviewApproval resolves "approved"|"denied" (runner/sand-auto-review.ts:9);
       // resolveLocalToolPermission takes the ask's own vocabulary; respondToWidget takes
@@ -730,7 +739,11 @@
         }));
         return notWired("Answering a credential request from this UI");
       },
-      setModel() { return notWired("Per-worker model routing"); },
+      setModel() {
+        // Kept only to answer the handoff's adapter contract. There is no per-agent model on this
+        // host; the real control is the endpoint switch in Settings, which is box-wide.
+        return notWired("Per-agent models — this host routes every agent through one endpoint, switchable in Settings");
+      },
       setAutoReview(enabled, rule) {
         const current = state.settings.autoReview ?? { allow: [], block: [] };
         // The view offers one free-text field. Treat it as a block instruction, because that is

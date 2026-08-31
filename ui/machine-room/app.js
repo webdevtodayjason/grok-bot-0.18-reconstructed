@@ -818,7 +818,9 @@
 
   function pluginDetailMarkup(plugin) {
     if (!plugin) return `<div class="empty-state">Choose a plugin to inspect its tools and account.</div>`;
-    const tools = plugin.tools.map((tool) => `<div class="tool-row"><div><strong>${escapeHtml(tool.name)}</strong><small>${escapeHtml(tool.description)}</small></div><button class="switch" type="button" data-toggle-tool="${escapeHtml(tool.id)}" aria-label="Toggle ${escapeHtml(tool.name)}" aria-pressed="${tool.enabled}"></button></div>`).join("");
+    const tools = plugin.tools.length
+      ? plugin.tools.map((tool) => `<div class="tool-row"><div><strong>${escapeHtml(tool.name)}</strong><small>${escapeHtml(tool.description)}</small></div><button class="switch" type="button" data-toggle-tool="${escapeHtml(tool.id)}" aria-label="Toggle ${escapeHtml(tool.name)}" aria-pressed="${tool.enabled}"></button></div>`).join("")
+      : `<div class="empty-state">This host reports which connectors are attached, but not which tools they expose — so there is nothing to grant or revoke here. The gate that does apply is the review policy in Settings.</div>`;
     const skills = plugin.skills.map((skill) => `<span class="tag">✦ ${escapeHtml(skill)}</span>`).join("");
     let account;
     if (plugin.status === "available") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>Opens ${escapeHtml(plugin.name)}'s own authorisation page. The credential is exchanged there and stored by the host — it never passes through this page.</small></div></div><div class="form-actions"><button class="primary-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Connect ${escapeHtml(plugin.name)}</button></div></div>`;
