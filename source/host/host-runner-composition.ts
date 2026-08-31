@@ -2049,6 +2049,77 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       createSendToAgentToolInputs: () => ({
         dependencies: dependencies.sendToAgent,
       }),
+      /**
+       * Computer and Screenshot were the only host tools with no entry here, so every turn fell
+       * through to `props.createComputerToolDependencies` -- which the Agent engine never sets. The
+       * props a turn actually receives carry `resourceAccessor` and nothing else the projections
+       * would have added, so `factories` came back without them and no turn was ever offered a way
+       * to see or touch the desktop. A computerUse subagent was asked to drive a machine with no
+       * hands: it answered in prose, reported done, and its parent dispatched it again.
+       *
+       * The accessor is all `createHostComputerToolDependencies` needs, and it is right there on
+       * the props, so the dependencies are built per turn from it -- the same builder and the same
+       * auto-review wiring the unreachable projection used.
+       */
+      createComputerToolInputs: (_turn, props) => {
+        const accessor = (props as { readonly resourceAccessor?: unknown }).resourceAccessor;
+        if (accessor === undefined) {
+          throw new TypeError("computer tool dependencies need the turn's resource accessor");
+        }
+        const modes = autoReviewGate?.currentModes();
+        return {
+          dependencies: createHostComputerToolDependencies({
+            resourceAccessor: accessor as never,
+            ...(modes === undefined ? {} : {
+              autoReview: {
+                mode: modes.computer,
+                agentId: session.id,
+                boxIdentity: {
+                  boxId: session.id,
+                  windowGeneration: `${autoReviewController?.hostGeneration ?? "host"}:${session.id}`,
+                },
+                ...(autoReviewController === undefined ? {} : { autoReviewController }),
+                extractConversationContext:
+                  extractProductionTurnAutoReviewConversationContext,
+                getApprovalExpiryPolicy: () => sandAutoReviewApprovalExpiryPolicy("turn"),
+                // Which screen this agent owns. Without it a click lands on the shared seat.
+                resolveDisplayNumber: async (context: unknown) => {
+                  await method(remoteBox, "ensureReady")?.(context, session.id);
+                  const windowIndex = boxAgentWindowIndex(remoteBox as never, session.id);
+                  return windowIndex ?? (boxSupportsMultiWindow(remoteBox as never) ? undefined : 1);
+                },
+                ...(autoReviewGate === null || autoReviewGate === undefined
+                  ? {}
+                  : { userAutoRunInstructions: autoReviewGate.userInstructions() }),
+              },
+            }),
+            ...(persistImageForTurn === undefined ? {} : { persistImage: persistImageForTurn }),
+            isUnicodeTypingEnabled: () =>
+              method(experiments, "isUnicodeTypingEnabled")?.() ?? false,
+            onComputerAction: action => {
+              deps.emitGatewayEvent({
+                channel: "computer-action",
+                payload: { agentId: session.id, ...action },
+              });
+            },
+          }),
+        };
+      },
+      createScreenshotToolInputs: (_turn, props) => {
+        const accessor = (props as { readonly resourceAccessor?: unknown }).resourceAccessor;
+        if (accessor === undefined) {
+          throw new TypeError("screenshot tool dependencies need the turn's resource accessor");
+        }
+        // Screenshot deliberately carries no auto-review: looking at the screen changes nothing.
+        return {
+          dependencies: createHostComputerToolDependencies({
+            resourceAccessor: accessor as never,
+            ...(persistImageForTurn === undefined ? {} : { persistImage: persistImageForTurn }),
+            isUnicodeTypingEnabled: () =>
+              method(experiments, "isUnicodeTypingEnabled")?.() ?? false,
+          }),
+        };
+      },
       createReactionToolInputs: turn => ({
         dependencies: turn.emitUpdate === undefined
           ? dependencies.reaction
