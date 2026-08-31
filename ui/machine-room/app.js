@@ -805,7 +805,7 @@
         : `<div class="run-result">Never run</div>`;
       return `<article class="routine-card"><div><div class="routine-header"><h3>${escapeHtml(routine.name)}</h3><span class="status-pill ${running ? "working" : routine.status === "paused" ? "" : "success"}">${escapeHtml(running ? "running" : routine.status)}</span></div><p>${escapeHtml(routine.instruction)}</p><div class="routine-meta"><span class="tag">◷ ${escapeHtml(routine.trigger)}</span><span class="tag">attached · ${escapeHtml(routineScopeLabel(routine))}</span>${coordinator ? `<span class="tag">coordinates · ${escapeHtml(coordinator.name)}</span>` : ""}${delegate ? `<span class="tag">runs as · ${escapeHtml(delegate.name)}</span>` : ""}</div>${routine.nextRunAt ? `<div class="run-result">Next run in ${escapeHtml(formatCountdown(routine.nextRunAt))}</div>` : ""}${lastResult}</div><div><button class="primary-button" type="button" data-run-routine="${escapeHtml(routine.id)}" ${running ? "disabled" : ""}>${running ? "Running…" : "Test run"}</button></div></article>`;
     }).join("") : `<div class="empty-state"><div><strong>No routines attached to ${escapeHtml(name)}</strong><p>Create one here and it will belong to this ${context.kind === "worker" ? "agent" : "room"}—not to the whole system.</p></div></div>`;
-    return `<div class="panel-intro"><p>These routines belong only to <strong>${escapeHtml(name)}</strong>. ${context.kind === "room" ? "A room routine can coordinate several members and delegate its execution step." : "An agent routine runs in this agent’s own context."}</p><button class="secondary-button" type="button" data-create-routine>＋ New routine</button></div><div class="routine-list">${cards}</div>`;
+    return `<div class="panel-intro"><p>These routines belong only to <strong>${escapeHtml(name)}</strong>. ${context.kind === "room" ? "A room routine can coordinate several members and delegate its execution step." : "An agent routine runs in this agent’s own context."}</p><details class="routine-create"><summary class="secondary-button">＋ New routine</summary><form data-new-routine><div class="field"><label for="routine-name">Name</label><input id="routine-name" name="name" required placeholder="e.g. Morning ticket sweep" /></div><div class="field"><label for="routine-prompt">What it should do</label><textarea id="routine-prompt" name="prompt" rows="3" required placeholder="Written as if you were asking in chat"></textarea></div><div class="field"><label for="routine-cron">Schedule</label><input id="routine-cron" name="schedule" required placeholder="0 8 * * 1-5" value="0 8 * * 1-5" /><span class="field-hint">Five cron fields, box time. Weekdays at 8am is 0 8 * * 1-5.</span></div><div class="form-actions"><button class="primary-button" type="submit">Create routine</button></div></form></details></div><div class="routine-list">${cards}</div>`;
   }
 
   function renderRoutinesPanel() {
@@ -1090,8 +1090,6 @@
         showToast(`${routine.name} dispatched — the outcome appears on the card when the host reports it.`);
       });
       renderRoutinesPanel();
-    } else if (target.hasAttribute("data-create-routine")) {
-      showToast("Creating a routine from here is not built yet — the host command exists (createAgentAutomation), the form does not.");
     } else if (target.dataset.manageMember && activeContext().kind === "room") {
       if (target.dataset.memberAction === "add") adapter.addMember(activeContext().id, target.dataset.manageMember);
       else adapter.removeMember(activeContext().id, target.dataset.manageMember);
@@ -1133,6 +1131,23 @@
         renderPluginsPanel();
         showToast(`${plugin.name} connected; the entered value was discarded by this demo`);
       }
+    } else if (form.hasAttribute("data-new-routine")) {
+      const data = new FormData(form);
+      const submit = form.querySelector("button[type=submit]");
+      submit.disabled = true;
+      const context = activeContext();
+      adapter.createRoutine(context.id, context.kind, {
+        name: String(data.get("name")).trim(),
+        prompt: String(data.get("prompt")).trim(),
+        trigger: { type: "cron", schedule: String(data.get("schedule")).trim() },
+        isEnabled: true,
+      }).then((routine) => {
+        renderRoutinesPanel();
+        showToast(`${routine.name} created — ${routine.trigger}`);
+      }).catch((error) => {
+        submit.disabled = false;
+        showToast(`Could not create that routine: ${error.message}`);
+      });
     } else if (form.hasAttribute("data-add-worker")) {
       const data = new FormData(form);
       Promise.resolve(adapter.addWorker({ name: data.get("name"), role: data.get("role") }))

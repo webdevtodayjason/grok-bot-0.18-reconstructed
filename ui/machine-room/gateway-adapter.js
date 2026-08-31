@@ -535,6 +535,22 @@
         return snapshot;
       },
 
+      // createAgentAutomation { id, spec } with spec { name, prompt, trigger, isEnabled } -- the
+      // same shape the old operator UI builds, and the same shape getAgentAutomations hands back,
+      // so it round-trips. The host validates the cron and computes nextRunAt; nothing is reported
+      // until that comes back.
+      createRoutine(agentId, kind, spec) {
+        return call("createAgentAutomation", { id: agentId, spec })
+          .then(() => call("getAgentAutomations", { id: agentId }))
+          .then((list) => {
+            const scope = { kind, id: agentId };
+            const shaped = routinesOf(list ?? [], scope);
+            state.routines = [...state.routines.filter((x) => !same(x.scope, scope)), ...shaped];
+            emit("routine:created", { agentId });
+            return shaped.find((r) => r.name === spec.name) ?? shaped[shaped.length - 1];
+          });
+      },
+
       runRoutine(routineId) {
         // The view awaits this and reads lastRun.duration off what it resolves with, so the
         // duration is measured rather than invented -- a routine that took nine seconds should
