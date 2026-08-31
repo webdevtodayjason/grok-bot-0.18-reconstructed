@@ -577,6 +577,30 @@ must return a **Promise resolving to the routine** (the view reads `lastRun.dura
 adapter now measures the real elapsed time instead of reporting the demo's invented 2.2s, and
 `app.js` gained the error arm it never had, so a failed run says so instead of throwing.
 
+**Desktop surfaces -- what is true as of 2026-08-30 23:00.** The Terminal surface is real: a live
+`xfce4-terminal` on display `:1`, interactive through noVNC. **The Browser surface is not yet
+real** -- `google-chrome` on `:1` exits within seconds and never enters `_NET_CLIENT_LIST`, so the
+pane shows whatever else is on that display. Reproduce:
+`docker exec -e DISPLAY=:1 grok-bot-local-vm google-chrome --no-sandbox --user-data-dir=/tmp/x about:blank`
+returns exit 0 with no window; only dbus warnings in the output. A Chrome *was* seen on `:1`
+earlier in the session (screenshotted, with Google loaded), so this is a state change, not a
+missing capability. Suspects, untested: a singleton/profile lock left by the agent's own
+computer-use Chrome, or the box's Chrome being managed by the host and refusing a second instance.
+
+Two defects found and fixed while getting there:
+- The VNC frame was rendering **900x30**. The clip wrapper used `flex:1` inside `.desktop-browser`,
+  which is not a flex column with a definite height, so it collapsed and the operator saw the
+  panel's own light background -- looking exactly like an empty browser page. The wrapper now sets
+  `display:flex; flex-direction:column; height:100%` explicitly.
+- `/box/launch` spawned a **new window on every switch**; the box had collected four terminals
+  before anyone looked. It now finds the existing window by `WM_CLASS` in `_NET_CLIENT_LIST` and
+  raises it with `xdotool windowactivate`, launching only when none exists. Class and command are
+  server-side constants; no part of the request reaches the shell.
+
+The address bar in the desktop dialog is **decorative** -- it is the prototype's drawn toolbar and
+navigates nothing. Typing a URL does not browse. Same for the `Context7` / `Reports` /
+`Ticket audit` sub-labels under the surface buttons: hardcoded strings from the mockup.
+
 **Run it.**
 
 ```

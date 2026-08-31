@@ -147,19 +147,31 @@ const server = createServer(async (req, res) => {
     // loopback -- the box is already the agent's sandbox, but that is no reason to hand a
     // browser tab arbitrary exec on it.
     if (req.method === "POST" && url.pathname === "/box/launch") {
-      const LAUNCH = {
-        browser: ["google-chrome", "--no-sandbox", "--start-maximized", "--no-first-run", "--disable-session-crashed-bubble"],
-        terminal: ["xfce4-terminal", "--maximize"],
+      // Find-or-launch, then raise. Two fixed entries; the class and command are server constants
+      // and no part of the request is ever interpolated into the shell. Without the find step every
+      // switch spawned another window -- the box collected four terminals before this was noticed.
+      // Chrome needs its own profile dir or it just attaches to whatever instance already exists
+      // and opens no window on this display at all.
+      const APPS = {
+        browser: { cls: "Google-chrome", cmd: "google-chrome --no-sandbox --no-first-run --disable-session-crashed-bubble --user-data-dir=/tmp/machine-room-chrome --start-maximized about:blank" },
+        terminal: { cls: "Xfce4-terminal", cmd: "xfce4-terminal --maximize" },
       };
       let app;
       try { app = JSON.parse(await readBody(req))?.app; } catch { app = null; }
-      const argv = LAUNCH[app];
-      if (!argv) return fail(res, 400, `unknown app: ${app}`);
+      const spec = APPS[app];
+      if (!spec) return fail(res, 400, `unknown app: ${app}`);
+      const script = [
+        `win=$(for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do`,
+        `  xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${spec.cls}"' && echo $w && break;`,
+        `done)`,
+        `if [ -n "$win" ]; then xdotool windowactivate $win;`,
+        `else setsid ${spec.cmd} >/dev/null 2>&1 & sleep 3;`,
+        `  for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do`,
+        `    xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${spec.cls}"' && xdotool windowactivate $w && break;`,
+        `  done; fi`,
+      ].join(" ");
       const { spawn } = await import("node:child_process");
-      // setsid so the app outlives this exec; DISPLAY=:0 is the display noVNC serves on 6080.
-      const child = spawn("docker", [
-        "exec", "-d", "-e", "DISPLAY=:1", BOX, "setsid", ...argv,
-      ], { stdio: "ignore" });
+      const child = spawn("docker", ["exec", "-e", "DISPLAY=:1", BOX, "sh", "-c", script], { stdio: "ignore" });
       child.on("error", () => {});
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ launched: app }));

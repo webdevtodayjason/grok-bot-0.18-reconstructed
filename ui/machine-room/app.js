@@ -827,7 +827,7 @@
     // noVNC's own status strip ("Connected to ... / Send CtrlAltDel") is its chrome, not ours, and
     // it cannot be styled from here across origins. Clip it: the frame is pulled up by exactly the
     // strip's height inside a hidden-overflow box, so the screen starts at the top of the panel.
-    elements.desktopWindow.innerHTML = `<div class="desktop-browser"><div class="browser-toolbar"><div class="browser-controls">‹ › ↻</div><div class="browser-address" data-box-caption>${escapeHtml(caption)}</div><span>⋮</span></div><div style="flex:1;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${BOX_VNC}" title="Live view of the box" style="position:absolute;top:-30px;left:0;width:100%;height:calc(100% + 30px);border:0"></iframe></div></div>`;
+    elements.desktopWindow.innerHTML = `<div class="desktop-browser" style="display:flex;flex-direction:column;height:100%"><div class="browser-toolbar" style="flex:0 0 auto"><div class="browser-controls">‹ › ↻</div><div class="browser-address" data-box-caption>${escapeHtml(caption)}</div><span>⋮</span></div><div style="flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${BOX_VNC}" title="Live view of the box" style="position:absolute;top:-30px;left:0;width:100%;height:calc(100% + 30px);border:0"></iframe></div></div>`;
   }
 
   function renderDesktop(appName) {
