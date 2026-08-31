@@ -107,6 +107,36 @@
   // a tray the operator cleared has to stop colouring the roster.
   const attentionIds = new Set();
 
+  // Files that passed through this agent's conversation. The gateway has read-by-path but no
+  // directory listing of any kind, and there is no per-worker directory to list either -- every
+  // worker's Shell runs in one shared /workspace (EXEC_DAEMON_CWD). So this is scoped by
+  // construction: it comes out of that agent's own transcript, which is the only per-agent file
+  // record the host actually keeps. The UI says as much, because "files" implying a private
+  // working directory would be the same lie in a new place.
+  function filesOf(transcript) {
+    const seen = new Set();
+    return (transcript ?? []).flatMap((e) => {
+      if (e.kind === "user-attachment" && e.file_path) {
+        return [{ name: e.file_name || String(e.file_path).split("/").pop(), path: e.file_path, from: "you", at: Number(e.timestampMs) || 0, bytes: Number(e.byteSize) || 0 }];
+      }
+      if (e.kind === "send-message" && e.message?.type === "attachment") {
+        const url = e.message.url ?? e.message.file_path;
+        if (url) return [{ name: e.message.file_name || String(url).split("/").pop(), path: url, from: "the worker", at: Number(e.timestampMs) || 0, bytes: Number(e.message.byteSize) || 0 }];
+      }
+      return [];
+    })
+      .filter((f) => (seen.has(f.path) ? false : seen.add(f.path)))
+      .sort((a, b) => b.at - a.at)
+      .map((f) => ({
+        ...f,
+        meta: [
+          `from ${f.from}`,
+          f.bytes ? (f.bytes < 1024 ? `${f.bytes} B` : `${(f.bytes / 1024).toFixed(1)} KB`) : null,
+          f.at ? new Date(f.at).toLocaleDateString() : null,
+        ].filter(Boolean).join(" · "),
+      }));
+  }
+
   function statusOf(agent) {
     if (agent.isRunning) return { status: "working", statusText: "Working now" };
     // The third real state the old operator UI has and this one discarded: blocked on you.
@@ -200,7 +230,7 @@
     const latestAgentMs = (transcript ?? [])
       .filter((e) => e.kind === "send-message")
       .reduce((n, e) => Math.max(n, Number(e.timestampMs) || 0), 0);
-    return { messages: messagesOf(transcript, name), routines: routinesOf(automations, context), latestAgentMs };
+    return { messages: messagesOf(transcript, name), routines: routinesOf(automations, context), latestAgentMs, files: filesOf(transcript) };
   }
 
   const DEFAULTS = {
@@ -266,6 +296,7 @@
     const active = { kind: workers[0] ? "worker" : "room", id: first.id };
     const loaded = await loadContext(active, first.name);
     first.messages = loaded.messages;
+    first.files = loaded.files;
 
     // One call covers every agent. Fetching per-context left every other row showing zero
     // routines and no next run, which reads as "nothing scheduled" rather than "not loaded".
@@ -404,6 +435,7 @@
       if (!r) return;
       const loaded = await loadContext(state.activeContext, r.name);
       r.messages = loaded.messages;
+      r.files = loaded.files;
       applyAwaiting(state.activeContext, r, loaded.latestAgentMs);
       state.routines = [
         ...state.routines.filter((x) => !same(x.scope, state.activeContext)),
@@ -441,6 +473,7 @@
         const snapshot = emit("context:selected", { context });
         loadContext(context, r.name).then((loaded) => {
           r.messages = loaded.messages;
+          r.files = loaded.files;
           applyAwaiting(context, r, loaded.latestAgentMs);
           state.routines = [...state.routines.filter((x) => !same(x.scope, context)), ...loaded.routines];
           emit("message:created", { context });

@@ -984,8 +984,10 @@
     elements.desktopLive.innerHTML = `<span class="status-dot ${lead && lead.status === "working" ? "working" : "ready"}"></span> ${escapeHtml(lead ? lead.name : record.name)} ${state.desktop.paused ? "is paused" : "is working"}`;
     document.querySelectorAll("[data-desktop-app]").forEach((button) => button.classList.toggle("active", button.dataset.desktopApp === activeDesktopApp));
     if (activeDesktopApp === "files") {
-      const files = record.files.length ? record.files.map((file) => `<div class="file-tile">▱<strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(file.meta)}</small></div>`).join("") : `<div class="empty-state">This gateway exposes no file list for a worker, so nothing can be shown here yet.</div>`;
-      elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} files</h3><p>Not wired to this host.</p></div><span class="status-pill">unwired</span></div><div class="file-grid">${files}</div></div>`;
+      const files = record.files.length
+        ? record.files.map((file) => `<div class="file-tile">▱<strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(file.meta)}</small></div>`).join("")
+        : `<div class="empty-state">Nothing has been attached to this conversation yet.</div>`;
+      elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} files</h3><p>Files that passed through this conversation. This host keeps no per-worker directory — anything a worker writes with Shell goes to one /workspace shared by every agent on the box.</p></div><span class="status-pill">${record.files.length}</span></div><div class="file-grid">${files}</div></div>`;
     } else if (activeDesktopApp === "sheets") {
       elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} sheet</h3><p>Not wired to this host.</p></div><span class="status-pill">unwired</span></div><div class="empty-state">This gateway exposes no sheet for a worker. Nothing is being tracked here.</div></div>`;
     } else if (activeDesktopApp === "terminal") {
