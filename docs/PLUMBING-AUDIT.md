@@ -521,6 +521,13 @@ routing, Wave 5 #12).
    after send. Against real data that is the UI putting words in a worker's mouth. Since `app.js`
    stays unchanged, the refusal lives in the adapter: `addMessage` accepts the operator's own echo
    and the transient "working" bubble, and drops any text attributed to a worker.
+3. The same 1.15s timer also owned the "working" dots, so they flashed and died while the real
+   reply was still tens of seconds out and the operator waited in silence. The adapter now owns
+   that bubble's lifetime: raised on send, re-hung after every transcript rebuild, and cleared
+   only when a `send-message` newer than the send appears -- or after a five-minute cap, so it can
+   never spin forever on a turn that died. `removeMessage` and `setWorkerStatus(ready)` decline
+   the demo timer while a wait is genuinely open. Measured: dots up at t+1s, still up at t+4s,
+   gone at t+6s as the real reply rendered.
 
 **Run it.**
 

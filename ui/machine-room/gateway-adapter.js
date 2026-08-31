@@ -112,7 +112,10 @@
       call("getAgentTranscript", { id: context.id }).catch(() => null),
       call("getAgentAutomations", { id: context.id }).catch(() => null),
     ]);
-    return { messages: messagesOf(transcript, name), routines: routinesOf(automations, context) };
+    const latestAgentMs = (transcript ?? [])
+      .filter((e) => e.kind === "send-message")
+      .reduce((n, e) => Math.max(n, Number(e.timestampMs) || 0), 0);
+    return { messages: messagesOf(transcript, name), routines: routinesOf(automations, context), latestAgentMs };
   }
 
   const DEFAULTS = {
@@ -193,6 +196,14 @@
 
   function createGatewayAdapter(state) {
     const listeners = new Set();
+    // app.js drives the "working" bubble from simulateReply's 1.15s timer, which is right for a
+    // demo and wrong for a machine: a real reply takes tens of seconds, so the dots flashed and
+    // died and the wait happened in silence. The adapter owns that bubble's lifetime instead --
+    // it lives from send until the worker actually speaks. Capped, so it can never spin forever
+    // on a turn that died.
+    const awaiting = new Map();
+    const AWAIT_CAP_MS = 5 * 60_000;
+    const keyOf = (c) => `${c.kind}:${c.id}`;
     const clone = (v) => JSON.parse(JSON.stringify(v));
     const same = (a, b) => Boolean(a && b && a.kind === b.kind && a.id === b.id);
     const record = (c) => (c.kind === "worker" ? state.workers : state.rooms).find((r) => r.id === c.id);
@@ -214,11 +225,30 @@
       return emit("message:created", { context: state.activeContext });
     }
 
+    // Re-hangs the working bubble after a rebuild, for as long as we are genuinely still waiting.
+    function applyAwaiting(context, r, latestAgentMs) {
+      const key = keyOf(context);
+      const wait = awaiting.get(key);
+      if (!wait) return;
+      const answered = latestAgentMs > wait.sentAtMs;
+      const expired = Date.now() - wait.sentAtMs > AWAIT_CAP_MS;
+      if (answered || expired) {
+        awaiting.delete(key);
+        r.status = "ready";
+        r.statusText = expired ? "No reply came back" : "Ready for the next task";
+        return;
+      }
+      r.status = "working";
+      r.statusText = "Working now";
+      r.messages.push({ id: wait.id, authorId: wait.authorId, authorName: wait.authorName, type: "working", text: "", time: "" });
+    }
+
     async function reloadActive() {
       const r = record(state.activeContext);
       if (!r) return;
       const loaded = await loadContext(state.activeContext, r.name);
       r.messages = loaded.messages;
+      applyAwaiting(state.activeContext, r, loaded.latestAgentMs);
       state.routines = [
         ...state.routines.filter((x) => !same(x.scope, state.activeContext)),
         ...loaded.routines,
@@ -251,6 +281,7 @@
         const snapshot = emit("context:selected", { context });
         loadContext(context, r.name).then((loaded) => {
           r.messages = loaded.messages;
+          applyAwaiting(context, r, loaded.latestAgentMs);
           state.routines = [...state.routines.filter((x) => !same(x.scope, context)), ...loaded.routines];
           emit("message:created", { context });
         }).catch(() => {});
@@ -267,6 +298,9 @@
           type: "text", text: clean, time: timeOf(Date.now()),
         });
         r.status = "working"; r.statusText = "Working now";
+        const wait = { sentAtMs: Date.now(), id: `working-${Date.now()}`, authorId: context.id, authorName: r.name };
+        awaiting.set(keyOf(context), wait);
+        r.messages.push({ id: wait.id, authorId: wait.authorId, authorName: wait.authorName, type: "working", text: "", time: "" });
         const snapshot = emit("message:created", { context });
         call("sendPrompt", { agentId: context.id, prompt: clean })
           .then(() => reloadActive())
@@ -349,6 +383,10 @@
         if (!r) return null;
         const fabricated = message.type === "text" && message.authorId && message.authorId !== "you";
         if (fabricated) return null;
+        // One set of dots, whoever asked for them. Hand back the bubble already hanging so the
+        // caller's later removal is aimed at a message this adapter is willing to defend.
+        const wait = awaiting.get(keyOf(target));
+        if (message.type === "working" && wait) return { ...message, id: wait.id, time: "" };
         const complete = {
           id: message.id || `local-${Date.now()}-${r.messages.length}`,
           time: message.time || timeOf(Date.now()),
@@ -360,11 +398,18 @@
         return complete;
       },
       removeMessage(context, messageId) {
-        const r = record(context ?? state.activeContext);
+        const target = context ?? state.activeContext;
+        const wait = awaiting.get(keyOf(target));
+        // The demo timer tries to clear the dots after 1.15s. While the worker is genuinely still
+        // out there, that removal is declined; the reply landing is what clears them.
+        if (wait && messageId === wait.id) return clone(state);
+        const r = record(target);
         if (r) r.messages = r.messages.filter((m) => m.id !== messageId);
         return emit("message:removed", { messageId });
       },
       setWorkerStatus(workerId, status, statusText) {
+        // Same reason: the demo flips the worker back to ready on its own timer.
+        if (status === "ready" && awaiting.has(`worker:${workerId}`)) return clone(state);
         const w = state.workers.find((x) => x.id === workerId);
         if (w) Object.assign(w, { status, statusText: statusText ?? w.statusText });
         return emit("worker:status", { workerId, status });
