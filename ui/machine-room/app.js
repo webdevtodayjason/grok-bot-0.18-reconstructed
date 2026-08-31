@@ -575,7 +575,7 @@
     const lead = contextLead();
     elements.roomTitle.textContent = name;
     elements.roomSubtitle.textContent = context.kind === "worker"
-      ? `Agent · ${lead.status === "working" ? "working" : "ready"}`
+      ? `Agent · ${lead ? lead.statusText : "unknown"}`
       : `Room · ${members.length} ${members.length === 1 ? "member" : "members"}`;
     elements.messageInput.placeholder = `Ask ${name}…`;
     elements.participantCluster.innerHTML = members.slice(0, 4).map((worker) => avatarMarkup(worker, "participant-avatar", worker.name)).join("");
@@ -635,17 +635,38 @@
     }).join("");
   }
 
-  function approvalMarkup(message) {
-    if (message.decision) {
-      const label = message.decision === "once" ? "Allowed once" : "Always allowed for this connector";
-      return `<div class="inline-card" style="--card-accent:var(--green-500)"><div class="inline-card-header"><span class="inline-card-icon">✓</span><span class="inline-card-copy"><strong>${escapeHtml(message.approval.title)}</strong><small class="approval-result">${escapeHtml(label)}</small></span></div></div>`;
+  const DECISION_ACTIONS = {
+    "auto-review": [["approved", "✓ Approve", true], ["denied", "✕ Deny", false]],
+    "local-tool": [["allow-once", "✓ Allow once", true], ["always", "↗ Always allow", false], ["deny", "✕ Deny", false]],
+  };
+
+  function decisionMarkup(message) {
+    const card = message.card;
+    if (card.status === "sending") {
+      return `<div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">Sending your answer…</small></span></div></div>`;
     }
-    return `<div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(message.approval.title)} <span title="Scoped connector request">ⓘ</span></strong><small>${escapeHtml(message.approval.description)}</small></span></div><div class="inline-card-actions"><button class="card-action primary" type="button" data-approval="once" data-message-id="${escapeHtml(message.id)}">✓ Allow once</button><button class="card-action" type="button" data-approval="always" data-message-id="${escapeHtml(message.id)}">↗ Always allow</button></div></div>`;
+    if (card.status && card.status !== "pending") {
+      const settled = card.status === "approved" ? "You approved this"
+        : card.status === "denied" ? "You denied this"
+        : `Closed by the host — ${card.status}`;
+      const accent = card.status === "approved" ? "var(--green-500)" : "var(--amber-500)";
+      return `<div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${card.status === "approved" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">${escapeHtml(settled)}</small></span></div></div>`;
+    }
+    const button = (value, label, primary) => `<button class="card-action${primary ? " primary" : ""}" type="button" data-decide="${escapeHtml(String(value))}" data-message-id="${escapeHtml(message.id)}">${escapeHtml(label)}</button>`;
+    const actions = DECISION_ACTIONS[card.kind]
+      ? DECISION_ACTIONS[card.kind].map(([v, l, p]) => button(v, l, p)).join("")
+      : card.kind === "widget"
+        ? ((card.options ?? []).length ? card.options : ["Yes", "No"]).map((option, index) => {
+            const value = typeof option === "string" ? option : (option.value ?? option.label ?? String(index));
+            const label = typeof option === "string" ? option : (option.label ?? option.value ?? String(index));
+            return button(value, label, index === 0);
+          }).join("")
+        : `<span class="field-hint">Answer this in the host app. This UI never carries a credential.</span>`;
+    return `<div class="inline-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span></div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
   }
 
   function specialMessageMarkup(message) {
-    if (message.type === "approval") return approvalMarkup(message);
-    if (message.type === "routine-result") return `<div class="inline-card" style="--card-accent:var(--green-500)"><div class="inline-card-header"><span class="inline-card-icon">✓</span><span class="inline-card-copy"><strong>${escapeHtml(message.title)}</strong><small>Test run passed · ${escapeHtml(message.duration)}</small></span></div></div>`;
+    if (message.type === "decision") return decisionMarkup(message);
     if (message.type === "skill") return `<div class="inline-card" style="--card-accent:var(--violet-500)"><div class="inline-card-header"><span class="inline-card-icon">✦</span><span class="inline-card-copy"><strong>${escapeHtml(message.title)}</strong><small>${escapeHtml(message.description)}</small></span></div><div class="tag-list"><span class="tag">skill draft</span><span class="tag">recording attached</span><span class="tag">review required</span></div></div>`;
     return "";
   }
@@ -1062,8 +1083,11 @@
     } else if (target.hasAttribute("data-save-review")) {
       const toggle = document.getElementById("auto-review-toggle");
       const rule = document.getElementById("auto-review-rule");
-      adapter.setAutoReview(toggle.getAttribute("aria-pressed") === "true", rule.value);
-      showToast("Global auto-review rule saved");
+      // Report the write, not the intent to write. This is the one panel where a premature
+      // "saved" tells the operator a safety gate is armed when it is not.
+      Promise.resolve(adapter.setAutoReview(toggle.getAttribute("aria-pressed") === "true", rule.value))
+        .then(() => showToast("Review policy saved to the host"))
+        .catch((error) => showToast(`Policy not saved: ${error.message}`));
     } else if (target.id === "auto-review-toggle") {
       target.setAttribute("aria-pressed", target.getAttribute("aria-pressed") !== "true");
     } else if (target.hasAttribute("data-open-context-browser")) {
@@ -1144,10 +1168,10 @@
 
   elements.contextCard.addEventListener("click", handleContextCardClick);
   elements.transcript.addEventListener("click", (event) => {
-    const action = event.target.closest("[data-approval]");
+    const action = event.target.closest("[data-decide]");
     if (!action) return;
-    adapter.decideApproval(activeContext(), action.dataset.messageId, action.dataset.approval);
-    showToast(action.dataset.approval === "once" ? "Approved for this run only" : "Approval rule saved for Context7");
+    // No toast: the card itself reports what the host did, once the host has done it.
+    adapter.decideApproval(activeContext(), action.dataset.messageId, action.dataset.decide);
   });
 
   document.querySelectorAll("[data-capability]").forEach((button) => button.addEventListener("click", () => {

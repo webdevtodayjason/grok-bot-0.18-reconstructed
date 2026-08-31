@@ -41,11 +41,52 @@
 
   // The transcript carries two kinds. "send-message" is the agent speaking, and is the agent's
   // only voice; "message" with role "user" is the operator. Everything else is machinery.
+  // An approval, a local-tool permission ask and a widget question all arrive as send-message
+  // entries whose message carries no .content. They read as text:"" and were dropped by the filter
+  // below -- so an agent could sit blocked forever with nothing on screen to answer. This box runs
+  // with autoReviewInstructions armed and localToolPermission "ask", so this is not a rare path:
+  // "send that email" produces one every time.
+  function cardOf(entry) {
+    const m = entry.message ?? {};
+    if (m.type === "auto-review-approval" && m.approval) return {
+      kind: "auto-review",
+      requestId: m.approval.requestId,
+      status: m.approval.status ?? "pending",
+      title: m.approval.summary || "This action needs your review",
+      detail: [m.approval.reason, m.approval.command].filter(Boolean).join(" — "),
+      rule: m.approval.proposedRule ?? null,
+      options: [],
+    };
+    if (m.type === "local-tool-permission" && m.ask) return {
+      kind: "local-tool",
+      requestId: m.ask.requestId,
+      status: m.ask.status ?? "pending",
+      title: `${m.ask.action ?? "Run"} · ${m.ask.target ?? "a local tool"}`,
+      detail: m.ask.description || "This runs on the box itself, not in a sandbox.",
+      rule: null,
+      options: [],
+    };
+    if (m.type === "widget" && m.widget) return {
+      kind: "widget", requestId: null, status: "pending",
+      title: m.widget.prompt || "The agent asked you a question",
+      detail: "", rule: null,
+      options: Array.isArray(m.widget.options) ? m.widget.options : [],
+    };
+    // Still refused, but silently dropping it meant the operator never learned it had been asked.
+    if (m.type === "secret-request") return {
+      kind: "secret", requestId: null, status: "pending",
+      title: "The agent asked for a credential",
+      detail: "This UI will not carry a secret. Answer it in the host app.", rule: null, options: [],
+    };
+    return null;
+  }
+
   function messagesOf(transcript, fallbackName) {
     return (transcript ?? [])
       .filter((e) => e.kind === "send-message" || (e.kind === "message" && e.role === "user"))
       .map((e, i) => {
         const mine = e.kind !== "send-message";
+        const card = mine ? null : cardOf(e);
         const text = e.kind === "send-message"
           ? (typeof e.message?.content === "string" ? e.message.content : "")
           : (typeof e.content === "string" ? e.content : e.content?.map?.((c) => c.text ?? "").join("") ?? "");
@@ -53,12 +94,13 @@
           id: e.id ?? `entry-${i}`,
           authorId: mine ? "you" : (e.author?.id ?? "agent"),
           authorName: mine ? "You" : (e.author?.name ?? fallbackName),
-          type: "text",
+          type: card ? "decision" : "text",
+          ...(card ? { card } : {}),
           text: String(text).trim(),
           time: timeOf(Number(e.timestampMs ?? e.createdAt)),
         };
       })
-      .filter((m) => m.text);
+      .filter((m) => m.text || m.card);
   }
 
   // Agents the host is currently raising an error tray for. Rebuilt each pass, never accumulated:
@@ -104,7 +146,9 @@
       id: `${scope.id}::${a.id}`,
       name: a.name ?? a.id,
       scope,
-      coordinatorId: scope.id,
+      // The gateway has no coordinator or delegate on an automation. This was the agent you
+      // happened to have open, rendered as "coordinates · <name>" -- a routing fact nobody set.
+      coordinatorId: null,
       delegatedToId: null,
       trigger: a.triggerDescription ?? a.trigger?.summary ?? a.summary ?? "On a schedule",
       instruction: a.prompt ?? a.instruction ?? "",
@@ -343,6 +387,9 @@
           text: `That turn failed: ${tray.title ?? "error"}${tray.detail ? ` — ${tray.detail}` : ""}`,
           time: timeOf(Date.now()),
         });
+        // The dedupe set dies with the page; without this, every reload re-narrates every historical
+        // failure as though it had just happened.
+        void call("dismissTray", { id: tray.id }).catch(() => {});
       }
     }
 
@@ -564,7 +611,36 @@
         return clone(state);
       },
       togglePluginTool() { return notWired("Per-tool permissions"); },
-      decideApproval() { return notWired("Approval cards"); },
+      // Every argument name and resolution string below was read from host source, not guessed:
+      // resolveAutoReviewApproval resolves "approved"|"denied" (runner/sand-auto-review.ts:9);
+      // resolveLocalToolPermission takes the ask's own vocabulary; respondToWidget takes
+      // (entryId, value, agentId). Nothing reports success on its own -- the host rewrites the
+      // card's status and reloadActive reads it back, so the card says what actually happened.
+      decideApproval(context, messageId, decision) {
+        const target = context ?? state.activeContext;
+        const r = record(target);
+        const message = r?.messages.find((m) => m.id === messageId);
+        const card = message?.card;
+        if (!card) return clone(state);
+        const agentId = target.id;
+        const sent = (promise) => {
+          card.status = "sending";
+          promise.then(() => reloadActive())
+            .catch((error) => { card.status = "pending"; notWired(`That answer did not reach the host: ${error.message}`); });
+          return emit("message:created", { context: target });
+        };
+        if (card.kind === "auto-review") return sent(call("resolveAutoReviewApproval", {
+          agentId, entryId: messageId, requestId: card.requestId,
+          resolution: decision === "denied" ? "denied" : "approved",
+        }));
+        if (card.kind === "local-tool") return sent(call("resolveLocalToolPermission", {
+          agentId, entryId: messageId, requestId: card.requestId, resolution: decision,
+        }));
+        if (card.kind === "widget") return sent(call("respondToWidget", {
+          entryId: messageId, value: decision, agentId,
+        }));
+        return notWired("Answering a credential request from this UI");
+      },
       setModel() { return notWired("Per-worker model routing"); },
       setAutoReview(enabled, rule) {
         const current = state.settings.autoReview ?? { allow: [], block: [] };
@@ -576,10 +652,9 @@
           : current.block ?? [];
         const next = { isEnabled: Boolean(enabled), allowInstructions: current.allow ?? [], blockInstructions: block };
         state.settings.autoReview = { enabled: next.isEnabled, allow: next.allowInstructions, block: next.blockInstructions };
-        const snapshot = emit("settings:auto-review", { enabled: next.isEnabled });
-        call("setHostSettings", { autoReviewInstructions: next })
-          .catch((error) => notWired(`Review policy could not be saved: ${error.message}`));
-        return snapshot;
+        emit("settings:auto-review", { enabled: next.isEnabled });
+        return call("setHostSettings", { autoReviewInstructions: next })
+          .catch((error) => { notWired(`Review policy could not be saved: ${error.message}`); throw error; });
       },
       startTeaching(workerId) {
         const id = workerId ?? state.activeContext?.id;
@@ -628,7 +703,7 @@
         // Anything attributed to a worker is fiction unless it came off the wire. The type does
         // not matter: a "skill" card and a "routine-result" card lie exactly as loudly as text,
         // and both slipped through when this checked for text alone.
-        const fabricated = message.authorId && message.authorId !== "you" && message.type !== "working";
+        const fabricated = message.authorId && message.authorId !== "you" && message.type !== "working" && message.type !== "decision";
         if (fabricated) return null;
         // One set of dots, whoever asked for them. Hand back the bubble already hanging so the
         // caller's later removal is aimed at a message this adapter is willing to defend.
