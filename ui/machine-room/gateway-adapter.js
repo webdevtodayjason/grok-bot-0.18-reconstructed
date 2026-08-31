@@ -131,12 +131,7 @@
     openContexts: [],
     workers: [], rooms: [], routines: [], plugins: [],
     models: { default: "default", available: [] },
-    settings: {
-      autoReview: {
-        enabled: true,
-        rule: "Approve read-only tools. Ask me before external writes, purchases, deletions, or sending messages.",
-      },
-    },
+    settings: { autoReview: { enabled: false, allow: [], block: [] }, localToolPermission: null, reachable: false },
     desktop: {
       paused: false,
       timeline: [
@@ -199,12 +194,24 @@
     first.messages = loaded.messages;
 
     const teaching = await call("getTeachRecordingStatus").catch(() => null);
+    const hostSettings = await call("getHostSettings").catch(() => null);
 
     return {
       ...seed,
       teaching: teaching?.state === "recording"
         ? { active: true, workerId: teaching.agentId, startedAt: teaching.startedAtMs, maxDurationMs: teaching.maxDurationMs }
         : seed.teaching,
+      // The policy the host is actually enforcing, not a sentence in the seed. isEnabled, the two
+      // instruction lists and the tool-permission mode are all real fields it reads.
+      settings: {
+        autoReview: {
+          enabled: hostSettings?.autoReviewInstructions?.isEnabled ?? false,
+          allow: hostSettings?.autoReviewInstructions?.allowInstructions ?? [],
+          block: hostSettings?.autoReviewInstructions?.blockInstructions ?? [],
+        },
+        localToolPermission: hostSettings?.localToolPermission ?? null,
+        reachable: hostSettings != null,
+      },
       activeContext: active,
       openContexts: [active],
       workers, rooms,
@@ -453,7 +460,21 @@
       togglePluginTool() { return notWired("Per-tool permissions"); },
       decideApproval() { return notWired("Approval cards"); },
       setModel() { return notWired("Per-worker model routing"); },
-      setAutoReview() { return notWired("Auto-review rules"); },
+      setAutoReview(enabled, rule) {
+        const current = state.settings.autoReview ?? { allow: [], block: [] };
+        // The view offers one free-text field. Treat it as a block instruction, because that is
+        // the direction an operator writes in ("ask me before deleting anything") and the safe
+        // way to be wrong.
+        const block = typeof rule === "string" && rule.trim()
+          ? [rule.trim()]
+          : current.block ?? [];
+        const next = { isEnabled: Boolean(enabled), allowInstructions: current.allow ?? [], blockInstructions: block };
+        state.settings.autoReview = { enabled: next.isEnabled, allow: next.allowInstructions, block: next.blockInstructions };
+        const snapshot = emit("settings:auto-review", { enabled: next.isEnabled });
+        call("setHostSettings", { autoReviewInstructions: next })
+          .catch((error) => notWired(`Review policy could not be saved: ${error.message}`));
+        return snapshot;
+      },
       startTeaching(workerId) {
         const id = workerId ?? state.activeContext?.id;
         const worker = state.workers.find((w) => w.id === id);
