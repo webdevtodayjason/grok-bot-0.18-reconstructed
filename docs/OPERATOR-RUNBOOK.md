@@ -28,7 +28,7 @@ thing to check before trusting anything on screen.
 | Room roster add / remove | `setGroupMembers`. Rolls back if the write is rejected. The last member cannot be removed. |
 | **Routines → ＋ New routine** | `createAgentAutomation`. Seven trigger kinds — schedule, Slack, Git, Linear, Sentry, PagerDuty, Teams — and several at once become a group. The host validates and describes them back. |
 | Routines → Test run | `runAgentAutomationNow`, then the card shows the host's own outcome and measured duration. |
-| **Browser / Terminal** | That worker's own X display, live and interactive. |
+| **Browser / Terminal** | That worker's own X display when it has a desktop session; otherwise the shared screen, and the caption says which. |
 | **Teach this task** | ffmpeg records that worker's screen on the box. |
 | **Plugins → Connect** | Opens the platform's own authorisation page. No credential passes through the browser. |
 | **Settings → Model** | Switches the whole box's inference endpoint. Takes effect on the next message. |
@@ -53,7 +53,16 @@ thing to check before trusting anything on screen.
   display. After that it is instant.
 - **"not set" under Role** is honest — the host's per-agent `title` field is empty on this box.
 - **Two workers show different screens.** Correct: the host assigns one display per agent
-  (`/home/box/.sand-window-assignments.json`). Chief is `:2`, Atera `:3`.
+  (`/home/box/.sand-window-assignments.json`).
+- **"...has no desktop session — showing the shared screen instead."** True and current. On this
+  box image the fork displays start an X server but no window manager (`xfwm4` fails with "Xfconf
+  could not be initialized"), so only `:1` has a usable desktop. The UI says so rather than
+  showing you an empty grey rectangle. Fixing it is box-image work, written up in
+  `docs/PLUMBING-AUDIT.md` §6f.
+- **Asking a worker to use its browser does not work yet.** It dispatches a computerUse subagent,
+  which finishes without driving anything, and the worker honestly tells you the pass returned
+  nothing. Half the cause is fixed (the model could not receive a screenshot at all); the other
+  half is the missing fork desktop above.
 - **A routine card saying "Dispatched · outcome not reported yet"** means exactly that. The
   outcome replaces it when the host records one.
 
