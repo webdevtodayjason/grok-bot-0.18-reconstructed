@@ -247,7 +247,14 @@ const server = createServer(async (req, res) => {
     // is that the DOM and event layer stay untouched. So it gets served as a directory rather
     // than inlined, and the only file this repo authors inside it is the gateway adapter.
     if (req.method === "GET" && url.pathname.startsWith("/machine-room")) {
-      const rel = url.pathname === "/machine-room" || url.pathname === "/machine-room/"
+      // Every asset in the handoff is referenced relatively, so at "/machine-room" (no trailing
+      // slash) the browser resolves them against "/" and the page renders as unstyled HTML.
+      // Redirect to the directory form the way a static server would.
+      if (url.pathname === "/machine-room") {
+        res.writeHead(302, { location: "/machine-room/" });
+        return res.end();
+      }
+      const rel = url.pathname === "/machine-room/"
         ? "index.html"
         : url.pathname.slice("/machine-room/".length);
       const file = path.resolve(HERE, "machine-room", rel);
