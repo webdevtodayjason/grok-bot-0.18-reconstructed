@@ -631,6 +631,23 @@ select:focus-visible {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
   scroll-behavior: smooth;
+  /* Messages arrive and leave through soft edges instead of being guillotined by the dock above
+     and the composer below. The mask rides the scroll container, so the fade sits at the frame
+     rather than travelling with the content. */
+  mask-image: linear-gradient(
+    180deg,
+    transparent 0,
+    #000 58px,
+    #000 calc(100% - 42px),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    180deg,
+    transparent 0,
+    #000 58px,
+    #000 calc(100% - 42px),
+    transparent 100%
+  );
 }
 
 .transcript::before {
