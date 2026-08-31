@@ -173,18 +173,19 @@
           <time id="teach-timer">00:00</time>
         </header>
         <div class="teach-canvas">
-          <div class="teach-browser">
-            <div class="browser-chrome"><span></span><span></span><span></span><div>app.atera.com/tickets</div></div>
-            <div class="ticket-demo">
-              <h3>Open tickets</h3>
-              <p>Demonstrate the task naturally. The agent will review the recording before creating a skill.</p>
-              <div class="fake-ticket"><span>VPN connectivity</span><b>High</b></div>
-              <div class="fake-ticket"><span>Backup warning</span><b>Review</b></div>
-            </div>
-          </div>
+          <!-- Was a drawing of an Atera ticket queue on a real customer URL, captioned as though the
+               agent would review the footage. The real capture is ffmpeg on this worker's own X
+               display, so the live screen belongs here and the note below is what the agent
+               actually learns from. -->
+          <div class="teach-live" id="teach-live"></div>
+        </div>
+        <div class="field">
+          <label for="teach-note">Say what you are doing, as you would to a person</label>
+          <textarea id="teach-note" rows="2" placeholder="e.g. Open Atera, filter to unassigned tickets, and flag anything for Jason Brashear"></textarea>
+          <span class="field-hint">The recording is saved on the box, but the agent does not watch it. It learns from this note and what it can see of the browsing you did — so describe the task, do not rely on the video.</span>
         </div>
         <footer>
-          <span>Recording is local to this worker session.</span>
+          <span>Recorded on this worker's own screen, on the box. It never leaves the machine.</span>
           <button class="danger-button" id="finish-teach" type="button">■ Finish recording</button>
         </footer>
       </div>

@@ -755,7 +755,7 @@
         return snapshot;
       },
 
-      finishTeaching(save = true) {
+      finishTeaching(save = true, note = "") {
         const id = state.teaching?.workerId ?? state.activeContext?.id;
         state.teaching = { active: false, workerId: null, startedAt: null };
         const snapshot = emit("teaching:finished", { workerId: id });
@@ -763,6 +763,10 @@
         // save:true is what queues demo.mp4 and dispatches the learning prompt. The agent's reply
         // arrives through the transcript like any other turn, so nothing is fabricated here.
         call("stopTeachRecording", { agentId: id, save })
+          // The host queues the recording and dispatches its own learning prompt. The operator's
+          // note is the part the agent can actually use, so it follows as a normal message rather
+          // than being dropped on the floor.
+          .then(() => (note ? call("sendPrompt", { agentId: id, prompt: `I just recorded a demonstration on your screen. What I did: ${note}` }) : null))
           .then(() => reloadActive())
           .catch((error) => notWired(`Recording could not be saved: ${error.message}`));
         return snapshot;

@@ -1022,10 +1022,15 @@
     const lead = contextLead();
     if (elements.desktopDialog.open) elements.desktopDialog.close();
     adapter.startTeaching(lead.id);
-    elements.teachTitle.textContent = `${lead.name} is watching and learning`;
+    elements.teachTitle.textContent = `Recording ${lead.name}'s screen`;
+    // The dialog used to draw a fake ticket queue. Show the screen actually being recorded.
+    adapter.ensureDesktop(lead.id).then((desk) => {
+      const live = document.getElementById("teach-live");
+      if (live) live.innerHTML = `<iframe src="${escapeHtml(desk.url)}" title="The screen being recorded" style="width:100%;height:100%;border:0;background:#0b0f13"></iframe>`;
+    }).catch(() => {});
     elements.teachTimer.textContent = "00:00";
     elements.teachDialog.showModal();
-    const startedAt = Date.now();
+    const startedAt = state.teaching?.startedAt ?? Date.now();
     window.clearInterval(teachInterval);
     teachInterval = window.setInterval(() => {
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -1038,7 +1043,9 @@
     teachInterval = null;
     const context = activeContext();
     const lead = contextLead();
-    adapter.finishTeaching();
+    const note = document.getElementById("teach-note");
+    adapter.finishTeaching(true, note ? note.value.trim() : "");
+    if (note) note.value = "";
     elements.teachDialog.close();
     showToast(`Recording saved — ${lead.name} is learning from it now.`);
   }

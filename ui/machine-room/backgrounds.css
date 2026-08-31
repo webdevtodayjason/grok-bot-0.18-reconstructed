@@ -97,3 +97,7 @@ html[data-demo="true"] body::before {
   box-shadow: 0 2px 14px rgba(0, 0, 0, 0.4);
 }
 html[data-demo="true"] .app-shell { outline: 2px solid #ff4d6a; outline-offset: -2px; }
+
+/* The teach dialog shows the screen actually being recorded, in place of the drawn ticket queue
+   that used to sit there captioned as footage the agent would review. */
+.teach-live { width: 100%; height: 100%; min-height: 320px; border-radius: 10px; overflow: hidden; background: #0b0f13; }
