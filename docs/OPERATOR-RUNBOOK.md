@@ -26,13 +26,14 @@ thing to check before trusting anything on screen.
 | Workers / Rooms tabs | `listAgents`, split by `isGroup`. Re-read every 15s. |
 | **＋ → Create agent / Create room** | `createAgent` / `createGroup`. The toast names the agent the host returned, or the error it refused with. |
 | Room roster add / remove | `setGroupMembers`. Rolls back if the write is rejected. The last member cannot be removed. |
-| **Routines → ＋ New routine** | `createAgentAutomation`. The host validates the cron and computes the next run. |
+| **Routines → ＋ New routine** | `createAgentAutomation`. Seven trigger kinds — schedule, Slack, Git, Linear, Sentry, PagerDuty, Teams — and several at once become a group. The host validates and describes them back. |
 | Routines → Test run | `runAgentAutomationNow`, then the card shows the host's own outcome and measured duration. |
 | **Browser / Terminal** | That worker's own X display, live and interactive. |
 | **Teach this task** | ffmpeg records that worker's screen on the box. |
 | **Plugins → Connect** | Opens the platform's own authorisation page. No credential passes through the browser. |
 | **Settings → Model** | Switches the whole box's inference endpoint. Takes effect on the next message. |
 | **Settings → auto-review** | Writes a real policy the host enforces. |
+| **Composer ＋** | Uploads on pick, sends with the message. 8MB cap, direct conversations only. |
 | Notifications (♧) | The host's own unread counts and previews. |
 | Approve / Deny on a card | `resolveAutoReviewApproval` / `resolveLocalToolPermission` / `respondToWidget`. |
 
@@ -43,8 +44,6 @@ thing to check before trusting anything on screen.
 - **Sheets** is not wired. There is no host command behind it.
 - **Per-agent models do not exist.** `updateAgent` takes only name, description and title, and
   there is no `agentDefaultModel`. One endpoint serves the whole box.
-- **Attaching a file from the composer ＋** is not built. The host commands exist
-  (`uploadAttachment`, then `sendPrompt` with `attachmentPaths`); the picker does not.
 - **The agent does not watch your teach recording.** It is saved on the box, and the agent learns
   from the note you type plus the browsing it can see. Describe the task.
 

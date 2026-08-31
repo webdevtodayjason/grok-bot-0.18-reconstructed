@@ -805,7 +805,7 @@
         : `<div class="run-result">Never run</div>`;
       return `<article class="routine-card"><div><div class="routine-header"><h3>${escapeHtml(routine.name)}</h3><span class="status-pill ${running ? "working" : routine.status === "paused" ? "" : "success"}">${escapeHtml(running ? "running" : routine.status)}</span></div><p>${escapeHtml(routine.instruction)}</p><div class="routine-meta"><span class="tag">◷ ${escapeHtml(routine.trigger)}</span><span class="tag">attached · ${escapeHtml(routineScopeLabel(routine))}</span>${coordinator ? `<span class="tag">coordinates · ${escapeHtml(coordinator.name)}</span>` : ""}${delegate ? `<span class="tag">runs as · ${escapeHtml(delegate.name)}</span>` : ""}</div>${routine.nextRunAt ? `<div class="run-result">Next run in ${escapeHtml(formatCountdown(routine.nextRunAt))}</div>` : ""}${lastResult}</div><div><button class="primary-button" type="button" data-run-routine="${escapeHtml(routine.id)}" ${running ? "disabled" : ""}>${running ? "Running…" : "Test run"}</button></div></article>`;
     }).join("") : `<div class="empty-state"><div><strong>No routines attached to ${escapeHtml(name)}</strong><p>Create one here and it will belong to this ${context.kind === "worker" ? "agent" : "room"}—not to the whole system.</p></div></div>`;
-    return `<div class="panel-intro"><p>These routines belong only to <strong>${escapeHtml(name)}</strong>. ${context.kind === "room" ? "A room routine can coordinate several members and delegate its execution step." : "An agent routine runs in this agent’s own context."}</p><details class="routine-create"><summary class="secondary-button">＋ New routine</summary><form data-new-routine><div class="field"><label for="routine-name">Name</label><input id="routine-name" name="name" required placeholder="e.g. Morning ticket sweep" /></div><div class="field"><label for="routine-prompt">What it should do</label><textarea id="routine-prompt" name="prompt" rows="3" required placeholder="Written as if you were asking in chat"></textarea></div><div class="field"><label for="routine-cron">Schedule</label><input id="routine-cron" name="schedule" required placeholder="0 8 * * 1-5" value="0 8 * * 1-5" /><span class="field-hint">Five cron fields, box time. Weekdays at 8am is 0 8 * * 1-5.</span></div><div class="form-actions"><button class="primary-button" type="submit">Create routine</button></div></form></details></div><div class="routine-list">${cards}</div>`;
+    return `<div class="panel-intro"><p>These routines belong only to <strong>${escapeHtml(name)}</strong>. ${context.kind === "room" ? "A room routine can coordinate several members and delegate its execution step." : "An agent routine runs in this agent’s own context."}</p><details class="routine-create"><summary class="secondary-button">＋ New routine</summary><form data-new-routine><div class="field"><label for="routine-name">Name</label><input id="routine-name" name="name" required placeholder="e.g. Morning ticket sweep" /></div><div class="field"><label for="routine-prompt">What it should do</label><textarea id="routine-prompt" name="prompt" rows="3" required placeholder="Written as if you were asking in chat"></textarea></div><div class="field"><label>Triggers</label><div id="trigger-stack">${triggerStackMarkup()}</div></div><div class="form-actions"><button class="primary-button" type="submit">Create routine</button></div></form></details></div><div class="routine-list">${cards}</div>`;
   }
 
   function renderRoutinesPanel() {
@@ -863,6 +863,70 @@
         .then((answer) => { showToast(`Now answering through ${answer.using ?? id}`); fillEndpoints(); })
         .catch((error) => showToast(`Could not switch endpoint: ${error.message}`));
     };
+  }
+
+  const TRIGGER_KINDS = [
+    ["cron", "On a schedule"], ["slack", "Slack message"], ["github", "Git event"],
+    ["linear", "Linear issue"], ["sentry", "Sentry alert"], ["pagerduty", "PagerDuty incident"],
+    ["microsoftTeams", "Teams message"],
+  ];
+  const GITHUB_EVENTS = [
+    ["pr-opened", "PR opened"], ["pr-merged", "PR merged"], ["review-requested", "Review requested"],
+    ["issue-assigned", "Issue assigned"], ["ci-failed", "CI failed"], ["ci-passed", "CI passed"],
+  ];
+
+  let draftTriggers = [{ type: "cron", schedule: "0 8 * * 1-5" }];
+
+  // Ported from the old operator UI. Each rule is a field the host needs and will not complain
+  // about: an incomplete trigger is accepted and then never fires, which is the worst outcome.
+  function triggerProblem(t) {
+    if (t.type === "cron") {
+      const v = String(t.schedule ?? "").trim();
+      if (!v) return "needs a schedule";
+      if (!/^@every\s+\d+\s*[smhd]$/i.test(v) && v.split(/\s+/).length !== 5) return "not a cron expression";
+      return null;
+    }
+    if (t.type === "github") {
+      if (!/^[^\s/]+\/[^\s/]+$/.test(String(t.repo ?? "").trim())) return "needs owner/repo";
+      if (!(t.events ?? []).length) return "pick at least one event";
+      if ((t.events ?? []).some((e) => e.startsWith("ci-")) && !String(t.ciBranch ?? "").trim()) return "CI events need a branch";
+      return null;
+    }
+    if (t.type === "slack") {
+      if (!String(t.channel ?? "").trim()) return "needs a channel, or * for anywhere";
+      return null;
+    }
+    if (t.type === "microsoftTeams") {
+      if (!String(t.tenantId ?? "").trim()) return "needs a tenant id";
+      if (!String(t.teamId ?? "").trim()) return "needs a team id";
+      return null;
+    }
+    if (t.type === "linear" && !String(t.teamKey ?? "").trim()) return "needs a Linear team key";
+    if (t.type === "sentry" && !String(t.project ?? "").trim()) return "needs a Sentry project";
+    if (t.type === "pagerduty" && !String(t.service ?? "").trim()) return "needs a PagerDuty service";
+    return null;
+  }
+
+  function triggerFields(t, i) {
+    const box = (name, label, value, hint) =>
+      `<div class="field"><label for="trig-${i}-${name}">${escapeHtml(label)}</label><input id="trig-${i}-${name}" data-trig="${i}" data-trig-field="${name}" value="${escapeHtml(String(value ?? ""))}" placeholder="${escapeHtml(hint ?? "")}" /></div>`;
+    if (t.type === "cron") return box("schedule", "Cron expression", t.schedule, "0 8 * * 1-5");
+    if (t.type === "slack") return box("channel", "Channel", t.channel, "#support or * for anywhere") + box("keyword", "Only when it mentions (optional)", t.keyword, "");
+    if (t.type === "github") return box("repo", "Repository", t.repo, "owner/repo")
+      + `<div class="field"><label>Events</label><div class="tag-list">${GITHUB_EVENTS.map(([v, l]) => `<label class="tag"><input type="checkbox" data-trig="${i}" data-trig-event="${v}" ${(t.events ?? []).includes(v) ? "checked" : ""} /> ${escapeHtml(l)}</label>`).join("")}</div></div>`
+      + ((t.events ?? []).some((e) => e.startsWith("ci-")) ? box("ciBranch", "CI branch", t.ciBranch, "main") : "");
+    if (t.type === "linear") return box("teamKey", "Team key", t.teamKey, "ENG");
+    if (t.type === "sentry") return box("project", "Project", t.project, "grok-bot");
+    if (t.type === "pagerduty") return box("service", "Service", t.service, "production");
+    if (t.type === "microsoftTeams") return box("tenantId", "Tenant id", t.tenantId, "") + box("teamId", "Team id", t.teamId, "");
+    return "";
+  }
+
+  function triggerStackMarkup() {
+    return draftTriggers.map((t, i) => {
+      const problem = triggerProblem(t);
+      return `<div class="panel-card" style="${problem ? "outline:1px solid var(--amber-500)" : ""}"><div class="setting-row"><select data-trig="${i}" data-trig-field="type">${TRIGGER_KINDS.map(([v, l]) => `<option value="${v}" ${t.type === v ? "selected" : ""}>${escapeHtml(l)}</option>`).join("")}</select>${draftTriggers.length > 1 ? `<button class="ghost-button" type="button" data-drop-trigger="${i}">Remove</button>` : ""}</div>${triggerFields(t, i)}${problem ? `<span class="field-hint">${escapeHtml(problem)} — the host accepts an incomplete trigger and then never fires it.</span>` : ""}</div>`;
+    }).join("") + `<button class="ghost-button" type="button" data-add-trigger>＋ Another trigger</button>`;
   }
 
   function notificationsPanel() {
@@ -1087,7 +1151,48 @@
     }
   }
 
+  function redrawTriggerStack() {
+    const host = document.getElementById("trigger-stack");
+    if (host) host.innerHTML = triggerStackMarkup();
+  }
+
+  function handleTriggerInput(event) {
+    const el = event.target.closest("[data-trig]");
+    if (!el) return;
+    const t = draftTriggers[Number(el.dataset.trig)];
+    if (!t) return;
+    if (el.dataset.trigEvent) {
+      const events = new Set(t.events ?? []);
+      if (el.checked) events.add(el.dataset.trigEvent); else events.delete(el.dataset.trigEvent);
+      t.events = [...events];
+      redrawTriggerStack();
+      return;
+    }
+    const field = el.dataset.trigField;
+    if (field === "type") {
+      // Keep only the type: the fields of one trigger kind mean nothing to another, and carrying
+      // them over is how a Slack channel ends up on a Sentry trigger.
+      draftTriggers[Number(el.dataset.trig)] = el.value === "cron"
+        ? { type: "cron", schedule: "0 8 * * 1-5" }
+        : el.value === "github" ? { type: "github", events: [] } : { type: el.value };
+      redrawTriggerStack();
+      return;
+    }
+    t[field] = el.value;
+  }
+
   function handlePanelClick(event) {
+    if (event.target.closest("[data-add-trigger]")) {
+      draftTriggers.push({ type: "cron", schedule: "0 9 * * 1-5" });
+      redrawTriggerStack();
+      return;
+    }
+    const drop = event.target.closest("[data-drop-trigger]");
+    if (drop) {
+      draftTriggers.splice(Number(drop.dataset.dropTrigger), 1);
+      redrawTriggerStack();
+      return;
+    }
     const target = event.target.closest("button");
     if (!target) return;
     // Rows in the unread panel carry a context; clicking one should take you there.
@@ -1164,13 +1269,22 @@
       const data = new FormData(form);
       const submit = form.querySelector("button[type=submit]");
       submit.disabled = true;
+      const problems = draftTriggers.map(triggerProblem).filter(Boolean);
+      if (problems.length) {
+        submit.disabled = false;
+        showToast(`Fix the trigger first: ${problems[0]}`);
+        return;
+      }
       const context = activeContext();
+      // One trigger goes as itself; several become the group the host understands.
+      const trigger = draftTriggers.length === 1 ? draftTriggers[0] : { type: "group", listeners: draftTriggers };
       adapter.createRoutine(context.id, context.kind, {
         name: String(data.get("name")).trim(),
         prompt: String(data.get("prompt")).trim(),
-        trigger: { type: "cron", schedule: String(data.get("schedule")).trim() },
+        trigger,
         isEnabled: true,
       }).then((routine) => {
+        draftTriggers = [{ type: "cron", schedule: "0 8 * * 1-5" }];
         renderRoutinesPanel();
         showToast(`${routine.name} created — ${routine.trigger}`);
       }).catch((error) => {
@@ -1249,6 +1363,8 @@
   document.querySelectorAll("[data-close-desktop]").forEach((button) => button.addEventListener("click", () => elements.desktopDialog.close()));
   document.querySelectorAll("[data-desktop-app]").forEach((button) => button.addEventListener("click", () => renderDesktop(button.dataset.desktopApp)));
   elements.panelContent.addEventListener("click", handlePanelClick);
+  elements.panelContent.addEventListener("input", handleTriggerInput);
+  elements.panelContent.addEventListener("change", handleTriggerInput);
   elements.panelContent.addEventListener("change", handlePanelChange);
   elements.panelContent.addEventListener("submit", handlePanelSubmit);
 
