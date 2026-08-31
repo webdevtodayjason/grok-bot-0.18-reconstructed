@@ -154,6 +154,8 @@
       instruction: a.prompt ?? a.instruction ?? "",
       status: a.isEnabled === false ? "paused" : "ready",
       nextRunAt: a.nextRunAt ?? null,
+      // The host stamps this; the island had nothing else to say but "moments ago".
+      lastRunAt: a.lastRunAt ?? null,
       lastRun: lastRunOf(a),
     }));
   }

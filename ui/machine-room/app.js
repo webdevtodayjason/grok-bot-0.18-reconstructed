@@ -387,6 +387,7 @@
   let countdownInterval = null;
   let toastTimer = null;
   let rosterHidden = false;
+  let nowDismissedId = null;
 
   const elements = {
     stage: document.getElementById("stage"),
@@ -547,7 +548,6 @@
     return `<button class="worker-card${selected ? " is-active" : ""}" type="button" data-context-kind="worker" data-context-id="${escapeHtml(worker.id)}" data-status="${escapeHtml(worker.status)}" style="--accent:${escapeHtml(worker.accent)}" aria-pressed="${selected}">
       ${avatarMarkup(worker, "worker-avatar")}
       <span class="worker-copy"><span class="worker-name"><i class="status-dot ${statusClass(worker.status)}"></i>${escapeHtml(worker.name)}</span><span class="worker-status">${escapeHtml(worker.statusText)}</span></span>
-      <span class="voice-meter" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
     </button>`;
   }
 
@@ -585,7 +585,7 @@
     const model = modelById(worker.model);
     const routineCount = routinesForContext({ kind: "worker", id: worker.id }).length;
     return `<div class="context-profile">
-      <div class="island-heading"><div><span class="status-dot ${statusClass(worker.status)}"></span><strong>Agent</strong></div><button class="icon-button compact" type="button" data-context-menu aria-label="Agent options">•••</button></div>
+      <div class="island-heading"><div><span class="status-dot ${statusClass(worker.status)}"></span><strong>Agent</strong></div></div>
       <div class="context-profile-header">${avatarMarkup(worker, "context-profile-avatar")}<div class="context-profile-copy"><span class="context-kind-label">Direct conversation</span><strong>${escapeHtml(worker.name)}</strong><small>${escapeHtml(worker.statusText)}</small></div></div>
       <div class="context-divider"></div>
       <div class="context-detail-list"><div class="context-detail-row"><span>Role</span><strong>${escapeHtml(worker.role)}</strong></div><div class="context-detail-row"><span>Model</span><strong>${escapeHtml(model ? model.name : worker.model)}</strong></div></div>
@@ -600,7 +600,7 @@
     const routineCount = routinesForContext({ kind: "room", id: room.id }).length;
     const memberRows = members.map((worker) => `<div class="member-row">${avatarMarkup(worker, "member-avatar")}<span>${escapeHtml(worker.name)}</span><button class="member-remove" type="button" data-remove-member="${escapeHtml(worker.id)}" aria-label="Remove ${escapeHtml(worker.name)}">×</button></div>`).join("");
     return `<div class="context-profile">
-      <div class="island-heading"><div><span class="status-dot ${statusClass(room.status)}"></span><strong>Room</strong></div><button class="icon-button compact" type="button" data-context-menu aria-label="Room options">•••</button></div>
+      <div class="island-heading"><div><span class="status-dot ${statusClass(room.status)}"></span><strong>Room</strong></div></div>
       <p class="context-room-name">${escapeHtml(room.name)}</p>
       <div class="member-list">${memberRows}</div>
       <button class="text-action" type="button" data-context-action="members"><span>＋</span> Add member</button>
@@ -717,12 +717,19 @@
     const next = scheduledRoutines()[0];
     const display = running || next;
     if (display) {
-      elements.nowIsland.classList.remove("is-dismissed");
+      // Dismissing hides THIS routine, not the island forever -- a different routine coming up is
+      // new information. Un-dismissing on a timer made the button look broken.
+      elements.nowIsland.classList.toggle("is-dismissed", display.id === nowDismissedId);
       elements.nowHeading.textContent = running ? "Now" : "Up next";
       elements.routineTitle.textContent = display.name;
       const performer = workerById(display.delegatedToId || display.coordinatorId || (display.scope.kind === "worker" ? display.scope.id : null));
       elements.routineWorker.textContent = running ? `${performer ? performer.name : contextName()} is working` : `Attached to ${contextName()}`;
-      elements.routineMeta.textContent = running ? "Started moments ago" : `Scheduled in ${formatCountdown(display.nextRunAt)}`;
+      const startedMs = display.lastRunAt ? Date.now() - Number(display.lastRunAt) : null;
+      elements.routineMeta.textContent = !running
+        ? `Scheduled in ${formatCountdown(display.nextRunAt)}`
+        : startedMs == null ? "Running — the host reported no start time"
+        : startedMs < 60_000 ? `Started ${Math.max(1, Math.round(startedMs / 1000))}s ago`
+        : `Started ${Math.round(startedMs / 60_000)}m ago`;
     } else {
       elements.nowIsland.classList.add("is-dismissed");
     }
@@ -730,7 +737,17 @@
       elements.countdown.textContent = formatCountdown(next.nextRunAt);
       elements.countdownLabel.textContent = "next routine";
       elements.scheduleButton.setAttribute("aria-label", `${next.name} runs in ${formatCountdown(next.nextRunAt)}`);
-      elements.scheduleButton.title = `${next.name} · ${contextName()}`;
+      // The arc measures one real span. An unlabelled arc gets read as whatever the viewer
+      // assumes, so the tooltip says which span it is.
+      const from = Number(next.lastRunAt) || 0;
+      const to = Number(next.nextRunAt) || 0;
+      const fill = from && to && to > from
+        ? Math.max(0, Math.min(100, (100 * (Date.now() - from)) / (to - from)))
+        : 0;
+      elements.scheduleButton.style.setProperty("--ring-fill", `${fill.toFixed(1)}%`);
+      elements.scheduleButton.title = from && to
+        ? `${next.name} · ${contextName()} — ${fill.toFixed(0)}% of the wait since its last run`
+        : `${next.name} · ${contextName()}`;
     } else {
       elements.countdown.textContent = "trigger";
       elements.countdownLabel.textContent = "event routine";
@@ -877,7 +894,7 @@
   function agentProfilePanel(worker) {
     const model = modelById(worker.model);
     const routines = routinesForContext({ kind: "worker", id: worker.id });
-    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : "success"}">${escapeHtml(worker.status)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role)}</p><div class="tag-list"><span class="tag">${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section><section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, files, browser session, model, and routines shown here belong to this agent. They are not a one-person room.</p><div class="setting-row"><div><strong>Direct conversation</strong><small>Private operator-to-agent thread</small></div><span class="status-pill success">active</span></div><div class="setting-row"><div><strong>Browser</strong><small>${escapeHtml(worker.browser.url)}</small></div><button class="ghost-button" type="button" data-open-context-browser>Open</button></div></section></div>`;
+    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role)}</p><div class="tag-list"><span class="tag">${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section><section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript and the routines shown here belong to this agent. The model and the browser belong to the whole box and are shared with every other agent on it.</p><div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div><div class="setting-row"><div><strong>Browser</strong><small>${escapeHtml(worker.browser.url)}</small></div><button class="ghost-button" type="button" data-open-context-browser>Open</button></div></section></div>`;
   }
 
   function membersPanel() {
@@ -1039,7 +1056,6 @@
       else if (action.dataset.contextAction === "profile" && activeContext().kind === "worker") openPanel("Agent details", contextName(), agentProfilePanel(contextRecord()));
       return;
     }
-    if (event.target.closest("[data-context-menu]")) simplePanel("context");
   }
 
   function handlePanelClick(event) {
@@ -1092,8 +1108,6 @@
       target.setAttribute("aria-pressed", target.getAttribute("aria-pressed") !== "true");
     } else if (target.hasAttribute("data-open-context-browser")) {
       openDesktop("browser");
-    } else if (target.hasAttribute("data-demo-action")) {
-      showToast("Not built. Nothing was sent to the gateway.");
     }
   }
 
@@ -1207,7 +1221,12 @@
     adapter.setRunPaused(!state.desktop.paused);
     showToast(state.desktop.paused ? "Context run paused" : "Context run resumed");
   });
-  document.getElementById("dismiss-now").addEventListener("click", () => elements.nowIsland.classList.add("is-dismissed"));
+  document.getElementById("dismiss-now").addEventListener("click", () => {
+    const routines = routinesForContext();
+    const display = routines.find((r) => r.status === "running") || scheduledRoutines()[0];
+    nowDismissedId = display ? display.id : null;
+    elements.nowIsland.classList.add("is-dismissed");
+  });
   document.getElementById("theme-toggle").addEventListener("click", () => {
     const root = document.documentElement;
     root.dataset.theme = root.dataset.theme === "mist" ? "dusk" : "mist";
