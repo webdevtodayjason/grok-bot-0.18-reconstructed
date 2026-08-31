@@ -488,6 +488,9 @@
 
   function scheduledRoutines(context = activeContext()) {
     return routinesForContext(context)
+      // A paused routine still carries its next-run timestamp, so counting down to it promised a
+      // run that was never going to fire.
+      .filter((routine) => routine.status !== "paused")
       .filter((routine) => routine.nextRunAt && new Date(routine.nextRunAt).getTime() > Date.now())
       .sort((left, right) => new Date(left.nextRunAt) - new Date(right.nextRunAt));
   }
@@ -827,6 +830,15 @@
     fetch("/box/launch", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ app }),
     }).catch(() => {});
+    // The launch is fire-and-forget by necessity, so confirm separately rather than assuming. A
+    // pane showing an empty desktop with no word about why is how this hid for a whole evening.
+    window.setTimeout(async () => {
+      try {
+        const state = await (await fetch(`/box/surface?app=${encodeURIComponent(app)}`)).json();
+        const caption = elements.desktopWindow.querySelector("[data-box-caption]");
+        if (!state.present && caption) caption.textContent = `${app} did not start on the box — the view below is whatever else is running.`;
+      } catch { /* the check is a courtesy; never let it break the pane */ }
+    }, 16_000);
     const existing = elements.desktopWindow.querySelector("iframe[data-box-vnc]");
     if (existing) {
       elements.desktopWindow.querySelector("[data-box-caption]").textContent = caption;

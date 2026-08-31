@@ -601,6 +601,42 @@ The address bar in the desktop dialog is **decorative** -- it is the prototype's
 navigates nothing. Typing a URL does not browse. Same for the `Context7` / `Reports` /
 `Ticket audit` sub-labels under the surface buttons: hardcoded strings from the mockup.
 
+**Acceptance harness (contract 2026-08-30).** Six commands, all green as of wave 3:
+
+```
+PLAYWRIGHT_DIR=<node_modules with playwright> node scripts/verify-machine-room.mjs --assert-no-silent-mocks
+PLAYWRIGHT_DIR=...                            node scripts/verify-machine-room.mjs --e2e
+PLAYWRIGHT_DIR=...                            node scripts/verify-machine-room.mjs --surfaces
+SAND_PROFILE_DIRS=...                         node scripts/verify-local-turn.mjs --rounds 5
+                                              node scripts/verify-agent-identity.mjs
+                                              node --test tests/*.test.mjs      # the glob matters
+```
+
+`node --test tests/` alone fails on this Node with `Cannot find module .../tests`; the suite is
+fine, the command form is not. The mock list inside the harness is derived from the audit's 55
+MOCK verdicts, not written from memory -- a hand-kept list is how a mock survives its own test.
+
+**Wave 2-3 findings worth keeping.**
+- The roster was hydrated once at boot and never re-read, so `isRunning` froze at load. That is why
+  a worker sat on "Working now" indefinitely while answering normally -- frozen, not wedged. Now
+  re-read on the SSE tick plus a 15s heartbeat.
+- Failed turns left no trace anywhere in this UI: the transcript never grew and the working dots
+  ran to their five-minute cap. The host records them as **error trays** (`getTrays`); they are
+  read and written into the conversation now.
+- **The Pause button stopped nothing** and said "Resume" -- a control that answers while doing
+  nothing is worse than one that is missing. There is no host command to halt a turn in flight, so
+  it is "Pause view".
+- `getListenerIntegrations` answers `{integrations:[...]}` on this host, a third shape after
+  `platforms` and `connections`. Missing it rendered "no connectors" on a box that has two. Each
+  entry carries only `platform`, `isConnected`, `state`, `neededByCount` -- any category or blurb
+  beyond that is invention.
+- The `/model` probe ran *after* workers were shaped, so every worker wore the seed default while
+  the picker showed the truth. Probe first.
+- Paused routines kept their `nextRunAt`, so the countdown promised runs that would never fire.
+- `/box/launch` is detached and answered 200 unconditionally -- it reported success all evening
+  while a shell syntax error meant nothing launched. `GET /box/surface?app=` now reports whether
+  the window is actually present, and the pane says so when it is not.
+
 **Run it.**
 
 ```

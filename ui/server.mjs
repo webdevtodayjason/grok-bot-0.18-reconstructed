@@ -146,6 +146,22 @@ const server = createServer(async (req, res) => {
     // fixed commands, no operator string ever reaches a shell, and the relay only listens on
     // loopback -- the box is already the agent's sandbox, but that is no reason to hand a
     // browser tab arbitrary exec on it.
+    // Did the window actually appear? The launch is detached and cannot report, so the UI asks
+    // afterwards instead of trusting a 200 that only ever meant "the request was accepted".
+    if (req.method === "GET" && url.pathname === "/box/surface") {
+      const CLASSES = { browser: "Google-chrome", terminal: "Xfce4-terminal" };
+      const cls = CLASSES[url.searchParams.get("app")];
+      if (!cls) return fail(res, 400, "unknown app");
+      const script = `for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${cls}"' && echo present && break; done`;
+      const { execFile } = await import("node:child_process");
+      const present = await new Promise((resolve) => {
+        execFile("docker", ["exec", "-e", "DISPLAY=:1", BOX, "sh", "-c", script], (error, stdout) =>
+          resolve(!error && String(stdout).includes("present")));
+      });
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ app: url.searchParams.get("app"), present }));
+    }
+
     if (req.method === "POST" && url.pathname === "/box/launch") {
       // Find-or-launch, then raise. --disable-dev-shm-usage is load-bearing: /dev/shm in this box
       // is 64MB, and without it Chrome dies during startup with nothing in its output but GCM

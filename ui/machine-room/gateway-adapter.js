@@ -89,18 +89,26 @@
   function pluginsOf(raw) {
     const list = Array.isArray(raw) ? raw
       : Array.isArray(raw?.platforms) ? raw.platforms
-      : Array.isArray(raw?.connections) ? raw.connections : [];
+      : Array.isArray(raw?.connections) ? raw.connections
+      : Array.isArray(raw?.integrations) ? raw.integrations : [];
     return list.map((p) => {
       const name = p.name ?? p.platform ?? p.id ?? "Connector";
+      const connected = Boolean(p.isConnected ?? p.connected);
       return {
         id: String(p.id ?? p.platform ?? name).toLowerCase(),
         name: name[0].toUpperCase() + name.slice(1),
         icon: name[0].toUpperCase(),
-        category: "Connector",
-        description: p.description ?? "Connected through the host listener.",
-        status: (p.isConnected ?? p.connected) ? "connected" : "available",
+        // The host reports platform, isConnected, state and neededByCount -- nothing else. Any
+        // category or blurb beyond that would be invented, and a plausible sentence is exactly
+        // what makes fixture data read as fact.
+        category: connected ? "Connected" : "Not connected",
+        description: p.description
+          ?? `Reported by the host as ${p.state ?? (connected ? "connected" : "idle")}.`
+          + (p.neededByCount ? ` ${p.neededByCount} agent(s) want it.` : ""),
+        status: connected ? "connected" : "available",
         account: p.account ?? null,
-        secretField: "OAuth connection",
+        // Connecting a listener is not wired to this UI, so there is no field to fill in.
+        secretField: null,
         tools: [],
         skills: [],
       };
@@ -147,6 +155,15 @@
       call("getListenerIntegrations").catch(() => null),
     ]);
 
+    // Ask the box what it is actually running before stamping any worker with a model name. This
+    // used to happen after shape(), so workers wore the seed's default while the picker showed the
+    // truth -- two numbers on one screen disagreeing about the same fact.
+    let models = seed.models;
+    try {
+      const live = await (await fetch("/model")).json();
+      if (live?.model) models = { default: live.model, available: [{ id: live.model, name: live.model, provider: live.endpoint ?? "box", context: "" }] };
+    } catch { /* the model probe is a convenience, not a dependency */ }
+
     const shape = (a) => ({
       id: a.id,
       name: a.name ?? "Untitled",
@@ -155,7 +172,7 @@
       // Real face first; the vendored SVGs are only the fallback for an agent with no avatar.
       avatar: a.avatarDataUrl || `/avatars/${a.id}`,
       accent: pick(ACCENTS, a.id),
-      model: seed.models?.default ?? "default",
+      model: models?.default ?? "default",
       files: [],
       browser: { label: `${a.name} desktop`, url: "" },
       messages: [],
@@ -177,12 +194,6 @@
     const active = { kind: workers[0] ? "worker" : "room", id: first.id };
     const loaded = await loadContext(active, first.name);
     first.messages = loaded.messages;
-
-    let models = seed.models;
-    try {
-      const live = await (await fetch("/model")).json();
-      if (live?.model) models = { default: live.model, available: [{ id: live.model, name: live.model, provider: live.endpoint ?? "box", context: "" }] };
-    } catch { /* the model probe is a convenience, not a dependency */ }
 
     return {
       ...seed,
