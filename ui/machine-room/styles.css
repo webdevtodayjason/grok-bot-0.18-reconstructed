@@ -1244,7 +1244,10 @@ select:focus-visible {
 
 .composer {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 38px auto;
+  /* Four columns were plus / input / mic / send. The mic button could not act -- nothing in the
+     bundle referenced it -- so removing it left an orphan track and the Send button drifted over
+     the shelf icons beside it. */
+  grid-template-columns: 38px minmax(0, 1fr) auto;
   align-items: center;
   gap: 4px;
   height: 54px;
