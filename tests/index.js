@@ -16,4 +16,5 @@ import "./research-archives.test.mjs";
 import "./router-settings.test.mjs";
 import "./ui-routine-triggers.test.mjs";
 import "./machine-room-decisions.test.mjs";
+import "./machine-room-markdown.test.mjs";
 import "./ui-views-render.test.mjs";

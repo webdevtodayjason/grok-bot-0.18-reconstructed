@@ -1034,10 +1034,17 @@
     // A room has no screen of its own; its members do. Fall back to the lead member's.
     const agentId = context.kind === "worker" ? context.id : (record?.memberIds ?? [])[0] ?? null;
 
+    const borrowedFrom = context.kind === "room" && agentId
+      ? (state.workers.find((w) => w.id === agentId)?.name ?? "a member")
+      : null;
     const paint = (frameUrl, display, shared) => {
+      // A room has no screen of its own -- it is looking at a member's. Saying "Diag Room's own
+      // screen" would invent an ownership the host does not have.
       const line = shared
-        ? `${caption} — shared screen, every agent on this box sees it`
-        : `${caption} — ${escapeHtml(contextName())}'s own screen (display :${display})`;
+        ? `${caption} · shared screen — every agent on this box sees it`
+        : borrowedFrom
+          ? `${caption} · ${escapeHtml(borrowedFrom)}'s screen, shown for this room (display :${display})`
+          : `${caption} · ${escapeHtml(contextName())}'s own screen (display :${display})`;
       const existing = elements.desktopWindow.querySelector("iframe[data-box-vnc]");
       if (existing && mountedDesktop === frameUrl) {
         elements.desktopWindow.querySelector("[data-box-caption]").innerHTML = line;
@@ -1085,12 +1092,12 @@
     } else if (activeDesktopApp === "sheets") {
       elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} sheet</h3><p>Not wired to this host.</p></div><span class="status-pill">unwired</span></div><div class="empty-state">This gateway exposes no sheet for a worker. Nothing is being tracked here.</div></div>`;
     } else if (activeDesktopApp === "terminal") {
-      mountBoxSurface("terminal", "A shell on the box this worker uses.");
+      mountBoxSurface("terminal", "Terminal");
     } else {
       // Browser and Terminal are the live box, not a drawing of one. noVNC re-runs its whole
       // handshake whenever the element is replaced, so the frame is mounted once and left alone;
       // rebuilding it on every render is what made the old desktop reconnect on every repaint.
-      mountBoxSurface("browser", "Live view of the box's shared display :1.");
+      mountBoxSurface("browser", "Browser");
     }
     const runName = document.getElementById("desktop-run-name");
     const working = lead && lead.status === "working";
