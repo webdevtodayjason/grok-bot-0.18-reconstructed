@@ -737,6 +737,38 @@ Two distinct causes, found by working down the stack. Everything below was measu
    **This is not subagent-specific.** The main agent's turns carry the same 26 tools. Whatever is
    broken is broken for everyone, which makes it one break rather than three.
 
+   **The break is one line, and here it is.** `createProductionTurnToolsetHost`
+   (`runner-production-bridge.ts:244`) opens with:
+
+   ```js
+   const factories = !("props" in input) ? {} : createTurnToolsetFactoriesForTurn(...)
+   ```
+
+   The lazy tool host the production run shell uses (`host-runner-composition.ts:2333`, consumed at
+   `:2544` as `toolHost: lazyToolHost()`) passes `turn` and `factoryProvider` but **no `props`** —
+   so `factories` is `{}` and every factory-built tool disappears. Computer, Screenshot and Browser
+   are all factory-built; the 26 that survive are the static ones. That is the whole defect.
+
+   The projections themselves are fine. `createTurnToolInputs` (`:2204`) returns exactly the right
+   shape — the projected inputs including `createComputerToolDependencies`, plus a
+   `turnToolsetFactoryProvider` built from them. It is simply never handed to anything: its only
+   consumer is the `deps.createRunStep` branch at `:2607`, guarded by
+   `runnerOptions.productionTurnRunShell === undefined`, and the run shell **is** defined (set at
+   `:2367`). So the branch never runs and the projections are dropped on the floor.
+
+   **The fix**, for whoever picks this up: give `lazyToolHost` the per-turn inputs. `baseAccessor`
+   is already in scope at the `:2544` call site, so `lazyToolHost` can take a
+   `ProductionTurnToolInputs`, call `createTurnToolInputs` on it, and pass the result as `props`
+   together with the returned `turnToolsetFactoryProvider`. Assemble the full
+   `ProductionTurnToolInputs` there (it needs more than the accessor — `cancelThisRun` and
+   `emitUpdate` are already destructured in `createAgentOwnerInput` a few lines above).
+
+   **Treat this as high-risk.** It is the code path every turn runs through, so a mistake takes out
+   ordinary conversation as well as computer use. Verify with `scripts/verify-local-turn.mjs
+   --rounds 5` before anything else, and confirm the fix by re-adding the tool wire tap (see the
+   commit "Find the real reason computer use does nothing") and checking that `Screenshot` and
+   `Computer` appear in the tool list.
+
    The pieces all exist: `runner/tools/sand-computer-tool.ts:239` defines the `Screenshot` tool
    (`id: "OPENAI_COMPUTER_USE"`), `turn-toolset.ts` wires `createComputerToolInputs` /
    `createScreenshotToolInputs`, and `host-runner-composition.ts:1020` builds

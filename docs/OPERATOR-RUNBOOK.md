@@ -59,10 +59,12 @@ thing to check before trusting anything on screen.
   could not be initialized"), so only `:1` has a usable desktop. The UI says so rather than
   showing you an empty grey rectangle. Fixing it is box-image work, written up in
   `docs/PLUMBING-AUDIT.md` §6f.
-- **Asking a worker to use its browser does not work yet.** It dispatches a computerUse subagent,
-  which finishes without driving anything, and the worker honestly tells you the pass returned
-  nothing. Half the cause is fixed (the model could not receive a screenshot at all); the other
-  half is the missing fork desktop above.
+- **Asking a worker to use its browser does not work yet, and the reason is now known.** No turn
+  on this host is given a computer tool — no `Screenshot`, no `Computer`, for the main agent or a
+  subagent. So a worker asked to drive a desktop answers conversationally and reports back nothing.
+  It is one missing argument in the toolset host, written up with the fix in
+  `docs/PLUMBING-AUDIT.md` §6f. Two contributing causes underneath it are already fixed: the model
+  could not receive a screenshot at all, and the fork displays had no desktop session.
 - **A routine card saying "Dispatched · outcome not reported yet"** means exactly that. The
   outcome replaces it when the host records one.
 
