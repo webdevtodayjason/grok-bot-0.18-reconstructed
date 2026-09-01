@@ -923,6 +923,25 @@ stream-observed signal like the one at :1758.
 another step, and what does it emit there? Do not claim a cause before that is instrumented; this
 failure has already produced two confident wrong answers.
 
+## 6i. Computer use: verified once, then blocked by a request-shape error (2026-09-02)
+
+`scripts/verify-computer-use.mjs` passed cleanly once -- screenshot artifacts 0 -> 1 with a real
+`computerUse` subagent -- which confirms the four fixes underneath it (engine adapter, box resource
+accessor, result parts, subagent toolset gate) are all real.
+
+Subsequent runs abort. The host log shows the model API returning
+`{"message":"Internal error during token generation","type":"server_error","code":"internal"}`.
+
+**Do not write this off as provider flakiness.** Direct `grok-4.6` completions from inside the same
+box, using the same key, succeed 3/3. Something about the request this stack builds triggers it.
+Untested candidates, in order of suspicion: the parent turn declares **33 tools**; its history has
+accumulated **130+ tool results**; the tool JSON Schemas may contain a construct the endpoint rejects
+only in combination.
+
+Next: bisect the request. Send the same conversation with the tool list truncated, then with the
+history trimmed, and find which dimension flips it. The provider tap pattern used throughout §6h is
+the cheap way in.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole

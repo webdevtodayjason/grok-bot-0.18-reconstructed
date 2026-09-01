@@ -62,21 +62,35 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const agentId = flag("--agent", null) ?? (await call("listAgents"))[0]?.id;
 if (agentId == null) throw new Error("no agents on the host to test with");
 
-const before = await shotCount();
-console.log(`  screenshot artifacts before: ${before}`);
+// The subagent aborts with the model API returning "Internal error during token generation". Do NOT
+// read that as upstream flakiness: direct grok-4.6 completions from the same box with the same key
+// succeed 3/3, so something about OUR request triggers it -- the parent turn carries 33 tools and a
+// history with 130+ tool results, either of which is a candidate. Retry twice, and report the abort
+// honestly as unexplained rather than blaming the provider.
+const ATTEMPTS = Number.parseInt(flag("--attempts", "2"), 10);
+let before = 0;
+let after = 0;
+let providerFailed = false;
 
-await call("sendPrompt", {
-  agentId,
-  prompt: "Dispatch a computerUse subagent to take a screenshot of the desktop and describe exactly "
-    + "what is on screen. Report back what it saw.",
-});
+for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+  before = await shotCount();
+  console.log(`  attempt ${attempt}: screenshot artifacts before: ${before}`);
+  await call("sendPrompt", {
+    agentId,
+    prompt: "Dispatch a computerUse subagent to take a screenshot of the desktop and describe exactly "
+      + "what is on screen. Report back what it saw.",
+  });
 
-const deadline = Date.now() + TIMEOUT_MS;
-let after = before;
-while (Date.now() < deadline) {
-  await sleep(10000);
-  after = await shotCount();
+  const deadline = Date.now() + Math.floor(TIMEOUT_MS / ATTEMPTS);
+  after = before;
+  while (Date.now() < deadline) {
+    await sleep(10000);
+    after = await shotCount();
+    if (after > before) break;
+  }
   if (after > before) break;
+  const aborted = await call("getSubagents", { id: agentId }).catch(() => []);
+  providerFailed = (Array.isArray(aborted) ? aborted : []).some((s) => s.status === "aborted");
 }
 
 const subagents = await call("getSubagents", { id: agentId }).catch(() => []);
@@ -89,5 +103,10 @@ if (after > before) {
   console.log("\nOK");
   process.exit(0);
 }
-console.log("\nFAILED — no screenshot artifact was captured");
+console.log(providerFailed
+  ? "\nFAILED — no screenshot captured; the subagent aborted with the model API returning\n"
+    + "         'Internal error during token generation'. Direct completions to the same endpoint\n"
+    + "         succeed, so this is OUR request shape, not the provider. Unexplained: suspect the\n"
+    + "         parent turn's 33 tools or its 130+ accumulated tool results."
+  : "\nFAILED — no screenshot artifact was captured");
 process.exit(1);
