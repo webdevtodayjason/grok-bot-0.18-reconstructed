@@ -1207,7 +1207,23 @@ function streamModelAndCollectToolCalls(
         throw settledResponse.error;
       }
       response = settledResponse.response;
-      if (hasMeaningfulResponseMessageContent(response.messages)) {
+      /**
+       * A provider can return an assistant message carrying the narration but NOT the tool calls it
+       * streamed. Text alone counts as "meaningful", so that first branch won and the streamed
+       * tool-call parts were dropped -- after which `containsToolCall(response.messages)` in
+       * `runStep` read false, the step loop broke, and the turn ended with the work done and never
+       * reported. The buffer already holds those parts; prefer the synthesized message whenever the
+       * stream saw a tool call the response did not carry.
+       */
+      const streamedToolCall = contentBuffer.some(part => part.type === "tool-call");
+      const responseCarriesToolCall = response.messages.some(message =>
+        message.role === "assistant"
+        && Array.isArray(message.content)
+        && (message.content as readonly AssistantContentPart[]).some(part => part.type === "tool-call"));
+      if (
+        hasMeaningfulResponseMessageContent(response.messages)
+        && (!streamedToolCall || responseCarriesToolCall)
+      ) {
         newMessages.push(...response.messages);
       } else if (contentBuffer.some(shouldSynthesizeResponseFromStreamContent)) {
         newMessages.push({

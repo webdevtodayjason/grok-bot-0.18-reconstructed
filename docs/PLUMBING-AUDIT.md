@@ -887,6 +887,15 @@ then nothing.
 asserts the agent names it back. It cannot be satisfied from training or prompt, and it fails
 consistently. Use it rather than judging message text by eye.
 
+**FIXED 2026-09-01.** `tool-stream-executor.ts` assembles the turn's response messages and chose
+between the provider's own messages and a message synthesized from the streamed content buffer. A
+provider can return the narration text without the tool calls it streamed; text alone satisfies
+`hasMeaningfulResponseMessageContent`, so that branch won and the streamed tool-call parts were
+dropped. `runStep`'s `containsToolCall(response.messages)` then read false, the step loop broke, and
+the turn ended with the work done and never reported. The buffer already held those parts (they are
+pushed at ~:977) -- the fix prefers the synthesized message whenever the stream saw a tool call the
+response did not carry. `scripts/verify-work-report.mjs` goes 2/2.
+
 **MEASURED 2026-09-01, cause located.** The provider surfaces tool calls correctly and the agent
 never sees them:
 
