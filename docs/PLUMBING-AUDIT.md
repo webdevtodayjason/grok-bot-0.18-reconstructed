@@ -938,9 +938,20 @@ Untested candidates, in order of suspicion: the parent turn declares **33 tools*
 accumulated **130+ tool results**; the tool JSON Schemas may contain a construct the endpoint rejects
 only in combination.
 
-Next: bisect the request. Send the same conversation with the tool list truncated, then with the
-history trimmed, and find which dimension flips it. The provider tap pattern used throughout §6h is
-the cheap way in.
+**BISECTED 2026-09-02. It is the history, not the tools and not the provider.** The same gate run
+against a FRESH agent passes immediately (artifacts 1 -> 2, subagent running), while the long-lived
+test agent -- 130+ accumulated tool results -- aborts every time. Tool count is identical in both
+cases, so 33 tools is exonerated; direct completions to the same endpoint succeed 3/3, so the
+provider is exonerated.
+
+**This is a product problem, not a test artifact.** Every agent accumulates history, so every agent
+walks toward the point where its turns start failing with an opaque
+`Internal error during token generation`. Whatever should be trimming or compacting that history is
+either absent or not firing on the local-provider route. Worth its own investigation: find the
+compaction path, check whether it runs here at all, and establish the practical ceiling.
+
+Practical note: use a fresh agent for desktop checks, or the gate reports a capability failure that
+is really a context-length failure.
 
 ## 7. The wave plan
 
