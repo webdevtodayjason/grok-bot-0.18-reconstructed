@@ -51,6 +51,8 @@ export const CLOSING_SEND_NUDGE_PROMPT =
 export const MAX_WORK_REDRIVES = 3;
 export const WORK_REDRIVE_PROMPT =
   "Your previous turn replied to the user and then ended without calling a single tool — you acknowledged the request but never did the work it asked for. An acknowledgement is not the work, and from the user's side an unstarted task and a finished one look identical until you tell them otherwise. If the request needs tools — reading, running, editing, searching, reaching another system — start on it now and actually invoke them, then send the real outcome with SendMessage. If it genuinely needed no tools and your reply already answered it in full, end this turn without sending anything further: do not send another message just to break the silence.";
+export const REPORT_REDRIVE_PROMPT =
+  "Your previous turn ran a tool after your last message to the user, and then ended without telling them what it produced. The user is still looking at your acknowledgement; the result exists only in your own context. Send it now with SendMessage: what you actually found or did, in the detail they asked for. Do not re-run the work unless you genuinely need to, and do not send a message that only says you are working on it.";
 export const TASK_ERROR_RESULT_CLASS = "task_error_result";
 export const CONNECT_CODE_NAMES = [
   "Canceled",
@@ -210,6 +212,30 @@ export function requestImpliesAction(prompt: string | undefined): boolean {
   return ACTION_REQUEST_PATTERN.test(trimmed);
 }
 
+/**
+ * The turn where the agent acknowledged, went and did the work, and ended without saying what came
+ * of it. Sibling of `isWorkOwed`, and the stronger of the two: it needs no guess about whether the
+ * request implied action, because the agent answered that question itself by calling a tool. A
+ * purely conversational turn calls no work tool and can never trip this.
+ */
+export function isReportOwed(
+  result: Pick<
+    TurnResult,
+    "sentMessageCount" | "reacted" | "aborted" | "quiescedForUpgrade" | "awaitingUserSelection"
+  >,
+  ticks: { readonly lastWorkTick: number; readonly lastDeliveryTick: number },
+): boolean {
+  if (
+    result.aborted ||
+    result.quiescedForUpgrade === true ||
+    result.awaitingUserSelection === true ||
+    result.reacted ||
+    result.sentMessageCount === 0
+  )
+    return false;
+  return ticks.lastWorkTick > 0 && ticks.lastWorkTick > ticks.lastDeliveryTick;
+}
+
 export interface TurnWorkSignals {
   readonly prompt: string | undefined;
   /** Aggregated over every run in the turn; undefined when no run reported it. */
@@ -316,6 +342,15 @@ export class TurnRuntime {
   readonly pendingToolCallStarts = new Map<string, Map<string, number>>();
   readonly workToolCallCounts = new Map<string, number>();
   readonly deliveryToolCallCounts = new Map<string, number>();
+  /**
+   * Counts answer "did it work" but not "did it work AFTER it last spoke", and the failure operators
+   * actually hit is the latter: the agent acknowledges, runs the tool, and the turn ends with the
+   * output still in its own context. A per-session monotonic tick, and the tick of the last call of
+   * each kind, is all it takes to see that ordering.
+   */
+  readonly toolCallTicks = new Map<string, number>();
+  readonly lastWorkToolTick = new Map<string, number>();
+  readonly lastDeliveryToolTick = new Map<string, number>();
   /** Consecutive work-owed turns per session; survives the turn, unlike the counts. */
   readonly workRedriveStreaks = new Map<string, number>();
 
@@ -600,6 +635,9 @@ export class TurnRuntime {
           this.pendingToolCallStarts,
           this.workToolCallCounts,
           this.deliveryToolCallCounts,
+          this.toolCallTicks,
+          this.lastWorkToolTick,
+          this.lastDeliveryToolTick,
           this.activeRequestPrompts,
           this.activeRequestSources,
         ])
@@ -686,7 +724,11 @@ export class TurnRuntime {
         });
       }
     }
-    const workOwed = isWorkOwed(latest, {
+    const reportOwed = isReportOwed(latest, {
+      lastWorkTick: this.lastWorkToolTick.get(session.id) ?? 0,
+      lastDeliveryTick: this.lastDeliveryToolTick.get(session.id) ?? 0,
+    });
+    const workOwed = reportOwed || isWorkOwed(latest, {
       prompt: this.activeRequestPrompts.get(session.id),
       madeWorkToolCall: workReported,
       workToolCalls: this.workToolCallCounts.get(session.id) ?? 0,
@@ -710,7 +752,7 @@ export class TurnRuntime {
       // settled result would record `aborted` for it. Keep the original on any failure.
       let redriven: Awaited<ReturnType<typeof runner.run>> | undefined;
       try {
-        redriven = await runner.run(WORK_REDRIVE_PROMPT, {
+        redriven = await runner.run(reportOwed ? REPORT_REDRIVE_PROMPT : WORK_REDRIVE_PROMPT, {
           hidden: true,
           ackToken,
           traceCtx,
@@ -795,10 +837,15 @@ export class TurnRuntime {
             starts.set(update.id, performance.now());
             // One count per distinct call, split by whether it was the agent
             // working or the agent talking. Feeds the work-owed redrive.
-            const counts = isDeliveryToolCallName(String(update.name ?? ""))
+            const isDelivery = isDeliveryToolCallName(String(update.name ?? ""));
+            const counts = isDelivery
               ? this.deliveryToolCallCounts
               : this.workToolCallCounts;
             counts.set(runSession.id, (counts.get(runSession.id) ?? 0) + 1);
+            const tick = (this.toolCallTicks.get(runSession.id) ?? 0) + 1;
+            this.toolCallTicks.set(runSession.id, tick);
+            (isDelivery ? this.lastDeliveryToolTick : this.lastWorkToolTick)
+              .set(runSession.id, tick);
           }
           const dual = sandDualSurfaceToolTelemetry(update.name);
           if (
