@@ -47,9 +47,12 @@ import {
 } from "./runner/tools/turn-toolset.js";
 import type {
   TurnAwaitToolFactoryInput,
+  TurnBoxHelpToolFactoryInput,
   TurnCloudAgentToolFactoryInput,
+  TurnFileTransferToolFactoryInput,
   TurnMcpManagementToolFactoryInput,
   TurnReadToolFactoryInput,
+  TurnSubagentManagementToolFactoryInput,
   TurnWebFetchToolFactoryInput,
   TurnWebSearchToolFactoryInput,
 } from "./runner/tools/turn-toolset.js";
@@ -71,7 +74,7 @@ import {
   SAND_EXTERNAL_AWAIT_SHELL_TOOL_NAME,
   SAND_EXTERNAL_READ_TOOL_NAME,
 } from "./sand-activity.js";
-import { connectorCardEmissionToMessage } from "./runner/tools/box-help-tool.js";
+import { connectorCardEmissionToMessage, type BoxHelpOutcome } from "./runner/tools/box-help-tool.js";
 import { createAgentPromptSession } from "./extensions/inference/extension.js";
 import { CONNECTOR_MANIFESTS } from "../shared/channels.js";
 import { parseStoredTrigger } from "./automations/automation-trigger.js";
@@ -787,6 +790,16 @@ function createRunnerSubagentManagement(
     steerSubagent: (id, message) => value.steerSubagent(id, message),
     abortSubagent: id => value.abortSubagent(id),
   };
+}
+
+/** A missing handoff service must fail the tool, not report a handoff that never happened. */
+function isBoxHelpOutcome(value: unknown): value is BoxHelpOutcome {
+  if (typeof value !== "object" || value == null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.requestId !== "string") return false;
+  return candidate.kind === "started"
+    || (candidate.kind === "already-pending"
+      && typeof candidate.instruction === "string");
 }
 
 function createRunnerCloudWatch(
@@ -2036,6 +2049,8 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
     ): TurnToolsetHostFactoryProvider => {
       const cloudAgent = dependencies.cloudAgent;
       const mcpManagement = dependencies.mcpManagement;
+      const subagentManagement = dependencies.subagentManagement;
+      const startHandoff = method(extensions.api("session"), "startHandoff");
       const provider: TurnToolsetHostFactoryProvider = {
       createSendMessageToolInputs: turn => ({
         dependencies: turn.emitUpdate === undefined
@@ -2083,6 +2098,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           throw new TypeError("remote box resource accessor is not bound");
         }
         const modes = autoReviewGate?.currentModes();
+        const autoRunInstructions = autoReviewGate?.userInstructions();
         return {
           dependencies: createHostComputerToolDependencies({
             resourceAccessor: accessor as never,
@@ -2104,9 +2120,11 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                   const windowIndex = boxAgentWindowIndex(remoteBox as never, session.id);
                   return windowIndex ?? (boxSupportsMultiWindow(remoteBox as never) ? undefined : 1);
                 },
-                ...(autoReviewGate === null || autoReviewGate === undefined
+                // userInstructions() is itself optional, so gating on the gate rather than the
+                // value put an explicit `undefined` on an exactOptionalPropertyTypes property.
+                ...(autoRunInstructions === undefined
                   ? {}
-                  : { userAutoRunInstructions: autoReviewGate.userInstructions() }),
+                  : { userAutoRunInstructions: autoRunInstructions }),
               },
             }),
             ...(persistImageForTurn === undefined ? {} : { persistImage: persistImageForTurn }),
@@ -2137,6 +2155,75 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           }),
         };
       },
+      /**
+       * CopyToBox/CopyFromBox were built by the toolset and never registered, while the system
+       * prompt promised them unconditionally -- so agents narrated transfers they had no tool for.
+       * The controller comes from the prompt glue rather than a second copy, so the tools address
+       * the same box and the same user-computer registry the prompt describes.
+       */
+      ...(productionPromptGlue === undefined
+        ? {}
+        : {
+            createFileTransferToolInputs: (): TurnFileTransferToolFactoryInput => ({
+              controller: productionPromptGlue.createFileTransferController(),
+            }),
+          }),
+      /**
+       * The tool, the handoff service and the resume path all existed; nothing joined them, so an
+       * agent stuck on a login or captcha had no way to hand the desktop to a human. requestHelp is
+       * the same session-extension entry the runner's own boxHandoff option calls. The send-message
+       * carries the handoff so turn-runtime stamps the transcript entry with its request id -- that
+       * stamp is what the hand-back resolves against.
+       */
+      ...(startHandoff === undefined
+        ? {}
+        : {
+            createRequestBoxHelpToolInputs: (turn): TurnBoxHelpToolFactoryInput => ({
+              dependencies: {
+                getAgentId: () => session.id,
+                // `turn.cancelThisRun` bottoms out at a no-op stub in the production run shell,
+                // so the tool would tell the user their box was handed over and the run would carry
+                // straight on. Interrupt the runner directly, the way the owner-level
+                // cancelThisRun does.
+                endTurn: () => {
+                  const runner = builtRunner as { interrupt?: (value: string) => boolean } | undefined;
+                  runner?.interrupt?.("handed the box to the user");
+                },
+                requestHelp: async request => {
+                  const outcome = await startHandoff({
+                    agentId: request.agentId,
+                    instruction: request.instruction,
+                    telemetry: request.telemetry,
+                  });
+                  if (!isBoxHelpOutcome(outcome)) {
+                    throw new TypeError("box handoff service is not bound");
+                  }
+                  return outcome;
+                },
+                onSendMessage: (message, timestampMs, metadata) => {
+                  const update = {
+                    type: "send-message",
+                    message,
+                    timestampMs,
+                    boxHandoff: {
+                      requestId: metadata.requestId,
+                      instruction: metadata.instruction,
+                    },
+                  };
+                  if (turn.emitUpdate === undefined) {
+                    hooks.transport.onUpdate(update);
+                    return;
+                  }
+                  turn.emitUpdate({
+                    ...update,
+                    ...(turn.ackToken === undefined
+                      ? {}
+                      : { ackToken: turn.ackToken }),
+                  });
+                },
+              },
+            }),
+          }),
       createReactionToolInputs: turn => ({
         dependencies: turn.emitUpdate === undefined
           ? dependencies.reaction
@@ -2235,6 +2322,23 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               };
             },
           }),
+        /**
+         * The scope trap this lane exists for: `subagentManagement` is a local inside
+         * hostDependencies(), NOT a binding of this literal, and an earlier attempt to read it as
+         * a bare identifier here shipped and threw "subagentManagement is not defined" on every
+         * turn. It reaches this scope only as a field of the `dependencies` parameter, hoisted
+         * above. turn-toolset's `props.hostDependencies` fallback does not cover this: those props
+         * come from createTurnToolInputs, which the production run-shell path never uses -- so
+         * without this entry an agent can dispatch a subagent and then never check, steer or stop
+         * it.
+         */
+        ...(subagentManagement === undefined
+          ? {}
+          : {
+              createSubagentManagementToolInputs: (): TurnSubagentManagementToolFactoryInput => ({
+                controller: subagentManagement,
+              }),
+            }),
         ...(mcpManagement === undefined
           ? {}
           : {

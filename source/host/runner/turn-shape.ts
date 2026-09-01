@@ -1,3 +1,4 @@
+import { SEND_MESSAGE_TOOL_CALL_OUTLINE_NAME } from "./conversation-outline.js";
 import { isInjectedReminderMessage } from "./send-message-reminder-middleware.js";
 import { SAND_REACT_TO_MESSAGE_TOOL_NAME } from "./tools/sand-reaction-tool.js";
 import { SAND_SEND_MESSAGE_TOOL_NAME } from "./tools/send-message-tool.js";
@@ -6,6 +7,21 @@ export const DELIVERY_TOOL_NAMES = new Set([
   SAND_SEND_MESSAGE_TOOL_NAME,
   SAND_REACT_TO_MESSAGE_TOOL_NAME,
 ]);
+
+/**
+ * The delivery tools under both spellings they travel by: prompt messages name
+ * the tool, live tool-call updates name the proto oneof case. Keep this set to
+ * calls that are certainly delivery — anything wrongly listed here reads as
+ * "the agent did no work" and would earn it an undeserved redrive.
+ */
+export const DELIVERY_TOOL_CALL_NAMES = new Set([
+  ...DELIVERY_TOOL_NAMES,
+  SEND_MESSAGE_TOOL_CALL_OUTLINE_NAME,
+]);
+
+export function isDeliveryToolCallName(name: string): boolean {
+  return DELIVERY_TOOL_CALL_NAMES.has(name);
+}
 
 export interface CorePart {
   readonly type: string;
@@ -150,4 +166,34 @@ export function turnEndedOnSilentToolCalls(
     }
   }
   return ackedFirst;
+}
+
+/**
+ * Whether the turn called a tool that was not a delivery. Talking is not
+ * working: a turn whose every tool call was a SendMessage answered the user and
+ * did nothing else, which is the one shape `turnEndedOnSilentToolCalls` cannot
+ * see because it only looks at how the turn ended.
+ */
+export function turnMadeWorkToolCall(
+  rawMessages: readonly unknown[],
+): boolean {
+  const messages = rawMessages.map(asCoreMessage);
+  let boundary = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message === undefined || isInjectedReminderMessage(message)) continue;
+    if (message.role === "user" || message.role === "system") {
+      boundary = index;
+      break;
+    }
+  }
+
+  for (let index = boundary + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message === undefined || message.role !== "assistant") continue;
+    if (toolCallNames(message).some((name) => !isDeliveryToolCallName(name))) {
+      return true;
+    }
+  }
+  return false;
 }

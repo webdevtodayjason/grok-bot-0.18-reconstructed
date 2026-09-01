@@ -827,16 +827,37 @@
       const coordinator = workerById(routine.coordinatorId);
       const delegate = workerById(routine.delegatedToId);
       const running = routine.status === "running";
+      const paused = routine.status === "paused";
       const RUN_LABEL = { passed: "✓ Last run succeeded", running: "● Running now…", failed: "✕ Last run failed", dispatched: "→ Dispatched · outcome not reported yet", unknown: "· Last run outcome not reported" };
       const lastResult = routine.lastRun
         ? `<div class="run-result">${escapeHtml(RUN_LABEL[routine.lastRun.status] ?? RUN_LABEL.unknown)}${routine.lastRun.duration ? ` · ${escapeHtml(routine.lastRun.duration)}` : ""}</div>`
         : `<div class="run-result">Never run</div>`;
-      return `<article class="routine-card"><div><div class="routine-header"><h3>${escapeHtml(routine.name)}</h3><span class="status-pill ${running ? "working" : routine.status === "paused" ? "" : "success"}">${escapeHtml(running ? "running" : routine.status)}</span></div><p>${escapeHtml(routine.instruction)}</p><div class="routine-meta"><span class="tag">◷ ${escapeHtml(routine.trigger)}</span><span class="tag">attached · ${escapeHtml(routineScopeLabel(routine))}</span>${coordinator ? `<span class="tag">coordinates · ${escapeHtml(coordinator.name)}</span>` : ""}${delegate ? `<span class="tag">runs as · ${escapeHtml(delegate.name)}</span>` : ""}</div>${routine.nextRunAt ? `<div class="run-result">Next run in ${escapeHtml(formatCountdown(routine.nextRunAt))}</div>` : ""}${lastResult}</div><div><button class="primary-button" type="button" data-run-routine="${escapeHtml(routine.id)}" ${running ? "disabled" : ""}>${running ? "Running…" : "Test run"}</button></div></article>`;
+      // Pause, edit and delete are setAgentAutomationEnabled / updateAgentAutomation /
+      // deleteAgentAutomation on the gateway. The card had a Test run button and nothing else, so
+      // a routine written here could only ever be run, never stopped or corrected.
+      const controls = `<button class="primary-button" type="button" data-run-routine="${escapeHtml(routine.id)}" ${running ? "disabled" : ""}>${running ? "Running…" : "Test run"}</button><button class="ghost-button" type="button" data-toggle-routine="${escapeHtml(routine.id)}" data-routine-paused="${paused}">${paused ? "Resume" : "Pause"}</button><button class="ghost-button" type="button" data-edit-routine="${escapeHtml(routine.id)}">Edit</button><button class="ghost-button" type="button" data-delete-routine="${escapeHtml(routine.id)}">Delete</button>`;
+      return `<article class="routine-card"><div><div class="routine-header"><h3>${escapeHtml(routine.name)}</h3><span class="status-pill ${running ? "working" : paused ? "" : "success"}">${escapeHtml(running ? "running" : routine.status)}</span></div><p>${escapeHtml(routine.instruction)}</p><div class="routine-meta"><span class="tag">◷ ${escapeHtml(routine.trigger)}</span><span class="tag">attached · ${escapeHtml(routineScopeLabel(routine))}</span>${coordinator ? `<span class="tag">coordinates · ${escapeHtml(coordinator.name)}</span>` : ""}${delegate ? `<span class="tag">runs as · ${escapeHtml(delegate.name)}</span>` : ""}</div>${routine.nextRunAt ? `<div class="run-result">Next run in ${escapeHtml(formatCountdown(routine.nextRunAt))}</div>` : ""}${lastResult}</div><div style="display:grid;gap:6px;align-content:start">${controls}</div></article>`;
     }).join("") : `<div class="empty-state"><div><strong>No routines attached to ${escapeHtml(name)}</strong><p>Create one here and it will belong to this ${context.kind === "worker" ? "agent" : "room"}—not to the whole system.</p></div></div>`;
-    return `<div class="panel-intro"><p>These routines belong only to <strong>${escapeHtml(name)}</strong>. ${context.kind === "room" ? "A room routine can coordinate several members and delegate its execution step." : "An agent routine runs in this agent’s own context."}</p><details class="routine-create"><summary class="secondary-button">＋ New routine</summary><form data-new-routine><div class="field"><label for="routine-name">Name</label><input id="routine-name" name="name" required placeholder="e.g. Morning ticket sweep" /></div><div class="field"><label for="routine-prompt">What it should do</label><textarea id="routine-prompt" name="prompt" rows="3" required placeholder="Written as if you were asking in chat"></textarea></div><div class="field"><label>Triggers</label><div id="trigger-stack">${triggerStackMarkup()}</div></div><div class="form-actions"><button class="primary-button" type="submit">Create routine</button></div></form></details></div><div class="routine-list">${cards}</div>`;
+    // One form serves both writes: the trigger stack is the hard part of it and an edit that
+    // could not reach the stack would only ever be a rename.
+    const editing = editingRoutineId ? routines.find((routine) => routine.id === editingRoutineId) : null;
+    const form = `<details class="routine-create"${editing ? " open" : ""}><summary class="secondary-button">${editing ? `Editing ${escapeHtml(editing.name)}` : "＋ New routine"}</summary><form ${editing ? `data-edit-routine-form="${escapeHtml(editing.id)}"` : "data-new-routine"}><div class="field"><label for="routine-name">Name</label><input id="routine-name" name="name" required placeholder="e.g. Morning ticket sweep" value="${escapeHtml(editing ? editing.name : "")}" /></div><div class="field"><label for="routine-prompt">What it should do</label><textarea id="routine-prompt" name="prompt" rows="3" required placeholder="Written as if you were asking in chat">${escapeHtml(editing ? editing.instruction : "")}</textarea></div><div class="field"><label>Triggers</label><div id="trigger-stack">${triggerStackMarkup()}</div></div><div class="form-actions">${editing ? `<button class="ghost-button" type="button" data-cancel-routine-edit>Cancel</button>` : ""}<button class="primary-button" type="submit">${editing ? "Save changes" : "Create routine"}</button></div></form></details>`;
+    return `<div class="panel-intro"><p>These routines belong only to <strong>${escapeHtml(name)}</strong>. ${context.kind === "room" ? "A room routine can coordinate several members and delegate its execution step." : "An agent routine runs in this agent’s own context."}</p>${form}</div><div class="routine-list">${cards}</div>`;
+  }
+
+  function resetRoutineForm() {
+    draftTriggers = [blankTrigger("cron")];
+    editingRoutineId = null;
   }
 
   function renderRoutinesPanel() {
+    // An armed delete lives on the button's own label, so any repaint disarms it: a button reading
+    // "Delete" must never be one click from deleting.
+    armedDeleteId = null;
+    // The editor belongs to one routine in one context. Switching context leaves it pointing at a
+    // routine that is no longer on screen, and its half-typed triggers would then be submitted
+    // here as a brand new one.
+    if (editingRoutineId && !routinesForContext().some((routine) => routine.id === editingRoutineId)) resetRoutineForm();
     openPanel(activeContext().kind === "worker" ? "Agent routines" : "Room routines", `${contextName()} routines`, routinesPanel());
   }
 
@@ -904,11 +925,57 @@
     ["pr-opened", "PR opened"], ["pr-merged", "PR merged"], ["review-requested", "Review requested"],
     ["issue-assigned", "Issue assigned"], ["ci-failed", "CI failed"], ["ci-passed", "CI passed"],
   ];
+  const SLACK_MATCHES = [
+    ["message", "Any message"], ["mention", "When @mentioned"], ["keyword", "Keyword match"], ["reaction", "A reaction"],
+  ];
+  const LINEAR_EVENTS = [
+    ["issueCreated", "Issue created"], ["statusChanged", "Issue status changed"], ["endOfCycle", "End of cycle"],
+  ];
+  const SENTRY_EVENTS = [
+    ["issueCreated", "Created"], ["issueResolved", "Resolved"], ["issueAssigned", "Assigned"],
+    ["issueArchived", "Archived"], ["issueUnresolved", "Unresolved"], ["issueAny", "Any issue event"],
+  ];
+  const PAGERDUTY_EVENTS = [
+    ["incidentTriggered", "Triggered"], ["incidentAcknowledged", "Acknowledged"], ["incidentResolved", "Resolved"],
+    ["incidentEscalated", "Escalated"], ["incidentAny", "Any incident event"],
+  ];
 
   let draftTriggers = [{ type: "cron", schedule: "0 8 * * 1-5" }];
+  // Which routine the form is editing. Panel-local like draftTriggers: the panel is rebuilt from
+  // its markup on every open, so there is nowhere else for it to live.
+  let editingRoutineId = null;
+  let armedDeleteId = null;
+
+  // The host parses each trigger into a typed listener and throws away the members it cannot
+  // read (automation-trigger.ts parseMember), then automation-store.upsert writes nothing at all
+  // if that leaves none -- and the gateway answers 200 either way. A flat { type: "slack",
+  // channel, keyword } parses to nothing. These are the shapes parseMember actually accepts,
+  // ported from the operator UI's blankTrigger rather than invented here.
+  function blankTrigger(kind) {
+    if (kind === "cron") return { type: "cron", schedule: "0 8 * * 1-5" };
+    if (kind === "slack") return { type: "slack", channel: "*", match: { kind: "message" } };
+    if (kind === "github") return { type: "github", repo: "", events: ["pr-opened"] };
+    if (kind === "linear") return { type: "linear", event: { case: "issueCreated" }, projectIds: [], teamIds: [] };
+    if (kind === "sentry") return { type: "sentry", event: { case: "issueCreated" }, projectIds: [] };
+    if (kind === "pagerduty") return { type: "pagerduty", event: { case: "incidentTriggered" }, serviceIds: [] };
+    return { type: "microsoftTeams", tenantId: "", teamId: "", teamIds: [], channelIds: [],
+      messageContains: "", messageContainsIsRegex: false, blockUnauthenticatedTeamsUsers: false };
+  }
+
+  // A group trigger is n listeners, anything else is one. Cloned, because the form mutates what
+  // it is handed and the card behind it is drawn from the same snapshot.
+  function triggerMembers(spec) {
+    const members = spec == null ? [] : spec.type === "group" ? (spec.listeners ?? []) : [spec];
+    return members.length ? members.map((m) => JSON.parse(JSON.stringify(m))) : [blankTrigger("cron")];
+  }
+
+  const isCiEvent = (kind) => kind === "ci-passed" || kind === "ci-failed";
+  const idList = (value) => String(value).split(/[,\s]+/).filter(Boolean);
 
   // Ported from the old operator UI. Each rule is a field the host needs and will not complain
   // about: an incomplete trigger is accepted and then never fires, which is the worst outcome.
+  // The id filters are genuinely optional -- the host treats an empty list as "everything" -- so
+  // demanding a Linear team or a Sentry project here refused triggers the host would have taken.
   function triggerProblem(t) {
     if (t.type === "cron") {
       const v = String(t.schedule ?? "").trim();
@@ -919,11 +986,12 @@
     if (t.type === "github") {
       if (!/^[^\s/]+\/[^\s/]+$/.test(String(t.repo ?? "").trim())) return "needs owner/repo";
       if (!(t.events ?? []).length) return "pick at least one event";
-      if ((t.events ?? []).some((e) => e.startsWith("ci-")) && !String(t.ciBranch ?? "").trim()) return "CI events need a branch";
+      if ((t.events ?? []).some(isCiEvent) && !String(t.ciBranch ?? "").trim()) return "CI events need a branch";
       return null;
     }
     if (t.type === "slack") {
       if (!String(t.channel ?? "").trim()) return "needs a channel, or * for anywhere";
+      if (t.match?.kind === "keyword" && !String(t.match.keyword ?? "").trim()) return "needs a keyword";
       return null;
     }
     if (t.type === "microsoftTeams") {
@@ -931,24 +999,48 @@
       if (!String(t.teamId ?? "").trim()) return "needs a team id";
       return null;
     }
-    if (t.type === "linear" && !String(t.teamKey ?? "").trim()) return "needs a Linear team key";
-    if (t.type === "sentry" && !String(t.project ?? "").trim()) return "needs a Sentry project";
-    if (t.type === "pagerduty" && !String(t.service ?? "").trim()) return "needs a PagerDuty service";
     return null;
+  }
+
+  // Field names are the host's, not the form's: a Slack match and its keyword nest under match,
+  // an event case nests under event, and the id filters are lists. Writing any of them flat is
+  // exactly what the host was dropping.
+  function applyTrigger(t, field, value) {
+    if (field === "match") t.match = value === "keyword" ? { kind: "keyword", keyword: "" } : { kind: value };
+    else if (field === "keyword") t.match = { kind: "keyword", keyword: value };
+    else if (field === "event") t.event = value === "statusChanged" ? { case: value, statusIds: [] }
+      : value === "endOfCycle" ? { case: value, cycleIds: [] } : { case: value };
+    else if (field === "ids") t[t.type === "pagerduty" ? "serviceIds" : "projectIds"] = idList(value);
+    else if (field === "teamIds") t.teamIds = idList(value);
+    else if (field === "userAllowlist") {
+      const users = idList(value);
+      if (users.length) t.userAllowlist = users; else delete t.userAllowlist;
+    } else t[field] = value;
   }
 
   function triggerFields(t, i) {
     const box = (name, label, value, hint) =>
       `<div class="field"><label for="trig-${i}-${name}">${escapeHtml(label)}</label><input id="trig-${i}-${name}" data-trig="${i}" data-trig-field="${name}" value="${escapeHtml(String(value ?? ""))}" placeholder="${escapeHtml(hint ?? "")}" /></div>`;
+    const pick = (name, label, options, current) =>
+      `<div class="field"><label for="trig-${i}-${name}">${escapeHtml(label)}</label><select id="trig-${i}-${name}" data-trig="${i}" data-trig-field="${name}">${options.map(([v, l]) => `<option value="${v}" ${String(current) === v ? "selected" : ""}>${escapeHtml(l)}</option>`).join("")}</select></div>`;
     if (t.type === "cron") return box("schedule", "Cron expression", t.schedule, "0 8 * * 1-5");
-    if (t.type === "slack") return box("channel", "Channel", t.channel, "#support or * for anywhere") + box("keyword", "Only when it mentions (optional)", t.keyword, "");
+    if (t.type === "slack") return pick("match", "Fires on", SLACK_MATCHES, t.match?.kind)
+      + box("channel", "Channel", t.channel, "#support or * for anywhere")
+      + (t.match?.kind === "keyword" ? box("keyword", "Containing", t.match.keyword, "outage") : "");
     if (t.type === "github") return box("repo", "Repository", t.repo, "owner/repo")
       + `<div class="field"><label>Events</label><div class="tag-list">${GITHUB_EVENTS.map(([v, l]) => `<label class="tag"><input type="checkbox" data-trig="${i}" data-trig-event="${v}" ${(t.events ?? []).includes(v) ? "checked" : ""} /> ${escapeHtml(l)}</label>`).join("")}</div></div>`
-      + ((t.events ?? []).some((e) => e.startsWith("ci-")) ? box("ciBranch", "CI branch", t.ciBranch, "main") : "");
-    if (t.type === "linear") return box("teamKey", "Team key", t.teamKey, "ENG");
-    if (t.type === "sentry") return box("project", "Project", t.project, "grok-bot");
-    if (t.type === "pagerduty") return box("service", "Service", t.service, "production");
-    if (t.type === "microsoftTeams") return box("tenantId", "Tenant id", t.tenantId, "") + box("teamId", "Team id", t.teamId, "");
+      + ((t.events ?? []).some(isCiEvent) ? box("ciBranch", "CI branch", t.ciBranch, "main") : "")
+      + box("userAllowlist", "Only from (optional)", (t.userAllowlist ?? []).join(", "), "Anyone");
+    if (t.type === "linear") return pick("event", "Fires on", LINEAR_EVENTS, t.event?.case)
+      + box("ids", "Project ids (optional)", (t.projectIds ?? []).join(", "), "All projects")
+      + box("teamIds", "Team ids (optional)", (t.teamIds ?? []).join(", "), "All teams");
+    if (t.type === "sentry") return pick("event", "Fires on", SENTRY_EVENTS, t.event?.case)
+      + box("ids", "Project ids (optional)", (t.projectIds ?? []).join(", "), "All projects");
+    if (t.type === "pagerduty") return pick("event", "Fires on", PAGERDUTY_EVENTS, t.event?.case)
+      + box("ids", "Service ids (optional)", (t.serviceIds ?? []).join(", "), "All services");
+    if (t.type === "microsoftTeams") return box("tenantId", "Tenant id", t.tenantId, "")
+      + box("teamId", "Team id", t.teamId, "")
+      + box("messageContains", "Containing (optional)", t.messageContains, "Any text");
     return "";
   }
 
@@ -1226,14 +1318,16 @@
     const field = el.dataset.trigField;
     if (field === "type") {
       // Keep only the type: the fields of one trigger kind mean nothing to another, and carrying
-      // them over is how a Slack channel ends up on a Sentry trigger.
-      draftTriggers[Number(el.dataset.trig)] = el.value === "cron"
-        ? { type: "cron", schedule: "0 8 * * 1-5" }
-        : el.value === "github" ? { type: "github", events: [] } : { type: el.value };
+      // them over is how a Slack channel ends up on a Sentry trigger. A bare { type } was itself
+      // a shape the host drops, so the replacement is the full blank the host will parse.
+      draftTriggers[Number(el.dataset.trig)] = blankTrigger(el.value);
       redrawTriggerStack();
       return;
     }
-    t[field] = el.value;
+    applyTrigger(t, field, el.value);
+    // These two decide which fields exist below them. Both are selects, so redrawing here cannot
+    // pull the caret out of a half-typed box.
+    if (field === "match" || field === "event") redrawTriggerStack();
   }
 
   function handlePanelClick(event) {
@@ -1268,7 +1362,6 @@
       adapter.togglePluginTool(selectedPluginId, target.dataset.toggleTool);
       renderPluginsPanel();
     } else if (target.dataset.runRoutine) {
-      const context = activeContext();
       const routineId = target.dataset.runRoutine;
       adapter.runRoutine(routineId).catch((error) => {
         showToast(`Could not run that routine: ${error.message}`);
@@ -1279,6 +1372,46 @@
         showToast(`${routine.name} dispatched — the outcome appears on the card when the host reports it.`);
       });
       renderRoutinesPanel();
+    } else if (target.dataset.toggleRoutine) {
+      const routineId = target.dataset.toggleRoutine;
+      const isEnabled = target.dataset.routinePaused === "true";
+      // The adapter reads the flag back before resolving, so this toast reports the host's state
+      // and not the click.
+      adapter.setRoutineEnabled(routineId, isEnabled)
+        .then((routine) => { renderRoutinesPanel(); showToast(`${routine.name} ${isEnabled ? "resumed" : "paused"}`); })
+        .catch((error) => showToast(`Could not ${isEnabled ? "resume" : "pause"} that routine: ${error.message}`));
+    } else if (target.dataset.editRoutine) {
+      const routine = state.routines.find((entry) => entry.id === target.dataset.editRoutine);
+      if (routine) {
+        editingRoutineId = routine.id;
+        // triggerSpec is the host's own stored trigger, not the sentence on the card: an editor
+        // seeded from triggerDescription would rewrite the trigger as whatever it could parse.
+        draftTriggers = triggerMembers(routine.triggerSpec);
+        renderRoutinesPanel();
+      }
+    } else if (target.hasAttribute("data-cancel-routine-edit")) {
+      resetRoutineForm();
+      renderRoutinesPanel();
+    } else if (target.dataset.deleteRoutine) {
+      const routineId = target.dataset.deleteRoutine;
+      // Two clicks rather than confirm(): a native dialog on top of a modal panel is not what the
+      // rest of this looks like, and the host removes the routine's folder outright.
+      if (armedDeleteId !== routineId) {
+        armedDeleteId = routineId;
+        target.textContent = "Confirm";
+        window.setTimeout(() => {
+          if (armedDeleteId !== routineId) return;
+          armedDeleteId = null;
+          target.textContent = "Delete";
+        }, 4000);
+        showToast("Click again to delete. The host keeps no copy.");
+        return;
+      }
+      armedDeleteId = null;
+      if (editingRoutineId === routineId) resetRoutineForm();
+      adapter.deleteRoutine(routineId)
+        .then((name) => { renderRoutinesPanel(); showToast(`${name} deleted`); })
+        .catch((error) => { renderRoutinesPanel(); showToast(`Could not delete that routine: ${error.message}`); });
     } else if (target.dataset.manageMember && activeContext().kind === "room") {
       if (target.dataset.memberAction === "add") adapter.addMember(activeContext().id, target.dataset.manageMember);
       else adapter.removeMember(activeContext().id, target.dataset.manageMember);
@@ -1320,7 +1453,7 @@
         renderPluginsPanel();
         showToast(`${plugin.name} connected; the entered value was discarded by this demo`);
       }
-    } else if (form.hasAttribute("data-new-routine")) {
+    } else if (form.hasAttribute("data-new-routine") || form.dataset.editRoutineForm) {
       const data = new FormData(form);
       const submit = form.querySelector("button[type=submit]");
       submit.disabled = true;
@@ -1331,20 +1464,28 @@
         return;
       }
       const context = activeContext();
+      const routineId = form.dataset.editRoutineForm;
+      const edited = routineId ? state.routines.find((entry) => entry.id === routineId) : null;
       // One trigger goes as itself; several become the group the host understands.
       const trigger = draftTriggers.length === 1 ? draftTriggers[0] : { type: "group", listeners: draftTriggers };
-      adapter.createRoutine(context.id, context.kind, {
+      const spec = {
         name: String(data.get("name")).trim(),
         prompt: String(data.get("prompt")).trim(),
         trigger,
-        isEnabled: true,
-      }).then((routine) => {
-        draftTriggers = [{ type: "cron", schedule: "0 8 * * 1-5" }];
+        // A paused routine stays paused through an edit. Sending a flat true here would restart
+        // a routine somebody deliberately stopped, because they fixed a typo in it.
+        isEnabled: edited ? edited.status !== "paused" : true,
+      };
+      const saved = routineId
+        ? adapter.updateRoutine(routineId, spec)
+        : adapter.createRoutine(context.id, context.kind, spec);
+      saved.then((routine) => {
+        resetRoutineForm();
         renderRoutinesPanel();
-        showToast(`${routine.name} created — ${routine.trigger}`);
+        showToast(`${routine.name} ${routineId ? "saved" : "created"} — ${routine.trigger}`);
       }).catch((error) => {
         submit.disabled = false;
-        showToast(`Could not create that routine: ${error.message}`);
+        showToast(`Could not ${routineId ? "save" : "create"} that routine: ${error.message}`);
       });
     } else if (form.hasAttribute("data-add-worker")) {
       const data = new FormData(form);

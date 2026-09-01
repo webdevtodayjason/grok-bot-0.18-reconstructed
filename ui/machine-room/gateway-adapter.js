@@ -181,6 +181,10 @@
       coordinatorId: null,
       delegatedToId: null,
       trigger: a.triggerDescription ?? a.trigger?.summary ?? a.summary ?? "On a schedule",
+      // The sentence above is the host's rendering of the trigger; this is the trigger. The
+      // editor needs the stored shape back or a re-save rewrites it as whatever it could parse
+      // out of the prose.
+      triggerSpec: a.trigger ?? null,
       instruction: a.prompt ?? a.instruction ?? "",
       status: a.isEnabled === false ? "paused" : "ready",
       nextRunAt: a.nextRunAt ?? null,
@@ -189,6 +193,18 @@
       lastRun: lastRunOf(a),
     }));
   }
+
+  // Routine ids are namespaced by scope so two workers can hold the same automation name; the
+  // gateway wants the bare id back.
+  const splitRoutineId = (routineId) => String(routineId).split("::");
+
+  // The host keeps a trigger's members in the order it was handed them and drops the ones it
+  // cannot parse (automation-trigger.ts parseMembers), rewriting values -- a cron string -- but
+  // never a type. So the list of member types is the one thing a write can be checked against
+  // without re-implementing the host's normalisation here.
+  const memberTypes = (trigger) => (trigger == null ? []
+    : trigger.type === "group" ? (trigger.listeners ?? [])
+    : [trigger]).map((m) => m.type).join(",");
 
   // Integrations are the closest real thing to the prototype's plugin cards. Tool lists and
   // per-tool switches are not in the gateway yet, so the cards render with no tools rather than
@@ -426,6 +442,18 @@
       }
     }
 
+    // Every routine write re-reads the agent's automations instead of patching the row in place.
+    // The host recomputes nextRunAt and triggerDescription on write, and -- the reason this exists
+    // -- it answers 200 to a write it then declines to store, so the read back is the only proof
+    // anything happened.
+    async function reloadRoutines(scope) {
+      const list = await call("getAgentAutomations", { id: scope.id });
+      const rows = Array.isArray(list) ? list : [];
+      const shaped = routinesOf(rows, scope);
+      state.routines = [...state.routines.filter((x) => !same(x.scope, scope)), ...shaped];
+      return { rows, shaped };
+    }
+
     async function reloadActive() {
       // Trays first: reloadRoster stamps every status through statusOf, which needs the tray set
       // already current. The other order let the roster paint over attention on every tick.
@@ -588,15 +616,86 @@
       // same shape the old operator UI builds, and the same shape getAgentAutomations hands back,
       // so it round-trips. The host validates the cron and computes nextRunAt; nothing is reported
       // until that comes back.
+      //
+      // automation-store.upsert returns null and writes NOTHING when the name, the prompt or the
+      // trigger fails to parse, and the gateway still answers 200. This used to resolve with
+      // shaped[length - 1] on that path, so a routine that was never written toasted the name of
+      // one that was already there. The id the agent did not have a moment ago is the proof.
       createRoutine(agentId, kind, spec) {
-        return call("createAgentAutomation", { id: agentId, spec })
-          .then(() => call("getAgentAutomations", { id: agentId }))
-          .then((list) => {
-            const scope = { kind, id: agentId };
-            const shaped = routinesOf(list ?? [], scope);
-            state.routines = [...state.routines.filter((x) => !same(x.scope, scope)), ...shaped];
-            emit("routine:created", { agentId });
-            return shaped.find((r) => r.name === spec.name) ?? shaped[shaped.length - 1];
+        const scope = { kind, id: agentId };
+        return call("getAgentAutomations", { id: agentId }).catch(() => null).then((before) => {
+          const known = Array.isArray(before) ? new Set(before.map((a) => a.id)) : null;
+          return call("createAgentAutomation", { id: agentId, spec })
+            .then(() => reloadRoutines(scope))
+            .then(({ rows, shaped }) => {
+              emit("routine:created", { agentId });
+              // With no usable pre-read the name is all there is to match on. Compare against
+              // what the host would have stored: clampAutomationName collapses whitespace, trims,
+              // then cuts at AUTOMATION_MAX_NAME_LENGTH.
+              const wanted = String(spec.name).replace(/\s+/g, " ").trim().slice(0, 80);
+              const created = known
+                ? rows.find((a) => !known.has(a.id))
+                : rows.find((a) => a.name === wanted);
+              if (!created) throw new Error("the host took the request and stored no routine — check the trigger fields");
+              return shaped.find((r) => r.id === `${agentId}::${created.id}`);
+            });
+        });
+      },
+
+      // updateAgentAutomation { id, automationId, spec }. automation-store.update declines the
+      // same way upsert does -- null, no write, 200 back -- so the saved row is read and checked
+      // against what was sent rather than assumed.
+      updateRoutine(routineId, spec) {
+        const routine = state.routines.find((r) => r.id === routineId);
+        if (!routine) return Promise.reject(new Error("that routine is not on this box any more"));
+        const scope = routine.scope;
+        const [agentId, automationId] = splitRoutineId(routineId);
+        return call("updateAgentAutomation", { id: agentId, automationId, spec })
+          .then(() => reloadRoutines(scope))
+          .then(({ rows, shaped }) => {
+            emit("routine:updated", { routineId });
+            const saved = rows.find((a) => a.id === automationId);
+            if (!saved) throw new Error("the host answered but that routine is gone");
+            if (saved.prompt !== spec.prompt || memberTypes(saved.trigger) !== memberTypes(spec.trigger)) {
+              throw new Error("the host answered but kept the old routine — check the trigger fields");
+            }
+            return shaped.find((r) => r.id === routineId);
+          });
+      },
+
+      // setAgentAutomationEnabled { id, automationId, isEnabled }. Pausing is the control an
+      // operator reaches for when a routine is misbehaving, so it reports the host's flag rather
+      // than flipping the card and hoping.
+      setRoutineEnabled(routineId, isEnabled) {
+        const routine = state.routines.find((r) => r.id === routineId);
+        if (!routine) return Promise.reject(new Error("that routine is not on this box any more"));
+        const scope = routine.scope;
+        const [agentId, automationId] = splitRoutineId(routineId);
+        return call("setAgentAutomationEnabled", { id: agentId, automationId, isEnabled })
+          .then(() => reloadRoutines(scope))
+          .then(({ rows, shaped }) => {
+            emit("routine:updated", { routineId });
+            const saved = rows.find((a) => a.id === automationId);
+            if (!saved || (saved.isEnabled !== false) !== isEnabled) {
+              throw new Error(`the host did not ${isEnabled ? "resume" : "pause"} that routine`);
+            }
+            return shaped.find((r) => r.id === routineId);
+          });
+      },
+
+      // deleteAgentAutomation { id, automationId }. The host removes the routine's folder, so
+      // "still listed" is the whole failure condition.
+      deleteRoutine(routineId) {
+        const routine = state.routines.find((r) => r.id === routineId);
+        if (!routine) return Promise.reject(new Error("that routine is not on this box any more"));
+        const scope = routine.scope, name = routine.name;
+        const [agentId, automationId] = splitRoutineId(routineId);
+        return call("deleteAgentAutomation", { id: agentId, automationId })
+          .then(() => reloadRoutines(scope))
+          .then(({ rows }) => {
+            emit("routine:deleted", { routineId });
+            if (rows.some((a) => a.id === automationId)) throw new Error("the host answered but the routine is still there");
+            return name;
           });
       },
 
@@ -606,9 +705,7 @@
         // not report the demo's cheerful 2.2s.
         const routine = state.routines.find((r) => r.id === routineId);
         if (!routine) return Promise.resolve(null);
-        // Routine ids are namespaced by scope so two workers can hold the same automation name;
-        // the gateway wants the bare id back.
-        const [agentId, automationId] = routineId.split("::");
+        const [agentId, automationId] = splitRoutineId(routineId);
         routine.status = "running";
         emit("routine:started", { routineId });
         const startedMs = Date.now();

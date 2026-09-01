@@ -1,4 +1,4 @@
-import { turnEndedOnSilentToolCalls } from "./turn-shape.js";
+import { turnEndedOnSilentToolCalls, turnMadeWorkToolCall } from "./turn-shape.js";
 import { StepTiming } from "../../packages/proto/generated/agent/v1/agent_pb.js";
 import {
   runTurnMemory,
@@ -124,6 +124,12 @@ export interface TurnSettleResult extends TurnResultFlags {
   readonly sentMessageCount: number;
   readonly reacted: boolean;
   readonly endedOnSilentToolCalls?: boolean;
+  /**
+   * Whether the turn called any tool that is not a delivery tool. `sentMessageCount` answers
+   * whether the agent SPOKE; this answers whether it WORKED, which is what the redrive needs and
+   * what nothing in the product measured before.
+   */
+  readonly madeWorkToolCall?: boolean;
 }
 
 export function createTurnSettle(
@@ -134,6 +140,7 @@ export function createTurnSettle(
   let sentMessageCount = 0;
   let reacted = false;
   let endedOnSilentToolCalls = false;
+  let madeWorkToolCall = false;
   const agentMessages: string[] = [];
 
   const collectors = {
@@ -313,6 +320,9 @@ export function createTurnSettle(
         host.latestPromptMessages(),
       );
     }
+    // Computed for hidden turns too: a redrive is hidden, and whether IT did work is exactly what
+    // decides if the streak clears.
+    madeWorkToolCall = turnMadeWorkToolCall(host.latestPromptMessages());
 
     if (
       !host.isSubagentRunner
@@ -396,6 +406,7 @@ export function createTurnSettle(
       ...(endedOnSilentToolCalls
         ? { endedOnSilentToolCalls: true }
         : {}),
+      ...(madeWorkToolCall ? { madeWorkToolCall: true } : {}),
       ...(flags.streamOutputProduced === true
         ? { streamOutputProduced: true }
         : {}),

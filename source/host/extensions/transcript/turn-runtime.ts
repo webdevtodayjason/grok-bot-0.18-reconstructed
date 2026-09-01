@@ -12,6 +12,7 @@ import {
   isTransientStreamError,
   serverRetryAfterMsFromError,
 } from "../../runner/transient-stream-error.js";
+import { isDeliveryToolCallName } from "../../runner/turn-shape.js";
 import {
   beginTurnTrace,
   markTurnTraceError,
@@ -47,6 +48,9 @@ export const REPLY_NUDGE_PROMPT =
   "Your previous turn left the user without the result they're waiting on — you never called SendMessage that turn, or every SendMessage you tried failed to deliver. Either way they received nothing and are still waiting. Do not assume a send from an earlier turn covered it: an opening acknowledgement back then did not deliver this result (ack ≠ delivery). Deliver the result now by actually invoking the SendMessage tool — make a real tool/function call, not text you write. Plain assistant text is NEVER shown to the user; only a real SendMessage tool invocation reaches them, so if you don't call the tool they just keep seeing silence.";
 export const CLOSING_SEND_NUDGE_PROMPT =
   "Your previous turn acknowledged the user and then ran tool calls, but ended without a follow-up SendMessage — the last thing the user saw is that opening acknowledgement, so whatever the tool calls produced after it never reached them. If that work produced the result or answer they are waiting on, deliver it now by actually invoking the SendMessage tool — make a real tool/function call, not text you write. Plain assistant text is NEVER shown to the user; only a real SendMessage tool invocation reaches them. If the work is genuinely unfinished, continue it and send the result once you have it.";
+export const MAX_WORK_REDRIVES = 3;
+export const WORK_REDRIVE_PROMPT =
+  "Your previous turn replied to the user and then ended without calling a single tool — you acknowledged the request but never did the work it asked for. An acknowledgement is not the work, and from the user's side an unstarted task and a finished one look identical until you tell them otherwise. If the request needs tools — reading, running, editing, searching, reaching another system — start on it now and actually invoke them, then send the real outcome with SendMessage. If it genuinely needed no tools and your reply already answered it in full, end this turn without sending anything further: do not send another message just to break the silence.";
 export const TASK_ERROR_RESULT_CLASS = "task_error_result";
 export const CONNECT_CODE_NAMES = [
   "Canceled",
@@ -146,6 +150,13 @@ export interface TurnResult {
   streamOutputProduced?: boolean;
   endedOnSilentToolCalls?: boolean;
   awaitingUserSelection?: boolean;
+  /**
+   * Whether the run called a non-delivery tool, per `turnMadeWorkToolCall` over
+   * the prompt messages. Optional because only a runner that settles through
+   * turn-settle can know it; when absent the host falls back to counting the
+   * tool-call updates it saw on the wire.
+   */
+  madeWorkToolCall?: boolean;
 }
 
 export interface AgentRunner {
@@ -177,6 +188,78 @@ export function isDeliveryOwed(
   result: Pick<TurnResult, "sentMessageCount" | "reacted">,
 ): boolean {
   return result.sentMessageCount === 0 && !result.reacted;
+}
+
+const CONVERSATIONAL_OPENERS =
+  /^(what|why|how|who|when|where|which|is|are|was|were|do|does|did|can|could|should|would|will|any|thanks|thank|ok|okay|cool|nice|great|sure|yes|no|hi|hey|hello)\b/i;
+// Anchored, because half these verbs are also nouns: loose matching reads "the
+// build is broken" as an order to build something.
+const ACTION_REQUEST_PATTERN =
+  /^(?:(?:please|pls|now|also|then|and|go ahead and|go|let'?s|i need you to|you need to)\s+)*(?:add|build|change|check|clean|commit|configure|create|delete|deploy|download|edit|fix|generate|implement|install|kill|make|merge|move|open|pull|push|read|rebase|refactor|remove|rename|restart|run|search|send|set|start|stop|test|update|upgrade|upload|write)\b/i;
+
+/**
+ * A deliberately narrow read of "the user asked for work": a bare imperative,
+ * nothing else. Questions, asides and observations are excluded outright, since
+ * redriving one of those badgers a user who already got what they wanted —
+ * worse than the ack-and-stall this catches. Missing requests is the trade.
+ */
+export function requestImpliesAction(prompt: string | undefined): boolean {
+  const trimmed = prompt?.trim() ?? "";
+  if (trimmed.length === 0 || trimmed.endsWith("?")) return false;
+  if (CONVERSATIONAL_OPENERS.test(trimmed)) return false;
+  return ACTION_REQUEST_PATTERN.test(trimmed);
+}
+
+export interface TurnWorkSignals {
+  readonly prompt: string | undefined;
+  /** Aggregated over every run in the turn; undefined when no run reported it. */
+  readonly madeWorkToolCall: boolean | undefined;
+  readonly workToolCalls: number;
+  readonly deliveryToolCalls: number;
+}
+
+/**
+ * The turn the user asked for work, got an answer, and did nothing. Sibling of
+ * `isDeliveryOwed`, never a replacement: that one catches silence, this one
+ * catches the "on it" that never became work, and the two are disjoint because
+ * this requires a message to have been sent.
+ */
+export function isWorkOwed(
+  result: Pick<
+    TurnResult,
+    | "sentMessageCount"
+    | "reacted"
+    | "aborted"
+    | "quiescedForUpgrade"
+    | "awaitingUserSelection"
+  >,
+  signals: TurnWorkSignals,
+): boolean {
+  if (
+    result.aborted ||
+    result.quiescedForUpgrade === true ||
+    result.awaitingUserSelection === true ||
+    result.reacted ||
+    result.sentMessageCount === 0
+  )
+    return false;
+  if (!requestImpliesAction(signals.prompt)) return false;
+  if (signals.madeWorkToolCall != null) return !signals.madeWorkToolCall;
+  // The delivery count calibrates the work count. SendMessage is itself a tool
+  // call, so a turn that delivered without producing one tool-call update means
+  // this session's calls are not reaching the counter at all, and redriving off
+  // a counter that reads zero for everything would badger a working agent.
+  return signals.deliveryToolCalls > 0 && signals.workToolCalls === 0;
+}
+
+/** Folds one run's work report into the turn's, leaving it undefined until some run reports. */
+function mergeWorkReport(
+  reported: boolean | undefined,
+  run: TurnResult,
+): boolean | undefined {
+  return run.madeWorkToolCall == null
+    ? reported
+    : (reported ?? false) || run.madeWorkToolCall;
 }
 
 export function classifyAgentError(error: unknown): Record<string, unknown> {
@@ -231,6 +314,10 @@ export class TurnRuntime {
   readonly reportedToolCallErrors = new Map<string, Set<string>>();
   readonly reportedToolCallStalls = new Map<string, Set<string>>();
   readonly pendingToolCallStarts = new Map<string, Map<string, number>>();
+  readonly workToolCallCounts = new Map<string, number>();
+  readonly deliveryToolCallCounts = new Map<string, number>();
+  /** Consecutive work-owed turns per session; survives the turn, unlike the counts. */
+  readonly workRedriveStreaks = new Map<string, number>();
 
   constructor(readonly tm: TranscriptManagerLike) {}
 
@@ -511,6 +598,8 @@ export class TurnRuntime {
           this.reportedToolCallErrors,
           this.reportedToolCallStalls,
           this.pendingToolCallStarts,
+          this.workToolCallCounts,
+          this.deliveryToolCallCounts,
           this.activeRequestPrompts,
           this.activeRequestSources,
         ])
@@ -550,6 +639,7 @@ export class TurnRuntime {
     let attempts = 0;
     let delivered = !isDeliveryOwed(result);
     let streamOutputProduced = result.streamOutputProduced === true;
+    let workReported = result.madeWorkToolCall;
     while (
       isDeliveryOwed(latest) &&
       attempts < MAX_REPLY_NUDGES &&
@@ -564,6 +654,7 @@ export class TurnRuntime {
       });
       delivered ||= !isDeliveryOwed(latest);
       streamOutputProduced ||= latest.streamOutputProduced === true;
+      workReported = mergeWorkReport(workReported, latest);
       if (latest.aborted) break;
     }
     if (
@@ -584,6 +675,7 @@ export class TurnRuntime {
         latest = nudged;
         delivered ||= !isDeliveryOwed(nudged);
         streamOutputProduced ||= nudged.streamOutputProduced === true;
+        workReported = mergeWorkReport(workReported, nudged);
       } finally {
         this.tm.telemetry.reportClosingSendNudge({
           conversationId: session.id,
@@ -593,6 +685,51 @@ export class TurnRuntime {
           aborted: nudged?.aborted ?? false,
         });
       }
+    }
+    const workOwed = isWorkOwed(latest, {
+      prompt: this.activeRequestPrompts.get(session.id),
+      madeWorkToolCall: workReported,
+      workToolCalls: this.workToolCallCounts.get(session.id) ?? 0,
+      deliveryToolCalls: this.deliveryToolCallCounts.get(session.id) ?? 0,
+    });
+    const streak = this.workRedriveStreaks.get(session.id) ?? 0;
+    if (!workOwed) this.workRedriveStreaks.delete(session.id);
+    else if (streak >= MAX_WORK_REDRIVES)
+      // Stop rather than spin: an agent that has answered this many turns
+      // running without touching a tool will not start because we asked again.
+      setTurnTraceAttributes(turnTrace, {
+        "sand.work_redrive_paused": true,
+        "sand.work_redrive_pause_reason": "anti_spin",
+      });
+    else if (epoch === this.tm.sendPipeline.currentTurnEpoch(session)) {
+      this.workRedriveStreaks.set(session.id, streak + 1);
+      setTurnTraceAttributes(turnTrace, { "sand.work_redrive": streak + 1 });
+      const workBefore = this.workToolCallCounts.get(session.id) ?? 0;
+      // The redrive is speculative: the user may already have a good answer. An unguarded throw
+      // here would surface as "Agent failed to respond" on a turn that worked, and overwriting the
+      // settled result would record `aborted` for it. Keep the original on any failure.
+      let redriven: Awaited<ReturnType<typeof runner.run>> | undefined;
+      try {
+        redriven = await runner.run(WORK_REDRIVE_PROMPT, {
+          hidden: true,
+          ackToken,
+          traceCtx,
+          onModelResolved: (id: string) => turn?.setModel(id),
+        });
+      } catch {
+        setTurnTraceAttributes(turnTrace, { "sand.work_redrive_failed": true });
+      }
+      if (redriven !== undefined) {
+        latest = redriven;
+        streamOutputProduced ||= redriven.streamOutputProduced === true;
+      }
+      // Clear the streak only when the redrive actually did something. A
+      // redrive that answered again is what the cap above exists to stop.
+      if (
+        (this.workToolCallCounts.get(session.id) ?? 0) > workBefore ||
+        redriven?.madeWorkToolCall === true
+      )
+        this.workRedriveStreaks.delete(session.id);
     }
     return {
       result: latest,
@@ -654,7 +791,15 @@ export class TurnRuntime {
             starts = new Map();
             this.pendingToolCallStarts.set(runSession.id, starts);
           }
-          if (!starts.has(update.id)) starts.set(update.id, performance.now());
+          if (!starts.has(update.id)) {
+            starts.set(update.id, performance.now());
+            // One count per distinct call, split by whether it was the agent
+            // working or the agent talking. Feeds the work-owed redrive.
+            const counts = isDeliveryToolCallName(String(update.name ?? ""))
+              ? this.deliveryToolCallCounts
+              : this.workToolCallCounts;
+            counts.set(runSession.id, (counts.get(runSession.id) ?? 0) + 1);
+          }
           const dual = sandDualSurfaceToolTelemetry(update.name);
           if (
             dual != null &&
