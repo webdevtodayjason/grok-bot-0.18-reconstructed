@@ -42,6 +42,26 @@ async function writeSecrets(next) {
     child.stdin.end(body);
   });
 }
+const CONNECTORS_PATH = "/home/box/sand-data/connectors.json";
+
+// The connector file lives in the box's sand-data, which is a docker VOLUME -- there is no path on
+// the host to open it with. Read and write it through the box the same way the secrets file is
+// handled, so adding a connector is an edit in the UI rather than a docker exec.
+const readConnectors = async () => {
+  const raw = await dockerOut(["exec", BOX, "cat", CONNECTORS_PATH]);
+  try { return JSON.parse(raw); } catch { return { mcpServers: {} }; }
+};
+async function writeConnectors(next) {
+  const body = JSON.stringify(next, null, 2);
+  return new Promise((resolve, reject) => {
+    // 0600: this file carries connector tokens in plaintext.
+    const child = execFile("docker", ["exec", "-i", BOX, "sh", "-c",
+      `umask 077 && cat > ${CONNECTORS_PATH} && chmod 600 ${CONNECTORS_PATH}`],
+      (err) => (err ? reject(err) : resolve()));
+    child.stdin.end(body);
+  });
+}
+
 const readCatalog = async () => {
   try { return JSON.parse(await readFile(ENDPOINTS_FILE, "utf8")); } catch { return { endpoints: [] }; }
 };
@@ -266,6 +286,31 @@ const server = createServer(async (req, res) => {
         res.writeHead(200, { "content-type": types[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-store" });
         return res.end(bytes);
       } catch { return fail(res, 404, `not found: ${url.pathname}`); }
+    }
+    if (url.pathname === "/connectors") {
+      const sendJson = (value) => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(value));
+      };
+      if (req.method === "GET") return sendJson(await readConnectors());
+      if (req.method === "POST") {
+        let parsed;
+        try { parsed = JSON.parse(await readBody(req)); } catch { return fail(res, 400, "body must be JSON"); }
+        const servers = parsed?.mcpServers;
+        if (servers == null || typeof servers !== "object" || Array.isArray(servers)) {
+          return fail(res, 400, "expected { mcpServers: { ... } }");
+        }
+        // Reject a config the host would silently drop, rather than accepting it and leaving the
+        // operator wondering why their connector never appears.
+        for (const [name, config] of Object.entries(servers)) {
+          if (config == null || typeof config !== "object") return fail(res, 400, `${name}: not an object`);
+          if (typeof config.command !== "string" || config.command.length === 0) {
+            return fail(res, 400, `${name}: stdio connectors need a "command"`);
+          }
+        }
+        await writeConnectors({ mcpServers: servers });
+        return sendJson({ saved: Object.keys(servers), restartRequired: true });
+      }
     }
     if (req.method === "GET" && url.pathname === "/clients") {
       // The box is shared: the desktop app talks to this same gateway. Anyone driving

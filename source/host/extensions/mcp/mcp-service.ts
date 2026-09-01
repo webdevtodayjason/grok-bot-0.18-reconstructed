@@ -26,6 +26,8 @@ import {
 import type { CapableBox } from "../../box/box-capabilities.js";
 import { createSandMcpStateExecutor } from "../../ports/mcp-state-executor.js";
 import { createBoxSandMcpExec } from "./box-mcp-exec.js";
+import { getSandRootDir } from "../../host-paths.js";
+import { mergeLocalConnectors, readLocalConnectorFile } from "./local-connectors.js";
 
 export interface McpServerSummary { id: string; name: string; serverIdentifier: string; accountKey: string; pluginId?: string | null; isTeamServer: boolean; status: string; statusDetail?: string; transport: string; toolCount: number; disabledToolCount?: number; customInstructions: string }
 export interface CatalogField { key: string; label: string; hint: string; isRequired?: boolean; isSecret?: boolean }
@@ -203,7 +205,14 @@ export class McpHostService {
       ...(deps.pluginSkills == null ? {} : { pluginSkills: deps.pluginSkills }),
       getAccessToken: async () => { try { const token = await deps.auth.getAccessToken({ backendUrl: getSandInferenceBackendUrl() }); return token.length > 0 ? token : null; } catch { return null; } },
       getMachineId: deps.auth.getMachineId,
-      accountServersProvider: () => fetchAccountMcpServers(accountMcpDeps),
+      // Connectors used to reach this host only through the Cursor account's server list, so every
+      // connector depended on a Cursor login. Local stdio servers are merged over it here and stand
+      // on their own when the account is unreachable -- a connector configured on this machine must
+      // not stop working because a remote login expired.
+      accountServersProvider: async () => mergeLocalConnectors(
+        await fetchAccountMcpServers(accountMcpDeps).catch(() => null),
+        readLocalConnectorFile(getSandRootDir()),
+      ),
       accountMcpWriter: createAccountMcpWriter(accountMcpDeps),
       effectivePluginsProvider: () => fetchEffectiveUserPlugins(accountMcpDeps),
       backendMcpExec,
