@@ -19,9 +19,12 @@ export class SandConnectorSecretStore {
   setSecret(agentId: string, platform: string, field: string, value: string): boolean {
     if (!isSafeFolderId(agentId) || !isSafeFolderId(platform) || field.length === 0) return false;
     const path = this.filePath(agentId, platform), merged = { ...this.read(agentId, platform), [field]: value };
-    mkdirSync(dirname(path), { recursive: true });
+    // These files hold connector tokens in plaintext. Default mode is 0644, so anything running as
+    // another user in the box could read them; the directory gets 0700 and the file 0600 so the
+    // blast radius matches what the credential actually is.
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const tempPath = `${path}.${process.pid}.tmp`;
-    writeFileSync(tempPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8"); renameSync(tempPath, path); return true;
+    writeFileSync(tempPath, `${JSON.stringify(merged, null, 2)}\n`, { encoding: "utf8", mode: 0o600 }); renameSync(tempPath, path); return true;
   }
   getSecret(agentId: string, platform: string, field: string): string | null {
     if (!isSafeFolderId(agentId) || !isSafeFolderId(platform)) return null;
