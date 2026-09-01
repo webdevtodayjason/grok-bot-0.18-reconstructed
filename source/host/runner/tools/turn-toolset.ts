@@ -49,6 +49,7 @@ import {
   type ComputerToolDependencies,
 } from "./sand-computer-tool.js";
 import { createZodAgentTool, withSafeParsedArgs } from "../../../packages/agent/tools/common.js";
+import { createImageResult, createStringResult } from "../../../packages/chat-inference/prompt-executor.js";
 import { ToolCall } from "../../../packages/proto/generated/agent/v1/agent_pb.js";
 import {
   ComputerUseToolCall,
@@ -982,9 +983,22 @@ function adaptInnerComputerTool<T extends {
       ),
       computerUseCarrier(new ComputerUseResultMessage()),
     ),
-    render: (_ctx: unknown, result: ComputerUseResultMessage) => ({
-      content: describeOutcome(result as never, operation),
-    }),
+    /**
+     * The executor walks `content` as an ARRAY of typed parts. Returning a bare string meant it
+     * iterated the characters, found no `type: "text"` part, and dropped the whole result -- so a
+     * screenshot the tool successfully captured never reached the model at all. Hand back real
+     * parts, and carry the image when there is one.
+     */
+    render: (_ctx: unknown, result: ComputerUseResultMessage) => {
+      const text = describeOutcome(result as never, operation);
+      const outcome = (result as { readonly result?: { readonly case?: string; readonly value?: unknown } } | null)?.result;
+      const screenshot = outcome?.case === "success"
+        ? (outcome.value as { readonly screenshot?: string } | undefined)?.screenshot
+        : undefined;
+      return screenshot != null && screenshot.length > 0
+        ? createImageResult(screenshot, "image/webp", text)
+        : createStringResult(text);
+    },
     serializeError: (error: unknown) => computerUseCarrier(new ComputerUseResultMessage({
       result: { case: "error", value: new ComputerUseErrorMessage({
         error: error instanceof Error ? error.message : String(error),

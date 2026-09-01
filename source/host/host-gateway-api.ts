@@ -353,7 +353,12 @@ export function createHostGatewayApi(
     duplicateAgent: (args: any) => method(manager, "cloneAgent")(args.id),
     setAgentUnread: (args: any) =>
       method(manager, "setAgentUnread")(args.id, args.isUnread, args.atMs),
-    setAgentNotificationsEnabled: async () => undefined,
+    // Was `async () => undefined`: the command existed, the protocol and coordinator both routed to
+    // it, and it did nothing -- any UI bound to it looked like it worked. It is still referenced by
+    // gateway-protocol.ts and shared/rpc/coordinator.ts, so it is aliased onto the real control
+    // rather than removed.
+    setAgentNotificationsEnabled: (args: any) =>
+      method(manager, "setAgentNotifyOnUpdates")(args.id, args.isEnabled),
     setAgentNotifyOnUpdates: (args: any) =>
       method(manager, "setAgentNotifyOnUpdates")(args.id, args.isEnabled),
     setAgentHiddenFromSidebar: (args: any) =>
@@ -669,7 +674,15 @@ export function createHostGatewayApi(
         }))
       };
     },
-    completeMcpOAuth: async () => undefined,
+    completeMcpOAuth: async (args: any) => {
+      const stateId = typeof args?.stateId === "string" ? args.stateId : "";
+      const code = typeof args?.code === "string" ? args.code : args?.authorizationCode;
+      if (stateId.length === 0 || typeof code !== "string" || code.length === 0) {
+        throw new TypeError("completeMcpOAuth needs stateId and code");
+      }
+      await method(deps.extensions.api("mcp"), "completeOAuth")({ stateId, code });
+      return undefined;
+    },
     requestWebAuthnCeremony: (args: any) =>
       method(deps.extensions.api("webauthn-proxy"), "requestCeremony")(args),
     setBoxSecrets: ({ secrets }: any) =>

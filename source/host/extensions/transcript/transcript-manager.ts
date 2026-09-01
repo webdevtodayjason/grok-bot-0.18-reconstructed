@@ -354,7 +354,8 @@ export class TranscriptManager {
     return this.memory.list({ agentId });
   }
   async deleteAgentMemory(agentId: string, memoryId: string) {
-    const result = await this.memory.remove({ agentId, memoryId });
+    // The store destructures `id`; passing `memoryId` silently removed nothing and reported success.
+    const result = await this.memory.remove({ agentId, id: memoryId });
     await this.clearMemoryPromptSnapshot(agentId);
     return result;
   }

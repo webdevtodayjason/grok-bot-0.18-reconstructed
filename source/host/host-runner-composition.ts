@@ -1336,6 +1336,48 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           },
         });
       })();
+    /**
+     * Both providers were already written here, and the system-prompt assembly -- their ONLY
+     * consumer -- was handed `() => []` instead. Every agent's prompt therefore stated the user had
+     * no other agents and no groups, which silently disabled multi-agent addressing and group work
+     * across the whole product. Hoisted so the assembly and the runner options share one
+     * implementation rather than one real and one empty.
+     */
+    const agentDirectoryProvider = () => {
+      const roster = method(transcript, "listAgentsSync")?.() ?? [];
+      return roster
+        .filter((agent: any) =>
+          agent.id !== session.id &&
+          !agent.isGroup &&
+          agent.remoteRoom == null
+        )
+        .map((agent: any) => ({
+          id: agent.id,
+          name: agent.name,
+          description: agent.description
+        }));
+    };
+    const agentGroupsProvider = () => {
+      const roster = method(transcript, "listAgentsSync")?.() ?? [];
+      const byId = new Map(roster.map((agent: any) => [agent.id, agent]));
+      return roster
+        .filter((agent: any) =>
+          agent.isGroup && agent.memberIds.includes(session.id)
+        )
+        .map((group: any) => ({
+          id: group.id,
+          name: group.name,
+          members: group.memberIds
+            .filter((memberId: string) => memberId !== session.id)
+            .map((memberId: string) => byId.get(memberId))
+            .filter((member: any) => member != null)
+            .map((member: any) => ({
+              id: member.id,
+              name: member.name,
+              description: member.description
+            }))
+        }));
+    };
     const productionSystemPromptAssembly = productionContext === undefined
       || productionRequestContext === undefined
       ? undefined
@@ -1376,8 +1418,8 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           connectorManifests: CONNECTOR_MANIFESTS,
           sendToAgentImpl: sendToAgent,
           agentManagement,
-          agentDirectory: () => [],
-          agentGroups: () => [],
+          agentDirectory: agentDirectoryProvider,
+          agentGroups: agentGroupsProvider,
           agentsRootDir: () => dirname(dirname(session.dbPath)),
           isSpotlightEnabled: () => method(experiments, "isSpotlightEnabled")?.() ?? false,
           isMultitaskEnabled: () => method(experiments, "isMultitaskEnabled")?.() ?? false,
@@ -1474,41 +1516,8 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         )?.(platform) ?? false,
       resolveCloudAgentTitle,
       sendToAgent,
-      agentDirectory: () => {
-        const roster = method(transcript, "listAgentsSync")?.() ?? [];
-        return roster
-          .filter((agent: any) =>
-            agent.id !== session.id &&
-            !agent.isGroup &&
-            agent.remoteRoom == null
-          )
-          .map((agent: any) => ({
-            id: agent.id,
-            name: agent.name,
-            description: agent.description
-          }));
-      },
-      agentGroups: () => {
-        const roster = method(transcript, "listAgentsSync")?.() ?? [];
-        const byId = new Map(roster.map((agent: any) => [agent.id, agent]));
-        return roster
-          .filter((agent: any) =>
-            agent.isGroup && agent.memberIds.includes(session.id)
-          )
-          .map((group: any) => ({
-            id: group.id,
-            name: group.name,
-            members: group.memberIds
-              .filter((memberId: string) => memberId !== session.id)
-              .map((memberId: string) => byId.get(memberId))
-              .filter((member: any) => member != null)
-              .map((member: any) => ({
-                id: member.id,
-                name: member.name,
-                description: member.description
-              }))
-          }));
-      },
+      agentDirectory: agentDirectoryProvider,
+      agentGroups: agentGroupsProvider,
       agentManagement,
       agentsRootDir: () => dirname(dirname(session.dbPath))
     };
@@ -2061,10 +2070,17 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
        * the props, so the dependencies are built per turn from it -- the same builder and the same
        * auto-review wiring the unreachable projection used.
        */
-      createComputerToolInputs: (_turn, props) => {
-        const accessor = (props as { readonly resourceAccessor?: unknown }).resourceAccessor;
+      createComputerToolInputs: (turn, _props) => {
+        /**
+         * `props.resourceAccessor` is the accessor for the USER'S OWN MACHINE -- the local exec
+         * bridge, which has no computer-use handler at all. Driving the desktop needs the box, and
+         * every other box-scoped tool here (BoxAwait, BoxRead) already reads
+         * `turn.remoteBoxResourceAccessor`. Pointing the computer tools at the local bridge is why
+         * they still could not touch the screen after being given a working engine adapter.
+         */
+        const accessor = turn.remoteBoxResourceAccessor;
         if (accessor === undefined) {
-          throw new TypeError("computer tool dependencies need the turn's resource accessor");
+          throw new TypeError("remote box resource accessor is not bound");
         }
         const modes = autoReviewGate?.currentModes();
         return {
@@ -2105,10 +2121,11 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           }),
         };
       },
-      createScreenshotToolInputs: (_turn, props) => {
-        const accessor = (props as { readonly resourceAccessor?: unknown }).resourceAccessor;
+      createScreenshotToolInputs: (turn, _props) => {
+        // Same correction as the computer tool: the screen lives on the box, not on the user's Mac.
+        const accessor = turn.remoteBoxResourceAccessor;
         if (accessor === undefined) {
-          throw new TypeError("screenshot tool dependencies need the turn's resource accessor");
+          throw new TypeError("remote box resource accessor is not bound");
         }
         // Screenshot deliberately carries no auto-review: looking at the screen changes nothing.
         return {
