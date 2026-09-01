@@ -859,6 +859,39 @@ exactly this. Worth re-testing against a stronger endpoint before any further ho
 `Cannot read properties of undefined (reading 'case')`. Next action: give
 `sand-computer-tool.ts` its own `serializeError` returning a computer-shaped result. Owner: Claude.
 
+## 6h. The stall: what is ruled out (2026-09-01)
+
+**Retraction first.** Commit `8d8df88`'s message, and an earlier version of the published audit,
+claimed the model never receives its own tool calls or results. **That is wrong.** It generalised
+from a sample of the last twelve messages, which in that run happened to be all text. Anyone
+reading that commit message should stop here instead.
+
+Measured on the live box, all of these are RULED OUT as the cause:
+
+- **Tool execution.** Asked to `touch /workspace/proof-<token>.txt`, the file appears. The shell
+  tool runs correctly.
+- **Tool results reaching the model.** The history handed to the provider contains
+  `assistant[tool-call]` and `tool[tool-result]` parts.
+- **The id filter** at `provider-session.ts` `conversationInput` — `offered` ids and result ids
+  match exactly, `kept=130/130`.
+- **Redaction of result content.** A sampled result reads
+  `<cursor_untrusted_data_1337 source="SendMessage">Message sent to user…</cursor_untrusted_data_1337>` —
+  intact, not a privacy-mode placeholder, despite the privacy lookup failing over to its safe default.
+- **Step ceilings.** `SAND_AGENT_MAX_STEPS` is 5000; the openai-compatible provider loops to 8.
+
+What is established and still unexplained: the agent acknowledges, runs the work tool, and the turn
+ends with no reporting step. Ordering is confirmed — `sendMessageToolCall` then `shellToolCall`,
+then nothing.
+
+**Reproduction:** `scripts/verify-work-report.mjs` writes a random sentinel into `/workspace` and
+asserts the agent names it back. It cannot be satisfied from training or prompt, and it fails
+consistently. Use it rather than judging message text by eye.
+
+**Next measurement:** the runner's own step loop — `sand-agent-runner.ts:1269` and
+`abstract-user-message-action-handler.ts:2598`. After the work tool executes, does the model get
+another step, and what does it emit there? Do not claim a cause before that is instrumented; this
+failure has already produced two confident wrong answers.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole
