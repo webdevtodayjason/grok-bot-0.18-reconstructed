@@ -887,7 +887,29 @@ then nothing.
 asserts the agent names it back. It cannot be satisfied from training or prompt, and it fails
 consistently. Use it rather than judging message text by eye.
 
-**Next measurement:** the runner's own step loop — `sand-agent-runner.ts:1269` and
+**MEASURED 2026-09-01, cause located.** The provider surfaces tool calls correctly and the agent
+never sees them:
+
+```
+SANDSTREAM surfaced=1 entries=["0:name=\"SendMessage\":args=52"]
+SANDSTEP   hasToolCall=false tools=[]
+SANDSTREAM surfaced=1 entries=["0:name=\"Shell\":args=78"]
+SANDSTEP   hasToolCall=false tools=[]
+```
+
+`runStep` decides whether the turn continues with
+`const hasToolCall = containsToolCall(response.messages)` (~:2138). Our openai-compatible bridge
+never puts the surfaced tool calls into `response.messages`, so that is false, the loop breaks after
+one step, and no reporting step ever runs. The tools still execute over the stream path -- which is
+why a `touch` lands and the ack is delivered while the agent goes quiet.
+
+The same file already knows about this hazard: at ~:1779 it guards with
+`sawToolCall || containsToolCall(response.messages)`, tracking calls observed in the stream because
+`response.messages` may not carry them. `runStep` has no equivalent. Fix candidates, in order:
+populate `response.messages` in the bridge (correct, and fixes every consumer), or give `runStep` a
+stream-observed signal like the one at :1758.
+
+**Superseded next measurement:** the runner's own step loop — `sand-agent-runner.ts:1269` and
 `abstract-user-message-action-handler.ts:2598`. After the work tool executes, does the model get
 another step, and what does it emit there? Do not claim a cause before that is instrumented; this
 failure has already produced two confident wrong answers.
