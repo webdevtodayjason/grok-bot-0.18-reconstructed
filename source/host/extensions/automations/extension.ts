@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { createRealPollingPolicy } from "../../../internal/scheduling.js";
+import { startLocalScheduleTick } from "./local-schedule-tick.js";
 import { defineHostExtension } from "../../../internal/host-extensions.js";
 import { getConfiguredBackendUrl } from "../../../shared/node/cursor-token.js";
 import { AutomationsService } from "../../../packages/proto/generated/aiserver/v1/automations_connect.js";
@@ -14,7 +15,7 @@ import { SandAutomationCloudSync, type CloudSyncClient, type ScheduledCloudAutom
 import { SandAutomationFireConsumer } from "./sand-automation-fire-consumer.js";
 import { SandTriggerHub } from "./sand-trigger-hub.js";
 
-export const HUB_RECONCILE_INTERVAL_MS = 15_000, RELAY_POLL_INTERVAL_MS = 4_000, CONNECT_WATCH_POLL_INTERVAL_MS = 5_000;
+export const HUB_RECONCILE_INTERVAL_MS = 15_000, RELAY_POLL_INTERVAL_MS = 4_000, CONNECT_WATCH_POLL_INTERVAL_MS = 5_000, LOCAL_SCHEDULE_TICK_INTERVAL_MS = 20_000;
 export const SAND_BOX_BOOT_STARTED_AT_MS_ENV = "SAND_BOX_BOOT_STARTED_AT_MS";
 export function getBoxUptimeMs(): number | undefined { const raw = process.env[SAND_BOX_BOOT_STARTED_AT_MS_ENV]?.trim(); if (!raw) return undefined; const started = Number(raw); return Number.isFinite(started) && started > 0 ? Math.max(0, Date.now() - started) : undefined; }
 export function reconcileWhenAuthenticated(args: { auth: { peekAccessToken(): string | null; subscribeToRenewal(listener: () => void): () => void }; reconcile(): void }): () => void { let done = false; const once = () => { if (done || args.auth.peekAccessToken() == null) return; done = true; args.reconcile(); }; const off = args.auth.subscribeToRenewal(once); once(); return off; }
@@ -22,6 +23,8 @@ export function reconcileWhenAuthenticated(args: { auth: { peekAccessToken(): st
 interface AutomationTranscript {
   listAgents(): Promise<readonly { id: string }[]>;
   listAllAutomationDefinitions(): Promise<readonly { agentId: string; automation: ScheduledCloudAutomation & { runs?: readonly { id: string; status: string; detail?: string; coalescedRunIds?: readonly string[] }[] } }[]>;
+  listAllAutomations(): Promise<readonly { agentId: string; automation: { id: string; isEnabled: boolean; nextRunAt: number | null; runs?: readonly { startedAt?: number }[] } }[]>;
+  runAgentAutomationNow(agentId: string, automationId: string): Promise<unknown>;
   runAutomationForEvent(agentId: string, automation: ScheduledCloudAutomation, event: Record<string, unknown>): Promise<unknown>;
   runServerScheduledAutomation(args: { agentId: string; automation: ScheduledCloudAutomation; runUuid: string; scheduledForMs?: number }): Promise<string | undefined>;
   runServerAutomationForEvent(args: { agentId: string; automation: ScheduledCloudAutomation; event: Record<string, unknown>; runUuid: string }): Promise<string | undefined>;
@@ -79,6 +82,27 @@ export const automationsExtension = defineHostExtension({
     const watcher = new ListenerConnectWatcher({ polling: createRealPollingPolicy({ name: "automations.connect-watch", intervalMs: CONNECT_WATCH_POLL_INTERVAL_MS }), isPlatformConnected: listenerReads.isPlatformConnected, onConnected: (agentId, platform) => void deps.transcript.resumeAfterListenerConnect(agentId, platform) });
     const offConfigChanged = host.events.on("transcript.automation-config-changed", () => { fireConsumer.resetPollDelay(); void hub.reconcileNow(); });
     const offConnectCard = host.events.on("transcript.listener-connect-card", ({ agentId, platform }: { agentId: string; platform: "slack" | "github" }) => watcher.watch(agentId, platform));
+    /**
+     * Cron triggers are routed to the cloud by `shouldScheduleLocally`, and on a self-hosted box
+     * there is no cloud to route them to -- so a routine's countdown ran down and nothing fired.
+     * Everything below the trigger is already local, including the fire path the Test-run button
+     * uses, so this is just the clock that was missing.
+     */
+    // OFF by default, deliberately. The tick fires correctly (verify-routine-run --local-only
+    // passes), but running it alongside live work showed an in-flight computerUse subagent come back
+    // `aborted` while an every-minute probe routine fired underneath it. Firing a routine into a busy
+    // agent and killing the operator's work is worse than a routine that waits, so this stays behind
+    // SAND_LOCAL_SCHEDULE=1 until it consults a per-agent busy signal (turn-runtime keeps one in
+    // `activeTurns`, which is not reachable from here yet).
+    const localScheduleEnabled = process.env.SAND_LOCAL_SCHEDULE?.trim() === "1";
+    const localSchedule = !localScheduleEnabled ? { dispose: () => {} } : startLocalScheduleTick({
+      polling: createRealPollingPolicy({ name: "automations.local-schedule", intervalMs: LOCAL_SCHEDULE_TICK_INTERVAL_MS }),
+      listAutomations: () => deps.transcript.listAllAutomations(),
+      fire: (agentId, automationId) => deps.transcript.runAgentAutomationNow(agentId, automationId),
+      isReady: () => deps["turn-execution"].isRunReady(),
+      log: (message) => host.log(message),
+    });
+    context.onStop(() => localSchedule.dispose());
     hub.start();
     const stopAuth = reconcileWhenAuthenticated({ auth: deps.auth, reconcile: () => void hub.reconcileNow() });
     context.onStop(async () => { stopAuth(); offConfigChanged(); offConnectCard(); watcher.dispose(); fireConsumer.stop(); await hub.stop(); });
