@@ -22,3 +22,5 @@ import "./ui-views-render.test.mjs";
 import "./local-schedule-tick.test.mjs";
 import "./openai-compatible-context-window.test.mjs";
 import "./evidence-verdict.test.mjs";
+import "./openai-responses-transport.test.mjs";
+import "./subscriptions.test.mjs";

@@ -34,7 +34,16 @@ export type OpenAiCompatibleSettings = {
   readonly apiKey: string | null;
   /** Operator-configured context window in tokens, or null to ask the endpoint. */
   readonly contextWindow: number | null;
+  /** "responses" speaks the OpenAI Responses API (the ChatGPT/Codex subscription backend); absent means chat completions. */
+  readonly transport?: "chat" | "responses";
+  /** ChatGPT account id sent as `chatgpt-account-id` on the responses transport. */
+  readonly accountId?: string | null;
+  /** How this product names itself to the vendor; never a first-party client's name. */
+  readonly originator?: string | null;
 };
+export const OPENAI_COMPATIBLE_TRANSPORT_ENV = "SAND_OPENAI_COMPATIBLE_TRANSPORT";
+export const OPENAI_COMPATIBLE_ACCOUNT_ID_ENV = "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID";
+export const OPENAI_COMPATIBLE_ORIGINATOR_ENV = "SAND_OPENAI_COMPATIBLE_ORIGINATOR";
 
 export type OpenAiCompatibleEvent =
   | { readonly type: "text-delta"; readonly delta: string }
@@ -51,6 +60,9 @@ export type OpenAiCompatibleOptions = {
   readonly tools?: readonly OpenAiCompatibleTool[];
   readonly executeTool?: (tool: OpenAiCompatibleTool, args: unknown, toolCallId: string) => Promise<unknown>;
   readonly maxSteps?: number;
+  readonly transport?: "chat" | "responses";
+  readonly accountId?: string | null;
+  readonly originator?: string | null;
 };
 
 type PendingToolCall = { id: string; name: string; arguments: string };
@@ -76,6 +88,10 @@ export function resolveOpenAiCompatibleSettings(env: Readonly<Record<string, str
     model,
     apiKey: apiKey.length === 0 ? null : apiKey,
     contextWindow: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
+    // Only present when configured, so settings stay byte-equal for every chat-completions endpoint.
+    ...(configured(OPENAI_COMPATIBLE_TRANSPORT_ENV).toLowerCase() === "responses" ? { transport: "responses" as const } : {}),
+    ...(configured(OPENAI_COMPATIBLE_ACCOUNT_ID_ENV).length > 0 ? { accountId: configured(OPENAI_COMPATIBLE_ACCOUNT_ID_ENV) } : {}),
+    ...(configured(OPENAI_COMPATIBLE_ORIGINATOR_ENV).length > 0 ? { originator: configured(OPENAI_COMPATIBLE_ORIGINATOR_ENV) } : {}),
   };
 }
 
@@ -392,7 +408,158 @@ async function executeToolCalls(calls: readonly PendingToolCall[], toolsByName: 
   return results;
 }
 
+// --- the Responses transport: the same events, spoken to the OpenAI Responses API ----------------
+// Chat-shaped history in, Responses items out. The system prompt travels as `instructions`.
+export function openAiResponsesEndpoint(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  return trimmed.endsWith("/responses") ? trimmed : `${trimmed}/responses`;
+}
+function responsesUserParts(content: unknown): Loose[] {
+  if (typeof content === "string") return [{ type: "input_text", text: content }];
+  if (!Array.isArray(content)) return [{ type: "input_text", text: safeJson(content) }];
+  return content.map((part: unknown) => {
+    const p = record(part) ?? {};
+    if (p.type === "image_url") {
+      const url = typeof p.image_url === "string" ? p.image_url : String(record(p.image_url)?.url ?? "");
+      return { type: "input_image", image_url: url, detail: "auto" };
+    }
+    return { type: "input_text", text: typeof p.text === "string" ? p.text : safeJson(part) };
+  });
+}
+export function responsesInput(messages: readonly Loose[]): Loose[] {
+  const items: Loose[] = [];
+  for (const message of messages) {
+    if (message.role === "system") continue;
+    if (message.role === "user") { items.push({ role: "user", content: responsesUserParts(message.content) }); continue; }
+    if (message.role === "assistant") {
+      if (typeof message.content === "string" && message.content.length > 0) items.push({ role: "assistant", content: [{ type: "output_text", text: message.content }] });
+      if (Array.isArray(message.tool_calls)) {
+        for (const call of message.tool_calls) {
+          const c = record(call) ?? {};
+          const fn = record(c.function) ?? {};
+          items.push({ type: "function_call", call_id: String(c.id ?? ""), name: String(fn.name ?? ""), arguments: typeof fn.arguments === "string" ? fn.arguments : safeJson(fn.arguments ?? {}) });
+        }
+      }
+      continue;
+    }
+    if (message.role === "tool") items.push({ type: "function_call_output", call_id: String(message.tool_call_id ?? ""), output: typeof message.content === "string" ? message.content : safeJson(message.content) });
+  }
+  return items;
+}
+function responsesTools(tools: readonly OpenAiCompatibleTool[] | undefined): Loose[] | undefined {
+  if (tools == null) return undefined;
+  return tools.map(tool => ({ type: "function", name: tool.name, description: tool.description ?? "", parameters: tool.parameters ?? { type: "object", properties: {} }, strict: false }));
+}
+const count = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+
+async function* streamOpenAiResponses(options: OpenAiCompatibleOptions): AsyncGenerator<OpenAiCompatibleEvent> {
+  const endpoint = openAiResponsesEndpoint(options.baseUrl);
+  const apiKey = options.apiKey?.trim() ?? "";
+  const maxSteps = options.maxSteps ?? 8;
+  const declaredTools = responsesTools(options.tools);
+  const toolsByName = new Map((options.tools ?? []).map(tool => [tool.name, tool]));
+  let messages: Loose[] = options.input.map(item => ({ ...item }));
+  let text = "";
+  let usage: OpenAiCompatibleUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    const response = await options.fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "user-agent": "grok-bot-router/1",
+        "openai-beta": "responses=experimental",
+        // Honest identification: this product's own name, never a first-party client's.
+        originator: options.originator?.trim() || "grok-bot",
+        ...(options.accountId ? { "chatgpt-account-id": options.accountId } : {}),
+        ...(apiKey.length === 0 ? {} : { authorization: `Bearer ${apiKey}` }),
+      },
+      body: JSON.stringify({
+        model: options.model,
+        instructions: options.instructions,
+        input: responsesInput(messages),
+        ...(declaredTools == null ? {} : { tools: declaredTools, tool_choice: "auto", parallel_tool_calls: true }),
+        stream: true,
+        store: false,
+      }),
+    });
+    if (!response.ok) throw await responseError(response, apiKey.length > 0);
+
+    const pending = new Map<string, PendingToolCall>();
+    let stepUsage: OpenAiCompatibleUsage | null = null;
+    let stepText = "";
+    let chunks = 0;
+    for await (const chunk of sseEvents(response)) {
+      chunks += 1;
+      const type = String(chunk.type ?? "");
+      if (type === "error" || type === "response.failed") {
+        const failure = record(chunk.error) ?? record(record(chunk.response)?.error) ?? chunk;
+        throw new Error(`OpenAI Responses request failed: ${safeJson(failure).slice(0, 4_096)}`);
+      }
+      if (type === "response.output_text.delta" && typeof chunk.delta === "string" && chunk.delta.length > 0) {
+        stepText += chunk.delta;
+        text += chunk.delta;
+        yield { type: "text-delta", delta: chunk.delta };
+        continue;
+      }
+      if (type === "response.output_item.added" || type === "response.output_item.done") {
+        const item = record(chunk.item);
+        if (item?.type === "function_call") {
+          const key = String(item.id ?? chunk.output_index ?? pending.size);
+          const previous = pending.get(key);
+          pending.set(key, {
+            id: String(item.call_id ?? item.id ?? key),
+            name: String(item.name ?? previous?.name ?? ""),
+            arguments: typeof item.arguments === "string" && item.arguments.length > 0 ? item.arguments : previous?.arguments ?? "",
+          });
+        }
+        continue;
+      }
+      if (type === "response.function_call_arguments.delta" && typeof chunk.delta === "string") {
+        const current = pending.get(String(chunk.item_id));
+        if (current != null) current.arguments += chunk.delta;
+        continue;
+      }
+      if (type === "response.completed" || type === "response.incomplete") {
+        const reported = record(record(chunk.response)?.usage);
+        if (reported != null) {
+          stepUsage = {
+            inputTokens: count(reported.input_tokens),
+            outputTokens: count(reported.output_tokens),
+            cacheReadTokens: count(record(reported.input_tokens_details)?.cached_tokens),
+            cacheWriteTokens: 0,
+          };
+        }
+      }
+    }
+    if (chunks === 0) throw new Error("OpenAI Responses stream did not contain any events.");
+    if (stepUsage != null) usage = addUsage(usage, stepUsage);
+    const calls = [...pending.values()];
+    if (calls.length === 0) {
+      yield { type: "done", text, usage };
+      return;
+    }
+    if (options.executeTool == null) {
+      for (const call of calls) {
+        let args: unknown = {};
+        try { args = call.arguments.length > 0 ? JSON.parse(call.arguments) : {}; } catch { args = {}; }
+        yield { type: "tool-call", toolCallId: call.id, toolName: call.name, args };
+      }
+      yield { type: "done", text, usage };
+      return;
+    }
+    messages = [
+      ...messages,
+      { role: "assistant", content: stepText.length === 0 ? null : stepText, tool_calls: calls.map(call => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })) },
+      ...await executeToolCalls(calls, toolsByName, options.executeTool),
+    ];
+  }
+  throw new Error(`The OpenAI Responses endpoint exceeded Grok Bot's ${maxSteps}-step tool limit.`);
+}
+
 export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptions): AsyncGenerator<OpenAiCompatibleEvent> {
+  if (options.transport === "responses") { yield* streamOpenAiResponses(options); return; }
   const maxSteps = options.maxSteps ?? 8;
   const endpoint = openAiCompatibleChatEndpoint(options.baseUrl);
   const toolsByName = new Map((options.tools ?? []).map(tool => [tool.name, tool]));

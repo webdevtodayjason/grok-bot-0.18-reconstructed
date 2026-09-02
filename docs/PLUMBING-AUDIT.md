@@ -1390,6 +1390,47 @@ cache is per llama.cpp slot, so several agents with different prefixes will evic
 the server runs enough parallel slots. The router's 32,768 cap seen at 03:5xZ is gone; the same
 route now accepts 47K.
 
+## 6p. Subscriptions: discover, adopt honestly, score (2026-09-02, contract steps 1–4)
+
+Contract `docs/SUBSCRIPTIONS-CONTRACT.md`, armed 06:53 CDT. Built on the Mac side, where the vendor
+stores live: `ui/subscriptions.mjs` (scan, adopt, refresh, resolve), relay routes
+`GET /subscriptions`, `POST /subscriptions/adopt`, `POST /subscriptions/forget`, and a
+"Found on this machine" section in the operator page's Endpoints panel. Adopted secrets live in
+`ui/subscriptions.json` (0600, gitignored); an adopted endpoint row carries `subscription: <id>`
+and no key; `/endpoints/use` resolves the live token at switch time, refreshing through the
+vendor's own endpoint when it is within ten minutes of expiry, and writes the box's secrets with
+`SAND_OPENAI_COMPATIBLE_TRANSPORT`, `_ACCOUNT_ID`, `_ORIGINATOR` and `_CONTEXT_WINDOW`. Host side:
+the OpenAI-compatible transport gained a Responses mode (`openai-compatible-chat.ts`), chosen by
+`SAND_OPENAI_COMPATIBLE_TRANSPORT=responses`: chat history becomes Responses items, the system
+prompt travels as `instructions`, `store: false`, tools as top-level function tools, and the
+request identifies as `originator: grok-bot` with `chatgpt-account-id`; the same events come out.
+
+**Measured, this Mac + the box:**
+
+- Scan: Codex present and usable (identity `jbrashear@titaniumcomputing.com · pro plan`, expiry
+  2026-09-05; the relay's environment sets `CODEX_HOME` to Orca's managed Codex home, which the
+  CLI's own override rules honour), MiniMax absent (no CLI login here), Gemini present by
+  existence only, Claude present via `claude auth status --json` (`jason@webdevtoday.com · max
+  plan`). No token-shaped string and no stored secret in the output.
+- Leak gate: three adopted secrets held; none in `ui/endpoints.json`, the host log, three agents'
+  transcripts, or the scan output; store mode 600.
+- Codex adoption gate: adopted as a keyless Responses row (model follows the CLI's own
+  `config.toml`, `gpt-5.6-sol`; the guessed `gpt-5-codex` family is refused for ChatGPT accounts);
+  box on `transport=responses`, `originator=grok-bot`, account id set; rubric on a fresh agent
+  **95/100**: speak 2/2 (16 s, 6 s), work 2/2 evidenced, history 1/1 evidenced, 155 s wall;
+  `~/.codex/auth.json` sha256 unchanged before and after.
+- Pasted-key plumbing (Z.AI, throwaway key): adopt → keyless row → use writes key and 128k window
+  to the box → 0 occurrences in `endpoints.json` → leak gate clean → forget removes the row → box
+  restored with transport and originator cleared.
+- Unit: 107/107 (eight new: Responses transport headers, body, events and error; store mode; MiniMax
+  and Codex refresh against a mocked vendor, vendor file untouched; secret-free scan).
+
+**Operator-blocked, honestly:** the Z.AI and MiniMax acceptance lines need a Z.AI coding-plan key
+and a MiniMax CLI login that only Jason has; both paths are exercised end to end with mocks and a
+throwaway key, and `--models subscription:zai` fails cleanly with "needs an API key" until then.
+Kimi Code's token here is expired; Kimi runs by pasted key. Grok's CLI store carries an ArgentOS
+identity and an expired token; Grok stays on the xAI key.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole

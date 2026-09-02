@@ -563,6 +563,7 @@ async function refresh() {
   try { state.model = await (await fetch("/model")).json(); } catch { state.model = null; }
   if (state.view === "router") {
     try { state.endpoints = await (await fetch("/endpoints")).json(); } catch { state.endpoints = null; }
+    try { state.subscriptions = (await (await fetch("/subscriptions")).json()).subscriptions; } catch { state.subscriptions = null; }
   }
   // getAgentTranscript takes {id}, not {agentId} — the mismatch answers with
   // "Invalid Sand agent id: undefined" rather than an empty list.
@@ -713,7 +714,36 @@ function renderEndpoints() {
       host reads environment before this list — so choosing below is recorded but will not take
       effect. Recreate the box without those variables to hand this switch over.</p></div>` : ""}
     ${rows || '<div class="empty">No endpoints saved yet.</div>'}
-    <div class="row"><button class="btn ghost" onclick="reloadEndpoints()">Re-probe</button></div>`;
+    <div class="row"><button class="btn ghost" onclick="reloadEndpoints()">Re-probe</button></div>
+    ${renderSubscriptions()}`;
+}
+
+// Subscriptions already authenticated on this Mac. Presence, identity and expiry only; adopting
+// one writes a keyless endpoint row above and the secret to a 0600 store the browser never sees.
+function renderSubscriptions() {
+  const subs = state.subscriptions;
+  if (subs == null) return `<h3 style="margin-top:18px">Found on this machine</h3><div class="empty">Scanning…</div>`;
+  const rows = subs.map((sub) => {
+    const badge = sub.usable ? `<span class="badge live">${sub.adopted ? "adopted" : "signed in"}</span>`
+      : sub.present ? `<span class="badge warn">present, not usable</span>` : `<span class="badge down">not found</span>`;
+    const facts = [sub.identity, sub.expiresAt ? `expires ${new Date(sub.expiresAt).toLocaleString()}` : null, sub.note].filter(Boolean).map(esc).join(" · ");
+    const keyInput = sub.route === "key" && !sub.adopted
+      ? `<input id="subkey-${esc(sub.id)}" type="password" placeholder="paste API key" style="max-width:220px">` : "";
+    const modelInput = (sub.route === "key" || sub.route === "endpoint") && !sub.adopted
+      ? `<input id="submodel-${esc(sub.id)}" placeholder="${esc(sub.defaultModel ?? "model")}" style="max-width:180px">` : "";
+    const action = sub.route === "runtime" || sub.route === "none" ? ""
+      : sub.adopted ? `${sub.endpointReady ? `<button class="btn ghost" onclick="useEndpoint('${esc(sub.endpointId)}')">Use this</button>` : ""}
+          <button class="btn ghost" onclick="forgetSubscription('${esc(sub.id)}')">Forget</button>`
+      : `${keyInput}${modelInput}<button class="btn ghost" onclick="adoptSubscription('${esc(sub.id)}')" ${sub.usable || sub.route === "key" ? "" : "disabled title='nothing to adopt'"}>Adopt</button>`;
+    return `<div class="deskrow">
+      <div><b>${esc(sub.name)}</b> ${badge}<div class="sub">${facts || esc(sub.source ?? "")}</div><div class="sub">${esc(sub.posture)}</div></div>
+      <div class="row" style="margin:0">${action}</div>
+    </div>`;
+  }).join("");
+  return `<h3 style="margin-top:18px">Found on this machine</h3>
+    <p class="lede">Subscriptions your CLIs are already signed into. Claude and Gemini are asked, never read; Codex and MiniMax
+      tokens are adopted once from the stores their CLIs keep for reuse; Z.AI and Kimi take a pasted key. Nothing is used until you adopt it.</p>
+    ${rows}`;
 }
 
 views.agents = () => {
@@ -1682,6 +1712,22 @@ window.setSetting = (key, value) => guard(() => call("setHostSettings",
 
 window.reloadEndpoints = () => guard(async () => {
   state.endpoints = await (await fetch("/endpoints")).json();
+});
+window.adoptSubscription = (id) => guard(async () => {
+  const apiKey = document.getElementById(`subkey-${id}`)?.value?.trim() || undefined;
+  const model = document.getElementById(`submodel-${id}`)?.value?.trim() || undefined;
+  const res = await fetch("/subscriptions/adopt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, apiKey, model }) });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body?.error ?? "could not adopt");
+  alertLine(`adopted ${id}: endpoint ${body.endpoint.name} (${body.endpoint.model})`);
+  state.endpoints = await (await fetch("/endpoints")).json();
+  state.subscriptions = (await (await fetch("/subscriptions")).json()).subscriptions;
+});
+window.forgetSubscription = (id) => guard(async () => {
+  const res = await fetch("/subscriptions/forget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
+  if (!res.ok) throw new Error("could not forget");
+  state.endpoints = await (await fetch("/endpoints")).json();
+  state.subscriptions = (await (await fetch("/subscriptions")).json()).subscriptions;
 });
 window.useEndpoint = (id) => guard(async () => {
   const res = await fetch("/endpoints/use", { method: "POST",

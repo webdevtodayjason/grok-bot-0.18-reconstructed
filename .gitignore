@@ -31,3 +31,4 @@ node_modules/
 /xlsx-*.js
 /index.html
 ui/endpoints.json
+ui/subscriptions.json

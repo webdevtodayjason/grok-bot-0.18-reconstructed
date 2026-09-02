@@ -1,6 +1,6 @@
 # Subscriptions Contract — discover, adopt honestly, score
 
-**Status: DRAFT, not armed, not implemented.** Written 2026-09-02 for Jason's review after two
+**Status: armed 2026-09-02 06:53 CDT; steps 1–4 built and measured (`PLUMBING-AUDIT.md` §6p); the Z.AI and MiniMax live lines wait on Jason's key and CLI login.** Written 2026-09-02 after two
 read-only scouts: Orca 1.4.195 (extracted from `/Applications/Orca.app`, MIT) and OpenClaw
 v2026.8.1, the release branded 2.0 (source downloaded, MIT). Scout reports:
 `scratchpad/orca-accounts-report.md`, `scratchpad/openclaw-auth-report.md`.
@@ -198,3 +198,16 @@ DISPOSITION LOG as the last action before done — done is not claimable without
 Notes for arming: the rubric's subscription runs spend plan quota on Jason's accounts; each is
 one fresh agent, about ten requests. The Z.AI and Kimi keys come from Jason; the contract does not
 read `~/.api_keys`.
+
+## 9. As built (2026-09-02)
+
+- Scanner, store, adoption, refresh and switch-time resolution live in `ui/subscriptions.mjs`
+  and `ui/server.mjs`; the operator page gained the "Found on this machine" section. The store
+  honours `GROK_BOT_SUBSCRIPTIONS_FILE` for tests.
+- The Codex row's model follows the user's own Codex CLI `config.toml` (`gpt-5.6-sol` here);
+  the draft's `gpt-5-codex` is refused by the ChatGPT backend.
+- The Responses transport lives inside `openai-compatible-chat.ts` as a second mode, not a second
+  file, so the executor and the evidence layer are untouched.
+- Codex adoption honours `CODEX_HOME`, which on this Mac points at Orca's managed home.
+- Usage and reset-window display (section 4) was not built in this round; the readers are
+  identified in the OpenClaw tree for the next one.

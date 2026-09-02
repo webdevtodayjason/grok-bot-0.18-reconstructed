@@ -1,6 +1,6 @@
 {
  "measuredOn": "this Mac + grok-bot-local-vm",
- "capturedAt": "2026-09-02T11:09:44.488Z",
+ "capturedAt": "2026-09-02T12:09:07.206Z",
  "results": [
   {
    "entry": "m3-glm",
@@ -297,6 +297,56 @@
    ],
    "cost": "free/local",
    "wallMs": 275312
+  },
+  {
+   "entry": "sub-codex",
+   "endpointId": "sub-codex",
+   "model": "gpt-5.6-sol",
+   "startedAt": "2026-09-02T12:06:31.283Z",
+   "tiers": {
+    "reach": {
+     "reachable": true,
+     "serves": true,
+     "ms": null,
+     "models": 0
+    },
+    "speak": {
+     "passed": 2,
+     "of": 2,
+     "turnsMs": [
+      16164,
+      6058
+     ],
+     "failures": []
+    },
+    "latency": {
+     "medianMs": 16164
+    },
+    "work": {
+     "passed": 2,
+     "of": 2,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-5shsi5ya; verdict evidenced, attestation holds it",
+      "PASS  round 2 \u2014 reported grokbot-verify-dqaujq5m; verdict evidenced, attestation holds it"
+     ]
+    },
+    "history": {
+     "growthTurns": 4,
+     "of": 4,
+     "passed": 1,
+     "of_rounds": 1,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-9mgx27rp; verdict evidenced, attestation holds it"
+     ]
+    }
+   },
+   "score": 95,
+   "notes": [
+    "verify-codex-adoption 2026-09-02 07:2xZ: adopted keyless, box identified as grok-bot, ~/.codex auth.json sha256 unchanged"
+   ],
+   "cost": "subscription",
+   "wallMs": 154930,
+   "subscription": "ChatGPT Pro plan via the Codex CLI login, adopted; Responses transport, originator grok-bot"
   }
  ]
 }

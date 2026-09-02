@@ -95,19 +95,43 @@ const workReport = async (agentId, rounds) => {
   return { passed: lines.filter((l) => /^\s+PASS/.test(l)).length, lines: lines.map((l) => l.trim().slice(0, 200)) };
 };
 
+// subscription:<id> resolves through the relay's scan (docs/SUBSCRIPTIONS-CONTRACT.md): the
+// subscription is adopted if it is not yet, and the battery runs on its keyless endpoint row.
+async function resolveSubscriptionEntry(subId, override) {
+  const scan = (await relay("/subscriptions")).subscriptions.find((s) => s.id === subId);
+  if (scan == null) throw new Error(`unknown subscription ${subId}`);
+  if (!scan.adopted) {
+    const res = await fetch(`${GATEWAY}/subscriptions/adopt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: subId, model: override }) });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body?.error ?? `could not adopt ${subId}`);
+  }
+  return { endpointId: scan.endpointId, cost: "subscription", identity: scan.identity ?? null };
+}
+
 async function evaluate(entry) {
   const colon = entry.indexOf(":"); // ollama tags carry their own colon: dell-qwen32b:qwen2.5:14b
-  const endpointId = colon < 0 ? entry : entry.slice(0, colon);
-  const override = colon < 0 ? undefined : entry.slice(colon + 1);
-  const result = { entry, endpointId, model: override ?? null, startedAt: new Date().toISOString(), tiers: {}, score: 0, notes: [] };
+  let endpointId = colon < 0 ? entry : entry.slice(0, colon);
+  let override = colon < 0 ? undefined : entry.slice(colon + 1);
+  let subscription = null;
+  if (endpointId === "subscription") {
+    const [subId, ...rest] = String(override ?? "").split(":");
+    try { subscription = await resolveSubscriptionEntry(subId, rest.join(":") || undefined); }
+    catch (error) { return { entry, endpointId: `subscription:${subId}`, model: null, cost: "subscription", tiers: {}, score: 0, notes: [String(error.message)], wallMs: 0 }; }
+    endpointId = subscription.endpointId;
+    override = rest.join(":") || undefined;
+  }
+  const result = { entry, endpointId, model: override ?? null, startedAt: new Date().toISOString(), tiers: {}, score: 0, notes: [], ...(subscription ? { subscription: subscription.identity } : {}) };
   const t0 = Date.now();
   const sw = await relay("/endpoints/use", { id: endpointId }).catch((e) => ({ error: String(e) }));
   const health = sw?.health ?? {};
   if (override) await setModel(override);
   const model = override ?? (await boxSh(`python3 -c "import json;print(json.load(open('${SECRETS}'))['secrets'].get('SAND_OPENAI_COMPATIBLE_MODEL',''))"`)).trim();
   result.model = model;
-  result.cost = /x\.ai|openai|anthropic|api\./.test(String(sw?.using ?? "") + JSON.stringify(sw)) || endpointId.startsWith("xai") ? "paid" : "free/local";
-  const serves = health.reachable === true && (override ? (health.models ?? []).includes(override) : health.serves !== false);
+  const catalogRow = (await relay("/endpoints").catch(() => ({ endpoints: [] }))).endpoints?.find((e) => e.id === endpointId);
+  result.cost = subscription || catalogRow?.subscription ? "subscription" : /x\.ai|openai|anthropic|api\./.test(String(sw?.using ?? "") + JSON.stringify(sw)) || endpointId.startsWith("xai") ? "paid" : "free/local";
+  if (catalogRow?.subscription && !subscription) result.subscription = catalogRow.subscription;
+  // A subscription row may not expose /models; the relay says "verified on use" and the speak tier decides.
+  const serves = health.reachable === true && (override && health.models?.length ? health.models.includes(override) : health.serves !== false);
   result.tiers.reach = { reachable: health.reachable === true, serves, ms: health.ms ?? null, models: (health.models ?? []).length };
   result.score += serves ? 10 : 0;
   if (!serves) { result.notes.push(`endpoint ${endpointId} unreachable or does not serve ${model}: ${health.detail ?? ""}`); result.wallMs = Date.now() - t0; return result; }

@@ -10,6 +10,7 @@
 //   SAND_HOST_GATEWAY_TOKEN  optional; sent as Bearer when set
 //   SAND_UI_PORT             listen port, default 7777
 import { createServer } from "node:http";
+import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
 import { readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -339,6 +340,31 @@ const server = createServer(async (req, res) => {
       return res.end(JSON.stringify({ peers: [...new Set(peers.filter(Boolean))] }));
     }
     // The operator's endpoint list, what is live right now, and whether each one answers.
+    // Subscriptions already authenticated on this Mac (docs/SUBSCRIPTIONS-CONTRACT.md). The scan
+    // never returns a secret; adoption writes ui/subscriptions.json and a keyless endpoint row.
+    if (req.method === "GET" && url.pathname === "/subscriptions") {
+      const subscriptions = await scanSubscriptions(process.env, await readCatalog());
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ subscriptions }));
+    }
+    if (req.method === "POST" && url.pathname === "/subscriptions/adopt") {
+      const { id, apiKey, model } = JSON.parse(await readBody(req) || "{}");
+      let entry;
+      try { entry = await adoptSubscription(id, { apiKey, model }); } catch (error) { return fail(res, 400, error.message); }
+      const catalog = await readCatalog();
+      const endpoints = (catalog.endpoints ?? []).filter((e) => e.id !== entry.id).concat([entry]);
+      await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints }, null, 2));
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ adopted: id, endpoint: entry }));
+    }
+    if (req.method === "POST" && url.pathname === "/subscriptions/forget") {
+      const { id } = JSON.parse(await readBody(req) || "{}");
+      await forgetSubscription(id);
+      const catalog = await readCatalog();
+      await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints: (catalog.endpoints ?? []).filter((e) => e.subscription !== id) }, null, 2));
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ forgot: id }));
+    }
     if (req.method === "GET" && url.pathname === "/endpoints") {
       const [catalog, secrets, envOut] = await Promise.all([
         readCatalog(), readSecrets(),
@@ -351,8 +377,17 @@ const server = createServer(async (req, res) => {
       const pinned = PROVIDER_KEYS.some((k) => envOf(k) != null);
       const live = { baseUrl: envOf(PROVIDER_KEYS[0]) ?? secrets[PROVIDER_KEYS[0]] ?? null,
         model: envOf(PROVIDER_KEYS[1]) ?? secrets[PROVIDER_KEYS[1]] ?? null };
-      const endpoints = await Promise.all((catalog.endpoints ?? []).map(async (e) =>
-        ({ ...e, apiKey: e.apiKey ? "set" : "", health: await probe(e) })));
+      const endpoints = await Promise.all((catalog.endpoints ?? []).map(async (e) => {
+        if (!e.subscription) return { ...e, apiKey: e.apiKey ? "set" : "", health: await probe(e) };
+        // A subscription row carries no key; probe with the live token where the vendor serves
+        // /models, otherwise say so rather than show it down.
+        let resolved = null;
+        try { resolved = await resolveSubscription(e.subscription); } catch (error) { return { ...e, apiKey: "", health: { reachable: false, detail: error.message } }; }
+        const health = e.transport === "responses"
+          ? { reachable: true, serves: null, ms: null, detail: "subscription; verified on use" }
+          : await probe({ ...e, apiKey: resolved.apiKey });
+        return { ...e, apiKey: "subscription", health };
+      }));
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ endpoints, live, pinned,
         pinnedBy: pinned ? "container env — recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin" : null }));
@@ -377,12 +412,31 @@ const server = createServer(async (req, res) => {
       const chosen = (catalog.endpoints ?? []).find((e) => e.id === id);
       if (chosen == null) return fail(res, 404, `no endpoint named ${id}`);
       const secrets = await readSecrets();
-      await writeSecrets({ ...secrets,
-        SAND_OPENAI_COMPATIBLE_BASE_URL: chosen.baseUrl,
-        SAND_OPENAI_COMPATIBLE_MODEL: chosen.model,
-        ...(chosen.apiKey ? { SAND_OPENAI_COMPATIBLE_API_KEY: chosen.apiKey } : {}) });
+      const next = { ...secrets, SAND_OPENAI_COMPATIBLE_BASE_URL: chosen.baseUrl, SAND_OPENAI_COMPATIBLE_MODEL: chosen.model };
+      for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR"]) delete next[key];
+      if (chosen.subscription) {
+        // The live token, refreshed through the vendor's own endpoint if it is about to expire;
+        // the refreshed token goes to our store, never back to the vendor's file.
+        let resolved;
+        try { resolved = await resolveSubscription(chosen.subscription); } catch (error) { return fail(res, 502, error.message); }
+        next.SAND_OPENAI_COMPATIBLE_API_KEY = resolved.apiKey;
+        next.SAND_OPENAI_COMPATIBLE_TRANSPORT = resolved.transport;
+        next.SAND_OPENAI_COMPATIBLE_ORIGINATOR = resolved.originator;
+        if (resolved.accountId) next.SAND_OPENAI_COMPATIBLE_ACCOUNT_ID = resolved.accountId;
+      } else if (chosen.apiKey) {
+        next.SAND_OPENAI_COMPATIBLE_API_KEY = chosen.apiKey;
+      }
+      if (chosen.contextWindow) next.SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW = String(chosen.contextWindow);
+      await writeSecrets(next);
+      // A subscription row has no key of its own and the Codex backend serves no /models; report
+      // it the way the listing does instead of probing it into a false "down".
+      const health = chosen.subscription
+        ? (chosen.transport === "responses"
+          ? { reachable: true, serves: null, ms: null, detail: "subscription; verified on use" }
+          : await probe({ ...chosen, apiKey: next.SAND_OPENAI_COMPATIBLE_API_KEY }))
+        : await probe(chosen);
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify({ using: chosen.name, health: await probe(chosen) }));
+      return res.end(JSON.stringify({ using: chosen.name, health }));
     }
     if (req.method === "GET" && url.pathname === "/model") {
       // The gateway reports which provider is routed but never which model answers, and
