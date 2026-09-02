@@ -1340,6 +1340,34 @@ inside `turn-runtime.ts`, a named non-goal, and `attemptId` is the nonce anyway.
 registration is two files, receipts have three call sites, and the scripts, test, registry and
 docs each count. Reported here rather than trimmed.
 
+## 6n. The model rubric: which model works, measured (2026-09-02)
+
+`scripts/model-rubric.mjs` runs one scored battery per model on a **fresh** throwaway agent: reach
+(10), speak (2 turns echoing an unfakeable token, 20), work (2 rounds of
+`verify-work-report --require-evidence`, 40), history (4 growth turns of ~3k tokens of tool output,
+then one more evidence-required round, 20), latency (median speak turn, 10). Cost class is shown,
+never scored. Results in `docs/evidence/model-rubric-2026-09-02.json`; page: https://artifacts.semfreak.dev/a/grok-bot-reconstructed/model-rubric-61040c12/
+
+| endpoint · model | score | cost | speak | work | history | median turn | what the host log says |
+|---|---|---|---|---|---|---|---|
+| m3-glm · glm-m3 | 10 | free | 0/2 | – | – | – | 35k fresh-agent request > 32,768 router cap |
+| m3-qwen · qwen3.8 | 10 | free | 0/2 | – | – | – | router 500, qwen backend unreachable |
+| m3-qwen · deepseek | 10 | free | 0/2 | – | – | – | no turn completed in 60 s (same router) |
+| dell-qwen32b · qwen2.5:32b | 10 | free | 0/2 | – | – | – | prose about "a mistake in formatting"; no valid tool call (Ollama shim, 33 tools) |
+| dell-qwen32b · qwen2.5:14b | 0 | free | – | – | – | – | not run; rubric tag bug, fixed `4344517` |
+| xai-grok · grok-4.20-0309-reasoning | 10 | paid | ? | ? | runaway | – | 1,012 duplicate sends in 8 turns; killed (P1c) |
+| xai-grok · grok-4.6 | **95** | paid | 2/2 | 2/2 | 1/1 | 22 s | 102 s wall, every reply `evidenced` |
+| spark4-nemotron · Nemotron 30B | – | free | – | – | – | – | endpoint down for the run (vLLM EngineCore error) |
+
+**Reading it.** Tonight no free local model in the fleet can run the product, and in every case the
+reason is configuration or serving, not model quality: the M3 router caps GLM below the product's
+own base prompt, its qwen backend is off, the Dell serves through Ollama whose tool-call shim cannot
+carry 33 tools, and the Spark, the one endpoint with a window large enough, is down. Nemotron, when
+it was up, fabricated under history load; the evidence layer now labels that instead of trusting
+it. The rubric is the instrument to re-run after each operator fix: restart the Spark, raise GLM's
+router context to at least 64k (the model supports 128k), and put a vLLM or llama.cpp server in
+front of the Dell's weights instead of Ollama. grok-4.6 is the control and the reference score.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole

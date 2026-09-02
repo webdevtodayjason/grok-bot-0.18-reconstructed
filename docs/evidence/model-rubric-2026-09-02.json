@@ -1,6 +1,6 @@
 {
  "measuredOn": "this Mac + grok-bot-local-vm",
- "capturedAt": "2026-09-02T04:12:09.561Z",
+ "capturedAt": "2026-09-02T04:34:25.115Z",
  "results": [
   {
    "entry": "m3-glm",
@@ -32,7 +32,8 @@
    },
    "score": 10,
    "notes": [
-    "could not complete a turn; work and history tiers skipped"
+    "could not complete a turn; work and history tiers skipped",
+    "fresh-agent request 35,192\u201336,124 tokens > router cap 32,768 (LiteLLM ContextWindowExceededError)"
    ],
    "cost": "free/local"
   },
@@ -66,7 +67,8 @@
    },
    "score": 10,
    "notes": [
-    "could not complete a turn; work and history tiers skipped"
+    "could not complete a turn; work and history tiers skipped",
+    "router 500: connection error to the qwen backend"
    ],
    "cost": "free/local"
   },
@@ -100,7 +102,8 @@
    },
    "score": 10,
    "notes": [
-    "could not complete a turn; work and history tiers skipped"
+    "could not complete a turn; work and history tiers skipped",
+    "no turn completed in 60 s per attempt (same router)"
    ],
    "cost": "free/local"
   },
@@ -134,7 +137,8 @@
    },
    "score": 10,
    "notes": [
-    "could not complete a turn; work and history tiers skipped"
+    "could not complete a turn; work and history tiers skipped",
+    "spoke prose about 'a mistake in formatting my previous message'; no valid tool call reached the host (Ollama tool-call shim at 33 tools)"
    ],
    "cost": "free/local"
   },
@@ -153,7 +157,8 @@
    },
    "score": 0,
    "notes": [
-    "endpoint dell-qwen32b unreachable or does not serve qwen2.5: "
+    "endpoint dell-qwen32b unreachable or does not serve qwen2.5: ",
+    "not run: rubric tag parsing bug, fixed in 4344517"
    ],
    "cost": "free/local",
    "wallMs": 318
@@ -196,6 +201,53 @@
     "runaway: 1,012 SendMessage deliveries in 8 turns, 371 items in one turn (hundreds of identical SendMessage calls per completion); killed at 04:31Z; see PLUMBING-AUDIT.md \u00a75 P1c"
    ],
    "wallMs": 900000
+  },
+  {
+   "entry": "xai-grok",
+   "endpointId": "xai-grok",
+   "model": "grok-4.6",
+   "startedAt": "2026-09-02T04:32:42.514Z",
+   "tiers": {
+    "reach": {
+     "reachable": true,
+     "serves": true,
+     "ms": 106,
+     "models": 12
+    },
+    "speak": {
+     "passed": 2,
+     "of": 2,
+     "turnsMs": [
+      22164,
+      4042
+     ],
+     "failures": []
+    },
+    "latency": {
+     "medianMs": 22164
+    },
+    "work": {
+     "passed": 2,
+     "of": 2,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-bpezt5v2; verdict evidenced, attestation holds it",
+      "PASS  round 2 \u2014 reported grokbot-verify-se2dsj5y; verdict evidenced, attestation holds it"
+     ]
+    },
+    "history": {
+     "growthTurns": 4,
+     "of": 4,
+     "passed": 1,
+     "of_rounds": 1,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-z1hsrh0w; verdict evidenced, attestation holds it"
+     ]
+    }
+   },
+   "score": 95,
+   "notes": [],
+   "cost": "paid",
+   "wallMs": 101717
   }
  ]
 }
