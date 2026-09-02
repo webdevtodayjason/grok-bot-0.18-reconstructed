@@ -22,6 +22,8 @@ export interface LocalScheduleTickDeps {
   listAutomations(): Promise<readonly { readonly agentId: string; readonly automation: LocalScheduleAutomation }[]>;
   fire(agentId: string, automationId: string): Promise<unknown>;
   isReady(): boolean | Promise<boolean>;
+  /** Firing into an agent mid-turn aborts its work; a busy agent's slot waits for a later tick. */
+  isAgentBusy?(agentId: string): boolean;
   log(message: string): void;
   now?(): number;
 }
@@ -60,6 +62,8 @@ export function startLocalScheduleTick(deps: LocalScheduleTickDeps): { dispose()
       if (!(await deps.isReady())) return;
       const entries = await deps.listAutomations();
       for (const { agentId, automationId, slot } of dueAutomations(entries, now(), lastFired)) {
+        // Not marked as fired: the slot stays due and is picked up once the agent is free.
+        if (deps.isAgentBusy?.(agentId) === true) continue;
         lastFired.set(`${agentId}:${automationId}`, slot);
         try {
           await deps.fire(agentId, automationId);

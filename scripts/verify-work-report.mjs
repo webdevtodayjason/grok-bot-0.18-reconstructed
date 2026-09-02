@@ -66,19 +66,38 @@ const spoken = (entries) => entries.flatMap((entry) => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const agentId = flag("--agent", null) ?? (await call("listAgents"))[0]?.id;
+// Skip throwaway agents: the desktop gate creates "verify-*" agents and deletes them on exit, so
+// taking [0] can pick one up mid-life and crash on the next transcript fetch.
+const agentId = flag("--agent", null) ?? (await call("listAgents")).find((a) => !a.isGroup && !String(a.name ?? "").startsWith("verify-"))?.id;
 if (agentId == null) throw new Error("no agents on the host to test with");
+
+// A new round sent while the previous turn is still running bleeds the two together: the agent's
+// late messages from round N count against round N+1, and round N+1's prompt lands mid-turn. Wait
+// for idle first. This is test hygiene, not a hidden product fix -- round 1 proves the capability.
+const waitForIdle = async () => {
+  for (let i = 0; i < 60; i += 1) {
+    const me = (await call("listAgents")).find((a) => a.id === agentId);
+    if (me == null || me.isRunning !== true) return;
+    await sleep(5000);
+  }
+};
 
 let failures = 0;
 for (let round = 1; round <= ROUNDS; round += 1) {
+  await waitForIdle();
   // A fresh sentinel per round: a cached answer from the previous round must not pass this one.
   const sentinel = `grokbot-verify-${Math.random().toString(36).slice(2, 10)}`;
   await docker(["exec", BOX, "sh", "-c", `printf 'sentinel\\n' > /workspace/${sentinel}.txt`]);
 
   const before = spoken(await call("getAgentTranscript", { id: agentId })).length;
+  // Round N+1 asks the identical question the agent just answered, and a model that remembers
+  // round N will reasonably say "I already listed those" and skip the tool -- which reads as a
+  // stall but is stale context. Say the contents changed, so re-checking is the only right move;
+  // the sentinel stays unfakeable either way.
   await call("sendPrompt", {
     agentId,
-    prompt: `Check what files are in /workspace and report the exact file names you find.`,
+    prompt: `The contents of /workspace have just changed (round ${round}). Check the directory `
+      + `again right now and report the exact file names you find this time.`,
   });
 
   const deadline = Date.now() + TIMEOUT_MS;

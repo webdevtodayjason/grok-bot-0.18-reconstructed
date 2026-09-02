@@ -12,7 +12,12 @@
 // Integration check, not a unit test -- needs the box running, a desktop, and a provider, so it
 // stays out of `npm test`. Exit 0: a new screenshot artifact appeared. Exit 1: none did.
 //
-// Usage: node scripts/verify-computer-use.mjs [--timeout-ms 300000] [--agent <id>]
+// A long-lived agent's accumulated history makes its turns fail with an opaque "Internal error
+// during token generation" (docs/PLUMBING-AUDIT.md 6i), which this gate would then misreport as a
+// desktop failure. So unless --agent is given, it creates a fresh agent for the run and deletes it
+// afterward: the check measures the desktop path and nothing else.
+//
+// Usage: node scripts/verify-computer-use.mjs [--timeout-ms 300000] [--attempts 2] [--agent <id>]
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -59,8 +64,25 @@ const shotCount = async () => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const agentId = flag("--agent", null) ?? (await call("listAgents"))[0]?.id;
-if (agentId == null) throw new Error("no agents on the host to test with");
+const idOf = (created) => created?.id ?? created?.agentId ?? created?.agent?.id ?? null;
+let ownedAgentId = null;
+let agentId = flag("--agent", null);
+if (agentId == null) {
+  const created = await call("createAgent", {
+    name: `verify-computer-use ${Math.random().toString(36).slice(2, 8)}`,
+    description: "Throwaway agent for the computer-use verification gate. Safe to delete.",
+  });
+  agentId = ownedAgentId = idOf(created);
+  if (agentId == null) throw new Error(`createAgent returned no id: ${JSON.stringify(created).slice(0, 200)}`);
+  console.log(`  created fresh agent ${agentId}`);
+}
+// Runs before both exit paths below. A throw mid-run skips it and leaves an agent behind -- one
+// whose name starts with "verify-computer-use" and whose description says it is safe to delete.
+const cleanup = async () => {
+  if (ownedAgentId == null) return;
+  await call("deleteAgent", { id: ownedAgentId }).catch(() => {});
+  ownedAgentId = null;
+};
 
 // The subagent aborts with the model API returning "Internal error during token generation". Do NOT
 // read that as upstream flakiness: direct grok-4.6 completions from the same box with the same key
@@ -99,14 +121,24 @@ const computerUse = (Array.isArray(subagents) ? subagents : [])
 console.log(`  computerUse subagents: ${computerUse.map((s) => s.status).join(", ") || "none"}`);
 console.log(`  screenshot artifacts after:  ${after}`);
 
+await cleanup();
 if (after > before) {
   console.log("\nOK");
   process.exit(0);
 }
+// Report what was observed, not a presumed cause. An earlier version of this message asserted a
+// specific provider error on every abort; a subagent also aborts when a new prompt lands on its
+// agent mid-turn, which is what a concurrent test run did. The host log has the real reason.
+let lastHostError = "";
+try {
+  lastHostError = String(await docker(["exec", BOX, "sh", "-c",
+    "grep -iE 'run failed|error' /tmp/sand-host.log | grep -viE 'privacy-mode|connection read' | tail -1"])).trim();
+} catch { /* the log is a convenience, not a requirement */ }
 console.log(providerFailed
-  ? "\nFAILED — no screenshot captured; the subagent aborted with the model API returning\n"
-    + "         'Internal error during token generation'. Direct completions to the same endpoint\n"
-    + "         succeed, so this is OUR request shape, not the provider. Unexplained: suspect the\n"
-    + "         parent turn's 33 tools or its 130+ accumulated tool results."
+  ? "\nFAILED — no screenshot captured; the computerUse subagent aborted.\n"
+    + (lastHostError ? `         last host error: ${lastHostError.slice(0, 220)}\n` : "")
+    + "         Two known causes: a new prompt sent to this agent mid-turn (aborts the subagent),\n"
+    + "         or a long-lived agent's history (docs/PLUMBING-AUDIT.md 6i). This gate uses a fresh\n"
+    + "         agent, so if nothing else was driving it, read the host log."
   : "\nFAILED — no screenshot artifact was captured");
 process.exit(1);

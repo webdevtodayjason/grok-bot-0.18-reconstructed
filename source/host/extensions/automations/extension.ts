@@ -25,6 +25,7 @@ interface AutomationTranscript {
   listAllAutomationDefinitions(): Promise<readonly { agentId: string; automation: ScheduledCloudAutomation & { runs?: readonly { id: string; status: string; detail?: string; coalescedRunIds?: readonly string[] }[] } }[]>;
   listAllAutomations(): Promise<readonly { agentId: string; automation: { id: string; isEnabled: boolean; nextRunAt: number | null; runs?: readonly { startedAt?: number }[] } }[]>;
   runAgentAutomationNow(agentId: string, automationId: string): Promise<unknown>;
+  isAgentBusy(agentId: string): boolean;
   runAutomationForEvent(agentId: string, automation: ScheduledCloudAutomation, event: Record<string, unknown>): Promise<unknown>;
   runServerScheduledAutomation(args: { agentId: string; automation: ScheduledCloudAutomation; runUuid: string; scheduledForMs?: number }): Promise<string | undefined>;
   runServerAutomationForEvent(args: { agentId: string; automation: ScheduledCloudAutomation; event: Record<string, unknown>; runUuid: string }): Promise<string | undefined>;
@@ -88,18 +89,12 @@ export const automationsExtension = defineHostExtension({
      * Everything below the trigger is already local, including the fire path the Test-run button
      * uses, so this is just the clock that was missing.
      */
-    // OFF by default, deliberately. The tick fires correctly (verify-routine-run --local-only
-    // passes), but running it alongside live work showed an in-flight computerUse subagent come back
-    // `aborted` while an every-minute probe routine fired underneath it. Firing a routine into a busy
-    // agent and killing the operator's work is worse than a routine that waits, so this stays behind
-    // SAND_LOCAL_SCHEDULE=1 until it consults a per-agent busy signal (turn-runtime keeps one in
-    // `activeTurns`, which is not reachable from here yet).
-    const localScheduleEnabled = process.env.SAND_LOCAL_SCHEDULE?.trim() === "1";
-    const localSchedule = !localScheduleEnabled ? { dispose: () => {} } : startLocalScheduleTick({
+    const localSchedule = startLocalScheduleTick({
       polling: createRealPollingPolicy({ name: "automations.local-schedule", intervalMs: LOCAL_SCHEDULE_TICK_INTERVAL_MS }),
       listAutomations: () => deps.transcript.listAllAutomations(),
       fire: (agentId, automationId) => deps.transcript.runAgentAutomationNow(agentId, automationId),
       isReady: () => deps["turn-execution"].isRunReady(),
+      isAgentBusy: (agentId) => deps.transcript.isAgentBusy(agentId),
       log: (message) => host.log(message),
     });
     context.onStop(() => localSchedule.dispose());

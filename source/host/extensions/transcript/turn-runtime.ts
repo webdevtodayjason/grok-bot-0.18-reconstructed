@@ -356,6 +356,16 @@ export class TurnRuntime {
 
   constructor(readonly tm: TranscriptManagerLike) {}
 
+  /**
+   * Whether an agent has a turn in flight. `activeTurns` is keyed by session id, which is the agent
+   * id. The local schedule tick asks before firing a routine: firing into a busy agent aborted an
+   * in-flight computerUse subagent during verification, and a routine that waits is strictly
+   * better than one that kills the operator's work.
+   */
+  isAgentBusy(agentId: string): boolean {
+    return this.activeTurns.has(agentId);
+  }
+
   settleCardStatus(args: {
     runSession?: LiveTranscriptSession | null;
     isForActiveAgent: boolean;

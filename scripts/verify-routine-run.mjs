@@ -9,7 +9,7 @@ const call = async (m, a = {}) => {
   return JSON.parse(t);
 };
 const LOCAL_ONLY = process.argv.includes("--local-only");
-const agent = (await call("listAgents")).find((a) => !a.isGroup);
+const agent = (await call("listAgents")).find((a) => !a.isGroup && !String(a.name ?? "").startsWith("verify-"));
 const id = agent.id, automationId = LOCAL_ONLY ? "verify-local-schedule-probe" : "verify-run-probe";
 
 // --local-only proves the box fires a SCHEDULED routine by itself. Cron triggers are routed to the

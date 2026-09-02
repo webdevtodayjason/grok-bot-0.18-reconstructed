@@ -578,6 +578,7 @@ const delegations: ReadonlyArray<[string, keyof TranscriptManager]> = [
   ["resumeAfterListenerConnect", "boxHandoff"],
   ["subscribeAutomations", "automationRuntime"],
   ["getAgentAutomations", "automationRuntime"],
+  ["isAgentBusy", "turnRuntime"],
   ["listAllAutomations", "automationRuntime"],
   ["listAllAutomationDefinitions", "automationRuntime"],
   ["setAgentAutomationEnabled", "automationRuntime"],

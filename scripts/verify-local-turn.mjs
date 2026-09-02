@@ -57,7 +57,8 @@ const say = (e) => e.kind === "send-message" ? e.message.content : e.content;
 
 const agents = await call("listAgents");
 if (agents.length === 0) throw new Error("no agents on the host to test with");
-const agent = agents[0];
+// Skip throwaway "verify-*" agents, which another gate creates and deletes mid-run.
+const agent = agents.find((a) => !a.isGroup && !String(a.name ?? "").startsWith("verify-")) ?? agents[0];
 const settings = await call("getHostSettings");
 
 console.log(`agent    ${agent.name} (${agent.id})`);

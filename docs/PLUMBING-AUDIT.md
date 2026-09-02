@@ -950,8 +950,18 @@ walks toward the point where its turns start failing with an opaque
 either absent or not firing on the local-provider route. Worth its own investigation: find the
 compaction path, check whether it runs here at all, and establish the practical ceiling.
 
-Practical note: use a fresh agent for desktop checks, or the gate reports a capability failure that
-is really a context-length failure.
+**A second way a subagent aborts, observed 2026-09-01:** sending a new prompt to an agent while its
+`computerUse` subagent is mid-flight aborts the subagent. Two verification gates briefly shared one
+agent -- the desktop gate dispatching a subagent, the work-report gate sending sentinel prompts --
+and every subagent came back `aborted` with no artifact. Whether that is intended (a new instruction
+supersedes in-flight work) or a defect is undecided; it is the same hazard the local schedule tick's
+busy guard exists to avoid, and it means any abort must be read against what else was driving that
+agent before blaming history or the provider.
+
+Practical consequence, now built in: `scripts/verify-computer-use.mjs` creates its own fresh agent
+for each run and deletes it afterward, so it measures the desktop path and nothing else. Pass
+`--agent <id>` only when you specifically want to test a long-lived agent -- and expect the
+history failure when you do.
 
 ## 7. The wave plan
 
