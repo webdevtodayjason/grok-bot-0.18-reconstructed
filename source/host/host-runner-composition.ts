@@ -1,4 +1,5 @@
 import { dirname } from "node:path";
+import { evidenceRegistry } from "./extensions/evidence/evidence-registry.js";
 import { createSandExecutorSubagentConfig } from "./sand-multitask.js";
 import { SubagentType, SubagentTypeCustom } from "../packages/proto/generated/agent/v1/subagents_pb.js";
 import { createSandComputerUseSubagentConfig } from "./runner/tools/sand-computer-use-subagent.js";
@@ -1015,9 +1016,11 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             resourceAccessor: input.resourceAccessor,
             assertNoPendingApproval: autoReviewGate.assertNoPendingApproval,
             auditShellCommand: command => {
+              evidenceRegistry.noteReceipt(session.id, "shell");
               method(actionAuditor as DynamicApi, "record")?.({
                 agentId: session.id,
                 occurredAtMs: Date.now(),
+                ...evidenceRegistry.receiptFields(session.id),
                 action: {
                   kind: "shellCommand",
                   command,

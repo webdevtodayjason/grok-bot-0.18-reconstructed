@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { evidenceRegistry } from "../extensions/evidence/evidence-registry.js";
 import type { Context } from "../../packages/context/core.js";
 import { CONNECTOR_MANIFESTS, type ConnectorManifest } from "../../shared/channels.js";
 import { InMemoryBlobStore } from "../../packages/agent-kv/blob-store.js";
@@ -1409,8 +1410,10 @@ export class SandAgentRunner<T = unknown> {
     target: "box" | "user_machine",
     attribution: { readonly turnId?: string; readonly boxId?: string } = {},
   ): void {
+    evidenceRegistry.noteReceipt(this.getConversationId(), "shell");
     this.options.actionAuditor?.record({
       agentId: this.getConversationId(),
+      ...evidenceRegistry.receiptFields(this.getConversationId()),
       ...(attribution.turnId == null ? {} : { turnId: attribution.turnId }),
       ...(attribution.boxId == null ? {} : { boxId: attribution.boxId }),
       occurredAtMs: (this.options.now ?? Date.now)(),

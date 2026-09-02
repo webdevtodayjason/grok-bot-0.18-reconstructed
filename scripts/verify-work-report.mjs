@@ -25,6 +25,10 @@ const flag = (name, fallback) => (process.argv.includes(name)
   : fallback);
 const TIMEOUT_MS = Number.parseInt(flag("--timeout-ms", "240000"), 10);
 const ROUNDS = Math.max(1, Number.parseInt(flag("--rounds", "1"), 10));
+// --require-evidence: the sentinel in the reply is no longer the proof. The reply must carry the
+// host's own verdict "evidenced", and an attestation of this attempt must contain the sentinel
+// (docs/EVIDENCE-CONTRACT.md). A reply that names the file without a receipt fails.
+const REQUIRE_EVIDENCE = process.argv.includes("--require-evidence");
 
 function token() {
   const explicit = process.env.SAND_HOST_GATEWAY_TOKEN?.trim();
@@ -111,13 +115,31 @@ for (let round = 1; round <= ROUNDS; round += 1) {
 
   await docker(["exec", BOX, "sh", "-c", `rm -f /workspace/${sentinel}.txt`]).catch(() => {});
 
+  const entries = (await call("getAgentTranscript", { id: agentId })).filter((e) => e.kind === "send-message");
+  const reply = entries.find((e) => typeof e.message?.content === "string" && e.message.content.includes(sentinel));
+  const last = entries.at(-1);
+  const verdictOf = (e) => (e?.evidence ? `${e.evidence.verdict}${e.evidence.missing?.length ? ` (missing ${e.evidence.missing.slice(0, 2).join(", ")})` : ""}` : "no stamp");
+  if (found && REQUIRE_EVIDENCE) {
+    const verdict = reply?.evidence?.verdict;
+    const evidence = reply?.evidence?.attemptId
+      ? await call("getAgentEvidence", { id: agentId, attemptId: reply.evidence.attemptId }).catch(() => null)
+      : null;
+    const attested = (evidence?.attestations ?? []).some((a) => typeof a.head === "string" && a.head.includes(sentinel));
+    if (verdict === "evidenced" && attested) {
+      console.log(`  PASS  round ${round} — reported ${sentinel}; verdict evidenced, attestation holds it`);
+      continue;
+    }
+    failures += 1;
+    console.log(`  FAIL  round ${round} — named ${sentinel} but verdict ${verdictOf(reply)}; attestation holds it: ${attested}`);
+    continue;
+  }
   if (found) {
-    console.log(`  PASS  round ${round} — reported ${sentinel}`);
+    console.log(`  PASS  round ${round} — reported ${sentinel}; verdict ${verdictOf(reply)}`);
     continue;
   }
   failures += 1;
   const tail = said.at(-1) ?? "(nothing said)";
-  console.log(`  FAIL  round ${round} — never named ${sentinel}`);
+  console.log(`  FAIL  round ${round} — never named ${sentinel}; verdict of last reply: ${verdictOf(last)}`);
   console.log(`        ${said.length} message(s); last: ${JSON.stringify(tail.slice(0, 160))}`);
 }
 

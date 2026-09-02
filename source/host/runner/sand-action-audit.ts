@@ -1,4 +1,5 @@
 import { requestIdKey } from "../../packages/chat-inference-proto/client.js";
+import { evidenceRegistry } from "../extensions/evidence/evidence-registry.js";
 import { shellExecutorResource } from "../../packages/agent-exec/shell.js";
 import { delay } from "../../packages/utils/promise-extras.js";
 import {
@@ -36,8 +37,10 @@ export function wrapMcpExecutorForAudit<
       const transport = deps.resolveTransport(args.providerIdentifier).catch(() => "unknown");
       const report = (status: "ok" | "error"): void => {
         const durationMs = now() - startedAtMs;
+        evidenceRegistry.noteReceipt(deps.agentId, "mcp");
         void transport.then(resolved => deps.auditor.record({
           agentId: deps.agentId,
+          ...evidenceRegistry.receiptFields(deps.agentId),
           ...(deps.getTurnId?.(ctx) == null ? {} : { turnId: deps.getTurnId?.(ctx) }),
           occurredAtMs: startedAtMs,
           action: {

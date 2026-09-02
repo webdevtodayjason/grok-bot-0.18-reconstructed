@@ -2,6 +2,7 @@ import {
   SAND_HIDDEN_PROMPT_MARKER,
   SAND_TRUSTED_AUTOMATION_PROMPT_MARKER,
 } from "../sand-prompt-markers.js";
+import { evidenceRegistry, isWorkTool } from "../../extensions/evidence/evidence-registry.js";
 import {
   SAND_BOX_AWAIT_SHELL_TOOL_NAME,
   SAND_BOX_READ_TOOL_NAME,
@@ -479,6 +480,26 @@ export function withRecordedToolCallNames<T extends TurnTool>(
       ) throw new TypeError("tool call metadata is not bound");
       record(metadata.toolCallId, tool.name);
       return tool.execute(...args);
+    },
+  };
+}
+
+/** Result attestation: hash and head of what a work tool returned, keyed to the current attempt. */
+export function withAttestedResult<T extends TurnTool>(tool: T, agentId: string): T {
+  if (!isWorkTool(tool.name)) return tool;
+  return {
+    ...tool,
+    async execute(...args: readonly unknown[]) {
+      const metadata = args.at(-1) as { toolCallId?: unknown } | undefined;
+      const toolCallId = typeof metadata?.toolCallId === "string" ? metadata.toolCallId : "";
+      try {
+        const result = await tool.execute(...args);
+        evidenceRegistry.attest(agentId, { toolCallId, tool: tool.name, ok: true, result });
+        return result;
+      } catch (error) {
+        evidenceRegistry.attest(agentId, { toolCallId, tool: tool.name, ok: false, result: error instanceof Error ? error.message : String(error) });
+        throw error;
+      }
     },
   };
 }
@@ -1623,7 +1644,7 @@ export function buildTurnTools(
       tool.name,
       host.isComputerUseSubagent,
     );
-    return withToolTimeout(tool, executionTimeoutMs, () =>
+    return withToolTimeout(withAttestedResult(tool, host.getConversationId()), executionTimeoutMs, () =>
       createToolCallExecutionTimeoutError({
         toolName: tool.name,
         executionTimeoutMs,

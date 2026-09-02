@@ -72,6 +72,7 @@ export const SAND_GATEWAY_COMMANDS = {
   importAgentWorkflowUrl: (api: GatewayApi, body: string) => api.importAgentWorkflowUrl(parseCommandArgs(body)),
   portAgentLocalSkills: (api: GatewayApi, body: string) => api.portAgentLocalSkills(parseCommandArgs(body)),
   getConversationOutline: (api: GatewayApi, body: string) => api.getConversationOutline(parseCommandArgs(body)),
+  getAgentEvidence: (api: GatewayApi, body: string) => api.getAgentEvidence(parseCommandArgs(body)),
   skillsCatalog: (api: GatewayApi) => api.skillsCatalog(),
   syncPluginSkills: (api: GatewayApi) => api.syncPluginSkills(),
   getPluginSyncStatus: (api: GatewayApi) => api.getPluginSyncStatus(),

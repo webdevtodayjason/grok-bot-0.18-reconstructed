@@ -1,5 +1,6 @@
 
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
+import { readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
 import {
   parseCoordinatorAgentThreadRequest,
   parseCoordinatorTranscriptWindowRequest,
@@ -513,6 +514,11 @@ export function createHostGatewayApi(
       method(manager, "portAgentLocalSkills")(args.id),
     getConversationOutline: (args: any) =>
       method(manager, "getConversationOutline")(args.id),
+    getAgentEvidence: async (args: any) =>
+      readAgentEvidence(String(args.id), {
+        ...(args.attemptId == null ? {} : { attemptId: String(args.attemptId) }),
+        entries: await (manager as any).sessionStore?.getAgentTranscriptEntries?.(String(args.id)) ?? [],
+      }),
 
     skillsCatalog: () => method(managedSetup, "skillsCatalog")(),
     syncPluginSkills: () =>

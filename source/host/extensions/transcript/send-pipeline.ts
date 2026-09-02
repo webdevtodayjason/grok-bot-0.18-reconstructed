@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { evidenceRegistry } from "../evidence/evidence-registry.js";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -469,6 +470,7 @@ export class SendPipeline {
   nextTurnEpoch(session: { id: string }): number {
     const next = (this.turnEpochs.get(session.id) ?? 0) + 1;
     this.turnEpochs.set(session.id, next);
+    evidenceRegistry.beginAttempt(session.id, next);
     return next;
   }
 

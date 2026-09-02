@@ -153,9 +153,22 @@
           ...(card ? { card } : {}),
           text: String(text).trim(),
           time: timeOf(Number(e.timestampMs ?? e.createdAt)),
+          ...(e.evidence ? { evidence: e.evidence } : {}),
         };
       })
-      .filter((m) => m.text || m.card);
+      .filter((m) => m.text || m.card)
+      // Claim provenance (docs/EVIDENCE-CONTRACT.md): the host stamps every text reply with a verdict
+      // it computed from the tool results of that attempt. Label, never suppress: the reply stays,
+      // a pill under it says what the receipts could not back.
+      .flatMap((m) => {
+        const v = m.evidence?.verdict;
+        if (v !== "unverified" && v !== "unsupported" && v !== "undecidable") return [m];
+        const missing = (m.evidence.missing ?? []).slice(0, 3).join(", ");
+        const why = v === "unverified" ? "no tool ran in this attempt"
+          : v === "undecidable" ? "a tool result was truncated before the check"
+          : `${missing} in no tool result this attempt`;
+        return [m, { id: `${m.id}-evidence`, type: "system", text: `Evidence: ${v} · ${why}` }];
+      });
   }
 
   // Agents the host is currently raising an error tray for. Rebuilt each pass, never accumulated:
