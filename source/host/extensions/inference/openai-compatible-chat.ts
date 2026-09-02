@@ -4,6 +4,15 @@ export const OPENAI_COMPATIBLE_BASE_URL_ENV = "SAND_OPENAI_COMPATIBLE_BASE_URL";
 export const OPENAI_COMPATIBLE_MODEL_ENV = "SAND_OPENAI_COMPATIBLE_MODEL";
 export const OPENAI_COMPATIBLE_API_KEY_ENV = "SAND_OPENAI_COMPATIBLE_API_KEY";
 export const DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://127.0.0.1:11434/v1";
+export const OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV = "SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW";
+/**
+ * Used only when the endpoint does not advertise a window and none is configured. Deliberately
+ * modest: compaction firing early on a large model wastes a summary, while a window set larger
+ * than the real one leaves compaction dead until the provider rejects the prompt -- which is
+ * the failure this whole path exists to prevent. The 32k figure is where local runtimes that
+ * advertise nothing (Ollama, LM Studio) tend to sit.
+ */
+export const DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW = 32_000;
 
 export type OpenAiCompatibleUsage = {
   readonly inputTokens: number;
@@ -23,6 +32,8 @@ export type OpenAiCompatibleSettings = {
   readonly baseUrl: string;
   readonly model: string;
   readonly apiKey: string | null;
+  /** Operator-configured context window in tokens, or null to ask the endpoint. */
+  readonly contextWindow: number | null;
 };
 
 export type OpenAiCompatibleEvent =
@@ -59,7 +70,55 @@ export function resolveOpenAiCompatibleSettings(env: Readonly<Record<string, str
   const model = configured(OPENAI_COMPATIBLE_MODEL_ENV);
   if (model.length === 0) throw new Error(`An OpenAI-compatible endpoint needs a model name. Set ${OPENAI_COMPATIBLE_MODEL_ENV} to a model your server serves.`);
   const apiKey = configured(OPENAI_COMPATIBLE_API_KEY_ENV);
-  return { baseUrl: configured(OPENAI_COMPATIBLE_BASE_URL_ENV) || DEFAULT_OPENAI_COMPATIBLE_BASE_URL, model, apiKey: apiKey.length === 0 ? null : apiKey };
+  const contextWindow = Number.parseInt(configured(OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV), 10);
+  return {
+    baseUrl: configured(OPENAI_COMPATIBLE_BASE_URL_ENV) || DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    model,
+    apiKey: apiKey.length === 0 ? null : apiKey,
+    contextWindow: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
+  };
+}
+
+/** The sibling of the chat endpoint: same root, `/models` instead of `/chat/completions`. */
+export function openAiCompatibleModelsEndpoint(baseUrl: string): string {
+  const chat = openAiCompatibleChatEndpoint(baseUrl);
+  return `${chat.slice(0, -"/chat/completions".length)}/models`;
+}
+
+/**
+ * Every local inference executor used to report a context window of zero, and the compaction
+ * trigger's first line is `if (maxTokens <= 0) return` -- so a conversation on this route grew
+ * until the provider rejected the prompt, then failed identically every turn. The window is a
+ * real number that OpenAI-compatible servers mostly advertise on `/models` (xAI and OpenRouter as
+ * `context_length`, vLLM as `max_model_len`), so ask for it. Never throws: a server that does not
+ * answer, or answers without a figure, yields null and the caller falls back.
+ */
+export async function fetchOpenAiCompatibleContextWindow(
+  fetchImpl: typeof fetch,
+  settings: Pick<OpenAiCompatibleSettings, "baseUrl" | "model" | "apiKey">,
+  timeoutMs = 5_000,
+): Promise<number | null> {
+  try {
+    const response = await fetchImpl(openAiCompatibleModelsEndpoint(settings.baseUrl), {
+      headers: settings.apiKey == null ? {} : { authorization: `Bearer ${settings.apiKey}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return null;
+    const body = record(await response.json());
+    const entries = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    const matches = (entry: Loose): boolean => entry.id === settings.model
+      || (Array.isArray(entry.aliases) && entry.aliases.includes(settings.model))
+      || entry.name === settings.model;
+    const entry = entries.map(record).find((candidate) => candidate != null && matches(candidate));
+    if (entry == null) return null;
+    for (const field of ["context_length", "max_model_len", "max_context_length", "context_window"]) {
+      const value = entry[field];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.floor(value);
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** Accepts a server root, a `/v1` root, or a full completions URL so every local runtime's advertised address works verbatim. */

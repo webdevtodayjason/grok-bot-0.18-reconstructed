@@ -20,3 +20,4 @@ import "./openai-compatible-images.test.mjs";
 import "./machine-room-markdown.test.mjs";
 import "./ui-views-render.test.mjs";
 import "./local-schedule-tick.test.mjs";
+import "./openai-compatible-context-window.test.mjs";

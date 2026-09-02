@@ -208,6 +208,10 @@ export function createTurnSettle(
     const tokenDetails = checkpoint.tokenDetails;
 
     if (summaryArchiveCount > observedSummaryArchiveCount) {
+      // The one operator-visible trace that compaction ran. The transcript keeps every turn by
+      // design, so nothing in the UI changes when the model's window shrinks; without this line
+      // the only evidence would be a later request being smaller than the one before it.
+      console.info(`[sand][turn] conversation compacted: ${summaryArchiveCount} summary archive(s); usedTokens before compaction=${tokenDetails?.usedTokens ?? "?"} of maxTokens=${tokenDetails?.maxTokens ?? "?"}`);
       observedSummaryArchiveCount = summaryArchiveCount;
       tokenDetailsPersistenceState = {
         kind: "stale",

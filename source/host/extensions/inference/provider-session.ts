@@ -8,13 +8,14 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { jsonSchema, streamText, tool, type CoreMessage, type LanguageModelV1, type ToolSet } from "ai";
 
 import { BasePromptBuilder, BasePromptExecutor } from "../../../packages/chat-inference/base.js";
+import { classifyTokenLimitErrorFromMessage } from "../../../packages/chat-inference/token-limit-error-classification.js";
 import type { SandInferenceProvider } from "../../../shared/inference-router.js";
 import { resolveClaudeCodeCliPath } from "../../../shared/node/inference-router-local.js";
 import { getSandRootDir } from "../../host-paths.js";
 import { SandSettingsStore } from "../../../shared/node/settings/sand-settings-store.js";
 import { getBoxSecretsStorePath } from "../secrets/secrets-service.js";
 import { streamCodexDirectResponses, type CodexDirectTool } from "./codex-direct-responses.js";
-import { openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
+import { DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW, OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV, fetchOpenAiCompatibleContextWindow, openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
 import type { LabelMessage, PromptExecutor } from "./sand-labeling.js";
 
 type Loose = Record<string, any>;
@@ -384,6 +385,48 @@ function openAiCompatibleSettings(): OpenAiCompatibleSettings {
   return resolveOpenAiCompatibleSettings(process.env, persistedSecrets());
 }
 
+/**
+ * Every local executor reported a context window of zero, and the compaction trigger's first
+ * line is `if (maxTokens <= 0) return` -- so a conversation on this route grew until the provider
+ * rejected the prompt, then failed identically every turn after. The window is a real number:
+ * the operator's setting wins, otherwise the endpoint is asked once. Only an advertised figure is
+ * cached, because pinning the default for the host's lifetime after one transient `/models`
+ * failure would fire compaction at 22k on a 500k model every turn.
+ */
+const DEFAULT_CONTEXT_WINDOW_RECHECK_MS = 10 * 60 * 1000;
+const resolvedContextWindows = new Map<string, { readonly value: number; readonly expiresAt: number }>();
+const announcedContextWindows = new Map<string, number>();
+async function resolveOpenAiCompatibleContextWindow(settings: OpenAiCompatibleSettings): Promise<number> {
+  if (settings.contextWindow != null) return settings.contextWindow;
+  const key = `${settings.baseUrl}\n${settings.model}`;
+  const cached = resolvedContextWindows.get(key);
+  if (cached !== undefined && Date.now() < cached.expiresAt) return cached.value;
+  const advertised = await fetchOpenAiCompatibleContextWindow(fetch, settings);
+  const resolved = advertised ?? DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW;
+  // An advertised figure is good for the host's lifetime; a default is rechecked after a while,
+  // so an endpoint that was merely down for a moment is not pinned to 32k until restart, and one
+  // that never advertises is not asked on every single turn either.
+  resolvedContextWindows.set(key, { value: resolved, expiresAt: advertised == null ? Date.now() + DEFAULT_CONTEXT_WINDOW_RECHECK_MS : Number.POSITIVE_INFINITY });
+  if (announcedContextWindows.get(key) !== resolved) {
+    announcedContextWindows.set(key, resolved);
+    console.info(`[sand-host] context window for ${settings.model}: ${resolved} tokens (${advertised == null ? `default; the endpoint did not advertise one, set ${OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV} to override` : "advertised by the endpoint"})`);
+  }
+  return resolved;
+}
+
+/**
+ * The compact-and-retry rescue keys on `InputTokenLimitError`, and the string classifier that
+ * produces it only had callers on the Cursor RPC route. The transport wraps every failure in a
+ * bare Error whose message carries the provider's body, so classify here by that message, with
+ * the same observed-phrase list every other route uses -- an xAI overflow reads "This model's
+ * maximum prompt length is N but the request contains M tokens." Anything unrecognised, including
+ * a genuine 500, passes through unchanged rather than being guessed at.
+ */
+function classifyProviderFailure(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  return classifyTokenLimitErrorFromMessage(error.message) ?? error;
+}
+
 function configuredOpenAiCompatibleModel(): string {
   try { return openAiCompatibleSettings().model; } catch { return "openai-compatible"; }
 }
@@ -437,6 +480,7 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
   const fullStream = (async function* () {
     let text = "";
     try {
+      const contextWindow = await resolveOpenAiCompatibleContextWindow(settings);
       for await (const event of streamOpenAiCompatibleChat({
         fetch,
         baseUrl: settings.baseUrl,
@@ -466,11 +510,14 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
         const basic = { promptTokens: event.usage.inputTokens, completionTokens: event.usage.outputTokens, totalTokens: event.usage.inputTokens + event.usage.outputTokens };
         onUsage?.(event.usage);
         usage.resolve(basic);
-        extendedUsage.resolve({ ...event.usage, maxTokens: 0 });
+        extendedUsage.resolve({ ...event.usage, maxTokens: contextWindow });
         metadata.resolve({ openaiCompatible: { baseUrl: settings.baseUrl, model: settings.model } });
         resultResponse.resolve(response(text, invocationId, settings.model));
       }
-    } catch (error) { usage.reject(error); extendedUsage.reject(error); metadata.reject(error); resultResponse.reject(error); throw error; }
+    } catch (raw) {
+      const error = classifyProviderFailure(raw);
+      usage.reject(error); extendedUsage.reject(error); metadata.reject(error); resultResponse.reject(error); throw error;
+    }
   })();
   return { fullStream, response: resultResponse.promise, usage: usage.promise, extendedUsage: extendedUsage.promise, providerMetadata: metadata.promise, invocationId: Promise.resolve(invocationId) };
 }

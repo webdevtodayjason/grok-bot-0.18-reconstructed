@@ -1044,6 +1044,98 @@ itself completed normally (the agent answered `READY`). Two consequences, stated
   The efficient next step is not more taps on the debug hook; it is fix (a), a real context
   window, which makes both the automatic and the forced path testable.
 
+**FIX SHIPPED 2026-09-01.** Three changes:
+
+1. `openai-compatible-chat.ts` -- the settings gain `contextWindow` from
+   `SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW` (env or `box-secrets.json`, re-read on every call, so
+   no restart), plus `fetchOpenAiCompatibleContextWindow`, a no-throw probe of `GET /models` that
+   reads `context_length` (xAI, OpenRouter), `max_model_len` (vLLM), `max_context_length` or
+   `context_window`. Default when nothing is configured or advertised: 32,000 -- modest on
+   purpose, since a window set *larger* than the real one leaves compaction dead until the
+   provider rejects the prompt.
+2. `provider-session.ts` -- the openai-compatible executor resolves that window once per
+   endpoint (advertised figures cached for the host lifetime, defaults rechecked every 10
+   minutes) and reports it as `maxTokens` instead of `0`. Its catch runs the transport's error
+   through the shared `classifyTokenLimitErrorFromMessage`, so a real xAI overflow -- measured
+   live as HTTP 400 `This model's maximum prompt length is 500000 but the request contains
+   1427641 tokens.` -- becomes `InputTokenLimitError`, which is what the compact-and-retry rescue
+   at `abstract-user-message-action-handler.ts:2511` and the summarizer's own reduce-inputs retry
+   (`agent-summarization/error-handling.ts:122`) both key on. A genuine 500 (`Internal error
+   during token generation`) is deliberately NOT classified; it passes through unchanged.
+3. `runner/turn-settle.ts` -- one `[sand][turn] conversation compacted` line when a checkpoint
+   carries a new summary archive. The transcript keeps every turn by design, so this is the only
+   operator-visible trace that the model's window shrank.
+
+Not touched, on purpose: `state.ts` load (no truncation; the prompt is authoritative state), the
+transcript layer, `agentTokenLimit`, and no clear-conversation command. The other three local
+executors (`codex`, `claude-code`, `openrouter`) still report `maxTokens: 0`; they are unused here
+and are noted rather than fixed.
+
+**Verification:** `scripts/verify-compaction.mjs` runs the box's traffic through a small proxy
+INSIDE the container that forwards to the real endpoint unchanged (authorization header included,
+never read) and, with `--recover`, enforces a small prompt cap by answering with the verbatim xAI
+overflow body. Real model, real tools, real summarizer; only the limit is small, so a run costs
+cents rather than the ~$10 a genuine 500k accumulation would. Ground truth is the compacted line
+plus a transcript that did not shrink -- never a turn merely succeeding. It backs up
+`box-secrets.json` first and restores it on every exit path.
+
+**MEASURED 2026-09-01, acceptance 1 -- automatic compaction fires on the local route.** Against
+the box's configured endpoint at the time (the Spark 4 Nemotron 30B, so every request was free), a
+fresh agent's base prompt was 37,099 tokens; the window was set to 61,099 (start at 51,099, persist
+at 56,099) and growth turns carried the prompt to 51,656 then 66,172 tokens. On the third turn the
+host printed
+
+```
+[sand][turn] conversation compacted: 1 summary archive(s); usedTokens before compaction=80512 of maxTokens=61099
+```
+
+and that turn's prompt was **37,431 tokens** -- the rewrite, measured at the checkpoint rather than
+inferred from a turn succeeding. The transcript kept every turn (1 -> 5 messages). `box-secrets.json`
+was restored and the backup removed on exit.
+
+**MEASURED 2026-09-01, acceptance 2 -- an overflowing agent recovers.** Same endpoint. With the
+proxy cap armed 16,000 chars above the first prompt (75,541 chars), growth turn 1 was accepted at
+46,390 tokens; growth turn 2's tool-result step was rejected with the verbatim xAI 400, the rescue
+ran, the host printed `conversation compacted: 1 summary archive(s)`, and the retried turn
+completed with its sentinel. Transcript kept every turn (0 -> 2). Wall-clock **94s**, inside the
+verify runner's 300s ceiling. The compacted line reads `usedTokens before compaction=0 of
+maxTokens=0` on this path: the rescue compacts after a rejected step, when the checkpoint carries no
+fresh token details -- cosmetic, the archive count is the signal.
+
+**Regression sweep 2026-09-01, and a model-dependence finding.** Unit suite 93/93 and
+`verify-local-turn --rounds 3` 3/3 on the Spark endpoint. `verify-work-report --rounds 2` went 1/2
+in the sweep and then **0/2 on a clean workspace** against the long-lived `Atera Triage` agent on
+the Spark's Nemotron 30B, and the failure signature is unambiguous: the workspace held
+`grokbot-verify-hvtewbsc.txt` and the agent answered `grokbot-verify-x1ipm3y.txt` -- a name that
+exists nowhere, in the shape of earlier listings. The model fabricated the listing without calling
+the tool, and on the clean-workspace run both rounds returned that same fabricated listing verbatim. When it does call the tool (the passing rounds) the report comes through, so the Phase 1
+fix holds; the miss is model judgment. The same gate passed 2/2 in four separate runs earlier the
+same day on grok-4.6. A **fresh agent on the same Spark endpoint passed 2/2**, so it is neither the model in general nor
+this change: it is the long-lived agent's history (~636 transcript entries, ~100k tokens) on a 30B
+model. That is history rot in a second form -- and it exposes a limit of the fix as shipped: the
+Spark advertises a 1,048,576-token window, so compaction keyed on the advertised maximum never
+fires at 100k, long after a small model has stopped behaving. For local models set
+`SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW` to a *behavioural* window (64k is a sane start for a 30B
+model) rather than trusting the advertised one; the override is the recommended setting, not a
+fallback. Attribution closed by running the **same long-lived agent on grok-4.6 with the same new bundle:
+2/2 PASS** (125s), the box switched there and back through the operator's own
+`POST /endpoints/use`. So new-bundle + grok + long-lived passes, new-bundle + Spark + fresh passes,
+and only new-bundle + Spark + long-lived fails: the change is not the variable. Treat
+`verify-work-report` as model-dependent: it measures whether the model
+chooses to act, which a 30B local model does less reliably than the frontier model, and read a
+failure against the transcript (fabricated name = model, real listing missing the sentinel =
+plumbing) before blaming the host.
+
+**Found while sizing the recovery test -- the base prompt dominates the window.** A fresh agent's
+first request on this box is **75,541 chars / ~37,000 tokens before a single word of conversation**:
+the system prompt plus 33 tool descriptions. Compaction rewrites only the conversation, so it can
+never bring a request below that floor. Two consequences: (1) a provider window smaller than
+base-plus-one-tool-result cannot be recovered by compaction at all -- the rescue rejects, compacts,
+retries, re-overflows, and after five attempts the turn fails (`StepRetriesExhaustedError`); the
+first recovery run reproduced exactly that with a cap 8,000 chars above the base prompt. (2) On a
+32k default window the trigger fires on the very first turn. The lever is the system prompt and
+tool count, not compaction; worth its own item.
+
 **Why the Machine Room scrolls everything in:** `gateway-adapter.js:243` and `ui/index.html:570` call
 `getAgentTranscript`, whose SQL is `SELECT entry FROM transcript_entries ORDER BY seq` with no LIMIT
 (`agent-db-schema.ts:59`), then rebuild the DOM with `innerHTML` and refetch on every event. **The

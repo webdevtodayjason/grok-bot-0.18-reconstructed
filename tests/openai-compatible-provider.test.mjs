@@ -38,10 +38,20 @@ async function loadProviderSession() {
 
 async function serveOpenAiCompatible(respond) {
   const requests = [];
+  const probes = [];
   const server = createServer((request, response) => {
     const chunks = [];
     request.on("data", chunk => chunks.push(chunk));
     request.on("end", () => {
+      // The transport now asks GET /models for the model's context window before the first
+      // turn; that request has no body and is not a chat completion.
+      if (request.method === "GET") {
+        // Recorded apart from the chat turns: `respond` numbers turns by requests.length, and the
+        // probe would otherwise shift every turn by one.
+        probes.push({ url: request.url, headers: request.headers });
+        response.writeHead(200, { "content-type": "application/json" });
+        return response.end(JSON.stringify({ data: [] }));
+      }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       requests.push({ url: request.url, headers: request.headers, body });
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
@@ -50,7 +60,7 @@ async function serveOpenAiCompatible(respond) {
     });
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  return { requests, baseUrl: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(resolve => server.close(resolve)) };
+  return { requests, probes, baseUrl: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(resolve => server.close(resolve)) };
 }
 
 const TEXT_TURN = [
@@ -90,14 +100,14 @@ test("router usage tracking covers the openai-compatible provider", async () => 
 
 test("endpoint and model come from configuration, with the API key optional", async () => {
   const { resolveOpenAiCompatibleSettings, DEFAULT_OPENAI_COMPATIBLE_BASE_URL } = await loadTransport();
-  assert.deepEqual(resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_MODEL: "qwen3-coder:30b" }), { baseUrl: DEFAULT_OPENAI_COMPATIBLE_BASE_URL, model: "qwen3-coder:30b", apiKey: null });
+  assert.deepEqual(resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_MODEL: "qwen3-coder:30b" }), { baseUrl: DEFAULT_OPENAI_COMPATIBLE_BASE_URL, model: "qwen3-coder:30b", apiKey: null, contextWindow: null });
   assert.deepEqual(
     resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_BASE_URL: " http://spark.local:8000/v1 ", SAND_OPENAI_COMPATIBLE_MODEL: " glm-4.6 ", SAND_OPENAI_COMPATIBLE_API_KEY: " local-key " }),
-    { baseUrl: "http://spark.local:8000/v1", model: "glm-4.6", apiKey: "local-key" }
+    { baseUrl: "http://spark.local:8000/v1", model: "glm-4.6", apiKey: "local-key", contextWindow: null }
   );
   assert.deepEqual(
     resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_MODEL: "" }, { SAND_OPENAI_COMPATIBLE_BASE_URL: "http://r750.local:8000/v1", SAND_OPENAI_COMPATIBLE_MODEL: "llama-3.3-70b", SAND_OPENAI_COMPATIBLE_API_KEY: "" }),
-    { baseUrl: "http://r750.local:8000/v1", model: "llama-3.3-70b", apiKey: null }
+    { baseUrl: "http://r750.local:8000/v1", model: "llama-3.3-70b", apiKey: null, contextWindow: null }
   );
   assert.equal(resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_MODEL: "env-wins" }, { SAND_OPENAI_COMPATIBLE_MODEL: "secret-loses" }).model, "env-wins");
   assert.throws(() => resolveOpenAiCompatibleSettings({}), /SAND_OPENAI_COMPATIBLE_MODEL/);
