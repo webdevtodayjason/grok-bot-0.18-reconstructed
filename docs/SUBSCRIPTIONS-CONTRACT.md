@@ -17,11 +17,11 @@ They disagree on the one thing that matters most, and the disagreement is the de
 |---|---|---|
 | Claude | Reads the Claude Code OAuth token from the keychain (`Claude Code-credentials`, or the `-<hash>` scoped item) or `~/.claude/.credentials.json`, replays it to `api.anthropic.com` with `anthropic-beta: oauth-2025-04-20` and `User-Agent: claude-code/2.1.0`, refreshes at `platform.claude.com/v1/oauth/token` with Claude Code's client id, reads `/api/oauth/usage`; last resort spawns the `claude` binary under a pty and screen-scrapes `/usage` | **Removed token replay in 2.0.** Probes `claude auth status --json` and reads only `loggedIn`; runs the subscription as a subprocess `claude -p --output-format stream-json … --setting-sources user --allowedTools mcp__openclaw__*`, exposing its own tools to Claude Code over MCP, environment scrubbed of `ANTHROPIC_*` keys, sessions resumed by id |
 | Codex / ChatGPT | Reads `~/.codex/auth.json`, calls `chatgpt.com/backend-api/wham` with `User-Agent: codex-cli`, `originator: Codex Desktop`, `ChatGPT-Account-Id`; never refreshes (refuses the app-server's refresh with a JSON-RPC error and lets the CLI do it); usage via `codex app-server` JSON-RPC `account/rateLimits/read` | Reads the `Codex Auth` keychain item (`cli\|<sha256(codexHome)[0:16]>`) or `$CODEX_HOME/auth.json`, expiry from the JWT `exp`; **bootstrap-only** adoption (seeds a profile once, never overwrites a locally refreshed token); refreshes at `auth.openai.com/oauth/token` with Codex's client id; requests to `chatgpt.com/backend-api/codex` with a bearer, `ChatGPT-Account-Id`, and an honest `originator: openclaw` |
-| Gemini | OpenCode's `auth.json` if it holds a Google OAuth entry, else `~/.gemini/oauth_creds.json`; labelled "experimental, may break, use at your own risk" in Orca's own UI | Presence only, for onboarding detection; **the client-secret harvesting from the installed Gemini binary is gone**; runs the Gemini CLI as a subprocess with `--allowed-mcp-server-names` |
-| MiniMax | supported (details in the Orca report) | `~/.minimax/oauth_creds.json`, bearer to `api.minimax.io`, refresh at `account.minimax.io/oauth2/token` (device-code grant, MiniMax's client id), usage `/v1/token_plan/remains` |
+| Gemini | OpenCode's `auth.json` if it holds a Google OAuth entry, else `~/.gemini/oauth_creds.json`; off by default (`geminiCliOAuthEnabled: false`); refreshes with Google's client id and secret **regex-scraped out of the installed Gemini CLI bundle** and writes the refreshed token back into the user's file; the one place Orca's UI says "experimental, may break, use at your own risk" | Presence only, for onboarding detection; **the client-secret harvesting from the installed Gemini binary is gone**; runs the Gemini CLI as a subprocess with `--allowed-mcp-server-names` |
+| MiniMax | not discovered: the user pastes a browser `Cookie` header, stored under `~/.orca` (plaintext when safeStorage is unavailable), sent with a spoofed Firefox user agent to `platform.minimax.io` behind Akamai bot protection, for usage display only | `~/.minimax/oauth_creds.json`, bearer to `api.minimax.io`, refresh at `account.minimax.io/oauth2/token` (device-code grant, MiniMax's client id), usage `/v1/token_plan/remains` |
 | Z.AI GLM | absent | API key only, `api.z.ai/api/coding/paas/v4` for the coding plan, usage `api.z.ai/api/monitor/usage/quota/limit` |
-| Kimi | supported (Orca report) | API key from `KIMI_API_KEY` / `KIMICODE_API_KEY`, no discovery |
-| Grok | supported (Orca report) | xAI API key only; a SuperGrok subscription has no API |
+| Kimi | reads the Kimi Code CLI token at `~/.kimi-code/credentials/kimi-code.json`, calls `api.kimi.com/coding/v1/usages` for usage; never refreshes ("run kimi") | API key from `KIMI_API_KEY` / `KIMICODE_API_KEY`, no discovery |
+| Grok | reads `~/.grok/auth.json` (keyed by `https://auth.x.ai`), reads billing from `cli-chat-proxy.grok.com/v1` with `X-XAI-Token-Auth: xai-grok-cli`, i.e. posing as the Grok CLI; never refreshes | xAI API key only; a SuperGrok subscription has no API |
 
 **One nuance, so nobody over-reads the table.** OpenClaw 2.0 still ships its *own* Anthropic OAuth
 login (`src/llm/utils/oauth/anthropic.ts`: PKCE at `claude.ai/oauth/authorize`, scopes including
@@ -53,8 +53,8 @@ treatment.
 | ChatGPT / Codex | `~/.codex/auth.json` or the `Codex Auth` keychain item, presence and expiry only | Responses API at `chatgpt.com/backend-api/codex` (needs a Responses transport; the host has chat-completions only) | bearer, `ChatGPT-Account-Id`, bootstrap-only adoption, refresh via Codex's own flow | `originator: grok-bot` |
 | MiniMax | `~/.minimax/oauth_creds.json` | OpenAI-compatible chat at `api.minimax.io/v1` | bearer, refresh at `account.minimax.io/oauth2/token` | user agent names this product |
 | Z.AI GLM coding plan | `ZAI_API_KEY` or a key the user pastes | OpenAI-compatible chat at `api.z.ai/api/coding/paas/v4` | static key | — |
-| Kimi | `KIMI_API_KEY` or pasted | OpenAI-compatible chat at Moonshot | static key | — |
-| Grok | xAI key, already an endpoint | as today | static key | — |
+| Kimi | `KIMI_API_KEY` or pasted; the Kimi Code CLI token at `~/.kimi-code` is detected for presence and, read-only, for the plan's usage window | OpenAI-compatible chat at Moonshot | static key | — |
+| Grok | xAI key, already an endpoint; `~/.grok/auth.json` detected for presence and email only, because the CLI's chat proxy demands the CLI's own identification header | as today | static key | — |
 
 **Agent runtimes** (the subscription's own CLI is the agent; the host's tools reach it over MCP):
 
@@ -112,6 +112,8 @@ From OpenClaw 2.0, MIT, with attribution in `THIRD_PARTY_NOTICES.md`:
 - The `claude -p` argument vector and the environment scrub list from
   `extensions/anthropic/cli-backend.ts` and `cli-constants.ts`.
 
+From Orca 1.4.195, MIT, unminified on disk under `app.asar.unpacked/out/`: `main/chunks/keychain-yzCs5_6b.js`, a complete macOS keychain read layer with no dependencies beyond node, and `shared/codex-auth-errors.js`, `shared/rate-limit-reset-format.js`, `shared/usage-percentage-display.js` for the panel. Nothing from Orca's Claude, Gemini, MiniMax or OpenCode Go paths.
+
 Reimplemented here: the Responses-API transport for Codex (the host has chat-completions only; about
 300 lines beside `openai-compatible-chat.ts`), the MCP server that exposes box tools to a subprocess
 (the host already has an MCP client stack; the server side is new), the scanner, and the Endpoints
@@ -130,7 +132,9 @@ panel surface. Not copied: anything from Orca's Claude or Gemini paths.
   here the equivalent is the explicit "Scan this machine" action and per-provider opt-in. Read-only
   status paths never trigger a keychain prompt.
 - Every outbound request identifies this product. No first-party user agents, no first-party
-  originators.
+  originators. Orca ships none of that and, per the scout, no terms-of-service or
+  "not affiliated" notice for any provider anywhere in its bundle; its Claude account switching
+  rewrites the user's own Claude Code login. Neither happens here.
 - Per-provider opt-in with the vendor's own posture shown next to the switch: Codex and MiniMax
   "supported by the vendor's CLI for reuse", Z.AI and Kimi "API key from your plan", Claude and
   Gemini "runs your CLI; your plan's terms apply", Grok "API key only, your SuperGrok plan does not
