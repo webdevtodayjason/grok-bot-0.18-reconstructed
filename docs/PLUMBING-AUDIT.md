@@ -1146,6 +1146,82 @@ client uses them (`frontend/src/production/ProductionRenderer.tsx:978`, `:2231`)
 matches the adapter's own `messagesOf`. This is a read path: it makes the tab fast and does nothing
 for the model's context.
 
+## 6k. Governance: nothing ties a claim to evidence (2026-09-01)
+
+**The question.** `verify-work-report` failed against the long-lived agent on the Spark's 30B
+model, and the failure was first read as "the model hallucinated". Jason asked the sharper question:
+what enforcement exists between *the model says it observed X* and *the system has evidence X
+occurred*? Traced below, with the action-audit ledger as the primary witness.
+
+**What actually happened, from the ledger (`/home/box/sand-data/agents/<id>/audit.jsonl`).** In the
+fabricated rounds the agent **did run** `ls -1 /workspace` -- `shell_command` records at 01:42:46Z,
+01:47:49Z and 01:51:51Z -- and then delivered a listing that was not what the tool returned (the
+file on disk was `grokbot-verify-hvtewbsc.txt`; it reported `grokbot-verify-x1ipm3y.txt`). In the
+last round (01:53-01:56Z) there is **no shell record**: the same fabricated listing, parroted. Two
+failure modes, then: *tool ran, result ignored, report fabricated*; and *no tool, report parroted*.
+
+**The path by which both counted as completed work:**
+
+1. The model emits `SendMessage` with the listing. The send pipeline writes
+   `{kind: "send-message", id, message, timestampMs}` (`roster-projection.ts:448`) -- no request
+   id, no turn epoch, no pointer to any tool execution.
+2. The turn loop ends when a step has no tool call (`abstract-user-message-action-handler.ts`).
+   `turn-settle` reports `sentMessageCount=1` and `madeWorkToolCall` (true in the ran-then-ignored
+   case, false in the parroted case).
+3. `turn-runtime`'s post-run checks: `isDeliveryOwed` false (it spoke); `isReportOwed` false (the
+   report followed the work, or there was none); `isWorkOwed` false -- `requestImpliesAction`
+   requires the prompt to *start* with an imperative, and "The contents of /workspace have just
+   changed…" does not, so the one work check was switched off by prompt shape. Outcome: success.
+4. Nothing, anywhere, compared the delivered message to a tool result. The gate failed the claim
+   only because its sentinel is unfakeable; a request without one would have surfaced both
+   fabrications as finished work with no signal.
+
+**What exists, and where each stops short:**
+
+- *Speech checks* -- delivery-owed, the ack reminder, the closing-send nudge -- are about silence.
+- *Work checks* -- `isWorkOwed` / `isReportOwed` -- are about whether a tool ran and in what
+  order. Regex-gated on the prompt's first word; blind to whether the report derives from the result.
+- *Auto-review* -- permission to **act**, not attestation of **claims**.
+- *The action-audit ledger* -- the receipt for invocation. Exists, populated, local JSONL per agent
+  (`action-audit-service.ts:9`), records `shellCommand`, `mcpToolCall`, `browserNavigation`,
+  `computerUse…` with agent id and time. Three gaps: main-agent shell records carry **no `turnId`**
+  (the call site at `host-runner-composition.ts:1017` builds the record without one; only subagents
+  get `subagent:<callId>`), records hold the **command, never the result**, and **nothing reads it**
+  -- not the completion checks, not the transcript, not the gateway (no command exposes it), not
+  the UI.
+- *Conversation state* holds every tool result as a `tool-result` part (measured: `kept=130/130`),
+  but `transcript_entries` never receives tool calls, the mirror keeps only `toolName` of a result
+  (`legacy-transcript-mirror.ts:211`), and no gateway surface reaches the state.
+
+So the invariant is **absent by construction, not broken**: invocation evidence exists but is
+unlinked to any claim; result evidence exists only inside the model's own context; no field on a
+delivered message points at either.
+
+**Smallest architectural fix, in leverage order (not implemented; needs its own contract):**
+
+1. **Key the receipt to the attempt.** Add `turnId` (the turn's request id, which `turn-runtime`
+   already tracks in `lastRequestIdBySession`) to the shell audit record at
+   `host-runner-composition.ts:1017`. That is the nonce.
+2. **Record result provenance on the receipt.** Extend the shell record with `resultSha256`,
+   `resultBytes` and a bounded snippet; the executor holds the output when it returns.
+3. **Stamp evidence on the delivered message.** When the send pipeline writes a `send-message`
+   entry, attach `evidence: { requestId, workToolCalls, lastWork: { tool, eventId } }` from
+   `turn-runtime`'s per-turn counters (the writer already holds `this.tm.turnRuntime`). Any reader
+   can then render a report that follows zero tool executions as **unverified** -- the visible
+   signal that was missing.
+4. **Expose the ledger read-only on the gateway** (`getAgentActionAudit`), so verifiers and the
+   Machine Room consult receipts instead of text.
+
+With 1-3 a work/report contract becomes machine-checkable: pass iff the delivered message carries
+the sentinel **and** a receipt exists with `turnId == this request` **and** that receipt's result
+digest shows the result contained it. Invoked, during this attempt, result is the source, cannot
+pass without it, nonce -- each of the five requirements maps to one field. It does not make prose
+truthful in general; it makes claims checkable and flagged, which is the honest scope of governance.
+
+**Separately, hygiene:** a behavioural window for local models (`SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW`
+= 64k for a 30B model) reduces how often a degraded context produces this; it does not restore the
+invariant. A model can fabricate at 20k.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole
