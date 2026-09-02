@@ -1028,6 +1028,22 @@ departure from the design), touch the transcript layer, or repoint `agentTokenLi
 `$HOME/debug-summarization-strategy.txt` in the host's home forces one blocking compaction on the
 next user message. Remove the file afterwards.
 
+**Measured 2026-09-01, after the scouting:** arming `next-human` and sending a prompt to the
+long-lived agent produced **no rewrite** -- a tap on the `clearMessages` / `appendMessages` block in
+`summarization-orchestrator.ts:762-765`, confirmed present in the bundle, never fired. The turn
+itself completed normally (the agent answered `READY`). Two consequences, stated exactly:
+
+- The long-lived agent now completes turns **without any compaction having occurred**, so an
+  earlier inference that a forced compaction had unwedged it is withdrawn. The cause of that
+  agent's afternoon of `Internal error during token generation` failures is therefore **unproven**:
+  a fresh agent worked and an old one failed on the same afternoon, and now the old one works. Do
+  not cite history size as the established cause until a request-size measurement ties them.
+- The forced path did not run the summarizer. A verified candidate: `resolveSummaryTokenLimit`
+  (`summarization-orchestrator.ts:307-311`) returns `undefined` unless `maxTokens > 0` or an eval
+  override is set -- so the zero window plausibly disables even manual compaction. Not measured.
+  The efficient next step is not more taps on the debug hook; it is fix (a), a real context
+  window, which makes both the automatic and the forced path testable.
+
 **Why the Machine Room scrolls everything in:** `gateway-adapter.js:243` and `ui/index.html:570` call
 `getAgentTranscript`, whose SQL is `SELECT entry FROM transcript_entries ORDER BY seq` with no LIMIT
 (`agent-db-schema.ts:59`), then rebuild the DOM with `innerHTML` and refetch on every event. **The
