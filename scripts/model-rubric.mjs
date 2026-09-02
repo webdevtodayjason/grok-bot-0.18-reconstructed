@@ -116,7 +116,7 @@ async function evaluate(entry) {
   if (endpointId === "subscription") {
     const [subId, ...rest] = String(override ?? "").split(":");
     try { subscription = await resolveSubscriptionEntry(subId, rest.join(":") || undefined); }
-    catch (error) { return { entry, endpointId: `subscription:${subId}`, model: null, cost: "subscription", tiers: {}, score: 0, notes: [String(error.message)], wallMs: 0 }; }
+    catch (error) { return { entry, endpointId: `subscription:${subId}`, model: null, cost: "subscription", tiers: {}, score: 0, notRunnable: true, notes: [String(error.message)], wallMs: 0 }; }
     endpointId = subscription.endpointId;
     override = rest.join(":") || undefined;
   }
@@ -188,8 +188,15 @@ for (const entry of ENTRIES) {
   for (const n of r.notes) console.log(`  note: ${n}`);
   writeFileSync(OUT, JSON.stringify({ measuredOn: "this Mac + grok-bot-local-vm", capturedAt: new Date().toISOString(), results }, null, 1));
 }
+// A subscription that could not be adopted is not a measurement; say so with the exit code rather
+// than a zero score that reads like one. Verified-by-exit-code proofs depend on this.
+const notRunnable = results.filter((r) => r.notRunnable);
 const endId = END ?? ENTRIES.at(-1).split(":")[0];
 const final = await relay("/endpoints/use", { id: endId }).catch(() => null);
 console.log(`\nbox left on ${final?.using ?? endId}; results in ${OUT}`);
 console.log("\nmodel".padEnd(46) + "score  cost        speak  work  history  median turn");
 for (const r of results) console.log(`${(r.endpointId + " " + (r.model ?? "")).slice(0, 44).padEnd(46)}${String(r.score).padStart(3)}    ${String(r.cost).padEnd(11)} ${String(r.tiers.speak?.passed ?? "-").padStart(3)}/2  ${String(r.tiers.work?.passed ?? "-").padStart(2)}/2   ${String(r.tiers.history?.passed ?? "-").padStart(2)}/1     ${r.tiers.latency?.medianMs == null ? "-" : Math.round(r.tiers.latency.medianMs / 1000) + "s"}`);
+if (notRunnable.length > 0) {
+  console.log(`\nNOT RUNNABLE: ${notRunnable.map((r) => `${r.endpointId} (${r.notes[0]})`).join("; ")}`);
+  process.exit(2);
+}
