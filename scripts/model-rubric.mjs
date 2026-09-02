@@ -12,6 +12,7 @@
 //
 // Usage: node scripts/model-rubric.mjs --models m3-glm,m3-qwen:deepseek,dell-qwen32b,xai-grok:grok-4.6 [--out file.json] [--end xai-grok]
 //   an entry is <endpointId>[:<model override>]; the box ends on --end (default: the last entry's endpoint).
+//   --turn-timeout-ms (default 120000) bounds each speak and growth turn.
 // The box is switched through the relay's own switcher; a model override is patched into
 // box-secrets.json in place and undone by the final switch.
 import { execFile } from "node:child_process";
@@ -25,6 +26,8 @@ const ENTRIES = flag("--models", "").split(",").map((s) => s.trim()).filter(Bool
 const OUT = flag("--out", `docs/evidence/model-rubric-${new Date().toISOString().slice(0, 10)}.json`);
 const END = flag("--end", null);
 const RUNAWAY_REPLIES = 20;
+// Reasoning models think before they speak; the turn gate allows 120 s and so does this by default.
+const TURN_TIMEOUT_MS = Number.parseInt(flag("--turn-timeout-ms", "120000"), 10);
 if (ENTRIES.length === 0) { console.error("usage: --models <endpointId[:model]>,..."); process.exit(2); }
 
 function token() {
@@ -115,7 +118,7 @@ async function evaluate(entry) {
     const speak = [];
     for (let i = 1; i <= 2; i += 1) {
       const token = `TOKEN-${Math.random().toString(36).slice(2, 10)}`;
-      speak.push(await turn(agentId, `Reply with exactly this word and nothing else: ${token}`, token, 60_000));
+      speak.push(await turn(agentId, `Reply with exactly this word and nothing else: ${token}`, token, TURN_TIMEOUT_MS));
     }
     if (speak.some((x) => x.runaway)) { result.notes.push("runaway during speak; agent deleted"); result.runaway = true; }
     const spoke = speak.filter((s) => s.ok).length;
@@ -133,7 +136,7 @@ async function evaluate(entry) {
     const growth = [];
     for (let i = 1; i <= 4; i += 1) {
       const token = `GROW-${Math.random().toString(36).slice(2, 8)}`;
-      const g = await turn(agentId, `Run exactly this shell command with your Shell tool, then send me only the last line it printed: seq 1 2000 | tr '\\n' ' '; echo; echo ${token}`, token, 90_000);
+      const g = await turn(agentId, `Run exactly this shell command with your Shell tool, then send me only the last line it printed: seq 1 2000 | tr '\\n' ' '; echo; echo ${token}`, token, TURN_TIMEOUT_MS);
       growth.push(g);
       if (g.runaway) { result.notes.push(`runaway during growth turn ${i}: ${g.said} replies in one turn; agent deleted`); result.runaway = true; break; }
     }

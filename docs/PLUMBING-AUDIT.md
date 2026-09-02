@@ -1368,6 +1368,28 @@ it. The rubric is the instrument to re-run after each operator fix: restart the 
 router context to at least 64k (the model supports 128k), and put a vLLM or llama.cpp server in
 front of the Dell's weights instead of Ollama. grok-4.6 is the control and the reference score.
 
+## 6o. The M3 as a GLM host: prefix caching makes it viable (measured 2026-09-02 06:05Z)
+
+The other agent's question: the M3 Studio holds GLM at 256K context but prefills at ~200 tokens/s,
+so a 40K prompt costs three minutes; does llama.cpp's prefix cache make that a one-time cost? Measured
+from this Mac through the LiteLLM router at `100.84.108.16:4000` (glm-m3 → llama.cpp on the M3 at
+port 8940), a 47,073-token prompt, `max_tokens` 8, four calls in a row:
+
+| call | prompt | wall | llama.cpp timings |
+|---|---|---|---|
+| 1, cold | 47,073 tokens | 240.6 s | `cache_n` 9, `prompt_n` 47,064, 197 tokens/s |
+| 2, identical | same | 1.3 s | `cache_n` 47,069, `prompt_n` 4 |
+| 3, same prefix, new user message | same | 1.3 s | `cache_n` 47,069, `prompt_n` 4 |
+| 4, identical to 1 | same | 1.3 s | `cache_n` 47,069, `prompt_n` 4 |
+
+The cache survives the router, and the product's pattern (a stable ~35K base prompt with a new tail
+each call) hits it. So the M3 pays the prefill once per server lifetime and per distinct prefix, then
+turns in about a second plus generation. Two design consequences: keep the stable part of the prompt
+first and byte-identical across calls (agent-specific text after the shared base), and remember the
+cache is per llama.cpp slot, so several agents with different prefixes will evict each other unless
+the server runs enough parallel slots. The router's 32,768 cap seen at 03:5xZ is gone; the same
+route now accepts 47K.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole
