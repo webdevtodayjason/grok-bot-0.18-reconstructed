@@ -1357,9 +1357,9 @@ never scored. Results in `docs/evidence/model-rubric-2026-09-02.json`; page: htt
 | dell-qwen32b · qwen2.5:14b | 0 | free | – | – | – | – | not run; rubric tag bug, fixed `4344517` |
 | xai-grok · grok-4.20-0309-reasoning | 10 | paid | ? | ? | runaway | – | 1,012 duplicate sends in 8 turns; killed (P1c) |
 | xai-grok · grok-4.6 | **95** | paid | 2/2 | 2/2 | 1/1 | 22 s | 102 s wall, every reply `evidenced` |
-| spark4-nemotron · Nemotron 30B | – | free | – | – | – | – | endpoint down for the run (vLLM EngineCore error) |
+| spark4-nemotron · Nemotron 30B | **70** | free | 2/2 | 1/2 | 1/1 | 30 s | rerun 06:10Z after the restart, 150 s turn timeout; one silent work round, truthful after growth |
 
-**Reading it.** Tonight no free local model in the fleet can run the product, and in every case the
+**Reading it, updated 06:15Z.** With Spark back, Nemotron is the one free model that runs the product, at 70: it speaks, it stays truthful under history load now that the evidence layer checks it, and it still goes silent on one work round in two. Overnight no free local model could run at all, and in every case the
 reason is configuration or serving, not model quality: the M3 router caps GLM below the product's
 own base prompt, its qwen backend is off, the Dell serves through Ollama whose tool-call shim cannot
 carry 33 tools, and the Spark, the one endpoint with a window large enough, is down. Nemotron, when

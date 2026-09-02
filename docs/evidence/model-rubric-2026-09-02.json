@@ -1,6 +1,6 @@
 {
  "measuredOn": "this Mac + grok-bot-local-vm",
- "capturedAt": "2026-09-02T04:34:25.115Z",
+ "capturedAt": "2026-09-02T11:09:44.488Z",
  "results": [
   {
    "entry": "m3-glm",
@@ -248,6 +248,55 @@
    "notes": [],
    "cost": "paid",
    "wallMs": 101717
+  },
+  {
+   "entry": "spark4-nemotron",
+   "endpointId": "spark4-nemotron",
+   "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+   "startedAt": "2026-09-02T11:05:06.983Z",
+   "tiers": {
+    "reach": {
+     "reachable": true,
+     "serves": true,
+     "ms": 183,
+     "models": 1
+    },
+    "speak": {
+     "passed": 2,
+     "of": 2,
+     "turnsMs": [
+      30196,
+      10071
+     ],
+     "failures": []
+    },
+    "latency": {
+     "medianMs": 30196
+    },
+    "work": {
+     "passed": 1,
+     "of": 2,
+     "lines": [
+      "FAIL  round 1 \u2014 never named grokbot-verify-63nfj18m; verdict of last reply: conversational",
+      "PASS  round 2 \u2014 reported grokbot-verify-4yo6b1zu; verdict evidenced, attestation holds it"
+     ]
+    },
+    "history": {
+     "growthTurns": 4,
+     "of": 4,
+     "passed": 1,
+     "of_rounds": 1,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-9wvwlfoc; verdict evidenced, attestation holds it"
+     ]
+    }
+   },
+   "score": 70,
+   "notes": [
+    "rerun 06:10Z with --turn-timeout-ms 150000 after the server restart; the 60 s run scored 10 because a fresh agent thought past the limit"
+   ],
+   "cost": "free/local",
+   "wallMs": 275312
   }
  ]
 }
