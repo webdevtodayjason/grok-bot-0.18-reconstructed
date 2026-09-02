@@ -22,7 +22,49 @@ export type OutlineItem =
     readonly name: string;
     readonly status: "pending" | "failed" | "done";
     readonly summary: string | undefined;
+    /** Shell only: bounded head of what the command returned, and its exit code. Additive; the
+     * desktop renderer ignores both and keeps reading `summary`. */
+    readonly output?: string;
+    readonly exitCode?: number;
   };
+
+interface ShellToolCallLike {
+  readonly args?: { readonly command?: unknown };
+  readonly result?: {
+    readonly result?: {
+      readonly case?: string;
+      readonly value?: {
+        readonly interleavedOutput?: unknown;
+        readonly stdout?: unknown;
+        readonly stderr?: unknown;
+        readonly exitCode?: unknown;
+        readonly error?: unknown;
+        readonly reason?: unknown;
+      };
+    };
+  };
+}
+
+export const MAX_OUTLINE_OUTPUT_CHARS = 600;
+
+const str = (value: unknown): string => (typeof value === "string" ? value : "");
+
+/** What a shell row needs to be a receipt: the command it ran and the head of what came back. */
+export function shellOutline(shell: ShellToolCallLike): { summary: string | undefined; output: string | undefined; exitCode: number | undefined } {
+  const command = str(shell.args?.command).trim();
+  const result = shell.result?.result;
+  const value = result?.value;
+  let output = value == null
+    ? ""
+    : str(value.interleavedOutput) || [str(value.stdout), str(value.stderr)].filter(Boolean).join("\n") || str(value.error) || str(value.reason);
+  if (output.length === 0 && result?.case != null && result.case !== "success") output = result.case;
+  if (output.length > MAX_OUTLINE_OUTPUT_CHARS) output = `${output.slice(0, MAX_OUTLINE_OUTPUT_CHARS)}\n… (truncated)`;
+  return {
+    summary: command.length > 0 ? command : undefined,
+    output: output.length > 0 ? output : undefined,
+    exitCode: typeof value?.exitCode === "number" ? value.exitCode : undefined,
+  };
+}
 
 interface JsonArguments {
   toJson(): unknown;
@@ -125,9 +167,9 @@ export function getTaskSummary(taskToolCall: TaskToolCall): string | undefined {
 }
 
 export function getOutlineToolCallSummary(toolCall: OutlineToolCall): string | undefined {
-  return toolCall.tool.case === "taskToolCall"
-    ? getTaskSummary(toolCall.tool.value as TaskToolCall)
-    : undefined;
+  if (toolCall.tool.case === "taskToolCall") return getTaskSummary(toolCall.tool.value as TaskToolCall);
+  if (toolCall.tool.case === "shellToolCall") return shellOutline(toolCall.tool.value as ShellToolCallLike).summary;
+  return getToolCallActivityArgs(toolCall);
 }
 
 export function getToolCallActivityArgs(toolCall: OutlineToolCall): string | undefined {
@@ -203,12 +245,15 @@ export function stepToOutlineItem(step: OutlineStep, id: string): OutlineItem | 
         return message == null ? null : { kind: "send-message", id, message };
       }
       const summary = getOutlineToolCallSummary(toolCall);
+      const shell = toolCall.tool.case === "shellToolCall" ? shellOutline(toolCall.tool.value as ShellToolCallLike) : undefined;
       return {
         kind: "tool-call",
         id,
         name: getOutlineToolCallName(toolCall),
         status: getOutlineToolCallStatus("toolCallCompleted", toolCall),
         summary,
+        ...(shell?.output != null ? { output: shell.output } : {}),
+        ...(shell?.exitCode != null ? { exitCode: shell.exitCode } : {}),
       };
     }
     default:

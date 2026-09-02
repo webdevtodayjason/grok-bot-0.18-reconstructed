@@ -1156,9 +1156,14 @@ occurred*? Traced below, with the action-audit ledger as the primary witness.
 **What actually happened, from the ledger (`/home/box/sand-data/agents/<id>/audit.jsonl`).** In the
 fabricated rounds the agent **did run** `ls -1 /workspace` -- `shell_command` records at 01:42:46Z,
 01:47:49Z and 01:51:51Z -- and then delivered a listing that was not what the tool returned (the
-file on disk was `grokbot-verify-hvtewbsc.txt`; it reported `grokbot-verify-x1ipm3y.txt`). In the
-last round (01:53-01:56Z) there is **no shell record**: the same fabricated listing, parroted. Two
-failure modes, then: *tool ran, result ignored, report fabricated*; and *no tool, report parroted*.
+file on disk was `grokbot-verify-hvtewbsc.txt`; it reported `grokbot-verify-x1ipm3y.txt`).
+**Corrected the same evening, after cross-checking the ledger against `getConversationOutline`:**
+the tool ran in *every* fabricated round -- round 2 at 01:51:51Z returned
+`grokbot-verify-cfrl743s.txt` and the report was again `x1ipm3y`. That name appears in no tool
+output anywhere in the agent's state: it was invented in round 1 and repeated in round 2. The
+earlier reading of a final round with no shell record was wrong. So the *recorded* failure mode is
+one: *tool ran, result ignored, a report invented or repeated*. The second mode, *no tool, report
+parroted*, was never observed here and is kept as a constructed regression case only.
 
 **The path by which both counted as completed work:**
 
@@ -1166,14 +1171,14 @@ failure modes, then: *tool ran, result ignored, report fabricated*; and *no tool
    `{kind: "send-message", id, message, timestampMs}` (`roster-projection.ts:448`) -- no request
    id, no turn epoch, no pointer to any tool execution.
 2. The turn loop ends when a step has no tool call (`abstract-user-message-action-handler.ts`).
-   `turn-settle` reports `sentMessageCount=1` and `madeWorkToolCall` (true in the ran-then-ignored
-   case, false in the parroted case).
+   `turn-settle` reports `sentMessageCount=1` and `madeWorkToolCall` (true in every recorded
+   round; it would be false in the constructed no-tool case).
 3. `turn-runtime`'s post-run checks: `isDeliveryOwed` false (it spoke); `isReportOwed` false (the
    report followed the work, or there was none); `isWorkOwed` false -- `requestImpliesAction`
    requires the prompt to *start* with an imperative, and "The contents of /workspace have just
    changed…" does not, so the one work check was switched off by prompt shape. Outcome: success.
 4. Nothing, anywhere, compared the delivered message to a tool result. The gate failed the claim
-   only because its sentinel is unfakeable; a request without one would have surfaced both
+   only because its sentinel is unfakeable; a request without one would have surfaced the
    fabrications as finished work with no signal.
 
 **What exists, and where each stops short:**
@@ -1221,6 +1226,50 @@ truthful in general; it makes claims checkable and flagged, which is the honest 
 **Separately, hygiene:** a behavioural window for local models (`SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW`
 = 64k for a 30B model) reduces how often a degraded context produces this; it does not restore the
 invariant. A model can fabricate at 20k.
+
+## 6l. What upstream had instead, and the visibility restored (2026-09-01)
+
+**The question.** What in the original plumbing kept this from happening? **Nothing enforced it.**
+Upstream relied on two things that made the invariant unnecessary at its scale, plus advisories:
+
+- *A frontier model.* The same bundle on grok-4.6 passed `verify-work-report` 2/2, twice.
+- *Tool calls shown next to claims.* The desktop transcript renders `tool-call` rows from
+  `getConversationOutline` (`transcript.tsx:707`, `TranscriptToolCallRow`: name, status, summary,
+  expandable result card). A listing with no Shell card above it is visibly a parrot; a card whose
+  result differs from the reply is visibly a fabrication. The Machine Room never called that command
+  -- its adapter kept only sent messages and user messages -- so here both rounds looked identical.
+- *The prompt's "## Never fabricate data" section* -- advisory; the 30B model walked past it.
+- *`turn-observation` empty-delivery telemetry* -- measures silence, not fabrication; its counter
+  has no callers in the reconstruction, so it always reports zero.
+- *Auto-review* (permission to act, not attestation) and *the ledger forward to Cursor* (unread).
+
+Characterisation, agreed with Jason: **the local model exposed an assumption in the original
+architecture, not a regression in it.**
+
+**What the outline actually carried** (measured on the long-lived agent: 1,503 items, 64 tool rows):
+rows and status, yes; `summary` only for Task rows -- `getOutlineToolCallSummary` was Task-only by
+upstream design -- and `toolResult` never populated host-side. The desktop's result cards come from
+the ClientSideToolV2 projection over the live stream (`agent-adapters.ts`), which no gateway command
+exposes. So "already exposes the command summary and result cards" was half true.
+
+**Restored.** Host `conversation-outline.ts`: shell rows now carry `summary` = the command and two
+additive fields, `output` (head of stdout/stderr, 600 chars) and `exitCode`, from the shell result;
+other tools get their bounded args as summary. The desktop renderer ignores the new fields. Machine
+Room `gateway-adapter.js`: `loadContext` also fetches the outline; `weaveToolRows` places each tool
+row before the next transcript entry the outline shares (same sent-message content or user text),
+and trailing rows at the end -- which is what "worked and never reported" looks like. Rows render as
+the operator app's existing `system` pill; `app.js` and the stylesheets are untouched.
+
+**Measured** (this Mac, headless Chrome through Playwright in the session scratchpad, long-lived
+agent, after a wheel-scroll to the tail): 684 rows, 64 system rows, 28 `Shell · ls -1 /workspace`
+rows; the row immediately before the first fabricated report reads
+`Shell · ls -1 /workspace → grokbot-verify-hvtewbsc.txt · proof-1788287229.txt · teach-sessions`;
+zero page errors. Unit suite 93/93; `verify-local-turn --rounds 1` PASS on the rebuilt bundle.
+
+**Limits, stated.** The outline is the model's prompt state: no timestamps, and compaction rewrites
+it, so rows older than the last compaction vanish while the transcript keeps the messages. Upstream
+has the same limit. And rows are visibility, not enforcement: the evidence layer from §6k is drafted
+separately, as an extension beyond Grok Bot, in `docs/EVIDENCE-CONTRACT.md`.
 
 ## 7. The wave plan
 

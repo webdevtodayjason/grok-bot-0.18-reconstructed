@@ -81,10 +81,65 @@
     return null;
   }
 
-  function messagesOf(transcript, fallbackName) {
-    return (transcript ?? [])
-      .filter((e) => e.kind === "send-message" || (e.kind === "message" && e.role === "user"))
+  // The transcript never records tool calls; the conversation outline (the model's own turn state,
+  // no timestamps, rewritten by compaction) does. Weave the outline's tool rows into the durable
+  // transcript so a claim sits next to its receipt, the way the upstream desktop shows it. A row is
+  // placed before the next transcript entry the outline also contains; rows after the last shared
+  // entry go at the end, which is what "worked and never reported" looks like.
+  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task" };
+  const oneLine = (value, max) => {
+    const text = String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" · ");
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  };
+  function toolRowText(item) {
+    let text = TOOL_LABELS[item.name] ?? String(item.name ?? "Tool").replace(/ToolCall$/, "");
+    if (item.summary) text += ` · ${oneLine(item.summary, 120)}`;
+    if (item.status === "pending") text += " · running";
+    if (item.status === "failed") text += " · failed";
+    if (item.output) text += ` → ${oneLine(item.output, 200)}`;
+    else if (typeof item.exitCode === "number") text += ` → exit ${item.exitCode}`;
+    return text;
+  }
+  const messageKey = (message) => (message?.type === "text" ? `a:${String(message.content ?? "").trim()}` : `a:${JSON.stringify(message ?? null)}`);
+  const userText = (e) => (typeof e.content === "string" ? e.content : e.content?.map?.((c) => c.text ?? "").join("") ?? "");
+  function entryKey(e) {
+    if (e.kind === "send-message") return messageKey(e.message);
+    if (e.kind === "message" && e.role === "user") return `u:${userText(e).trim()}`;
+    return null;
+  }
+  function outlineKey(item) {
+    if (item.kind === "send-message") return messageKey(item.message);
+    if (item.kind === "user") return `u:${String(item.text ?? "").trim()}`;
+    return null;
+  }
+  function weaveToolRows(transcript, outline) {
+    const entries = [...(transcript ?? [])];
+    const items = Array.isArray(outline) ? outline : [];
+    if (!items.some((item) => item?.kind === "tool-call")) return entries;
+    const inserts = new Map();
+    let cursor = 0;
+    let pending = [];
+    for (const item of items) {
+      if (item?.kind === "tool-call") { pending.push({ kind: "tool-row", id: `tool-${item.id}`, text: toolRowText(item) }); continue; }
+      const key = item ? outlineKey(item) : null;
+      if (key == null) continue;
+      let at = -1;
+      for (let j = cursor; j < entries.length; j += 1) if (entryKey(entries[j]) === key) { at = j; break; }
+      if (at < 0) continue;
+      if (pending.length) { inserts.set(at, [...(inserts.get(at) ?? []), ...pending]); pending = []; }
+      cursor = at + 1;
+    }
+    const woven = [];
+    entries.forEach((e, j) => { if (inserts.has(j)) woven.push(...inserts.get(j)); woven.push(e); });
+    woven.push(...pending);
+    return woven;
+  }
+
+  function messagesOf(transcript, fallbackName, outline) {
+    return weaveToolRows(transcript, outline)
+      .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || (e.kind === "message" && e.role === "user"))
       .map((e, i) => {
+        if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text };
         const mine = e.kind !== "send-message";
         const card = mine ? null : cardOf(e);
         const text = e.kind === "send-message"
@@ -239,14 +294,15 @@
   }
 
   async function loadContext(context, name) {
-    const [transcript, automations] = await Promise.all([
+    const [transcript, automations, outline] = await Promise.all([
       call("getAgentTranscript", { id: context.id }).catch(() => null),
       call("getAgentAutomations", { id: context.id }).catch(() => null),
+      call("getConversationOutline", { id: context.id }).catch(() => null),
     ]);
     const latestAgentMs = (transcript ?? [])
       .filter((e) => e.kind === "send-message")
       .reduce((n, e) => Math.max(n, Number(e.timestampMs) || 0), 0);
-    return { messages: messagesOf(transcript, name), routines: routinesOf(automations, context), latestAgentMs, files: filesOf(transcript) };
+    return { messages: messagesOf(transcript, name, outline), routines: routinesOf(automations, context), latestAgentMs, files: filesOf(transcript) };
   }
 
   const DEFAULTS = {
