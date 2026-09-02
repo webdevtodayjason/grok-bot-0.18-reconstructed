@@ -1271,6 +1271,50 @@ it, so rows older than the last compaction vanish while the transcript keeps the
 has the same limit. And rows are visibility, not enforcement: the evidence layer from §6k is drafted
 separately, as an extension beyond Grok Bot, in `docs/EVIDENCE-CONTRACT.md`.
 
+## 6m. The evidence layer, implemented and measured (2026-09-02)
+
+Contract `docs/EVIDENCE-CONTRACT.md`, armed 03:23Z, implemented in `29d9ef7`. Three layers, each
+in its own place: **receipts** at the existing audit sites (`sand-agent-runner.ts` shell,
+`host-runner-composition.ts` shell, `sand-action-audit.ts` MCP) now carry `attemptId` and
+`turnEpoch`; **attestations** are written by `withAttestedResult` in `turn-toolset.ts`, which wraps
+every work tool at the one point the toolset is finalised, and appends `tool_result` lines (sha256,
+bytes, 8 KB head) to the per-agent ledger through `evidence-registry.ts` -- never through the
+auditor, so a head cannot reach the Cursor forwarder; **provenance** is stamped by the transcript
+store (`agent-db.ts`, in place, because the active session serves the same object from memory) from
+`evidence-verdict.ts`, a zero-import module the unit test loads alone. The attempt opens in
+`send-pipeline.ts` when the epoch moves; `turnId` stays unset because the request id is assigned
+inside `turn-runtime.ts`, a named non-goal, and `attemptId` is the nonce anyway.
+
+**Measured, all on this Mac + the box:**
+
+- Unit: 99/99 (six new, over `docs/evidence/nemotron-fabrication-2026-09-02.json`).
+- Replay (`verify-evidence-replay`, canned provider inside the box, real shell): round 1 recorded
+  fabrication -> `unsupported`, missing `grokbot-verify-x1ipm3y.txt`, one attestation holding the real
+  listing; round 2 constructed no-tool -> `unverified`, zero attestations; round 3 control ->
+  `evidenced`. 25 s wall-clock, model-free.
+- Live, first Nemotron round after the build (long-lived agent, before Spark went down): the reply
+  named `grokbot-verify-7k475tk0.txt`, the attested listing held `ftmyb32d`; stamped `unsupported`,
+  the Machine Room shows the pill under it. A fresh fabrication caught in real time.
+- grok-4.6, long-lived agent, `--require-evidence`: 2/2 `evidenced`, attestation holds the sentinel,
+  126 s.
+- Compat: 456 pre-feature replies across three agents, none stamped; outline shape unchanged;
+  no `tool_result` in the forward outbox; ledger files 0600 once the registry has written to them.
+
+**Two findings on the way:**
+
+- The long-lived agent's prompt is now **295,101 tokens**. Only xAI's 500k window still runs it.
+  The M3 router (32k) refused it with LiteLLM's wording, `exceeds the available context size`,
+  which the host's token-limit classifier does not recognise (it knows xAI's `maximum prompt
+  length … request contains … tokens`), so the rescue-and-compact path never engaged and the turn
+  errored. Filed as follow-up work: teach the classifier the LiteLLM, vLLM and OpenAI phrasings.
+  Lives under `source/host/extensions/inference/`, a named non-goal of the armed contract.
+- Spark 4's Nemotron stopped answering at 03:5xZ after a vLLM `EngineCore encountered an issue`
+  500 seen in the host log. The endpoint needs a restart on the Spark.
+
+**Budget, stated:** the contract said twelve files; the diff touches sixteen, because gateway
+registration is two files, receipts have three call sites, and the scripts, test, registry and
+docs each count. Reported here rather than trimmed.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole

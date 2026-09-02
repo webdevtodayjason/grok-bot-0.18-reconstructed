@@ -1,6 +1,7 @@
 # Evidence Contract — receipts, attestation, provenance
 
-**Status: DRAFT, not armed, not implemented.** Written 2026-09-01 for Jason's review. This is an
+**Status: armed 2026-09-02 03:23Z, implemented in `29d9ef7`, acceptance measured (see
+`PLUMBING-AUDIT.md` §6m).** Written 2026-09-01 for Jason's review, executed the same night with his go. This is an
 extension beyond Grok Bot, not a reconstruction fix: upstream never enforced this invariant either
 (`PLUMBING-AUDIT.md` §6l). It relied on a frontier model and on tool-call rows rendered next to the
 replies. The local model exposed that assumption; it did not break anything that existed.
@@ -268,3 +269,22 @@ DISPOSITION LOG as the last action before done — done is not claimable without
 Notes for arming: `verify-work-report --require-evidence` needs the box on grok-4.6 or a fresh
 local agent to pass honestly; on the long-lived Spark agent it is expected to fail, which is the
 point. All acceptance gates share the one box and must run sequentially.
+
+## 10. As built (2026-09-02), where it differs from the draft
+
+- **Nonce.** The registry mints `attemptId` when the send pipeline moves the turn epoch; every
+  receipt, attestation and stamp carries `attemptId` + `turnEpoch`. `turnId` (the request id) is
+  assigned inside `turn-runtime.ts`, a named non-goal, so it is left unset rather than reached for.
+- **Stamp site.** The transcript store (`agent-db.ts`, `appendTranscriptEntry`) stamps in place,
+  not the outline appender the draft named: that appender builds outline items, and the agent's
+  entry is written from `turn-runtime.ts`. In place, because the active session serves the same
+  object from memory. The store also records the latest user prompt for the token filter.
+- **Attestation site.** `withAttestedResult` in `turn-toolset.ts`, applied where the toolset is
+  finalised, so Read, Task, MCP, browser and computer results are attested through one wrapper; no
+  separate `file_read` receipt was needed. Non-work tools (SendMessage, communicate, update_state,
+  todo, sleep, wait) are skipped so a sent message never counts as evidence for the next claim.
+- **Tokens.** Bare numbers need five digits, hex twelve, and file names need a known extension, so
+  a version like `grok-4.6` or a year is not a claim. Rule name unchanged: `containment@1`.
+- **Gateway.** `getAgentEvidence {id, attemptId?}` is implemented in `host-gateway-api.ts` directly
+  over the session store and the ledger file; no manager registry entry.
+- **Budget.** Sixteen files against the twelve the draft estimated; reported in §6m of the audit.
