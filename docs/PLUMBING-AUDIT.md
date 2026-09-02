@@ -963,6 +963,81 @@ for each run and deletes it afterward, so it measures the desktop path and nothi
 `--agent <id>` only when you specifically want to test a long-lived agent -- and expect the
 history failure when you do.
 
+## 6j. History and context: the two-tier design, and why compaction never fires here (2026-09-01)
+
+Scouted by four read-only lanes with a refutation pass each; the load-bearing lines were then
+re-read by hand. **The operator's model is exactly right.**
+
+**Tier 1 -- kept forever, on disk.** `transcript_entries` (the UI scrollback) has no cap, TTL, or
+retention: `session/agent-db-schema.ts:15-19`; the only removal is a wholesale
+`clearTranscriptEntries` at `:65`. Every prompt message, turn, and summary archive is also a
+content-addressed blob in `conversation-blobs.db`.
+
+**Tier 2 -- what the model sees.** One field, `rootPromptMessagesJson`. On every action the agent
+rebuilds the prompt from ALL loaded blobs (`packages/agent/state.ts:1470-1484`,
+`rootPromptBuilder.clearMessages(); appendMessages(rootPromptMessages)`) -- no slice, no window --
+and the local provider serializes the whole thing to the wire (`provider-session.ts:127-155`).
+
+**The only thing that shortens it is compaction rewriting that field in place**
+(`packages/agent/summarization-orchestrator.ts:762-765`): the context collapses to
+`[system, userInfo, summary, ...preservedTail]` (`agent-summarization/summarization-handler.ts:1113-1123`)
+while the transcript on disk is untouched, and the collapsed turns are recorded in
+`summaryArchives` so the UI can still show them (`agent-transcript/index.ts:166-180`).
+
+**No "new chat" is design, not a gap.** No gateway command clears a conversation
+(`gateway-protocol.ts:4-127`); the product's own error copy says "Start a new conversation with
+this agent" (`session/conversation-size-limits.ts:37`). The working wipe primitive,
+`SandAgentDb.clearConversation()` (`session/agent-db.ts:264`), is reached only through
+**`duplicateAgent`** (`gateway-protocol.ts:34` -> `agents/agent-clone.ts:24`, `includesChatHistory`
+typed as literal `false`). That is today's "new chat": same profile, settings, and routines, empty
+conversation, new id.
+
+**Why compaction never fires on our route -- verified by hand:**
+
+1. `provider-session.ts:469` (openai-compatible), and `:317`/`:348`/`:378` for the other local
+   executors, resolve usage as `{ ...event.usage, maxTokens: 0 }` -- the literal follows the spread,
+   so the context window is always zero. A real window only ever arrives from the Cursor backend
+   (`chat-inference-proto/client.ts:243`).
+2. `agent-summarization/background-summarization.ts:27`: `if (maxTokens <= 0) return undefined;` --
+   so `shouldStartBackgroundSummarization` is always false. The thresholds themselves are live and
+   sane: 10,000 tokens / 10% to start, 5,000 / 5% to persist (`runner/turn-agent-composition.ts:209-216`).
+3. The last-ditch "provider rejected the prompt, compact and retry" rescue
+   (`abstract-user-message-action-handler.ts:2511-2529`) keys on `error instanceof InputTokenLimitError`.
+   Our transport wraps everything in a bare `Error` (`openai-compatible-chat.ts:167-178`), and the
+   string classifier (`chat-inference/token-limit-error-classification.ts:38-43`) is only called on the
+   Cursor RPC route. So `Internal error during token generation` misses the rescue and is rethrown;
+   same input next turn, same death. That is the forever-failure loop of 6i.
+
+**Correction to the obvious theory:** `NoopConversationActionReceiver` is real and `summarizeAction`
+is dead twice over (nothing constructs one; the queue is a no-op), but automatic compaction never
+used that queue -- it calls `orchestrator.handleSummarization` directly at nine sites on the turn
+path. Reviving the queue buys a manual `/compact`; it does not fix this.
+
+**The fix, ~1 day:** (a) report a real context window from the openai-compatible executor -- xAI's
+`/v1/models` advertises `context_length` (500000 for grok-4.6), so read it rather than guess; do the
+same for the other three executors. (b) Recognise the local transport's overflow failure as
+`InputTokenLimitError` so the rescue path fires; the existing phrase classifier does not match this
+message, so it needs a recogniser for the actual shape. **Must not:** truncate at load in
+`state.ts:1483` (destroys what the summary should capture), add a clear-conversation command (a
+departure from the design), touch the transcript layer, or repoint `agentTokenLimit`
+(`host-runner-composition.ts:2754`, which budgets the skill catalogue).
+
+**Free proof of the summarizer:** `shouldForceSummarizationForTesting`
+(`summarization-handler.ts:737-792`) runs every iteration of the turn loop and is gated only on
+`NODE_ENV === "production"`, which the running host does not set. Writing `next-human` to
+`$HOME/debug-summarization-strategy.txt` in the host's home forces one blocking compaction on the
+next user message. Remove the file afterwards.
+
+**Why the Machine Room scrolls everything in:** `gateway-adapter.js:243` and `ui/index.html:570` call
+`getAgentTranscript`, whose SQL is `SELECT entry FROM transcript_entries ORDER BY seq` with no LIMIT
+(`agent-db-schema.ts:59`), then rebuild the DOM with `innerHTML` and refetch on every event. **The
+gateway already pages** -- `getAgentTranscriptTail`, `openAgentTail`, `getAgentTranscriptWindow` with a
+`beforeSeq`/`nextBeforeSeq` cursor (`agent-db-transcript-pages.ts:9-16`) -- and the shipped Electron
+client uses them (`frontend/src/production/ProductionRenderer.tsx:978`, `:2231`). Porting touches only
+`gateway-adapter.js` and `app.js`; `getAgentTranscriptPage` is the better command because its filter
+matches the adapter's own `messagesOf`. This is a read path: it makes the tab fast and does nothing
+for the model's context.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole
