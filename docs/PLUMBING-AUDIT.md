@@ -168,6 +168,18 @@ router's cap is above the base prompt. Deferred from the evidence contract becau
 named non-goal; nonblocking for that contract, blocking for long-lived agents on local models.
 Mirrored to Dart when the token works again (the public API answered 401 on 2026-09-02).
 
+**P1c — No per-turn cap on SendMessage (found 2026-09-02 04:30Z).** On the rubric's growth prompt
+("run `seq 1 2000 …`, send me only the last line"), `grok-4.20-0309-reasoning` emitted hundreds of
+identical `SendMessage` calls per completion: 1,012 sends in 8 turns, 371 items in one turn, one
+message a second until the rubric was killed and the agent deleted. The host executed every call.
+grok-4.6 and Nemotron never did this on the same prompt. **Owner:** Jason (a Claude session
+executes). **Next action:** cap sends per step and drop consecutive identical messages in the
+SendMessage tool path, with a host-log line when the cap trips; add a runaway guard to the rubric
+(stop the agent when replies in one turn exceed 20). **Proof of closure:** the replay provider
+returning 50 identical SendMessage calls in one response yields one delivered message and one
+capped-line in the host log. Cost of the incident: a few dollars of xAI credit (bursts within
+completions, not a thousand completions).
+
 **P2 — The turn toolset has never been enumerated.** `turn-toolset.ts` is 1,532 lines plus
 23 tool files, unread. Everything said so far about "what tools the agent has" is inference.
 

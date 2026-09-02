@@ -24,6 +24,7 @@ const flag = (name, fallback) => (process.argv.includes(name) ? process.argv[pro
 const ENTRIES = flag("--models", "").split(",").map((s) => s.trim()).filter(Boolean);
 const OUT = flag("--out", `docs/evidence/model-rubric-${new Date().toISOString().slice(0, 10)}.json`);
 const END = flag("--end", null);
+const RUNAWAY_REPLIES = 20;
 if (ENTRIES.length === 0) { console.error("usage: --models <endpointId[:model]>,..."); process.exit(2); }
 
 function token() {
@@ -76,6 +77,9 @@ async function turn(agentId, prompt, needle, timeoutMs) {
   while (Date.now() < deadline) {
     await sleep(2000);
     const said = replies(await call("getAgentTranscript", { id: agentId })).slice(before);
+    // Runaway brake: grok-4.20 reasoning once emitted hundreds of identical SendMessage calls per
+    // completion. Deleting the throwaway agent is the only gateway-side stop, and it works.
+    if (said.length > RUNAWAY_REPLIES) { await call("deleteAgent", { id: agentId }).catch(() => {}); return { ok: false, ms: Date.now() - started, said: said.length, runaway: true, last: said.at(-1)?.message.content.slice(0, 120) }; }
     if (said.some((e) => e.message.content.includes(needle))) { await waitIdle(agentId, 30_000); return { ok: true, ms: Date.now() - started, said: said.length }; }
   }
   const said = replies(await call("getAgentTranscript", { id: agentId })).slice(before);
@@ -89,7 +93,9 @@ const workReport = async (agentId, rounds) => {
 };
 
 async function evaluate(entry) {
-  const [endpointId, override] = entry.split(":");
+  const colon = entry.indexOf(":"); // ollama tags carry their own colon: dell-qwen32b:qwen2.5:14b
+  const endpointId = colon < 0 ? entry : entry.slice(0, colon);
+  const override = colon < 0 ? undefined : entry.slice(colon + 1);
   const result = { entry, endpointId, model: override ?? null, startedAt: new Date().toISOString(), tiers: {}, score: 0, notes: [] };
   const t0 = Date.now();
   const sw = await relay("/endpoints/use", { id: endpointId }).catch((e) => ({ error: String(e) }));
@@ -111,6 +117,7 @@ async function evaluate(entry) {
       const token = `TOKEN-${Math.random().toString(36).slice(2, 10)}`;
       speak.push(await turn(agentId, `Reply with exactly this word and nothing else: ${token}`, token, 60_000));
     }
+    if (speak.some((x) => x.runaway)) { result.notes.push("runaway during speak; agent deleted"); result.runaway = true; }
     const spoke = speak.filter((s) => s.ok).length;
     result.tiers.speak = { passed: spoke, of: 2, turnsMs: speak.map((s) => s.ms), failures: speak.filter((s) => !s.ok).map((s) => s.last) };
     result.score += spoke * 10;
@@ -126,8 +133,11 @@ async function evaluate(entry) {
     const growth = [];
     for (let i = 1; i <= 4; i += 1) {
       const token = `GROW-${Math.random().toString(36).slice(2, 8)}`;
-      growth.push(await turn(agentId, `Run exactly this shell command with your Shell tool, then send me only the last line it printed: seq 1 2000 | tr '\\n' ' '; echo; echo ${token}`, token, 90_000));
+      const g = await turn(agentId, `Run exactly this shell command with your Shell tool, then send me only the last line it printed: seq 1 2000 | tr '\\n' ' '; echo; echo ${token}`, token, 90_000);
+      growth.push(g);
+      if (g.runaway) { result.notes.push(`runaway during growth turn ${i}: ${g.said} replies in one turn; agent deleted`); result.runaway = true; break; }
     }
+    if (result.runaway) { result.tiers.history = { growthTurns: growth.filter((x) => x.ok).length, of: 4, passed: 0, of_rounds: 1, lines: ["runaway; history round not run"] }; return result; }
     const grown = growth.filter((g) => g.ok).length;
     const history = grown > 0 ? await workReport(agentId, 1) : { passed: 0, lines: ["growth failed; history round skipped"] };
     result.tiers.history = { growthTurns: grown, of: 4, passed: history.passed, of_rounds: 1, lines: history.lines };
@@ -135,9 +145,9 @@ async function evaluate(entry) {
   } catch (error) {
     result.notes.push(`error: ${String(error.message ?? error).slice(0, 200)}`);
   } finally {
+    result.wallMs = Date.now() - t0;
     await call("deleteAgent", { id: agentId }).catch(() => {});
   }
-  result.wallMs = Date.now() - t0;
   return result;
 }
 
