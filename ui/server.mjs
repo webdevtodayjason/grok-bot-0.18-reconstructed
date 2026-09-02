@@ -158,10 +158,15 @@ async function relayAvatar(req, res, pathname) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${PORT}`);
   try {
-    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+    // The Machine Room is the console at "/"; the operator page lives at /operator/ (2026-09-02).
+    if (req.method === "GET" && (url.pathname === "/operator" || url.pathname === "/operator/" || url.pathname === "/operator/index.html")) {
       const html = await readFile(path.join(HERE, "index.html"));
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       return res.end(html);
+    }
+    if (req.method === "GET" && (url.pathname === "/machine-room" || url.pathname === "/machine-room/")) {
+      res.writeHead(302, { location: "/" });
+      return res.end();
     }
     // Put an app on the box's X display so the VNC view has something to show. Strictly two
     // fixed commands, no operator string ever reaches a shell, and the relay only listens on
@@ -267,17 +272,16 @@ const server = createServer(async (req, res) => {
     // The Machine Room frontend is a vendored handoff: many files, and the rule from its README
     // is that the DOM and event layer stay untouched. So it gets served as a directory rather
     // than inlined, and the only file this repo authors inside it is the gateway adapter.
-    if (req.method === "GET" && url.pathname.startsWith("/machine-room")) {
+    // Static console: "/" and the handoff's assets (by extension, so the JSON API routes below stay
+    // reachable), plus the old /machine-room/ paths for bookmarks.
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html" || url.pathname.startsWith("/machine-room/")
+      || (/\.(css|js|mjs|svg|png|jpg|jpeg|gif|ico|woff2?|ttf|map|webmanifest|txt)$/.test(url.pathname) && !url.pathname.startsWith("/api/")))) {
       // Every asset in the handoff is referenced relatively, so at "/machine-room" (no trailing
       // slash) the browser resolves them against "/" and the page renders as unstyled HTML.
       // Redirect to the directory form the way a static server would.
-      if (url.pathname === "/machine-room") {
-        res.writeHead(302, { location: "/machine-room/" });
-        return res.end();
-      }
-      const rel = url.pathname === "/machine-room/"
+      const rel = url.pathname === "/" || url.pathname === "/index.html"
         ? "index.html"
-        : url.pathname.slice("/machine-room/".length);
+        : url.pathname.startsWith("/machine-room/") ? url.pathname.slice("/machine-room/".length) : url.pathname.slice(1);
       const file = path.resolve(HERE, "machine-room", rel);
       // Resolve first, then check: a path that escapes the directory never reaches readFile.
       if (!file.startsWith(path.join(HERE, "machine-room") + path.sep)) return fail(res, 403, "outside the frontend directory");

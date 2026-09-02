@@ -306,6 +306,35 @@
     });
   }
 
+  // Subscriptions already authenticated on this Mac (docs/SUBSCRIPTIONS-CONTRACT.md), shown as
+  // plugin cards. A key provider that is not yet adopted renders as "installed", which is the one
+  // state the handoff app draws with a secure input; the value goes to the relay's 0600 store and
+  // never through chat. Codex and MiniMax adopt from their CLI stores on a typed "adopt".
+  const SUB_CATEGORY = { key: "Subscription · paste a key", endpoint: "Subscription · CLI login", runtime: "Subscription · next contract", none: "Subscription · not usable here" };
+  function subscriptionPlugins(rows) {
+    return (Array.isArray(rows) ? rows : []).map((sub) => {
+      const facts = [sub.identity, sub.expiresAt ? `expires ${new Date(sub.expiresAt).toLocaleDateString()}` : null, sub.note].filter(Boolean).join(" · ");
+      const status = sub.adopted ? "connected" : sub.route === "key" || (sub.route === "endpoint" && sub.usable) ? "installed" : "available";
+      return {
+        id: `sub:${sub.id}`, name: sub.name, icon: sub.name[0].toUpperCase(),
+        category: SUB_CATEGORY[sub.route] ?? "Subscription",
+        description: `${facts ? `${facts}. ` : ""}${sub.posture}${sub.adopted ? " Adopted: the secret sits in the 0600 store on this Mac; pick the endpoint in a worker's model menu to use it." : ""}`,
+        status, account: sub.identity ?? null,
+        secretField: sub.route === "key" ? "API key" : sub.route === "endpoint" ? "Type adopt to confirm" : null,
+        tools: [], skills: [],
+      };
+    });
+  }
+  // Every endpoint in the catalog, adopted subscriptions included, as a model-menu entry. The
+  // switch is box-wide; the app's per-worker menu is the only affordance it offers for it.
+  function endpointModels(live, catalog) {
+    const rows = Array.isArray(catalog?.endpoints) ? catalog.endpoints : [];
+    const available = rows.map((e) => ({ id: e.id, name: `${e.name} · ${e.model}`, provider: e.subscription ? "subscription" : e.baseUrl, context: e.contextWindow ? `${Math.round(e.contextWindow / 1000)}k` : "" }));
+    const current = rows.find((e) => e.baseUrl === catalog?.live?.baseUrl && e.model === catalog?.live?.model);
+    if (live?.model && !current) available.unshift({ id: live.model, name: live.model, provider: live.endpoint ?? "box", context: "" });
+    return { default: current?.id ?? live?.model ?? "default", available };
+  }
+
   async function loadContext(context, name) {
     const [transcript, automations, outline] = await Promise.all([
       call("getAgentTranscript", { id: context.id }).catch(() => null),
@@ -331,9 +360,11 @@
   };
 
   async function hydrate(seed) {
-    const [agents, integrations] = await Promise.all([
+    const [agents, integrations, subscriptions, catalog] = await Promise.all([
       call("listAgents"),
       call("getListenerIntegrations").catch(() => null),
+      fetch("/subscriptions").then((r) => r.json()).then((b) => b.subscriptions).catch(() => null),
+      fetch("/endpoints").then((r) => r.json()).catch(() => null),
     ]);
 
     // Ask the box what it is actually running before stamping any worker with a model name. This
@@ -342,7 +373,7 @@
     let models = seed.models;
     try {
       const live = await (await fetch("/model")).json();
-      if (live?.model) models = { default: live.model, available: [{ id: live.model, name: live.model, provider: live.endpoint ?? "box", context: "" }] };
+      if (live?.model) models = endpointModels(live, catalog);
     } catch { /* the model probe is a convenience, not a dependency */ }
 
     const shape = (a) => ({
@@ -415,7 +446,7 @@
             return routinesOf([entry.automation], { kind: owner.isGroup ? "room" : "worker", id: owner.id });
           })
         : loaded.routines,
-      plugins: pluginsOf(integrations),
+      plugins: [...pluginsOf(integrations), ...subscriptionPlugins(subscriptions)],
       models,
     };
   }
@@ -449,6 +480,19 @@
         type: "system", text: `${what} is not wired to the gateway yet.`, time: timeOf(Date.now()),
       });
       return emit("message:created", { context: state.activeContext });
+    }
+
+    // After an adoption or an endpoint switch: re-read the scan and the catalog, redraw.
+    async function refreshSubscriptions() {
+      const [subscriptions, catalog, live] = await Promise.all([
+        fetch("/subscriptions").then((r) => r.json()).then((b) => b.subscriptions).catch(() => null),
+        fetch("/endpoints").then((r) => r.json()).catch(() => null),
+        fetch("/model").then((r) => r.json()).catch(() => null),
+      ]);
+      state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("sub:")), ...subscriptionPlugins(subscriptions)];
+      if (live?.model) state.models = endpointModels(live, catalog);
+      for (const w of state.workers) w.model = state.models.default;
+      emit("plugins:changed", {});
     }
 
     // Re-hangs the working bubble after a rebuild, for as long as we are genuinely still waiting.
@@ -838,10 +882,24 @@
       },
 
       // -- No backend behind these yet. They say so rather than pretending. ------------------
-      submitSecret() {
-        // submitSecret exists and works; it answers a request the HOST raised, keyed by entryId.
-        // A connector card has no such request, so there is nothing to answer -- and this UI
-        // should never be the thing carrying a credential anyway.
+      submitSecret(pluginId, field, value) {
+        // A subscription card: the value is a key (or the word "adopt" for a CLI-store provider)
+        // and goes straight to the relay, which keeps it in the 0600 store. The app's own toast
+        // says the demo discarded the value; here it was stored, and the card says so on refresh.
+        if (String(pluginId).startsWith("sub:")) {
+          const id = String(pluginId).slice(4);
+          const isKey = field === "API key";
+          if (!isKey && String(value).trim().toLowerCase() !== "adopt") return { accepted: false };
+          fetch("/subscriptions/adopt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(isKey ? { id, apiKey: value } : { id }) })
+            .then(async (res) => {
+              const body = await res.json().catch(() => ({}));
+              if (!res.ok) { notWired(`Adopting ${id} failed: ${body?.error ?? res.status}`); return; }
+              await refreshSubscriptions();
+            })
+            .catch((error) => notWired(`Adopting ${id} failed: ${error.message}`));
+          return { accepted: true };
+        }
+        // Connector cards have no host request to answer; this UI must not carry those credentials.
         return notWired("Answering a host secret request — the host asks by entryId and this UI has no request to answer");
       },
       setPluginState(pluginId, status) {
@@ -908,10 +966,19 @@
         }));
         return notWired("Answering a credential request from this UI");
       },
-      setModel() {
-        // Kept only to answer the handoff's adapter contract. There is no per-agent model on this
-        // host; the real control is the endpoint switch in Settings, which is box-wide.
-        return notWired("Per-agent models — this host routes every agent through one endpoint, switchable in Settings");
+      setModel(workerId, modelId) {
+        // Box-wide: every agent answers through one endpoint. The menu lists the catalog, adopted
+        // subscriptions included, so choosing here is the endpoint switch.
+        const chosen = state.models.available.find((m) => m.id === modelId);
+        if (!chosen || chosen.provider === "box") return notWired("Per-agent models — this host routes every agent through one endpoint");
+        fetch("/endpoints/use", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: modelId }) })
+          .then(async (res) => {
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) { notWired(`Switching to ${chosen.name} failed: ${body?.error ?? res.status}`); return; }
+            await refreshSubscriptions();
+          })
+          .catch((error) => notWired(`Switching to ${chosen.name} failed: ${error.message}`));
+        return emit("models:changed", { workerId, modelId });
       },
       setAutoReview(enabled, rule) {
         const current = state.settings.autoReview ?? { allow: [], block: [] };
