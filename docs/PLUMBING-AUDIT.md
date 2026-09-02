@@ -155,6 +155,19 @@ tools (`computerUse`/`browserUse` subagent configs exist — `sand-computer-use-
 model emits prose anyway. **Wave 3 decides.** Note `listRoutedMcpTools` returning `[]`
 concerns MCP tools only — it says nothing about the turn toolset.
 
+**P1b — The token-limit classifier knows only xAI's wording (filed 2026-09-02).** LiteLLM says
+`exceeds the available context size`, OpenAI/vLLM say `maximum context length is … resulted in`,
+and none of them match `classifyTokenLimitErrorFromMessage`, so on every local endpoint an
+oversized request errors the turn (`Agent failed to respond`) instead of entering the
+rescue-and-compact path verified in §6j. Seen live twice on 2026-09-02: the 295k-token long-lived
+agent, and fresh agents whose 35k base prompt exceeds the M3 router's 32k cap. **Owner:** Jason
+(a Claude session executes). **Next action:** add the three phrasings to the classifier in
+`source/host/extensions/inference/`, then run `verify-compaction --recover` through a proxy that
+answers with each wording. **Proof of closure:** the long-lived agent recovers on `m3-glm` once the
+router's cap is above the base prompt. Deferred from the evidence contract because that tree was a
+named non-goal; nonblocking for that contract, blocking for long-lived agents on local models.
+Mirrored to Dart when the token works again (the public API answered 401 on 2026-09-02).
+
 **P2 — The turn toolset has never been enumerated.** `turn-toolset.ts` is 1,532 lines plus
 23 tool files, unread. Everything said so far about "what tools the agent has" is inference.
 
