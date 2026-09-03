@@ -49,6 +49,16 @@ export const PROVIDERS = {
     baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", transport: "chat", defaultModel: "qwen3.8-max", contextWindow: 128_000,
     posture: "API key from your Model Studio token plan, pasted once. Serves qwen3.8-max, qwen3.8-flash, deepseek-v4-pro, deepseek-v4-pro-0813, deepseek-v4-flash-0731; type the model you want or take the default.",
   },
+  "gemini-key": {
+    name: "Gemini (API key)", route: "key", endpointId: "sub-gemini-key", env: "GEMINI_API_KEY",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", transport: "chat", defaultModel: "gemini-2.5-flash", contextWindow: 1_000_000,
+    posture: "An AI Studio API key through Google's OpenAI-compatible endpoint; the free tier works. Your Gemini CLI login stays untouched; that route is the runtime contract.",
+  },
+  "minimax-key": {
+    name: "MiniMax (API key)", route: "key", endpointId: "sub-minimax-key", env: "MINIMAX_API_KEY",
+    baseUrl: "https://api.minimax.io/v1", transport: "chat", defaultModel: "MiniMax-M2", contextWindow: 200_000,
+    posture: "A MiniMax platform API key, pasted once; the alternative to a MiniMax CLI login.",
+  },
   claude: {
     name: "Claude subscription", route: "runtime",
     posture: "Runs your Claude CLI as the agent with box tools over MCP; that is the second contract. Its token is never read.",
