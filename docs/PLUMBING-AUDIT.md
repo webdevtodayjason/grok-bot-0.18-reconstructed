@@ -116,6 +116,11 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
   dismiss. Security finding on the way: the recreate script mounted `~/.claude` and `~/.codex`
   read-write into the box (MOUNT-1 in GAP-ANALYSIS §0); mounts removed from the script, recreate
   pending. ENDPOINT-1 / §5 P3 closed on inspection: the live container has no endpoint env pin.
+  The gate pass forced three host fixes: deleted agents now release their shared-desktop window
+  (DISPLAY-1); deleted agents are tombstoned in `agents/deleted-agents.json`, readers skip them,
+  the roster sweeps a resurrected directory, `withAgentDb` refuses them, ledger writers never
+  recreate a deleted directory, `[sand][agents]` logs every mint and createSession with its
+  caller (PHANTOM-2); the desktop capsule clamps long names (CAPSULE-1).
 
 - **2026-09-03 (host wave E1, by hand during the Anthropic 529 outage).** Unread raise path fixed;
   `getAgentActionAudit` reads the action ledger; browser screenshots reach the model as image
@@ -1548,6 +1553,11 @@ wave's output; `npm test` still green; zero UI/feature diffs outside `docs/`.
   `[sand][wire]` = what actually left for the provider (transport, model, offered, sent, names);
   `sand-system-prompt-<agentId>.json` beside the settings file = section-presence report only, never
   prompt text. Gate for all of it: `scripts/verify-toolset.mjs`.
+- **Agent lifecycle facts (2026-09-03):** an agent is a directory under `agents/` with `store.db`;
+  `deleted-agents.json` beside them is the tombstone list every reader consults; subagent ledgers
+  live at `agents/sand-subagent-<id>/audit.jsonl` and are not agents; shared-desktop window
+  assignments persist in `/home/box/.sand-window-assignments.json` and are released on delete.
+  Every gate that mints a probe deletes it and reports any agent that appeared during its run.
 
 
 - Worktree `/Users/sem/orca/workspaces/grok-bot-0.18-reconstructed/gb`, branch `webdevtodayjason/gb`.
