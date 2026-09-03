@@ -41,12 +41,12 @@ export const PROVIDERS = {
   },
   zai: {
     name: "Z.AI GLM (coding plan)", route: "key", endpointId: "sub-zai", env: "ZAI_API_KEY",
-    baseUrl: "https://api.z.ai/api/coding/paas/v4", transport: "chat", defaultModel: "glm-4.7", contextWindow: 128_000,
+    baseUrl: "https://api.z.ai/api/coding/paas/v4", transport: "chat", defaultModel: "glm-5.3", contextWindow: 128_000,
     posture: "API key from your coding plan, pasted once. No discovery: Z.AI keeps no CLI store.",
   },
   kimi: {
     name: "Kimi (Moonshot)", route: "key", endpointId: "sub-kimi", env: "KIMI_API_KEY",
-    baseUrl: "https://api.moonshot.ai/v1", transport: "chat", defaultModel: "kimi-k2-turbo-preview", contextWindow: 256_000,
+    baseUrl: "https://api.moonshot.ai/v1", transport: "chat", defaultModel: "kimi-k3", contextWindow: 256_000,
     posture: "API key from your plan, pasted once. The Kimi Code CLI's token is detected for presence only and never replayed.",
   },
   claude: {

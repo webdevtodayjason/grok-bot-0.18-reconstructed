@@ -507,7 +507,8 @@
       state.plugins = [...subscriptionPlugins(subscriptions), ...state.plugins.filter((p) => !String(p.id).startsWith("sub:"))];
       if (live?.model) state.models = endpointModels(live, catalog);
       for (const w of state.workers) w.model = state.models.default;
-      emit("plugins:changed", {});
+      // "plugin:" is the prefix the app redraws its panels for; anything else only refreshes the transcript.
+      emit("plugin:state", {});
     }
 
     // Re-hangs the working bubble after a rebuild, for as long as we are genuinely still waiting.
@@ -1004,7 +1005,7 @@
             await refreshSubscriptions();
           })
           .catch((error) => notWired(`Switching to ${chosen.name} failed: ${error.message}`));
-        return emit("models:changed", { workerId, modelId });
+        return emit("settings:model", { workerId, modelId });
       },
       setAutoReview(enabled, rule) {
         const current = state.settings.autoReview ?? { allow: [], block: [] };
