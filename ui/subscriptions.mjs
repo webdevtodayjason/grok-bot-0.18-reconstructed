@@ -191,9 +191,10 @@ export async function adoptSubscription(id, input = {}, env = process.env) {
   if (spec == null || (spec.route !== "endpoint" && spec.route !== "key")) throw new Error(`${id} is not adoptable in this contract`);
   const store = await readStore();
   if (spec.route === "key") {
-    const apiKey = String(input.apiKey ?? env[spec.env] ?? "").trim();
+    // A re-adopt without a key (say, to change the model) keeps the stored one.
+    const apiKey = String(input.apiKey ?? env[spec.env] ?? store[id]?.apiKey ?? "").trim();
     if (apiKey.length === 0) throw new Error(`${spec.name} needs an API key`);
-    store[id] = { apiKey, adoptedAt: new Date().toISOString(), source: input.apiKey ? "pasted" : `$${spec.env}` };
+    store[id] = { ...(store[id] ?? {}), apiKey, adoptedAt: store[id]?.adoptedAt ?? new Date().toISOString(), source: input.apiKey ? "pasted" : store[id]?.source ?? `$${spec.env}` };
   } else if (id === "codex") {
     const home = env.CODEX_HOME?.trim() || path.join(HOME, ".codex");
     const file = path.join(home, "auth.json");
