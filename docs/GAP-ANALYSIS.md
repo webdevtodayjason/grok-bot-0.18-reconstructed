@@ -42,6 +42,10 @@ three maintenance switches read the host settings file; DEAD-1 the unreferenced 
 the caller-less `createTurnToolSession` and the duplicate spread are gone; CHURN-1 an unchanged
 summary no longer emits `agent-upserted` (idle roster: 0 events in 30 s); BOX-1 the standalone box
 reports window 0 and logs its limits once. New gate: `scripts/verify-gateway-reads.mjs`.
+Model note from the pass: on qwen3.8-max the browser child navigated, snapshotted and finished,
+but the parent never spoke again after its subagent reported (7 minutes); the same run on grok-4.6
+answered "Example Domain" with the screenshot carried, as Codex did earlier. A revival-reply gap
+worth a rubric row for the next model pass.
 
 | Id | Finding | Fix | Size |
 |---|---|---|---|
