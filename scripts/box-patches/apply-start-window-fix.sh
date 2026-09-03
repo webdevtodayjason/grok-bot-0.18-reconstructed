@@ -19,7 +19,7 @@ BOX="${1:-grok-bot-local-vm}"
 
 docker exec "$BOX" sh -c 'test -f /usr/local/bin/start-window.orig || cp /usr/local/bin/start-window /usr/local/bin/start-window.orig'
 
-docker exec "$BOX" python3 - <<'PY'
+docker exec -i "$BOX" python3 - <<'PY'
 p = "/usr/local/bin/start-window"
 s = open(p).read()
 if "session_alive" in s:
@@ -56,5 +56,79 @@ open(p, "w").write(s)
 print("patched")
 PY
 
+docker exec -i "$BOX" python3 - <<'PY'
+# DISPLAY-1 (2026-09-03). stop-window removes the owner token and kills by port, but an X server
+# holds no port, so a released fork's Xvfb lived on as an orphan with no token; start-window then
+# read "no token" as "someone else's token" and refused the display to the next agent
+# ("start-window failed"). An alive display with no owner is torn down and rebuilt; a display
+# owned by a different live token is still refused.
+p = "/usr/local/bin/start-window"
+s = open(p).read()
+if "orphan display with no owner" in s:
+    print("orphan branch already patched")
+else:
+    old = '''\tif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
+\t\techo "sand window ${DISPLAY_NUM}: display owned by a different token; refusing to adopt" >&2'''
+    new = '''\tif [ -z "${current_binding}" ]; then
+\t\techo "sand window ${DISPLAY_NUM}: orphan display with no owner; tearing it down" >&2
+\t\tpkill -f "Xvfb :${DISPLAY_NUM} " 2>/dev/null || true
+\t\tpkill -f "DISPLAY=:${DISPLAY_NUM}" 2>/dev/null || true
+\t\tsleep 1
+\t\trm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
+\telif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
+\t\techo "sand window ${DISPLAY_NUM}: display owned by a different token; refusing to adopt" >&2'''
+    assert old in s, "refusal branch not found -- the box image changed"
+    s = s.replace(old, new, 1)
+    open(p, "w").write(s)
+    print("orphan branch patched")
+q = "/usr/local/bin/stop-window"
+w = open(q).read()
+if "Xvfb :${DISPLAY_NUM} " in w:
+    print("stop-window already kills Xvfb")
+else:
+    w = w.rstrip("\n") + '''
+# DISPLAY-1 (2026-09-03): the X server holds no port, so the port sweep above never reached it.
+pkill -f "Xvfb :${DISPLAY_NUM} " 2>/dev/null || true
+rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
+'''
+    open(q, "w").write(w)
+    print("stop-window patched")
+PY
+
+docker exec -i "$BOX" python3 - <<'PY'
+# DISPLAY-2, second rule (2026-09-03). A display owned by another token is refused only while its
+# exec daemon answers; a seat whose daemon is dead is an orphan whatever token it carries (a
+# subagent's seat after its run, a stopped fork that came back), and is torn down and rebuilt.
+p = "/usr/local/bin/start-window"
+s = open(p).read()
+if "refuse only a live seat" in s:
+    print("live-seat rule already patched")
+else:
+    old = '''\telif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
+\t\techo "sand window ${DISPLAY_NUM}: display owned by a different token; refusing to adopt" >&2'''
+    new = '''\telif [ "${current_binding}" != "${OWNER_TOKEN}" ] && daemon_alive; then
+\t\t# refuse only a live seat: a dead daemon means nobody is driving this display
+\t\techo "sand window ${DISPLAY_NUM}: display owned by a different token; refusing to adopt" >&2'''
+    assert old in s, "refusal branch (orphan form) not found"
+    s = s.replace(old, new, 1)
+    old2 = '''\t\texit "${WINDOW_UNAVAILABLE_EXIT_CODE}"
+\tfi
+fi'''
+    new2 = '''\t\texit "${WINDOW_UNAVAILABLE_EXIT_CODE}"
+\telif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
+\t\techo "sand window ${DISPLAY_NUM}: display held by a dead seat (token differs, no daemon); tearing it down" >&2
+\t\tpkill -f "Xvfb :${DISPLAY_NUM} " 2>/dev/null || true
+\t\tpkill -f "DISPLAY=:${DISPLAY_NUM}" 2>/dev/null || true
+\t\tsleep 1
+\t\trm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
+\tfi
+fi'''
+    assert old2 in s, "refusal exit not found"
+    s = s.replace(old2, new2, 1)
+    open(p, "w").write(s)
+    print("live-seat rule patched")
+PY
+
 docker exec "$BOX" sh -n /usr/local/bin/start-window
-echo "start-window patched and syntax-checked on $BOX"
+docker exec "$BOX" sh -n /usr/local/bin/stop-window
+echo "start-window and stop-window patched and syntax-checked on $BOX"

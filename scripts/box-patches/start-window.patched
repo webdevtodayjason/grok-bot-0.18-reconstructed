@@ -40,9 +40,22 @@ daemon_alive() { (exec 3<>"/dev/tcp/127.0.0.1/${EXEC_DAEMON_PORT}") >/dev/null 2
 
 if [ -n "${OWNER_TOKEN}" ] && display_alive; then
 	current_binding="$(cat "${WINDOW_TOKEN_DIR}/${DISPLAY_NUM}" 2>/dev/null || true)"
-	if [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
+	if [ -z "${current_binding}" ]; then
+		echo "sand window ${DISPLAY_NUM}: orphan display with no owner; tearing it down" >&2
+		pkill -f "Xvfb :${DISPLAY_NUM} " 2>/dev/null || true
+		pkill -f "DISPLAY=:${DISPLAY_NUM}" 2>/dev/null || true
+		sleep 1
+		rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
+	elif [ "${current_binding}" != "${OWNER_TOKEN}" ] && daemon_alive; then
+		# refuse only a live seat: a dead daemon means nobody is driving this display
 		echo "sand window ${DISPLAY_NUM}: display owned by a different token; refusing to adopt" >&2
 		exit "${WINDOW_UNAVAILABLE_EXIT_CODE}"
+	elif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
+		echo "sand window ${DISPLAY_NUM}: display held by a dead seat (token differs, no daemon); tearing it down" >&2
+		pkill -f "Xvfb :${DISPLAY_NUM} " 2>/dev/null || true
+		pkill -f "DISPLAY=:${DISPLAY_NUM}" 2>/dev/null || true
+		sleep 1
+		rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 	fi
 fi
 

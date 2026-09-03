@@ -587,7 +587,9 @@ export function createHostGatewayApi(
       ),
     // DISPLAY-1: a call with no id once parked a window under the key "undefined" for good.
     ensureForeverBox: async (args: any) =>
-      (typeof args?.id !== "string" || args.id.length === 0 ? Promise.reject(new Error("ensureForeverBox requires an agent id")) :
+      (typeof args?.id !== "string" || args.id.length === 0 ? Promise.reject(new Error("ensureForeverBox requires an agent id"))
+      // DISPLAY-2: a page that still held a deleted agent's id kept asking for its desktop, and every ask allocated a fresh window with a token nobody would ever release.
+      : (manager as any).sessionStore?.agentExists?.(args.id) === false ? Promise.reject(new Error(`ensureForeverBox: unknown agent ${args.id}`)) :
       deps.decorateForeverBoxStatus(
         await method(deps.extensions.api("forever-box"), "ensure")(args)
       )),
