@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isSandSubagentId } from "../../../shared/agents/subagents.js";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -182,7 +183,7 @@ export class SandAgentSessionStore {
   private rosterHost() { return { rootDir: this.rootDir, isAgentBeingDeleted: (id: string) => this.isAgentBeingDeleted(id), memory: this.memory, loadCachedExtras: (args: { dirName: string; dbPath: string; dbStats: { size: number; mtimeMs: number } }) => this.loadCachedExtras(args), recoverAgentWithMissingDb: (args: { dbPath: string; dirName: string; activeAgentId?: string }) => recoverAgentWithMissingDb({ memory: this.memory, isAgentBeingDeleted: (id: string) => this.isAgentBeingDeleted(id), reseedMinimalStoreDbIfMissing: (path: string) => this.reseedMinimalStoreDbIfMissing(path) }, args), pruneExtrasCache: (ids: Set<string>) => { for (const id of this.extrasCache.keys()) if (!ids.has(id)) this.extrasCache.delete(id); } }; }
   async summarizeAgentById(agentId: string, activeAgentId?: string): Promise<Record<string, unknown> | null> { return summarizeAgentById(this.rosterHost(), agentId, activeAgentId); }
   async listAgents(activeAgentId?: string): Promise<Record<string, unknown>[]> { return listAgents(this.rosterHost(), activeAgentId); }
-  async listAgentIds(): Promise<string[]> { try { return (await readdir(this.rootDir, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } }
+  async listAgentIds(): Promise<string[]> { try { return (await readdir(this.rootDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !isSandSubagentId(entry.name)).map((entry) => entry.name).sort(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } }
 
   async getTranscriptEntries(session: OpenAgentSession): Promise<TranscriptEntry[]> { return this.conversationState?.getTranscriptEntries(session) ?? session.db.getTranscriptEntries(); }
   async getSessionOutline(session: OpenAgentSession): Promise<unknown> { if (this.conversationState == null) throw new Error("Session conversation-state provider is required"); return this.conversationState.getSessionOutline(session); }

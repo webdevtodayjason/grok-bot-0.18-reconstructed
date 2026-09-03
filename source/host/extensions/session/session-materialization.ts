@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isSandSubagentId } from "../../../shared/agents/subagents.js";
 import { readdir, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { getSandProfilePath, writeSandProfileFile, type SandAgentProfile } from "../../agents/agent-profile.js";
@@ -46,7 +47,7 @@ export class SandSessionMaterialization {
 
   requireWorkerPool(): AgentWorkerPool { this.workerPool ??= this.host.createBlobWorkerPool(); return this.workerPool; }
   async closeWorkerPool(): Promise<void> { const pool = this.workerPool; if (pool == null) return; this.workerPool = null; await pool.closeAll(); }
-  async listAgentRecordIds(): Promise<string[]> { try { return (await readdir(this.host.rootDir, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } }
+  async listAgentRecordIds(): Promise<string[]> { try { return (await readdir(this.host.rootDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !isSandSubagentId(entry.name)).map((entry) => entry.name).sort(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } }
   async countOwnedAgents(): Promise<number> { return (await this.listAgentRecordIds()).length; }
   enqueueMint<T>(run: () => Promise<T>): Promise<T> { const next = this.mintChain.then(run, run); this.mintChain = next.then(() => {}, () => {}); return next; }
 

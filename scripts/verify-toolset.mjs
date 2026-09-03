@@ -116,6 +116,13 @@ const wireLinesSince = async (from) => {
 
 const spoken = (entries) => entries.filter((entry) => entry.kind === "send-message");
 
+// A subagent's ledger directory once surfaced in the roster as a phantom "New Agent" with a
+// materialised database. After any subagent run, the roster must hold no subagent ids.
+const assertNoPhantomAgents = async () => {
+  const phantoms = (await call("listAgents")).filter((a) => /^(sand-)?subagent-/.test(String(a.id)));
+  if (phantoms.length > 0) fail(`${phantoms.length} subagent id(s) surfaced in the roster as agents: ${phantoms.map((a) => a.id).join(", ")}`);
+};
+
 const freshAgent = async (name) => {
   const made = await call("createAgent", {
     name, description: "", origin: "user", isKickstartRequested: false,
@@ -207,6 +214,7 @@ try {
         }
       }
     }
+    await assertNoPhantomAgents();
     console.log(`PASS — ${MODE}`);
   }
 
@@ -274,6 +282,7 @@ try {
       const text = String(reply?.message?.content ?? "");
       console.log(`reply: ${text.slice(0, 200)}`);
       if (!/example domain/i.test(text)) fail("the parent never reported the page heading (\"Example Domain\")");
+      await assertNoPhantomAgents();
       console.log("PASS — browser");
     } finally {
       if (previousBrowser !== "1") await writeSetting("SAND_BROWSER_USE", previousBrowser).catch(() => {});
