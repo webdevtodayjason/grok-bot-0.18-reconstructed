@@ -223,7 +223,7 @@ the rebuilt summary with the cached one and return early when nothing changed.
 **P6 — cosmetic.** Trigger-row controls wrap loosely in the 432px rail. Now lives on the
 secondary page (`/operator/`), which is why it stopped being noticed (GAP-ANALYSIS BL-P6).
 
-**P7 — Connector substrate decision (GAP-ANALYSIS CP-14).** No decision exists anywhere in the repo
+**P7 — CLOSED 2026-09-03: the substrate was decided 2026-08-18 (OOMOL OpenConnector, pinned, as a sidecar; `docs/CONNECTOR-PLUGIN-PLANE.md` now points at the journeyman record). Original entry follows.** No decision existed anywhere in this repo
 on whether this product owns its connector plane. Local stdio connectors work end to end today
 (`connectors.json` → box process → 14 tools discovered) but nothing reaches the model until
 TOOLS-01 lands, and every marketplace, OAuth and remote-server verb is a Cursor RPC on an expired

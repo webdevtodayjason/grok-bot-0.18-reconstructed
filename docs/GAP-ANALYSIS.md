@@ -261,7 +261,7 @@ cards, routines, settings, add agent/room, composer, live box, schedule, demo fa
 GW-04 (routines fully wired; run history needs a new host read), CP-02 (local stdio connectors are
 the spine), TOOLS-04, TOOLS-07, BL-P2.
 
-Decisions (operator): **CP-14** substrate (section 7); **ENDPOINT-1 / BL-P3** recreate the box
+Decisions (operator): **CP-14** closed, the substrate was decided 2026-08-18 (section 7, `docs/CONNECTOR-PLUGIN-PLANE.md`); **ENDPOINT-1 / BL-P3** recreate the box
 without the env lines or invert precedence; **TOOLS-12** keep multitask on and fix the comment;
 **TOOLS-05** generate_image only if an image model is wanted; **GW-02 / GW-12 / TOOLS-06 /
 BACKEND-1 / CP-15** stay out of scope, said so here.
@@ -302,9 +302,9 @@ GW-14 (palette), GW-08 (tool switches). Two sessions; C1 = GW-03, GW-05, GW-10 h
 rest. Proof per command: the call appears in the adapter and a headless check exercises it against
 the live box.
 
-**Wave D — own the connector plane (after CP-14).** D1 (no decision needed): CP-10, CP-07, CP-08,
-CP-03, CP-11, CP-12, CP-04, CP-05 short-term, secret card (GW-11/CP-09/MR-15). D2 (decision):
-CP-13 HTTP transport, CP-05 local catalog, CP-06 callback. Proof: a secret submitted from the
+**Wave D — own the connector plane on OpenConnector (`docs/CONNECTOR-PLUGIN-PLANE.md`).** D1 (no decision needed): CP-10, CP-07, CP-08,
+CP-03, CP-11, CP-12, CP-04, CP-05 short-term, secret card (GW-11/CP-09/MR-15). D2:
+OpenConnector as a stdio sidecar in the box, CP-13 local HTTP transport, CP-05 catalog through OpenConnector, CP-06 callback. Proof: a secret submitted from the
 Machine Room lands in that server's env and the server restarts with it; the connected connector
 shows on a card with its tool switches.
 
@@ -327,11 +327,14 @@ rubric (chief on the highest-scoring endpoint, workers on cheap ones).
 
 ## 7. What only the operator can decide
 
-1. **CP-14, the connector substrate.** Option 1: stdio-only local connectors (works today, no
-   marketplace, no hosted connectors like Context7 or Granola). Option 2: a local HTTP MCP client in
-   the box exec daemon plus a manifest catalog and git-clone install (owns the plane, replaces the
-   Cursor backend for remote servers, L). Recommendation: ship Wave D1 on the stdio spine now,
-   schedule D2 as Option 2.
+1. **CP-14, the connector substrate — already decided, not a question.** OOMOL OpenConnector
+   (`oomol-lab/open-connector`) was locked on 2026-08-18 in the journeyman repo as the pinned,
+   self-hosted catalog and local executor; Activepieces supplements, the MCP Registry is a
+   discovery feed, Composio and the rest were evaluated and not chosen. This repo now carries the
+   pointer in `docs/CONNECTOR-PLUGIN-PLANE.md`. The 2026-09-02 audit searched only this tree and
+   filed it as open. What remains is engineering: run OpenConnector as a stdio sidecar in the box
+   first (D2), or make the HTTP MCP path execute locally (CP-13); inject secrets into the server
+   env at spawn (CP-10). Wave D1 needs none of it and starts now.
 2. **ENDPOINT-1.** Recreate the box without the `SAND_OPENAI_COMPATIBLE_*` env lines (30 s
    downtime, the relay switch becomes permanent). Recommendation: yes, at the next quiet moment.
 3. **MODEL-1 timing.** Per-agent model is a design contract, not a wiring job. Recommendation: after
