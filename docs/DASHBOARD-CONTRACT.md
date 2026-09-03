@@ -1,6 +1,6 @@
 # Dashboard Contract — Providers panel and the view-only exchange viewer
 
-Armed 2026-09-02 22:50 CDT on Jason's "Go". This one edits the handoff's own layout
+Armed 2026-09-02 22:50 CDT on Jason's "Go"; built and browser-verified the same hour (`9970c67`): nine checks pass, the switch moves the box and the gate restores it, no secret in the DOM. This one edits the handoff's own layout
 (`ui/machine-room/app.js`, `styles.css`), which every earlier round left byte-identical; that is
 the point of the contract. Verification is a real browser, headless Chrome through Playwright from
 the session scratchpad (`GROK_BOT_PLAYWRIGHT_DIR`), never a dependency in the repo.
@@ -35,3 +35,15 @@ RULES: Restate this contract before the first action. Check every step against G
 NON-GOALS. Report against ACCEPTANCE at the budget and before declaring done. Emit the
 DISPOSITION LOG as the last action before done — done is not claimable without it.
 === Work only to this contract. ===
+
+## As built
+
+- Plugins page: a `Providers` group leads, `Connectors` follow (`renderPluginsPanel`); provider
+  cards get a "Use this endpoint" button when adopted and an "answering now" pill when live
+  (`pluginDetailMarkup`, `handlePanelClick` → `adapter.setModel`, box-wide).
+- System rows that carry an exchange are clickable (`data-exchange`); the transcript click handler
+  opens `openExchangeViewer`, which renders the exchange in the panel dialog with a view-only footer.
+- Adapter: provider plugins carry `group`, `endpointId`, `live`; blurbs carry `exchange`, `self`,
+  `peer`. Verified with `scripts/verify-dashboard.mjs` (playwright-core from
+  `GROK_BOT_PLAYWRIGHT_DIR`, Chrome from `GROK_BOT_CHROME`).
+- Not in this round: usage and reset windows per plan; a Providers panel of its own outside Plugins.
