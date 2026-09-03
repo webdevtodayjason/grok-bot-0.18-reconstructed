@@ -588,11 +588,24 @@
       return { rows, shaped };
     }
 
+    // The box's endpoint can be switched from anywhere (settings, the operator page, a gate
+    // script mid-run), so the model shown on a card is re-read on every tick from the cheap
+    // /model route, and the catalog is re-read only when it actually moved.
+    let liveModelKey = null;
+    async function reloadLiveModel() {
+      const live = await fetch("/model").then((r) => r.json()).catch(() => null);
+      if (!live?.model) return;
+      const key = `${live.endpoint ?? ""}|${live.model}`;
+      if (key === liveModelKey) return;
+      liveModelKey = key;
+      await refreshSubscriptions();
+    }
     async function reloadActive() {
       // Trays first: reloadRoster stamps every status through statusOf, which needs the tray set
       // already current. The other order let the roster paint over attention on every tick.
       await reloadTrays();
       await reloadRoster();
+      await reloadLiveModel();
       const r = record(state.activeContext);
       if (!r) return;
       const loaded = await loadContext(state.activeContext, r.name);
