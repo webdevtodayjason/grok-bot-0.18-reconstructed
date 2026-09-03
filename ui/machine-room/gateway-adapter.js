@@ -310,7 +310,7 @@
   // plugin cards. A key provider that is not yet adopted renders as "installed", which is the one
   // state the handoff app draws with a secure input; the value goes to the relay's 0600 store and
   // never through chat. Codex and MiniMax adopt from their CLI stores on a typed "adopt".
-  const SUB_CATEGORY = { key: "Subscription · paste a key", endpoint: "Subscription · CLI login", runtime: "Subscription · next contract", none: "Subscription · not usable here" };
+  const SUB_CATEGORY = { key: "Provider · paste a key", endpoint: "Provider · CLI login", runtime: "Provider · next contract", none: "Provider · not usable here" };
   function subscriptionPlugins(rows) {
     return (Array.isArray(rows) ? rows : []).map((sub) => {
       const facts = [sub.identity, sub.expiresAt ? `expires ${new Date(sub.expiresAt).toLocaleDateString()}` : null, sub.note].filter(Boolean).join(" · ");
@@ -456,7 +456,8 @@
             return routinesOf([entry.automation], { kind: owner.isGroup ? "room" : "worker", id: owner.id });
           })
         : loaded.routines,
-      plugins: [...pluginsOf(integrations), ...subscriptionPlugins(subscriptions)],
+      // Providers first: they are what a user connects; connectors follow.
+      plugins: [...subscriptionPlugins(subscriptions), ...pluginsOf(integrations)],
       models,
     };
   }
@@ -503,7 +504,7 @@
         fetch("/endpoints").then((r) => r.json()).catch(() => null),
         fetch("/model").then((r) => r.json()).catch(() => null),
       ]);
-      state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("sub:")), ...subscriptionPlugins(subscriptions)];
+      state.plugins = [...subscriptionPlugins(subscriptions), ...state.plugins.filter((p) => !String(p.id).startsWith("sub:"))];
       if (live?.model) state.models = endpointModels(live, catalog);
       for (const w of state.workers) w.model = state.models.default;
       emit("plugins:changed", {});
