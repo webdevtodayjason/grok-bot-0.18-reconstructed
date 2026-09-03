@@ -15,7 +15,7 @@ ledger for the *host* and now points here; the living dashboard carries the curr
 
 **Waves A and B landed** (`526a013`, plus the browser-subagent follow-up commit). Every proof in
 §5 for those two waves ran green on the live box in one sequential pass: unit 126/126, source
-typecheck, `verify-toolset` in all four modes (chief 36 tools with GetMcpTools and CallMcpTool;
+typecheck, `verify-toolset` in all four modes (chief 36 tools with GetMcpTools and CallMcpTool, 35 once CLOUD-1 withheld CloudAgent;
 computerUse child 3 tools; connector round trip stamped evidenced; browserUse child reads
 example.com and the parent reports "Example Domain"), subagent dispatch, evidence replay, work
 report with evidence required, dashboard 35 checks plus its leak arm, subscription leak scan.
@@ -25,11 +25,27 @@ report with evidence required, dashboard 35 checks plus its leak arm, subscripti
 | Id | Finding | Next | Size |
 |---|---|---|---|
 | SP-1b | User and project memory stay null in the prompt: `createUserMemory` / `createProjectMemory` exist on no api; the two candidate classes have mismatched recall signatures | Decide whether the product wants user/project memory sections; if so, write the two factories against the memory service and re-hoist | M |
-| TOOLS-13 | The SetMcpInstructions round trip has no runnable proof: the prompt is never written out (by design, it carries memory), and the section report has no marker for connector instructions | Add an `mcpCustomInstructions` marker to the section report and a `verify-toolset --mcp-instructions` mode; needs CP-07 so `local:` ids validate | S |
-| SUB-2 | Browser tools return text only; the per-action screenshot the driver captures stays on the box | Carry `imageB64` as an image part the way the Computer adapter does (`createImageResult`) | S |
+| TOOLS-13 · **landed** | The SetMcpInstructions round trip has no runnable proof: the prompt is never written out (by design, it carries memory), and the section report has no marker for connector instructions | Add an `mcpCustomInstructions` marker to the section report and a `verify-toolset --mcp-instructions` mode; needs CP-07 so `local:` ids validate | S |
+| SUB-2 · **landed** | Browser tools return text only; the per-action screenshot the driver captures stays on the box | Carry `imageB64` as an image part the way the Computer adapter does (`createImageResult`) | S |
 | ENDPOINT-2 | The relay writes the `SAND_OPENAI_COMPATIBLE_*` pin into `box-secrets.json`, a store whose `SAND_` prefix is reserved, so `BoxSecretsApplier.applyPersisted` has always bailed on this box and no real box secret is ever injected | Move the pin to `sand-host-settings.json` in `provider-session.ts` and repoint `ui/server.mjs` at the same file in one change. Proof: `box-secrets.json` holds no `SAND_` key and the host log prints "applying N persisted box secret(s)" | M |
-| GW-15 | `setAgentUnread{isUnread:true}` errors with "this.tm.sessionStore.seedSessionActivityFromDbMtime is not a function"; the clear direction works, which is all MR-06 needs | Trace the session store method on the raise path; one host fix | S |
+| GW-15 · **landed** | `setAgentUnread{isUnread:true}` errors with "this.tm.sessionStore.seedSessionActivityFromDbMtime is not a function"; the clear direction works, which is all MR-06 needs | Trace the session store method on the raise path; one host fix | S |
 | MR-11, MR-15 | Not in Wave B: the run rail's synthetic timeline, and the credential card (needs the secret-card work in Wave D1) | Wave C / Wave D1 | S / M |
+
+**Host wave E1 landed 2026-09-03 (done by hand in the main session during Anthropic's 529 outage,
+gate-verified the same way).** GW-15 the unread raise path (the session store never had
+`seedSessionActivityFromDbMtime`); AUDIT-1 `getAgentActionAudit{id,limit,before}` reads the
+per-agent ledger newest-first, paged; SUB-2 browser screenshots reach the model as image parts
+(`[sand][image]` line under the trace switch); TOOLS-13 an `mcpCustomInstructions` prompt marker
+and `verify-toolset --mcp-instructions`; FLAGS-1 one `[sand][gates]` table line at host start with
+value and source per gate; GC-1 stale-root GC reads the existing `SAND_STALE_ROOT_GC` helper and all
+three maintenance switches read the host settings file; DEAD-1 the unreferenced projection file,
+the caller-less `createTurnToolSession` and the duplicate spread are gone; CHURN-1 an unchanged
+summary no longer emits `agent-upserted` (idle roster: 0 events in 30 s); BOX-1 the standalone box
+reports window 0 and logs its limits once. New gate: `scripts/verify-gateway-reads.mjs`.
+
+| Id | Finding | Fix | Size |
+|---|---|---|---|
+| CLOUD-1 · **landed** | CloudAgent declared no parameters and kept Cursor's argument order, so the executor dropped it from every request: 36 offered, 35 sent, for as long as the wire trace existed. It manages Cursor cloud agents this box cannot reach | Withheld unless `SAND_CLOUD_AGENTS=1` in the host settings file; the chief gate now asserts offered equals sent. The chief's wire count is 35 | S |
 
 **Regression caught by the final gate pass, fixed before commit.** Giving subagents their own
 audit identity created `agents/subagent-<id>/audit.jsonl` beside the real agents, and the roster
@@ -225,7 +241,7 @@ merged into one row and both ids kept.
 | TOOLS-09 · **landed** | CloudAgent's team gate never resolves | Point `cloudAgentsDisabledByTeam` at the cloud-agents service's `isDisabledByTeamAdmin` | S |
 | MODEL-1 | Per-agent and per-subagent model dead on every routed provider; §5's "no new plumbing" was wrong | Per-session model override in `createProviderPromptSession`, `resolveSandRequestedModel` threaded through the routed branch keyed on subagent kind and stored settings. Design item; enables seniority routing against the rubric | L |
 | COMPACT-1 · **landed** | `compactionEpoch` hardcoded 0 at both sites | Per-session counter incremented where turn-settle logs "conversation compacted"; must land with SP-1 | S |
-| GC-1 | Stale-root GC unreachable on a self-hosted box | Env override matching the other two; decide local defaults | S |
+| GC-1 · **landed** | Stale-root GC unreachable on a self-hosted box | Env override matching the other two; decide local defaults | S |
 | GW-01 | Agent identity write path unwired: no edit, avatar, notifications, hygiene | Agent-detail panel on `updateAgent`, `setAgentAvatarBytes`, notify setters, hidden/unread, duplicate | M |
 | GW-06 · **landed** | Memory only on the operator page | Port the three call sites into the Machine Room agent-detail panel | S |
 | GW-07 | Teach recording throws at a default-off gate | Dev-flags row through `setHostSettings{featureFlagOverrides}`; then settle the fork-window contradiction with one live call | M |
@@ -267,7 +283,7 @@ without the env lines or invert precedence; **TOOLS-12** keep multitask on and f
 BACKEND-1 / CP-15** stay out of scope, said so here.
 
 Hygiene (S each): MR-10 remove the Sheets tab (landed); MR-11 feed the outline's tool rows into the run
-rail; MR-12 toast string (landed); MR-13 delete the unreachable builders (landed); CP-11 connectors editor on the
+rail; MR-12 toast string (landed); MR-13 delete the unreachable builders (landed); DEAD-1, CHURN-1 / BL-P5, BOX-1, AUDIT-1, FLAGS-1 (all landed in E1); CP-11 connectors editor on the
 relay's existing `/connectors` route with a `refreshMcp` follow-up; CP-12 pass the agent id to
 `disconnectChannel`; DEAD-1 delete `production-turn-input-projection.ts`, `createTurnToolSession`,
 the duplicate spread; CHURN-1 / BL-P5 compare summaries before emitting `agent-upserted`; BOX-1 log

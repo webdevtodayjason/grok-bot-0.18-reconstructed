@@ -176,35 +176,6 @@ export interface TurnAgentToolSessionInput {
   ) => void;
 }
 
-/**
- * Reconstructs the immutable per-turn executor order: disk pressure first,
- * then SendMessage reminder, then start-of-turn acknowledgement. A fresh
- * executor is requested on every call and the latest-message getter is
- * updated by identity; no executor or state is cached across turns.
- */
-export function createTurnToolSession(
-  input: TurnAgentToolSessionInput,
-): TurnAgentToolSession {
-  return {
-    getExecutor: () => {
-      const base = input.getExecutor();
-      const withDiskPressure = input.diskPressureReminderEpisodeId == null
-        ? base
-        : createDiskPressureReminderMiddleware(
-          input.diskPressureReminderEpisodeId,
-        )(base);
-      const withSendMessage = input.isSubagentRunner || input.isSilenceAllowed
-        ? withDiskPressure
-        : createSendMessageReminderMiddleware()(withDiskPressure);
-      const executor = input.isSubagentRunner || input.isSilenceAllowed
-        ? withSendMessage
-        : createStartOfTurnAckReminderMiddleware()(withSendMessage);
-      const toolExecutor = new SimplePromptToolExecutor(executor);
-      input.onLatestPromptMessages?.(() => toolExecutor.getMessages());
-      return toolExecutor;
-    },
-  };
-}
 
 const DEFAULT_BACKGROUND_SUMMARIZATION = {
   unusedTokensThresholdToStartBackgroundSummarization: 10_000,

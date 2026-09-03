@@ -107,3 +107,15 @@ export const SAND_BROWSER_USE_SETTING = "SAND_BROWSER_USE";
  * inference client (docs/audit-wave3-wire.md).
  */
 export const SAND_TOOL_TRACE_SETTING = "SAND_TOOL_TRACE";
+
+/**
+ * GC-1. The maintenance switches read `env`; on a running box only the host settings file can
+ * change, so an env view with the file's values layered over process.env lets the existing
+ * is*Enabled(env) helpers flip without a recreate. Only the named keys are consulted.
+ */
+export function envWithSandBoxSettings(names: readonly string[], env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const layered: NodeJS.ProcessEnv = { ...env };
+  for (const name of names) { const value = readSandBoxSetting(name); if (value !== undefined) layered[name] = value; }
+  return layered;
+}
+export const SAND_MAINTENANCE_SETTINGS = ["SAND_STALE_ROOT_GC", "SAND_RETIRE_LEGACY_STORE_BLOBS", "SAND_CONVERSATION_GC"] as const;

@@ -79,3 +79,15 @@ test("resolveBrowserUseEnabled: an explicit override decides, otherwise the gate
   assert.equal(mod.resolveBrowserUseEnabled(undefined, () => true), true);
   assert.equal(mod.resolveBrowserUseEnabled(undefined, () => false), false);
 });
+
+// GC-1. The maintenance switches (stale-root GC, legacy blob retirement, conversation GC) read an
+// env object; on a running box only the settings file can change, so the helpers now default to
+// process.env with the file's values layered in. Only the named keys are consulted.
+test("maintenance switches read the host settings file through envWithSandBoxSettings", () => {
+  write("sand-host-settings.json", { SAND_STALE_ROOT_GC: "1", SAND_TOOL_TRACE: "1" });
+  const env = mod.envWithSandBoxSettings(["SAND_STALE_ROOT_GC", "SAND_CONVERSATION_GC"], { HOME: "/x" });
+  assert.equal(env.SAND_STALE_ROOT_GC, "1");
+  assert.equal(env.SAND_CONVERSATION_GC, undefined);
+  assert.equal(env.SAND_TOOL_TRACE, undefined, "keys that were not asked for are not layered in");
+  assert.equal(env.HOME, "/x");
+});

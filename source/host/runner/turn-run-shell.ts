@@ -253,7 +253,6 @@ export async function createTurnAgentRunContext<ContextValue>(
       ? {}
       : { onProfileUpdateAppended: input.onProfileUpdateAppended }),
     diskPressureReminderEpisodeId,
-    ...(profilePromptSnapshot === undefined ? {} : { profilePromptSnapshot }),
     ...(profileUpdateForTurn == null ? {} : { profileUpdateForTurn }),
     emittedConnectorCards: input.emittedConnectorCards,
   };

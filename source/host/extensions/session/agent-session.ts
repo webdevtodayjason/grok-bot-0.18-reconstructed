@@ -9,6 +9,7 @@ import { getSandProfilePath, readSandProfileFile, writeSandProfileFile, type San
 import { getSandSettingsPath, writeSandSettingsFile } from "../../agents/settings-file.js";
 import { AUTOMATION_UI_LIMIT } from "../../automations/automation.js";
 import { getSandAgentsRootDir } from "../../storage/agent-paths.js";
+import { seedActivityFromMtime } from "./session-projection.js";
 import { deleteSandAgentDbWriteGeneration, getSandAgentDbWriteGeneration } from "../../storage/store-db.js";
 import { limitSurfacedWorkflows, type WorkflowSpec } from "../../../shared/workflow-model.js";
 import { SandAgentDb, type AwaitingUserResponse, type TranscriptEntry } from "./agent-db.js";
@@ -199,6 +200,8 @@ export class SandAgentSessionStore {
   markSessionViewedNow(session: OpenAgentSession, at = Date.now(), options: { preserveManualUnread?: boolean } = {}): void { session.db.markViewed(at, options); }
   markSessionActivity(session: OpenAgentSession, at = Date.now()): void { session.db.markActivity(at); }
   async markAgentViewed(agentId: string, at = Date.now(), options: { preserveManualUnread?: boolean } = {}): Promise<void> { try { await this.withAgentDb(agentId, (db) => db.markViewed(at, options)); } catch {} }
+  /** GW-15. The lifecycle's raise path calls this on the active session before markUnread; it never existed here, so setAgentUnread{isUnread:true} threw "is not a function" while the clear path worked. */
+  async seedSessionActivityFromDbMtime(session: OpenAgentSession): Promise<void> { let stats: { mtimeMs: number } | undefined; try { stats = { mtimeMs: Number((await stat(getAgentDbPath(this.rootDir, session.id))).mtimeMs) }; } catch {} seedActivityFromMtime(session.db as never, session.id, stats); }
   async setSessionUnread(agentId: string, unread: boolean, at = Date.now()): Promise<void> { await this.withAgentDb(agentId, (db) => unread ? db.markUnread(at) : db.markRead(at)); }
   setSessionNotifyOnUpdates(agentId: string, enabled: boolean): void { writeSandSettingsFile(getSandSettingsPath(this.getAgentDir(agentId)), { notifyOnAgentUpdates: enabled }); }
   setSessionHiddenFromSidebar(agentId: string, hidden: boolean): void { writeSandSettingsFile(getSandSettingsPath(this.getAgentDir(agentId)), { hiddenFromSidebar: hidden }); }

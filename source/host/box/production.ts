@@ -101,7 +101,8 @@ function createStandaloneProductionBoxInner<
     downloadFile: (ctx, agentId, boxPath) =>
       loopback.downloadFile(ctx, agentId, boxPath),
     releaseWindow: async () => {},
-    getAgentWindowIndex: () => 1,
+    // BOX-1: the primary window is index 0 everywhere else (box-windows.ts, host-box.ts).
+    getAgentWindowIndex: () => 0,
     maxWindows: () => 1,
     getTerminalsFolder: () => loopback.getTerminalsFolder(),
     isAvailable: () => loopback.isAvailable(),
@@ -208,6 +209,8 @@ export function createProductionBoxInner<
   });
 
   if (options.sharedDesktop === false) {
+    // BOX-1: say so once; this mode used to blank the VNC url and collapse windows silently.
+    console.warn("[sand-host] standalone box: one window, no per-agent desktops, no VNC url (SAND_USE_EXISTING_BOX_EXEC_DAEMON is not 1)");
     return createStandaloneProductionBoxInner(
       loopback,
       accessor => generated.withNoMonitorComputerUse(accessor)

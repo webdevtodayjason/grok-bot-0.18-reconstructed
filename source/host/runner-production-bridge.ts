@@ -223,6 +223,8 @@ export interface ProductionTurnToolsetHostInput {
   readonly getConversationId: () => string;
   readonly getRemoteBoxAvailable: () => boolean;
   readonly cloudAgentsDisabledByTeam: () => boolean;
+  /** CLOUD-1: undefined means offered; false withholds the CloudAgent tool. */
+  readonly cloudAgentsAvailable?: () => boolean;
   readonly spotlightEnabled: () => boolean;
   readonly isDynamicToolsEnabled?: () => boolean;
   readonly isMultitaskEnabled?: () => boolean;
@@ -259,6 +261,7 @@ export function createProductionTurnToolsetHost(
     getConversationId: input.getConversationId,
     getRemoteBoxAvailable: input.getRemoteBoxAvailable,
     cloudAgentsDisabledByTeam: input.cloudAgentsDisabledByTeam,
+    ...(input.cloudAgentsAvailable === undefined ? {} : { cloudAgentsAvailable: input.cloudAgentsAvailable }),
     spotlightEnabled: input.spotlightEnabled,
     ...(input.isDynamicToolsEnabled === undefined ? {} : { isDynamicToolsEnabled: input.isDynamicToolsEnabled }),
     ...(input.isMultitaskEnabled === undefined ? {} : { isMultitaskEnabled: input.isMultitaskEnabled }),

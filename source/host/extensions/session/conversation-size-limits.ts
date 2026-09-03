@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { envWithSandBoxSettings, SAND_MAINTENANCE_SETTINGS } from "../../sand-box-setting.js";
 import { basename, dirname, join } from "node:path";
 import { CONVERSATION_BLOBS_FILENAME } from "./session-paths.js";
 import { reportSessionDiagnostic } from "./session-diagnostics.js";
@@ -25,7 +26,7 @@ export function conversationSoftLimitBytes(env: NodeJS.ProcessEnv = process.env)
 export function conversationHardLimitBytes(env: NodeJS.ProcessEnv = process.env): number { return readByteLimitOverride("SAND_CONVERSATION_HARD_LIMIT_BYTES", env) ?? configuredLimitBytes("hard_limit_mb") ?? HARD_LIMIT_DEFAULT_BYTES; }
 export function pinConversationGc(enabled: boolean): void { pinnedConversationGcEnabled = enabled; }
 export function pinConversationGcReporter(reporter: ((report: ConversationGcReport) => void) | null): void { pinnedConversationGcReporter = reporter; }
-export function isConversationGcEnabled(env: NodeJS.ProcessEnv = process.env): boolean { const raw = env.SAND_CONVERSATION_GC?.trim().toLowerCase(); if (["1", "true", "on"].includes(raw ?? "")) return true; if (["0", "false", "off"].includes(raw ?? "")) return false; return pinnedConversationGcEnabled; }
+export function isConversationGcEnabled(env: NodeJS.ProcessEnv = envWithSandBoxSettings(SAND_MAINTENANCE_SETTINGS)): boolean { const raw = env.SAND_CONVERSATION_GC?.trim().toLowerCase(); if (["1", "true", "on"].includes(raw ?? "")) return true; if (["0", "false", "off"].includes(raw ?? "")) return false; return pinnedConversationGcEnabled; }
 
 export function reportConversationGcVerdict(trigger: string, dbPath: string, verdict: ConversationGcVerdict, stillOverCap = false): void {
   const agentId = basename(dirname(dbPath));

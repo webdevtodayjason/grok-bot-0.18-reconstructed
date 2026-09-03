@@ -1052,8 +1052,8 @@ export function createTurnScreenshotToolFactory(
  * failed with "url is required" while the model had sent the URL. The file-transfer tools
  * already go through `defineCommunicateTool`, which parses the arguments against the zod
  * schema and hands the driver a plain string result; the browser tools take the same road.
- * The model receives the driver's text (page snapshots, URLs, summaries); the per-action
- * screenshot stays on the box for now.
+ * The model receives the driver's text (page snapshots, URLs, summaries) and, when the driver
+ * captured one, the per-action screenshot as an image part (SUB-2).
  */
 export function createTurnBrowserToolFactory(
   input: TurnBrowserToolFactoryInput,
@@ -1066,7 +1066,9 @@ export function createTurnBrowserToolFactory(
     execute: async (ctx, args: Record<string, unknown>, deps) => {
       const output = await tool.execute(ctx as never, args, { toolCallId: deps.toolCallId });
       if (output.isError === true) throw new Error(output.text);
-      return output.text;
+      return output.imageB64 != null && output.imageB64.length > 0
+        ? { text: output.text, imageB64: output.imageB64, mimeType: "image/png" }
+        : output.text;
     },
   }) as unknown as TurnTool);
 }
@@ -1407,6 +1409,8 @@ export interface TurnToolsetHost {
   getConversationId(): string;
   getRemoteBoxAvailable(): boolean;
   cloudAgentsDisabledByTeam(): boolean;
+  /** CLOUD-1: cloud agents are a Cursor product surface; on a self-hosted box the tool can only fail. Undefined means offered. */
+  cloudAgentsAvailable?(): boolean;
   spotlightEnabled(): boolean;
   isDynamicToolsEnabled?(): boolean;
   isMultitaskEnabled?(): boolean;
@@ -1570,9 +1574,14 @@ export function buildTurnTools(
     if (generateImage !== undefined) tools.push(generateImage);
   }
 
+  // CLOUD-1. CloudAgent declares no parameters and keeps Cursor's execute(ctx, args) order, so the
+  // OpenAI-compatible executor dropped it from every request while the toolset counted it: 36
+  // offered, 35 sent, for as long as the wire trace has existed. It manages Cursor cloud agents,
+  // which this box cannot reach; withhold it unless the host says cloud agents are available.
   if (
     !host.isBoxScopedSubagent
     && !host.cloudAgentsDisabledByTeam()
+    && host.cloudAgentsAvailable?.() !== false
   ) {
     const cloudAgent = factories.cloudAgent?.();
     if (cloudAgent !== undefined) tools.push(cloudAgent);

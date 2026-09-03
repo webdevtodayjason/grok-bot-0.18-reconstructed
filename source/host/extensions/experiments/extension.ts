@@ -15,6 +15,28 @@ export const experimentsExtension = defineHostExtension({
     const service = new SandExperimentService({ getAccessToken: auth.getAccessToken, getMachineId: auth.getMachineId, getCacheDir: () => getSandRootDir(), isDevBuild: process.env.SAND_PACKAGED !== "1" || process.env.SAND_HOST_DEV_ERROR_DETAIL === "1" });
     service.start(); context.onStop(() => service.dispose()); context.onStop(auth.subscribeToRenewal((event) => { if (event.outcome === "renewed" && (event.isFirstCredential || !service.hasAuthenticatedStatsigBootstrap())) service.handleAuthChange(); }));
     if (auth.peekAccessToken() !== null) service.handleAuthChange(); context.onStop(settings.subscribeToFeatureFlagOverrides((overrides) => service.replaceFeatureFlagOverrides(overrides)));
+    // FLAGS-1. Gates default false and never bootstrap without an xAI login, and nothing said which
+    // capability was off for that reason. One line at start, per gate that matters on this box.
+    try {
+      const source = (envName?: string, settingName?: string) =>
+        settingName !== undefined && readSandBoxSetting(settingName) !== undefined ? `host setting ${settingName}`
+        : envName !== undefined && process.env[envName] !== undefined ? `env ${envName}`
+        : service.hasAuthenticatedStatsigBootstrap() ? "statsig" : "bundled default";
+      const gate = (name: Parameters<typeof service.checkFeatureGate>[0]) => service.checkFeatureGate(name);
+      const rows: Record<string, { value: boolean; source: string }> = {
+        sand_browser_use_subagent: { value: resolveBrowserUseEnabled(readSandBoxSetting(SAND_BROWSER_USE_SETTING), () => gate("sand_browser_use_subagent")), source: source(undefined, SAND_BROWSER_USE_SETTING) },
+        grok_bot_dynamic_tools: { value: gate("grok_bot_dynamic_tools"), source: source() },
+        sand_agent_network: { value: gate("sand_agent_network"), source: source() },
+        sand_multitask: { value: resolveMultitaskEnabled(process.env.SAND_MULTITASK, () => gate("sand_multitask")), source: source("SAND_MULTITASK") },
+        sand_spotlight: { value: resolveSpotlightEnabled(process.env.SAND_SPOTLIGHT, () => gate("sand_spotlight")), source: source("SAND_SPOTLIGHT") },
+        sand_global_search: { value: gate("sand_global_search"), source: source() },
+        sand_teach_by_demonstration: { value: gate("sand_teach_by_demonstration"), source: source() },
+        sand_stale_root_gc: { value: gate("sand_stale_root_gc"), source: source("SAND_STALE_ROOT_GC", "SAND_STALE_ROOT_GC") },
+        grok_bot_conversation_gc: { value: gate("grok_bot_conversation_gc"), source: source("SAND_CONVERSATION_GC", "SAND_CONVERSATION_GC") },
+        sand_legacy_store_blob_retirement: { value: gate("sand_legacy_store_blob_retirement"), source: source("SAND_RETIRE_LEGACY_STORE_BLOBS", "SAND_RETIRE_LEGACY_STORE_BLOBS") },
+      };
+      console.log(`[sand][gates] ${JSON.stringify(rows)}`);
+    } catch (error) { console.warn(`[sand][gates] table failed: ${error instanceof Error ? error.message : String(error)}`); }
     return {
       checkFeatureGate: (name: Parameters<typeof service.checkFeatureGate>[0]) => service.checkFeatureGate(name), getFeatureGateProperty: (name: Parameters<typeof service.getFeatureGateProperty>[0]) => service.getFeatureGateProperty(name),
       checkGate: (name: Parameters<typeof service.checkGate>[0], options?: { timeoutMs?: number }) => service.checkGate(name, options), getDynamicConfig: (name: Parameters<typeof service.getDynamicConfig>[0]) => service.getDynamicConfig(name), subscribe: (listener: Parameters<typeof service.subscribe>[0]) => service.subscribe(listener),

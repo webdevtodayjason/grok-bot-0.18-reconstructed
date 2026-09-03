@@ -1,6 +1,6 @@
 
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
-import { readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
+import { evidenceRegistry, readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
 import {
   parseCoordinatorAgentThreadRequest,
   parseCoordinatorTranscriptWindowRequest,
@@ -519,6 +519,20 @@ export function createHostGatewayApi(
         ...(args.attemptId == null ? {} : { attemptId: String(args.attemptId) }),
         entries: await (manager as any).sessionStore?.getAgentTranscriptEntries?.(String(args.id)) ?? [],
       }),
+    // AUDIT-1. The per-agent action ledger (agents/<id>/audit.jsonl) had no read surface: written
+    // on every tool action, forwarded only behind a gate this box never gets, readable by nobody.
+    // Newest first, paged by `before` (an eventId from a previous page), bodies never larger than
+    // the stored head. Rows are what the evidence layer attested plus the shell/MCP receipts.
+    getAgentActionAudit: async (args: any) => {
+      const id = String(args.id ?? "");
+      if (id.length === 0) return { rows: [], nextBefore: null };
+      const limit = Math.min(200, Math.max(1, Number(args.limit) || 50));
+      const rows = (await evidenceRegistry.readLedger(id)).reverse();
+      const start = args.before == null ? 0 : Math.max(0, rows.findIndex((row) => row.eventId === String(args.before)) + 1);
+      const page = rows.slice(start, start + limit);
+      const last = page.at(-1);
+      return { rows: page, nextBefore: start + limit < rows.length && last != null ? String(last.eventId ?? "") || null : null };
+    },
 
     skillsCatalog: () => method(managedSetup, "skillsCatalog")(),
     syncPluginSkills: () =>

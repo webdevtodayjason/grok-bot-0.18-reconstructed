@@ -11,7 +11,13 @@ export interface SnapshotStamp {
   snapshotSeq: number;
 }
 
-export type EmitAgentUpdateOutcome = "delta" | "full" | "failed";
+export type EmitAgentUpdateOutcome = "delta" | "full" | "failed" | "unchanged";
+
+const VOLATILE_SUMMARY_KEYS = new Set(["snapshotEpoch", "snapshotSeq", "ordered"]);
+function summariesEqualIgnoringStamp(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const strip = (value: Record<string, unknown>): string => JSON.stringify(value, (key, item) => (VOLATILE_SUMMARY_KEYS.has(key) ? undefined : item));
+  return strip(a) === strip(b);
+}
 
 export class RosterEmit {
   cachedAgentSummaries: any[] = [];
@@ -153,6 +159,9 @@ export class RosterEmit {
     return this.tm.runLifecycle.withRunStates([summary])[0] ?? summary;
   }
 
+  private loggedIdleEmitter = false;
+
+
   async runEmitAgentUpdate(agentId: string): Promise<EmitAgentUpdateOutcome> {
     if (this.tm.disposed) return "failed";
     try {
@@ -186,6 +195,14 @@ export class RosterEmit {
           [reconciled.find((agent: any) => agent.id === agentId) ?? summary],
           stamp,
         )[0] ?? summary;
+      // CHURN-1. agent-upserted fired on every poke of the roster, idle or not, and every UI
+      // learned to diff it away. Compare against what was last emitted for this agent, ignoring
+      // the snapshot stamp that changes by construction; an unchanged summary emits nothing.
+      const previous = this.cachedAgentSummaries.find((agent: any) => agent.id === agentId);
+      if (previous != null && summariesEqualIgnoringStamp(previous, emitted)) {
+        if (!this.loggedIdleEmitter) { this.loggedIdleEmitter = true; console.log(`[sand][roster] suppressed an unchanged agent-upserted for ${agentId}; caller: ${new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()).join(" <- ") ?? "unknown"}`); }
+        return "unchanged";
+      }
       this.cachedAgentSummaries = upsertAgentSummary(reconciled, emitted);
       this.emitter.emit("agent-upserted", {
         activeAgentId:

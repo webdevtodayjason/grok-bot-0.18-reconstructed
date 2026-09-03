@@ -3,6 +3,8 @@ import { dirname, join } from "node:path";
 import { getSandRootDir } from "./host-paths.js";
 import {
   isSandBoxSettingEnabled,
+  isSandOverrideTruthy,
+  readSandBoxSetting,
   SAND_TOOL_TRACE_SETTING,
 } from "./sand-box-setting.js";
 import { evidenceRegistry } from "./extensions/evidence/evidence-registry.js";
@@ -652,6 +654,7 @@ const SYSTEM_PROMPT_SECTION_MARKERS: Readonly<Record<string, string>> = {
   skills: "Workflows are a GLOBAL, shared library",
   timeZone: "Your box and tools run on a UTC clock",
   browser: "You drive this box's browser at the page level with the browser_* tools",
+  mcpCustomInstructions: "Custom instructions are configured for some connected tools",
 };
 
 function dumpAssembledSystemPrompt(agentId: string, prompt: string): string {
@@ -2876,6 +2879,8 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         // TOOLS-09: same non-existent experiments method as the prompt assembly's gate; the
         // team-admin policy lives on the cloud-agents service.
         cloudAgentsDisabledByTeam: () => method(cloudAgents, "isDisabledByTeamAdmin")?.() ?? false,
+        // CLOUD-1: offered only when the operator turns cloud agents on (SAND_CLOUD_AGENTS in the host settings file).
+        cloudAgentsAvailable: () => isSandOverrideTruthy(readSandBoxSetting("SAND_CLOUD_AGENTS")),
         spotlightEnabled: () => method(experiments, "isSpotlightEnabled")?.() ?? false,
         isDynamicToolsEnabled: () => method(experiments, "isDynamicToolsEnabled")?.() ?? false,
         isMultitaskEnabled: () => method(experiments, "isMultitaskEnabled")?.() ?? false,

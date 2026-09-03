@@ -1,4 +1,6 @@
 import { existsSync } from "node:fs";
+import { envWithSandBoxSettings, SAND_MAINTENANCE_SETTINGS } from "../../sand-box-setting.js";
+import { isStaleRootGcEnabled } from "./session-paths.js";
 import { readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { ConversationStateStructure } from "../../../packages/proto/generated/agent/v1/agent_pb.js";
@@ -10,10 +12,13 @@ import { CONVERSATION_BLOBS_FILENAME } from "./session-paths.js";
 export const LEGACY_BLOB_RETIREMENT_VERSION = 1;
 export const STALE_ROOT_CLEANUP_VERSION = 1;
 export const HIDDEN_ENTRY_REPAIR_VERSION = 1;
-let legacyRetirement = false, staleRootGc = false;
+let legacyRetirement = false;
 export function pinLegacyStoreBlobRetirement(enabled: boolean): void { legacyRetirement = enabled; }
-export function isLegacyStoreBlobRetirementEnabled(env: NodeJS.ProcessEnv = process.env): boolean { const raw = env.SAND_RETIRE_LEGACY_STORE_BLOBS?.trim().toLowerCase(); if (["1", "true", "on"].includes(raw ?? "")) return true; if (["0", "false", "off"].includes(raw ?? "")) return false; return legacyRetirement; }
-export function pinStaleRootGc(enabled: boolean): void { staleRootGc = enabled; }
+export function isLegacyStoreBlobRetirementEnabled(env: NodeJS.ProcessEnv = envWithSandBoxSettings(SAND_MAINTENANCE_SETTINGS)): boolean { const raw = env.SAND_RETIRE_LEGACY_STORE_BLOBS?.trim().toLowerCase(); if (["1", "true", "on"].includes(raw ?? "")) return true; if (["0", "false", "off"].includes(raw ?? "")) return false; return legacyRetirement; }
+// GC-1. session-paths.ts already owned pinStaleRootGc / isStaleRootGcEnabled (env SAND_STALE_ROOT_GC) and nothing
+// imported them, so the switch was unreachable on a self-hosted box: this file kept its own flag that only
+// an authenticated Statsig bootstrap could set. One owner now.
+export { pinStaleRootGc } from "./session-paths.js";
 
 export interface MaintenanceDb {
   get(key: string): Uint8Array | string;
@@ -55,7 +60,7 @@ export function backfillTranscript(_host: unknown, db: Pick<MaintenanceDb, "getT
   const tail = rebuilt.slice(persisted.length) as Array<Record<string, unknown> & { id: string; kind: string }>; const result = db.appendTranscriptEntries(tail); return typeof result === "number" ? result : result ? tail.length : 0;
 }
 export async function clearStaleCheckpointRootsOnce(host: MaintenanceHost, dbPath: string, db: MaintenanceDb, store: MaintenanceStore): Promise<boolean> {
-  if (!staleRootGc || db.getStaleRootCleanupVersion() >= STALE_ROOT_CLEANUP_VERSION) return false;
+  if (!isStaleRootGcEnabled() || db.getStaleRootCleanupVersion() >= STALE_ROOT_CLEANUP_VERSION) return false;
   try { const root = db.get("latestRootBlobId"); if (!(root instanceof Uint8Array) || root.length === 0 || store.getConversationStateStructure().turns.length === 0 || handles(host, dbPath) > 1) return false; const before = generation(host, dbPath); await host.requireWorkerPool().clearStaleCheckpointRoots(basename(dirname(dbPath)), join(dirname(dbPath), "conversation-blobs.db"), hex(root), dbPath); if (generation(host, dbPath) !== before || hex(db.get("latestRootBlobId") as Uint8Array) !== hex(root) || handles(host, dbPath) > 1) return false; return db.setStaleRootCleanupVersion(STALE_ROOT_CLEANUP_VERSION); } catch (error) { diagnostic(host, "checkpoint_cleanup_failed", dbPath, error); return false; }
 }
 export async function findLatestDurableRootBlobId(host: MaintenanceHost, args: { dbPath: string; blobsPath: string }): Promise<Uint8Array | null> { try { return await host.requireWorkerPool().findLatestRootBlobId({ agentId: basename(dirname(args.dbPath)), blobDbPath: args.blobsPath, legacyBlobDbPath: args.dbPath }); } catch (error) { throw new ConversationRecoveryScanError(error instanceof Error ? error.name : String(error)); } }

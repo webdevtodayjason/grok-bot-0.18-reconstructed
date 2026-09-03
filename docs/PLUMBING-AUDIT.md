@@ -110,6 +110,16 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-03 (host wave E1, by hand during the Anthropic 529 outage).** Unread raise path fixed;
+  `getAgentActionAudit` reads the action ledger; browser screenshots reach the model as image
+  parts; `[sand][gates]` table at host start; maintenance switches (`SAND_STALE_ROOT_GC`,
+  `SAND_RETIRE_LEGACY_STORE_BLOBS`, `SAND_CONVERSATION_GC`) read the host settings file; dead code
+  gone; `agent-upserted` no longer fires for an unchanged summary; standalone box reports window 0;
+  CloudAgent withheld unless `SAND_CLOUD_AGENTS=1` (it was silently dropped from the wire: 36 offered,
+  35 sent). Gates: `verify-gateway-reads.mjs`, `verify-toolset --mcp-instructions`, chief mode asserts
+  offered == sent. The ChatGPT/Codex backend answered 404 to the Codex CLI itself that morning, so the
+  gate pass ran on the Alibaba subscription.
+
 - **2026-09-03 (Waves A and B, `526a013` + browser follow-up).** GetMcpTools/CallMcpTool reach the
   model (the per-turn MCP projection is handed to the tools handoff); the production prompt carries
   memory, routines, skills and channels; per-turn connector instructions and the discovery notice

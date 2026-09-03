@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { envWithSandBoxSettings, SAND_MAINTENANCE_SETTINGS } from "../../sand-box-setting.js";
 import type { Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -18,7 +19,7 @@ export const CONNECTOR_SECRETS_DIRNAME = "connector-secrets";
 let pinnedStaleRootGcEnabled = false;
 
 export function pinStaleRootGc(enabled: boolean): void { pinnedStaleRootGcEnabled = enabled; }
-export function isStaleRootGcEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+export function isStaleRootGcEnabled(env: NodeJS.ProcessEnv = envWithSandBoxSettings(SAND_MAINTENANCE_SETTINGS)): boolean {
   const raw = env.SAND_STALE_ROOT_GC?.trim().toLowerCase();
   if (raw === "1" || raw === "true" || raw === "on") return true;
   if (raw === "0" || raw === "false" || raw === "off") return false;

@@ -15,6 +15,7 @@
 //   node scripts/verify-toolset.mjs --connector  a real CallMcpTool round trip, stamped evidenced
 //   node scripts/verify-toolset.mjs --subagent   a computerUse subagent is offered 3 tools
 //   node scripts/verify-toolset.mjs --browser    SAND_BROWSER_USE on: a browserUse subagent reads a page
+//   node scripts/verify-toolset.mjs --mcp-instructions  a stored connector instruction reaches the next prompt
 //
 // Integration check, not a unit test: needs the box up and a provider configured.
 import { execFile } from "node:child_process";
@@ -26,6 +27,7 @@ const SETTINGS = "/home/box/sand-data/sand-host-settings.json";
 const PROMPT_REPORTS = "/home/box/sand-data";
 const MODE = process.argv.includes("--connector")
   ? "connector"
+  : process.argv.includes("--mcp-instructions") ? "mcp-instructions"
   : process.argv.includes("--browser") ? "browser"
   : process.argv.includes("--subagent") ? "subagent" : "chief";
 const flag = (name, fallback) => (process.argv.includes(name)
@@ -175,6 +177,11 @@ try {
     console.log(`Task subagent types: ${chief.subagentTypes.join(", ") || "(none)"}`);
     const missing = ["GetMcpTools", "CallMcpTool"].filter((name) => !chief.tools.includes(name));
     if (missing.length > 0) fail(`the MCP meta pair is still withheld: missing ${missing.join(", ")}`);
+    // What the provider was actually sent must be what the toolset offered (CLOUD-1 was a silent 36 -> 35).
+    const chiefWire = (await wireLinesSince(from)).find((line) => line.offered === chief.count);
+    if (chiefWire == null) fail("no [sand][wire] line for the chief's request");
+    console.log(`wire: ${chiefWire.transport} ${chiefWire.model} offered ${chiefWire.offered} sent ${chiefWire.sent}`);
+    if (chiefWire.sent !== chiefWire.offered) fail(`the provider request dropped ${chiefWire.offered - chiefWire.sent} tool(s): ${chief.tools.filter((name) => !chiefWire.tools.includes(name)).join(", ")}`);
 
     // The host never writes the prompt itself out (it carries the user's memory, and every
     // agent on this box shares a filesystem) -- it reports which sections it carried.
@@ -282,10 +289,41 @@ try {
       const text = String(reply?.message?.content ?? "");
       console.log(`reply: ${text.slice(0, 200)}`);
       if (!/example domain/i.test(text)) fail("the parent never reported the page heading (\"Example Domain\")");
+      // SUB-2: the driver's screenshot reached the model as an image part at least once.
+      const imageLines = (await docker(["exec", BOX, "sh", "-c",
+        `tail -n +${from + 1} /tmp/sand-host.log | grep -c -F '[sand][image] carried' || true`])).trim();
+      console.log(`screenshots carried to the model this run: ${imageLines}`);
+      if (Number(imageLines) < 1) fail("no browser screenshot reached the model as an image part ([sand][image] never logged)");
       await assertNoPhantomAgents();
       console.log("PASS — browser");
     } finally {
       if (previousBrowser !== "1") await writeSetting("SAND_BROWSER_USE", previousBrowser).catch(() => {});
+    }
+  }
+
+  if (MODE === "mcp-instructions") {
+    // TOOLS-13. A connector instruction stored in host settings must render into the next prompt.
+    const before = await call("getHostSettings");
+    const previous = before?.mcpCustomInstructions ?? {};
+    const probe = `VERIFY-MCP-INSTRUCTIONS-${Math.random().toString(36).slice(2, 8)}`;
+    await call("setHostSettings", { mcpCustomInstructions: { ...previous, localfiles: probe } });
+    try {
+      agent = await freshAgent(`verify-mcpi-${Math.random().toString(36).slice(2, 8)}`);
+      await call("sendPrompt", { agentId: agent.id, prompt: "Reply with the single word READY." });
+      const deadline = Date.now() + TIMEOUT_MS;
+      let report = null;
+      while (Date.now() < deadline) {
+        await sleep(4000);
+        const raw = await docker(["exec", BOX, "sh", "-c", `cat ${PROMPT_REPORTS}/sand-system-prompt-${agent.id}.json 2>/dev/null || true`]);
+        try { report = JSON.parse(raw); } catch { report = null; }
+        if (report != null) break;
+      }
+      if (report == null) fail("no assembled prompt report was written for the probe agent");
+      console.log(`prompt sections: ${Object.entries(report.sections ?? {}).filter(([, has]) => has === true).map(([name]) => name).join(", ")}`);
+      if (report.sections?.mcpCustomInstructions !== true) fail("the stored connector instruction did not reach the assembled prompt (mcpCustomInstructions section absent)");
+      console.log("PASS — mcp-instructions");
+    } finally {
+      await call("setHostSettings", { mcpCustomInstructions: previous }).catch(() => {});
     }
   }
 

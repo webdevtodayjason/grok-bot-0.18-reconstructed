@@ -73,6 +73,7 @@ export const SAND_GATEWAY_COMMANDS = {
   portAgentLocalSkills: (api: GatewayApi, body: string) => api.portAgentLocalSkills(parseCommandArgs(body)),
   getConversationOutline: (api: GatewayApi, body: string) => api.getConversationOutline(parseCommandArgs(body)),
   getAgentEvidence: (api: GatewayApi, body: string) => api.getAgentEvidence(parseCommandArgs(body)),
+  getAgentActionAudit: (api: GatewayApi, body: string) => api.getAgentActionAudit(parseCommandArgs(body)),
   skillsCatalog: (api: GatewayApi) => api.skillsCatalog(),
   syncPluginSkills: (api: GatewayApi) => api.syncPluginSkills(),
   getPluginSyncStatus: (api: GatewayApi) => api.getPluginSyncStatus(),
