@@ -142,23 +142,24 @@
   // host stores it in the same transcript, but it is not this conversation: it is shown as the
   // product does, one blurb per run ("2 messages with Chief of staff"), never as a bubble from you.
   const peerOf = (e) => e.fromAgent?.name ?? e.toAgent?.name ?? null;
-  function collapseAgentExchanges(entries) {
+  function collapseAgentExchanges(entries, selfName) {
     const out = [];
     for (const e of entries) {
       const peer = e.kind === "message" ? peerOf(e) : null;
       if (peer == null) { out.push(e); continue; }
+      const item = { from: e.fromAgent ? e.fromAgent.name : selfName, peer: Boolean(e.fromAgent), text: userText(e).trim(), time: timeOf(Number(e.timestampMs) || Date.now()) };
       const last = out.at(-1);
-      if (last?.kind === "agent-exchange" && last.peer === peer) { last.count += 1; last.timestampMs = e.timestampMs ?? last.timestampMs; continue; }
-      out.push({ kind: "agent-exchange", id: `exchange-${e.id}`, peer, count: 1, timestampMs: e.timestampMs });
+      if (last?.kind === "agent-exchange" && last.peer === peer) { last.count += 1; last.timestampMs = e.timestampMs ?? last.timestampMs; last.exchange.push(item); continue; }
+      out.push({ kind: "agent-exchange", id: `exchange-${e.id}`, peer, self: selfName, count: 1, timestampMs: e.timestampMs, exchange: [item] });
     }
     return out;
   }
   function messagesOf(transcript, fallbackName, outline) {
-    return collapseAgentExchanges(weaveToolRows(transcript, outline))
+    return collapseAgentExchanges(weaveToolRows(transcript, outline), fallbackName)
       .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || e.kind === "agent-exchange" || (e.kind === "message" && e.role === "user"))
       .map((e, i) => {
         if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text };
-        if (e.kind === "agent-exchange") return { id: e.id, type: "system", text: `${e.count} message${e.count === 1 ? "" : "s"} with ${e.peer}` };
+        if (e.kind === "agent-exchange") return { id: e.id, type: "system", text: `${e.count} message${e.count === 1 ? "" : "s"} with ${e.peer}`, peer: e.peer, self: e.self, exchange: e.exchange };
         const mine = e.kind !== "send-message";
         const card = mine ? null : cardOf(e);
         const text = e.kind === "send-message"
@@ -330,7 +331,7 @@
   // state the handoff app draws with a secure input; the value goes to the relay's 0600 store and
   // never through chat. Codex and MiniMax adopt from their CLI stores on a typed "adopt".
   const SUB_CATEGORY = { key: "Provider · paste a key", endpoint: "Provider · CLI login", runtime: "Provider · next contract", none: "Provider · not usable here" };
-  function subscriptionPlugins(rows) {
+  function subscriptionPlugins(rows, liveEndpointId) {
     return (Array.isArray(rows) ? rows : []).map((sub) => {
       const facts = [sub.identity, sub.expiresAt ? `expires ${new Date(sub.expiresAt).toLocaleDateString()}` : null, sub.note].filter(Boolean).join(" · ");
       const status = sub.adopted ? "connected" : sub.route === "key" || (sub.route === "endpoint" && sub.usable) ? "installed" : "available";
@@ -340,6 +341,7 @@
         description: `${facts ? `${facts}. ` : ""}${sub.posture}${sub.adopted ? " Adopted: the secret sits in the 0600 store on this Mac; pick the endpoint in a worker's model menu to use it." : ""}`,
         status, account: sub.identity ?? null,
         secretField: sub.route === "key" ? "API key" : sub.route === "endpoint" ? "Type adopt to confirm" : null,
+        group: "Providers", endpointId: sub.endpointId ?? null, live: sub.endpointId != null && sub.endpointId === liveEndpointId,
         tools: [], skills: [],
       };
     });
@@ -476,7 +478,7 @@
           })
         : loaded.routines,
       // Providers first: they are what a user connects; connectors follow.
-      plugins: [...subscriptionPlugins(subscriptions), ...pluginsOf(integrations)],
+      plugins: [...subscriptionPlugins(subscriptions, models.default), ...pluginsOf(integrations)],
       models,
     };
   }
@@ -523,8 +525,8 @@
         fetch("/endpoints").then((r) => r.json()).catch(() => null),
         fetch("/model").then((r) => r.json()).catch(() => null),
       ]);
-      state.plugins = [...subscriptionPlugins(subscriptions), ...state.plugins.filter((p) => !String(p.id).startsWith("sub:"))];
       if (live?.model) state.models = endpointModels(live, catalog);
+      state.plugins = [...subscriptionPlugins(subscriptions, state.models.default), ...state.plugins.filter((p) => !String(p.id).startsWith("sub:"))];
       for (const w of state.workers) w.model = state.models.default;
       // "plugin:" is the prefix the app redraws its panels for; anything else only refreshes the transcript.
       emit("plugin:state", {});

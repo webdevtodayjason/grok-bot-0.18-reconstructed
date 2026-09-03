@@ -700,7 +700,7 @@
   }
 
   function messageMarkup(message) {
-    if (message.type === "system") return `<article class="message-row is-system" data-message-id="${escapeHtml(message.id)}"><div class="message-bubble">${escapeHtml(message.text)}</div></article>`;
+    if (message.type === "system") return `<article class="message-row is-system${message.exchange ? " is-exchange" : ""}" data-message-id="${escapeHtml(message.id)}"${message.exchange ? ' data-exchange="1" role="button" tabindex="0"' : ""}><div class="message-bubble">${escapeHtml(message.text)}</div></article>`;
     const isUser = message.authorId === "you";
     const author = workerById(message.authorId);
     const isWorking = message.type === "working";
@@ -876,7 +876,10 @@
     else if (plugin.status === "pending") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Awaiting authorisation</strong><small>Finish approving ${escapeHtml(plugin.name)} in the tab that opened, then reopen this panel.</small></div></div></div>`;
     else if (plugin.status === "installed") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Secure value required</strong><small>Scoped to ${escapeHtml(plugin.name)} · ${escapeHtml(plugin.secretField)}. It never enters chat or model context.</small></div></div><form data-secret-form="${escapeHtml(plugin.id)}"><div class="field"><label for="secret-${escapeHtml(plugin.id)}">${escapeHtml(plugin.secretField)}</label><input id="secret-${escapeHtml(plugin.id)}" name="secret" type="password" autocomplete="off" required placeholder="Enter securely" /><span class="field-hint">Standalone demo: the entered value is immediately discarded.</span></div><div class="form-actions"><button class="primary-button" type="submit">Connect account</button></div></form></div>`;
     else account = `<div class="demo-note"><strong>${escapeHtml(plugin.account || "Connected account")}</strong><br />The connector holds the credential globally. Contexts receive enabled capabilities, never the key.</div>`;
-    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>Global account</span><span>${escapeHtml(plugin.category)}</span></div>${account}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span><span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span></div><div class="plugin-list">${tools}</div></section><section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${skills}</div></section></div>`;
+    const providerSwitch = plugin.endpointId
+      ? `<div class="provider-switch">${plugin.live ? `<span class="status-pill success">answering now</span>` : plugin.status === "connected" ? `<button class="primary-button" type="button" data-use-endpoint="${escapeHtml(plugin.endpointId)}">Use this endpoint</button>` : ""}</div>`
+      : "";
+    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${providerSwitch}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span><span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span></div><div class="plugin-list">${tools}</div></section><section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${skills}</div></section></div>`;
   }
 
   // The relay holds the endpoint catalogue and probes each one; the box holds which is in use.
@@ -1073,7 +1076,11 @@
       return;
     }
     selectedPluginId = selected.id;
-    const nav = state.plugins.map((plugin) => `<button class="plugin-nav-button${plugin.id === selected.id ? " is-active" : ""}" type="button" data-plugin-id="${escapeHtml(plugin.id)}"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><span><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.category)}</small></span><span class="status-dot ${plugin.status === "connected" ? "success" : plugin.status === "installed" ? "attention" : ""}"></span></button>`).join("");
+    const navButton = (plugin) => `<button class="plugin-nav-button${plugin.id === selected.id ? " is-active" : ""}" type="button" data-plugin-id="${escapeHtml(plugin.id)}"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><span><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.category)}</small></span><span class="status-dot ${plugin.status === "connected" ? "success" : plugin.status === "installed" ? "attention" : ""}"></span></button>`;
+    // Providers (subscriptions and endpoints a user connects) lead; connectors follow.
+    const providers = state.plugins.filter((plugin) => plugin.group === "Providers");
+    const connectors = state.plugins.filter((plugin) => plugin.group !== "Providers");
+    const nav = `${providers.length ? `<div class="plugin-group-title">Providers</div>${providers.map(navButton).join("")}` : ""}${connectors.length ? `<div class="plugin-group-title">Connectors</div>${connectors.map(navButton).join("")}` : ""}`;
     openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>`);
   }
 
@@ -1350,6 +1357,12 @@
       elements.panelDialog.close();
       return;
     }
+    if (target.dataset.useEndpoint) {
+      const provider = state.plugins.find((plugin) => plugin.endpointId === target.dataset.useEndpoint);
+      adapter.setModel(null, target.dataset.useEndpoint);
+      showToast(`${provider?.name ?? "That endpoint"} answers from the next turn`);
+      return;
+    }
     if (target.dataset.pluginId) {
       selectedPluginId = target.dataset.pluginId;
       renderPluginsPanel();
@@ -1539,7 +1552,18 @@
   }));
 
   elements.contextCard.addEventListener("click", handleContextCardClick);
+  // Agent-to-agent traffic is shown as one blurb; opening it shows the exchange read-only, the
+  // way the product does, without it ever bleeding into this conversation.
+  function openExchangeViewer(messageId) {
+    const message = contextMessages().find((item) => item.id === messageId);
+    if (!message || !Array.isArray(message.exchange)) return;
+    const rows = message.exchange.map((item) => `<div class="exchange-message${item.peer ? " is-peer" : ""}"><strong>${escapeHtml(item.from)}</strong><time>${escapeHtml(item.time || "")}</time><p>${escapeHtml(item.text)}</p></div>`).join("");
+    openPanel("Agent to agent", `${escapeHtml(message.self || "This agent")} ↔ ${escapeHtml(message.peer || "another agent")}`, `<div class="exchange-view">${rows}<div class="exchange-footer">🔒 This chat is view-only</div></div>`);
+  }
+
   elements.transcript.addEventListener("click", (event) => {
+    const exchange = event.target.closest("[data-exchange]");
+    if (exchange) { openExchangeViewer(exchange.dataset.messageId); return; }
     const action = event.target.closest("[data-decide]");
     if (!action) return;
     // No toast: the card itself reports what the host did, once the host has done it.

@@ -2588,3 +2588,18 @@ dialog[open] {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+
+/* Providers section and the view-only exchange viewer (2026-09-02). */
+.plugin-group-title { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-secondary); padding: 10px 12px 4px; }
+.plugin-group-title + .plugin-group-title { margin-top: 8px; }
+.provider-switch { margin-top: 12px; }
+.message-row.is-exchange .message-bubble { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.message-row.is-exchange .message-bubble:hover { background: rgba(16, 25, 30, 0.85); }
+.exchange-view { display: flex; flex-direction: column; gap: 10px; }
+.exchange-message { padding: 10px 14px; border-radius: 14px; background: rgba(255, 255, 255, 0.06); max-width: 88%; align-self: flex-start; }
+.exchange-message.is-peer { align-self: flex-end; background: rgba(255, 255, 255, 0.1); }
+.exchange-message strong { display: inline-block; font-size: 12px; }
+.exchange-message time { font-size: 11px; color: var(--text-secondary); margin-left: 8px; }
+.exchange-message p { margin: 6px 0 0; white-space: pre-wrap; }
+.exchange-footer { text-align: center; font-size: 12px; color: var(--text-secondary); padding-top: 10px; }
