@@ -8,8 +8,9 @@ question. It was never open.
 
 ## The decision
 
-- **Substrate: OOMOL OpenConnector** (`oomol-lab/open-connector`, Apache-2.0, self-hostable).
-  A pinned upstream revision, run as an untrusted supervised sidecar. It supplies what this repo
+- **Substrate: OOMOL OpenConnector** (`oomol-lab/open-connector`, Apache-2.0, self-hostable),
+  **pinned at v1.3.5** (confirmed by Jason 2026-09-03), run as an untrusted supervised sidecar. It
+  supplies the existing third-party connector implementations; we write none of our own. It supplies what this repo
   lacks: provider definitions, OAuth and API-key connection handling, action schemas, local
   executors, run logs, MCP/HTTP/OpenAPI surfaces. We do not maintain a catalog of our own.
 - **Supplemental sources:** Activepieces for a connector OpenConnector lacks (after package and
