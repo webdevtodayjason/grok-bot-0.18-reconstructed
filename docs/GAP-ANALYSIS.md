@@ -31,6 +31,17 @@ report with evidence required, dashboard 35 checks plus its leak arm, subscripti
 | GW-15 | `setAgentUnread{isUnread:true}` errors with "this.tm.sessionStore.seedSessionActivityFromDbMtime is not a function"; the clear direction works, which is all MR-06 needs | Trace the session store method on the raise path; one host fix | S |
 | MR-11, MR-15 | Not in Wave B: the run rail's synthetic timeline, and the credential card (needs the secret-card work in Wave D1) | Wave C / Wave D1 | S / M |
 
+**Regression caught by the final gate pass, fixed before commit.** Giving subagents their own
+audit identity created `agents/subagent-<id>/audit.jsonl` beside the real agents, and the roster
+enumerates every directory there and *recovers* a missing database into a new agent: seventeen
+phantom "New Agent" rows appeared with materialized databases. Root cause underneath: the
+reconstruction minted subagent ids as `subagent-<uuid>` while the shared predicate
+`isSandSubagentId` expects `sand-subagent-`, so upstream's own guards (roster projection, the
+subagent branch of `getConversationOutline`) never matched. Ids now carry the shared prefix, the
+three directory enumerations skip subagent ledgers, and `verify-toolset` asserts the roster holds
+no subagent id after any subagent run. Side effect worth having: the conversation outline for a
+subagent id now answers.
+
 **How the browser subagent was actually broken, four faults deep.** The audit's "gated off" was
 the first layer only. With the gate open: (1) the prompt glue was built once with every identity
 flag false, so the child got the chief's desktop prompt with no Browser section and a ban on

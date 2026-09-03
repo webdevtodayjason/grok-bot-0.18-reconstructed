@@ -121,7 +121,10 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
   pill opens receipts, memory panel, unread clears. New host switches in
   `/home/box/sand-data/sand-host-settings.json` (`SAND_TOOL_TRACE`, `SAND_BROWSER_USE`); host-log
   lines `[sand][toolset]` (offered) and `[sand][wire]` (sent). Gate: `scripts/verify-toolset.mjs`
-  (chief / --subagent / --connector / --browser). Suite 126/126.
+  (chief / --subagent / --connector / --browser). Suite 126/126. Regression caught by the gate
+  pass and fixed: subagent ledger dirs surfaced as phantom "New Agent" rows because minted
+  subagent ids (`subagent-`) never matched the shared `sand-subagent-` predicate; ids aligned,
+  roster enumerations skip ledger dirs, gate asserts no phantom rows.
 
 | commit | what |
 |---|---|
