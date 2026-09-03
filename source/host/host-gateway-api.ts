@@ -585,10 +585,12 @@ export function createHostGatewayApi(
         args.bcId,
         args.includeFiles
       ),
+    // DISPLAY-1: a call with no id once parked a window under the key "undefined" for good.
     ensureForeverBox: async (args: any) =>
+      (typeof args?.id !== "string" || args.id.length === 0 ? Promise.reject(new Error("ensureForeverBox requires an agent id")) :
       deps.decorateForeverBoxStatus(
         await method(deps.extensions.api("forever-box"), "ensure")(args)
-      ),
+      )),
     resetForeverBox: async (args: any) =>
       deps.decorateForeverBoxStatus(
         await method(deps.extensions.api("forever-box"), "reset")(args)

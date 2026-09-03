@@ -102,6 +102,9 @@ export class AgentLifecycle {
     origin: string,
     options: CreateOptions,
   ): Promise<any> {
+    // Every agent that comes to exist is announced here with its origin, so a roster that grows
+    // during a gate run can be traced to the tool, the operator, or a recovery.
+    console.log(`[sand][agents] minted origin=${origin} name=${JSON.stringify(String((profile as { name?: unknown } | null)?.name ?? ""))}`);
     const session = await this.tm.sessionStore.createSession(
       profile,
       origin,
@@ -364,6 +367,15 @@ export class AgentLifecycle {
       throw error;
     }
   }
+  /**
+   * DISPLAY-1. A deleted agent kept its shared-desktop window: the assignment stayed in
+   * /home/box/.sand-window-assignments.json, the Xvfb display stayed up, and after enough probe
+   * agents a fresh one could not get a window at all ("could not identify this agent's own
+   * display"). The forever-box service already knows how to release; nothing called it on delete.
+   */
+  private async releaseBoxWindow(agentId: string): Promise<void> {
+    try { await this.tm.foreverBox?.releaseAgent?.(agentId); } catch {}
+  }
   async runDeleteAgents(ids: ReadonlySet<string>): Promise<any> {
     const active = await this.tm.sessions.tryEnsureSession();
     const deletingActive = active != null && ids.has(active.id);
@@ -375,6 +387,7 @@ export class AgentLifecycle {
       this.tm.sessions.liveSessions.delete(id);
       this.tm.sessions.pendingSessionOpens.delete(id);
       await this.tm.sessionStore.deleteSession(id);
+      await this.releaseBoxWindow(id);
       this.tm.onAgentForgotten?.(id);
       this.tm.pendingWakeStore?.clearAgent(id);
       this.tm.boxHandoff.boxHandoffs.delete(id);
@@ -391,6 +404,7 @@ export class AgentLifecycle {
     this.tm.sessions.pendingSessionOpens.delete(active.id);
     this.tm.runLifecycle.closeSessionWhenIdle(active);
     await this.tm.sessionStore.deleteSession(active.id);
+    await this.releaseBoxWindow(active.id);
     this.tm.onAgentForgotten?.(active.id);
     this.tm.pendingWakeStore?.clearAgent(active.id);
     this.tm.boxHandoff.boxHandoffs.delete(active.id);

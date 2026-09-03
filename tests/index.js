@@ -28,3 +28,5 @@ import "./machine-room-plugins.test.mjs";
 import "./turn-toolset-projection.test.mjs";
 import "./sand-host-setting.test.mjs";
 import "./browser-tool-parameters.test.mjs";
+import "./machine-room-gateway.test.mjs";
+import "./machine-room-identity.test.mjs";

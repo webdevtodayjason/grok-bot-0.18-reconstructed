@@ -6,6 +6,8 @@
 // lines go to the same per-agent ledger as receipts, written by this module directly so that a
 // result head can never reach the Cursor forwarder.
 // ponytail: module singleton keyed by agent id; make it per host if two hosts ever share a process.
+import { isSandSubagentId } from "../../../shared/agents/subagents.js";
+import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
@@ -147,6 +149,10 @@ class EvidenceRegistry {
     const path = this.ledgerPath(agentId);
     const tail = (this.writeTails.get(agentId) ?? Promise.resolve())
       .then(async () => {
+        // PHANTOM-2. A stamp landing after deleteAgent recreated agents/<id>/ and the roster
+        // recovered it as a "New Agent". A top-level agent's ledger is appended only while its
+        // directory exists; a subagent's ledger directory is its own and the roster skips it.
+        if (!isSandSubagentId(agentId) && !existsSync(dirname(path))) return;
         await fs.mkdir(dirname(path), { recursive: true });
         await fs.appendFile(path, line, { encoding: "utf8", mode: 0o600 });
         await fs.chmod(path, 0o600).catch(() => {});

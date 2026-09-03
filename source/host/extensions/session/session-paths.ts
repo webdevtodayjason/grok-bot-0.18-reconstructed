@@ -1,3 +1,4 @@
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { envWithSandBoxSettings, SAND_MAINTENANCE_SETTINGS } from "../../sand-box-setting.js";
 import type { Stats } from "node:fs";
@@ -37,3 +38,35 @@ export async function statIfExists(path: string): Promise<Stats | undefined> {
     return undefined;
   }
 }
+
+/**
+ * PHANTOM-2 tombstones. deleteSession removes the directory, but a handle opened before the delete
+ * (a clone being committed, a late ledger or checkpoint write, a per-agent command the dashboard
+ * still holds an id for) writes the directory back, and the next roster build turns whatever it
+ * finds into a "New Agent". A deleted id is recorded here; readers skip it, a resurrected directory
+ * is swept on sight, and no database is opened for it again. Bounded to the newest entries.
+ */
+const DELETED_AGENTS_FILENAME = "deleted-agents.json";
+const DELETED_AGENTS_MAX = 1000;
+const deletedCache = new Map<string, { mtimeMs: number; ids: Set<string> }>();
+export function getDeletedAgentsPath(rootDir: string): string { return join(rootDir, DELETED_AGENTS_FILENAME); }
+export function readDeletedAgentIds(rootDir: string): Set<string> {
+  const path = getDeletedAgentsPath(rootDir);
+  let mtimeMs = -1;
+  try { mtimeMs = statSync(path).mtimeMs; } catch { return new Set(); }
+  const cached = deletedCache.get(path);
+  if (cached != null && cached.mtimeMs === mtimeMs) return cached.ids;
+  let ids = new Set<string>();
+  try { const parsed = JSON.parse(readFileSync(path, "utf8")); if (Array.isArray(parsed)) ids = new Set(parsed.filter((id): id is string => typeof id === "string")); } catch {}
+  deletedCache.set(path, { mtimeMs, ids });
+  return ids;
+}
+export function markAgentDeleted(rootDir: string, agentId: string): void {
+  const path = getDeletedAgentsPath(rootDir);
+  const ids = [...readDeletedAgentIds(rootDir)].filter((id) => id !== agentId);
+  ids.push(agentId);
+  const trimmed = ids.slice(-DELETED_AGENTS_MAX);
+  try { writeFileSync(path, JSON.stringify(trimmed), { mode: 0o600 }); } catch {}
+  deletedCache.delete(path);
+}
+export function isAgentDeleted(rootDir: string, agentId: string): boolean { return readDeletedAgentIds(rootDir).has(agentId); }

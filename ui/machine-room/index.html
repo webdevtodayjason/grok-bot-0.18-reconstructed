@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="Machine Room — the operator console for this box." />
     <title>Machine Room — Titanbot console</title>
+    <!-- The relay serves no favicon; without this every load logs a 404 in the console. -->
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="motion.css" />
     <link rel="stylesheet" href="styles.css" />
@@ -34,6 +36,9 @@
           <button class="capability-button is-contextual" type="button" data-capability="routines" data-capability-scope="context" aria-label="Manage routines for the current context">
             <span class="capability-icon">◷</span><span>Routines</span>
           </button>
+          <button class="capability-button is-contextual" type="button" data-capability="skills" data-capability-scope="context" aria-label="Manage skills for the current agent">
+            <span class="capability-icon">✎</span><span>Skills</span>
+          </button>
           <span class="capability-divider" aria-hidden="true"></span>
           <button class="capability-button is-global" type="button" data-capability="plugins" data-capability-scope="global" aria-label="Manage global plugins">
             <span class="capability-icon">✦</span><span>Plugins</span>
@@ -44,6 +49,8 @@
         </nav>
 
         <div class="window-actions">
+          <!-- GW-14: shown only when isGlobalSearchEnabled answered true at boot. -->
+          <button class="quiet-button palette-hint" id="palette-hint" type="button" aria-label="Search messages, bots and files" hidden>Search <kbd>⌘K</kbd></button>
           <button class="icon-button" id="theme-toggle" type="button" aria-label="Toggle atmosphere">◐</button>
           <button class="icon-button" id="settings-button" type="button" aria-label="Open settings">⚙</button>
         </div>
@@ -56,6 +63,8 @@
               <button class="roster-tab is-active" id="workers-tab" type="button" role="tab" aria-selected="true" data-roster-tab="workers">Workers</button>
               <button class="roster-tab" id="rooms-tab" type="button" role="tab" aria-selected="false" data-roster-tab="rooms">Rooms</button>
             </div>
+            <!-- countAgents, as the host reports it, against its 50-agent cap (GW-01). -->
+            <span class="roster-count" data-agent-count hidden></span>
             <button class="quiet-button" id="hide-roster" type="button">Hide</button>
           </div>
           <div class="worker-stack" id="worker-stack" role="tabpanel" aria-labelledby="workers-tab"></div>
@@ -104,6 +113,9 @@
       <footer class="control-shelf">
         <div class="workspace-list" id="workspace-list" aria-label="Open rooms"></div>
         <div class="attachment-tray" id="attachment-tray" hidden></div>
+        <!-- The host's acceptance ledger for the last send, never the click: promptAcceptanceStatus
+             fills this after every sendPrompt, which itself answers "accepted" unconditionally. -->
+        <div class="composer-status" id="composer-status" data-composer-status data-composer-state="idle" hidden></div>
         <form class="composer" id="composer">
           <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachment">＋</button>
           <input id="composer-file" type="file" multiple hidden />
@@ -162,6 +174,9 @@
         </div>
         <footer class="desktop-footer">
           <span class="desktop-live"><span class="status-dot working"></span> Atera Triage is working</span>
+          <!-- Drawn only while the host reports a pending request_box_help hand-off for this agent. -->
+          <span class="hand-back-note" id="hand-back-note" hidden></span>
+          <button class="primary-button" id="hand-back" type="button" hidden>Hand the computer back</button>
           <button class="secondary-button" id="pause-run" type="button">Pause</button>
         </footer>
       </div>
@@ -189,6 +204,21 @@
           <span>Recorded on this worker's own screen, on the box. It never leaves the machine.</span>
           <button class="danger-button" id="finish-teach" type="button">■ Finish recording</button>
         </footer>
+      </div>
+    </dialog>
+
+    <!-- GW-14: the search palette. Cmd-K / Ctrl-K; the host's own index through searchAgents
+         and searchMedia, bots matched on the roster already held. -->
+    <dialog class="palette-dialog" id="palette" aria-label="Search">
+      <div class="palette-frame">
+        <label class="sr-only" for="palette-input">Search messages, bots and files</label>
+        <input id="palette-input" type="search" autocomplete="off" placeholder="Search messages, bots and files…" />
+        <div class="palette-chips" role="group" aria-label="Result kinds">
+          <button class="roster-tab is-active" type="button" data-palette-kind="messages" aria-pressed="true">Messages <b>0</b></button>
+          <button class="roster-tab" type="button" data-palette-kind="bots" aria-pressed="false">Bots <b>0</b></button>
+          <button class="roster-tab" type="button" data-palette-kind="files" aria-pressed="false">Files <b>0</b></button>
+        </div>
+        <div class="palette-results" id="palette-results"></div>
       </div>
     </dialog>
 

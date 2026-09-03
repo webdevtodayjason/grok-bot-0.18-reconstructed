@@ -1144,6 +1144,18 @@ select:focus-visible {
 
 .desktop-capsule > span:nth-child(2) {
   display: grid;
+  min-width: 0;
+}
+
+/* A long agent name once pushed the capsule under the shelf utilities and no click reached it. */
+.desktop-capsule {
+  max-width: 380px;
+}
+.desktop-capsule strong,
+.desktop-capsule small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-capsule strong {
@@ -2599,3 +2611,217 @@ dialog[open] {
 .evidence-view { display: flex; flex-direction: column; gap: 10px; }
 .evidence-view .panel-card { display: grid; gap: 8px; }
 .evidence-head { margin: 0; padding: 8px 10px; border-radius: 10px; background: rgba(0, 0, 0, 0.28); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; }
+
+/* Wave C1: send acceptance, transcript paging, skills, hand-back. */
+.composer-status {
+  padding: 0 18px 4px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.composer-status[data-composer-state="accepted"] {
+  color: var(--teal-300);
+}
+
+.composer-status[data-composer-state="not-accepted"] {
+  color: var(--amber-500);
+}
+
+.transcript-older {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 12px;
+}
+
+.skill-body {
+  max-height: 140px;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  color: var(--text-secondary);
+  background: rgba(15, 23, 27, 0.5);
+}
+
+.hand-back-note {
+  flex: 1 1 auto;
+  margin: 0 14px;
+  font-size: 12px;
+  color: var(--amber-500);
+}
+
+/* -- Wave C2: identity, attachments, search (docs/GAP-ANALYSIS.md GW-01, GW-09, GW-11, GW-14). */
+
+.roster-count {
+  margin-left: auto;
+  margin-right: 8px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.roster-hidden {
+  margin-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 6px;
+}
+
+.roster-hidden > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+.roster-hidden > summary::-webkit-details-marker {
+  display: none;
+}
+
+.roster-hidden > summary::before {
+  content: "▸ ";
+}
+
+.roster-hidden[open] > summary::before {
+  content: "▾ ";
+}
+
+.roster-hidden .worker-card {
+  opacity: 0.72;
+}
+
+.avatar-upload {
+  cursor: pointer;
+}
+
+.card-dismiss {
+  margin-left: auto;
+  align-self: flex-start;
+}
+
+.message-attachment {
+  margin: 8px 0 0;
+  display: grid;
+  gap: 6px;
+}
+
+.message-attachment figcaption {
+  display: flex;
+}
+
+.attachment-slot {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.attachment-image {
+  display: block;
+  max-width: min(100%, 520px);
+  height: auto;
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 10px;
+  background: rgba(15, 23, 27, 0.5);
+  image-rendering: auto;
+}
+
+.attachment-preview {
+  max-height: 260px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+  background: rgba(15, 23, 27, 0.5);
+}
+
+.attachment-more {
+  justify-self: start;
+}
+
+.message-row.is-flash > .message-block > .message-bubble,
+.message-row.is-flash > .message-bubble {
+  animation: entry-flash 2.4s ease-out;
+}
+
+@keyframes entry-flash {
+  0% { box-shadow: 0 0 0 3px var(--amber-500); }
+  70% { box-shadow: 0 0 0 3px var(--amber-500); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+.palette-hint kbd {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-family: inherit;
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.palette-dialog {
+  width: min(640px, calc(100vw - 36px));
+  margin-top: 12vh;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  background: var(--ink-900, #182127);
+  color: inherit;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+}
+
+.palette-dialog::backdrop {
+  background: rgba(5, 8, 10, 0.55);
+  backdrop-filter: blur(6px);
+}
+
+.palette-frame {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.palette-frame input[type="search"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  font: inherit;
+  font-size: 15px;
+  color: inherit;
+  background: rgba(15, 23, 27, 0.6);
+}
+
+.palette-chips {
+  display: flex;
+  gap: 6px;
+}
+
+.palette-chips b {
+  margin-left: 4px;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.palette-results {
+  display: grid;
+  gap: 4px;
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.palette-row small {
+  display: block;
+  color: var(--text-secondary);
+}

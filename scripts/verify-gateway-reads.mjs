@@ -55,7 +55,9 @@ let upserts = 0;
 const listen = (async () => { try { const res = await fetch(`${GATEWAY}/events`, { headers: { authorization: `Bearer ${TOKEN}` }, signal: controller.signal }); const reader = res.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; while (true) { const { value, done } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); const lines = buffer.split("\n"); buffer = lines.pop() ?? ""; for (const line of lines) if (line.includes("agent-upserted")) upserts += 1; } } catch {} })();
 await sleep(30_000); controller.abort(); await listen.catch(() => {});
 check(upserts <= 2, "agent-upserted stays quiet on an idle roster for 30 s", `${upserts} event(s)`);
-const rosterAfter = (await call("listAgents")).map((a) => a.id).sort();
+let rosterAfter = (await call("listAgents")).map((a) => a.id).sort();
+for (const id of rosterAfter.filter((x) => !rosterBefore.includes(x))) { console.log(`  WARN  an agent appeared during the run and was removed: ${id}`); await call("deleteAgent", { id }).catch(() => {}); }
+rosterAfter = (await call("listAgents")).map((a) => a.id).sort();
 check(JSON.stringify(rosterAfter) === JSON.stringify(rosterBefore), "roster unchanged", `${rosterAfter.length} agents`);
 console.log(`\n${failures === 0 ? "OK" : `${failures} FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

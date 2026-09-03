@@ -1,0 +1,499 @@
+// Wave C1 (docs/GAP-ANALYSIS.md GW-03, GW-05, GW-08 item 2, GW-10): the gateway adapter behind
+// the Machine Room, driven against a stub gateway that records every command it is sent. What is
+// pinned here is the part a browser gate cannot see from the DOM: which command was called, with
+// which arguments, and what the adapter did with the answer. Shapes are the ones the live box
+// answered on 2026-09-03:
+//   getAgentTranscriptTail {id,limit}            -> { entries, nextBeforeSeq? }
+//   getAgentTranscriptPage {id,beforeSeq,untilMs,limit} -> { entries, nextBeforeSeq? }
+//   promptAcceptanceStatus {accountSlot,clientNonce} -> { outcome:"found", record:{status,rejectionCode} } | { outcome:"not-found" }
+//   getForeverBoxStatus {id}                     -> { agentId, state, handoff: null | { requestId, instruction } }
+//   getAgentWorkflows {id}                       -> WorkflowRecord[] (shared/workflow-model.ts)
+//   getAgentChannels {id}                        -> { manifests:[{platform}], connections:[{platform,...}] }
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+const entry = (id, kind, text, ms, extra = {}) => (kind === "user"
+  ? { kind: "message", id, role: "user", content: text, timestampMs: ms, ...extra }
+  : { kind: "send-message", id, message: { type: "text", content: text }, timestampMs: ms, ...extra });
+
+async function loadAdapter(answers = {}) {
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/gateway-adapter.js"), "utf8");
+  const body = source.slice(source.indexOf("(function attachGatewayAdapter"));
+  const exposed = body.replace(
+    "  global.__bootMachineRoom =",
+    "  global.__test = { createGatewayAdapter, messagesOf, weaveToolRows, skillsOf, channelsOf, describeAcceptance };\n  global.__bootMachineRoom =",
+  );
+  const calls = [];
+  const window = {
+    createDemoAdapter: () => ({}),
+    // Real, short: acceptanceOf sleeps between ledger reads. The heartbeat must never run here.
+    setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms, 2)),
+    clearTimeout: (h) => clearTimeout(h),
+    setInterval: () => 0,
+    clearInterval: () => {},
+    EventSource: function () { return { onmessage: null }; },
+    crypto: { randomUUID: () => "nonce-0001" },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    document: { documentElement: { dataset: {}, style: { setProperty() {}, removeProperty() {} }, removeAttribute() {} } },
+    open: () => {},
+  };
+  const defaults = { listAgents: [], getTrays: [], getAgentAutomations: [], getAgentWorkflows: [], getConversationOutline: [] };
+  const fetchStub = async (url, init) => {
+    const method = String(url).startsWith("/api/") ? String(url).slice(5) : null;
+    if (method == null) return { ok: true, text: async () => "{}", json: async () => ({}) };
+    const args = init?.body ? JSON.parse(init.body) : {};
+    calls.push({ method, args });
+    const answer = answers[method] ?? defaults[method] ?? {};
+    // An async answer holds the call open, so a test can drive a second read through the adapter
+    // while the first is in flight.
+    const value = await (typeof answer === "function" ? answer(args, calls) : answer);
+    if (value instanceof Error) return { ok: false, status: 500, text: async () => JSON.stringify({ error: value.message }) };
+    return { ok: true, text: async () => JSON.stringify(value) };
+  };
+  const fn = new Function("window", "fetch", `${exposed}\nreturn window.__test;`);
+  return { ...fn(window, fetchStub), calls };
+}
+
+const seed = () => ({
+  activeContext: { kind: "worker", id: "w1" },
+  openContexts: [{ kind: "worker", id: "w1" }],
+  workers: [{ id: "w1", name: "Probe", status: "ready", statusText: "Ready", messages: [], files: [], skills: [], channels: null, handoff: null, boxState: null, hasOlder: false, composer: null }],
+  rooms: [], routines: [], plugins: [], models: { default: "d", available: [] },
+  settings: { autoReview: { enabled: false, allow: [], block: [] }, localToolPermission: null, reachable: true },
+  desktop: { paused: false, timeline: [] }, teaching: { active: false, workerId: null, startedAt: null },
+});
+
+const settle = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+const only = (calls, method) => calls.filter((c) => c.method === method);
+
+test("GW-03: a send carries a nonce and the composer state is the ledger's answer, not the click", async () => {
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    sendPrompt: { accepted: true },
+    promptAcceptanceStatus: { outcome: "found", record: { status: "accepted", rejectionCode: null } },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  adapter.sendMessage({ kind: "worker", id: "w1" }, "Reply with the single word: ready.");
+  const w = state.workers[0];
+  assert.equal(w.composer.state, "sending");
+  await settle(60);
+  const sent = only(calls, "sendPrompt");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].args.agentId, "w1");
+  assert.equal(sent[0].args.clientNonce, "nonce-0001");
+  const asked = only(calls, "promptAcceptanceStatus");
+  assert.ok(asked.length >= 1, "promptAcceptanceStatus was polled after the send");
+  assert.deepEqual(asked[0].args, { accountSlot: "host", clientNonce: "nonce-0001" });
+  assert.equal(w.composer.state, "accepted");
+  assert.equal(w.composer.text, "Accepted by the host");
+  assert.equal(w.composer.nonce, "nonce-0001");
+  // The dots stay up: the send was taken, the reply is what clears them.
+  assert.ok(w.messages.some((m) => m.type === "working"));
+  assert.equal(only(calls, "getAgentTranscript").length, 0, "the refresh after a send reads the tail, never the whole transcript");
+  assert.ok(only(calls, "getAgentTranscriptTail").length >= 1);
+  adapter.destroy();
+});
+
+test("GW-03: a send the host did not accept says so, with the host's reason, and drops the dots", async () => {
+  const { createGatewayAdapter } = await loadAdapter({
+    sendPrompt: { accepted: true },
+    promptAcceptanceStatus: { outcome: "found", record: { status: "rejected", rejectionCode: "runner-unattached" } },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  adapter.sendMessage({ kind: "worker", id: "w1" }, "hello");
+  await settle(60);
+  const w = state.workers[0];
+  assert.equal(w.composer.state, "not-accepted");
+  assert.match(w.composer.text, /^Not accepted — runner-unattached/);
+  assert.equal(w.messages.some((m) => m.type === "working"), false, "no dots for a send the host refused");
+  assert.equal(w.status, "attention");
+  adapter.destroy();
+});
+
+test("GW-03: no ledger record after a send the gateway answered is reported, not shrugged off", async () => {
+  const { createGatewayAdapter, describeAcceptance } = await loadAdapter({
+    sendPrompt: { accepted: true },
+    promptAcceptanceStatus: { outcome: "not-found" },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  adapter.sendMessage({ kind: "worker", id: "w1" }, "hello");
+  await settle(80);
+  assert.equal(state.workers[0].composer.state, "not-accepted");
+  assert.match(state.workers[0].composer.text, /holds no record/);
+  assert.equal(describeAcceptance({ outcome: "unknown-durability" }).state, "not-accepted");
+  assert.equal(describeAcceptance({ outcome: "found", record: { status: "accepted" } }).state, "accepted");
+  adapter.destroy();
+});
+
+test("GW-03: a send the gateway threw on is 'Sending failed', not 'not wired', and a failed refresh cannot undo an acceptance", async () => {
+  const { createGatewayAdapter } = await loadAdapter({
+    sendPrompt: new Error("endpoint unreachable"),
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  adapter.sendMessage({ kind: "worker", id: "w1" }, "hello");
+  await settle(80);
+  const w = state.workers[0];
+  assert.equal(w.composer.state, "not-accepted");
+  assert.match(w.composer.text, /^Not accepted — .*endpoint unreachable/);
+  const rows = w.messages.filter((m) => m.type === "system").map((m) => m.text);
+  assert.equal(rows.length, 1);
+  assert.match(rows[0], /^Sending failed: .*endpoint unreachable/);
+  assert.ok(!rows.some((t) => /not wired/.test(t)), "a refused send is not a missing wire");
+  adapter.destroy();
+
+  // Accepted, then the refresh rejects: the verdict on screen stays the host's.
+  const second = await loadAdapter({
+    sendPrompt: { accepted: true },
+    promptAcceptanceStatus: { outcome: "found", record: { status: "accepted", rejectionCode: null } },
+    getAgentTranscriptTail: new Error("tail unavailable"),
+  });
+  const state2 = seed();
+  const adapter2 = second.createGatewayAdapter(state2);
+  adapter2.sendMessage({ kind: "worker", id: "w1" }, "hello");
+  await settle(120);
+  assert.equal(state2.workers[0].composer.state, "accepted");
+  assert.equal(state2.workers[0].messages.filter((m) => m.type === "system").length, 0);
+  adapter2.destroy();
+});
+
+test("GW-03: refresh reads a bounded tail and scrolling back pages older entries in through getAgentTranscriptPage", async () => {
+  const tail = { entries: [entry("t5", "user", "five", 5), entry("t6", "agent", "six", 6, { evidence: { attemptId: "att-6", verdict: "evidenced", receipts: 1, missing: [] } })], nextBeforeSeq: 5 };
+  const page = { entries: [entry("t3", "user", "three", 3), entry("t4", "agent", "four", 4)], nextBeforeSeq: 3 };
+  const lastPage = { entries: [entry("t1", "user", "one", 1), entry("t2", "agent", "two", 2)] };
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getAgentTranscriptTail: tail,
+    getAgentTranscriptPage: (args) => (args.beforeSeq === 5 ? page : lastPage),
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  const events = [];
+  adapter.subscribe((e) => events.push(e.type));
+  await adapter.refresh();
+  const w = state.workers[0];
+  assert.deepEqual(only(calls, "getAgentTranscript"), []);
+  assert.deepEqual(only(calls, "getAgentTranscriptTail")[0].args, { id: "w1", limit: 150 });
+  assert.deepEqual(w.messages.filter((m) => m.type !== "system").map((m) => m.text), ["five", "six"]);
+  assert.ok(w.messages.some((m) => m.type === "system" && /^Evidence: evidenced/.test(m.text)), "an evidence pill is built on a tail-loaded entry");
+  assert.equal(w.hasOlder, true);
+
+  const first = await adapter.loadOlderMessages({ kind: "worker", id: "w1" });
+  assert.deepEqual(first, { loaded: 2, more: true });
+  const paged = only(calls, "getAgentTranscriptPage");
+  assert.equal(paged.length, 1);
+  assert.equal(paged[0].args.id, "w1");
+  assert.equal(paged[0].args.beforeSeq, 5);
+  assert.equal(paged[0].args.limit, 150);
+  assert.ok(Number.isFinite(paged[0].args.untilMs));
+  assert.deepEqual(w.messages.filter((m) => m.type !== "system").map((m) => m.text), ["three", "four", "five", "six"]);
+  assert.equal(events.at(-1), "transcript:older");
+
+  const second = await adapter.loadOlderMessages({ kind: "worker", id: "w1" });
+  assert.deepEqual(second, { loaded: 2, more: false });
+  assert.equal(w.hasOlder, false);
+  assert.deepEqual(w.messages.filter((m) => m.type !== "system").map((m) => m.text), ["one", "two", "three", "four", "five", "six"]);
+  // A refresh re-reads the tail and splices it over the window; the pages scrolled up for stay.
+  await adapter.refresh();
+  assert.deepEqual(w.messages.filter((m) => m.type !== "system").map((m) => m.text), ["one", "two", "three", "four", "five", "six"]);
+  const third = await adapter.loadOlderMessages({ kind: "worker", id: "w1" });
+  assert.deepEqual(third, { loaded: 0, more: false });
+  assert.equal(only(calls, "getAgentTranscriptPage").length, 2, "no page is asked for once the host has no cursor");
+  adapter.destroy();
+});
+
+test("GW-03: outline tool rows weave into a tail window without dragging the whole history in", async () => {
+  const { weaveToolRows } = await loadAdapter();
+  const outline = [
+    { kind: "user", text: "one" }, { kind: "tool-call", id: "a", name: "shellToolCall", summary: "ls" },
+    { kind: "send-message", message: { type: "text", content: "two" } },
+    { kind: "user", text: "five" }, { kind: "tool-call", id: "b", name: "readToolCall", summary: "cat x" },
+    { kind: "send-message", message: { type: "text", content: "six" } },
+  ];
+  const window = [entry("t5", "user", "five", 5), entry("t6", "agent", "six", 6)];
+  const partial = weaveToolRows(window, outline, true).map((e) => e.id ?? e.kind);
+  assert.deepEqual(partial, ["t5", "tool-b", "t6"], "only the row between entries the window holds is placed");
+  const whole = weaveToolRows([entry("t1", "user", "one", 1), entry("t2", "agent", "two", 2), ...window], outline, false).map((e) => e.id);
+  assert.deepEqual(whole, ["t1", "tool-a", "t2", "t5", "tool-b", "t6"]);
+});
+
+test("GW-10: the hand-back control calls handBackForeverBox {id, trigger:'button'} and reads the box back", async () => {
+  let handoff = { requestId: "r1", instruction: "log in to the portal" };
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "running", handoff }),
+    handBackForeverBox: () => { handoff = null; return {}; },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  assert.deepEqual(state.workers[0].handoff, { requestId: "r1", instruction: "log in to the portal" });
+  const result = await adapter.handBack("w1");
+  assert.deepEqual(only(calls, "handBackForeverBox")[0].args, { id: "w1", trigger: "button" });
+  assert.deepEqual(result, { pending: false });
+  assert.equal(state.workers[0].handoff, null);
+  adapter.destroy();
+});
+
+test("GW-10: the Updates panel reads getHostStatus and its two writes are updateForeverBox / resetForeverBox", async () => {
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getHostStatus: { hostVersion: "2fcb12d", latestHostVersion: "dd30753", hostUpdateAvailable: true, isBusy: false, capabilities: ["sendAcceptanceV1"] },
+    updateForeverBox: { state: "recreating" },
+    resetForeverBox: { state: "recreating" },
+  });
+  const adapter = createGatewayAdapter(seed());
+  const status = await adapter.getHostStatus();
+  assert.equal(status.hostVersion, "2fcb12d");
+  assert.equal(status.hostUpdateAvailable, true);
+  assert.deepEqual((await adapter.updateBox("w1")).state, "recreating");
+  assert.deepEqual(only(calls, "updateForeverBox")[0].args, { id: "w1" });
+  assert.deepEqual((await adapter.resetBox("w1")).state, "recreating");
+  assert.deepEqual(only(calls, "resetForeverBox")[0].args, { id: "w1" });
+  assert.equal(only(calls, "updateHostNow").length, 0, "updateHostNow is not wired: this box runs a locally patched bundle");
+  adapter.destroy();
+});
+
+test("GW-05: skills are the host's workflows, every write read back, and a run is addressed to this agent", async () => {
+  const record = (over = {}) => ({ id: "gate-probe", name: "Gate probe", description: "d", body: "Reply with the single word: done.", trigger: null, source: "workflow", sourceRef: null, isEnabledForAgent: true, createdAt: 1, helperScripts: [], filePath: "/x/SKILL.md", ...over });
+  let rows = [record(), record({ id: "nightly", name: "Nightly", source: "automation", trigger: { schedule: "0 8 * * *", isEnabled: true } })];
+  const { createGatewayAdapter, calls, skillsOf } = await loadAdapter({
+    getAgentWorkflows: () => rows,
+    setAgentWorkflowEnabled: (args) => { rows = rows.map((r) => (r.id === args.workflowId ? { ...r, isEnabledForAgent: args.isEnabled } : r)); return rows; },
+    deleteAgentWorkflow: (args) => { rows = rows.filter((r) => r.id !== args.workflowId); return rows; },
+    importAgentWorkflowText: (args) => { rows = [...rows, record({ id: "pasted", name: "Pasted skill", body: args.markdown })]; return { workflows: rows, result: { imported: [{ id: "pasted", name: "Pasted skill" }], skipped: [] } }; },
+    portAgentLocalSkills: () => ({ workflows: rows, result: { imported: [{ id: "claude-memory", name: "Claude memory" }], skipped: [{ source: "/home/box/AGENTS.md", reason: "could not link" }] } }),
+    sendPrompt: { accepted: true },
+    runAgentWorkflowNow: {},
+    getAgentTranscriptTail: { entries: [] },
+  });
+  // A routine created on the Routines panel is listed by the host as source "automation"; it
+  // stays on that panel rather than being drawn twice.
+  assert.deepEqual(skillsOf(rows).map((s) => s.id), ["gate-probe"]);
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  assert.deepEqual(state.workers[0].skills.map((s) => `${s.id}:${s.enabled}`), ["gate-probe:true"]);
+
+  const off = await adapter.setSkillEnabled("w1", "gate-probe", false);
+  assert.deepEqual(only(calls, "setAgentWorkflowEnabled")[0].args, { id: "w1", workflowId: "gate-probe", isEnabled: false });
+  assert.equal(off.enabled, false);
+  assert.equal(state.workers[0].skills[0].enabled, false);
+  const on = await adapter.setSkillEnabled("w1", "gate-probe", true);
+  assert.equal(on.enabled, true);
+
+  const imported = await adapter.importSkillText("w1", "---\nname: Pasted skill\n---\nReply with the single word: done.");
+  assert.equal(only(calls, "importAgentWorkflowText")[0].args.id, "w1");
+  assert.match(only(calls, "importAgentWorkflowText")[0].args.markdown, /Pasted skill/);
+  assert.deepEqual(imported.imported, ["Pasted skill"]);
+  assert.deepEqual(imported.skipped, []);
+
+  // Unscheduled: the host's own runAgentWorkflowNow sends "@name" with no agentId, to whichever
+  // agent it has active. The adapter sends the same reference prompt, addressed to this agent.
+  const run = await adapter.runSkill("w1", "gate-probe");
+  assert.equal(run.via, "sendPrompt");
+  const sent = only(calls, "sendPrompt").at(-1).args;
+  assert.equal(sent.agentId, "w1");
+  assert.equal(sent.prompt, "@Gate probe");
+  assert.match(sent.richText, /"workflowReference"/);
+  assert.match(sent.richText, /"gate-probe"/);
+  assert.equal(only(calls, "runAgentWorkflowNow").length, 0);
+
+  // portAgentLocalSkills answers the same { workflows, result } shape as the imports.
+  rows = [...rows, record({ id: "claude-memory", name: "Claude memory", sourceRef: "/home/box/CLAUDE.md" })];
+  const ported = await adapter.portLocalSkills("w1");
+  assert.deepEqual(only(calls, "portAgentLocalSkills")[0].args, { id: "w1" });
+  assert.deepEqual(ported.imported, ["Claude memory"]);
+  assert.deepEqual(ported.skipped, [{ source: "/home/box/AGENTS.md", reason: "could not link" }]);
+
+  const name = await adapter.deleteSkill("w1", "gate-probe");
+  assert.equal(name, "Gate probe");
+  assert.deepEqual(only(calls, "deleteAgentWorkflow")[0].args, { id: "w1", workflowId: "gate-probe" });
+  assert.deepEqual(state.workers[0].skills.map((s) => s.id), ["pasted", "claude-memory"]);
+  adapter.destroy();
+});
+
+test("GW-05: a scheduled skill runs through runAgentWorkflowNow, and a write the host declined is an error", async () => {
+  const rows = [{ id: "sweep", name: "Sweep", description: "", body: "sweep", trigger: { schedule: "0 8 * * 1-5", isEnabled: true }, source: "workflow", sourceRef: null, isEnabledForAgent: true, createdAt: 1, helperScripts: [], filePath: "/x/SKILL.md" }];
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getAgentWorkflows: rows,
+    runAgentWorkflowNow: {},
+    setAgentWorkflowEnabled: rows, // answers 200, keeps the flag
+    deleteAgentWorkflow: rows, // answers 200, keeps the row
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  const run = await adapter.runSkill("w1", "sweep");
+  assert.equal(run.via, "runAgentWorkflowNow");
+  assert.deepEqual(only(calls, "runAgentWorkflowNow")[0].args, { id: "w1", workflowId: "sweep" });
+  await assert.rejects(() => adapter.setSkillEnabled("w1", "sweep", false), /did not disable/);
+  await assert.rejects(() => adapter.deleteSkill("w1", "sweep"), /still there/);
+  adapter.destroy();
+});
+
+test("GW-08 item 2: a listener card's per-agent state comes from getAgentChannels for the agent on screen", async () => {
+  const { createGatewayAdapter, calls, channelsOf } = await loadAdapter({
+    getAgentChannels: { manifests: [{ platform: "slack" }, { platform: "github" }], connections: [{ platform: "slack", name: "titanium" }] },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  assert.deepEqual(channelsOf({ manifests: [{ platform: "slack" }], connections: [] }), [{ platform: "slack", connected: false, detail: "" }]);
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  assert.equal(state.workers[0].channels, null, "null until read: 'not read yet' is not 'none'");
+  await adapter.refresh();
+  assert.deepEqual(only(calls, "getAgentChannels")[0].args, { id: "w1" });
+  assert.deepEqual(state.workers[0].channels, [
+    { platform: "slack", connected: true, detail: "titanium" },
+    { platform: "github", connected: false, detail: "" },
+  ]);
+  adapter.destroy();
+});
+
+// -- Review fixes (Wave C), each pinned against the stub gateway.
+
+test("review: updateSkill sends a paused schedule back paused; a typo fix does not re-arm it", async () => {
+  let rows = [{ id: "sweep", name: "Sweep", description: "", body: "sweep", trigger: { schedule: "0 8 * * 1-5", isEnabled: false }, source: "workflow", sourceRef: null, isEnabledForAgent: true, createdAt: 1, helperScripts: [], filePath: "/x/SKILL.md" }];
+  const { createGatewayAdapter, calls, skillsOf } = await loadAdapter({
+    getAgentWorkflows: () => rows,
+    updateAgentWorkflow: (args) => { rows = rows.map((r) => (r.id === args.workflowId ? { ...r, ...args.spec } : r)); return rows; },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  assert.equal(skillsOf(rows)[0].triggerEnabled, false);
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  const saved = await adapter.updateSkill("w1", "sweep", { name: "Sweep", description: "", body: "sweep the tickets" });
+  assert.deepEqual(only(calls, "updateAgentWorkflow")[0].args.spec.trigger, { schedule: "0 8 * * 1-5", isEnabled: false });
+  assert.equal(saved.body, "sweep the tickets");
+  assert.equal(saved.triggerEnabled, false);
+  adapter.destroy();
+});
+
+test("review: an older page read while a refresh replaced the tail still lands on the window on screen", async () => {
+  const tail = { entries: [entry("t5", "user", "five", 5), entry("t6", "agent", "six", 6)], nextBeforeSeq: 5 };
+  const page = { entries: [entry("t3", "user", "three", 3), entry("t4", "agent", "four", 4)], nextBeforeSeq: 3 };
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getAgentTranscriptTail: () => tail,
+    // The page answer waits until the test has driven a refresh through the adapter.
+    getAgentTranscriptPage: async () => { await gate; return page; },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  const w = state.workers[0];
+  const older = adapter.loadOlderMessages({ kind: "worker", id: "w1" });
+  await settle(5);
+  await adapter.refresh();
+  release();
+  assert.deepEqual(await older, { loaded: 2, more: true });
+  assert.deepEqual(w.messages.filter((m) => m.type !== "system").map((m) => m.text), ["three", "four", "five", "six"]);
+  assert.equal(w.hasOlder, true);
+  assert.equal(only(calls, "getAgentTranscriptPage").length, 1);
+  adapter.destroy();
+});
+
+test("review: a reveal asked for right after selectContext waits for that load instead of a timer", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const tail = { entries: [entry("t5", "user", "five", 5), entry("t6", "agent", "six", 6)], nextBeforeSeq: 5 };
+  const page = { entries: [entry("t3", "user", "three", 3), entry("t4", "agent", "four", 4)] };
+  let tailReads = 0;
+  const { createGatewayAdapter } = await loadAdapter({
+    listAgents: [{ id: "w1", name: "Probe" }, { id: "w2", name: "Other" }],
+    getAgentTranscriptTail: async (args) => { if (args.id === "w2") { tailReads += 1; await gate; return tail; } return { entries: [] }; },
+    getAgentTranscriptPage: page,
+  });
+  const state = seed();
+  state.workers.push({ ...seed().workers[0], id: "w2", name: "Other" });
+  const adapter = createGatewayAdapter(state);
+  const events = [];
+  adapter.subscribe((e) => events.push(e.type));
+  adapter.selectContext({ kind: "worker", id: "w2" });
+  const reveal = adapter.revealEntry({ kind: "worker", id: "w2" }, "t3");
+  await settle(5);
+  assert.equal(tailReads, 1, "the select's read is in flight");
+  assert.ok(!events.includes("transcript:reveal"), "nothing is revealed against an empty window");
+  release();
+  assert.equal(await reveal, true);
+  assert.equal(events.at(-1), "transcript:reveal");
+  assert.deepEqual(state.workers[1].messages.filter((m) => m.type !== "system").map((m) => m.text), ["three", "four", "five", "six"]);
+  adapter.destroy();
+});
+
+test("review: a host whose capabilities list no acceptance ledger gets 'taken by the gateway', not 'not accepted'", async () => {
+  let agents = [{ id: "w1", name: "Probe" }];
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getHostStatus: { hostVersion: "x", capabilities: [] },
+    listAgents: () => agents,
+    duplicateAgent: () => { agents = [...agents, { id: "w1-copy", name: "Probe copy" }]; return {}; },
+    sendPrompt: { accepted: true },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const adapter = createGatewayAdapter(seed());
+  // hydrate runs at boot and on every rebuild; a duplicate is the rebuild the adapter exposes.
+  await adapter.duplicateAgent("w1");
+  assert.equal(adapter.getSnapshot().host.sendAcceptance, false);
+  adapter.sendMessage({ kind: "worker", id: "w1" }, "hello", []);
+  await settle(40);
+  assert.equal(only(calls, "promptAcceptanceStatus").length, 0, "a host without the ledger is not asked for one");
+  const composer = adapter.getSnapshot().workers.find((w) => w.id === "w1").composer;
+  assert.equal(composer?.state, "sent");
+  assert.match(composer?.text ?? "", /keeps no acceptance ledger/);
+  adapter.destroy();
+});
+
+test("review: a rebuild keeps the conversation on screen and the open tabs when those agents still exist", async () => {
+  let agents = [{ id: "w1", name: "Probe", lastActivityAt: 1 }, { id: "w2", name: "Newer", lastActivityAt: 9 }];
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    listAgents: () => agents,
+    duplicateAgent: () => { agents = [...agents, { id: "w1-copy", name: "Probe copy", lastActivityAt: 10 }]; return {}; },
+    getHostStatus: { capabilities: ["sendAcceptanceV1"] },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  state.workers.push({ ...seed().workers[0], id: "w2", name: "Newer" });
+  state.openContexts = [{ kind: "worker", id: "w2" }, { kind: "worker", id: "w1" }];
+  const adapter = createGatewayAdapter(state);
+  const copy = await adapter.duplicateAgent("w1");
+  assert.equal(copy.id, "w1-copy");
+  const after = adapter.getSnapshot();
+  assert.deepEqual(after.activeContext, { kind: "worker", id: "w1" }, "the duplicate does not move the operator to another conversation");
+  assert.deepEqual(after.openContexts.map((c) => c.id), ["w2", "w1"]);
+  assert.equal(after.host.sendAcceptance, true);
+  assert.equal(only(calls, "getHostStatus").length, 1, "capabilities are read once per hydrate");
+  adapter.destroy();
+});
+
+test("review: a known avatar version is carried into the next rebuild instead of re-reading every avatar", async () => {
+  let agents = [{ id: "w1", name: "Probe", avatarVersion: null }, { id: "w2", name: "Two", avatarVersion: null }];
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    listAgents: () => agents,
+    duplicateAgent: () => { agents = [...agents, { id: "w1-copy", name: "Probe copy", avatarVersion: null }]; return {}; },
+    getAgentAvatar: (args) => ({ version: `v-${args.id}`, dataUrl: "data:image/png;base64,iVBORw0KGgo=" }),
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  state.workers[0].avatarVersion = "v-w1";
+  state.workers.push({ ...seed().workers[0], id: "w2", name: "Two" });
+  const adapter = createGatewayAdapter(state);
+  await adapter.duplicateAgent("w1");
+  const reads = only(calls, "getAgentAvatar").map((c) => c.args.id).sort();
+  assert.deepEqual(reads, ["w1-copy", "w2"], "w1's version was known from the previous state; only the rows without one are asked");
+  const after = adapter.getSnapshot();
+  assert.equal(after.workers.find((w) => w.id === "w1").avatarVersion, "v-w1");
+  assert.equal(after.workers.find((w) => w.id === "w2").avatarVersion, "v-w2");
+  adapter.destroy();
+});

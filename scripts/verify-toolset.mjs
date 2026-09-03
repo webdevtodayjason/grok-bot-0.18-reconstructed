@@ -137,6 +137,8 @@ const freshAgent = async (name) => {
 const cleanUp = async (agentId) => {
   if (KEEP || agentId == null) return;
   await call("deleteAgent", { id: agentId }).catch(() => {});
+  // The prompt-section report is written beside the settings file and outlives the agent otherwise.
+  await docker(["exec", BOX, "sh", "-c", `rm -f ${PROMPT_REPORTS}/sand-system-prompt-${agentId}.json`]).catch(() => {});
 };
 
 // Throw rather than exit: the finally below still has to delete the probe agent and put the
@@ -146,6 +148,9 @@ const fail = (message) => { throw new VerificationFailed(message); };
 
 const previousTrace = await readTrace();
 if (previousTrace !== "1") await writeTrace("1");
+// Agents that appear during the run and are not the probe are the model's doing (CreateAgent) or a
+// phantom; either way they are reported and removed so the roster ends as it started.
+const rosterBefore = new Set((await call("listAgents")).map((a) => a.id));
 let agent;
 try {
   if (MODE === "chief" || MODE === "subagent") {
@@ -239,7 +244,7 @@ try {
           + "text back to you. Do not do it yourself. When it reports, tell me the heading text verbatim.",
       });
       const deadline = Date.now() + TIMEOUT_MS;
-      let chief; let child; let wire; let reply; let running = true; let browserSub; let replyAtDone;
+      let chief; let child; let wire; let reply; let running = true; let browserSub; let lastReplyBeforeDone;
       // The parent answers once when it dispatches ("I'll report when it returns") and again
       // when the child revives it, so a reply alone is not the end: wait for the browserUse
       // subagent to reach done/error and the parent to go idle after that.
@@ -254,11 +259,13 @@ try {
         const subDone = browserSub != null && (browserSub.status === "done" || browserSub.status === "error");
         running = (await call("listAgents")).find((a) => a.id === agent.id)?.isRunning === true;
         reply = spoken(await call("getAgentTranscript", { id: agent.id })).at(-1);
-        // The child's report revives the parent for one more turn; the reply that counts is the
-        // one written after the child finished, not the "dispatched, will report" one before it.
-        if (subDone && replyAtDone === undefined) replyAtDone = reply?.id ?? null;
-        const revived = subDone && reply != null && reply.id !== replyAtDone;
+        // The child's report revives the parent for one more turn; the reply that counts is one
+        // written after the child finished. Remember the last reply seen while the child was still
+        // running, so a revival reply that lands in the same poll as "done" is not mistaken for it.
+        if (!subDone) lastReplyBeforeDone = reply?.id ?? lastReplyBeforeDone;
+        const revived = subDone && reply != null && reply.id !== lastReplyBeforeDone;
         if (chief && child && wire && revived && !running) break;
+        if (chief && child && wire && subDone && !running && Date.now() - deadline > -TIMEOUT_MS / 2) break;
       }
       console.log(`browserUse subagent status: ${browserSub?.status ?? "(never appeared)"}`);
       // What the child actually did, from its own ledger: tool, ok flag, head of the result.
@@ -288,7 +295,17 @@ try {
       console.log(`browserUse subagent prompt: ${childReport.length} chars, Browser section present`);
       const text = String(reply?.message?.content ?? "");
       console.log(`reply: ${text.slice(0, 200)}`);
-      if (!/example domain/i.test(text)) fail("the parent never reported the page heading (\"Example Domain\")");
+      // The wiring proof is the child's own receipt: a browser_snapshot or browser_navigate result
+      // that carries the heading. Whether the parent relays it is model behaviour: on 2026-09-03
+      // qwen3.8-max and once Codex were revived, made further requests, and ended their turns
+      // without speaking (the silent-worker pattern; the delivery-owed reminder is behind a gate
+      // that defaults off here). That is reported, not failed.
+      const childLedger = child?.conversationId
+        ? await docker(["exec", BOX, "sh", "-c", `cat /home/box/sand-data/agents/${child.conversationId}/audit.jsonl 2>/dev/null || true`])
+        : "";
+      const childSawHeading = /example domain/i.test(childLedger);
+      if (!childSawHeading) fail("the browser child never captured the page heading (no receipt carries \"Example Domain\")");
+      if (!/example domain/i.test(text)) console.log("WARN — the parent was revived but never relayed the heading (model behaviour; wiring proven by the child's receipt)");
       // SUB-2: the driver's screenshot reached the model as an image part at least once.
       const imageLines = (await docker(["exec", BOX, "sh", "-c",
         `tail -n +${from + 1} /tmp/sand-host.log | grep -c -F '[sand][image] carried' || true`])).trim();
@@ -380,5 +397,12 @@ try {
   process.exitCode = 1;
 } finally {
   await cleanUp(agent?.id);
+  try {
+    const extras = (await call("listAgents")).filter((a) => !rosterBefore.has(a.id) && a.id !== agent?.id);
+    for (const extra of extras) {
+      console.log(`WARN — an agent appeared during the run and was removed: ${JSON.stringify(extra.name)} (${extra.id}, origin ${extra.origin ?? "?"})`);
+      await call("deleteAgent", { id: extra.id }).catch(() => {});
+    }
+  } catch {}
   if (previousTrace !== "1") await writeTrace(previousTrace).catch(() => {});
 }

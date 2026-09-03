@@ -561,12 +561,30 @@
     </button>`;
   }
 
+  // GW-01: an agent hidden from the sidebar (setAgentHiddenFromSidebar) goes to a collapsed group
+  // at the foot of the roster rather than vanishing -- it is still on the box and still reachable.
+  // The group keeps its open state across redraws; a redraw on every tick would otherwise snap
+  // it shut under the cursor.
+  let hiddenGroupOpen = false;
   function renderRoster() {
     renderRosterTabs();
-    elements.rosterList.innerHTML = rosterMode === "workers"
-      ? state.workers.map(workerCardMarkup).join("")
-      : state.rooms.map(roomCardMarkup).join("");
+    const list = rosterMode === "workers" ? state.workers : state.rooms;
+    const markup = rosterMode === "workers" ? workerCardMarkup : roomCardMarkup;
+    const shown = list.filter((r) => r.hidden !== true);
+    const hidden = list.filter((r) => r.hidden === true);
+    elements.rosterList.innerHTML = shown.map(markup).join("")
+      + (hidden.length ? `<details class="roster-hidden" data-roster-hidden${hiddenGroupOpen ? " open" : ""}><summary>Hidden · ${hidden.length}</summary>${hidden.map(markup).join("")}</details>` : "");
+    // countAgents is the host's on-disk count, the one its 50-agent cap is measured against. The
+    // number is absent, not zero, until the host has answered.
+    const count = document.querySelector("[data-agent-count]");
+    if (count) {
+      const known = Number.isFinite(state.agentCount) ? state.agentCount : null;
+      count.hidden = known == null;
+      count.textContent = known == null ? "" : `${known} / ${AGENT_CAP} agents`;
+      count.title = known == null ? "" : "countAgents, as the host reports it — the cap is the host's";
+    }
   }
+  const AGENT_CAP = 50;
 
   function renderConversationHeader() {
     const context = activeContext();
@@ -591,6 +609,7 @@
       <div class="context-detail-list">${worker.role ? `<div class="context-detail-row"><span>Role</span><strong>${escapeHtml(worker.role)}</strong></div>` : ""}<div class="context-detail-row"><span>Endpoint (box-wide)</span><strong>${escapeHtml(model ? model.name : worker.model)}</strong></div></div>
       <button class="context-action-row" type="button" data-context-action="profile"><span>Agent details</span><b>›</b></button>
       <button class="context-action-row" type="button" data-context-action="routines"><span>Routines</span><b>${routineCount}</b></button>
+      ${typeof adapter.getSkills === "function" ? `<button class="context-action-row" type="button" data-context-action="skills"><span>Skills enabled</span><b>${(worker.skills ?? []).filter((skill) => skill.enabled).length} of ${(worker.skills ?? []).length}</b></button>` : ""}
       <button class="context-action-row" type="button" data-context-action="files"><span>Files</span><b>${worker.files.length}</b></button>
     </div>`;
   }
@@ -676,11 +695,18 @@
     if (card.status && card.status !== "pending") {
       const settled = card.status === "approved" ? "You approved this"
         : card.status === "denied" ? "You denied this"
+        : card.status === "answered" ? `You answered${card.answer != null ? `: ${String(card.answer)}` : ""}`
+        : card.status === "dismissed" ? "You dismissed this"
         : `Closed by the host — ${card.status}`;
-      const accent = card.status === "approved" ? "var(--green-500)" : "var(--amber-500)";
-      return `<div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${card.status === "approved" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">${escapeHtml(settled)}</small></span></div></div>`;
+      const accent = card.status === "approved" || card.status === "answered" ? "var(--green-500)" : "var(--amber-500)";
+      return `<div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${card.status === "approved" || card.status === "answered" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">${escapeHtml(settled)}</small></span></div></div>`;
     }
     const button = (value, label, primary) => `<button class="card-action${primary ? " primary" : ""}" type="button" data-decide="${escapeHtml(String(value))}" data-message-id="${escapeHtml(message.id)}">${escapeHtml(label)}</button>`;
+    // GW-11 item 2: the × on a question card is dismissWidget on the host, drawn only where the
+    // adapter implements it. It used to close the card on this page and nowhere else.
+    const dismiss = card.kind === "widget" && typeof adapter.dismissCard === "function"
+      ? `<button class="member-remove card-dismiss" type="button" data-dismiss-card="${escapeHtml(message.id)}" aria-label="Dismiss this question">×</button>`
+      : "";
     const actions = DECISION_ACTIONS[card.kind]
       ? DECISION_ACTIONS[card.kind].map(([v, l, p]) => button(v, l, p)).join("")
       : card.kind === "widget"
@@ -690,7 +716,18 @@
             return button(value, label, index === 0);
           }).join("")
         : `<span class="field-hint">Answer this in the host app. This UI never carries a credential.</span>`;
-    return `<div class="inline-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span></div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
+    return `<div class="inline-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span>${dismiss}</div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
+  }
+
+  // GW-09: a file in the transcript. The markup is a slot; fillAttachments asks the host for the
+  // bytes after the render (readAttachmentImage for an image, readAttachmentText for anything
+  // else) so nothing here is drawn from the path alone.
+  function attachmentMarkup(message) {
+    const a = message.attachment;
+    const body = a.kind === "image"
+      ? `<div class="attachment-slot" data-attachment-slot>Reading ${escapeHtml(a.name)} from the host…</div>`
+      : `<pre class="attachment-preview" data-attachment-slot>Reading ${escapeHtml(a.name)} from the host…</pre>`;
+    return `<figure class="message-attachment" data-attachment="${escapeHtml(a.path)}" data-attachment-kind="${escapeHtml(a.kind)}" data-attachment-name="${escapeHtml(a.name)}"><figcaption><span class="tag">▱ ${escapeHtml(a.name)}</span></figcaption>${body}</figure>`;
   }
 
   function specialMessageMarkup(message) {
@@ -709,14 +746,81 @@
     const isUser = message.authorId === "you";
     const author = workerById(message.authorId);
     const isWorking = message.type === "working";
-    const body = isWorking ? `<div class="typing-dots" aria-label="${escapeHtml(message.authorName)} is working"><i></i><i></i><i></i></div>` : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
+    const body = isWorking ? `<div class="typing-dots" aria-label="${escapeHtml(message.authorName)} is working"><i></i><i></i><i></i></div>`
+      : message.type === "attachment" && message.attachment ? `${paragraphMarkup(message.text)}${attachmentMarkup(message)}`
+      : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
     return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? avatarMarkup(author, "message-avatar") : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div></div></article>`;
   }
 
-  function renderTranscript(keepScroll) {
+  // The transcript is a tail window; the row above it says the host holds more and offers to
+  // page it in (GW-03). Scrolling to the top asks for the same page.
+  function transcriptMarkup() {
+    const record = contextRecord();
+    const older = record?.hasOlder && typeof adapter.loadOlderMessages === "function"
+      ? `<div class="transcript-older"><button class="ghost-button" type="button" data-load-older>Show earlier messages</button></div>`
+      : "";
+    return older + contextMessages().map(messageMarkup).join("");
+  }
+
+  // A row just revealed (a search hit) holds the reader on it: a refresh that lands in the next
+  // moments must not scroll the transcript back to the bottom under the flash.
+  let holdScrollUntil = 0;
+  function renderTranscript(keepScroll, pinToRevealed) {
     const wasNearBottom = elements.transcript.scrollHeight - elements.transcript.scrollTop - elements.transcript.clientHeight < 90;
-    elements.transcript.innerHTML = contextMessages().map(messageMarkup).join("");
+    elements.transcript.innerHTML = transcriptMarkup();
+    fillAttachments();
+    if (pinToRevealed || Date.now() < holdScrollUntil) return;
     if (!keepScroll || wasNearBottom) requestAnimationFrame(() => { elements.transcript.scrollTop = elements.transcript.scrollHeight; });
+  }
+
+  // After an older page lands: the same rebuild, but the reader stays on the line they were on
+  // rather than being thrown to the bottom the way a new message does.
+  function renderTranscriptKeepingOffset() {
+    const box = elements.transcript;
+    const previousHeight = box.scrollHeight;
+    const previousTop = box.scrollTop;
+    box.innerHTML = transcriptMarkup();
+    fillAttachments();
+    box.scrollTop = box.scrollHeight - previousHeight + previousTop;
+  }
+
+  // GW-14: a search hit, or a file, brought on screen. The adapter has paged the entry into the
+  // window and emitted transcript:reveal; the row is scrolled to and flashed once.
+  function flashEntry(entryId) {
+    const row = elements.transcript.querySelector(`[data-message-id="${CSS.escape(entryId)}"]`);
+    if (!row) return false;
+    holdScrollUntil = Date.now() + 3000;
+    row.scrollIntoView({ block: "center" });
+    row.classList.add("is-flash");
+    window.setTimeout(() => row.classList.remove("is-flash"), 2500);
+    return true;
+  }
+
+  let loadingOlder = false;
+  function loadOlderMessages() {
+    const record = contextRecord();
+    if (loadingOlder || !record?.hasOlder || typeof adapter.loadOlderMessages !== "function") return;
+    loadingOlder = true;
+    const button = elements.transcript.querySelector("[data-load-older]");
+    if (button) { button.disabled = true; button.textContent = "Reading earlier messages…"; }
+    Promise.resolve(adapter.loadOlderMessages(activeContext()))
+      .catch((error) => showToast(`Could not read earlier messages: ${error.message}`))
+      .finally(() => { loadingOlder = false; });
+  }
+
+  // The composer's state is the host's acceptance ledger, not the click: sendPrompt answers
+  // { accepted: true } no matter what (GW-03), and promptAcceptanceStatus is what says whether the
+  // host actually took the message. Empty until a send; then the ledger's word, verbatim.
+  function renderComposerStatus() {
+    const status = document.getElementById("composer-status");
+    if (!status) return;
+    const record = contextRecord();
+    const composer = record?.composer ?? null;
+    status.hidden = !composer;
+    if (!composer) { status.textContent = ""; status.removeAttribute("data-client-nonce"); status.dataset.composerState = "idle"; return; }
+    status.textContent = composer.text;
+    status.dataset.composerState = composer.state;
+    if (composer.nonce) status.dataset.clientNonce = composer.nonce; else status.removeAttribute("data-client-nonce");
   }
 
   function contextChipMarkup(context) {
@@ -789,11 +893,12 @@
     }
   }
 
-  function renderAll(keepScroll) {
+  function renderAll(keepScroll, pinToRevealed) {
     renderRoster();
     renderConversationHeader();
     renderContextCard();
-    renderTranscript(keepScroll);
+    renderTranscript(keepScroll, pinToRevealed);
+    renderComposerStatus();
     renderWorkspaces();
     renderCapabilities();
     renderNowAndSchedule();
@@ -866,6 +971,69 @@
     openPanel(activeContext().kind === "worker" ? "Agent routines" : "Room routines", `${contextName()} routines`, routinesPanel());
   }
 
+  // -- Skills (GW-05): the "how" beside the routines' "when". Every row is the host's own
+  // workflow record read through getAgentWorkflows; every control is drawn only where the adapter
+  // in front of this page implements the write, the way the Agent details panel guards its own.
+  let editingSkillId = null;
+  let armedDeleteSkillId = null;
+
+  function skillCardMarkup(skill) {
+    const canToggle = typeof adapter.setSkillEnabled === "function";
+    const canRun = typeof adapter.runSkill === "function";
+    // The host's store refuses to edit or remove a managed or plugin skill (WorkflowStore.remove
+    // answers false), so those two controls are not drawn for one.
+    const editable = !["managed", "plugin"].includes(skill.source);
+    const canEdit = editable && typeof adapter.updateSkill === "function";
+    const canDelete = editable && typeof adapter.deleteSkill === "function";
+    const origin = skill.source === "managed" ? "managed skill" : skill.source === "plugin" ? "plugin skill" : skill.sourceRef ? `live reference · ${skill.sourceRef}` : "stored on the host";
+    const schedule = skill.scheduled ? `<span class="tag">◷ ${escapeHtml(skill.scheduleDescription || skill.schedule)}</span>` : "";
+    const lastRun = skill.lastRunAt ? `<div class="run-result">Last run ${escapeHtml(new Date(Number(skill.lastRunAt)).toLocaleString())}</div>` : "";
+    const controls = [
+      canRun ? `<button class="primary-button" type="button" data-run-skill="${escapeHtml(skill.id)}" ${skill.enabled ? "" : "disabled"}>Run now</button>` : "",
+      canEdit ? `<button class="ghost-button" type="button" data-edit-skill="${escapeHtml(skill.id)}">Edit</button>` : "",
+      canDelete ? `<button class="ghost-button" type="button" data-delete-skill="${escapeHtml(skill.id)}" title="Removes this skill from the box's shared library, for every agent">Delete</button>` : "",
+    ].join("");
+    const toggle = canToggle
+      ? `<button class="switch" type="button" data-toggle-skill="${escapeHtml(skill.id)}" aria-label="Enable ${escapeHtml(skill.name)} for this agent" aria-pressed="${skill.enabled}"></button>`
+      : `<span class="status-pill${skill.enabled ? " success" : ""}">${skill.enabled ? "enabled" : "disabled"}</span>`;
+    return `<article class="routine-card skill-card" data-skill-id="${escapeHtml(skill.id)}" data-skill-name="${escapeHtml(skill.name)}"><div><div class="routine-header"><h3>${escapeHtml(skill.name)}</h3>${toggle}</div><p>${escapeHtml(skill.description || "No description on the host.")}</p><pre class="skill-body">${escapeHtml(skill.body)}</pre><div class="routine-meta"><span class="tag">${escapeHtml(origin)}</span>${schedule}${skill.helperScripts.length ? `<span class="tag">${skill.helperScripts.length} helper file(s)</span>` : ""}</div>${lastRun}</div><div style="display:grid;gap:6px;align-content:start">${controls}</div></article>`;
+  }
+
+  function skillsPanel(worker) {
+    const skills = worker.skills ?? [];
+    const editing = editingSkillId ? skills.find((skill) => skill.id === editingSkillId) : null;
+    const canCreate = typeof adapter.createSkill === "function";
+    const canImportText = typeof adapter.importSkillText === "function";
+    const canImportUrl = typeof adapter.importSkillUrl === "function";
+    const cards = skills.length ? skills.map(skillCardMarkup).join("")
+      : `<div class="empty-state"><div><strong>No skills in the box's library</strong><p>A skill is a named recipe an agent can be asked to run by name. The library is shared by every agent on the box; routines created on the Routines panel are scheduled skills and stay there.</p></div></div>`;
+    const form = canCreate || editing
+      ? `<details class="routine-create"${editing ? " open" : ""}><summary class="secondary-button">${editing ? `Editing ${escapeHtml(editing.name)}` : "＋ New skill"}</summary><form ${editing ? `data-skill-form="${escapeHtml(editing.id)}"` : "data-skill-form=\"\""}><div class="field"><label for="skill-name">Name</label><input id="skill-name" name="name" required placeholder="e.g. Weekly ticket digest" value="${escapeHtml(editing ? editing.name : "")}" /></div><div class="field"><label for="skill-description">When to use it</label><input id="skill-description" name="description" placeholder="One line the agent reads to decide" value="${escapeHtml(editing ? editing.description : "")}" /></div><div class="field"><label for="skill-body">Instructions</label><textarea id="skill-body" name="body" rows="5" required placeholder="The recipe, written as you would to a person">${escapeHtml(editing ? editing.body : "")}</textarea></div><div class="form-actions">${editing ? `<button class="ghost-button" type="button" data-cancel-skill-edit>Cancel</button>` : ""}<button class="primary-button" type="submit">${editing ? "Save changes" : "Create skill"}</button></div></form></details>`
+      : "";
+    const canPort = typeof adapter.portLocalSkills === "function";
+    const importers = canImportText || canImportUrl || canPort
+      ? `<details class="routine-create"><summary class="secondary-button">⇩ Import a skill</summary>${canImportText ? `<form data-import-skill-text><div class="field"><label for="skill-markdown">Paste skill markdown</label><textarea id="skill-markdown" name="markdown" rows="5" required placeholder="---&#10;name: My skill&#10;description: when to use it&#10;---&#10;The recipe…"></textarea><span class="field-hint">Frontmatter name and description are read if present; a trigger.schedule in it makes the skill scheduled as well.</span></div><div class="form-actions"><button class="primary-button" type="submit">Import markdown</button></div></form>` : ""}${canImportUrl ? `<form data-import-skill-url><div class="field"><label for="skill-url">Or a URL</label><input id="skill-url" name="url" type="url" required placeholder="https://…/SKILL.md" /><span class="field-hint">Stored as a live reference: the agent reads the URL when it runs the skill, so it follows the source as it changes.</span></div><div class="form-actions"><button class="primary-button" type="submit">Import from URL</button></div></form>` : ""}${canPort ? `<div class="setting-row"><div><strong>Port the host's local skill files</strong><small>The host scans its own working directory and home for CLAUDE.md, AGENTS.md and .cursor/rules and links each as a live reference. It reports what it found; nothing is invented here.</small></div><button class="ghost-button" type="button" data-port-local-skills>Port</button></div>` : ""}</details>`
+      : "";
+    return `<div class="panel-intro"><p>The box's <strong>shared skill library</strong>: the how, read by an agent when it is asked by name or when a scheduled one fires. A skill created or imported here is in the library for every agent on the box, enabled by default; the switch is <strong>${escapeHtml(worker.name)}</strong>'s own per-agent enable. Delete removes a skill for every agent.</p>${form}${importers}</div><div class="routine-list" data-skill-list>${cards}</div>`;
+  }
+
+  function renderSkillsPanel() {
+    const context = activeContext();
+    if (context.kind !== "worker") { showToast("Skills belong to an agent — open one of this room's members."); return; }
+    if (typeof adapter.getSkills !== "function") { showToast("This offline view has no gateway, so there are no skills to read."); return; }
+    armedDeleteSkillId = null;
+    const worker = contextRecord();
+    if (editingSkillId && !(worker.skills ?? []).some((skill) => skill.id === editingSkillId)) editingSkillId = null;
+    openPanel("Agent skills", `${worker.name} skills`, skillsPanel(worker));
+    // What is drawn came from the last refresh; read the host again so the panel opens on the
+    // list as it is now, not as it was at the last tick.
+    adapter.getSkills(worker.id)
+      // A repaint disarms the delete, as every repaint must: a button reading "Delete" is never
+      // one click from deleting.
+      .then((skills) => { worker.skills = skills; armedDeleteSkillId = null; if (elements.panelDialog.open && elements.panelEyebrow.textContent === "Agent skills") elements.panelContent.innerHTML = skillsPanel(worker); })
+      .catch((error) => showToast(`Could not read this agent's skills: ${error.message}`));
+  }
+
   // Only the gateway adapter stores a secret; the offline demo factory discards it and resolves
   // {accepted:true} with no message. So the fallback copy on both the form and the toast has to
   // be the demo's truth, not the relay's: claiming a credential was stored when it was thrown
@@ -904,12 +1072,25 @@
     const providerSwitch = plugin.endpointId
       ? `<div class="provider-switch">${plugin.live ? `<span class="status-pill success">answering now</span>` : plugin.status === "connected" ? `<button class="primary-button" type="button" data-use-endpoint="${escapeHtml(plugin.endpointId)}">Use this endpoint</button>` : ""}</div>`
       : "";
+    // GW-08: a listener is bound per agent. The card is global; this row is getAgentChannels for
+    // the agent on screen -- whether it holds a token for this platform -- and says which agent.
+    let channelRow = "";
+    if (plugin.group === "Listeners") {
+      const lead = contextLead();
+      const channel = Array.isArray(lead?.channels) ? lead.channels.find((c) => c.platform === plugin.id) : undefined;
+      const line = !lead ? "No agent on screen to read a channel for."
+        : lead.channels == null ? `Not read yet for ${lead.name} — the host answers getAgentChannels on the next refresh.`
+        : !channel ? `${lead.name}: the host lists no ${plugin.name} channel manifest for this agent.`
+        : channel.connected ? `${lead.name}: connected${channel.detail ? ` · ${channel.detail}` : ""}.`
+        : `${lead.name}: not connected — this agent holds no ${plugin.name} token.`;
+      channelRow = `<div class="setting-row" data-channel-state="${escapeHtml(plugin.id)}"><div><strong>For ${escapeHtml(lead ? lead.name : "this agent")}</strong><small>${escapeHtml(line)}</small></div><span class="status-pill${channel?.connected ? " success" : ""}">${channel ? (channel.connected ? "connected" : "not connected") : "unknown"}</span></div>`;
+    }
     // The Skills section was a heading over an empty div on every card the gateway builds: no
     // plugin here ships skills. It renders only where there are some, or where there is a reason.
     const skillsSection = plugin.skills.length
       ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${plugin.skills.map((skill) => `<span class="tag">✦ ${escapeHtml(skill)}</span>`).join("")}</div></section>`
       : plugin.skillsNote ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="empty-state">${escapeHtml(plugin.skillsNote)}</div></section>` : "";
-    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${providerSwitch}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
+    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${providerSwitch}${channelRow}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
   }
 
   // The relay holds the endpoint catalogue and probes each one; the box holds which is in use.
@@ -980,6 +1161,10 @@
   let armedDeleteId = null;
   // Same two-click arming as the routine delete, for "forget every memory".
   let armedClearMemoriesId = null;
+  // And for deleting the agent itself (GW-01).
+  let armedDeleteAgentId = null;
+  // AUDIT-1: ledger heads live here, not in the markup, so an un-revealed one is never in the DOM.
+  let auditHeads = [];
 
   // The host parses each trigger into a typed listener and throws away the members it cannot
   // read (automation-trigger.ts parseMember), then automation-store.upsert writes nothing at all
@@ -1130,13 +1315,40 @@
     // clearMemories, and an unguarded button would throw a TypeError out of the click handler
     // and simply do nothing -- a control that looks live and is not.
     const canWriteRole = typeof adapter.setRole === "function";
+    // GW-01: name and description go through the same updateAgent profile write as the role, so
+    // the three share one Save. Avatar, notifications, hide, duplicate and delete are each their
+    // own gateway command and each is drawn only where the adapter implements it.
+    const canWriteProfile = typeof adapter.updateProfile === "function";
     const canReadMemories = typeof adapter.getMemories === "function";
+    const canAvatar = typeof adapter.setAvatar === "function";
+    const canNotify = typeof adapter.setNotifications === "function";
+    const canHide = typeof adapter.setHidden === "function";
+    const canDuplicate = typeof adapter.duplicateAgent === "function";
+    const canDelete = typeof adapter.deleteAgent === "function";
+    const canAudit = typeof adapter.getActionAudit === "function";
+    const identity = canWriteProfile
+      ? `<div class="setting-row"><div><strong>Name</strong><small>The host's own name for this agent, on its profile file.</small></div><div class="field" style="margin:0;min-width:220px"><label class="sr-only" for="agent-name">Name</label><input id="agent-name" data-name-for="${escapeHtml(worker.id)}" value="${escapeHtml(worker.name)}" required /></div></div><div class="setting-row"><div><strong>Description</strong><small>What this agent is for, as the host stores it. Shown as its status while it is idle.</small></div><div class="field" style="margin:0;min-width:220px"><label class="sr-only" for="agent-description">Description</label><input id="agent-description" data-description-for="${escapeHtml(worker.id)}" value="${escapeHtml(worker.description ?? "")}" placeholder="e.g. Triages the service desk" /></div></div>`
+      : "";
     const role = `<div class="setting-row"><div><strong>Role</strong><small>The host's own per-agent title, stored on this agent's profile file. Blank is a real answer — the context card hides the row rather than printing the words 'not set'.</small></div><div class="field" style="margin:0;min-width:220px"><label class="sr-only" for="agent-role">Role</label><input id="agent-role" data-role-for="${escapeHtml(worker.id)}" value="${escapeHtml(worker.role)}"${canWriteRole ? "" : " readonly"} placeholder="e.g. Service desk specialist" /></div>${canWriteRole ? `<button class="ghost-button" type="button" data-save-role="${escapeHtml(worker.id)}">Save</button>` : `<span class="status-pill">read-only offline</span>`}</div>`;
+    const avatar = canAvatar
+      ? `<div class="setting-row"><div><strong>Avatar</strong><small data-avatar-note>${worker.avatarVersion ? `The host serves this agent's own avatar (version ${escapeHtml(String(worker.avatarVersion))}).` : "The host holds no avatar for this agent; the face shown is a placeholder. Upload a PNG and the host stores and serves it."}</small></div><label class="ghost-button avatar-upload"><input type="file" accept="image/png,.png" data-avatar-for="${escapeHtml(worker.id)}" hidden />Upload PNG</label></div>`
+      : "";
+    const switches = (canNotify ? `<div class="setting-row"><div><strong>Notify on updates</strong><small>The host's per-agent notification flag (setAgentNotifyOnUpdates). Off, and this agent's replies raise no notification.</small></div><button class="switch" type="button" data-toggle-notify="${escapeHtml(worker.id)}" aria-label="Notify on updates" aria-pressed="${worker.notify !== false}"></button></div>` : "")
+      + (canHide ? `<div class="setting-row"><div><strong>Hidden from the roster</strong><small>Moves this agent to the roster's collapsed Hidden group. It stays on the box and keeps working.</small></div><button class="switch" type="button" data-toggle-hidden="${escapeHtml(worker.id)}" aria-label="Hide from the roster" aria-pressed="${worker.hidden === true}"></button></div>` : "");
+    const hygiene = canDuplicate || canDelete
+      ? `<div class="setting-row"><div><strong>Duplicate</strong><small>Clones this agent on the host as “${escapeHtml(worker.name)} copy” — profile, skills and routines, not the conversation.</small></div>${canDuplicate ? `<button class="ghost-button" type="button" data-duplicate-agent="${escapeHtml(worker.id)}">Duplicate</button>` : ""}</div>${canDelete ? `<div class="setting-row"><div><strong>Delete this agent</strong><small>Removes the agent and its conversation from the host. Two clicks; the host keeps no copy.</small></div><button class="danger-button" type="button" data-delete-agent="${escapeHtml(worker.id)}">Delete</button></div>` : ""}`
+      : "";
     const browser = `<div class="setting-row"><div><strong>Browser</strong><small data-browser-screen="${escapeHtml(worker.id)}">${escapeHtml(worker.browser.screen || "Asking the host which screen this agent has…")}</small></div><button class="ghost-button" type="button" data-open-context-browser>Open</button></div>`;
     const memories = canReadMemories
       ? `<section class="settings-section" data-memories-for="${escapeHtml(worker.id)}"><div class="setting-row"><div><strong>Memory</strong><small>What the host has remembered about this agent across conversations.</small></div>${typeof adapter.clearMemories === "function" ? `<button class="ghost-button" type="button" data-clear-memories="${escapeHtml(worker.id)}">Forget all</button>` : ""}</div><div class="context-detail-list" data-memory-list>Reading this agent's memories…</div></section>`
       : "";
-    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role || "No role set on the host.")}</p><div class="tag-list"><span class="tag">endpoint (box-wide) · ${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section><section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, the role and the routines shown here belong to this agent. The endpoint and the box's screens belong to the whole box and are shared with every other agent on it.</p>${role}<div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div>${browser}</section>${memories}</div>`;
+    // AUDIT-1: the action ledger the host writes on every tool action, read on demand so opening
+    // the panel does not pull the whole file; heads stay out of the DOM until asked for, the way
+    // the evidence disclosure holds its attestations.
+    const audit = canAudit
+      ? `<section class="settings-section" data-audit-for="${escapeHtml(worker.id)}"><div class="setting-row"><div><strong>Action ledger</strong><small>Every tool action the host recorded for this agent (getAgentActionAudit), newest first. Tool output is withheld until you ask for one row's.</small></div><button class="ghost-button" type="button" data-read-audit="${escapeHtml(worker.id)}">Read</button></div><div class="context-detail-list" data-audit-list></div></section>`
+      : "";
+    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role || "No role set on the host.")}</p><div class="tag-list"><span class="tag">endpoint (box-wide) · ${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section><section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, the role and the routines shown here belong to this agent. The endpoint and the box's screens belong to the whole box and are shared with every other agent on it.</p>${identity}${role}${avatar}${switches}<div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div>${browser}${hygiene}</section>${memories}${audit}</div>`;
   }
 
   // The two async fills the panel above leaves placeholders for. Both are real host reads: the
@@ -1174,6 +1386,8 @@
 
   function openAgentProfile(worker) {
     if (!worker) return;
+    armedDeleteAgentId = null;
+    auditHeads = [];
     openPanel("Agent details", worker.name, agentProfilePanel(worker));
     fillAgentProfilePanel(worker);
   }
@@ -1192,7 +1406,33 @@
     // title, and the model is resolved globally from box-secrets.json on every request. A picker
     // per worker promised something the machine cannot do. One endpoint, switchable, is the truth.
     const rows = `<div class="setting-row"><div><strong>Endpoint</strong><small>Every worker and every subagent on this box answers through this one. Switching takes effect on the next turn.</small></div><select class="model-select" id="endpoint-select" aria-label="Inference endpoint"><option value="">Loading…</option></select></div><div class="setting-row"><div><strong>Currently answering</strong><small id="endpoint-current">Reading from the box…</small></div><span class="status-pill" id="endpoint-health">…</span></div>`;
-    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section><section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section></div>`;
+    // GW-10: the desktop app's Updates tab, which box-reference-docs.ts tells the model to send
+    // users to. Update and Reset recreate the box for the agent on screen (the host keys both by
+    // agent id). updateHostNow is deliberately NOT here: it swaps the host bundle from S3, and this
+    // box runs a locally patched bundle that such a swap would overwrite.
+    const boxAgent = contextLead();
+    const updates = typeof adapter.getHostStatus === "function"
+      ? `<section class="settings-section" data-updates-panel><h3>Updates</h3><p>The host bundle this box runs, as getHostStatus reports it. The host itself is not updated from this page: updateHostNow would fetch a bundle from S3 over the locally patched one this box runs, so that command is left unwired here on purpose.</p><div class="setting-row"><div><strong>Host version</strong><small data-host-version>Reading from the host…</small></div><span class="status-pill" data-host-update>…</span></div>${boxAgent ? `<div class="setting-row"><div><strong>Update ${escapeHtml(boxAgent.name)}'s computer</strong><small>Moves the box to a fresh instance and keeps files and logins. Two clicks.</small></div><button class="ghost-button" type="button" data-update-box="${escapeHtml(boxAgent.id)}"${typeof adapter.updateBox === "function" ? "" : " disabled"}>Update</button></div><div class="setting-row"><div><strong>Reset ${escapeHtml(boxAgent.name)}'s computer</strong><small>Restores the box from its last snapshot. Recent unsynced work can be lost — prefer Update. Two clicks.</small></div><button class="danger-button" type="button" data-reset-box="${escapeHtml(boxAgent.id)}"${typeof adapter.resetBox === "function" ? "" : " disabled"}>Reset</button></div>` : ""}</section>`
+      : "";
+    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section><section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${updates}</div>`;
+  }
+
+  // The Updates rows fill from getHostStatus after the panel opens, like the endpoint rows do.
+  let armedBoxAction = null;
+  function fillHostStatus() {
+    const version = elements.panelContent.querySelector("[data-host-version]");
+    const pill = elements.panelContent.querySelector("[data-host-update]");
+    if (!version || typeof adapter.getHostStatus !== "function") return;
+    armedBoxAction = null;
+    adapter.getHostStatus().then((status) => {
+      version.textContent = status.hostVersion
+        ? `${status.hostVersion} on this box${status.latestHostVersion ? ` · ${status.latestHostVersion} published` : ""}${status.isBusy ? " · host busy" : ""}`
+        : "The host did not report a version";
+      if (pill) {
+        pill.textContent = status.hostUpdateAvailable === true ? "newer bundle published" : status.hostUpdateAvailable === false ? "current" : "unknown";
+        pill.className = `status-pill${status.hostUpdateAvailable === false ? " success" : ""}`;
+      }
+    }).catch((error) => { version.textContent = `Could not read the host version: ${error.message}`; });
   }
 
   function addPanel() {
@@ -1284,7 +1524,7 @@
       const files = record.files.length
         ? record.files.map((file) => `<div class="file-tile">▱<strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(file.meta)}</small></div>`).join("")
         : `<div class="empty-state">Nothing has been attached to this conversation yet.</div>`;
-      elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} files</h3><p>Files that passed through this conversation. This host keeps no per-worker directory — anything a worker writes with Shell goes to one /workspace shared by every agent on the box.</p></div><span class="status-pill">${record.files.length}</span></div><div class="file-grid">${files}</div></div>`;
+      elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} files</h3><p>Files that passed through the part of this conversation loaded on screen${record.hasOlder ? " — show earlier messages to include older ones" : ""}. This host keeps no per-worker directory — anything a worker writes with Shell goes to one /workspace shared by every agent on the box.</p></div><span class="status-pill">${record.files.length}</span></div><div class="file-grid">${files}</div></div>`;
     } else if (activeDesktopApp === "terminal") {
       mountBoxSurface("terminal", "Terminal");
     } else {
@@ -1305,6 +1545,25 @@
     // command to halt a turn in flight, and a button labelled Pause promises exactly that.
     elements.pauseRun.textContent = state.desktop.paused ? "Resume view" : "Pause view";
     elements.pauseRun.title = "Pauses this view only. The worker keeps running — this host has no command to stop a turn.";
+    renderHandBack();
+  }
+
+  // GW-10: a request_box_help takeover parks the agent until the operator hands the computer
+  // back, and nothing here could. The control exists only while the host reports a pending
+  // hand-off for the agent whose screen this is, and says what the agent asked for.
+  function renderHandBack() {
+    const button = document.getElementById("hand-back");
+    const note = document.getElementById("hand-back-note");
+    if (!button) return;
+    const lead = contextLead();
+    const handoff = lead?.handoff ?? null;
+    const canHandBack = handoff && typeof adapter.handBack === "function";
+    button.hidden = !canHandBack;
+    button.dataset.handBack = canHandBack ? lead.id : "";
+    if (note) {
+      note.hidden = !handoff;
+      note.textContent = handoff ? `${lead.name} handed you the computer: ${handoff.instruction || "no instruction given"}` : "";
+    }
   }
 
   function openDesktop(appName) {
@@ -1396,6 +1655,7 @@
     const action = event.target.closest("[data-context-action]");
     if (action) {
       if (action.dataset.contextAction === "routines") renderRoutinesPanel();
+      else if (action.dataset.contextAction === "skills") renderSkillsPanel();
       else if (action.dataset.contextAction === "files") openDesktop("files");
       else if (action.dataset.contextAction === "members" && activeContext().kind === "room") openPanel("Room roster", `${contextName()} members`, membersPanel());
       else if (action.dataset.contextAction === "profile" && activeContext().kind === "worker") openAgentProfile(contextRecord());
@@ -1526,6 +1786,81 @@
       adapter.deleteRoutine(routineId)
         .then((name) => { renderRoutinesPanel(); showToast(`${name} deleted`); })
         .catch((error) => { renderRoutinesPanel(); showToast(`Could not delete that routine: ${error.message}`); });
+    } else if (target.dataset.runSkill) {
+      const worker = contextRecord();
+      target.disabled = true;
+      adapter.runSkill(worker.id, target.dataset.runSkill)
+        .then((run) => showToast(`${run.name} dispatched to ${worker.name} — its reply lands in the conversation`))
+        .catch((error) => { target.disabled = false; showToast(`Could not run that skill: ${error.message}`); });
+    } else if (target.dataset.toggleSkill) {
+      const worker = contextRecord();
+      const isEnabled = target.getAttribute("aria-pressed") !== "true";
+      adapter.setSkillEnabled(worker.id, target.dataset.toggleSkill, isEnabled)
+        .then((skill) => { worker.skills = (worker.skills ?? []).map((s) => (s.id === skill.id ? skill : s)); renderSkillsPanel(); showToast(`${skill.name} ${skill.enabled ? "enabled" : "disabled"} on the host`); })
+        .catch((error) => showToast(`Could not ${isEnabled ? "enable" : "disable"} that skill: ${error.message}`));
+    } else if (target.hasAttribute("data-port-local-skills")) {
+      const worker = contextRecord();
+      target.disabled = true;
+      adapter.portLocalSkills(worker.id)
+        .then((outcome) => {
+          renderSkillsPanel();
+          showToast(outcome.imported.length ? `Ported ${outcome.imported.join(", ")}`
+            : outcome.skipped.length ? `Nothing ported — ${outcome.skipped[0].reason} (${outcome.skipped[0].source})`
+            : "The host found no local skill file to port");
+        })
+        .catch((error) => { target.disabled = false; showToast(`Could not port local skills: ${error.message}`); });
+    } else if (target.dataset.editSkill) {
+      editingSkillId = target.dataset.editSkill;
+      renderSkillsPanel();
+    } else if (target.hasAttribute("data-cancel-skill-edit")) {
+      editingSkillId = null;
+      renderSkillsPanel();
+    } else if (target.dataset.deleteSkill) {
+      const workflowId = target.dataset.deleteSkill;
+      // Two clicks, the same shape as the routine delete: the host removes the folder from the
+      // shared library outright, and with it the skill on every agent.
+      if (armedDeleteSkillId !== workflowId) {
+        armedDeleteSkillId = workflowId;
+        target.textContent = "Confirm";
+        window.setTimeout(() => {
+          if (armedDeleteSkillId !== workflowId) return;
+          armedDeleteSkillId = null;
+          target.textContent = "Delete";
+        }, 4000);
+        showToast("Click again to delete this skill for every agent on the box. The host keeps no copy.");
+        return;
+      }
+      armedDeleteSkillId = null;
+      if (editingSkillId === workflowId) editingSkillId = null;
+      const worker = contextRecord();
+      adapter.deleteSkill(worker.id, workflowId)
+        .then((name) => { renderSkillsPanel(); showToast(`${name} deleted`); })
+        .catch((error) => { renderSkillsPanel(); showToast(`Could not delete that skill: ${error.message}`); });
+    } else if (target.dataset.updateBox || target.dataset.resetBox) {
+      // Both recreate the box. Two clicks, and the second is only taken while the first is armed;
+      // a repaint of the panel disarms it, so a button reading "Update" is never one click away.
+      const action = target.dataset.updateBox ? "update" : "reset";
+      const agentId = target.dataset.updateBox || target.dataset.resetBox;
+      if (armedBoxAction !== action) {
+        armedBoxAction = action;
+        target.textContent = "Click again to confirm";
+        window.setTimeout(() => {
+          if (armedBoxAction !== action) return;
+          armedBoxAction = null;
+          target.textContent = action === "update" ? "Update" : "Reset";
+        }, 6000);
+        showToast(action === "update"
+          ? "Click again to move the box to a fresh instance. Files and logins are kept."
+          : "Click again to restore the box from its last snapshot. Recent unsynced work can be lost.");
+        return;
+      }
+      armedBoxAction = null;
+      target.disabled = true;
+      target.textContent = action === "update" ? "Updating…" : "Resetting…";
+      (action === "update" ? adapter.updateBox(agentId) : adapter.resetBox(agentId))
+        .then((result) => showToast(`The host answered: box ${result.state}`))
+        .catch((error) => showToast(`The box was not ${action === "update" ? "updated" : "reset"}: ${error.message}`))
+        .finally(() => { if (elements.panelDialog.open) fillHostStatus(); });
     } else if (target.dataset.manageMember && activeContext().kind === "room") {
       if (target.dataset.memberAction === "add") adapter.addMember(activeContext().id, target.dataset.manageMember);
       else adapter.removeMember(activeContext().id, target.dataset.manageMember);
@@ -1543,11 +1878,75 @@
     } else if (target.hasAttribute("data-open-context-browser")) {
       openDesktop("browser");
     } else if (target.dataset.saveRole) {
-      const input = elements.panelContent.querySelector(`[data-role-for="${CSS.escape(target.dataset.saveRole)}"]`);
-      // The adapter reads the saved profile back, so this reports the host's title and not the box.
-      adapter.setRole(target.dataset.saveRole, input ? input.value : "")
-        .then((role) => showToast(role ? `Role saved as “${role}”` : "Role cleared on the host"))
-        .catch((error) => showToast(`Role not saved: ${error.message}`));
+      const agentId = target.dataset.saveRole;
+      const field = (attr) => elements.panelContent.querySelector(`[${attr}="${CSS.escape(agentId)}"]`);
+      const roleInput = field("data-role-for");
+      const nameInput = field("data-name-for");
+      const descriptionInput = field("data-description-for");
+      // The adapter reads the saved profile back, so this reports the host's record and not the
+      // box. Name and description ride the same updateAgent write (GW-01) where the adapter has it.
+      const write = typeof adapter.updateProfile === "function" && nameInput
+        ? adapter.updateProfile(agentId, { title: roleInput ? roleInput.value : "", name: nameInput.value, description: descriptionInput ? descriptionInput.value : "" }).then((saved) => saved.title)
+        : adapter.setRole(agentId, roleInput ? roleInput.value : "");
+      write
+        .then((role) => showToast(nameInput ? `Profile saved on the host${role ? ` — role “${role}”` : ""}` : role ? `Role saved as “${role}”` : "Role cleared on the host"))
+        .catch((error) => showToast(`Profile not saved: ${error.message}`));
+    } else if (target.dataset.toggleNotify) {
+      const wanted = target.getAttribute("aria-pressed") !== "true";
+      adapter.setNotifications(target.dataset.toggleNotify, wanted)
+        .then((on) => { target.setAttribute("aria-pressed", String(on)); showToast(`Notifications ${on ? "on" : "off"} on the host`); })
+        .catch((error) => showToast(`Notifications not changed: ${error.message}`));
+    } else if (target.dataset.toggleHidden) {
+      const wanted = target.getAttribute("aria-pressed") !== "true";
+      adapter.setHidden(target.dataset.toggleHidden, wanted)
+        .then((hidden) => { target.setAttribute("aria-pressed", String(hidden)); showToast(hidden ? "Moved to the roster's Hidden group" : "Back in the roster"); })
+        .catch((error) => showToast(`Not ${wanted ? "hidden" : "unhidden"}: ${error.message}`));
+    } else if (target.dataset.duplicateAgent) {
+      target.disabled = true;
+      adapter.duplicateAgent(target.dataset.duplicateAgent)
+        .then((copy) => { elements.panelDialog.close(); rosterMode = "workers"; showToast(`${copy.name} created on the host`); })
+        .catch((error) => { target.disabled = false; showToast(`Not duplicated: ${error.message}`); });
+    } else if (target.dataset.deleteAgent) {
+      const agentId = target.dataset.deleteAgent;
+      // Two clicks, the same shape as every other delete on this page: the host keeps no copy.
+      if (armedDeleteAgentId !== agentId) {
+        armedDeleteAgentId = agentId;
+        target.textContent = "Confirm";
+        window.setTimeout(() => {
+          if (armedDeleteAgentId !== agentId) return;
+          armedDeleteAgentId = null;
+          target.textContent = "Delete";
+        }, 4000);
+        showToast("Click again to delete this agent and its conversation. The host keeps no copy.");
+        return;
+      }
+      armedDeleteAgentId = null;
+      target.disabled = true;
+      adapter.deleteAgent(agentId)
+        .then((name) => { elements.panelDialog.close(); showToast(`${name} deleted on the host`); })
+        .catch((error) => { target.disabled = false; target.textContent = "Delete"; showToast(`Not deleted: ${error.message}`); });
+    } else if (target.dataset.readAudit || target.dataset.moreAudit) {
+      const agentId = target.dataset.readAudit || target.dataset.moreAudit;
+      const before = target.dataset.moreAudit ? target.dataset.before : null;
+      target.disabled = true;
+      adapter.getActionAudit(agentId, { limit: 25, ...(before ? { before } : {}) })
+        .then((page) => {
+          const list = elements.panelContent.querySelector("[data-audit-list]");
+          if (!list) return;
+          const start = auditHeads.length;
+          auditHeads.push(...page.rows.map((row) => maskSecrets(String(row.head ?? "").slice(0, 600))));
+          const rows = page.rows.map((row, i) => `<div class="panel-card" data-audit-row="${escapeHtml(String(row.eventId ?? ""))}"><div class="setting-row"><div><strong>${escapeHtml(row.tool ?? row.type ?? "action")}</strong><small>${escapeHtml(String(row.type ?? ""))} · ${row.ok === false ? "failed" : "ok"} · ${Number(row.bytes) || 0} bytes${row.truncated ? " · truncated" : ""} · ${escapeHtml(row.ts ? new Date(row.ts).toLocaleString() : "")}</small></div><span class="status-pill${row.ok === false ? "" : " success"}">${escapeHtml(String(row.sha256 ?? "").slice(0, 12))}</span></div><pre class="evidence-head" data-audit-head-slot="${start + i}">The host kept this output out of model context. It is not on this page until you ask for it.</pre><div class="form-actions"><button class="ghost-button" type="button" data-reveal-audit-head="${start + i}">Show output</button></div></div>`).join("");
+          const more = page.nextBefore ? `<div class="form-actions"><button class="ghost-button" type="button" data-more-audit="${escapeHtml(agentId)}" data-before="${escapeHtml(String(page.nextBefore))}">Older rows</button></div>` : "";
+          const older = list.querySelector("[data-more-audit]")?.parentElement;
+          if (older) older.remove();
+          list.insertAdjacentHTML("beforeend", (rows || (before ? "" : `<div class="empty-state">The host holds no action ledger rows for this agent yet.</div>`)) + more);
+          if (target.dataset.readAudit) target.remove();
+        })
+        .catch((error) => { target.disabled = false; showToast(`Could not read the action ledger: ${error.message}`); });
+    } else if (target.dataset.revealAuditHead) {
+      const slot = elements.panelContent.querySelector(`[data-audit-head-slot="${CSS.escape(target.dataset.revealAuditHead)}"]`);
+      if (slot) slot.textContent = auditHeads[Number(target.dataset.revealAuditHead)] || "The host stored no output for this row.";
+      target.remove();
     } else if (target.dataset.revealHead) {
       // One attestation at a time, and only on a click: the head goes into the DOM here and
       // nowhere else.
@@ -1642,6 +2041,33 @@
         submit.disabled = false;
         showToast(`Could not ${routineId ? "save" : "create"} that routine: ${error.message}`);
       });
+    } else if (form.hasAttribute("data-skill-form")) {
+      const data = new FormData(form);
+      const worker = contextRecord();
+      const submit = form.querySelector("button[type=submit]");
+      submit.disabled = true;
+      const spec = { name: String(data.get("name") ?? "").trim(), description: String(data.get("description") ?? "").trim(), body: String(data.get("body") ?? "").trim() };
+      const workflowId = form.dataset.skillForm;
+      // The adapter reads the list back before resolving, so the toast reports the host's row.
+      (workflowId ? adapter.updateSkill(worker.id, workflowId, spec) : adapter.createSkill(worker.id, spec))
+        .then((skill) => { editingSkillId = null; renderSkillsPanel(); showToast(`${skill.name} ${workflowId ? "saved" : "created"} on the host`); })
+        .catch((error) => { submit.disabled = false; showToast(`Could not ${workflowId ? "save" : "create"} that skill: ${error.message}`); });
+    } else if (form.hasAttribute("data-import-skill-text") || form.hasAttribute("data-import-skill-url")) {
+      const data = new FormData(form);
+      const worker = contextRecord();
+      const submit = form.querySelector("button[type=submit]");
+      submit.disabled = true;
+      const byUrl = form.hasAttribute("data-import-skill-url");
+      (byUrl ? adapter.importSkillUrl(worker.id, data.get("url")) : adapter.importSkillText(worker.id, data.get("markdown")))
+        .then((outcome) => {
+          renderSkillsPanel();
+          // The host says what it imported and what it skipped, with the reason; both are shown.
+          if (outcome.imported.length) showToast(`Imported ${outcome.imported.join(", ")}`);
+          else if (outcome.skipped.length) showToast(`Not imported — ${outcome.skipped[0].reason}`);
+          else if (outcome.missing.length) showToast(`The host reported ${outcome.missing.join(", ")} imported but does not list it`);
+          else showToast("The host imported nothing and gave no reason");
+        })
+        .catch((error) => { submit.disabled = false; showToast(`Could not import that skill: ${error.message}`); });
     } else if (form.hasAttribute("data-add-worker")) {
       const data = new FormData(form);
       Promise.resolve(adapter.addWorker({ name: data.get("name"), role: data.get("role") }))
@@ -1659,9 +2085,29 @@
 
   adapter.subscribe((event) => {
     state = event.snapshot;
+    // An older page is the one transcript change that must not move the reader.
+    if (event.type === "transcript:older") { renderTranscriptKeepingOffset(); renderContextCard(); return; }
+    // A revealed entry: the window may have grown backwards; redraw, then scroll to and flash it.
+    if (event.type === "transcript:reveal") {
+      // Redrawn without the bottom scroll, and flashed on the next frame, after the redraw has
+      // laid out: a scrollIntoView before that frame was undone by the render's own scroll.
+      renderAll(true, true);
+      const entryId = event.detail?.entryId;
+      requestAnimationFrame(() => { if (entryId && !flashEntry(entryId)) showToast("That message is not in the loaded part of the conversation."); });
+      return;
+    }
     renderAll(event.type === "worker:status" || event.type.startsWith("plugin:") || event.type.startsWith("settings:"));
     if (event.type === "desktop:pause") renderDesktop();
+    // Not renderDesktop: that remounts the VNC frame. Only the hand-back control follows state.
+    else if (elements.desktopDialog.open) renderHandBack();
   });
+
+  // On the wheel, not on "scroll": replacing the transcript's markup clamps scrollTop to 0 for a
+  // frame and fires a scroll event, which paged the entire history in on every redraw. A wheel
+  // upward at the top is the operator asking.
+  elements.transcript.addEventListener("wheel", (event) => {
+    if (event.deltaY < 0 && elements.transcript.scrollTop <= 40) loadOlderMessages();
+  }, { passive: true });
 
   elements.composer.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1679,6 +2125,10 @@
   });
 
   elements.rosterList.addEventListener("click", (event) => {
+    // The Hidden group's disclosure: remember the state the click is about to set, because the
+    // next redraw rebuilds the group from markup.
+    const summary = event.target.closest("[data-roster-hidden] > summary");
+    if (summary) { hiddenGroupOpen = !summary.parentElement.open; return; }
     const card = event.target.closest("[data-context-kind][data-context-id]");
     if (card) selectContext(card.dataset.contextKind, card.dataset.contextId);
   });
@@ -1752,6 +2202,15 @@
   }
 
   elements.transcript.addEventListener("click", (event) => {
+    if (event.target.closest("[data-load-older]")) { loadOlderMessages(); return; }
+    const dismiss = event.target.closest("[data-dismiss-card]");
+    if (dismiss) {
+      // No toast: the card reports what the host did once the refresh has read it back.
+      if (typeof adapter.dismissCard === "function") adapter.dismissCard(activeContext(), dismiss.dataset.dismissCard).catch(() => {});
+      return;
+    }
+    const more = event.target.closest("[data-attachment-more]");
+    if (more) { showMoreAttachment(more.closest("[data-attachment]")); return; }
     const evidence = event.target.closest("[data-evidence]");
     if (evidence) { openEvidenceViewer(evidence.dataset.messageId); return; }
     const exchange = event.target.closest("[data-exchange]");
@@ -1779,6 +2238,7 @@
     if (capability === "files") openDesktop("files");
     else if (capability === "browser") openDesktop("browser");
     else if (capability === "routines") renderRoutinesPanel();
+    else if (capability === "skills") renderSkillsPanel();
     else if (capability === "plugins") renderPluginsPanel();
     else if (capability === "add") openPanel("Global creation", "Add to the Machine Room", addPanel());
   }));
@@ -1789,10 +2249,37 @@
   elements.panelContent.addEventListener("click", handlePanelClick);
   elements.panelContent.addEventListener("input", handleTriggerInput);
   elements.panelContent.addEventListener("change", handleTriggerInput);
+  // GW-01: the avatar control. A PNG file, base64, to setAgentAvatarBytes; the adapter reads
+  // the new version back and the panel's own image follows it.
+  elements.panelContent.addEventListener("change", async (event) => {
+    const input = event.target.closest("[data-avatar-for]");
+    if (!input) return;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    if (!/\.png$/i.test(file.name) && file.type !== "image/png") { showToast("The host stores avatars as PNG — pick a .png file."); return; }
+    if (file.size > 2 * 1024 * 1024) { showToast("That PNG is over 2MB — pick a smaller one."); return; }
+    const agentId = input.dataset.avatarFor;
+    const note = elements.panelContent.querySelector("[data-avatar-note]");
+    if (note) note.textContent = "Sending the PNG to the host…";
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      const saved = await adapter.setAvatar(agentId, btoa(binary));
+      elements.panelContent.querySelectorAll(".context-profile-avatar").forEach((img) => { img.src = saved.avatar; });
+      if (note) note.textContent = `The host serves this agent's own avatar (version ${saved.version}).`;
+      showToast("Avatar stored on the host");
+    } catch (error) {
+      if (note) note.textContent = `Avatar not stored: ${error.message}`;
+      showToast(`Avatar not stored: ${error.message}`);
+    }
+  });
   elements.panelContent.addEventListener("submit", handlePanelSubmit);
 
-  document.getElementById("settings-button").addEventListener("click", () => { openPanel("Global router & policy", "Operator settings", settingsPanel()); fillEndpoints(); });
-  document.getElementById("shelf-settings").addEventListener("click", () => { openPanel("Global router & policy", "Operator settings", settingsPanel()); fillEndpoints(); });
+  const openSettings = () => { openPanel("Global router & policy", "Operator settings", settingsPanel()); fillEndpoints(); fillHostStatus(); };
+  document.getElementById("settings-button").addEventListener("click", openSettings);
+  document.getElementById("shelf-settings").addEventListener("click", openSettings);
   document.getElementById("people-button").addEventListener("click", () => {
     if (activeContext().kind === "room") openPanel("Room roster", `${contextName()} members`, membersPanel());
     else openAgentProfile(contextRecord());
@@ -1853,10 +2340,173 @@
       renderAttachmentTray();
     }
   });
+  // -- GW-09: attachment slots, filled after each transcript render. An image is
+  // readAttachmentImage; anything else is a bounded text preview through readAttachmentText
+  // (the host's 64 KB head), shown a slice at a time, then readAttachmentChunk once the head is
+  // used up. The per-file view state lives here so a transcript rebuild keeps what was expanded.
+  const PREVIEW_SLICE = 1500;
+  const CHUNK_BYTES = 16 * 1024;
+  const attachmentViews = new Map();
+  const byteLength = (text) => new TextEncoder().encode(text).length;
+  function paintTextPreview(figure, view) {
+    const slot = figure.querySelector("[data-attachment-slot]");
+    if (!slot) return;
+    slot.textContent = maskSecrets(view.text.slice(0, view.shown));
+    const remainingHeld = view.text.length > view.shown;
+    const remainingFile = view.truncated || view.bytesRead < view.totalSize;
+    let more = figure.querySelector("[data-attachment-more]");
+    if (remainingHeld || remainingFile) {
+      if (!more) { more = document.createElement("button"); more.type = "button"; more.className = "ghost-button attachment-more"; more.dataset.attachmentMore = "1"; figure.appendChild(more); }
+      more.textContent = `Show more · ${view.shown.toLocaleString()} of ${view.totalSize ? `${view.totalSize.toLocaleString()} bytes` : "the file"} shown`;
+      more.disabled = false;
+    } else if (more) more.remove();
+  }
+  function fillAttachments() {
+    if (typeof adapter.readAttachmentImage !== "function") return;
+    const agentId = activeContext().kind === "worker" ? activeContext().id : (contextRecord()?.memberIds ?? [])[0] ?? null;
+    elements.transcript.querySelectorAll("[data-attachment]").forEach((figure) => {
+      const path = figure.dataset.attachment;
+      const slot = figure.querySelector("[data-attachment-slot]");
+      if (!slot) return;
+      if (figure.dataset.attachmentKind === "image") {
+        adapter.readAttachmentImage(path, agentId).then((image) => {
+          if (!image) { slot.textContent = "The host could not serve this image (not an image it can read, or outside its storage)."; return; }
+          slot.innerHTML = `<img class="attachment-image" src="${escapeHtml(image.dataUrl)}" alt="${escapeHtml(figure.dataset.attachmentName)}"${image.width ? ` width="${image.width}"` : ""}${image.height ? ` height="${image.height}"` : ""} />`;
+        }).catch((error) => { slot.textContent = `The host could not read this image: ${error.message}`; });
+        return;
+      }
+      const held = attachmentViews.get(path);
+      if (held) { paintTextPreview(figure, held); return; }
+      adapter.readAttachmentText(agentId, path).then((answer) => {
+        if (!answer) { slot.textContent = "The host could not read this file (outside this agent's attachments, or gone)."; return; }
+        if (answer.kind !== "text") { slot.textContent = `${figure.dataset.attachmentName} · ${Number(answer.bytes) || 0} bytes — not a text file the host previews.`; return; }
+        const view = { text: String(answer.text ?? ""), shown: Math.min(PREVIEW_SLICE, String(answer.text ?? "").length), truncated: answer.truncated === true, totalSize: Number(answer.bytes) || 0, bytesRead: byteLength(String(answer.text ?? "")) };
+        attachmentViews.set(path, view);
+        paintTextPreview(figure, view);
+      }).catch((error) => { slot.textContent = `The host could not read this file: ${error.message}`; });
+    });
+  }
+  function showMoreAttachment(figure) {
+    if (!figure) return;
+    const path = figure.dataset.attachment;
+    const view = attachmentViews.get(path);
+    if (!view) return;
+    if (view.text.length > view.shown) { view.shown = Math.min(view.text.length, view.shown + PREVIEW_SLICE); paintTextPreview(figure, view); return; }
+    if (!view.truncated && view.bytesRead >= view.totalSize) return;
+    const more = figure.querySelector("[data-attachment-more]");
+    if (more) { more.disabled = true; more.textContent = "Reading more from the host…"; }
+    const agentId = activeContext().kind === "worker" ? activeContext().id : (contextRecord()?.memberIds ?? [])[0] ?? null;
+    adapter.readAttachmentChunk(agentId, path, view.bytesRead, CHUNK_BYTES).then((chunk) => {
+      if (!chunk) { view.truncated = false; view.totalSize = view.bytesRead; paintTextPreview(figure, view); return; }
+      view.text += chunk.text;
+      view.bytesRead += chunk.bytes;
+      view.totalSize = chunk.totalSize || view.totalSize;
+      view.truncated = view.bytesRead < view.totalSize;
+      view.shown = Math.min(view.text.length, view.shown + PREVIEW_SLICE);
+      paintTextPreview(figure, view);
+    }).catch((error) => { if (more) { more.disabled = false; more.textContent = `Could not read more: ${error.message}`; } });
+  }
+
+  // -- GW-14: the search palette. Cmd-K / Ctrl-K, only where isGlobalSearchEnabled answered
+  // true at boot (the adapter holds it) and the adapter implements search. Results are the
+  // host's own hits; a message row opens that conversation and flashes the entry, a file row
+  // opens the conversation and the file's inline preview.
+  const palette = document.getElementById("palette");
+  const paletteInput = document.getElementById("palette-input");
+  const paletteResults = document.getElementById("palette-results");
+  let paletteKind = "messages";
+  let paletteTimer = null;
+  let paletteSeq = 0;
+  let paletteHits = { messages: [], bots: [], files: [] };
+  const searchAvailable = () => typeof adapter.search === "function" && typeof adapter.searchEnabled === "function" && adapter.searchEnabled();
+  function renderPaletteAffordance() {
+    const hint = document.getElementById("palette-hint");
+    if (hint) hint.hidden = !searchAvailable();
+  }
+  function renderPaletteResults() {
+    if (!paletteResults) return;
+    document.querySelectorAll("[data-palette-kind]").forEach((chip) => {
+      const n = paletteHits[chip.dataset.paletteKind]?.length ?? 0;
+      chip.classList.toggle("is-active", chip.dataset.paletteKind === paletteKind);
+      chip.setAttribute("aria-pressed", String(chip.dataset.paletteKind === paletteKind));
+      chip.querySelector("b").textContent = String(n);
+    });
+    const rows = paletteHits[paletteKind] ?? [];
+    const row = (kind, id, entryId, title, sub, meta) => `<button class="context-action-row palette-row" type="button" data-palette-open="${kind}" data-context-kind="${escapeHtml(id.kind)}" data-context-id="${escapeHtml(id.id)}"${entryId ? ` data-entry-id="${escapeHtml(entryId)}"` : ""}><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(sub)}</small></span><b>${escapeHtml(meta)}</b></button>`;
+    paletteResults.innerHTML = rows.length
+      ? rows.map((r) => paletteKind === "messages"
+          ? row("message", { kind: r.kind, id: r.agentId }, r.entryId, r.snippet, `${r.agentName} · ${r.role || "message"}`, r.timestampMs ? new Date(r.timestampMs).toLocaleDateString() : "")
+          : paletteKind === "bots"
+            ? row("bot", { kind: r.kind, id: r.agentId }, null, r.name, r.role || (r.kind === "room" ? "Room" : "Agent"), r.hidden ? "hidden" : "")
+            : row("file", { kind: r.kind, id: r.agentId }, r.entryId, r.fileName, `${r.agentName} · ${r.fileKind}`, r.timestampMs ? new Date(r.timestampMs).toLocaleDateString() : "")).join("")
+      : `<div class="empty-state">${paletteInput?.value.trim() ? "Nothing on the host matches that." : "Type to search messages, bots and files — the host's own index."}</div>`;
+  }
+  function runPaletteSearch() {
+    const q = paletteInput?.value.trim() ?? "";
+    const seq = ++paletteSeq;
+    if (!q) { paletteHits = { messages: [], bots: [], files: [] }; renderPaletteResults(); return; }
+    adapter.search(q, 20).then((hits) => { if (seq !== paletteSeq) return; paletteHits = hits; renderPaletteResults(); })
+      .catch((error) => { if (seq === paletteSeq && paletteResults) paletteResults.innerHTML = `<div class="empty-state">Search failed: ${escapeHtml(error.message)}</div>`; });
+  }
+  function openPalette() {
+    if (!palette || !searchAvailable()) return;
+    closeOpenDialogs(palette);
+    if (!palette.open) palette.showModal();
+    renderPaletteResults();
+    paletteInput?.focus();
+    paletteInput?.select();
+  }
+  function openPaletteHit(button) {
+    const kind = button.dataset.paletteOpen;
+    const context = { kind: button.dataset.contextKind, id: button.dataset.contextId };
+    const entryId = button.dataset.entryId || null;
+    palette?.close();
+    selectContext(context.kind, context.id);
+    if (kind === "bot" || !entryId || typeof adapter.revealEntry !== "function") return;
+    // selectContext reloads the window asynchronously; revealEntry waits on that read itself.
+    adapter.revealEntry(context, entryId).then((found) => {
+      if (!found) return;
+      if (kind === "file") {
+        const figure = elements.transcript.querySelector(`[data-message-id="${CSS.escape(entryId)}"] [data-attachment]`);
+        if (figure) figure.classList.add("is-open");
+      }
+    }).catch((error) => showToast(`Could not open that result: ${error.message}`));
+  }
+  if (palette) {
+    document.addEventListener("keydown", (event) => {
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && String(event.key).toLowerCase() === "k") {
+        if (!searchAvailable()) return;
+        event.preventDefault();
+        if (palette.open) palette.close(); else openPalette();
+      }
+    });
+    paletteInput?.addEventListener("input", () => { window.clearTimeout(paletteTimer); paletteTimer = window.setTimeout(runPaletteSearch, 250); });
+    palette.addEventListener("click", (event) => {
+      if (event.target === palette) { palette.close(); return; }
+      const chip = event.target.closest("[data-palette-kind]");
+      if (chip) { paletteKind = chip.dataset.paletteKind; renderPaletteResults(); return; }
+      const hit = event.target.closest("[data-palette-open]");
+      if (hit) openPaletteHit(hit);
+    });
+    document.getElementById("palette-hint")?.addEventListener("click", openPalette);
+    renderPaletteAffordance();
+  }
+
   document.getElementById("open-desktop").addEventListener("click", () => openDesktop("browser"));
   elements.scheduleButton.addEventListener("click", renderRoutinesPanel);
   document.getElementById("teach-button").addEventListener("click", openTeachMode);
   document.getElementById("finish-teach").addEventListener("click", finishTeachMode);
+  document.getElementById("hand-back").addEventListener("click", (event) => {
+    // Captured now: currentTarget is null once dispatch ends, and the .finally below runs after.
+    const button = event.currentTarget;
+    const agentId = button.dataset.handBack;
+    if (!agentId || typeof adapter.handBack !== "function") return;
+    button.disabled = true;
+    adapter.handBack(agentId)
+      .then((result) => { showToast(result.pending ? "The host still reports the hand-off as pending" : "Handed back — the agent resumes on its own"); })
+      .catch((error) => showToast(`Could not hand the computer back: ${error.message}`))
+      .finally(() => { button.disabled = false; renderHandBack(); });
+  });
   document.getElementById("pause-run").addEventListener("click", () => {
     adapter.setRunPaused(!state.desktop.paused);
     showToast(state.desktop.paused ? "Desktop view paused — the worker keeps running" : "Desktop view resumed");

@@ -31,6 +31,30 @@ report with evidence required, dashboard 35 checks plus its leak arm, subscripti
 | GW-15 · **landed** | `setAgentUnread{isUnread:true}` errors with "this.tm.sessionStore.seedSessionActivityFromDbMtime is not a function"; the clear direction works, which is all MR-06 needs | Trace the session store method on the raise path; one host fix | S |
 | MR-11, MR-15 | Not in Wave B: the run rail's synthetic timeline, and the credential card (needs the secret-card work in Wave D1) | Wave C / Wave D1 | S / M |
 
+**Wave C landed 2026-09-03 (two slices under the Fable workflow, each adversarially verified,
+then reviewed and fixed, then every gate re-run by the orchestrator).** GW-03 acceptance status
+after every send (composer reads `promptAcceptanceStatus`, "not accepted" carries the host's reason)
+and the transcript loads by tail with paged scroll-back; GW-05 a Skills panel on all nine workflow
+commands (list, enable, edit, delete, run, import text/URL, port); GW-10 a hand-back control while a
+takeover is pending and an Updates panel on update/reset, with the host bundle update deliberately
+left out; GW-08 channel state on listener cards; GW-01 name/description editing, avatar upload to
+`/avatars/<id>`, notifications and hide toggles, Duplicate, the agent count against the cap; GW-09
+inline images and bounded text previews through the attachment reads; GW-14 a Cmd-K palette on
+`isGlobalSearchEnabled` / `searchAgents` / `searchMedia`; GW-11 the widget × reaches `dismissWidget`.
+Left for later: `reactToMessage` and `getAgentThread` (GW-03 third item), per-tool connector switches
+(blocked on CP-07), the secret card (Wave D1). The dashboard gate grew from 35 to about 70 checks and
+now sweeps the skills it imports out of the shared library.
+
+| Id | Finding | Next | Size |
+|---|---|---|---|
+| MOUNT-1 (P0, security) | The recreate script bind-mounts `~/.codex` and `~/.claude` **read-write** at `/root` in the box; the agent's shell runs as root there. Upstream's own connector asks for these mounts read-only. Nothing in the box uses them: Codex is adopted by the relay from the Mac, and the Claude/Gemini in-box route is not built. Found because `portAgentLocalSkills` discovered Jason's private global CLAUDE.md as a "skill" and six enabled copies accumulated in the shared library (cleaned) | Recreate the box from the updated `recreate-box.sh` (mounts removed 2026-09-03). Proof: `docker inspect` shows no `/root/.claude` or `/root/.codex` mount and the roster's skills list carries no "Claude memory" | operator, 30 s |
+| BOX-2 | `updateForeverBox` / `resetForeverBox` are wired in the Updates panel but the loopback backend defines no `recreateInBox`, so both throw "This box backend does not support an in-box recreate" (rewrapped as "Couldn't reach the service that updates this computer") | Say so in the panel, or implement recreate for the docker box (it is `recreate-box.sh`) behind the gateway | S / M |
+| WORKFLOW-1 | `runAgentWorkflowNow` drops the agent id for an unscheduled workflow; the skill runs as an `@name` mention with no agent context | Host fix in `workflow-commands.ts:259-285` | S |
+| DISPLAY-1 · **landed** | Deleted agents kept their shared-desktop window in `/home/box/.sand-window-assignments.json` (one entry sat under the key "undefined"); after enough probe agents a fresh one could not get a window and its browser child failed with "could not identify this agent's own display" | `deleteAgents` now calls the forever-box `releaseAgent`; `ensureForeverBox` refuses a call with no agent id; the assignments loader drops keys that are not agent ids; the live file was rewritten to the four live agents once | S |
+| PHANTOM-2 · **landed** | Eight phantom agents (seven "New Agent", one named after a replay prompt) appeared with real ids during the gate pass: the audit ledger and the evidence stamp append with `mkdir -p`, a write landing after `deleteAgent` recreated `agents/<id>/`, and the roster recovered the directory into an agent, naming it from whatever it found | Tombstones: `deleteSession` records the id in `agents/deleted-agents.json`; every reader skips a tombstoned id, the roster sweeps a resurrected directory on sight, `withAgentDb` refuses it. Also: both ledger writers refuse to recreate a deleted top-level agent's directory, the roster recovers a directory only when a profile says an agent lived there, `[sand][agents]` logs every mint and every createSession with its caller. The eight were deleted | S |
+| CAPSULE-1 · **landed** | The desktop capsule had no width clamp, so an agent with a 65-character name pushed it under the shelf utilities and no click reached it (the dashboard gate's `#open-desktop` click timed out) | `max-width: 380px` and ellipsis on the label | S |
+| AVATAR-1 | `listAgents` reports `avatarVersion` null right after `setAgentAvatarBytes` stored one; `getAgentAvatar` carries the version. The adapter works around it | Carry the version in the roster summary | S |
+
 **Host wave E1 landed 2026-09-03 (done by hand in the main session during Anthropic's 529 outage,
 gate-verified the same way).** GW-15 the unread raise path (the session store never had
 `seedSessionActivityFromDbMtime`); AUDIT-1 `getAgentActionAudit{id,limit,before}` reads the
@@ -229,8 +253,8 @@ merged into one row and both ids kept.
 | TOOLS-02 · **landed** | computerUse subagent offered 12 tools instead of 3 | Derive `isBoxScopedSubagent` from the normalized subagent kind at `:2542` and `:2759`. Proof: subagent wire capture shows Shell, Read, Computer | S |
 | CP-10 | A submitted connector secret is stored where nothing reads it | Make `routeSecret` connector-aware: merge into that server's `env` in `connectors.json` (0600, atomic) and restart it; keep the channel branch for slack/github | M |
 | GW-13 · **landed** | Evidence verdicts exist, are measured, and no UI shows the receipts behind them | Disclosure behind the pill: `getAgentEvidence{id, attemptId}` → receipt count, tool names, attestation heads | S |
-| GW-05 | Nine working skills commands called by nothing; teach has no product it can produce | Skills panel per agent mirroring Routines: list, enable, edit, delete, run, import text/URL | M |
-| GW-03 | Only the flat whole-transcript read is used; acceptance never checked | Poll `promptAcceptanceStatus` after every send; tail on refresh, page on scrollback; thread and react later | M |
+| GW-05 · **landed** | Nine working skills commands called by nothing; teach has no product it can produce | Skills panel per agent mirroring Routines: list, enable, edit, delete, run, import text/URL | M |
+| GW-03 · **landed** (acceptance, tail, page; react/thread later) | Only the flat whole-transcript read is used; acceptance never checked | Poll `promptAcceptanceStatus` after every send; tail on refresh, page on scrollback; thread and react later | M |
 | MR-01 · **landed** | Room ••• menu is hardcoded copy with a dead button | Point it at `agentProfilePanel` / `membersPanel`, which are live, or delete it | S |
 | MR-02 · **landed** | Plugins Tools/Skills sections structurally empty | Fill Tools from `listRoutedMcpTools` matched by server name; give Skills the same empty-state sentence or drop it | M |
 | MR-03 · **landed** | Key form says the value is discarded; the relay stores it | Branch the hint and the toast on `group === "Providers"`; report the adoption result the adapter awaits | S |
@@ -246,14 +270,14 @@ merged into one row and both ids kept.
 | MODEL-1 | Per-agent and per-subagent model dead on every routed provider; §5's "no new plumbing" was wrong | Per-session model override in `createProviderPromptSession`, `resolveSandRequestedModel` threaded through the routed branch keyed on subagent kind and stored settings. Design item; enables seniority routing against the rubric | L |
 | COMPACT-1 · **landed** | `compactionEpoch` hardcoded 0 at both sites | Per-session counter incremented where turn-settle logs "conversation compacted"; must land with SP-1 | S |
 | GC-1 · **landed** | Stale-root GC unreachable on a self-hosted box | Env override matching the other two; decide local defaults | S |
-| GW-01 | Agent identity write path unwired: no edit, avatar, notifications, hygiene | Agent-detail panel on `updateAgent`, `setAgentAvatarBytes`, notify setters, hidden/unread, duplicate | M |
+| GW-01 · **landed** | Agent identity write path unwired: no edit, avatar, notifications, hygiene | Agent-detail panel on `updateAgent`, `setAgentAvatarBytes`, notify setters, hidden/unread, duplicate | M |
 | GW-06 · **landed** | Memory only on the operator page | Port the three call sites into the Machine Room agent-detail panel | S |
 | GW-07 | Teach recording throws at a default-off gate | Dev-flags row through `setHostSettings{featureFlagOverrides}`; then settle the fork-window contradiction with one live call | M |
-| GW-08 | Six MCP reads unused; adapter's "no tool list" claim is false | `togglePluginTool` on `listRoutedMcpTools` + `listBoxMcpServers` + `setHostSettings{mcpDisabledToolsByServerId}`; `getAgentChannels` on the cards | M |
-| GW-09 | Attachments uploaded but never rendered | `readAttachmentImage` inline for screenshots, text/chunk previews; `searchMedia` behind Files | S |
-| GW-10 | No hand-back after a takeover; no update/reset panel | Hand-back control driven by `pendingHandoff`; Updates panel on `getHostStatus` + `updateForeverBox` + `resetForeverBox` | M |
+| GW-08 · **landed** (channel state; switches wait on CP-07) | Six MCP reads unused; adapter's "no tool list" claim is false | `togglePluginTool` on `listRoutedMcpTools` + `listBoxMcpServers` + `setHostSettings{mcpDisabledToolsByServerId}`; `getAgentChannels` on the cards | M |
+| GW-09 · **landed** | Attachments uploaded but never rendered | `readAttachmentImage` inline for screenshots, text/chunk previews; `searchMedia` behind Files | S |
+| GW-10 · **landed** (see BOX-2) | No hand-back after a takeover; no update/reset panel | Hand-back control driven by `pendingHandoff`; Updates panel on `getHostStatus` + `updateForeverBox` + `resetForeverBox` | M |
 | GW-11 · CP-09 · MR-15 | The masked secret card is complete on the host and dead in every UI | Carry `entryId` through `cardOf`, masked input, `submitSecret{entryId,value,agentId}`; wire `dismissWidget` on × | M |
-| GW-14 | Global search index built and queried by nobody | Cmd-K palette on `isGlobalSearchEnabled`, `searchAgents`, `searchMedia` | M |
+| GW-14 · **landed** | Global search index built and queried by nobody | Cmd-K palette on `isGlobalSearchEnabled`, `searchAgents`, `searchMedia` | M |
 | CP-03 | The one real connected connector is invisible in the UI | Three read commands wired to `mcp.management` (listInstalled, listPlugins, getPlugin); cards from listInstalled; listener rows in their own section | M |
 | CP-04 | Connect opens cursor.com for an account we do not own | Token form calling `connectChannel{id,platform,token}`; label the Cursor route honestly | S |
 | CP-05 | Marketplace/install are Cursor RPCs on an expired stub; catalog throws | Short term: return `[]` on catalog failure. Real: local manifest index + install into the plugin cache, routed at the connectors.json writer. Gated on CP-14 | L |
@@ -281,8 +305,7 @@ cards, routines, settings, add agent/room, composer, live box, schedule, demo fa
 GW-04 (routines fully wired; run history needs a new host read), CP-02 (local stdio connectors are
 the spine), TOOLS-04, TOOLS-07, BL-P2.
 
-Decisions (operator): **CP-14** closed, the substrate was decided 2026-08-18 (section 7, `docs/CONNECTOR-PLUGIN-PLANE.md`); **ENDPOINT-1 / BL-P3** recreate the box
-without the env lines or invert precedence; **TOOLS-12** keep multitask on and fix the comment;
+Decisions (operator): **CP-14** closed, the substrate was decided 2026-08-18 (section 7, `docs/CONNECTOR-PLUGIN-PLANE.md`); **ENDPOINT-1 / BL-P3** closed on inspection 2026-09-03: the live container carries no `SAND_OPENAI_COMPATIBLE_*` env (the 2026-08-30 recreate dropped it), so the relay's switch already sticks; **MOUNT-1** (§0) is the recreate that remains; **TOOLS-12** keep multitask on and fix the comment;
 **TOOLS-05** generate_image only if an image model is wanted; **GW-02 / GW-12 / TOOLS-06 /
 BACKEND-1 / CP-15** stay out of scope, said so here.
 
@@ -316,7 +339,7 @@ MR-07, MR-08, MR-09, MR-10, MR-12, MR-13, MR-14, GW-13 disclosure, GW-06 memory 
 Browser row carries text; the evidence pill opens a disclosure with a receipt count; a Providers card
 with a non-adoptable route shows no Connect button.
 
-**Wave C — next — the working commands get a surface (Machine Room).** GW-03 (acceptance + tail), GW-05
+**Wave C — landed 2026-09-03 — the working commands get a surface (Machine Room).** GW-03 (acceptance + tail), GW-05
 (Skills panel), GW-01 (agent detail edit), GW-09 (inline attachments), GW-10 (hand-back, Updates),
 GW-14 (palette), GW-08 (tool switches). Two sessions; C1 = GW-03, GW-05, GW-10 hand-back; C2 = the
 rest. Proof per command: the call appears in the adapter and a headless check exercises it against
@@ -355,7 +378,8 @@ rubric (chief on the highest-scoring endpoint, workers on cheap ones).
    filed it as open. What remains is engineering: run OpenConnector as a stdio sidecar in the box
    first (D2), or make the HTTP MCP path execute locally (CP-13); inject secrets into the server
    env at spawn (CP-10). Wave D1 needs none of it and starts now.
-2. **ENDPOINT-1.** Recreate the box without the `SAND_OPENAI_COMPATIBLE_*` env lines (30 s
-   downtime, the relay switch becomes permanent). Recommendation: yes, at the next quiet moment.
+2. **MOUNT-1 (was ENDPOINT-1).** The env pin was already gone; what the recreate now fixes is the
+   read-write mount of `~/.claude` and `~/.codex` into the box. Run `.cache/patched-host/recreate-box.sh`
+   (mounts removed): 30 s of downtime. Recommendation: today.
 3. **MODEL-1 timing.** Per-agent model is a design contract, not a wiring job. Recommendation: after
    Wave A, before Wave C2, because it is the token-bill lever.

@@ -110,6 +110,13 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-03 (Wave C, dashboard).** Acceptance status after every send, transcript tail with
+  paged scroll-back, Skills panel on the nine workflow commands, hand-back and Updates, channel
+  state on cards, agent editing with avatars and toggles, inline attachments, Cmd-K search, widget
+  dismiss. Security finding on the way: the recreate script mounted `~/.claude` and `~/.codex`
+  read-write into the box (MOUNT-1 in GAP-ANALYSIS §0); mounts removed from the script, recreate
+  pending. ENDPOINT-1 / §5 P3 closed on inspection: the live container has no endpoint env pin.
+
 - **2026-09-03 (host wave E1, by hand during the Anthropic 529 outage).** Unread raise path fixed;
   `getAgentActionAudit` reads the action ledger; browser screenshots reach the model as image
   parts; `[sand][gates]` table at host start; maintenance switches (`SAND_STALE_ROOT_GC`,
@@ -213,7 +220,7 @@ completions, not a thousand completions).
 commands in `docs/GAP-ANALYSIS.md` §2; the two real gaps are the MCP meta pair (TOOLS-01) and the
 browserUse subagent (SUB-1).
 
-**P3 — Endpoint pinned by container env.** The operator panel is built and honest about
+**P3 — CLOSED 2026-09-03 on inspection: the live container carries no `SAND_OPENAI_COMPATIBLE_*` env (the 2026-08-30 recreate dropped it) and the relay's switch sticks. Original entry follows.** Endpoint pinned by container env. The operator panel is built and honest about
 this (red banner). One recreate without the `SAND_OPENAI_COMPATIBLE_*` lines hands the
 switch over permanently. Asked; awaiting "go". Structural, not just operational: container env
 always beats the relay's switch (GAP-ANALYSIS ENDPOINT-1 offers the inverted-precedence alternative).

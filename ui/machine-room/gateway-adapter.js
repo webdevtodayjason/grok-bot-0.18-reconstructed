@@ -71,8 +71,13 @@
       rule: null,
       options: [],
     };
+    // The host stamps the entry, not the message: respondedValue once respondToWidget took an
+    // answer, widgetDismissed once dismissWidget closed it (widget-responses.ts). Reading neither
+    // left every answered question drawn with live buttons for the life of the transcript.
     if (m.type === "widget" && m.widget) return {
-      kind: "widget", requestId: null, status: "pending",
+      kind: "widget", requestId: null,
+      status: entry.widgetDismissed === true ? "dismissed" : entry.respondedValue != null ? "answered" : "pending",
+      answer: entry.respondedValue ?? null,
       title: m.widget.prompt || "The agent asked you a question",
       detail: "", rule: null,
       options: Array.isArray(m.widget.options) ? m.widget.options : [],
@@ -120,7 +125,11 @@
   // Rows are receipts of work. Progress updates, state edits and agent-to-agent sends are not
   // work, and their arguments are internal JSON nobody should read in a conversation.
   const NOT_A_RECEIPT = /communicate|update_state|todo|send.?to.?agent|react.?to.?message|sleep|wait/i;
-  function weaveToolRows(transcript, outline) {
+  // `partial` says the transcript is a tail window, not the whole history. The outline still
+  // starts at the beginning of the conversation, so rows that precede an outline entry the window
+  // does not hold belong to history that is off screen; carrying them forward would dump every
+  // tool call the agent ever made at the top of the window.
+  function weaveToolRows(transcript, outline, partial = false) {
     const entries = [...(transcript ?? [])];
     const items = (Array.isArray(outline) ? outline : []).filter((i) => !(i?.kind === "tool-call" && NOT_A_RECEIPT.test(String(i.name ?? ""))));
     if (!items.some((item) => item?.kind === "tool-call")) return entries;
@@ -133,7 +142,7 @@
       if (key == null) continue;
       let at = -1;
       for (let j = cursor; j < entries.length; j += 1) if (entryKey(entries[j]) === key) { at = j; break; }
-      if (at < 0) continue;
+      if (at < 0) { if (partial && cursor === 0) pending = []; continue; }
       if (pending.length) { inserts.set(at, [...(inserts.get(at) ?? []), ...pending]); pending = []; }
       cursor = at + 1;
     }
@@ -159,29 +168,53 @@
     }
     return out;
   }
-  function messagesOf(transcript, fallbackName, outline) {
-    return collapseAgentExchanges(weaveToolRows(transcript, outline), fallbackName)
-      .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || e.kind === "agent-exchange" || (e.kind === "message" && e.role === "user"))
+  // A file in the transcript (GW-09). The operator's upload lands as a user-attachment entry
+  // carrying file_path; the agent's own SendMessage {type:"attachment"} carries a url, which is
+  // a file:// URL when a tool saved the image to disk (mcp-image-assets.ts tells the model to
+  // pass exactly that). readAttachmentImage and readAttachmentText both take the bare path, so
+  // the URL form is unwrapped here and nowhere else. The kind is decided by extension, the same
+  // table the host serves images from (media-extensions.ts IMAGE_MIME_FROM_EXTENSION).
+  const IMAGE_EXT = /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp|heic|heif)$/i;
+  function localPathOf(urlOrPath) {
+    const s = String(urlOrPath ?? "");
+    if (!/^file:\/\//i.test(s)) return s;
+    try { return decodeURIComponent(new URL(s).pathname); } catch { return s.replace(/^file:\/\//i, ""); }
+  }
+  function attachmentOf(urlOrPath, fileName) {
+    const path = localPathOf(urlOrPath);
+    if (!path) return null;
+    const name = fileName || path.split("/").pop();
+    return { path, name, kind: IMAGE_EXT.test(name) || IMAGE_EXT.test(path) ? "image" : "file" };
+  }
+  const isAttachmentEntry = (e) => e.kind === "user-attachment" || (e.kind === "send-message" && e.message?.type === "attachment");
+  function messagesOf(transcript, fallbackName, outline, partial = false) {
+    return collapseAgentExchanges(weaveToolRows(transcript, outline, partial), fallbackName)
+      .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || e.kind === "agent-exchange" || e.kind === "user-attachment" || (e.kind === "message" && e.role === "user"))
       .map((e, i) => {
         if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text };
         if (e.kind === "agent-exchange") return { id: e.id, type: "system", text: `${e.count} message${e.count === 1 ? "" : "s"} with ${e.peer}`, peer: e.peer, self: e.self, exchange: e.exchange };
         const mine = e.kind !== "send-message";
         const card = mine ? null : cardOf(e);
-        const text = e.kind === "send-message"
+        const attachment = isAttachmentEntry(e)
+          ? attachmentOf(e.kind === "user-attachment" ? e.file_path : (e.message.url ?? e.message.file_path), e.kind === "user-attachment" ? e.file_name : e.message.file_name)
+          : null;
+        const text = attachment ? (e.kind === "send-message" ? e.message.alt ?? "" : "")
+          : e.kind === "send-message"
           ? (typeof e.message?.content === "string" ? e.message.content : "")
           : (typeof e.content === "string" ? e.content : e.content?.map?.((c) => c.text ?? "").join("") ?? "");
         return {
           id: e.id ?? `entry-${i}`,
           authorId: mine ? "you" : (e.author?.id ?? "agent"),
           authorName: mine ? "You" : (e.author?.name ?? fallbackName),
-          type: card ? "decision" : "text",
+          type: card ? "decision" : attachment ? "attachment" : "text",
           ...(card ? { card } : {}),
+          ...(attachment ? { attachment } : {}),
           text: String(text).trim(),
           time: timeOf(Number(e.timestampMs ?? e.createdAt)),
           ...(e.evidence ? { evidence: e.evidence } : {}),
         };
       })
-      .filter((m) => m.text || m.card)
+      .filter((m) => m.text || m.card || m.attachment)
       // Claim provenance (docs/EVIDENCE-CONTRACT.md): the host stamps every text reply with a verdict
       // it computed from the tool results of that attempt. Label, never suppress: the reply stays,
       // a pill under it says what the receipts could not back.
@@ -207,6 +240,31 @@
   // Agents the host is currently raising an error tray for. Rebuilt each pass, never accumulated:
   // a tray the operator cleared has to stop colouring the roster.
   const attentionIds = new Set();
+
+  // Send acceptance (GW-03). The ledger's account slot for the host's own sends is the literal
+  // "host" (shared/send-acceptance.ts HOST_ACCOUNT_SLOT); the nonce is ours. The ledger answers
+  // found/not-found/unknown-durability, and a found record is accepted, pending or rejected with
+  // a rejectionCode. A send that threw has its record cleared, so "no record" after a send the
+  // gateway answered is itself a finding, not a shrug.
+  const HOST_ACCOUNT_SLOT = "host";
+  const nonce = () => (global.crypto?.randomUUID ? global.crypto.randomUUID() : `mr-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  function describeAcceptance(answer) {
+    const status = answer?.outcome === "found" ? answer.record?.status : null;
+    if (status === "accepted") return { state: "accepted", text: "Accepted by the host" };
+    if (status === "rejected") return { state: "not-accepted", text: `Not accepted — ${answer.record?.rejectionCode ?? "the host gave no reason"}` };
+    if (status === "pending") return { state: "not-accepted", text: "Not accepted yet — the host still lists this send as pending" };
+    if (answer?.outcome === "unknown-durability") return { state: "not-accepted", text: "Not accepted — the host's acceptance ledger is degraded and cannot say whether it took this" };
+    if (answer?.outcome === "error") return { state: "not-accepted", text: `Not accepted — the acceptance check failed: ${answer.error}` };
+    return { state: "not-accepted", text: "Not accepted — the host holds no record of this send" };
+  }
+  // What an import answered, against the list read back afterwards. The host reports imported
+  // and skipped explicitly; a skipped row carries the reason, and that reason is the message.
+  function importOutcome(answer, skills) {
+    const imported = (Array.isArray(answer?.result?.imported) ? answer.result.imported : []).map((w) => (typeof w === "string" ? w : w?.name ?? w?.id ?? "")).filter(Boolean);
+    const skipped = (Array.isArray(answer?.result?.skipped) ? answer.result.skipped : []).map((s) => ({ source: String(s?.source ?? ""), reason: String(s?.reason ?? "no reason given") }));
+    const present = imported.filter((name) => skills.some((s) => s.name === name));
+    return { imported: present, skipped, missing: imported.filter((name) => !present.includes(name)), skills };
+  }
 
   // Files that passed through this agent's conversation. The gateway has read-by-path but no
   // directory listing of any kind, and there is no per-worker directory to list either -- every
@@ -463,27 +521,140 @@
     return { default: current?.id ?? live?.model ?? "default", available };
   }
 
+  // Skills are the host's workflows: the "how" beside the routines' "when" (box-reference-docs.ts
+  // describes them as name, description and instructions with a per-agent enable). A routine
+  // created on the Routines panel is also listed by getAgentWorkflows, as source "automation";
+  // it is left to that panel rather than drawn twice with two sets of controls.
+  function skillsOf(list) {
+    return (Array.isArray(list) ? list : []).filter((w) => w && w.source !== "automation").map((w) => ({
+      id: w.id, name: w.name ?? w.id, description: w.description ?? "", body: w.body ?? "",
+      enabled: w.isEnabledForAgent !== false,
+      source: w.source ?? "workflow", sourceRef: w.sourceRef ?? null,
+      // A skill imported with trigger frontmatter is also scheduled; the host fires it by agent
+      // id through the automation runtime, which is the path runAgentWorkflowNow takes for it.
+      scheduled: w.trigger != null, schedule: w.trigger?.schedule ?? null,
+      // The schedule's own switch, separate from the per-agent enable: an edit must send it back
+      // as it is, or saving a typo fix on a paused schedule re-arms it.
+      triggerEnabled: w.trigger?.isEnabled !== false,
+      scheduleDescription: w.scheduleDescription ?? null,
+      lastRunAt: w.lastRunAt ?? null, helperScripts: Array.isArray(w.helperScripts) ? w.helperScripts : [],
+    }));
+  }
+
+  // getAgentChannels answers { manifests: [{ platform }], connections: [{ platform, ... }] }: the
+  // platforms a chat listener can bind to and the ones this agent holds a token for. A listener
+  // card is global; this is the per-agent half of its state, read for the agent on screen.
+  function channelsOf(answer) {
+    const connections = Array.isArray(answer?.connections) ? answer.connections : [];
+    const platforms = (Array.isArray(answer?.manifests) ? answer.manifests : []).map((m) => m?.platform).filter(Boolean);
+    return platforms.map((platform) => {
+      const live = connections.find((c) => c?.platform === platform) ?? null;
+      return { platform, connected: live != null, detail: live ? String(live.name ?? live.workspace ?? live.channel ?? live.label ?? "") : "" };
+    });
+  }
+
+  // The transcript is read as a bounded tail and grown backwards on demand, never as the whole
+  // history on every refresh (GW-03). One window per agent: the entries on screen, oldest first,
+  // and the host's cursor for the page before them. A refresh reads the tail again and splices it
+  // over the window from the first entry both hold, so a page the operator scrolled up for stays
+  // put while the newest entries (streaming text, a stamped verdict, a card's status) refresh.
+  const TAIL_LIMIT = 150;
+  const PAGE_LIMIT = 150;
+  const windows = new Map();
+  // The load selectContext started for an agent, by id, while it is in flight (see revealEntry).
+  const loads = new Map();
+  const cursorOf = (answer) => (Number.isFinite(answer?.nextBeforeSeq) ? answer.nextBeforeSeq : null);
+  function mergeTail(held, answer) {
+    const fresh = Array.isArray(answer?.entries) ? answer.entries : [];
+    const reset = () => ({ entries: fresh, nextBeforeSeq: cursorOf(answer) });
+    if (!held || fresh.length === 0) return held && fresh.length === 0 ? held : reset();
+    const at = held.entries.findIndex((e) => e.id === fresh[0].id);
+    // More new entries than one tail holds, or a rewritten history: nothing we hold lines up, so
+    // the window starts over and the pages scrolled up for are gone with it.
+    if (at < 0) return reset();
+    // Spliced in place: the window keeps its identity across a refresh, so a page read that was
+    // in flight while the tail refreshed lands on the window that is still on screen.
+    held.entries = [...held.entries.slice(0, at), ...fresh];
+    return held;
+  }
+  async function loadOlder(agentId) {
+    const held = windows.get(agentId);
+    if (!held || held.nextBeforeSeq == null) return { loaded: 0, more: false };
+    const page = await call("getAgentTranscriptPage", { id: agentId, beforeSeq: held.nextBeforeSeq, untilMs: Date.now(), limit: PAGE_LIMIT });
+    const older = Array.isArray(page?.entries) ? page.entries : [];
+    // A heartbeat or stream refresh during the read splices the tail into this same object; only
+    // a window that started over (nothing lined up) is a different one, and this page was read
+    // for the cursor that window no longer has.
+    const current = windows.get(agentId);
+    if (current !== held) return { loaded: 0, more: current?.nextBeforeSeq != null };
+    held.entries = [...older, ...held.entries];
+    held.nextBeforeSeq = cursorOf(page);
+    return { loaded: older.length, more: held.nextBeforeSeq != null };
+  }
+
   // The outline is the model's whole turn state (1,500 items on a long-lived agent) and it only
   // moves when the transcript does, so it is refetched only when the transcript's tail changed.
   const outlineCache = new Map();
+  function shapeWindow(agentId, name, outline) {
+    const held = windows.get(agentId) ?? { entries: [], nextBeforeSeq: null };
+    const partial = held.nextBeforeSeq != null;
+    const latestAgentMs = held.entries
+      .filter((e) => e.kind === "send-message")
+      .reduce((n, e) => Math.max(n, Number(e.timestampMs) || 0), 0);
+    return { messages: messagesOf(held.entries, name, outline, partial), latestAgentMs, files: filesOf(held.entries), hasOlder: partial };
+  }
   async function loadContext(context, name) {
-    const [transcript, automations] = await Promise.all([
-      call("getAgentTranscript", { id: context.id }).catch(() => null),
+    const [tail, automations, workflows, channels, box] = await Promise.all([
+      call("getAgentTranscriptTail", { id: context.id, limit: TAIL_LIMIT }).catch(() => null),
       call("getAgentAutomations", { id: context.id }).catch(() => null),
+      call("getAgentWorkflows", { id: context.id }).catch(() => null),
+      call("getAgentChannels", { id: context.id }).catch(() => null),
+      // pendingHandoff reaches the gateway only as the `handoff` field decorateForeverBoxStatus
+      // stamps on the box status (sand-host.ts). A room has no box of its own.
+      context.kind === "worker" ? call("getForeverBoxStatus", { id: context.id }).catch(() => null) : Promise.resolve(null),
     ]);
-    const tail = transcript?.at?.(-1);
-    const sig = `${transcript?.length ?? 0}:${tail?.id ?? ""}:${tail?.timestampMs ?? ""}`;
+    windows.set(context.id, mergeTail(windows.get(context.id), tail));
+    const entries = windows.get(context.id).entries;
+    const last = entries.at(-1);
+    const sig = `${entries.length}:${last?.id ?? ""}:${last?.timestampMs ?? ""}`;
     const cached = outlineCache.get(context.id);
     let outline = cached?.sig === sig ? cached.outline : null;
     if (outline == null) {
       outline = await call("getConversationOutline", { id: context.id }).catch(() => null);
       outlineCache.set(context.id, { sig, outline });
     }
-    const latestAgentMs = (transcript ?? [])
-      .filter((e) => e.kind === "send-message")
-      .reduce((n, e) => Math.max(n, Number(e.timestampMs) || 0), 0);
-    return { messages: messagesOf(transcript, name, outline), routines: routinesOf(automations, context), latestAgentMs, files: filesOf(transcript) };
+    return {
+      ...shapeWindow(context.id, name, outline),
+      routines: routinesOf(automations, context),
+      skills: skillsOf(workflows),
+      channels: channels == null ? null : channelsOf(channels),
+      handoff: box?.handoff ?? null,
+      boxState: box?.state ?? null,
+    };
   }
+
+  // What loadContext read, onto the roster record it was read for. The transcript window and its
+  // outline are the adapter's; the record carries what the views draw.
+  function applyLoaded(r, loaded) {
+    r.messages = loaded.messages;
+    r.files = loaded.files;
+    r.hasOlder = loaded.hasOlder;
+    r.skills = loaded.skills;
+    if (loaded.channels != null) r.channels = loaded.channels;
+    r.handoff = loaded.handoff;
+    r.boxState = loaded.boxState;
+  }
+  // The part of a record that reloadActive compares to decide whether the app must redraw. Every
+  // emit rebuilds the whole conversation, so this has to name everything the views show and
+  // nothing that moves on its own.
+  const recordSig = (r) => [
+    r.messages?.length ?? 0, r.messages?.at?.(-1)?.id ?? "", r.messages?.at?.(-1)?.text?.length ?? 0,
+    r.files?.length ?? 0, r.hasOlder ? 1 : 0,
+    (r.skills ?? []).map((s) => `${s.id}:${s.enabled ? 1 : 0}:${s.name}`).join(","),
+    (r.channels ?? []).map((c) => `${c.platform}:${c.connected ? 1 : 0}`).join(","),
+    r.handoff?.requestId ?? "", r.boxState ?? "",
+    r.composer?.state ?? "", r.composer?.nonce ?? "",
+  ].join("|");
 
   const DEFAULTS = {
     activeContext: null,
@@ -495,15 +666,61 @@
     // renderDesktop builds an honest list from real state now.
     desktop: { paused: false, timeline: [] },
     teaching: { active: false, workerId: null, startedAt: null },
+    // countAgents is the host's on-disk count, the number its 50-agent cap is measured against;
+    // null until read. search.enabled is isGlobalSearchEnabled, consulted once at boot (GW-14).
+    agentCount: null,
+    search: { enabled: false },
   };
 
+  // The host's avatar, by URL, versioned. listAgents carries avatarVersion (null while the agent
+  // has none) and the gateway serves GET /avatars/<id>?v=<version> for exactly that version,
+  // immutable-cached, which the relay proxies. The old comment here said /avatars/<id> 404s: it
+  // does, for an agent with no avatar, which was every agent on this box until one was uploaded.
+  // The vendored SVGs stay as the placeholder, hashed from the id so a face is stable.
+  //
+  // Measured 2026-09-03 on this box: listAgents answers avatarVersion null for an agent whose
+  // avatar setAgentAvatarBytes just stored, while getAgentAvatar { id } answers { version,
+  // dataUrl } and GET /avatars/<id>?v=<version> serves it. So the version is taken from
+  // listAgents when it carries one and from getAgentAvatar otherwise (once at boot, and after a
+  // write), and a version once known is kept across ticks rather than reset by a null.
+  const avatarUrl = (id, version) => `/avatars/${encodeURIComponent(id)}?v=${encodeURIComponent(String(version))}`;
+  const avatarOf = (a, version) => (version != null ? avatarUrl(a.id, version) : pick(AVATARS, a.id));
+  const avatarVersionOf = (id) => call("getAgentAvatar", { id }).then((answer) => answer?.version ?? null).catch(() => null);
+  // The identity fields a roster record carries from listAgents, refreshed on every tick so a
+  // rename, an avatar or a hide made from any surface shows here (GW-01). `known` is the version
+  // already held for this agent, kept when the row carries none.
+  function identityOf(a, known = null) {
+    const version = a.avatarVersion ?? known ?? null;
+    return {
+      name: a.name ?? "Untitled",
+      // The host's own per-agent role field. Empty is the honest answer when it is unset -- the
+      // views hide the row rather than printing the literal words "not set" as if it were one.
+      role: (typeof a.title === "string" && a.title.trim()) || (a.isGroup ? "Group chat" : ""),
+      // updateAgent takes the whole profile and trims name and description, so both have to be
+      // carried here or a role edit would blank the description the host already holds.
+      description: typeof a.description === "string" ? a.description : "",
+      avatar: avatarOf(a, version),
+      avatarVersion: version,
+      notify: a.notifyOnUpdatesEnabled !== false,
+      hidden: a.isHiddenFromSidebar === true,
+    };
+  }
+
   async function hydrate(seed) {
-    const [agents, integrations, subscriptions, catalog] = await Promise.all([
+    const [agents, integrations, subscriptions, catalog, agentCount, searchEnabled, hostStatus] = await Promise.all([
       call("listAgents"),
       call("getListenerIntegrations").catch(() => null),
       fetch("/subscriptions").then((r) => r.json()).then((b) => b.subscriptions).catch(() => null),
       fetch("/endpoints").then((r) => r.json()).catch(() => null),
+      call("countAgents").catch(() => null),
+      call("isGlobalSearchEnabled").catch(() => false),
+      call("getHostStatus").catch(() => null),
     ]);
+    // The acceptance ledger is a host capability ("sendAcceptanceV1", host-gateway-api.ts). A host
+    // that lists its capabilities without it keeps no ledger, and "no record" there is not a
+    // refusal. A host that did not answer is assumed to run one, as this box does.
+    const capabilities = Array.isArray(hostStatus?.capabilities) ? hostStatus.capabilities : null;
+    const host = { sendAcceptance: capabilities == null ? true : capabilities.includes("sendAcceptanceV1") };
 
     // Ask the box what it is actually running before stamping any worker with a model name. This
     // used to happen after shape(), so workers wore the seed's default while the picker showed the
@@ -514,21 +731,17 @@
       if (live?.model) models = endpointModels(live, catalog);
     } catch { /* the model probe is a convenience, not a dependency */ }
 
+    // One getAgentAvatar per agent whose row carries no version and whose version the previous
+    // hydrate did not learn (see avatarOf). That answer is the whole avatar as a data URL, up to
+    // the 2 MB this UI accepts, so it is asked once per agent, not once per hydrate: listAgents on
+    // this box answers avatarVersion null for every agent (buildSummary is called without
+    // readAvatar), so without the carry-over every hydrate moved every avatar to learn a string.
+    const knownVersions = new Map([...(seed.workers ?? []), ...(seed.rooms ?? [])].filter((r) => r?.avatarVersion != null).map((r) => [r.id, r.avatarVersion]));
+    const versions = new Map(await Promise.all(agents.map(async (a) => [a.id, a.avatarVersion ?? knownVersions.get(a.id) ?? await avatarVersionOf(a.id)])));
     const shape = (a) => ({
       id: a.id,
-      name: a.name ?? "Untitled",
-      // The host's own per-agent role field. Empty is the honest answer when it is unset -- the
-      // views hide the row rather than printing the literal words "not set" as if it were one.
-      role: (typeof a.title === "string" && a.title.trim()) || (a.isGroup ? "Group chat" : ""),
-      // updateAgent takes the whole profile and trims name and description, so both have to be
-      // carried here or a role edit would blank the description the host already holds.
-      description: typeof a.description === "string" ? a.description : "",
+      ...identityOf(a, versions.get(a.id) ?? null),
       ...statusOf(a),
-      // Real face when the host has one. It does not on this box -- no avatarDataUrl, no colour,
-      // no shape -- and /avatars/<id> 404s, so pointing at it just broke every image. The vendored
-      // SVGs are placeholders, but the mapping is a stable hash of the id, so a worker keeps the
-      // same face across reloads rather than swapping faces with its neighbour.
-      avatar: a.avatarDataUrl || pick(AVATARS, a.id),
       accent: pick(ACCENTS, a.id),
       model: models?.default ?? "default",
       files: [],
@@ -537,6 +750,12 @@
       // opens; until then it says it is asking rather than rendering a bold label over nothing.
       browser: { label: `${a.name} desktop`, screen: "" },
       messages: [],
+      // Filled by loadContext for the context on screen: the agent's skills, the chat platforms
+      // it holds a token for, the box's pending hand-off, and whether the transcript window has
+      // older entries the host can page in. Null channels means "not read yet", not "none".
+      skills: [], channels: null, handoff: null, boxState: null, hasOlder: false,
+      // The composer's last send, as the host's acceptance ledger reports it.
+      composer: null,
       lastActivityAt: a.lastActivityAt ?? 0,
       unread: Number(a.unreadCount) || 0,
       preview: typeof a.lastMessagePreview === "string" ? a.lastMessagePreview : "",
@@ -554,12 +773,19 @@
     const connectors = await connectorPlugins().catch(() => []);
 
     const first = workers[0] ?? rooms[0];
-    if (!first) return { ...seed, workers: [], rooms: [], routines: [], plugins: [...connectors, ...pluginsOf(integrations)], openContexts: [] };
+    if (!first) return { ...seed, host, workers: [], rooms: [], routines: [], plugins: [...connectors, ...pluginsOf(integrations)], openContexts: [], agentCount: Number.isFinite(Number(agentCount)) && agentCount !== null ? Number(agentCount) : null, search: { enabled: searchEnabled === true } };
 
-    const active = { kind: workers[0] ? "worker" : "room", id: first.id };
-    const loaded = await loadContext(active, first.name);
-    first.messages = loaded.messages;
-    first.files = loaded.files;
+    // A rebuild (a duplicate, a delete, a plugin disconnect) keeps the conversation on screen and
+    // the open tabs, as long as those agents still exist; only a context that is gone, or a
+    // first boot, lands on the most recent worker.
+    const exists = (c) => c && (c.kind === "worker" ? workers : rooms).some((r) => r.id === c.id);
+    const kept = exists(seed.activeContext) ? { kind: seed.activeContext.kind, id: seed.activeContext.id } : null;
+    const active = kept ?? { kind: workers[0] ? "worker" : "room", id: first.id };
+    const activeRecord = (active.kind === "worker" ? workers : rooms).find((r) => r.id === active.id);
+    const openContexts = (seed.openContexts ?? []).filter(exists).map((c) => ({ kind: c.kind, id: c.id }));
+    if (!openContexts.some((c) => c.kind === active.kind && c.id === active.id)) openContexts.push(active);
+    const loaded = await loadContext(active, activeRecord.name);
+    applyLoaded(activeRecord, loaded);
 
     // One call covers every agent. Fetching per-context left every other row showing zero
     // routines and no next run, which reads as "nothing scheduled" rather than "not loaded".
@@ -583,9 +809,12 @@
         localToolPermission: hostSettings?.localToolPermission ?? null,
         reachable: hostSettings != null,
       },
+      host,
       activeContext: active,
-      openContexts: [active],
+      openContexts,
       workers, rooms,
+      agentCount: Number.isFinite(Number(agentCount)) && agentCount !== null ? Number(agentCount) : null,
+      search: { enabled: searchEnabled === true },
       routines: Array.isArray(everyAutomation) && everyAutomation.length
         ? everyAutomation.flatMap((entry) => {
             const owner = agents.find((a) => a.id === entry.agentId);
@@ -605,7 +834,7 @@
     // Set by reloadRoster when a status, unread count or preview moved; reloadActive emits on it
     // even when the transcript did not change.
     let rosterChanged = false;
-    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.unread}:${x.preview}`).join("|");
+    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.unread}:${x.preview}:${x.name}:${x.role}:${x.avatar}:${x.hidden ? 1 : 0}:${x.notify ? 1 : 0}`).join("|") + `|${state.agentCount}`;
     // app.js drives the "working" bubble from simulateReply's 1.15s timer, which is right for a
     // demo and wrong for a machine: a real reply takes tens of seconds, so the dots flashed and
     // died and the wait happened in silence. The adapter owns that bubble's lifetime instead --
@@ -613,9 +842,20 @@
     // on a turn that died.
     const awaiting = new Map();
     const AWAIT_CAP_MS = 5 * 60_000;
+    // Attachment reads, by path (GW-09): a transcript rebuild re-asks for every file on screen.
+    const attachmentReads = new Map();
     const keyOf = (c) => `${c.kind}:${c.id}`;
     const clone = (v) => JSON.parse(JSON.stringify(v));
     const same = (a, b) => Boolean(a && b && a.kind === b.kind && a.id === b.id);
+    // After a create, the new agent is the conversation on screen (hydrate keeps the previous one).
+    const landOn = async (id, kind) => {
+      const r = id ? (kind === "worker" ? state.workers : state.rooms).find((x) => x.id === id) : null;
+      if (!r) return;
+      state.activeContext = { kind, id };
+      if (!state.openContexts.some((c) => same(c, state.activeContext))) state.openContexts.push({ kind, id });
+      const loaded = await loadContext(state.activeContext, r.name).catch(() => null);
+      if (loaded) { applyLoaded(r, loaded); applyAwaiting(state.activeContext, r, loaded.latestAgentMs); }
+    };
     const record = (c) => (c.kind === "worker" ? state.workers : state.rooms).find((r) => r.id === c.id);
 
     function emit(type, detail) {
@@ -631,6 +871,17 @@
       if (r) r.messages.push({
         id: `unwired-${Date.now()}`, authorId: "system", authorName: "Machine Room",
         type: "system", text: `${what} is not wired to the gateway yet.`, time: timeOf(Date.now()),
+      });
+      return emit("message:created", { context: state.activeContext });
+    }
+    // A wired command the host refused or that never answered. Wave B routed these through
+    // notWired, which stamped "is not wired to the gateway yet" on a real failure -- the row
+    // then claimed the opposite of what had happened.
+    function failed(what) {
+      const r = record(state.activeContext);
+      if (r) r.messages.push({
+        id: `failed-${Date.now()}`, authorId: "system", authorName: "Machine Room",
+        type: "system", text: what, time: timeOf(Date.now()),
       });
       return emit("message:created", { context: state.activeContext });
     }
@@ -673,11 +924,13 @@
       if (rosterSig() !== before) rosterChanged = true;
     }
     async function reloadRosterInner() {
-      const agents = await call("listAgents").catch(() => null);
+      const [agents, count] = await Promise.all([call("listAgents").catch(() => null), call("countAgents").catch(() => null)]);
+      if (Number.isFinite(Number(count)) && count !== null) state.agentCount = Number(count);
       if (!agents) return;
       for (const a of agents) {
         const target = (a.isGroup ? state.rooms : state.workers).find((x) => x.id === a.id);
         if (!target) continue;
+        Object.assign(target, identityOf(a, target.avatarVersion ?? null));
         const next = statusOf(a);
         target.status = next.status;
         target.statusText = next.statusText;
@@ -750,38 +1003,70 @@
       // Emit only when something the transcript shows actually changed. Every emit makes the app
       // rebuild the whole conversation, and an unconditional one on each stream event and each
       // 15 s tick is a visible flash on a long conversation.
-      const before = `${r.messages?.length ?? 0}|${r.messages?.at?.(-1)?.id ?? ""}|${r.messages?.at?.(-1)?.text?.length ?? 0}|${r.files?.length ?? 0}|${r.awaiting ? 1 : 0}`;
-      r.messages = loaded.messages;
-      r.files = loaded.files;
+      const before = recordSig(r);
+      applyLoaded(r, loaded);
       applyAwaiting(state.activeContext, r, loaded.latestAgentMs);
       state.routines = [
         ...state.routines.filter((x) => !same(x.scope, state.activeContext)),
         ...loaded.routines,
       ];
-      const after = `${r.messages.length}|${r.messages.at(-1)?.id ?? ""}|${r.messages.at(-1)?.text?.length ?? 0}|${r.files.length}|${r.awaiting ? 1 : 0}`;
-      if (after !== before || rosterChanged) emit("message:created", { context: state.activeContext });
+      if (recordSig(r) !== before || rosterChanged) emit("message:created", { context: state.activeContext });
       rosterChanged = false;
+    }
+
+    // The host's send-acceptance ledger, asked by the nonce the send carried. sendPrompt answers
+    // { accepted: true } unconditionally (host-gateway-api.ts), so this is the only honest source
+    // for "the host took that message": a record marked accepted. The gateway returns once the
+    // send is admitted, so one or two reads normally settle it; a few more cover a slow ledger.
+    async function acceptanceOf(clientNonce) {
+      let last = null;
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        last = await call("promptAcceptanceStatus", { accountSlot: HOST_ACCOUNT_SLOT, clientNonce })
+          .catch((error) => ({ outcome: "error", error: error.message }));
+        const settled = last?.outcome === "found" ? last.record?.status !== "pending" : last?.outcome !== "not-found" || attempt > 0;
+        if (settled) break;
+        await new Promise((resolve) => global.setTimeout(resolve, 500));
+      }
+      return describeAcceptance(last);
     }
 
     // The gateway pushes; this adapter pulls what changed. Re-reading the active transcript on
     // every event is cheap next to a turn, and it means a reply from any surface shows up here.
     let pending = null;
     try {
-      const events = new EventSource("/events");
+      const events = new global.EventSource("/events");
       events.onmessage = () => {
         if (pending) return;
-        pending = setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, 900);
+        pending = global.setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, 900);
       };
     } catch { /* no stream: the UI still works, it just will not update on its own */ }
 
     // Heartbeat. The stream is the fast path; this is what keeps status honest when nothing is
     // being said -- the same 15s cadence the old operator UI settled on.
-    setInterval(() => { void reloadActive().catch(() => {}); }, 15_000);
+    const heartbeat = global.setInterval(() => { void reloadActive().catch(() => {}); }, 15_000);
 
     return {
       getSnapshot: () => clone(state),
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-      destroy() { listeners.clear(); },
+      destroy() { listeners.clear(); global.clearInterval(heartbeat); },
+      // The heartbeat's own body, callable: a test with a stub gateway drives a refresh through
+      // it, and a view that just wrote something can ask for the read-back without waiting 15s.
+      refresh: () => reloadActive(),
+
+      // Older entries, one page before the window (GW-03). Resolves with how many came and whether
+      // the host has more; emits its own event so the view can keep its scroll offset instead of
+      // jumping to the bottom the way a new message does.
+      loadOlderMessages(input) {
+        const context = input && typeof input === "object" ? { kind: input.kind, id: input.id } : state.activeContext;
+        const r = record(context);
+        if (!r) return Promise.resolve({ loaded: 0, more: false });
+        return loadOlder(context.id).then((page) => {
+          applyLoaded(r, { ...shapeWindow(context.id, r.name, outlineCache.get(context.id)?.outline ?? null), skills: r.skills, channels: null, handoff: r.handoff, boxState: r.boxState });
+          applyAwaiting(context, r, 0);
+          emit("transcript:older", { context, loaded: page.loaded, more: page.more });
+          return page;
+        });
+      },
 
       selectContext(input, maybeId) {
         const context = typeof input === "object" ? { kind: input.kind, id: input.id } : { kind: input, id: maybeId };
@@ -790,9 +1075,8 @@
         state.activeContext = context;
         if (!state.openContexts.some((c) => same(c, context))) state.openContexts.push(context);
         const snapshot = emit("context:selected", { context });
-        loadContext(context, r.name).then(async (loaded) => {
-          r.messages = loaded.messages;
-          r.files = loaded.files;
+        const load = loadContext(context, r.name).then(async (loaded) => {
+          applyLoaded(r, loaded);
           applyAwaiting(context, r, loaded.latestAgentMs);
           state.routines = [...state.routines.filter((x) => !same(x.scope, context)), ...loaded.routines];
           emit("message:created", { context });
@@ -806,6 +1090,9 @@
             emit("message:created", { context });
           }
         }).catch(() => {});
+        // Recorded so a reveal asked for right after the click waits for this read, rather than
+        // guessing how long five parallel reads and the outline take on a long agent.
+        loads.set(context.id, load);
         return snapshot;
       },
 
@@ -832,25 +1119,194 @@
         const wait = { sentAtMs: Date.now(), id: `working-${Date.now()}`, authorId: context.id, authorName: r.name };
         awaiting.set(keyOf(context), wait);
         r.messages.push({ id: wait.id, authorId: wait.authorId, authorName: wait.authorName, type: "working", text: "", time: "" });
+        // The nonce is what makes the send answerable: the host's acceptance ledger records a
+        // send only under its clientNonce, and promptAcceptanceStatus is keyed by it.
+        const clientNonce = nonce();
+        r.composer = { state: "sending", text: "Sending…", nonce: clientNonce, at: Date.now() };
         const snapshot = emit("message:created", { context });
+        // Not the dots: those belong to the reply. This is the send itself failing to be taken.
+        const refused = (text) => {
+          awaiting.delete(keyOf(context));
+          r.messages = r.messages.filter((m) => m.id !== wait.id);
+          r.status = "attention";
+          r.statusText = "The last message was not accepted";
+          r.composer = { state: "not-accepted", text, nonce: clientNonce, at: Date.now() };
+        };
         call("sendPrompt", {
           agentId: context.id,
           prompt: clean,
+          clientNonce,
           ...(attachments.length
             ? { attachmentPaths: attachments.map((a) => a.path), attachmentNames: attachments.map((a) => a.name) }
             : {}),
         })
-          .then(() => reloadActive())
-          .catch((error) => {
+          // A host that advertises no acceptance ledger cannot be asked; the gateway's answer is
+          // then the whole truth, and the row says exactly that much rather than "not accepted".
+          .then(() => (state.host?.sendAcceptance === false
+            ? { state: "sent", text: "Taken by the gateway (this host keeps no acceptance ledger)" }
+            : acceptanceOf(clientNonce)))
+          .then((acceptance) => {
+            if (acceptance.state === "accepted" || acceptance.state === "sent") r.composer = { ...acceptance, nonce: clientNonce, at: Date.now() };
+            else refused(acceptance.text);
+            emit("message:created", { context });
+            // The refresh runs after the verdict is on screen and fails on its own: a refresh that
+            // fails cannot turn a send the host accepted into a "not accepted".
+            return reloadActive().catch(() => {});
+          }, (error) => {
             // We know it failed. Leaving the dots up for five minutes turns a known failure into
-            // an apparent silence, which is the harder thing to diagnose.
-            awaiting.delete(keyOf(context));
-            r.messages = r.messages.filter((m) => m.id !== wait.id);
-            r.status = "attention";
-            r.statusText = "The last message did not reach the gateway";
-            notWired(`Sending failed: ${error.message}`);
+            // an apparent silence, which is the harder thing to diagnose. This is a send the host
+            // refused or never answered, not a missing wire, so the row says exactly that.
+            refused(`Not accepted — ${error.message}`);
+            r.messages.push({
+              id: `send-failed-${Date.now()}`, authorId: "system", authorName: "Machine Room",
+              type: "system", text: `Sending failed: ${error.message}`, time: timeOf(Date.now()),
+            });
+            emit("message:created", { context });
           });
         return snapshot;
+      },
+
+      // -- Skills (GW-05): the nine workflow commands. Every write is read back through
+      // getAgentWorkflows before it resolves, for the same reason the routine writes are: the
+      // gateway answers 200 to a write the store then declines, and the list is the only proof.
+      getSkills(agentId) {
+        return call("getAgentWorkflows", { id: agentId }).then((list) => {
+          const skills = skillsOf(list);
+          const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((x) => x.id === agentId);
+          if (target) target.skills = skills;
+          return skills;
+        });
+      },
+      // createAgentWorkflow { id, spec } with spec { name, description, body, trigger } -- the
+      // WorkflowSpec shape in shared/workflow-model.ts. trigger null is a plain skill.
+      createSkill(agentId, spec) {
+        const wanted = String(spec?.name ?? "").replace(/[\r\n]+/g, " ").trim();
+        if (!wanted || !String(spec?.body ?? "").trim()) return Promise.reject(new Error("a skill needs a name and instructions"));
+        return call("createAgentWorkflow", { id: agentId, spec: { name: wanted, description: String(spec.description ?? "").trim(), body: String(spec.body).trim(), trigger: null } })
+          .then(() => this.getSkills(agentId))
+          .then((skills) => {
+            const created = skills.find((s) => s.name === wanted.slice(0, 80));
+            if (!created) throw new Error("the host took the request and stored no skill");
+            emit("settings:skills", { agentId });
+            return created;
+          });
+      },
+      // updateAgentWorkflow { id, workflowId, spec }. The trigger the host already holds goes back
+      // with the edit, or a scheduled skill would be unscheduled by a typo fix.
+      updateSkill(agentId, workflowId, spec) {
+        const current = (record({ kind: "worker", id: agentId })?.skills ?? []).find((s) => s.id === workflowId) ?? null;
+        const wanted = String(spec?.name ?? "").replace(/[\r\n]+/g, " ").trim();
+        const body = String(spec?.body ?? "").trim();
+        if (!wanted || !body) return Promise.reject(new Error("a skill needs a name and instructions"));
+        const trigger = current?.scheduled ? { schedule: current.schedule, isEnabled: current.triggerEnabled !== false } : null;
+        return call("updateAgentWorkflow", { id: agentId, workflowId, spec: { name: wanted, description: String(spec.description ?? "").trim(), body, trigger } })
+          .then(() => this.getSkills(agentId))
+          .then((skills) => {
+            const saved = skills.find((s) => s.id === workflowId);
+            if (!saved) throw new Error("the host answered but that skill is gone");
+            if (saved.body !== body || saved.name !== wanted.slice(0, 80)) throw new Error("the host answered and kept the old skill");
+            emit("settings:skills", { agentId });
+            return saved;
+          });
+      },
+      setSkillEnabled(agentId, workflowId, isEnabled) {
+        return call("setAgentWorkflowEnabled", { id: agentId, workflowId, isEnabled: Boolean(isEnabled) })
+          .then(() => this.getSkills(agentId))
+          .then((skills) => {
+            const saved = skills.find((s) => s.id === workflowId);
+            if (!saved || saved.enabled !== Boolean(isEnabled)) throw new Error(`the host did not ${isEnabled ? "enable" : "disable"} that skill`);
+            emit("settings:skills", { agentId });
+            return saved;
+          });
+      },
+      // deleteAgentWorkflow { id, workflowId } removes the folder from the box's shared library
+      // (workflow-store.ts GlobalWorkflowLibrary.remove): the skill is gone for every agent on the
+      // box, not only the one whose panel asked. The copy on the control says so.
+      deleteSkill(agentId, workflowId) {
+        const name = (record({ kind: "worker", id: agentId })?.skills ?? []).find((s) => s.id === workflowId)?.name ?? workflowId;
+        return call("deleteAgentWorkflow", { id: agentId, workflowId })
+          .then(() => this.getSkills(agentId))
+          .then((skills) => {
+            if (skills.some((s) => s.id === workflowId)) throw new Error("the host answered but the skill is still there");
+            emit("settings:skills", { agentId });
+            return name;
+          });
+      },
+      // runAgentWorkflowNow { id, workflowId } fires a scheduled skill through the automation
+      // runtime, by agent id. For an unscheduled one the host's own implementation sends
+      // "@<name>" through tm.sendPrompt with NO agentId (workflow-commands.ts runAgentWorkflowNow),
+      // which lands on whichever agent the host currently has active -- not necessarily the one
+      // whose panel this is. So an unscheduled skill is run the way the host runs it, as the same
+      // @-reference prompt, but addressed to this agent. A model turn either way.
+      runSkill(agentId, workflowId) {
+        const skill = (record({ kind: "worker", id: agentId })?.skills ?? []).find((s) => s.id === workflowId);
+        if (!skill) return Promise.reject(new Error("that skill is not on this agent any more"));
+        const run = skill.scheduled
+          ? call("runAgentWorkflowNow", { id: agentId, workflowId })
+          : call("sendPrompt", {
+              agentId, prompt: `@${skill.name}`,
+              richText: JSON.stringify({ type: "doc", content: [{ type: "paragraph", content: [{ type: "workflowReference", attrs: { id: skill.id, label: skill.name } }] }] }),
+            });
+        return run.then(() => { void reloadActive(); return { dispatched: true, name: skill.name, via: skill.scheduled ? "runAgentWorkflowNow" : "sendPrompt" }; });
+      },
+      // importAgentWorkflowText { id, markdown, name } -> { workflows, result: { imported, skipped } }.
+      importSkillText(agentId, markdown, name) {
+        const text = String(markdown ?? "").trim();
+        if (!text) return Promise.reject(new Error("paste the skill's markdown first"));
+        return call("importAgentWorkflowText", { id: agentId, markdown: text, ...(name ? { name } : {}) })
+          .then((answer) => this.getSkills(agentId).then((skills) => importOutcome(answer, skills)))
+          .then((outcome) => { emit("settings:skills", { agentId }); return outcome; });
+      },
+      // importAgentWorkflowUrl { id, url, name? }: the host stores a live reference to the URL,
+      // not a copy, and the agent reads it at run time.
+      importSkillUrl(agentId, url) {
+        const source = String(url ?? "").trim();
+        if (!/^https?:\/\//i.test(source)) return Promise.reject(new Error("a skill URL starts with http:// or https://"));
+        return call("importAgentWorkflowUrl", { id: agentId, url: source })
+          .then((answer) => this.getSkills(agentId).then((skills) => importOutcome(answer, skills)))
+          .then((outcome) => { emit("settings:skills", { agentId }); return outcome; });
+      },
+
+      // portAgentLocalSkills { id }: the host scans its own cwd and home for CLAUDE.md, AGENTS.md
+      // and .cursor/rules/*.md (workflow-store.ts discoverLocalSkillFiles) and links each as a
+      // live reference. Whatever it found is the answer; nothing is claimed beyond the read-back.
+      portLocalSkills(agentId) {
+        return call("portAgentLocalSkills", { id: agentId })
+          .then((answer) => this.getSkills(agentId).then((skills) => importOutcome(answer, skills)))
+          .then((outcome) => { emit("settings:skills", { agentId }); return outcome; });
+      },
+
+      // -- The box (GW-10). handBackForeverBox { id, trigger } -> session.endHandoff: the exit
+      // from a request_box_help takeover, which had no button anywhere. Read back through
+      // getForeverBoxStatus, whose `handoff` field is where pendingHandoff reaches the gateway.
+      handBack(agentId) {
+        return call("handBackForeverBox", { id: agentId, trigger: "button" })
+          .then(() => call("getForeverBoxStatus", { id: agentId }).catch(() => null))
+          .then((status) => {
+            const target = state.workers.find((w) => w.id === agentId);
+            if (target) { target.handoff = status?.handoff ?? null; target.boxState = status?.state ?? target.boxState; }
+            emit("message:created", { context: state.activeContext });
+            return { pending: status?.handoff != null };
+          });
+      },
+      // getHostStatus: the host bundle's version state, plus busy and capabilities.
+      getHostStatus() {
+        return call("getHostStatus").then((status) => ({
+          hostVersion: status?.hostVersion ?? null,
+          latestHostVersion: status?.latestHostVersion ?? null,
+          hostUpdateAvailable: status?.hostUpdateAvailable ?? null,
+          isBusy: Boolean(status?.isBusy),
+          capabilities: Array.isArray(status?.capabilities) ? status.capabilities : [],
+        }));
+      },
+      // updateForeverBox { id, force? } recreates the box preserving data; resetForeverBox { id }
+      // recreates it from the last snapshot and can lose unsynced work. Both are the desktop
+      // app's Updates tab, which box-reference-docs.ts sends users to and which did not exist here.
+      updateBox(agentId) {
+        return call("updateForeverBox", { id: agentId }).then((status) => ({ state: status?.state ?? "unknown", status }));
+      },
+      resetBox(agentId) {
+        return call("resetForeverBox", { id: agentId }).then((status) => ({ state: status?.state ?? "unknown", status }));
       },
 
       addWorker(worker) {
@@ -859,10 +1315,11 @@
         return call("createAgent", { name, description: worker.role ?? "" })
           .then(async (result) => {
             state = await hydrate(state);
+            await landOn(result?.agent?.id, "worker");
             emit("worker:created", { name });
             return result?.agent ?? { name };
           })
-          .catch((error) => { notWired(`Creating a worker failed: ${error.message}`); throw error; });
+          .catch((error) => { failed(`Creating a worker failed: ${error.message}`); throw error; });
       },
 
       addRoom(room) {
@@ -874,10 +1331,11 @@
         return call("createGroup", { name, description: "", memberAgentIds })
           .then(async (result) => {
             state = await hydrate(state);
+            await landOn(result?.agent?.id, "room");
             emit("room:created", { name });
             return result?.agent ?? { name };
           })
-          .catch((error) => { notWired(`Creating a room failed: ${error.message}`); throw error; });
+          .catch((error) => { failed(`Creating a room failed: ${error.message}`); throw error; });
       },
 
       addMember(roomId, workerId) {
@@ -890,7 +1348,7 @@
         call("setGroupMembers", { id: roomId, memberAgentIds: memberIds }).catch((error) => {
           room.memberIds = before;
           emit("room:member-added", { roomId, workerId });
-          notWired(`Adding a member failed: ${error.message}`);
+          failed(`Adding a member failed: ${error.message}`);
         });
         return snapshot;
       },
@@ -899,7 +1357,7 @@
         const room = state.rooms.find((r) => r.id === roomId);
         if (!room) return clone(state);
         // A room with no members takes no turns. The old operator UI refuses the same way.
-        if (room.memberIds.length <= 1) return notWired("A room needs at least one member");
+        if (room.memberIds.length <= 1) return failed("A room needs at least one member.");
         const before = [...room.memberIds];
         const memberIds = room.memberIds.filter((id) => id !== workerId);
         room.memberIds = memberIds;
@@ -907,7 +1365,7 @@
         call("setGroupMembers", { id: roomId, memberAgentIds: memberIds }).catch((error) => {
           room.memberIds = before;
           emit("room:member-removed", { roomId, workerId });
-          notWired(`Removing a member failed: ${error.message}`);
+          failed(`Removing a member failed: ${error.message}`);
         });
         return snapshot;
       },
@@ -1032,7 +1490,7 @@
             routine.status = "ready";
             routine.lastRun = { status: "failed", duration: "" };
             emit("routine:completed", { routineId });
-            notWired(`${routine.name} could not run: ${error.message}`);
+            failed(`${routine.name} could not run: ${error.message}`);
             throw error;
           });
       },
@@ -1099,26 +1557,222 @@
       // be hours stale on a long-lived page, and sending the stale copy would silently revert a
       // rename made from the desktop app. The write is then read back: the host answers 200 and
       // the saved profile is the only proof it took.
-      setRole(agentId, title) {
+      // updateProfile writes whichever of name, title and description the caller hands it and
+      // carries the host's current value for the rest (GW-01). Read back and compared field by
+      // field: the host trims each, so the comparison is against the trimmed value.
+      updateProfile(agentId, patch) {
         const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((r) => r.id === agentId);
         if (!target) return Promise.reject(new Error("that agent is not on this box any more"));
-        const wanted = String(title ?? "").trim();
+        const wanted = {};
+        for (const key of ["name", "title", "description"]) if (patch && typeof patch[key] === "string") wanted[key] = patch[key].replace(/[\r\n]+/g, " ").trim();
+        if (wanted.name === "") return Promise.reject(new Error("an agent needs a name"));
         return call("listAgents")
           .then((agents) => {
             const current = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
             if (!current) throw new Error("that agent is not on this box any more");
-            return call("updateAgent", { id: agentId, profile: { name: current.name, description: current.description ?? "", title: wanted } });
+            const profile = { name: wanted.name ?? current.name, description: wanted.description ?? current.description ?? "", title: wanted.title ?? current.title ?? "" };
+            return call("updateAgent", { id: agentId, profile });
           })
           .then(() => call("listAgents"))
           .then((agents) => {
             const fresh = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
             if (!fresh) throw new Error("the host answered but that agent is gone");
-            const saved = typeof fresh.title === "string" ? fresh.title.trim() : "";
-            if (saved !== wanted) throw new Error("the host answered and kept the old role");
-            target.role = saved || (target.memberIds ? "Group chat" : "");
-            emit("settings:role", { agentId });
+            const saved = { name: String(fresh.name ?? "").trim(), title: String(fresh.title ?? "").trim(), description: String(fresh.description ?? "").trim() };
+            for (const key of Object.keys(wanted)) if (saved[key] !== wanted[key]) throw new Error(`the host answered and kept the old ${key === "title" ? "role" : key}`);
+            Object.assign(target, identityOf(fresh, target.avatarVersion ?? null));
+            emit("settings:profile", { agentId });
             return saved;
           });
+      },
+      setRole(agentId, title) {
+        return this.updateProfile(agentId, { title: String(title ?? "") }).then((saved) => saved.title);
+      },
+      // setAgentAvatarBytes { id, pngBase64 }. The proof is the version getAgentAvatar reports
+      // afterwards (listAgents does not carry it on this box, see avatarOf): the gateway serves
+      // /avatars/<id>?v=<that version>, and the roster image is pointed at it. A null version
+      // after the write means the host kept nothing.
+      setAvatar(agentId, pngBase64) {
+        const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((r) => r.id === agentId);
+        if (!target) return Promise.reject(new Error("that agent is not on this box any more"));
+        if (typeof pngBase64 !== "string" || pngBase64.length === 0) return Promise.reject(new Error("pick a PNG file first"));
+        const before = target.avatarVersion;
+        return call("setAgentAvatarBytes", { id: agentId, pngBase64 })
+          .then(() => Promise.all([call("listAgents"), call("getAgentAvatar", { id: agentId }).catch(() => null)]))
+          .then(([agents, avatar]) => {
+            const fresh = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
+            if (!fresh) throw new Error("the host answered but that agent is gone");
+            const version = fresh.avatarVersion ?? avatar?.version ?? null;
+            if (version == null || version === before) throw new Error("the host answered and reports no new avatar version");
+            Object.assign(target, identityOf(fresh, version));
+            emit("settings:avatar", { agentId });
+            return { avatar: target.avatar, version: target.avatarVersion };
+          });
+      },
+      // setAgentNotifyOnUpdates { id, isEnabled } (setAgentNotificationsEnabled is its alias);
+      // setAgentHiddenFromSidebar { id, isHidden }. Both read back from listAgents.
+      setNotifications(agentId, enabled) {
+        const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((r) => r.id === agentId);
+        if (!target) return Promise.reject(new Error("that agent is not on this box any more"));
+        const isEnabled = Boolean(enabled);
+        return call("setAgentNotifyOnUpdates", { id: agentId, isEnabled })
+          .then(() => call("listAgents"))
+          .then((agents) => {
+            const fresh = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
+            if (!fresh) throw new Error("the host answered but that agent is gone");
+            if ((fresh.notifyOnUpdatesEnabled !== false) !== isEnabled) throw new Error(`the host did not turn notifications ${isEnabled ? "on" : "off"}`);
+            Object.assign(target, identityOf(fresh, target.avatarVersion ?? null));
+            emit("settings:notify", { agentId });
+            return target.notify;
+          });
+      },
+      setHidden(agentId, hidden) {
+        const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((r) => r.id === agentId);
+        if (!target) return Promise.reject(new Error("that agent is not on this box any more"));
+        const isHidden = Boolean(hidden);
+        return call("setAgentHiddenFromSidebar", { id: agentId, isHidden })
+          .then(() => call("listAgents"))
+          .then((agents) => {
+            const fresh = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
+            if (!fresh) throw new Error("the host answered but that agent is gone");
+            if ((fresh.isHiddenFromSidebar === true) !== isHidden) throw new Error(`the host did not ${isHidden ? "hide" : "unhide"} that agent`);
+            Object.assign(target, identityOf(fresh, target.avatarVersion ?? null));
+            emit("settings:hidden", { agentId });
+            return target.hidden;
+          });
+      },
+      // duplicateAgent { id } clones the agent's folder without its chat history (agent-clone.ts)
+      // under "<name> copy". The clone's id is whatever listAgents holds afterwards that it did
+      // not hold before; the roster is rebuilt around it.
+      duplicateAgent(agentId) {
+        const source = state.workers.find((w) => w.id === agentId);
+        if (!source) return Promise.reject(new Error("only an agent can be duplicated — the host does not clone rooms"));
+        return call("listAgents").then((agents) => {
+          const known = new Set((Array.isArray(agents) ? agents : []).map((a) => a.id));
+          return call("duplicateAgent", { id: agentId })
+            .then((answer) => call("listAgents").then((after) => {
+              const created = (Array.isArray(after) ? after : []).find((a) => !known.has(a.id)) ?? answer?.agent ?? null;
+              if (!created?.id) throw new Error("the host answered and lists no new agent");
+              return created;
+            }))
+            .then(async (created) => {
+              state = await hydrate(state);
+              emit("worker:created", { name: created.name });
+              return { id: created.id, name: created.name };
+            });
+        });
+      },
+      // deleteAgents { ids }. One agent from this panel; the command takes a list, so it is the
+      // list form that is wired. "Still listed" is the whole failure condition.
+      deleteAgent(agentId) {
+        const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((r) => r.id === agentId);
+        if (!target) return Promise.reject(new Error("that agent is not on this box any more"));
+        const name = target.name;
+        return call("deleteAgents", { ids: [agentId] })
+          .then(() => call("listAgents"))
+          .then(async (agents) => {
+            if ((Array.isArray(agents) ? agents : []).some((a) => a.id === agentId)) throw new Error("the host answered but the agent is still there");
+            state = await hydrate(state);
+            emit("worker:deleted", { agentId });
+            return name;
+          });
+      },
+
+      // -- Attachments (GW-09). readAttachmentImage { path } -> { dataUrl, width, height } | null;
+      // readAttachmentText { path, agentId } -> { kind:"text", text, truncated, bytes } |
+      // { kind:"binary", bytes } | null, the text being the first 64 KB of the file;
+      // readAttachmentChunk { path, agentId, offset, length } -> { bytesBase64, totalSize, mime }
+      // pages the rest. Reads are cached by path: a re-render of the transcript must not re-read
+      // every file from the host, and a null answer is cached too -- the host said no.
+      // agentId rides the image read too. The host serves any image under its sand root for this
+      // one (attachments-service.ts readHostAttachmentImage ignores the agent) while the text reads
+      // are scoped to the agent's own attachments dir; sending it now means the host-side scoping
+      // fix changes nothing here.
+      readAttachmentImage(path, agentId = null) {
+        const key = `img:${path}`;
+        if (!attachmentReads.has(key)) attachmentReads.set(key, call("readAttachmentImage", { path, agentId }).then((answer) => (answer?.dataUrl ? { dataUrl: answer.dataUrl, width: answer.width ?? null, height: answer.height ?? null } : null)));
+        return attachmentReads.get(key);
+      },
+      readAttachmentText(agentId, path) {
+        const key = `txt:${path}`;
+        if (!attachmentReads.has(key)) attachmentReads.set(key, call("readAttachmentText", { path, agentId }).then((answer) => (answer && typeof answer === "object" ? answer : null)));
+        return attachmentReads.get(key);
+      },
+      readAttachmentChunk(agentId, path, offset, length) {
+        return call("readAttachmentChunk", { path, agentId, offset: Math.max(0, Number(offset) || 0), length: Math.max(1, Number(length) || 1) }).then((answer) => {
+          if (!answer || typeof answer.bytesBase64 !== "string") return null;
+          const bytes = Uint8Array.from(global.atob(answer.bytesBase64), (c) => c.charCodeAt(0));
+          return { text: new global.TextDecoder().decode(bytes), bytes: bytes.length, totalSize: Number(answer.totalSize) || 0, mime: answer.mime ?? null };
+        });
+      },
+
+      // -- Search (GW-14). isGlobalSearchEnabled was read once at boot into state.search; the
+      // palette hides itself when it was false. searchAgents { query, limit } answers transcript
+      // hits { agentId, entryId, role, timestampMs, snippet }; searchMedia the indexed files
+      // { agentId, entryId, fileName, kind, mime, timestampMs }. Bots are matched here, on the
+      // roster already held: the host has no agent-name search.
+      searchEnabled: () => state.search?.enabled === true,
+      search(query, limit = 20) {
+        const q = String(query ?? "").trim();
+        if (!q) return Promise.resolve({ messages: [], bots: [], files: [] });
+        const nameOf = (id) => (state.workers.find((w) => w.id === id) ?? state.rooms.find((r) => r.id === id))?.name ?? null;
+        const kindOf = (id) => (state.rooms.some((r) => r.id === id) ? "room" : "worker");
+        const lower = q.toLowerCase();
+        const bots = [...state.workers, ...state.rooms]
+          .filter((r) => [r.name, r.role, r.description].some((v) => String(v ?? "").toLowerCase().includes(lower)))
+          .map((r) => ({ agentId: r.id, kind: r.memberIds ? "room" : "worker", name: r.name, role: r.role ?? "", hidden: r.hidden === true }));
+        return Promise.all([
+          call("searchAgents", { query: q, limit }).catch(() => []),
+          call("searchMedia", { query: q, limit }).catch(() => []),
+        ]).then(([hits, media]) => ({
+          messages: (Array.isArray(hits) ? hits : []).filter((h) => h && nameOf(h.agentId)).map((h) => ({ agentId: h.agentId, kind: kindOf(h.agentId), agentName: nameOf(h.agentId), entryId: h.entryId, role: h.role ?? "", timestampMs: Number(h.timestampMs) || 0, snippet: String(h.snippet ?? "") })),
+          bots,
+          files: (Array.isArray(media) ? media : []).filter((m) => m && nameOf(m.agentId)).map((m) => ({ agentId: m.agentId, kind: kindOf(m.agentId), agentName: nameOf(m.agentId), entryId: m.entryId, fileName: String(m.fileName ?? ""), fileKind: m.kind ?? "file", timestampMs: Number(m.timestampMs) || 0 })),
+        }));
+      },
+      // Brings a transcript entry into the window: pages older entries in through loadOlder
+      // until the id is held, bounded, then emits so the view can scroll to it. Resolves with
+      // whether the entry is on screen now.
+      revealEntry(input, entryId) {
+        const context = input && typeof input === "object" ? { kind: input.kind, id: input.id } : state.activeContext;
+        const r = record(context);
+        if (!r) return Promise.resolve(false);
+        const held = () => (windows.get(context.id)?.entries ?? []).some((e) => e.id === entryId);
+        const step = async (pages) => {
+          await (loads.get(context.id) ?? Promise.resolve());
+          if (held()) return true;
+          if (pages <= 0) return false;
+          const page = await loadOlder(context.id);
+          if (page.loaded === 0 && !page.more) return held();
+          return step(pages - 1);
+        };
+        return step(8).then((found) => {
+          applyLoaded(r, { ...shapeWindow(context.id, r.name, outlineCache.get(context.id)?.outline ?? null), skills: r.skills, channels: null, handoff: r.handoff, boxState: r.boxState });
+          applyAwaiting(context, r, 0);
+          emit("transcript:reveal", { context, entryId, found });
+          return found;
+        });
+      },
+
+      // dismissWidget { entryId, agentId } (GW-11 item 2): the × on a question card. The host
+      // stamps widgetDismissed on the entry and the next refresh reads it back as the card's
+      // status; nothing is reported here beyond the host taking the call.
+      dismissCard(context, messageId) {
+        const target = context ?? state.activeContext;
+        const r = record(target);
+        const message = r?.messages.find((m) => m.id === messageId);
+        if (!message?.card || message.card.kind !== "widget") return Promise.reject(new Error("only a question card can be dismissed"));
+        message.card.status = "sending";
+        emit("message:created", { context: target });
+        return call("dismissWidget", { entryId: messageId, agentId: target.id })
+          .then((answer) => reloadActive().then(() => answer?.accepted !== false))
+          .catch((error) => { message.card.status = "pending"; failed(`That dismissal did not reach the host: ${error.message}`); throw error; });
+      },
+
+      // AUDIT-1: getAgentActionAudit { id, limit, before } -> { rows, nextBefore }, newest first.
+      // The per-agent action ledger the host writes on every tool action (agents/<id>/audit.jsonl).
+      getActionAudit(agentId, options = {}) {
+        return call("getAgentActionAudit", { id: agentId, limit: options.limit ?? 50, ...(options.before ? { before: options.before } : {}) })
+          .then((answer) => ({ rows: Array.isArray(answer?.rows) ? answer.rows : [], nextBefore: answer?.nextBefore ?? null }));
       },
 
       setRunPaused(paused) {
@@ -1142,7 +1796,7 @@
             .then(async (res) => {
               const body = await res.json().catch(() => ({}));
               if (!res.ok) {
-                notWired(`Adopting ${id} failed: ${body?.error ?? res.status}`);
+                failed(`Adopting ${id} failed: ${body?.error ?? res.status}`);
                 return { accepted: false, message: `Adopting ${id} failed: ${body?.error ?? res.status}` };
               }
               await refreshSubscriptions();
@@ -1157,7 +1811,7 @@
               };
             })
             .catch((error) => {
-              notWired(`Adopting ${id} failed: ${error.message}`);
+              failed(`Adopting ${id} failed: ${error.message}`);
               return { accepted: false, message: `Adopting ${id} failed: ${error.message}` };
             });
         }
@@ -1178,7 +1832,7 @@
         if (status === "available" || status === "disconnect") {
           return call("disconnectChannel", { platform })
             .then(() => hydrate(state)).then((next) => { state = next; emit("plugin:state", { pluginId, status: "available" }); return `${plugin.name} disconnected`; })
-            .catch((error) => { notWired(`Disconnecting ${plugin.name} failed: ${error.message}`); return `Disconnecting ${plugin.name} failed: ${error.message}`; });
+            .catch((error) => { failed(`Disconnecting ${plugin.name} failed: ${error.message}`); return `Disconnecting ${plugin.name} failed: ${error.message}`; });
         }
         // The credential never reaches this page. The host returns the platform's own consent URL,
         // the operator approves there, and the channel binds host-side -- which is why this opens
@@ -1186,7 +1840,7 @@
         return call("getListenerConnectUrl", { platform })
           .then((answer) => {
             const url = answer?.url;
-            if (!url) { notWired(`${plugin.name} returned no connect URL`); return `${plugin.name} returned no connect URL`; }
+            if (!url) { failed(`${plugin.name} returned no connect URL`); return `${plugin.name} returned no connect URL`; }
             global.open(url, "_blank", "noopener");
             const r = record(state.activeContext);
             if (r) r.messages.push({
@@ -1197,7 +1851,7 @@
             emit("plugin:state", { pluginId, status: "connecting" });
             return `Approve ${plugin.name} in the tab that just opened`;
           })
-          .catch((error) => { notWired(`Connecting ${plugin.name} failed: ${error.message}`); return `Connecting ${plugin.name} failed: ${error.message}`; });
+          .catch((error) => { failed(`Connecting ${plugin.name} failed: ${error.message}`); return `Connecting ${plugin.name} failed: ${error.message}`; });
       },
       togglePluginTool() {
         // The tool list is real (listRoutedMcpTools), so the old "this host reports no tool list"
@@ -1221,7 +1875,7 @@
         const sent = (promise) => {
           card.status = "sending";
           promise.then(() => reloadActive())
-            .catch((error) => { card.status = "pending"; notWired(`That answer did not reach the host: ${error.message}`); });
+            .catch((error) => { card.status = "pending"; failed(`That answer did not reach the host: ${error.message}`); });
           return emit("message:created", { context: target });
         };
         if (card.kind === "auto-review") return sent(call("resolveAutoReviewApproval", {
@@ -1244,10 +1898,10 @@
         fetch("/endpoints/use", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: modelId }) })
           .then(async (res) => {
             const body = await res.json().catch(() => ({}));
-            if (!res.ok) { notWired(`Switching to ${chosen.name} failed: ${body?.error ?? res.status}`); return; }
+            if (!res.ok) { failed(`Switching to ${chosen.name} failed: ${body?.error ?? res.status}`); return; }
             await refreshSubscriptions();
           })
-          .catch((error) => notWired(`Switching to ${chosen.name} failed: ${error.message}`));
+          .catch((error) => failed(`Switching to ${chosen.name} failed: ${error.message}`));
         return emit("settings:model", { workerId, modelId });
       },
       setAutoReview(enabled, rule) {
@@ -1262,7 +1916,7 @@
         state.settings.autoReview = { enabled: next.isEnabled, allow: next.allowInstructions, block: next.blockInstructions };
         emit("settings:auto-review", { enabled: next.isEnabled });
         return call("setHostSettings", { autoReviewInstructions: next })
-          .catch((error) => { notWired(`Review policy could not be saved: ${error.message}`); throw error; });
+          .catch((error) => { failed(`Review policy could not be saved: ${error.message}`); throw error; });
       },
       startTeaching(workerId) {
         const id = workerId ?? state.activeContext?.id;
@@ -1285,7 +1939,7 @@
           .catch((error) => {
             state.teaching = { active: false, workerId: null, startedAt: null };
             emit("teaching:finished", { workerId: id });
-            notWired(`Recording could not start: ${error.message}`);
+            failed(`Recording could not start: ${error.message}`);
           });
         return snapshot;
       },
@@ -1303,7 +1957,7 @@
           // than being dropped on the floor.
           .then(() => (note ? call("sendPrompt", { agentId: id, prompt: `I just recorded a demonstration on your screen. What I did: ${note}` }) : null))
           .then(() => reloadActive())
-          .catch((error) => notWired(`Recording could not be saved: ${error.message}`));
+          .catch((error) => failed(`Recording could not be saved: ${error.message}`));
         return snapshot;
       },
 
