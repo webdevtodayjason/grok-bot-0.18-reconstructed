@@ -1431,6 +1431,26 @@ throwaway key, and `--models subscription:zai` fails cleanly with "needs an API 
 Kimi Code's token here is expired; Kimi runs by pasted key. Grok's CLI store carries an ArgentOS
 identity and an expired token; Grok stays on the xAI key.
 
+**Addendum 21:58 CDT, keys in.** Jason pasted the Z.AI and Kimi keys in the dashboard (Plugins,
+provider cards; the paste needed two submits until the adapter emitted an event type the app
+redraws on, fixed in `2d89358`). Battery on fresh agents, work rounds evidence-required:
+
+| provider | model | score | speak | work | history | median turn | note |
+|---|---|---|---|---|---|---|---|
+| Z.AI coding plan | glm-5.3 | **90** | 2/2 | 2/2 | 1/1 | 38 s | the free-ish local answer is now a plan answer |
+| Kimi (Moonshot platform key) | kimi-k3 | 10 | 0/2 | – | – | – | HTTP 429 "account suspended due to insufficient balance"; the coding-plan host rejects that key. Billing, not the model |
+| ChatGPT Pro (Codex login) | gpt-5.6-sol | **95** | 2/2 | 2/2 | 1/1 | 20 s | second run, same score |
+
+Leak gate after the battery: three secrets held, none in `endpoints.json`, the host log, the
+transcripts or the scan. The box switches endpoints while the battery runs; the agent card now
+follows the live endpoint on every tick (`5fc7eb5`) so the card and the settings panel agree.
+
+**Persona finding.** Asked "what AI model backend are you", the agent answered "I'm Grok Bot,
+running on Grok, the LLM built by xAI" while the box was on glm-5.3. That is the upstream system
+prompt's persona, not knowledge: nothing tells the model which backend it is on. A one-line
+prompt addition naming the live endpoint and model would make that answer truthful; filed as
+the next small host item, not done here.
+
 ## 7. The wave plan
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole

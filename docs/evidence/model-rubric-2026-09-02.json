@@ -1,308 +1,112 @@
 {
  "measuredOn": "this Mac + grok-bot-local-vm",
- "capturedAt": "2026-09-02T12:09:07.206Z",
+ "capturedAt": "2026-09-03T02:58:20.462Z",
  "results": [
   {
-   "entry": "m3-glm",
-   "endpointId": "m3-glm",
-   "model": "glm-m3",
-   "startedAt": "2026-09-02T04:03:21.547Z",
-   "tiers": {
-    "reach": {
-     "reachable": true,
-     "serves": true,
-     "ms": 18,
-     "models": 3
-    },
-    "speak": {
-     "passed": 0,
-     "of": 2,
-     "turnsMs": [
-      60285,
-      60314
-     ],
-     "failures": [
-      "(nothing said)",
-      "(nothing said)"
-     ]
-    },
-    "latency": {
-     "medianMs": null
-    }
-   },
-   "score": 10,
-   "notes": [
-    "could not complete a turn; work and history tiers skipped",
-    "fresh-agent request 35,192\u201336,124 tokens > router cap 32,768 (LiteLLM ContextWindowExceededError)"
-   ],
-   "cost": "free/local"
-  },
-  {
-   "entry": "m3-qwen",
-   "endpointId": "m3-qwen",
-   "model": "qwen3.8",
-   "startedAt": "2026-09-02T04:05:23.515Z",
-   "tiers": {
-    "reach": {
-     "reachable": true,
-     "serves": true,
-     "ms": 14,
-     "models": 3
-    },
-    "speak": {
-     "passed": 0,
-     "of": 2,
-     "turnsMs": [
-      60293,
-      60321
-     ],
-     "failures": [
-      "(nothing said)",
-      "(nothing said)"
-     ]
-    },
-    "latency": {
-     "medianMs": null
-    }
-   },
-   "score": 10,
-   "notes": [
-    "could not complete a turn; work and history tiers skipped",
-    "router 500: connection error to the qwen backend"
-   ],
-   "cost": "free/local"
-  },
-  {
-   "entry": "m3-qwen:deepseek",
-   "endpointId": "m3-qwen",
-   "model": "deepseek",
-   "startedAt": "2026-09-02T04:07:24.539Z",
-   "tiers": {
-    "reach": {
-     "reachable": true,
-     "serves": true,
-     "ms": 16,
-     "models": 3
-    },
-    "speak": {
-     "passed": 0,
-     "of": 2,
-     "turnsMs": [
-      60280,
-      60318
-     ],
-     "failures": [
-      "(nothing said)",
-      "(nothing said)"
-     ]
-    },
-    "latency": {
-     "medianMs": null
-    }
-   },
-   "score": 10,
-   "notes": [
-    "could not complete a turn; work and history tiers skipped",
-    "no turn completed in 60 s per attempt (same router)"
-   ],
-   "cost": "free/local"
-  },
-  {
-   "entry": "dell-qwen32b",
-   "endpointId": "dell-qwen32b",
-   "model": "qwen2.5:32b",
-   "startedAt": "2026-09-02T04:09:25.603Z",
-   "tiers": {
-    "reach": {
-     "reachable": true,
-     "serves": true,
-     "ms": 47,
-     "models": 8
-    },
-    "speak": {
-     "passed": 0,
-     "of": 2,
-     "turnsMs": [
-      60316,
-      60300
-     ],
-     "failures": [
-      "It seems there was a mistake in formatting my previous message. Let's try this again! How can I assist you today?",
-      "It seems there was an error in my previous attempt to send a message. Let's try this again! How can I assist you today?"
-     ]
-    },
-    "latency": {
-     "medianMs": null
-    }
-   },
-   "score": 10,
-   "notes": [
-    "could not complete a turn; work and history tiers skipped",
-    "spoke prose about 'a mistake in formatting my previous message'; no valid tool call reached the host (Ollama tool-call shim at 33 tools)"
-   ],
-   "cost": "free/local"
-  },
-  {
-   "entry": "dell-qwen32b:qwen2.5:14b",
-   "endpointId": "dell-qwen32b",
-   "model": "qwen2.5",
-   "startedAt": "2026-09-02T04:12:09.242Z",
-   "tiers": {
-    "reach": {
-     "reachable": true,
-     "serves": false,
-     "ms": 43,
-     "models": 8
-    }
-   },
+   "entry": "subscription:minimax",
+   "endpointId": "subscription:minimax",
+   "model": null,
+   "cost": "subscription",
+   "tiers": {},
    "score": 0,
+   "notRunnable": true,
    "notes": [
-    "endpoint dell-qwen32b unreachable or does not serve qwen2.5: ",
-    "not run: rubric tag parsing bug, fixed in 4344517"
+    "no MiniMax CLI login found"
    ],
-   "cost": "free/local",
-   "wallMs": 318
+   "wallMs": 0
   },
   {
-   "entry": "xai-grok:grok-4.20-0309-reasoning",
-   "endpointId": "xai-grok",
-   "model": "grok-4.20-0309-reasoning",
-   "cost": "paid",
-   "score": 10,
+   "entry": "subscription:zai",
+   "endpointId": "sub-zai",
+   "model": "glm-5.3",
+   "startedAt": "2026-09-03T02:47:15.311Z",
    "tiers": {
     "reach": {
      "reachable": true,
-     "serves": true
+     "serves": true,
+     "ms": 465,
+     "models": 10
     },
     "speak": {
-     "passed": null,
+     "passed": 2,
      "of": 2,
-     "note": "turns completed but the script was killed before it printed"
+     "turnsMs": [
+      38205,
+      18092
+     ],
+     "failures": []
+    },
+    "latency": {
+     "medianMs": 38205
     },
     "work": {
-     "passed": null,
-     "of": 2
+     "passed": 2,
+     "of": 2,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-a1fu4wbu; verdict evidenced, attestation holds it",
+      "PASS  round 2 \u2014 reported grokbot-verify-v31ft08u; verdict evidenced, attestation holds it"
+     ]
     },
     "history": {
-     "growthTurns": null,
+     "growthTurns": 4,
      "of": 4,
-     "passed": 0,
+     "passed": 1,
      "of_rounds": 1,
      "lines": [
-      "runaway during growth turns; rubric killed, agent deleted"
+      "PASS  round 1 \u2014 reported grokbot-verify-6spa84pw; verdict evidenced, attestation holds it"
+     ]
+    }
+   },
+   "score": 90,
+   "notes": [
+    "Z.AI coding plan, pasted key; glm-5.3 via api.z.ai/api/coding/paas/v4"
+   ],
+   "subscription": null,
+   "cost": "subscription",
+   "wallMs": 212831
+  },
+  {
+   "entry": "subscription:kimi",
+   "endpointId": "sub-kimi",
+   "model": "kimi-k3",
+   "startedAt": "2026-09-03T02:50:49.472Z",
+   "tiers": {
+    "reach": {
+     "reachable": true,
+     "serves": true,
+     "ms": 334,
+     "models": 4
+    },
+    "speak": {
+     "passed": 0,
+     "of": 2,
+     "turnsMs": [
+      150597,
+      150574
+     ],
+     "failures": [
+      "(nothing said)",
+      "(nothing said)"
      ]
     },
     "latency": {
      "medianMs": null
     }
    },
-   "runaway": true,
+   "score": 10,
    "notes": [
-    "runaway: 1,012 SendMessage deliveries in 8 turns, 371 items in one turn (hundreds of identical SendMessage calls per completion); killed at 04:31Z; see PLUMBING-AUDIT.md \u00a75 P1c"
+    "could not complete a turn; work and history tiers skipped",
+    "Moonshot platform key: HTTP 429 'account suspended due to insufficient balance'; the coding-plan host rejected the same key as invalid. Billing, not the model. Re-run with the Kimi coding-plan key or a funded account."
    ],
-   "wallMs": 900000
+   "subscription": null,
+   "cost": "subscription",
+   "wallMs": 302937
   },
   {
-   "entry": "xai-grok",
-   "endpointId": "xai-grok",
-   "model": "grok-4.6",
-   "startedAt": "2026-09-02T04:32:42.514Z",
-   "tiers": {
-    "reach": {
-     "reachable": true,
-     "serves": true,
-     "ms": 106,
-     "models": 12
-    },
-    "speak": {
-     "passed": 2,
-     "of": 2,
-     "turnsMs": [
-      22164,
-      4042
-     ],
-     "failures": []
-    },
-    "latency": {
-     "medianMs": 22164
-    },
-    "work": {
-     "passed": 2,
-     "of": 2,
-     "lines": [
-      "PASS  round 1 \u2014 reported grokbot-verify-bpezt5v2; verdict evidenced, attestation holds it",
-      "PASS  round 2 \u2014 reported grokbot-verify-se2dsj5y; verdict evidenced, attestation holds it"
-     ]
-    },
-    "history": {
-     "growthTurns": 4,
-     "of": 4,
-     "passed": 1,
-     "of_rounds": 1,
-     "lines": [
-      "PASS  round 1 \u2014 reported grokbot-verify-z1hsrh0w; verdict evidenced, attestation holds it"
-     ]
-    }
-   },
-   "score": 95,
-   "notes": [],
-   "cost": "paid",
-   "wallMs": 101717
-  },
-  {
-   "entry": "spark4-nemotron",
-   "endpointId": "spark4-nemotron",
-   "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
-   "startedAt": "2026-09-02T11:05:06.983Z",
-   "tiers": {
-    "reach": {
-     "reachable": true,
-     "serves": true,
-     "ms": 183,
-     "models": 1
-    },
-    "speak": {
-     "passed": 2,
-     "of": 2,
-     "turnsMs": [
-      30196,
-      10071
-     ],
-     "failures": []
-    },
-    "latency": {
-     "medianMs": 30196
-    },
-    "work": {
-     "passed": 1,
-     "of": 2,
-     "lines": [
-      "FAIL  round 1 \u2014 never named grokbot-verify-63nfj18m; verdict of last reply: conversational",
-      "PASS  round 2 \u2014 reported grokbot-verify-4yo6b1zu; verdict evidenced, attestation holds it"
-     ]
-    },
-    "history": {
-     "growthTurns": 4,
-     "of": 4,
-     "passed": 1,
-     "of_rounds": 1,
-     "lines": [
-      "PASS  round 1 \u2014 reported grokbot-verify-9wvwlfoc; verdict evidenced, attestation holds it"
-     ]
-    }
-   },
-   "score": 70,
-   "notes": [
-    "rerun 06:10Z with --turn-timeout-ms 150000 after the server restart; the 60 s run scored 10 because a fresh agent thought past the limit"
-   ],
-   "cost": "free/local",
-   "wallMs": 275312
-  },
-  {
-   "entry": "sub-codex",
+   "entry": "subscription:codex",
    "endpointId": "sub-codex",
    "model": "gpt-5.6-sol",
-   "startedAt": "2026-09-02T12:06:31.283Z",
+   "startedAt": "2026-09-03T02:55:52.750Z",
    "tiers": {
     "reach": {
      "reachable": true,
@@ -314,20 +118,20 @@
      "passed": 2,
      "of": 2,
      "turnsMs": [
-      16164,
-      6058
+      20126,
+      6047
      ],
      "failures": []
     },
     "latency": {
-     "medianMs": 16164
+     "medianMs": 20126
     },
     "work": {
      "passed": 2,
      "of": 2,
      "lines": [
-      "PASS  round 1 \u2014 reported grokbot-verify-5shsi5ya; verdict evidenced, attestation holds it",
-      "PASS  round 2 \u2014 reported grokbot-verify-dqaujq5m; verdict evidenced, attestation holds it"
+      "PASS  round 1 \u2014 reported grokbot-verify-4ftmmj7o; verdict evidenced, attestation holds it",
+      "PASS  round 2 \u2014 reported grokbot-verify-0swmyphu; verdict evidenced, attestation holds it"
      ]
     },
     "history": {
@@ -336,17 +140,17 @@
      "passed": 1,
      "of_rounds": 1,
      "lines": [
-      "PASS  round 1 \u2014 reported grokbot-verify-9mgx27rp; verdict evidenced, attestation holds it"
+      "PASS  round 1 \u2014 reported grokbot-verify-lwvsj0qa; verdict evidenced, attestation holds it"
      ]
     }
    },
    "score": 95,
    "notes": [
-    "verify-codex-adoption 2026-09-02 07:2xZ: adopted keyless, box identified as grok-bot, ~/.codex auth.json sha256 unchanged"
+    "ChatGPT Pro via the Codex CLI login, Responses transport, originator grok-bot; second run, same 95"
    ],
+   "subscription": "jbrashear@titaniumcomputing.com \u00b7 pro plan",
    "cost": "subscription",
-   "wallMs": 154930,
-   "subscription": "ChatGPT Pro plan via the Codex CLI login, adopted; Responses transport, originator grok-bot"
+   "wallMs": 146772
   }
  ]
 }
