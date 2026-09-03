@@ -40,7 +40,10 @@ export type OpenAiCompatibleSettings = {
   readonly accountId?: string | null;
   /** How this product names itself to the vendor; never a first-party client's name. */
   readonly originator?: string | null;
+  /** The operator-facing name of the endpoint, so the agent can say truthfully what it runs on. */
+  readonly endpointName?: string | null;
 };
+export const OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV = "SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME";
 export const OPENAI_COMPATIBLE_TRANSPORT_ENV = "SAND_OPENAI_COMPATIBLE_TRANSPORT";
 export const OPENAI_COMPATIBLE_ACCOUNT_ID_ENV = "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID";
 export const OPENAI_COMPATIBLE_ORIGINATOR_ENV = "SAND_OPENAI_COMPATIBLE_ORIGINATOR";
@@ -92,6 +95,7 @@ export function resolveOpenAiCompatibleSettings(env: Readonly<Record<string, str
     ...(configured(OPENAI_COMPATIBLE_TRANSPORT_ENV).toLowerCase() === "responses" ? { transport: "responses" as const } : {}),
     ...(configured(OPENAI_COMPATIBLE_ACCOUNT_ID_ENV).length > 0 ? { accountId: configured(OPENAI_COMPATIBLE_ACCOUNT_ID_ENV) } : {}),
     ...(configured(OPENAI_COMPATIBLE_ORIGINATOR_ENV).length > 0 ? { originator: configured(OPENAI_COMPATIBLE_ORIGINATOR_ENV) } : {}),
+    ...(configured(OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV).length > 0 ? { endpointName: configured(OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV) } : {}),
   };
 }
 

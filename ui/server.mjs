@@ -416,7 +416,7 @@ const server = createServer(async (req, res) => {
       const chosen = (catalog.endpoints ?? []).find((e) => e.id === id);
       if (chosen == null) return fail(res, 404, `no endpoint named ${id}`);
       const secrets = await readSecrets();
-      const next = { ...secrets, SAND_OPENAI_COMPATIBLE_BASE_URL: chosen.baseUrl, SAND_OPENAI_COMPATIBLE_MODEL: chosen.model };
+      const next = { ...secrets, SAND_OPENAI_COMPATIBLE_BASE_URL: chosen.baseUrl, SAND_OPENAI_COMPATIBLE_MODEL: chosen.model, SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: chosen.name };
       for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR"]) delete next[key];
       if (chosen.subscription) {
         // The live token, refreshed through the vendor's own endpoint if it is about to expire;

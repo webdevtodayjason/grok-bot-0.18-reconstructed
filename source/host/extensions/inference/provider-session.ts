@@ -307,7 +307,9 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
         endpoint: "https://chatgpt.com/backend-api/codex/responses",
         model,
         ...(configuredCodexReasoningEffort() == null ? {} : { reasoningEffort: configuredCodexReasoningEffort()! }),
-        instructions: conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions,
+        // The persona is a name, not knowledge: without this line a model on any backend answers
+        // "which model are you" from the prompt's name. Say what is actually answering.
+        instructions: `${conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${settings.endpointName ? `"${settings.endpointName}"` : "an OpenAI-compatible endpoint"}, model '${settings.model}' at ${(() => { try { return new URL(settings.baseUrl).host; } catch { return settings.baseUrl; } })()}. If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`,
         input: conversationInput(messages).input,
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
