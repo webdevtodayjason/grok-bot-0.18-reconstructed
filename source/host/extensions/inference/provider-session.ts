@@ -307,9 +307,7 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
         endpoint: "https://chatgpt.com/backend-api/codex/responses",
         model,
         ...(configuredCodexReasoningEffort() == null ? {} : { reasoningEffort: configuredCodexReasoningEffort()! }),
-        // The persona is a name, not knowledge: without this line a model on any backend answers
-        // "which model are you" from the prompt's name. Say what is actually answering.
-        instructions: `${conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${settings.endpointName ? `"${settings.endpointName}"` : "an OpenAI-compatible endpoint"}, model '${settings.model}' at ${(() => { try { return new URL(settings.baseUrl).host; } catch { return settings.baseUrl; } })()}. If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`,
+        instructions: withBackendNote(conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions, settings),
         input: conversationInput(messages).input,
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
@@ -381,6 +379,16 @@ function openRouterExecutor(messages: readonly ProviderMessage[], invocationId: 
   const extendedUsage = result.usage.then(value => ({ inputTokens: value.promptTokens, outputTokens: value.completionTokens, cacheReadTokens: 0, cacheWriteTokens: 0, maxTokens: 0 }));
   if (onUsage != null) void extendedUsage.then(onUsage);
   return { fullStream: result.fullStream, response: result.response, usage: result.usage, extendedUsage, providerMetadata: result.providerMetadata, invocationId: Promise.resolve(invocationId) };
+}
+
+// The persona is a name, not knowledge: without this a model on any backend answers "which model
+// are you" from the prompt's name (glm-5.3 once said it was Grok, built by xAI). Appended to every
+// instruction set this route sends, so the answer is the endpoint that is actually answering.
+function withBackendNote(instructions: string, settings: OpenAiCompatibleSettings): string {
+  let host = settings.baseUrl;
+  try { host = new URL(settings.baseUrl).host; } catch { /* keep the raw value */ }
+  const through = settings.endpointName ? `"${settings.endpointName}"` : "an OpenAI-compatible endpoint";
+  return `${instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${through}, model '${settings.model}' at ${host}. If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`;
 }
 
 function openAiCompatibleSettings(): OpenAiCompatibleSettings {
@@ -491,7 +499,7 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
         ...(settings.transport == null ? {} : { transport: settings.transport }),
         ...(settings.accountId == null ? {} : { accountId: settings.accountId }),
         ...(settings.originator == null ? {} : { originator: settings.originator }),
-        instructions: conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions,
+        instructions: withBackendNote(conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions, settings),
         input: conversationInput(messages).input,
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),

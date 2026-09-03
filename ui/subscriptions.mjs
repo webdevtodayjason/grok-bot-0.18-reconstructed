@@ -44,10 +44,10 @@ export const PROVIDERS = {
     baseUrl: "https://api.z.ai/api/coding/paas/v4", transport: "chat", defaultModel: "glm-5.3", contextWindow: 128_000,
     posture: "API key from your coding plan, pasted once. No discovery: Z.AI keeps no CLI store.",
   },
-  kimi: {
-    name: "Kimi (Moonshot)", route: "key", endpointId: "sub-kimi", env: "KIMI_API_KEY",
-    baseUrl: "https://api.moonshot.ai/v1", transport: "chat", defaultModel: "kimi-k3", contextWindow: 256_000,
-    posture: "API key from your plan, pasted once. The Kimi Code CLI's token is detected for presence only and never replayed.",
+  alibaba: {
+    name: "Alibaba Model Studio (token plan)", route: "key", endpointId: "sub-alibaba", env: "DASHSCOPE_API_KEY",
+    baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", transport: "chat", defaultModel: "qwen3.8-max", contextWindow: 128_000,
+    posture: "API key from your Model Studio token plan, pasted once. Serves qwen3.8-max, qwen3.8-flash, deepseek-v4-pro, deepseek-v4-pro-0813, deepseek-v4-flash-0731; type the model you want or take the default.",
   },
   claude: {
     name: "Claude subscription", route: "runtime",
@@ -141,7 +141,7 @@ function scanKey(id, env, store) {
   const spec = PROVIDERS[id];
   const fromEnv = typeof env[spec.env] === "string" && env[spec.env].trim().length > 0;
   const fromStore = typeof store[id]?.apiKey === "string" && store[id].apiKey.length > 0;
-  const extra = id === "kimi" ? scanKimiCode(env) : {};
+  const extra = {};
   return { present: fromEnv || fromStore || extra.present === true, usable: fromEnv || fromStore, source: fromStore ? "pasted key" : fromEnv ? `$${spec.env}` : extra.source ?? "none", identity: null, expiresAt: extra.expiresAt ?? null, ...(extra.note ? { note: extra.note } : {}) };
 }
 function scanKimiCode(env) {
