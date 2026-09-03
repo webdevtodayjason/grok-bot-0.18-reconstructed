@@ -155,7 +155,7 @@ tools (`computerUse`/`browserUse` subagent configs exist — `sand-computer-use-
 model emits prose anyway. **Wave 3 decides.** Note `listRoutedMcpTools` returning `[]`
 concerns MCP tools only — it says nothing about the turn toolset.
 
-**P1b — The token-limit classifier knows only xAI's wording (filed 2026-09-02).** LiteLLM says
+**P1b — FIXED 2026-09-02 23:15 CDT (`token-limit-error-classification.ts`, four wordings added, unit cases for LiteLLM, OpenAI/vLLM, xAI; suite 111/111). Original entry follows.** The token-limit classifier knew only xAI's wording. LiteLLM says
 `exceeds the available context size`, OpenAI/vLLM say `maximum context length is … resulted in`,
 and none of them match `classifyTokenLimitErrorFromMessage`, so on every local endpoint an
 oversized request errors the turn (`Agent failed to respond`) instead of entering the
@@ -168,7 +168,7 @@ router's cap is above the base prompt. Deferred from the evidence contract becau
 named non-goal; nonblocking for that contract, blocking for long-lived agents on local models.
 Mirrored to Dart when the token works again (the public API answered 401 on 2026-09-02).
 
-**P1c — No per-turn cap on SendMessage (found 2026-09-02 04:30Z).** On the rubric's growth prompt
+**P1c — FIXED 2026-09-02 23:15 CDT (`send-message-tool.ts`: 20 sends per turn, consecutive duplicates suppressed, one host-log line each; replay round 4 delivers 1 of 30 identical sends with 29 cap lines). Original entry follows.** No per-turn cap on SendMessage. On the rubric's growth prompt
 ("run `seq 1 2000 …`, send me only the last line"), `grok-4.20-0309-reasoning` emitted hundreds of
 identical `SendMessage` calls per completion: 1,012 sends in 8 turns, 371 items in one turn, one
 message a second until the rubric was killed and the agent deleted. The host executed every call.

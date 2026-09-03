@@ -64,7 +64,14 @@ function errorResult(error: string): SendMessageResult {
   });
 }
 
+// P1c (2026-09-02): a model once emitted hundreds of identical SendMessage calls in one completion
+// and the host delivered every one. The tool is built per turn, so these counters are per turn.
+// Never silent: the model gets an error result it can read, and the host log gets one line.
+const MAX_SENDS_PER_TURN = 20;
+
 export function createSendMessageTool(deps: SendMessageDependencies<Context>) {
+  let sentThisTurn = 0;
+  let lastDelivered: string | null = null;
   const execute = async (
     ctx: Context,
     interactionHandler: SendMessageInteractionHandler<Context>,
@@ -78,8 +85,19 @@ export function createSendMessageTool(deps: SendMessageDependencies<Context>) {
       if (deps.isAwaitingUserSelection?.() === true) {
         return errorResult(SAND_AWAITING_USER_SEND_MESSAGE_BLOCKED);
       }
+      const fingerprint = JSON.stringify(input);
+      if (lastDelivered === fingerprint) {
+        console.warn("[sand][send-cap] duplicate SendMessage suppressed: identical to the previous message this turn");
+        return errorResult("This exact message was already delivered a moment ago and was not sent again. Say something new, or stop.");
+      }
+      if (sentThisTurn >= MAX_SENDS_PER_TURN) {
+        console.warn(`[sand][send-cap] cap reached: ${sentThisTurn} messages delivered this turn; further sends refused`);
+        return errorResult(`Send cap reached: ${MAX_SENDS_PER_TURN} messages were already delivered in this turn. Stop sending and finish.`);
+      }
       const timestampMs = Date.now();
       const messageId = deps.onSendMessage(message, timestampMs);
+      sentThisTurn += 1;
+      lastDelivered = fingerprint;
       return new SendMessageResult({
         result: {
           case: "success",

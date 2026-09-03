@@ -24,6 +24,12 @@ function isObservedInputTokenLimitMessage(message: string): boolean {
     includesAll(message, ["message size", "bytes", "exceeds", "mb limit"]) ||
     message.includes("context_length_exceeded") ||
     message.includes("payload too large") ||
+    // Local routes (P1b, 2026-09-02): llama.cpp behind LiteLLM, OpenAI/vLLM, and LiteLLM's own
+    // error class name. Without these an oversized history errors the turn instead of compacting.
+    message.includes("exceeds the available context size") ||
+    message.includes("contextwindowexceedederror") ||
+    includesAll(message, ["maximum context length is", "however"]) ||
+    includesAll(message, ["context length", "exceeded"]) ||
     /max tokens of \d+ exceeded/.test(message);
 }
 

@@ -108,6 +108,8 @@ function decide(body) {
   const shellResult = after.find((m) => m.role === "tool" && callNames.get(m.tool_call_id) === shell);
   const sent = [...callNames.values()].includes(send);
   if (sent) return { text: "Done." };
+  // Round 4, the runaway: thirty identical sends in ONE completion, as grok-4.20 once did.
+  if (round === 4) return { calls: Array.from({ length: 30 }, () => ({ name: send, args: { type: "text", content: "Runaway ping: the same message thirty times." } })) };
   if (round === 2) return { call: send, args: { type: "text", content: listing(INVENTED) } };
   if (!shellResult) return { call: shell, args: { command: "ls -1 /workspace" } };
   if (round === 1) return { call: send, args: { type: "text", content: listing(INVENTED) } };
@@ -122,19 +124,21 @@ http.createServer(async (req, res) => {
   const d = decide(body); n += 1;
   log({ n, url: req.url, stream: body.stream === true, tools: names(body.tools ?? []).slice(0, 40), decision: d });
   const id = "chatcmpl-replay-" + n, created = Math.floor(Date.now() / 1000), callId = "call-replay-" + n;
-  const toolCall = d.call ? { id: callId, type: "function", function: { name: d.call, arguments: JSON.stringify(d.args) } } : null;
-  const finish = d.call ? "tool_calls" : "stop";
+  const toolCalls = d.calls
+    ? d.calls.map((c, i) => ({ id: callId + "-" + i, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } }))
+    : d.call ? [{ id: callId, type: "function", function: { name: d.call, arguments: JSON.stringify(d.args) } }] : [];
+  const finish = toolCalls.length ? "tool_calls" : "stop";
   const usage = { prompt_tokens: 1000, completion_tokens: 20, total_tokens: 1020 };
   if (body.stream === true) {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     const chunk = (delta, finish_reason = null, extra = {}) => res.write("data: " + JSON.stringify({ id, object: "chat.completion.chunk", created, model: body.model ?? "replay", choices: [{ index: 0, delta, finish_reason }], ...extra }) + "\n\n");
     chunk({ role: "assistant" });
-    if (toolCall) chunk({ tool_calls: [{ index: 0, ...toolCall }] }); else chunk({ content: d.text });
+    if (toolCalls.length) chunk({ tool_calls: toolCalls.map((c, i) => ({ index: i, ...c })) }); else chunk({ content: d.text });
     chunk({}, finish, { usage });
     res.write("data: [DONE]\n\n"); return res.end();
   }
   res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify({ id, object: "chat.completion", created, model: body.model ?? "replay", choices: [{ index: 0, message: toolCall ? { role: "assistant", content: null, tool_calls: [toolCall] } : { role: "assistant", content: d.text }, finish_reason: finish }], usage }));
+  res.end(JSON.stringify({ id, object: "chat.completion", created, model: body.model ?? "replay", choices: [{ index: 0, message: toolCalls.length ? { role: "assistant", content: null, tool_calls: toolCalls } : { role: "assistant", content: d.text }, finish_reason: finish }], usage }));
 }).listen(port, "127.0.0.1");
 `;
 
@@ -209,6 +213,26 @@ async function round(n, expect) {
   return ok;
 }
 
+// Thirty identical sends in one completion must deliver one message, and the host must say so.
+async function runawayRound() {
+  await waitIdle(agentId);
+  const before = textReplies(await call("getAgentTranscript", { id: agentId })).length;
+  const logBefore = Number.parseInt((await boxSh("wc -l < /tmp/sand-host.log")).trim(), 10) || 0;
+  await call("sendPrompt", { agentId, prompt: "Evidence replay round 4. Say hello." });
+  const deadline = Date.now() + TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await sleep(2000);
+    const me = (await call("listAgents")).find((a) => a.id === agentId);
+    if (me && me.isRunning !== true && textReplies(await call("getAgentTranscript", { id: agentId })).length > before) break;
+  }
+  await waitIdle(agentId);
+  const delivered = textReplies(await call("getAgentTranscript", { id: agentId })).slice(before).length;
+  const capLines = (await boxSh(`tail -n +${logBefore + 1} /tmp/sand-host.log | grep -c 'send-cap' || true`)).trim();
+  const ok = delivered <= 2 && Number(capLines) >= 1;
+  console.log(`  ${ok ? "PASS" : "FAIL"}  round 4 — runaway: 30 identical sends in one completion delivered ${delivered} message(s); host logged ${capLines} send-cap line(s)`);
+  return ok;
+}
+
 async function compat() {
   let ok = true;
   const agents = (await call("listAgents")).filter((a) => !String(a.name ?? "").startsWith("verify-"));
@@ -241,7 +265,7 @@ try {
   }
   await boxSh(`cp ${SECRETS} ${BACKUP}`);
   secretsPatched = true;
-  await patchSecrets({ SAND_OPENAI_COMPATIBLE_BASE_URL: `http://127.0.0.1:${PORT}/v1` });
+  await patchSecrets({ SAND_OPENAI_COMPATIBLE_BASE_URL: `http://127.0.0.1:${PORT}/v1`, SAND_OPENAI_COMPATIBLE_TRANSPORT: null, SAND_OPENAI_COMPATIBLE_ACCOUNT_ID: null, SAND_OPENAI_COMPATIBLE_ORIGINATOR: null, SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: "evidence replay" });
   await startProvider();
   providerStarted = true;
   const created = await call("createAgent", {
@@ -255,9 +279,10 @@ try {
     await round(1, { label: "recorded: tool ran, reply invented", verdict: "unsupported", missing: INVENTED, attestations: "some" }),
     await round(2, { label: "constructed: no tool, reply parroted", verdict: "unverified", missing: INVENTED, attestations: "none" }),
     await round(3, { label: "control: reply echoes the real listing", verdict: "evidenced", attestations: "some", saysSentinel: true }),
+    await runawayRound(),
   ];
   const failures = results.filter((r) => !r).length;
-  console.log(`\n${failures === 0 ? "OK" : `${failures}/3 FAILED`}`);
+  console.log(`\n${failures === 0 ? "OK" : `${failures}/4 FAILED`}`);
   await cleanup();
   process.exit(failures === 0 ? 0 : 1);
 } catch (error) {
