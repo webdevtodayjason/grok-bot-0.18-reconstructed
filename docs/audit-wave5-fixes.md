@@ -29,11 +29,10 @@
 10. **Group UI depth** — sender labels, member management, serialized-round status in our
     dashboard, building on the wired host model. Est: 1 day.
 
-11. **`runAgentAutomationNow` returns 500 ("Cannot read properties of undefined (reading
-    'mapped')") while the run itself starts and completes fine** — found during the
-    visibility round, host-side, reproducible on every manual run. Owner: next host
-    session; Next: trace the handler at host-gateway-api.ts:433; Proof: the command
-    returns 200 and `scripts/verify-routine-run.mjs` passes without its error-tolerance.
+11. **DONE — `runAgentAutomationNow` returned 500 ("Cannot read properties of undefined (reading
+    'mapped')") while the run itself completed.** Fixed at `analytics-service.ts:68-76`
+    (`.call(telemetry, report)`; the comment there names this row). Struck 2026-09-02 by the gap
+    audit (BL-W5), which found it fixed but still written open.
 
 12. **Per-agent provider/model routing (operator ask, 2026-08-30)** — "set a provider and
     a specific model to a specific sub-agent." Hooks already in the plumbing:

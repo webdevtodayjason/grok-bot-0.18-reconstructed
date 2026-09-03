@@ -24,7 +24,7 @@ agent before evidence was gathered. Every one was cured by measurement, none by 
 Browser ──► ui/server.mjs (127.0.0.1:7777, holds Bearer token)
                  │  relays /api/*, /events without an Origin header
                  ▼
-        Host gateway (127.0.0.1:1340) ── 122 commands, POST /api/<cmd>, GET /events SSE
+        Host gateway (127.0.0.1:1340) ── 123 commands, POST /api/<cmd>, GET /events SSE
                  │
         host-main.cjs (patched bundle, runs in the box as root, log /tmp/sand-host.log)
                  │  spawns node:worker_threads per agent turn (SQLite isolation, NOT sandboxes)
@@ -145,15 +145,17 @@ technique is §4.
 
 ## 5. Open problems, ranked
 
-**P1 — Chief narrates actions it does not take.** Said *"Launching the browser subagent
-now"*; `getSubagents` → `[]`, `getAsyncTasks` → `[]`. Also refuses tool-list diagnostics
-with invented policy, and offers bulleted menus where the upstream prompt demands widgets.
-Three hypotheses, none proven: (a) the 281-line runner prompt never reaches the
-openai-compatible branch and the thin fallback lets the model improvise; (b) the dispatch
-tools (`computerUse`/`browserUse` subagent configs exist — `sand-computer-use-subagent.ts`,
-`sand-browser-use-subagent.ts`) are not in the toolset this path offers; (c) tools offered,
-model emits prose anyway. **Wave 3 decides.** Note `listRoutedMcpTools` returning `[]`
-concerns MCP tools only — it says nothing about the turn toolset.
+**Ranked backlog moved 2026-09-02:** `docs/GAP-ANALYSIS.md` holds the 90-finding gap analysis
+(87 verified, 3 refuted) with the wave plan. This section keeps the host rows and their history.
+
+**P1 — CLOSED 2026-09-02, cause named.** Hypothesis (b) was the answer, twice over: the dispatch
+tools were not in the toolset this path offered, and the computer tools sat behind a projection the
+engine never populated (§6g, §6i; `host-runner-composition.ts:2505-2525`). The one remaining sliver
+is the browserUse subagent, still not offered — tracked as SUB-1 / TOOLS-03 in GAP-ANALYSIS. Original
+symptom, for the record: said *"Launching the browser subagent now"* while `getSubagents` → `[]`.
+A second contributor was found by the 2026-09-02 audit and is P0 there (SP-1): the production
+system prompt is handed null memory, routine, skill and channel providers, so the agent narrates
+from a prompt that never shows it what it has.
 
 **P1b — FIXED 2026-09-02 23:15 CDT (`token-limit-error-classification.ts`, four wordings added, unit cases for LiteLLM, OpenAI/vLLM, xAI; suite 111/111). Original entry follows.** The token-limit classifier knew only xAI's wording. LiteLLM says
 `exceeds the available context size`, OpenAI/vLLM say `maximum context length is … resulted in`,
@@ -162,7 +164,7 @@ oversized request errors the turn (`Agent failed to respond`) instead of enterin
 rescue-and-compact path verified in §6j. Seen live twice on 2026-09-02: the 295k-token long-lived
 agent, and fresh agents whose 35k base prompt exceeds the M3 router's 32k cap. **Owner:** Jason
 (a Claude session executes). **Next action:** add the three phrasings to the classifier in
-`source/host/extensions/inference/`, then run `verify-compaction --recover` through a proxy that
+`source/packages/chat-inference/` (corrected path; the host only calls it), then run `verify-compaction --recover` through a proxy that
 answers with each wording. **Proof of closure:** the long-lived agent recovers on `m3-glm` once the
 router's cap is above the base prompt. Deferred from the evidence contract because that tree was a
 named non-goal; nonblocking for that contract, blocking for long-lived agents on local models.
@@ -180,28 +182,45 @@ returning 50 identical SendMessage calls in one response yields one delivered me
 capped-line in the host log. Cost of the incident: a few dollars of xAI credit (bursts within
 completions, not a thousand completions).
 
-**P2 — The turn toolset has never been enumerated.** `turn-toolset.ts` is 1,532 lines plus
-23 tool files, unread. Everything said so far about "what tools the agent has" is inference.
+**P2 — DONE (wave 2, `docs/audit-wave2-toolset.md`).** 26 factory slots → 55 distinct tool names →
+34 offered to a chief with the box up (CloudAgent is the 34th). Reconciled against the gateway's 123
+commands in `docs/GAP-ANALYSIS.md` §2; the two real gaps are the MCP meta pair (TOOLS-01) and the
+browserUse subagent (SUB-1).
 
 **P3 — Endpoint pinned by container env.** The operator panel is built and honest about
 this (red banner). One recreate without the `SAND_OPENAI_COMPATIBLE_*` lines hands the
-switch over permanently. Asked; awaiting "go".
+switch over permanently. Asked; awaiting "go". Structural, not just operational: container env
+always beats the relay's switch (GAP-ANALYSIS ENDPOINT-1 offers the inverted-precedence alternative).
 
 **P4 — Per-agent screens.** Upstream: "each Bot gets its own screen." Our box: one X
 display (`/tmp/.X11-unix/X1`), the token-routed websockify on :6081 running with an
 **empty** token dir. The fork machinery exists (`box-windows.ts` `runWindowScript`,
 window indexes, "live fork owned by a different agent" error path; `sand-window-router.mjs
-1339 1337 14000`). Real work, not a flag.
+1339 1337 14000`). Real work, not a flag. **Owner: the box image (§6f), not host code** — the
+host machinery is live; the standalone fallback that blanks the VNC url is a separate, smaller item
+(GAP-ANALYSIS BOX-1).
 
 **P5 — Event churn.** `agent-upserted` fires every few seconds idle. The UI diffs it away
-now, but the host-side chatter is unexplained.
+now, but the host-side chatter is unexplained. Host-side fix named in GAP-ANALYSIS CHURN-1: compare
+the rebuilt summary with the cached one and return early when nothing changed.
 
-**P6 — cosmetic.** Trigger-row controls wrap loosely in the 432px rail.
+**P6 — cosmetic.** Trigger-row controls wrap loosely in the 432px rail. Now lives on the
+secondary page (`/operator/`), which is why it stopped being noticed (GAP-ANALYSIS BL-P6).
 
-**Opportunity, not a problem:** `settings-service.ts:33` exposes `agentDefaultModel` and
-`computerUseModel` — per-agent model fields already in the settings store. That is the
-hook for seniority-as-routing (chief on Nemotron, cheap workers on small models) with no
-new plumbing.
+**P7 — Connector substrate decision (GAP-ANALYSIS CP-14).** No decision exists anywhere in the repo
+on whether this product owns its connector plane. Local stdio connectors work end to end today
+(`connectors.json` → box process → 14 tools discovered) but nothing reaches the model until
+TOOLS-01 lands, and every marketplace, OAuth and remote-server verb is a Cursor RPC on an expired
+stub. **Owner:** Jason. **Next action:** choose stdio-only (works now, no marketplace) or a local
+HTTP MCP client plus manifest catalog (owns the plane, L). **Proof of closure:**
+`docs/CONNECTOR-PLUGIN-PLANE.md` exists and names the choice; Wave D is scheduled against it.
+
+**Corrected 2026-09-02 (GAP-ANALYSIS MODEL-1):** `settings-service.ts:33` exposes
+`agentDefaultModel` and `computerUseModel`, but on every routed (non-Cursor) provider the session
+is created before those fields are consulted (`cursor-session.ts:115` returns to
+`createProviderPromptSession` first; `provider-session.ts:552-553` fixes one model per provider).
+Seniority-as-routing therefore needs a per-session model override threaded through the routed
+branch — a design contract, not a half-hour wiring job. Schedule after Wave A; it is the token-bill lever.
 
 ## 6. Upstream intent (condensed from docs.x.ai/grok-bot, supplied 2026-08-30)
 
@@ -331,9 +350,10 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
   → redirect to **`localhost:8767/callback?code=…&state=…`** → "Authorization complete!
   You can close this tab." → app flips the account to **Connected**.
   The desktop app runs a local OAuth callback server on **:8767**. Our gateway's
-  `completeMcpOAuth` is a stub (`host-gateway-api.ts`, `async () => undefined`) — the
-  callback server lived in the Electron main, so a local re-implementation belongs in the
-  relay (Wave 5 candidate).
+  `completeMcpOAuth` is implemented (`host-gateway-api.ts:683-691`, validates stateId + code
+  and calls `mcp.completeOAuth`); corrected 2026-09-02, it was recorded here as a stub. What is
+  missing is the callback server itself, which lived in the Electron main — a local
+  re-implementation belongs in the relay (GAP-ANALYSIS CP-06, after the CP-14 substrate decision).
 - After connect: **Tools 6 of 6 enabled** (Query granola meetings, List meetings, List
   meeting folders, Get meetings, Get meeting transcript, Get account info), per-tool
   toggles; Connectors: 1 ("granola"); Skills: 3, each with claude-code-style activation
@@ -662,7 +682,7 @@ MOCK verdicts, not written from memory -- a hand-kept list is how a mock survive
   while a shell syntax error meant nothing launched. `GET /box/surface?app=` now reports whether
   the window is actually present, and the pane says so when it is not.
 
-**The gateway registers 122 commands, and the first audit was wrong about several.** It claimed no
+**The gateway registers 123 commands, and the first audit was wrong about several.** It claimed no
 approval command, no policy engine, no capture path and no way to connect a connector. All four
 were false, and acting on those claims made me label real capabilities "not wired" — a false
 "unwired" misleads exactly as much as a false "working". `source/host/gateway-protocol.ts` is the
@@ -1452,6 +1472,11 @@ prompt addition naming the live endpoint and model would make that answer truthf
 the next small host item, not done here.
 
 ## 7. The wave plan
+
+**Closed 2026-09-02: waves 1–5 delivered (`docs/audit-wave1-prompts.md` … `audit-wave5-fixes.md`).
+The scope discipline below applied to the audit only and ended 2026-08-30; every commit since is
+feature work under its own contract. §5 and `docs/GAP-ANALYSIS.md` are the live backlog; this
+section is history.**
 
 Scope discipline: **read-and-prove only.** No features, no drive-by fixes; the sole
 mutation allowed is Wave 3's temporary wire tap, which is removed after capture.
