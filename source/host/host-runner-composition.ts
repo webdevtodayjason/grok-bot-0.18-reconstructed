@@ -651,6 +651,7 @@ const SYSTEM_PROMPT_SECTION_MARKERS: Readonly<Record<string, string>> = {
   routines: "Routines (your scheduling/automation feature)",
   skills: "Workflows are a GLOBAL, shared library",
   timeZone: "Your box and tools run on a UTC clock",
+  browser: "You drive this box's browser at the page level with the browser_* tools",
 };
 
 function dumpAssembledSystemPrompt(agentId: string, prompt: string): string {
@@ -1370,10 +1371,37 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
     let shellWatchWatermark:
       | { readonly turnCount: number; readonly boundaryRef: Uint8Array; readonly lastUserMessageId?: string; readonly hasUserTurn: boolean }
       | undefined;
-    const productionPromptGlue = productionContext === undefined
-      || productionRequestContext === undefined
-      ? undefined
-      : (() => {
+    /**
+     * SUB-1 / TOOLS-03. The prompt glue carries the runner identity the collector reads for
+     * the "Your box" and "Browser" sections (`getRemoteBoxSection`, `getComputerSection`), and
+     * it was built once with every flag false. A browserUse subagent was therefore handed the
+     * chief's desktop prompt: no "Browser" section, no mention of its browser_* tools, and an
+     * explicit ban on driving Chrome from Shell -- so it answered that its browser tools were
+     * unavailable while holding all fifteen of them. One glue per identity, memoized like the
+     * assembly below; the chief glue is unchanged for every other caller (file transfer, turn
+     * actions, prompt state).
+     */
+    type PromptIdentity = {
+      readonly isSubagentRunner: boolean;
+      readonly isBoxScopedSubagent: boolean;
+      readonly isComputerUseSubagent: boolean;
+      readonly isBrowserUseSubagent: boolean;
+    };
+    const CHIEF_IDENTITY: PromptIdentity = {
+      isSubagentRunner: false,
+      isBoxScopedSubagent: false,
+      isComputerUseSubagent: false,
+      isBrowserUseSubagent: false,
+    };
+    const promptIdentityKey = (identity: PromptIdentity): string =>
+      `${identity.isSubagentRunner}|${identity.isBoxScopedSubagent}|${identity.isComputerUseSubagent}|${identity.isBrowserUseSubagent}`;
+    const promptGluesByIdentity = new Map<string, ReturnType<typeof createRunnerPromptGlue>>();
+    const makePromptGlue = (identity: PromptIdentity) => {
+      if (productionContext === undefined || productionRequestContext === undefined) return undefined;
+      const key = promptIdentityKey(identity);
+      const existing = promptGluesByIdentity.get(key);
+      if (existing !== undefined) return existing;
+      const built = (() => {
         const box = asTransferBox(localExec.box);
         const remoteBoxForPrompt = asCapableTransferBox(remoteBox);
         const userComputers = asPromptUserComputers(localExec.userComputers);
@@ -1390,9 +1418,9 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           remoteBox: remoteBoxForPrompt,
           userComputers,
           remoteBoxHasDesktop: true,
-          isSubagentRunner: false,
-          isComputerUseSubagent: false,
-          isBrowserUseSubagent: false,
+          isSubagentRunner: identity.isSubagentRunner,
+          isComputerUseSubagent: identity.isComputerUseSubagent,
+          isBrowserUseSubagent: identity.isBrowserUseSubagent,
           requestContext: productionRequestContext,
           ...(typeof hooks.agentProfileProvider === "function"
             ? { agentProfileProvider: () => hooks.agentProfileProvider?.() ?? { name: "", description: "" } }
@@ -1446,6 +1474,10 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           },
         });
       })();
+      if (built !== undefined) promptGluesByIdentity.set(key, built);
+      return built;
+    };
+    const productionPromptGlue = makePromptGlue(CHIEF_IDENTITY);
     /**
      * Both providers were already written here, and the system-prompt assembly -- their ONLY
      * consumer -- was handed `() => []` instead. Every agent's prompt therefore stated the user had
@@ -1539,16 +1571,14 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       string,
       ReturnType<typeof createSystemPromptAssembly>
     >();
-    const createProductionSystemPromptAssembly = (identity: {
-      readonly isSubagentRunner: boolean;
-      readonly isBoxScopedSubagent: boolean;
-    }) => {
+    const createProductionSystemPromptAssembly = (identity: PromptIdentity) => {
       if (productionContext === undefined || productionRequestContext === undefined) {
         return undefined;
       }
-      const key = `${identity.isSubagentRunner}|${identity.isBoxScopedSubagent}`;
+      const key = promptIdentityKey(identity);
       const existing = promptAssembliesByIdentity.get(key);
       if (existing !== undefined) return existing;
+      const identityGlue = makePromptGlue(identity);
       const built = createSystemPromptAssembly({
           basePrompt: typeof overrides.systemPrompt === "string"
             ? overrides.systemPrompt
@@ -1616,18 +1646,15 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           // TOOLS-09: `experiments` exposes no isCloudAgentsDisabledByTeam, so this always
           // resolved false through the optional call. The cloud-agents service owns the answer.
           isCloudAgentsDisabledByTeam: () => method(cloudAgents, "isDisabledByTeamAdmin")?.() ?? false,
-          mcpCustomInstructionsSection: () => productionPromptGlue?.getMcpCustomInstructionsSection() ?? null,
-          mcpDiscoveryStatusSection: () => productionPromptGlue?.getMcpDiscoveryStatusSection() ?? null,
-          remoteBoxSection: () => productionPromptGlue?.getRemoteBoxSection() ?? "",
-          computerSection: () => productionPromptGlue?.getComputerSection() ?? null,
+          mcpCustomInstructionsSection: () => identityGlue?.getMcpCustomInstructionsSection() ?? null,
+          mcpDiscoveryStatusSection: () => identityGlue?.getMcpDiscoveryStatusSection() ?? null,
+          remoteBoxSection: () => identityGlue?.getRemoteBoxSection() ?? "",
+          computerSection: () => identityGlue?.getComputerSection() ?? null,
         });
       promptAssembliesByIdentity.set(key, built);
       return built;
     };
-    const productionSystemPromptAssembly = createProductionSystemPromptAssembly({
-      isSubagentRunner: false,
-      isBoxScopedSubagent: false,
-    });
+    const productionSystemPromptAssembly = createProductionSystemPromptAssembly(CHIEF_IDENTITY);
 
     const runnerOptions: Record<string, unknown> = {
       inference: extensions.api("inference").port,
@@ -2887,6 +2914,8 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       const runShellPromptAssembly = createProductionSystemPromptAssembly({
         isSubagentRunner: shellSubagentKind !== undefined,
         isBoxScopedSubagent: isBoxScopedSubagentKind(shellSubagentKind),
+        isComputerUseSubagent: normalizeSubagentKind(shellSubagentKind) === "computeruse",
+        isBrowserUseSubagent: normalizeSubagentKind(shellSubagentKind) === "browseruse",
       });
       /**
        * TOOLS-01 / CP-01 / TOOLS-10. Connectors were discovered every turn and then dropped on

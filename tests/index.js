@@ -27,3 +27,4 @@ import "./token-limit-classifier.test.mjs";
 import "./machine-room-plugins.test.mjs";
 import "./turn-toolset-projection.test.mjs";
 import "./sand-host-setting.test.mjs";
+import "./browser-tool-parameters.test.mjs";

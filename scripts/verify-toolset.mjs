@@ -14,6 +14,7 @@
 //   node scripts/verify-toolset.mjs              chief: the pair is offered, prompt has its sections
 //   node scripts/verify-toolset.mjs --connector  a real CallMcpTool round trip, stamped evidenced
 //   node scripts/verify-toolset.mjs --subagent   a computerUse subagent is offered 3 tools
+//   node scripts/verify-toolset.mjs --browser    SAND_BROWSER_USE on: a browserUse subagent reads a page
 //
 // Integration check, not a unit test: needs the box up and a provider configured.
 import { execFile } from "node:child_process";
@@ -25,6 +26,7 @@ const SETTINGS = "/home/box/sand-data/sand-host-settings.json";
 const PROMPT_REPORTS = "/home/box/sand-data";
 const MODE = process.argv.includes("--connector")
   ? "connector"
+  : process.argv.includes("--browser") ? "browser"
   : process.argv.includes("--subagent") ? "subagent" : "chief";
 const flag = (name, fallback) => (process.argv.includes(name)
   ? process.argv[process.argv.indexOf(name) + 1]
@@ -70,20 +72,22 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // The switch is a host setting file, not container env, precisely so it can be flipped on a
 // running box. Flip it, and put it back the way it was on the way out. The file need not exist:
 // a missing or unparseable one means "no overrides", and the write creates it.
-const readTrace = async () => {
+const readSetting = async (name) => {
   const raw = await docker(["exec", BOX, "sh", "-c", `cat ${SETTINGS} 2>/dev/null || echo '{}'`]);
-  try { return JSON.parse(raw).SAND_TOOL_TRACE; } catch { return undefined; }
+  try { return JSON.parse(raw)[name]; } catch { return undefined; }
 };
-const writeTrace = async (value) => {
+const writeSetting = async (name, value) => {
   const mutate = value == null
-    ? `delete d.SAND_TOOL_TRACE;`
-    : `d.SAND_TOOL_TRACE=${JSON.stringify(value)};`;
+    ? `delete d[${JSON.stringify(name)}];`
+    : `d[${JSON.stringify(name)}]=${JSON.stringify(value)};`;
   await docker(["exec", BOX, "node", "-e",
     `const fs=require('fs');const p=${JSON.stringify(SETTINGS)};`
     + `let d={};try{const parsed=JSON.parse(fs.readFileSync(p,'utf8'));`
     + `if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))d=parsed;}catch{}`
     + `${mutate}fs.writeFileSync(p,JSON.stringify(d),{mode:0o600});`]);
 };
+const readTrace = () => readSetting("SAND_TOOL_TRACE");
+const writeTrace = (value) => writeSetting("SAND_TOOL_TRACE", value);
 
 const hostLogLines = async () =>
   Number.parseInt((await docker(["exec", BOX, "sh", "-c", "wc -l < /tmp/sand-host.log"])).trim(), 10);
@@ -96,6 +100,17 @@ const traceLinesSince = async (from) => {
     const at = line.indexOf("[sand][toolset] ");
     if (at < 0) return [];
     try { return [JSON.parse(line.slice(at + "[sand][toolset] ".length))]; } catch { return []; }
+  });
+};
+
+// Every [sand][wire] line (what actually left for the provider) written after `from`.
+const wireLinesSince = async (from) => {
+  const out = await docker(["exec", BOX, "sh", "-c",
+    `tail -n +${from + 1} /tmp/sand-host.log | grep -F '[sand][wire]' || true`]);
+  return out.split("\n").flatMap((line) => {
+    const at = line.indexOf("[sand][wire] ");
+    if (at < 0) return [];
+    try { return [JSON.parse(line.slice(at + "[sand][wire] ".length))]; } catch { return []; }
   });
 };
 
@@ -193,6 +208,76 @@ try {
       }
     }
     console.log(`PASS — ${MODE}`);
+  }
+
+  if (MODE === "browser") {
+    // The browser switch is flipped for this run only and restored in the finally below.
+    const previousBrowser = await readSetting("SAND_BROWSER_USE");
+    if (previousBrowser !== "1") await writeSetting("SAND_BROWSER_USE", "1");
+    try {
+      agent = await freshAgent(`verify-browser-${Math.random().toString(36).slice(2, 8)}`);
+      const from = await hostLogLines();
+      await call("sendPrompt", {
+        agentId: agent.id,
+        prompt: "Dispatch one browserUse subagent whose only job is to open https://example.com "
+          + "with its browser tools, read the page's main heading, and report the exact heading "
+          + "text back to you. Do not do it yourself. When it reports, tell me the heading text verbatim.",
+      });
+      const deadline = Date.now() + TIMEOUT_MS;
+      let chief; let child; let wire; let reply; let running = true; let browserSub; let replyAtDone;
+      // The parent answers once when it dispatches ("I'll report when it returns") and again
+      // when the child revives it, so a reply alone is not the end: wait for the browserUse
+      // subagent to reach done/error and the parent to go idle after that.
+      while (Date.now() < deadline) {
+        await sleep(6000);
+        const lines = await traceLinesSince(from);
+        chief ??= lines.find((line) => line.conversationId === agent.id && !line.isSubagentRunner);
+        child ??= lines.find((line) => line.isBrowserUseSubagent);
+        wire ??= (await wireLinesSince(from)).find((line) => line.tools.includes("browser_navigate"));
+        const subs = await call("getSubagents", { id: agent.id }).catch(() => []);
+        browserSub = subs.find((s) => String(s.subagentType ?? "").toLowerCase().replace(/[-_]/g, "") === "browseruse") ?? browserSub;
+        const subDone = browserSub != null && (browserSub.status === "done" || browserSub.status === "error");
+        running = (await call("listAgents")).find((a) => a.id === agent.id)?.isRunning === true;
+        reply = spoken(await call("getAgentTranscript", { id: agent.id })).at(-1);
+        // The child's report revives the parent for one more turn; the reply that counts is the
+        // one written after the child finished, not the "dispatched, will report" one before it.
+        if (subDone && replyAtDone === undefined) replyAtDone = reply?.id ?? null;
+        const revived = subDone && reply != null && reply.id !== replyAtDone;
+        if (chief && child && wire && revived && !running) break;
+      }
+      console.log(`browserUse subagent status: ${browserSub?.status ?? "(never appeared)"}`);
+      // What the child actually did, from its own ledger: tool, ok flag, head of the result.
+      if (child?.conversationId) {
+        const ledger = await docker(["exec", BOX, "sh", "-c",
+          `cat /home/box/sand-data/agents/${child.conversationId}/audit.jsonl 2>/dev/null || true`]);
+        for (const line of ledger.split("\n").filter(Boolean)) {
+          try {
+            const row = JSON.parse(line);
+            if (row.type === "tool_result") console.log(`  child ${row.tool}: ${String(row.head ?? "").slice(0, 140).replace(/\s+/g, " ")}`);
+          } catch {}
+        }
+      }
+      if (chief == null) fail("no [sand][toolset] line for the chief");
+      console.log(`Task subagent types: ${chief.subagentTypes.join(", ")}`);
+      if (!chief.subagentTypes.includes("browserUse")) fail("browserUse is not in Task's enum with SAND_BROWSER_USE on");
+      if (child == null) fail("no browserUse subagent toolset line; the dispatch never ran");
+      const browserTools = child.tools.filter((name) => name.startsWith("browser_"));
+      console.log(`browserUse subagent offered ${child.count} tools, ${browserTools.length} browser_*`);
+      if (browserTools.length !== 15) fail(`expected 15 browser_* tools offered, got ${browserTools.length}`);
+      if (wire == null) fail("no [sand][wire] request carried browser_navigate: the tools were offered but never sent");
+      console.log(`wire: ${wire.transport} ${wire.model} offered ${wire.offered} sent ${wire.sent}`);
+      if (wire.sent !== wire.offered) fail(`the provider request dropped ${wire.offered - wire.sent} tool(s)`);
+      const childReport = child.conversationId == null ? null : await docker(["exec", BOX, "sh", "-c",
+        `cat ${PROMPT_REPORTS}/sand-system-prompt-${child.conversationId}.json 2>/dev/null || true`]).then((raw) => { try { return JSON.parse(raw); } catch { return null; } });
+      if (childReport?.sections?.browser !== true) fail("the browserUse subagent's prompt has no Browser section");
+      console.log(`browserUse subagent prompt: ${childReport.length} chars, Browser section present`);
+      const text = String(reply?.message?.content ?? "");
+      console.log(`reply: ${text.slice(0, 200)}`);
+      if (!/example domain/i.test(text)) fail("the parent never reported the page heading (\"Example Domain\")");
+      console.log("PASS — browser");
+    } finally {
+      if (previousBrowser !== "1") await writeSetting("SAND_BROWSER_USE", previousBrowser).catch(() => {});
+    }
   }
 
   if (MODE === "connector") {

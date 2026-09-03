@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { z } from "zod";
 import { createHash } from "node:crypto";
 import { buildHostShellArgs } from "../../box/box-shell-command.js";
 import { navigationProbeCommand, normalizeNavigationUrl, parseNavigationProbeOutput } from "../sand-action-audit.js";
@@ -418,10 +419,23 @@ async function captureBrowserReviewState(args: {
       workingDirectory: "/workspace",
       toolCallId: `${args.toolCallId}:auto-review-state`,
     }));
-  } catch {
+  } catch (error) {
+    // The message the model sees stays generic; the host log carries the cause, because this
+    // preflight failed for a week with nothing to read (GAP-ANALYSIS SUB-1).
+    console.warn(`[sand][browser-review] page-state capture threw: ${error instanceof Error ? error.message : String(error)}`);
     throw new SandBrowserAutoReviewBlockedError("Browser Auto-review could not capture the current page state.");
   }
-  if (result?.result?.case !== "success") throw new SandBrowserAutoReviewBlockedError("Browser Auto-review could not capture the current page state.");
+  // This box's shell executor reports a non-zero exit as `failure` with the exit code, where
+  // the upstream executor reported `success` with exitCode != 0. Before the driver has launched
+  // Chrome for a fresh display the probe's curl exits 7, and that is the "chrome-unreachable"
+  // state the review already knows how to handle, not a capture error.
+  if (result?.result?.case === "failure" && typeof result.result.value?.exitCode === "number") {
+    return { displayStateIdentity: "chrome-unreachable" };
+  }
+  if (result?.result?.case !== "success") {
+    console.warn(`[sand][browser-review] page-state capture returned ${String(result?.result?.case ?? "no result")}: ${JSON.stringify(result?.result?.value ?? null).slice(0, 300)}`);
+    throw new SandBrowserAutoReviewBlockedError("Browser Auto-review could not capture the current page state.");
+  }
   if (result.result.value.exitCode !== 0) return { displayStateIdentity: "chrome-unreachable" };
   const stdout = result.result.value.stdout ?? "";
   const markerIndex = stdout.indexOf(BROWSER_REVIEW_STATE_MARKER);
@@ -523,6 +537,8 @@ export interface BrowserToolDefinition<Context> {
   readonly description: string;
   readonly op: string;
   readonly schema: BrowserToolSchema;
+  /** Model-facing argument schema (zod); see BROWSER_TOOL_PARAMETERS. */
+  readonly parameters: z.ZodTypeAny;
   readonly canNavigate?: boolean;
   readonly skipScreenshot?: boolean;
   execute(
@@ -547,6 +563,36 @@ interface BrowserToolSpec {
   readonly canNavigate?: boolean;
   readonly skipScreenshot?: boolean;
 }
+
+/**
+ * SUB-1 / TOOLS-03. The specs below carried only a `schema` of required names, and nothing
+ * turned that into a model-facing parameter schema. The OpenAI-compatible executor drops any
+ * tool without `parameters` / `inputSchema` (openai-compatible-chat.ts, openAiCompatibleTools),
+ * so a browserUse subagent that buildTurnTools had handed all fifteen browser tools reached the
+ * wire holding Shell and Read alone, and truthfully reported its browser tools unavailable.
+ * The Computer tool declares zod parameters; these do the same. Field names are the ones the
+ * box driver reads (sand-browser-driver-source.ts); extras it ignores.
+ */
+const ref = z.string().describe("Element ref from the latest browser_snapshot, e.g. e12");
+const button = z.enum(["left", "right", "middle"]).optional().describe("Mouse button; default left");
+const modifiers = z.array(z.string()).optional().describe("Held modifier keys, e.g. [\"Shift\"]");
+export const BROWSER_TOOL_PARAMETERS: Readonly<Record<string, z.ZodTypeAny>> = {
+  navigate: z.object({ url: z.string().describe("Absolute URL to open"), newTab: z.boolean().optional().describe("Open in a new tab instead of reusing yours") }),
+  snapshot: z.object({ interactive: z.boolean().optional().describe("Only interactive elements"), maxDepth: z.number().optional().describe("Maximum tree depth"), selector: z.string().optional().describe("CSS selector to scope the snapshot") }),
+  click: z.object({ ref, button, modifiers, doubleClick: z.boolean().optional(), holdDurationMs: z.number().optional() }),
+  mouse_click_xy: z.object({ x: z.number().describe("Viewport x in CSS pixels"), y: z.number().describe("Viewport y in CSS pixels"), button, modifiers }),
+  type: z.object({ ref, text: z.string().describe("Text to type"), submit: z.boolean().optional().describe("Press Enter after typing"), slowly: z.boolean().optional().describe("Type character by character") }),
+  fill: z.object({ ref, value: z.string().describe("Value to set") }),
+  select_option: z.object({ ref, values: z.array(z.string()).describe("Option values or labels to select") }),
+  press_key: z.object({ key: z.string().describe("Key name: Enter, Escape, Tab, ArrowDown, or a single character"), modifiers }),
+  scroll: z.object({ ref: ref.optional().describe("Element to scroll into view; omit to scroll the page"), direction: z.enum(["up", "down", "left", "right"]).optional(), amount: z.number().optional().describe("Pixels to scroll"), deltaX: z.number().optional(), deltaY: z.number().optional() }),
+  drag: z.object({ sourceRef: z.string().describe("Ref of the element to drag"), targetRef: z.string().optional().describe("Ref to drop onto"), targetX: z.number().optional(), targetY: z.number().optional(), offsetX: z.number().optional(), offsetY: z.number().optional(), durationMs: z.number().optional() }),
+  get_bounding_box: z.object({ ref }),
+  highlight: z.object({ ref, durationMs: z.number().optional() }),
+  cdp: z.object({ method: z.string().describe("CDP method, e.g. Runtime.evaluate"), params: z.record(z.unknown()).optional().describe("Method parameters") }),
+  tabs: z.object({ action: z.enum(["list", "new", "close", "select"]), index: z.number().optional().describe("Tab index for close/select") }),
+  screenshot: z.object({ fullPage: z.boolean().optional().describe("Capture the full scrollable page") }),
+};
 
 const BROWSER_TOOL_SPECS: readonly BrowserToolSpec[] = [
   { id: "BROWSER_NAVIGATE", name: "browser_navigate", op: "navigate", description: "Navigate the box browser to a URL. By default reuses your tab; set newTab: true to open in a new tab. Returns the resulting page state with a screenshot.", schema: { required: ["url"] }, canNavigate: true },
@@ -596,6 +642,7 @@ export function createSandBrowserTools<Context>(
     description: spec.description,
     op: spec.op,
     schema: spec.schema ?? {},
+    parameters: BROWSER_TOOL_PARAMETERS[spec.op] ?? z.object({}),
     ...(spec.canNavigate === true ? { canNavigate: true } : {}),
     ...(spec.skipScreenshot === true ? { skipScreenshot: true } : {}),
     async execute(context, args, metadata) {

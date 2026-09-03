@@ -26,11 +26,19 @@ const call = async (method, args = {}) => {
 // starts refusing to dispatch at all, which tests its patience rather than the plumbing.
 const NAME = process.env.DISPATCH_AGENT ?? "Dispatch Probe";
 let agent = (await call("listAgents")).find((a) => a.name === NAME && !a.isGroup);
+let created = false;
 if (!agent) {
   const made = await call("createAgent", { name: NAME, description: "", origin: "user", isKickstartRequested: false });
   agent = made?.agent ?? made;
+  created = true;
 }
 if (!agent) throw new Error("no agent to test with");
+// An agent this gate created is its own debris: delete it on every exit path. An agent the
+// operator named through DISPATCH_AGENT is theirs and is left alone.
+const finish = async (code) => {
+  if (created) await call("deleteAgent", { id: agent.id }).catch(() => {});
+  process.exit(code);
+};
 const seen = new Set((await call("getSubagents", { id: agent.id }).catch(() => []))
   .map((s) => s.subagentId));
 console.log(`agent ${agent.name} · mode ${MODE} · prior subagents ${seen.size}`);
@@ -47,12 +55,12 @@ while (Date.now() < deadline) {
   process.stdout.write(`  ${Math.round((Date.now() - deadline + TIMEOUT_MS) / 1000)}s ${states.join(",")}\n`);
   if (fresh.some((s) => s.status === "done")) {
     console.log(`PASS — ${MODE} subagent reached status "done" (${fresh.find((s) => s.status === "done").subagentId})`);
-    process.exit(0);
+    await finish(0);
   }
   if (fresh.length > 0 && fresh.every((s) => s.status === "error")) {
     console.error(`FAIL — every fresh ${MODE} subagent errored`);
-    process.exit(1);
+    await finish(1);
   }
 }
 console.error(`FAIL — no fresh ${WANT_TYPE} subagent reached "done" within ${TIMEOUT_MS}ms`);
-process.exit(1);
+await finish(1);

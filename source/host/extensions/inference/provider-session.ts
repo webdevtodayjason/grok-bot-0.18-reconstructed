@@ -12,6 +12,7 @@ import { classifyTokenLimitErrorFromMessage } from "../../../packages/chat-infer
 import type { SandInferenceProvider } from "../../../shared/inference-router.js";
 import { resolveClaudeCodeCliPath } from "../../../shared/node/inference-router-local.js";
 import { getSandRootDir } from "../../host-paths.js";
+import { isSandBoxSettingEnabled, SAND_TOOL_TRACE_SETTING } from "../../sand-box-setting.js";
 import { SandSettingsStore } from "../../../shared/node/settings/sand-settings-store.js";
 import { getBoxSecretsStorePath } from "../secrets/secrets-service.js";
 import { streamCodexDirectResponses, type CodexDirectTool } from "./codex-direct-responses.js";
@@ -490,6 +491,15 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
 }
 
   const tools = openAiCompatibleTools(withJsonSchemaParameters(definitions));
+  // SAND_TOOL_TRACE: what actually leaves for the provider, beside the [sand][toolset] line for
+  // what buildTurnTools offered. openAiCompatibleTools drops any definition without parameters;
+  // the browserUse subagent lost all fifteen browser tools that way and nobody could see it.
+  if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) {
+    console.log(`[sand][wire] ${JSON.stringify({
+      transport: settings.transport ?? "chat", model: settings.model,
+      offered: (definitions ?? []).length, sent: (tools ?? []).length, tools: (tools ?? []).map(tool => tool.name),
+    })}`);
+  }
   const fullStream = (async function* () {
     let text = "";
     try {

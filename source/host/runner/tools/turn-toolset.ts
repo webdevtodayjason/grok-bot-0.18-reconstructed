@@ -54,6 +54,7 @@ import {
   type ComputerToolDependencies,
 } from "./sand-computer-tool.js";
 import { createZodAgentTool, withSafeParsedArgs } from "../../../packages/agent/tools/common.js";
+import { defineCommunicateTool } from "./communicate-tool.js";
 import { createImageResult, createStringResult } from "../../../packages/chat-inference/prompt-executor.js";
 import { ToolCall } from "../../../packages/proto/generated/agent/v1/agent_pb.js";
 import {
@@ -1044,10 +1045,30 @@ export function createTurnScreenshotToolFactory(
   return () => adaptInnerComputerTool(createScreenshotTool(input.dependencies), "screenshot");
 }
 
+/**
+ * SUB-1 / TOOLS-03. The browser tools kept Cursor's `execute(context, args, metadata)` order,
+ * but this core calls a tool as `execute(ctx, interactionHandler, args, meta)` -- so the args
+ * slot held the interaction handler, `metadata` held the model's arguments, and every call
+ * failed with "url is required" while the model had sent the URL. The file-transfer tools
+ * already go through `defineCommunicateTool`, which parses the arguments against the zod
+ * schema and hands the driver a plain string result; the browser tools take the same road.
+ * The model receives the driver's text (page snapshots, URLs, summaries); the per-action
+ * screenshot stays on the box for now.
+ */
 export function createTurnBrowserToolFactory(
   input: TurnBrowserToolFactoryInput,
 ): () => readonly TurnTool[] {
-  return () => createSandBrowserTools(input.dependencies).map(asTurnTool);
+  return () => createSandBrowserTools(input.dependencies).map((tool) => defineCommunicateTool({}, {
+    id: tool.id,
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters as never,
+    execute: async (ctx, args: Record<string, unknown>, deps) => {
+      const output = await tool.execute(ctx as never, args, { toolCallId: deps.toolCallId });
+      if (output.isError === true) throw new Error(output.text);
+      return output.text;
+    },
+  }) as unknown as TurnTool);
 }
 
 export function createTurnFileTransferToolFactory(

@@ -217,6 +217,12 @@ async function captureComputerDisplayStateIdentity(
   } catch {
     throw new SandComputerAutoReviewBlockedError("Computer Auto-review could not capture the current page state.");
   }
+  // Same executor difference as the browser capture: a non-zero exit arrives as `failure` with
+  // the exit code on this box, and it means Chrome is not up on this display, not that the
+  // capture broke.
+  if (result?.result?.case === "failure" && typeof result.result.value?.exitCode === "number") {
+    return SAND_COMPUTER_PAGE_STATE_CHROME_UNREACHABLE;
+  }
   if (result?.result?.case !== "success") throw new SandComputerAutoReviewBlockedError("Computer Auto-review could not capture the current page state.");
   if (result.result.value.exitCode !== 0) return SAND_COMPUTER_PAGE_STATE_CHROME_UNREACHABLE;
   return computeSandComputerPageStateIdentity(result.result.value.stdout ?? "");
