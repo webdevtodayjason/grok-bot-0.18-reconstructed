@@ -3,13 +3,18 @@
  * ----------------------------------------------------
  * The handoff README asks that the DOM and event layer stay unchanged and that only the adapter
  * be replaced. So this file loads after adapter.js and takes over the factory app.js already
- * calls; app.js and adapter.js are byte-identical to the handoff. The demo factory is kept as
- * createDemoAdapterOffline so the prototype still runs with no gateway behind it.
+ * calls. adapter.js is still byte-identical to the handoff; app.js is not -- docs/DASHBOARD-
+ * CONTRACT.md permits edits to it, and the wave that made these modals tell the truth needed
+ * some (the room ••• menu, the plugin card, the agent panel, the evidence pill). The demo
+ * factory is kept as createDemoAdapterOffline so the console still runs with no gateway.
  *
  * Two rules this file holds to, because the alternative is a UI that lies:
- *   - A method with no backend behind it yet says so, on screen. It never reports success.
- *   - submitSecret refuses outright. Telling someone a credential was stored when it was not is
- *     worse than any missing feature.
+ *   - A method with no backend behind it yet says so, on screen. It never reports success, and
+ *     a control that cannot work is not drawn at all (see connectable below).
+ *   - submitSecret now really does store: it POSTs to the relay's /subscriptions/adopt and
+ *     resolves with what the re-scan says happened, and the form says where the value went.
+ *     Telling someone a credential was stored when it was not is worse than any missing feature,
+ *     and so is telling them it was discarded when it was kept.
  */
 (function attachGatewayAdapter(global) {
   "use strict";
@@ -182,12 +187,20 @@
       // a pill under it says what the receipts could not back.
       .flatMap((m) => {
         const v = m.evidence?.verdict;
-        if (v !== "unverified" && v !== "unsupported" && v !== "undecidable") return [m];
+        // "conversational" means the reply made no checkable claim, so there are no receipts to
+        // disclose and a pill under every such line would be noise. Every other verdict gets one,
+        // and the pill carries the attemptId so a click can read the receipts behind it.
+        if (v == null || v === "conversational") return [m];
         const missing = (m.evidence.missing ?? []).slice(0, 3).join(", ");
-        const why = v === "unverified" ? "no tool ran in this attempt"
+        const receipts = Number(m.evidence.receipts) || 0;
+        const why = v === "evidenced" ? `${receipts} receipt${receipts === 1 ? "" : "s"} behind this reply — open for the tools and their attested output`
+          : v === "unverified" ? "no tool ran in this attempt"
           : v === "undecidable" ? "a tool result was truncated before the check"
           : `${missing} in no tool result this attempt`;
-        return [m, { id: `${m.id}-evidence`, type: "system", text: `Evidence: ${v} · ${why}` }];
+        return [m, {
+          id: `${m.id}-evidence`, type: "system", text: `Evidence: ${v} · ${why}`,
+          evidence: { attemptId: m.evidence.attemptId ?? null, verdict: v, missing: m.evidence.missing ?? [] },
+        }];
       });
   }
 
@@ -260,7 +273,9 @@
   }
 
   function routinesOf(list, scope) {
-    return (list ?? []).map((a) => ({
+    return (list ?? []).map((a) => {
+    const lastRun = lastRunOf(a);
+    return {
       id: `${scope.id}::${a.id}`,
       name: a.name ?? a.id,
       scope,
@@ -274,12 +289,16 @@
       // out of the prose.
       triggerSpec: a.trigger ?? null,
       instruction: a.prompt ?? a.instruction ?? "",
-      status: a.isEnabled === false ? "paused" : "ready",
+      // "running" is the host's own word for a run it has started and not finished
+      // (sand-automation-fire-consumer.ts reads run.status === "running"), so the Now island's
+      // running branch is reachable from the record rather than only from a click in this tab.
+      status: a.isEnabled === false ? "paused" : lastRun?.status === "running" ? "running" : "ready",
       nextRunAt: a.nextRunAt ?? null,
       // The host stamps this; the island had nothing else to say but "moments ago".
       lastRunAt: a.lastRunAt ?? null,
-      lastRun: lastRunOf(a),
-    }));
+      lastRun,
+    };
+    });
   }
 
   // Routine ids are namespaced by scope so two workers can hold the same automation name; the
@@ -294,9 +313,11 @@
     : trigger.type === "group" ? (trigger.listeners ?? [])
     : [trigger]).map((m) => m.type).join(",");
 
-  // Integrations are the closest real thing to the prototype's plugin cards. Tool lists and
-  // per-tool switches are not in the gateway yet, so the cards render with no tools rather than
-  // with invented ones.
+  // Integrations are the closest real thing to the prototype's plugin cards. A listener is a
+  // chat platform the host binds to, not a toolset: getListenerIntegrations reports the platform
+  // and its connection state and nothing else, so the card says that rather than showing an
+  // empty Tools list that reads as "this connector has no tools".
+  const LISTENER_TOOLS_NOTE = "A listener is a chat platform the host binds to, not a toolset. This gateway reports its platform and connection state only — the tools an agent holds come from the Connectors below and from its own built-ins.";
   function pluginsOf(raw) {
     const list = Array.isArray(raw) ? raw
       : Array.isArray(raw?.platforms) ? raw.platforms
@@ -320,8 +341,75 @@
         account: p.account ?? null,
         // Connecting a listener is not wired to this UI, so there is no field to fill in.
         secretField: null,
-        tools: [],
-        skills: [],
+        group: "Listeners",
+        tools: [], toolsNote: LISTENER_TOOLS_NOTE,
+        skills: [], skillsNote: null,
+      };
+    });
+  }
+
+  // The connectors that actually run inside the box. connectors.json is the only list of their
+  // ids on this relay and listBoxMcpServers needs them by id; listRoutedMcpTools carries the
+  // discovered tools, keyed by the same identifier. Both commands answer today, so these cards
+  // carry real rows instead of the hardcoded empty arrays the Tools section used to render.
+  const CONNECTOR_TOOLS_NOTE = "The box reports this server as attached but discovered no tools from it.";
+  // Why the switches are absent rather than inert: the host stores per-tool disables in
+  // mcpDisabledToolsByServerId, and its normaliser drops every key that is not a positive
+  // integer (sand-settings-store.ts normalizeDisabledToolsByServerId). A local stdio server's id
+  // is its name, so a write for it is accepted and silently discarded. Read-only until the host
+  // has stable numeric ids for local servers.
+  const CONNECTOR_TOOLS_READONLY = "Read-only here: the host keys per-tool disables by numeric server id and a local stdio server's id is its name, so a switch would be accepted and dropped.";
+  async function connectorPlugins() {
+    const [config, tools] = await Promise.all([
+      fetch("/connectors").then((r) => r.json()).catch(() => null),
+      call("listRoutedMcpTools").catch(() => null),
+    ]);
+    const rows = Array.isArray(tools) ? tools : [];
+    const ids = [...new Set([...Object.keys(config?.mcpServers ?? {}), ...rows.map((t) => t.providerIdentifier)])]
+      .filter((id) => typeof id === "string" && id.length > 0);
+    if (ids.length === 0) return [];
+    const answer = await call("listBoxMcpServers", { serverIdentifiers: ids }).catch(() => null);
+    const byId = new Map((Array.isArray(answer?.servers) ? answer.servers : []).map((s) => [s.serverIdentifier, s]));
+    return ids.map((id) => {
+      const server = byId.get(id) ?? null;
+      const spec = config?.mcpServers?.[id] ?? null;
+      const mine = rows.filter((t) => t.providerIdentifier === id);
+      const status = server?.status ?? "unknown";
+      // The executable only, never its argv. ui/server.mjs's own note on connectors.json is
+      // "0600: this file carries connector tokens in plaintext", and a stdio MCP server is
+      // routinely launched with `--api-key=...` or `--header "Authorization: Bearer ..."` in
+      // argv. This description is painted straight into the dashboard DOM, so joining the args
+      // in would put those on screen. The count is enough to say the file has more in it.
+      const command = spec?.command ? String(spec.command) : null;
+      const argCount = Array.isArray(spec?.args) ? spec.args.length : 0;
+      return {
+        id: `mcp:${id}`, name: id, icon: id[0].toUpperCase(),
+        group: "Connectors",
+        category: `${command ? "stdio" : "mcp"} · ${status}`,
+        description: [
+          `The box reports this server as ${status}${server?.statusDetail ? ` — ${server.statusDetail}` : ""}.`,
+          `${server?.toolCount ?? mine.length} tool(s) discovered.`,
+          command ? `Runs in the box as ${command} (${argCount} argument(s), configured in connectors.json).` : null,
+        ].filter(Boolean).join(" "),
+        status: status === "connected" ? "connected" : "available",
+        account: null, secretField: null,
+        // getListenerConnectUrl is a chat-platform command; an MCP server is not one, and there is
+        // no gateway command that installs one from here. connectors.json is where it is edited.
+        connectable: false,
+        connectNote: "This connector is configured on the box in connectors.json, not from this page. Edit it there and the host re-reads it.",
+        // "no credential here" means this page, not the box: connectors.json can carry env and
+        // argv credentials, which is exactly why neither is echoed onto this card.
+        connectedNote: "Configured on the box in connectors.json. The box runs the process and the host discovers its tools; this page holds no credential for it and does not show the ones connectors.json may carry.",
+        tools: mine.map((t) => ({
+          id: `${id}::${t.toolName}`,
+          name: t.toolName ?? t.name,
+          description: oneLine(t.description ?? "", 160) || "No description from the server.",
+          enabled: true,
+          togglable: false,
+        })),
+        toolsNote: CONNECTOR_TOOLS_NOTE,
+        toolsReadOnlyNote: CONNECTOR_TOOLS_READONLY,
+        skills: [], skillsNote: null,
       };
     });
   }
@@ -341,8 +429,27 @@
         description: `${facts ? `${facts}. ` : ""}${sub.posture}${sub.adopted ? " Adopted: the secret sits in the 0600 store on this Mac; pick the endpoint in a worker's model menu to use it." : ""}`,
         status, account: sub.identity ?? null,
         secretField: sub.route === "key" ? "API key" : sub.route === "endpoint" ? "Type adopt to confirm" : null,
-        group: "Providers", endpointId: sub.endpointId ?? null, live: sub.endpointId != null && sub.endpointId === liveEndpointId,
-        tools: [], skills: [],
+        // Where the value actually goes. The form used to say the opposite of the truth.
+        secretHint: sub.route === "key"
+          ? "Stored by the relay in its 0600 store on this Mac and used as this endpoint's key. It never enters chat or model context."
+          : "Nothing is read from this box: the relay copies the credential the provider's own CLI already stored on this Mac into its 0600 store. It never enters chat or model context.",
+        group: "Providers", route: sub.route ?? null,
+        endpointId: sub.endpointId ?? null, live: sub.endpointId != null && sub.endpointId === liveEndpointId,
+        // Only a card that can be adopted RIGHT NOW gets a button. A key card always can (the
+        // form is the adoption). A CLI-login card can only when the provider's own CLI already
+        // holds a usable login on this Mac for the relay to copy -- route alone is not enough:
+        // MiniMax is route "endpoint" with no CLI login here, and clicking Connect on it opened
+        // getListenerConnectUrl{platform:"sub:minimax"}, which does not error but answers with an
+        // unrelated Cursor dashboard URL. A resolved lie is worse than a rejected one.
+        connectable: sub.route === "key" || (sub.route === "endpoint" && sub.usable === true),
+        connectedNote: "Adopted: the value sits in the relay's 0600 store on this Mac and is used as this endpoint's key. It never enters chat or model context.",
+        connectNote: sub.route === "runtime"
+          ? "Not adoptable here: this is a subscription runtime, not an API endpoint. Reaching it needs the OpenClaw 2.0 line in docs/SUBSCRIPTIONS-CONTRACT.md, not a connect flow."
+          : sub.route === "endpoint"
+            ? `Nothing to adopt yet: ${sub.name}'s own CLI holds no usable login on this Mac${sub.source ? ` (${sub.source})` : ""}, and this page never asks for the credential itself. Sign in with that CLI and the card turns into an adopt.`
+            : "Not usable on this box: this provider exposes no endpoint this host can route to.",
+        tools: [], toolsNote: "A provider is an inference endpoint, not a toolset. The tools an agent holds come from its own built-ins and from the Connectors below.",
+        skills: [], skillsNote: null,
       };
     });
   }
@@ -410,8 +517,12 @@
     const shape = (a) => ({
       id: a.id,
       name: a.name ?? "Untitled",
-      // The host's own per-agent role field. Empty is the honest answer when it is unset.
-      role: (typeof a.title === "string" && a.title.trim()) || (a.isGroup ? "Group chat" : "not set"),
+      // The host's own per-agent role field. Empty is the honest answer when it is unset -- the
+      // views hide the row rather than printing the literal words "not set" as if it were one.
+      role: (typeof a.title === "string" && a.title.trim()) || (a.isGroup ? "Group chat" : ""),
+      // updateAgent takes the whole profile and trims name and description, so both have to be
+      // carried here or a role edit would blank the description the host already holds.
+      description: typeof a.description === "string" ? a.description : "",
       ...statusOf(a),
       // Real face when the host has one. It does not on this box -- no avatarDataUrl, no colour,
       // no shape -- and /avatars/<id> 404s, so pointing at it just broke every image. The vendored
@@ -421,7 +532,10 @@
       accent: pick(ACCENTS, a.id),
       model: models?.default ?? "default",
       files: [],
-      browser: { label: `${a.name} desktop`, url: "" },
+      // The screen an agent gets is a real fact, but only ensureForeverBox knows it and asking
+      // for every agent at boot would allocate a display each. The panel fills this in when it
+      // opens; until then it says it is asking rather than rendering a bold label over nothing.
+      browser: { label: `${a.name} desktop`, screen: "" },
       messages: [],
       lastActivityAt: a.lastActivityAt ?? 0,
       unread: Number(a.unreadCount) || 0,
@@ -437,8 +551,10 @@
     const byRecent = (a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0);
     workers.sort(byRecent); rooms.sort(byRecent);
 
+    const connectors = await connectorPlugins().catch(() => []);
+
     const first = workers[0] ?? rooms[0];
-    if (!first) return { ...seed, workers: [], rooms: [], routines: [], plugins: pluginsOf(integrations), openContexts: [] };
+    if (!first) return { ...seed, workers: [], rooms: [], routines: [], plugins: [...connectors, ...pluginsOf(integrations)], openContexts: [] };
 
     const active = { kind: workers[0] ? "worker" : "room", id: first.id };
     const loaded = await loadContext(active, first.name);
@@ -477,8 +593,9 @@
             return routinesOf([entry.automation], { kind: owner.isGroup ? "room" : "worker", id: owner.id });
           })
         : loaded.routines,
-      // Providers first: they are what a user connects; connectors follow.
-      plugins: [...subscriptionPlugins(subscriptions, models.default), ...pluginsOf(integrations)],
+      // Providers first: they are what a user connects; the box's own connectors follow, then the
+      // chat listeners the host reports.
+      plugins: [...subscriptionPlugins(subscriptions, models.default), ...connectors, ...pluginsOf(integrations)],
       models,
     };
   }
@@ -673,12 +790,21 @@
         state.activeContext = context;
         if (!state.openContexts.some((c) => same(c, context))) state.openContexts.push(context);
         const snapshot = emit("context:selected", { context });
-        loadContext(context, r.name).then((loaded) => {
+        loadContext(context, r.name).then(async (loaded) => {
           r.messages = loaded.messages;
           r.files = loaded.files;
           applyAwaiting(context, r, loaded.latestAgentMs);
           state.routines = [...state.routines.filter((x) => !same(x.scope, context)), ...loaded.routines];
           emit("message:created", { context });
+          // Reading a conversation is what marks it read. Nothing in this UI ever told the host
+          // that, so a badge raised by a reply stayed up for the life of the box. setAgentUnread
+          // rather than openAgent: it says only this, and does not switch the host's active agent
+          // or kickstart a pending turn as a side effect of a click in the roster.
+          if ((r.unread ?? 0) > 0) {
+            await call("setAgentUnread", { id: context.id, isUnread: false }).catch(() => {});
+            await reloadRoster();
+            emit("message:created", { context });
+          }
         }).catch(() => {});
         return snapshot;
       },
@@ -915,6 +1041,14 @@
       // /home/box/.sand-window-assignments.json maps agentId to a fork index, websockify on 6081
       // routes by that index as its token, and 6080 is the shared seat on :1. ensureForeverBox
       // allocates one if the agent has never had a screen (about 13s cold) and returns its URL.
+      // The same call, rendered as one sentence for the Agent details row. That row used to be a
+      // bold "Browser" label over an empty string, because nothing ever assigned the url it read.
+      describeScreen(agentId) {
+        if (!agentId) return Promise.resolve("A room has no screen of its own — it looks at a member's.");
+        return this.ensureDesktop(agentId).then((desk) => (desk.shared
+          ? `The shared screen on display :1 — every agent on this box sees it (box ${desk.state}).`
+          : `Its own screen on this box — display :${desk.display} (box ${desk.state}).`));
+      },
       ensureDesktop(agentId) {
         if (!agentId) return Promise.reject(new Error("an agent is required"));
         return call("ensureForeverBox", { id: agentId }).then((status) => {
@@ -936,50 +1070,123 @@
         });
       },
 
+      // The receipts behind an evidence verdict. The host has measured and stored them all along
+      // and getAgentEvidence was called by verification scripts only, so a pill said "unsupported"
+      // and there was no way to see what it had been checked against.
+      getEvidence(agentId, attemptId) {
+        return call("getAgentEvidence", { id: agentId, ...(attemptId ? { attemptId } : {}) })
+          .then((answer) => ({
+            receipts: Array.isArray(answer?.receipts) ? answer.receipts : [],
+            attestations: Array.isArray(answer?.attestations) ? answer.attestations : [],
+          }));
+      },
+
+      // Memory the host keeps for one agent. These three were on the operator page only.
+      getMemories(agentId) {
+        return call("getAgentMemories", { id: agentId }).then((rows) => (Array.isArray(rows) ? rows : []));
+      },
+      forgetMemory(agentId, memoryId) {
+        return call("deleteAgentMemory", { id: agentId, memoryId }).then(() => this.getMemories(agentId));
+      },
+      clearMemories(agentId) {
+        return call("clearAgentMemories", { id: agentId }).then(() => this.getMemories(agentId));
+      },
+
+      // updateAgent takes the whole profile and trims name and description, so both go with the
+      // title or the host writes empty strings over what it already had. They are read from the
+      // host immediately before the write rather than from the roster cache: reloadRosterInner
+      // refreshes status, unread, preview and activity only, so a cached name or description can
+      // be hours stale on a long-lived page, and sending the stale copy would silently revert a
+      // rename made from the desktop app. The write is then read back: the host answers 200 and
+      // the saved profile is the only proof it took.
+      setRole(agentId, title) {
+        const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((r) => r.id === agentId);
+        if (!target) return Promise.reject(new Error("that agent is not on this box any more"));
+        const wanted = String(title ?? "").trim();
+        return call("listAgents")
+          .then((agents) => {
+            const current = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
+            if (!current) throw new Error("that agent is not on this box any more");
+            return call("updateAgent", { id: agentId, profile: { name: current.name, description: current.description ?? "", title: wanted } });
+          })
+          .then(() => call("listAgents"))
+          .then((agents) => {
+            const fresh = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
+            if (!fresh) throw new Error("the host answered but that agent is gone");
+            const saved = typeof fresh.title === "string" ? fresh.title.trim() : "";
+            if (saved !== wanted) throw new Error("the host answered and kept the old role");
+            target.role = saved || (target.memberIds ? "Group chat" : "");
+            emit("settings:role", { agentId });
+            return saved;
+          });
+      },
+
       setRunPaused(paused) {
         // Presentation only: this pauses the operator's view of the desktop, not the worker.
         state.desktop.paused = Boolean(paused);
         return emit("desktop:pause", { paused: state.desktop.paused });
       },
 
-      // -- No backend behind these yet. They say so rather than pretending. ------------------
+      // A subscription card: the value is a key (or the word "adopt" for a CLI-store provider)
+      // and goes straight to the relay, which keeps it in its 0600 store. This resolves with the
+      // adoption's own outcome, because the caller used to toast a success the moment the form
+      // was submitted -- and the sentence it toasted said the value had been discarded.
       submitSecret(pluginId, field, value) {
-        // A subscription card: the value is a key (or the word "adopt" for a CLI-store provider)
-        // and goes straight to the relay, which keeps it in the 0600 store. The app's own toast
-        // says the demo discarded the value; here it was stored, and the card says so on refresh.
         if (String(pluginId).startsWith("sub:")) {
           const id = String(pluginId).slice(4);
           const isKey = field === "API key";
-          if (!isKey && String(value).trim().toLowerCase() !== "adopt") return { accepted: false };
-          fetch("/subscriptions/adopt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(isKey ? { id, apiKey: value } : { id }) })
+          if (!isKey && String(value).trim().toLowerCase() !== "adopt") {
+            return Promise.resolve({ accepted: false, message: `Type adopt to confirm ${id}` });
+          }
+          return fetch("/subscriptions/adopt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(isKey ? { id, apiKey: value } : { id }) })
             .then(async (res) => {
               const body = await res.json().catch(() => ({}));
-              if (!res.ok) { notWired(`Adopting ${id} failed: ${body?.error ?? res.status}`); return; }
+              if (!res.ok) {
+                notWired(`Adopting ${id} failed: ${body?.error ?? res.status}`);
+                return { accepted: false, message: `Adopting ${id} failed: ${body?.error ?? res.status}` };
+              }
               await refreshSubscriptions();
+              // The scan is re-read, so this reports what the relay now holds rather than what
+              // the POST was asked to do.
+              const card = state.plugins.find((p) => p.id === pluginId);
+              return {
+                accepted: true,
+                message: card?.status === "connected"
+                  ? `${card.name} adopted — the value is in the relay's 0600 store on this Mac, not in chat or model context`
+                  : `${id} was accepted, but the scan does not report it adopted yet`,
+              };
             })
-            .catch((error) => notWired(`Adopting ${id} failed: ${error.message}`));
-          return { accepted: true };
+            .catch((error) => {
+              notWired(`Adopting ${id} failed: ${error.message}`);
+              return { accepted: false, message: `Adopting ${id} failed: ${error.message}` };
+            });
         }
         // Connector cards have no host request to answer; this UI must not carry those credentials.
-        return notWired("Answering a host secret request — the host asks by entryId and this UI has no request to answer");
+        notWired("Answering a host secret request — the host asks by entryId and this UI has no request to answer");
+        return Promise.resolve({ accepted: false, message: "This UI has no host secret request to answer" });
       },
+      // Resolves with what happened, so the caller can toast the outcome instead of toasting the
+      // click: this used to fire "Plugin installed globally" before the host had answered, and on
+      // a card whose route the host always rejects the answer was always an error.
       setPluginState(pluginId, status) {
         const plugin = state.plugins.find((p) => p.id === pluginId);
-        if (!plugin) return clone(state);
+        if (!plugin) return Promise.resolve(`No such plugin: ${pluginId}`);
         const platform = plugin.id;
+        if (plugin.connectable === false) {
+          return Promise.resolve(plugin.connectNote ?? `${plugin.name} cannot be connected from this page.`);
+        }
         if (status === "available" || status === "disconnect") {
-          call("disconnectChannel", { platform })
-            .then(() => hydrate(state)).then((next) => { state = next; emit("plugin:state", { pluginId, status: "available" }); })
-            .catch((error) => notWired(`Disconnecting ${plugin.name} failed: ${error.message}`));
-          return clone(state);
+          return call("disconnectChannel", { platform })
+            .then(() => hydrate(state)).then((next) => { state = next; emit("plugin:state", { pluginId, status: "available" }); return `${plugin.name} disconnected`; })
+            .catch((error) => { notWired(`Disconnecting ${plugin.name} failed: ${error.message}`); return `Disconnecting ${plugin.name} failed: ${error.message}`; });
         }
         // The credential never reaches this page. The host returns the platform's own consent URL,
         // the operator approves there, and the channel binds host-side -- which is why this opens
         // a tab rather than collecting anything.
-        call("getListenerConnectUrl", { platform })
+        return call("getListenerConnectUrl", { platform })
           .then((answer) => {
             const url = answer?.url;
-            if (!url) return notWired(`${plugin.name} returned no connect URL`);
+            if (!url) { notWired(`${plugin.name} returned no connect URL`); return `${plugin.name} returned no connect URL`; }
             global.open(url, "_blank", "noopener");
             const r = record(state.activeContext);
             if (r) r.messages.push({
@@ -988,14 +1195,16 @@
               time: timeOf(Date.now()),
             });
             emit("plugin:state", { pluginId, status: "connecting" });
+            return `Approve ${plugin.name} in the tab that just opened`;
           })
-          .catch((error) => notWired(`Connecting ${plugin.name} failed: ${error.message}`));
-        return clone(state);
+          .catch((error) => { notWired(`Connecting ${plugin.name} failed: ${error.message}`); return `Connecting ${plugin.name} failed: ${error.message}`; });
       },
       togglePluginTool() {
-        // This host reports no per-tool breakdown for a connector, so there is nothing to grant
-        // or revoke here. The gate that does exist is the review policy in Settings.
-        return notWired("Per-tool permissions — this host reports no tool list for a connector");
+        // The tool list is real (listRoutedMcpTools), so the old "this host reports no tool list"
+        // was false. What is missing is the write: setHostSettings stores disables in
+        // mcpDisabledToolsByServerId, whose normaliser keeps only positive-integer server ids
+        // (sand-settings-store.ts), and a local stdio server's id is its name.
+        return notWired("Per-tool permissions — the host keys them by numeric server id and this box's connectors have name ids, so the write would be dropped");
       },
       // Every argument name and resolution string below was read from host source, not guessed:
       // resolveAutoReviewApproval resolves "approved"|"denied" (runner/sand-auto-review.ts:9);

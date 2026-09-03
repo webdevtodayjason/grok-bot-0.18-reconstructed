@@ -1,8 +1,18 @@
-import { dirname } from "node:path";
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getSandRootDir } from "./host-paths.js";
+import {
+  isSandBoxSettingEnabled,
+  SAND_TOOL_TRACE_SETTING,
+} from "./sand-box-setting.js";
 import { evidenceRegistry } from "./extensions/evidence/evidence-registry.js";
 import { createSandExecutorSubagentConfig } from "./sand-multitask.js";
 import { SubagentType, SubagentTypeCustom } from "../packages/proto/generated/agent/v1/subagents_pb.js";
 import { createSandComputerUseSubagentConfig } from "./runner/tools/sand-computer-use-subagent.js";
+import {
+  BROWSER_USE_SUBAGENT_TYPE,
+  createSandBrowserUseSubagentConfig,
+} from "./runner/tools/sand-browser-use-subagent.js";
 import { TranscriptMirrorOffloadPool } from "./agent-isolation/transcript-mirror-offload.js";
 import type {
   CreateProductionRunnerRunStep,
@@ -49,6 +59,7 @@ import {
 import type {
   TurnAwaitToolFactoryInput,
   TurnBoxHelpToolFactoryInput,
+  TurnBrowserToolFactoryInput,
   TurnCloudAgentToolFactoryInput,
   TurnFileTransferToolFactoryInput,
   TurnMcpManagementToolFactoryInput,
@@ -102,7 +113,18 @@ import {
   createTurnAgentRunStreamInput,
   createTurnAgentStreamStart,
   type TurnLocalResourceProjectionInput,
+  type TurnMcpForTurn,
+  type TurnMcpProjectionInput,
 } from "./runner/turn-agent-composition.js";
+import type { McpToolForMeta } from "./runner/tools/mcp-meta-tools.js";
+import { wrapMcpExecutorForAudit } from "./runner/sand-action-audit.js";
+import { boundedConnectorTag } from "../shared/observability/connector-auth-telemetry.js";
+import { errorLogTag } from "../shared/errors.js";
+import {
+  mcpErrorClassOf,
+  reportMcpHostEdgeDegraded,
+  takeMcpExecErrorClass,
+} from "../shared/node/mcp/mcp-diagnostics.js";
 import {
   createProductionTurnAgentOwner,
   createProductionTurnAgentRunInput,
@@ -126,6 +148,7 @@ import { DEFAULT_SAND_SYSTEM_PROMPT } from "./runner/system-prompt.js";
 import {
   createSystemPromptAssembly,
   type PromptSnapshotStore,
+  type SystemPromptAssemblyDependencies,
 } from "./runner/system-prompt-assembly.js";
 import { PrivacyMode, type PrivacyMode as PrivacyModeValue } from "../packages/redaction/privacy-mode.js";
 import { tryExtractSandAutoReviewClassifierConversationContext } from "../packages/agent/smart-mode-classifier-context.js";
@@ -612,6 +635,65 @@ function asPromptSnapshotStore(value: unknown): PromptSnapshotStore | undefined 
     },
   };
 }
+
+/**
+ * The one question the prompt trace has to answer is *which sections the assembled prompt
+ * carries* -- that is what SP-1/SP-2 broke and what scripts/verify-toolset.mjs asserts. The
+ * prompt itself is not written anywhere: it is 70k+ characters of the user's memory, agent
+ * profile, routines and connector instructions, every agent on this box has Shell on the same
+ * filesystem, and a dump of it would outlive both the run and the switch. So the trace records
+ * the section markers and the length, under the same operator switch as the toolset line, in a
+ * host-owned file (0600, beside the rest of the sand data rather than in agent-writable /tmp).
+ * Returns its argument so it can wrap the generator in place.
+ */
+const SYSTEM_PROMPT_SECTION_MARKERS: Readonly<Record<string, string>> = {
+  memory: "Memory: durable facts you have learned about the user",
+  routines: "Routines (your scheduling/automation feature)",
+  skills: "Workflows are a GLOBAL, shared library",
+  timeZone: "Your box and tools run on a UTC clock",
+};
+
+function dumpAssembledSystemPrompt(agentId: string, prompt: string): string {
+  if (!isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) return prompt;
+  try {
+    writeFileSync(
+      join(getSandRootDir(), `sand-system-prompt-${agentId}.json`),
+      JSON.stringify({
+        agentId,
+        length: prompt.length,
+        sections: Object.fromEntries(
+          Object.entries(SYSTEM_PROMPT_SECTION_MARKERS)
+            .map(([name, marker]) => [name, prompt.includes(marker)]),
+        ),
+      }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch { /* tracing must never break a turn */ }
+  return prompt;
+}
+
+/**
+ * SP-1. The prompt stores reach this module as `unknown` on the session object, and the
+ * reconstruction resolved that by handing the system-prompt assembly `() => null` for every one
+ * of them -- so the assembled prompt carried no memory, no routines, no skills and no channels
+ * while the very same stores were passed to the gateway runner a few hundred lines below. A
+ * store is accepted here only when it actually answers the methods the assembly calls; anything
+ * else stays null, which keeps the section absent rather than throwing mid-prompt.
+ */
+function asStoreWithMethods<T>(value: unknown, methods: readonly string[]): T | null {
+  if (typeof value !== "object" || value == null) return null;
+  const candidate = value as Record<string, unknown>;
+  for (const name of methods) {
+    if (typeof candidate[name] !== "function") return null;
+  }
+  return value as T;
+}
+
+type PromptMemoryStore = ReturnType<SystemPromptAssemblyDependencies["memoryStore"]>;
+type PromptMemorySnapshots = ReturnType<SystemPromptAssemblyDependencies["memorySnapshots"]>;
+type PromptAutomationStore = ReturnType<SystemPromptAssemblyDependencies["automationStore"]>;
+type PromptWorkflowStore = ReturnType<SystemPromptAssemblyDependencies["workflowStore"]>;
+type PromptChannelStore = ReturnType<SystemPromptAssemblyDependencies["channelStore"]>;
 
 function createTypedInferenceOwner(
   value: DynamicApi,
@@ -1273,6 +1355,18 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       : undefined;
     const readVideoAttachmentBytes = method(attachments, "readVideoBytes");
     const mcpCustomInstructions = method(mcp.mcp, "getCustomInstructions");
+    /**
+     * SP-2. `turn-run-shell` declares three setters for this state and calls them, but the
+     * production run shell never supplies `discoverMcpTools`, so on this path the setters were
+     * dead and the prompt glue was handed the constants `[]`, `new Map()` and `false`. The
+     * production route discovers connectors inside the run-input projection instead
+     * (`createTurnAgentRunInputProjection`), so the same three facts are recorded there, once
+     * per turn, and read from here. Without this the model is never told which connectors are
+     * connected, never sees their custom instructions, and is never told discovery failed.
+     */
+    let mcpConnectedServerNamesForTurn: readonly string[] = [];
+    let mcpCustomInstructionsForTurn: ReadonlyMap<string, string> = new Map();
+    let mcpDiscoveryUnavailableForTurn = false;
     let shellWatchWatermark:
       | { readonly turnCount: number; readonly boundaryRef: Uint8Array; readonly lastUserMessageId?: string; readonly hasUserTurn: boolean }
       | undefined;
@@ -1315,9 +1409,9 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           ...(mcpCustomInstructions === undefined
             ? {}
             : { mcp: { getCustomInstructions: async (_context: Context) => await mcpCustomInstructions() } }),
-          mcpConnectedServerNamesForTurn: () => [],
-          mcpCustomInstructionsForTurn: () => new Map(),
-          isMcpDiscoveryUnavailableForTurn: () => false,
+          mcpConnectedServerNamesForTurn: () => mcpConnectedServerNamesForTurn,
+          mcpCustomInstructionsForTurn: () => mcpCustomInstructionsForTurn,
+          isMcpDiscoveryUnavailableForTurn: () => mcpDiscoveryUnavailableForTurn,
           shellWatchHost: () => {
             const store = session.agentStore;
             if (
@@ -1394,14 +1488,72 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             }))
         }));
     };
-    const productionSystemPromptAssembly = productionContext === undefined
-      || productionRequestContext === undefined
-      ? undefined
-      : createSystemPromptAssembly({
+    /**
+     * COMPACT-1. Both call sites pinned this to 0, so every epoch comparison was
+     * `0 === 0`: the frozen memory prompt and the agent-profile snapshot were reused for the
+     * life of the conversation, including across a compaction that had just thrown their
+     * context away. `summaryArchives.length` is the count turn-settle prints when it logs
+     * "conversation compacted", so it is the epoch; it is read defensively (the state owner is
+     * not bound before the first turn) and kept monotonic per session.
+     */
+    let observedCompactionEpoch = 0;
+    let conversationStateForEpoch: (() => unknown) | undefined;
+    /**
+     * Refreshed at most once per run generation. The only way to read the archive count is
+     * `getAgentConversationStateStructure`, which round-trips the WHOLE conversation through
+     * protobuf on every call -- and this getter is now on the prompt-assembly path, which
+     * renders more than once a turn, on an agent whose history is hundreds of thousands of
+     * tokens. Once per run is enough: turn-settle is what appends a summary archive, so a
+     * compaction is visible to the next turn's prompt either way.
+     */
+    let epochReadForGeneration = -1;
+    const readCompactionEpoch = (): number => {
+      const generation = (builtRunner as { currentRunGeneration?: number } | undefined)
+        ?.currentRunGeneration ?? 0;
+      if (generation === epochReadForGeneration) return observedCompactionEpoch;
+      try {
+        const state = conversationStateForEpoch?.() as
+          | { readonly summaryArchives?: readonly unknown[] }
+          | undefined;
+        const count = state?.summaryArchives?.length;
+        if (typeof count === "number" && count > observedCompactionEpoch) {
+          observedCompactionEpoch = count;
+        }
+        epochReadForGeneration = generation;
+      } catch { /* conversation state is not bound yet; keep the last epoch seen, retry next call */ }
+      return observedCompactionEpoch;
+    };
+    /**
+     * One assembly per runner identity. It used to be built once per session with
+     * `isSubagentRunner: false` and `isBoxScopedSubagent: () => false`, and every run shell --
+     * parent and subagent alike -- generated its prompt from that single object. So a
+     * computerUse or browserUse subagent holding exactly three tools was still handed the
+     * chief's prompt: CopyToBox / CopyFromBox, cloud agents, connectors, routines, the user's
+     * memory, and the time-zone section `getTimeZoneSection` exists to suppress for a
+     * box-scoped runner -- the same "the prompt promises tools that do not exist" failure this
+     * wave fixes on the toolset side. The assembly is a closure over deps with no state of its
+     * own, so one per identity is cheap; they are memoized so a run shell does not rebuild it
+     * per turn.
+     */
+    const promptAssembliesByIdentity = new Map<
+      string,
+      ReturnType<typeof createSystemPromptAssembly>
+    >();
+    const createProductionSystemPromptAssembly = (identity: {
+      readonly isSubagentRunner: boolean;
+      readonly isBoxScopedSubagent: boolean;
+    }) => {
+      if (productionContext === undefined || productionRequestContext === undefined) {
+        return undefined;
+      }
+      const key = `${identity.isSubagentRunner}|${identity.isBoxScopedSubagent}`;
+      const existing = promptAssembliesByIdentity.get(key);
+      if (existing !== undefined) return existing;
+      const built = createSystemPromptAssembly({
           basePrompt: typeof overrides.systemPrompt === "string"
             ? overrides.systemPrompt
             : DEFAULT_SAND_SYSTEM_PROMPT,
-          isSubagentRunner: false,
+          isSubagentRunner: identity.isSubagentRunner,
           isSharedRoomRunner: isSharedRoomTurn,
           isSystemPromptOverridden: typeof overrides.systemPrompt === "string",
           agentProfileProvider: () => hooks.agentProfileProvider?.() ?? null,
@@ -1411,12 +1563,26 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               ? { getMetadata: (key: string) => String(store.getMetadata(key)) }
               : null;
           },
-          compactionEpoch: () => 0,
-          memoryStore: () => null,
-          memorySnapshots: () => null,
+          compactionEpoch: readCompactionEpoch,
+          memoryStore: () =>
+            asStoreWithMethods<PromptMemoryStore>(session.memory, ["recall", "getLocation"]),
+          memorySnapshots: () =>
+            asStoreWithMethods<PromptMemorySnapshots>(session.db, [
+              "getMemoryPromptSnapshot",
+              "setMemoryPromptSnapshot",
+            ]),
+          // SP-1 restores memory, routines, skills and channels -- NOT these two. `memory`
+          // exposes MemoryService plus createAgentState (extensions/memory/extension.ts); there
+          // is no createUserMemory / createProjectMemory anywhere in source, so the owners the
+          // gateway runner is handed below are `undefined` and always have been. The two
+          // classes that would serve them (UserMemoryStore / ProjectMemoryStore) are never
+          // constructed and their `recall` signatures do not match what the assembly calls --
+          // it passes {profileLimit, recentLimit} and reads `.injected`, they take
+          // {profile, recent} and return a flat array -- so wiring them as-is would throw
+          // inside prompt assembly. Left null deliberately: absent section, not a broken turn.
           userMemory: () => null,
           projectMemory: () => null,
-          isBoxScopedSubagent: () => false,
+          isBoxScopedSubagent: () => identity.isBoxScopedSubagent,
           requestContext: {
             resolve: () => {
               const resolved = productionRequestContext.resolve();
@@ -1428,9 +1594,15 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               };
             },
           },
-          automationStore: () => null,
-          workflowStore: () => null,
-          channelStore: () => null,
+          automationStore: () =>
+            asStoreWithMethods<PromptAutomationStore>(session.automations, ["getLocation", "list"]),
+          workflowStore: () =>
+            asStoreWithMethods<PromptWorkflowStore>(session.workflows, ["getLocation"]),
+          channelStore: () =>
+            asStoreWithMethods<PromptChannelStore>(session.channels, [
+              "getLocation",
+              "listConnections",
+            ]),
           connectorManifests: CONNECTOR_MANIFESTS,
           sendToAgentImpl: sendToAgent,
           agentManagement,
@@ -1441,12 +1613,21 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           isMultitaskEnabled: () => method(experiments, "isMultitaskEnabled")?.() ?? false,
           mcpManagement: () => mcp.management,
           isMcpMultiAccountEnabled: () => method(experiments, "isMcpMultiAccountEnabled")?.() ?? false,
-          isCloudAgentsDisabledByTeam: () => method(experiments, "isCloudAgentsDisabledByTeam")?.() ?? false,
+          // TOOLS-09: `experiments` exposes no isCloudAgentsDisabledByTeam, so this always
+          // resolved false through the optional call. The cloud-agents service owns the answer.
+          isCloudAgentsDisabledByTeam: () => method(cloudAgents, "isDisabledByTeamAdmin")?.() ?? false,
           mcpCustomInstructionsSection: () => productionPromptGlue?.getMcpCustomInstructionsSection() ?? null,
           mcpDiscoveryStatusSection: () => productionPromptGlue?.getMcpDiscoveryStatusSection() ?? null,
           remoteBoxSection: () => productionPromptGlue?.getRemoteBoxSection() ?? "",
           computerSection: () => productionPromptGlue?.getComputerSection() ?? null,
         });
+      promptAssembliesByIdentity.set(key, built);
+      return built;
+    };
+    const productionSystemPromptAssembly = createProductionSystemPromptAssembly({
+      isSubagentRunner: false,
+      isBoxScopedSubagent: false,
+    });
 
     const runnerOptions: Record<string, unknown> = {
       inference: extensions.api("inference").port,
@@ -1702,12 +1883,12 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         memoryStore: session.memory,
         userMemory: method(memory, "createUserMemory")?.({
           agentId: session.id,
-          resolveAgentName: resolveAgentDisplayName
+          resolveAgentName: resolveAgentDisplayName,
         }),
         projectMemory: method(memory, "createProjectMemory")?.({
           agentDir: dirname(session.dbPath),
           agentId: session.id,
-          resolveAgentName: resolveAgentDisplayName
+          resolveAgentName: resolveAgentDisplayName,
         }),
         memorySnapshots: session.db,
         profilePromptSnapshots: session.db,
@@ -2142,6 +2323,74 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           }),
         };
       },
+      /**
+       * SUB-1 / TOOLS-03, second half. Offering the browserUse subagent in Task's enum is not
+       * enough: `turn-toolset` pushes the fifteen browser_* tools only when `factories.browser`
+       * exists, and like Computer before it that factory had no entry here -- so the first live
+       * browserUse dispatch came back "browserUse isn't available in its session" with a
+       * two-tool set (Shell, Read). Same correction as the computer tool: the browser is the
+       * box's, so it is built on the box accessor, not the user's machine.
+       */
+      createBrowserToolInputs: (turn, _props) => {
+        const accessor = turn.remoteBoxResourceAccessor;
+        if (accessor === undefined) {
+          throw new TypeError("remote box resource accessor is not bound");
+        }
+        const modes = autoReviewGate?.currentModes();
+        const autoRunInstructions = autoReviewGate?.userInstructions();
+        return {
+          dependencies: createHostBrowserDriverDependencies({
+            resourceAccessor: accessor as never,
+            box: remoteBox as unknown as HostBrowserBoxOwner<unknown>,
+            getBoxId: () => session.id,
+            getDefaultViewId: () => session.id,
+            executeShell: createHostShellExecutor({
+              resourceAccessor: accessor as never,
+              assertNoPendingApproval: () =>
+                autoReviewGate?.assertNoPendingApproval(),
+              auditShellCommand: command => {
+                evidenceRegistry.noteReceipt(session.id, "shell");
+                method(actionAuditor as DynamicApi, "record")?.({
+                  agentId: session.id,
+                  occurredAtMs: Date.now(),
+                  ...evidenceRegistry.receiptFields(session.id),
+                  action: {
+                    kind: "shellCommand",
+                    command,
+                    shellKind: "foreground",
+                    target: "box",
+                  },
+                });
+              },
+            }),
+            ...(modes === undefined ? {} : {
+              autoReview: {
+                mode: modes.computer,
+                agentId: session.id,
+                boxIdentity: {
+                  boxId: session.id,
+                  windowGeneration: `${autoReviewController?.hostGeneration ?? "host"}:${session.id}`,
+                },
+                ...(autoReviewController === undefined ? {} : { autoReviewController }),
+                extractConversationContext:
+                  extractProductionTurnAutoReviewConversationContext,
+                getApprovalExpiryPolicy: () => sandAutoReviewApprovalExpiryPolicy("turn"),
+                resolveDisplayNumber: async (context: unknown) => {
+                  await method(remoteBox, "ensureReady")?.(context, session.id);
+                  const windowIndex = boxAgentWindowIndex(remoteBox as never, session.id);
+                  return windowIndex ?? (boxSupportsMultiWindow(remoteBox as never) ? undefined : 1);
+                },
+                ...(autoRunInstructions === undefined
+                  ? {}
+                  : { userAutoRunInstructions: autoRunInstructions }),
+              },
+            }),
+            ...(persistImageForTurn === undefined
+              ? {}
+              : { getPersistImage: () => persistImageForTurn }),
+          }) as unknown as TurnBrowserToolFactoryInput["dependencies"],
+        };
+      },
       createScreenshotToolInputs: (turn, _props) => {
         // Same correction as the computer tool: the screen lives on the box, not on the user's Mac.
         const accessor = turn.remoteBoxResourceAccessor;
@@ -2502,9 +2751,23 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       // generalPurpose (task-tool-schema.ts:101 falls back to it), while execution resolves
       // against THIS list and throws "No subagent types are available."
       // (task-subagent-preparation.ts:494). Offer what the local box can actually run.
-      const baseTurn: TurnToolsetTurnInput = {
-        autoReviewModes,
-        subagentConfigs: [
+      // SUB-1 / TOOLS-03: the third entry. Task's enum is built from THIS list, so with only two
+      // rows the browserUse subagent was unreachable and its fifteen browser_* tools -- which
+      // turn-toolset pushes only for isBrowserUseSubagent -- were dead code. The gate is the
+      // same one the prompt glue reads, so the description the model is given and the types it
+      // may actually dispatch move together.
+      // Evaluated per turn, not once per session: the browserUse override is re-read from the
+      // host settings file on every call, and both desktop rows are only real when the box is
+      // up -- `buildTurnTools` gates the browser factory AND Shell/Read on the same
+      // `getRemoteBoxAvailable`, so offering the type with the box down dispatches a subagent
+      // with an empty toolset. Offered types and the tools that back them move together.
+      const desktopSubagentsAvailable = (): boolean =>
+        method(remoteBox, "isAvailable")?.() !== false;
+      const buildSubagentConfigs = (): NonNullable<TurnToolsetTurnInput["subagentConfigs"]> => {
+        const desktopAvailable = desktopSubagentsAvailable();
+        const browserUseOffered = desktopAvailable
+          && method(experiments, "isBrowserUseSubagentEnabled")?.() === true;
+        return [
           {
             // The executor factory carries the right description and shape; the name is
             // generalPurpose so the schema default and the resolver's preferred lookup
@@ -2515,14 +2778,35 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             }),
             permissionMode: 0,
           },
-          {
-            ...createSandComputerUseSubagentConfig({ browserUseOffered: false }),
-            subagent_type: new SubagentType({
-              type: { case: "custom", value: new SubagentTypeCustom({ name: "computerUse" }) },
-            }),
-            permissionMode: 0,
-          },
-        ],
+          ...(desktopAvailable
+            ? [{
+              ...createSandComputerUseSubagentConfig({ browserUseOffered }),
+              subagent_type: new SubagentType({
+                type: {
+                  case: "custom" as const,
+                  value: new SubagentTypeCustom({ name: "computerUse" }),
+                },
+              }),
+              permissionMode: 0,
+            }]
+            : []),
+          ...(browserUseOffered
+            ? [{
+              ...createSandBrowserUseSubagentConfig(),
+              subagent_type: new SubagentType({
+                type: {
+                  case: "custom" as const,
+                  value: new SubagentTypeCustom({ name: BROWSER_USE_SUBAGENT_TYPE }),
+                },
+              }),
+              permissionMode: 0,
+            }]
+            : []),
+        ];
+      };
+      const baseTurn: TurnToolsetTurnInput = {
+        autoReviewModes,
+        subagentConfigs: buildSubagentConfigs(),
       };
       const staticModelId = process.env.SAND_AGENT_MODEL ?? DEFAULT_SAND_MODEL;
       /**
@@ -2534,19 +2818,37 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
        */
       const normalizeSubagentKind = (value: string | undefined): string | undefined =>
         typeof value === "string" ? value.replace(/[-_ ]/g, "").toLowerCase() : undefined;
-      const lazyToolHost = (shellSubagentKind?: string) => createProductionTurnToolsetHost({
+      /**
+       * TOOLS-02. The two desktop flags below were derived correctly while this one stayed the
+       * literal `false`, so a computerUse subagent was offered the chief's twelve tools -- the
+       * user's own machine (ExternalShell/ExternalRead/AwaitShell), the web pair, CopyToBox /
+       * CopyFromBox, CloudAgent and the MCP pair -- instead of the three its role has. A
+       * desktop-scoped subagent lives inside the box: Shell, Read, Computer.
+       */
+      const isBoxScopedSubagentKind = (shellSubagentKind?: string): boolean => {
+        const kind = normalizeSubagentKind(shellSubagentKind);
+        return kind === "computeruse" || kind === "browseruse";
+      };
+      const lazyToolHost = (
+        shellSubagentKind?: string,
+        shellConversationId: string = session.id,
+      ) => createProductionTurnToolsetHost({
         turn: baseTurn,
         factoryProvider: createTurnToolsetFactoryProvider(hostDependencies()),
         isSubagentRunner: shellSubagentKind !== undefined,
         isSharedRoomRunner: isSharedRoomTurn,
-        isBoxScopedSubagent: false,
+        isBoxScopedSubagent: isBoxScopedSubagentKind(shellSubagentKind),
         isComputerUseSubagent: normalizeSubagentKind(shellSubagentKind) === "computeruse",
         isBrowserUseSubagent: normalizeSubagentKind(shellSubagentKind) === "browseruse",
         isSystemPromptOverridden: typeof overrides.systemPrompt === "string",
         remoteBoxHasDesktop: true,
-        getConversationId: () => session.id,
-        getRemoteBoxAvailable: () => method(remoteBox, "isAvailable")?.() !== false,
-        cloudAgentsDisabledByTeam: () => method(experiments, "isCloudAgentsDisabledByTeam")?.() ?? false,
+        // The identity the shell runs as. `withAttestedResult` and the local-tool scope both key
+        // off it, so a subagent's tool results used to be attested against its parent.
+        getConversationId: () => shellConversationId,
+        getRemoteBoxAvailable: desktopSubagentsAvailable,
+        // TOOLS-09: same non-existent experiments method as the prompt assembly's gate; the
+        // team-admin policy lives on the cloud-agents service.
+        cloudAgentsDisabledByTeam: () => method(cloudAgents, "isDisabledByTeamAdmin")?.() ?? false,
         spotlightEnabled: () => method(experiments, "isSpotlightEnabled")?.() ?? false,
         isDynamicToolsEnabled: () => method(experiments, "isDynamicToolsEnabled")?.() ?? false,
         isMultitaskEnabled: () => method(experiments, "isMultitaskEnabled")?.() ?? false,
@@ -2568,12 +2870,45 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         }
         throw new TypeError("production Agent conversation state is not bound");
       };
+      conversationStateForEpoch = getProductionConversationState;
       /**
        * One shell per runner identity. A child previously reused the parent's shell, so its turns
        * were built with the parent's toolHost -- which is why a real computerUse subagent still
        * came back without the Computer tool and answered in prose.
        */
-      const makeRunShell = (shellSubagentKind?: string) => createProductionTurnRunShellHostInput({
+      /**
+       * `shellConversationId` is the identity the shell RUNS AS: `session.id` for the chief, and
+       * the child's own agent id for a subagent. The audit/receipt lane needs it -- a connector
+       * call made by a subagent used to be recorded against the parent, which both emptied the
+       * child's ledger and let a parent reply that made no tool call of its own be stamped
+       * `evidenced` off its child's receipt.
+       */
+      const makeRunShell = (shellSubagentKind?: string, shellConversationId: string = session.id) => {
+      const runShellPromptAssembly = createProductionSystemPromptAssembly({
+        isSubagentRunner: shellSubagentKind !== undefined,
+        isBoxScopedSubagent: isBoxScopedSubagentKind(shellSubagentKind),
+      });
+      /**
+       * TOOLS-01 / CP-01 / TOOLS-10. Connectors were discovered every turn and then dropped on
+       * the floor: `mcpMeta` was never bound on this path, so `buildTurnTools` never offered
+       * GetMcpTools / CallMcpTool and the model could not reach a single connector tool. This
+       * holder is what closes the loop -- the same per-turn discovery that feeds the Agent
+       * stream also feeds the meta pair's descriptors. It is declared per run shell (one per
+       * runner identity, and a runner runs one turn at a time), so a parent and its subagents
+       * never share it.
+       */
+      let turnMcpTools: readonly McpToolForMeta[] = [];
+      const isMcpToolForMeta = (value: unknown): value is McpToolForMeta =>
+        typeof value === "object" && value != null
+        && typeof (value as { providerIdentifier?: unknown }).providerIdentifier === "string"
+        && typeof (value as { toolName?: unknown }).toolName === "string";
+      const recordDiscoveredMcpTools = (tools: readonly unknown[]): void => {
+        turnMcpTools = tools.filter(isMcpToolForMeta);
+        mcpConnectedServerNamesForTurn = [
+          ...new Set(turnMcpTools.map(tool => tool.providerIdentifier)),
+        ];
+      };
+      return createProductionTurnRunShellHostInput({
         createAgentOwnerInput: ({ requestId, runOptions, context, cancelThisRun, emitUpdate }) => {
           if (session.agentStore == null || typeof session.agentStore.getBlobStore !== "function") {
             throw new TypeError("production Agent blob store is not bound");
@@ -2627,6 +2962,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           );
           const turn: TurnToolsetTurnInput = {
             ...baseTurn,
+            subagentConfigs: buildSubagentConfigs(),
             emitUpdate,
             cancelThisRun,
             ...(runOptions.ackToken === undefined
@@ -2672,6 +3008,80 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               if (projectedActionAuditor === undefined) {
                 throw new TypeError("production turn action auditor is not bound");
               }
+              const mcpApi = mcp.mcp as DynamicApi | undefined;
+              const mcpForTurn: TurnMcpProjectionInput | undefined =
+                mcpApi == null
+                  || typeof mcpApi.createExecutor !== "function"
+                  || typeof mcpApi.createStateExecutor !== "function"
+                  ? undefined
+                  : {
+                    mcpForTurn: {
+                      // wrapMcpExecutorForAudit was written and then wired to nothing, so an
+                      // MCP call left no receipt and no audit row; the evidence layer could
+                      // never stamp a connector answer "evidenced". It belongs here, around
+                      // the executor this turn actually runs.
+                      createExecutor: (persistImage, spillLargeText, auditIdentity) =>
+                        wrapMcpExecutorForAudit(
+                          mcpApi.createExecutor(
+                            persistImage,
+                            spillLargeText,
+                            auditIdentity,
+                          ) as { execute(ctx: unknown, args: never, options?: unknown): Promise<never> },
+                          {
+                            agentId: shellConversationId,
+                            auditor: projectedActionAuditor,
+                            resolveTransport: async server =>
+                              String(await mcpApi.resolveToolTransport?.(server) ?? "unknown"),
+                          },
+                        ) as unknown as ReturnType<TurnMcpForTurn["createExecutor"]>,
+                      createStateExecutor: () =>
+                        mcpApi.createStateExecutor() as ReturnType<
+                          TurnMcpForTurn["createStateExecutor"]
+                        >,
+                      ...(typeof mcpApi.resolveNeedsAuthSlot === "function"
+                        ? {
+                          resolveNeedsAuthSlot: (providerIdentifier: string) =>
+                            mcpApi.resolveNeedsAuthSlot(providerIdentifier) as Promise<
+                              { readonly serverName: string; readonly serverId: string } | null
+                            >,
+                        }
+                        : {}),
+                    },
+                    persistImage: persistImageForTurn,
+                    textSpiller: undefined,
+                    isSubagentRunner: shellSubagentKind !== undefined,
+                    // Not a stub: the guard hands back an error class only when a call fails,
+                    // and mcp-diagnostics is the existing sink for exactly that. A constant
+                    // no-op here would throw away the one signal the guard produces.
+                    beginObservation: ({ connector }) => errorClass => {
+                      if (errorClass === undefined) return;
+                      reportMcpHostEdgeDegraded(`mcp_exec:${connector}`, errorClass);
+                    },
+                    boundedConnectorTag,
+                    mcpErrorClassOf,
+                    takeMcpExecErrorClass,
+                    emitConnectorCard: emission => {
+                      hooks.transport.onUpdate({
+                        type: "send-message",
+                        message: connectorCardEmissionToMessage({
+                          ...emission,
+                          connector: emission.connector ?? "",
+                        }),
+                        timestampMs: Date.now(),
+                      });
+                    },
+                    ...(runOptions.ackToken === undefined
+                      ? {}
+                      : { ackToken: runOptions.ackToken }),
+                    cancelThisRun,
+                    reportDiagnostic: event =>
+                      reportMcpHostEdgeDegraded(event.kind, event.errorClass),
+                    errorLogTag,
+                    mcpMeta: {
+                      getMcpTools: () => turnMcpTools,
+                      callOptions: {},
+                    },
+                  };
               const createSubagentRunner = (
                 agentId: string,
                 args: SubagentAdapterArgs,
@@ -2693,7 +3103,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                   // which surfaces as "production subagent result is not bound". Give the
                   // child the same production run shell the parent runs on; its own
                   // conversationId/transcriptId keep its turns distinct.
-                  productionTurnRunShell: makeRunShell(args.subagentType),
+                  productionTurnRunShell: makeRunShell(args.subagentType, agentId),
                 });
                 bindSessionOwnedRunner(child);
                 ownedRunners.add(child);
@@ -2744,28 +3154,42 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                   assertNoPendingApproval: () => turnAutoReviewGate.assertNoPendingApproval(),
                 },
                 actionAuditor: projectedActionAuditor,
-                agentId: session.id,
+                // The runner identity, not the session's: this projection audits the shell's own
+                // shell commands, subagent-action reviews and MCP calls.
+                agentId: shellConversationId,
+                /**
+                 * TOOLS-01. Two things hang off this projection and neither existed on the
+                 * production path: the MCP executor / state-executor resources CallMcpTool
+                 * runs on, and the `mcpMeta` descriptors GetMcpTools reads. Without it
+                 * `createTurnLocalResourceProjection` reported `mcpEntriesPending: true` and
+                 * `buildTurnTools` withheld the pair, which is why fourteen live connector
+                 * tools were invisible to the model.
+                 */
+                ...(mcpForTurn === undefined ? {} : { mcp: mcpForTurn }),
               };
             },
             blobStore: getAgentBlobStore(
               session.agentStore as Parameters<typeof getAgentBlobStore>[0],
             ),
-            toolHost: lazyToolHost(shellSubagentKind),
+            toolHost: lazyToolHost(shellSubagentKind, shellConversationId),
             turn,
             staticConfig: {
               modelId: staticModelId,
               agentTokenLimit: 200_000,
-              conversationId: session.id,
-              isBoxScopedSubagent: false,
+              conversationId: shellConversationId,
+              isBoxScopedSubagent: isBoxScopedSubagentKind(shellSubagentKind),
               isSubagentRunner: shellSubagentKind !== undefined,
               isSharedRoomRunner: isSharedRoomTurn,
               sandSendMessageDeliveryOwed: method(experiments, "isSendMessageDeliveryOwedEnabled")?.() ?? false,
-              systemPromptGenerator: () => productionSystemPromptAssembly?.getSystemPrompt() ?? DEFAULT_SAND_SYSTEM_PROMPT,
+              systemPromptGenerator: () => dumpAssembledSystemPrompt(
+                shellConversationId,
+                runShellPromptAssembly?.getSystemPrompt() ?? DEFAULT_SAND_SYSTEM_PROMPT,
+              ),
             },
             emitUpdate,
             interactionObservers: {},
             diskPressureReminder: foreverBox.diskPressureReminder,
-            ...(productionSystemPromptAssembly === undefined
+            ...(runShellPromptAssembly === undefined
               ? {}
               : (() => {
                   const profilePromptSnapshotStore = asPromptSnapshotStore(session.db);
@@ -2778,13 +3202,42 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         },
         promptOptions: (_prompt, options) => toGeneratedTurnPromptOptions(options),
         assembleGeneratedTurnAction: productionPromptGlue.assembleGeneratedTurnAction,
-        compactionEpoch: () => 0,
+        compactionEpoch: readCompactionEpoch,
         getConversationState: getProductionConversationState,
         ...(mcp.mcp != null && typeof mcp.mcp.getTools === "function"
           ? {
               mcp: {
-                getTools: (runContext: Context) => mcp.mcp.getTools(runContext),
+                // The single per-turn discovery. Its result is what the Agent stream is given,
+                // what the meta pair's descriptors are built from (TOOLS-01), and where the
+                // connected-server names and custom instructions the prompt needs come from
+                // (SP-2) -- one call, three consumers, instead of the three constants the
+                // prompt glue used to be handed.
+                getTools: async (runContext: Context) => {
+                  let tools: readonly unknown[];
+                  try {
+                    tools = [...await mcp.mcp.getTools(runContext)];
+                  } catch (error) {
+                    turnMcpTools = [];
+                    mcpConnectedServerNamesForTurn = [];
+                    mcpDiscoveryUnavailableForTurn = true;
+                    throw error;
+                  }
+                  mcpDiscoveryUnavailableForTurn = false;
+                  recordDiscoveredMcpTools(tools);
+                  try {
+                    const instructions = await mcpCustomInstructions?.();
+                    mcpCustomInstructionsForTurn = instructions instanceof Map
+                      ? instructions
+                      : new Map();
+                  } catch {
+                    mcpCustomInstructionsForTurn = new Map();
+                  }
+                  return tools;
+                },
                 refreshAccountConfig: () => mcp.mcp.refreshAccountConfig(),
+              },
+              onMcpDiscoveryFailed: () => {
+                mcpDiscoveryUnavailableForTurn = true;
               },
             }
           : {}),
@@ -2811,6 +3264,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           : { lastReactionApplied: () => hooks.transport.lastReactionApplied?.() === true }),
         cancelThisRun: () => {},
       });
+      };
       runnerOptions.productionTurnRunShell = makeRunShell();
     }
 

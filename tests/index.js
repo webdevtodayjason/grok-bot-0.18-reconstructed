@@ -24,3 +24,6 @@ import "./openai-compatible-context-window.test.mjs";
 import "./evidence-verdict.test.mjs";
 import "./openai-responses-transport.test.mjs";
 import "./token-limit-classifier.test.mjs";
+import "./machine-room-plugins.test.mjs";
+import "./turn-toolset-projection.test.mjs";
+import "./sand-host-setting.test.mjs";

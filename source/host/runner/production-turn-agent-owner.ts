@@ -205,8 +205,11 @@ export async function createProductionTurnAgentOwner(
   try {
     const baseResourceAccessor = await input.createResourceAccessor(input.context);
     const remoteBoxResourceAccessor = await input.createRemoteBoxResourceAccessor(input.context);
+    const turnLocalResourceProjectionInput = input.createTurnLocalResourceProjectionInput(
+      baseResourceAccessor,
+    );
     const turnLocalResourceProjection = createTurnLocalResourceProjection({
-      ...input.createTurnLocalResourceProjectionInput(baseResourceAccessor),
+      ...turnLocalResourceProjectionInput,
       baseAccessor: baseResourceAccessor,
     });
     const resourceAccessor = turnLocalResourceProjection.resourceAccessor;
@@ -239,6 +242,12 @@ export async function createProductionTurnAgentOwner(
       toolHost,
       turn,
       turnScope: runContext.scope,
+      // TOOLS-01: the same projection that just registered the MCP executor resources also
+      // carries the descriptors the discovery/call pair is built from. Handing it to the tool
+      // handoff is what makes GetMcpTools / CallMcpTool reachable on this path.
+      ...(turnLocalResourceProjectionInput.mcp === undefined
+        ? {}
+        : { mcpProjection: turnLocalResourceProjectionInput.mcp }),
     };
     return {
       built: buildAgentForRun(buildInput),

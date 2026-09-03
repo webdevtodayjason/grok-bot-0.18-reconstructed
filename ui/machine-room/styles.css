@@ -118,17 +118,6 @@ select:focus-visible {
   letter-spacing: 0.01em;
 }
 
-.prototype-badge {
-  padding: 4px 8px;
-  border: 1px solid var(--glass-edge-soft);
-  border-radius: var(--radius-pill);
-  color: var(--text-tertiary);
-  background: rgba(10, 18, 23, 0.26);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  text-decoration: none;
-}
 
 .traffic-lights {
   display: flex;
@@ -2405,7 +2394,6 @@ dialog[open] {
     grid-template-rows: 68px minmax(0, 1fr) 92px;
   }
 
-  .window-identity .prototype-badge,
   .traffic-lights,
   .capability-button span:last-child {
     display: none;
@@ -2603,3 +2591,11 @@ dialog[open] {
 .exchange-message time { font-size: 11px; color: var(--text-secondary); margin-left: 8px; }
 .exchange-message p { margin: 6px 0 0; white-space: pre-wrap; }
 .exchange-footer { text-align: center; font-size: 12px; color: var(--text-secondary); padding-top: 10px; }
+
+/* An evidence pill is a disclosure: the receipts behind the verdict are one click away, so the
+   row reads as clickable the same way an agent-to-agent blurb does. */
+.message-row.is-evidence .message-bubble { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.message-row.is-evidence .message-bubble:hover { background: rgba(16, 25, 30, 0.85); }
+.evidence-view { display: flex; flex-direction: column; gap: 10px; }
+.evidence-view .panel-card { display: grid; gap: 8px; }
+.evidence-head { margin: 0; padding: 8px 10px; border-radius: 10px; background: rgba(0, 0, 0, 0.28); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; }

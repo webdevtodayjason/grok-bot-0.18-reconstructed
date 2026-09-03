@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Standalone spatial multi-agent frontend prototype." />
-    <title>Machine Room — Frontend Prototype</title>
+    <meta name="description" content="Machine Room — the operator console for this box." />
+    <title>Machine Room — Titanbot console</title>
     <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="motion.css" />
     <link rel="stylesheet" href="styles.css" />
@@ -16,7 +16,7 @@
       <div class="ambient-vignette" aria-hidden="true"></div>
 
       <header class="window-bar">
-        <div class="window-identity" aria-label="Machine Room prototype">
+        <div class="window-identity" aria-label="Machine Room">
           <div class="traffic-lights" aria-hidden="true">
             <span></span><span></span><span></span>
           </div>
@@ -68,7 +68,7 @@
               <span id="room-subtitle">3 members · ready</span>
             </div>
             <div class="participant-cluster" id="participant-cluster" aria-label="Room participants"></div>
-            <button class="icon-button compact" id="room-menu" type="button" aria-label="Room actions">•••</button>
+            <button class="icon-button compact" id="room-menu" type="button" aria-label="Conversation actions">•••</button>
           </header>
 
           <div class="transcript" id="transcript" aria-live="polite"></div>
@@ -150,8 +150,7 @@
         <div class="desktop-workspace">
           <nav class="app-previews" id="app-previews" aria-label="Open desktop applications">
             <button class="app-preview active" data-desktop-app="browser" type="button"><span>Browser</span><small>Live view of the box</small></button>
-            <button class="app-preview" data-desktop-app="files" type="button"><span>Files</span><small>Not wired yet</small></button>
-            <button class="app-preview" data-desktop-app="sheets" type="button"><span>Sheets</span><small>Not wired yet</small></button>
+            <button class="app-preview" data-desktop-app="files" type="button"><span>Files</span><small>Files from this conversation</small></button>
             <button class="app-preview" data-desktop-app="terminal" type="button"><span>Terminal</span><small>Shell on the box</small></button>
           </nav>
           <section class="desktop-window" id="desktop-window"></section>

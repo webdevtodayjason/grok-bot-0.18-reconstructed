@@ -328,6 +328,16 @@ export function createTurnAgentToolsHandoff(input: {
   readonly toolHost: TurnToolsetHost;
   readonly turn: TurnToolsetTurnInput;
   readonly turnScope?: TurnAgentTurnScope;
+  /**
+   * TOOLS-01. The engine builds the props object this handoff is called with, and it has no
+   * idea whether MCP is live -- so on the production run-shell path `props.mcp` was always
+   * absent, `hasDirectMcpMetaInputs` was always false, and buildTurnTools kept GetMcpTools /
+   * CallMcpTool withheld even though the turn had just discovered fourteen connector tools and
+   * registered an executor for them. The host supplies the same projection it used to build
+   * those resources; it is merged into the props here, and nowhere else, so a turn without MCP
+   * still sees no MCP tools.
+   */
+  readonly mcpProjection?: TurnMcpProjectionInput;
 }): TurnAgentToolsHandoff {
   let activeStateHandler: TurnAgentStateHandler | undefined;
   const turn = input.turnScope === undefined
@@ -529,7 +539,9 @@ export function createTurnAgentToolsHandoff(input: {
   return {
     toolsGenerator: props => {
       const enrichedProps: TurnToolsetBuildProps =
-        turn.parentModelInfo === undefined && turn.subagentModels === undefined
+        turn.parentModelInfo === undefined
+          && turn.subagentModels === undefined
+          && (input.mcpProjection === undefined || props.mcp !== undefined)
           ? props
           : {
               ...props,
@@ -539,6 +551,9 @@ export function createTurnAgentToolsHandoff(input: {
               ...(turn.subagentModels === undefined
                 ? {}
                 : { subagentModels: turn.subagentModels }),
+              ...(input.mcpProjection === undefined || props.mcp !== undefined
+                ? {}
+                : { mcp: input.mcpProjection }),
             };
       activeStateHandler = enrichedProps.stateHandler;
       return buildTurnTools(
@@ -556,6 +571,8 @@ export interface TurnAgentConstructorHandoff
   readonly toolHost: TurnToolsetHost;
   readonly turn: TurnToolsetTurnInput;
   readonly turnScope?: TurnAgentTurnScope;
+  /** The live per-turn MCP projection, when this turn has one (TOOLS-01). */
+  readonly mcpProjection?: TurnMcpProjectionInput;
 }
 
 /**
@@ -571,6 +588,9 @@ export function createTurnAgentConstructorHandoff(
     ...(input.turnScope === undefined
       ? {}
       : { turnScope: input.turnScope }),
+    ...(input.mcpProjection === undefined
+      ? {}
+      : { mcpProjection: input.mcpProjection }),
   });
   const agent = createTurnAgentForRun({
     ...input,
@@ -756,6 +776,9 @@ export function buildAgentForRun(
     ...(input.turnScope === undefined
       ? {}
       : { turnScope: input.turnScope }),
+    ...(input.mcpProjection === undefined
+      ? {}
+      : { mcpProjection: input.mcpProjection }),
   });
   const config = createSandAgentStaticConfig({
     ...input.staticConfig,

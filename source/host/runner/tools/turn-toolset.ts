@@ -37,6 +37,10 @@ import {
   wrapDynamicInvocationToolWithTimeout,
   type McpToolForMeta,
 } from "./mcp-meta-tools.js";
+import {
+  isSandBoxSettingEnabled,
+  SAND_TOOL_TRACE_SETTING,
+} from "../../sand-box-setting.js";
 import { fencedToolSet } from "./sand-spotlight-tools.js";
 import {
   McpDescriptor,
@@ -1651,5 +1655,33 @@ export function buildTurnTools(
       }));
   });
 
+  /**
+   * The only place that knows what the model was actually offered. Before this, reading the
+   * offered set meant taping the inference client and rebuilding the bundle
+   * (docs/audit-wave3-wire.md), which is why "34 tools" was an inference rather than a
+   * measurement. One line per build, off unless an operator turns it on.
+   */
+  if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) {
+    console.info(`[sand][toolset] ${JSON.stringify({
+      conversationId: host.getConversationId(),
+      isSubagentRunner: host.isSubagentRunner,
+      isBoxScopedSubagent: host.isBoxScopedSubagent,
+      isComputerUseSubagent: host.isComputerUseSubagent,
+      isBrowserUseSubagent: host.isBrowserUseSubagent,
+      isSharedRoomRunner: host.isSharedRoomRunner,
+      subagentTypes: (turn.subagentConfigs ?? []).map(subagentConfigName),
+      count: guarded.length,
+      tools: guarded.map(tool => tool.name),
+    })}`);
+  }
+
   return fencedToolSet(guarded, host.spotlightEnabled(), dynamicToolRegistry);
+}
+
+/** Reads the custom subagent name out of the generated SubagentType for the trace line. */
+function subagentConfigName(config: unknown): string {
+  const type = (config as { readonly subagent_type?: unknown } | null)?.subagent_type;
+  const inner = (type as { readonly type?: { readonly value?: unknown } } | null)?.type?.value;
+  const name = (inner as { readonly name?: unknown } | null)?.name;
+  return typeof name === "string" ? name : "unknown";
 }

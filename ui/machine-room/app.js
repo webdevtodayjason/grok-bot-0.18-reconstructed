@@ -588,7 +588,7 @@
       <div class="island-heading"><div><span class="status-dot ${statusClass(worker.status)}"></span><strong>Agent</strong></div></div>
       <div class="context-profile-header">${avatarMarkup(worker, "context-profile-avatar")}<div class="context-profile-copy"><span class="context-kind-label">Direct conversation</span><strong>${escapeHtml(worker.name)}</strong><small>${escapeHtml(worker.statusText)}</small></div></div>
       <div class="context-divider"></div>
-      <div class="context-detail-list"><div class="context-detail-row"><span>Role</span><strong>${escapeHtml(worker.role)}</strong></div><div class="context-detail-row"><span>Model</span><strong>${escapeHtml(model ? model.name : worker.model)}</strong></div></div>
+      <div class="context-detail-list">${worker.role ? `<div class="context-detail-row"><span>Role</span><strong>${escapeHtml(worker.role)}</strong></div>` : ""}<div class="context-detail-row"><span>Endpoint (box-wide)</span><strong>${escapeHtml(model ? model.name : worker.model)}</strong></div></div>
       <button class="context-action-row" type="button" data-context-action="profile"><span>Agent details</span><b>›</b></button>
       <button class="context-action-row" type="button" data-context-action="routines"><span>Routines</span><b>${routineCount}</b></button>
       <button class="context-action-row" type="button" data-context-action="files"><span>Files</span><b>${worker.files.length}</b></button>
@@ -700,7 +700,12 @@
   }
 
   function messageMarkup(message) {
-    if (message.type === "system") return `<article class="message-row is-system${message.exchange ? " is-exchange" : ""}" data-message-id="${escapeHtml(message.id)}"${message.exchange ? ' data-exchange="1" role="button" tabindex="0"' : ""}><div class="message-bubble">${escapeHtml(message.text)}</div></article>`;
+    if (message.type === "system") {
+      // An evidence pill is a disclosure: the host stored the receipts behind the verdict and
+      // getAgentEvidence reads them, so the pill opens them rather than only naming the verdict.
+      const evidence = message.evidence?.attemptId ? ' data-evidence="1" role="button" tabindex="0"' : "";
+      return `<article class="message-row is-system${message.exchange ? " is-exchange" : ""}${evidence ? " is-evidence" : ""}" data-message-id="${escapeHtml(message.id)}"${message.exchange ? ' data-exchange="1" role="button" tabindex="0"' : ""}${evidence}><div class="message-bubble">${escapeHtml(message.text)}</div></article>`;
+    }
     const isUser = message.authorId === "you";
     const author = workerById(message.authorId);
     const isWorking = message.type === "working";
@@ -861,25 +866,50 @@
     openPanel(activeContext().kind === "worker" ? "Agent routines" : "Room routines", `${contextName()} routines`, routinesPanel());
   }
 
+  // Only the gateway adapter stores a secret; the offline demo factory discards it and resolves
+  // {accepted:true} with no message. So the fallback copy on both the form and the toast has to
+  // be the demo's truth, not the relay's: claiming a credential was stored when it was thrown
+  // away is the same class of lie this wave exists to remove, pointing the other way.
+  const isLiveGateway = () => window.__machineRoomLive === true;
+  // Only the gateway adapter allocates a display. Called bare, this threw "adapter.ensureDesktop
+  // is not a function" out of the click handler on the offline path, past the .catch that was
+  // already there for it, and left the pane on its "Opening…" sentence forever.
+  const ensureDesktop = (agentId) => (typeof adapter.ensureDesktop === "function"
+    ? adapter.ensureDesktop(agentId)
+    : Promise.reject(new Error("this offline view has no gateway, so the box allocates no screen")));
+  const demoSecretNote = "Offline view: this page has no gateway, so the value is discarded and nothing is stored.";
+
   function pluginStatusLabel(status) {
     return status === "connected" ? "connected" : status === "installed" ? "needs account" : "available";
   }
 
   function pluginDetailMarkup(plugin) {
     if (!plugin) return `<div class="empty-state">Choose a plugin to inspect its tools and account.</div>`;
+    // A tool row carries a switch only where the write exists. Where it does not, the row says
+    // what the host holds and the section says why it cannot be changed from here.
+    const toolRow = (tool) => `<div class="tool-row"><div><strong>${escapeHtml(tool.name)}</strong><small>${escapeHtml(tool.description)}</small></div>${tool.togglable === false
+      ? `<span class="status-pill${tool.enabled ? " success" : ""}">${tool.enabled ? "enabled" : "disabled"}</span>`
+      : `<button class="switch" type="button" data-toggle-tool="${escapeHtml(tool.id)}" aria-label="Toggle ${escapeHtml(tool.name)}" aria-pressed="${tool.enabled}"></button>`}</div>`;
     const tools = plugin.tools.length
-      ? plugin.tools.map((tool) => `<div class="tool-row"><div><strong>${escapeHtml(tool.name)}</strong><small>${escapeHtml(tool.description)}</small></div><button class="switch" type="button" data-toggle-tool="${escapeHtml(tool.id)}" aria-label="Toggle ${escapeHtml(tool.name)}" aria-pressed="${tool.enabled}"></button></div>`).join("")
-      : `<div class="empty-state">This host reports which connectors are attached, but not which tools they expose — so there is nothing to grant or revoke here. The gate that does apply is the review policy in Settings.</div>`;
-    const skills = plugin.skills.map((skill) => `<span class="tag">✦ ${escapeHtml(skill)}</span>`).join("");
+      ? plugin.tools.map(toolRow).join("") + (plugin.toolsReadOnlyNote ? `<span class="field-hint">${escapeHtml(plugin.toolsReadOnlyNote)}</span>` : "")
+      : `<div class="empty-state">${escapeHtml(plugin.toolsNote || "No tools are reported for this plugin.")}</div>`;
     let account;
-    if (plugin.status === "available") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>Opens ${escapeHtml(plugin.name)}'s own authorisation page. The credential is exchanged there and stored by the host — it never passes through this page.</small></div></div><div class="form-actions"><button class="primary-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Connect ${escapeHtml(plugin.name)}</button></div></div>`;
+    // A card the host cannot connect gets no button. Clicking it ran getListenerConnectUrl with a
+    // subscription id, which always errors -- behind a success toast fired before the answer came.
+    if (plugin.status === "available" && plugin.connectable === false) account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Not connectable from here</strong><small>${escapeHtml(plugin.connectNote || `This host has no connect flow for ${plugin.name}.`)}</small></div></div></div>`;
+    else if (plugin.status === "available") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>Opens ${escapeHtml(plugin.name)}'s own authorisation page. The credential is exchanged there and stored by the host — it never passes through this page.</small></div></div><div class="form-actions"><button class="primary-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Connect ${escapeHtml(plugin.name)}</button></div></div>`;
     else if (plugin.status === "pending") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Awaiting authorisation</strong><small>Finish approving ${escapeHtml(plugin.name)} in the tab that opened, then reopen this panel.</small></div></div></div>`;
-    else if (plugin.status === "installed") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Secure value required</strong><small>Scoped to ${escapeHtml(plugin.name)} · ${escapeHtml(plugin.secretField)}. It never enters chat or model context.</small></div></div><form data-secret-form="${escapeHtml(plugin.id)}"><div class="field"><label for="secret-${escapeHtml(plugin.id)}">${escapeHtml(plugin.secretField)}</label><input id="secret-${escapeHtml(plugin.id)}" name="secret" type="password" autocomplete="off" required placeholder="Enter securely" /><span class="field-hint">Standalone demo: the entered value is immediately discarded.</span></div><div class="form-actions"><button class="primary-button" type="submit">Connect account</button></div></form></div>`;
-    else account = `<div class="demo-note"><strong>${escapeHtml(plugin.account || "Connected account")}</strong><br />The connector holds the credential globally. Contexts receive enabled capabilities, never the key.</div>`;
+    else if (plugin.status === "installed") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Secure value required</strong><small>Scoped to ${escapeHtml(plugin.name)} · ${escapeHtml(plugin.secretField)}. It never enters chat or model context.</small></div></div><form data-secret-form="${escapeHtml(plugin.id)}"><div class="field"><label for="secret-${escapeHtml(plugin.id)}">${escapeHtml(plugin.secretField)}</label><input id="secret-${escapeHtml(plugin.id)}" name="secret" type="password" autocomplete="off" required placeholder="Enter securely" /><span class="field-hint">${escapeHtml(plugin.secretHint || demoSecretNote)}</span></div><div class="form-actions"><button class="primary-button" type="submit">Connect account</button></div></form></div>`;
+    else account = `<div class="demo-note"><strong>${escapeHtml(plugin.account || (plugin.group === "Providers" ? "Adopted on this Mac" : "Connected"))}</strong><br />${escapeHtml(plugin.connectedNote || "The host holds this connection. Contexts receive its capabilities, never the credential.")}</div>`;
     const providerSwitch = plugin.endpointId
       ? `<div class="provider-switch">${plugin.live ? `<span class="status-pill success">answering now</span>` : plugin.status === "connected" ? `<button class="primary-button" type="button" data-use-endpoint="${escapeHtml(plugin.endpointId)}">Use this endpoint</button>` : ""}</div>`
       : "";
-    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${providerSwitch}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span><span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span></div><div class="plugin-list">${tools}</div></section><section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${skills}</div></section></div>`;
+    // The Skills section was a heading over an empty div on every card the gateway builds: no
+    // plugin here ships skills. It renders only where there are some, or where there is a reason.
+    const skillsSection = plugin.skills.length
+      ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${plugin.skills.map((skill) => `<span class="tag">✦ ${escapeHtml(skill)}</span>`).join("")}</div></section>`
+      : plugin.skillsNote ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="empty-state">${escapeHtml(plugin.skillsNote)}</div></section>` : "";
+    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${providerSwitch}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
   }
 
   // The relay holds the endpoint catalogue and probes each one; the box holds which is in use.
@@ -948,6 +978,8 @@
   // its markup on every open, so there is nowhere else for it to live.
   let editingRoutineId = null;
   let armedDeleteId = null;
+  // Same two-click arming as the routine delete, for "forget every memory".
+  let armedClearMemoriesId = null;
 
   // The host parses each trigger into a typed listener and throws away the members it cannot
   // read (automation-trigger.ts parseMember), then automation-store.upsert writes nothing at all
@@ -1072,22 +1104,78 @@
     // explanation -- an empty capability set is a normal state, not an error.
     if (!selected) {
       openPanel("Global capabilities", "Plugins, connectors & skills",
-        `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill">none installed</span></div><div class="empty-state">This host reports no connectors. When it has some, connecting one opens that platform\u2019s own authorisation page.</div>`);
+        `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Listeners are chat platforms the host binds to.</p><span class="status-pill">none installed</span></div><div class="empty-state">This box has no providers, connectors or listeners yet. Connectors are added to connectors.json on the box, not from this page; a provider appears here once its CLI holds a login on this Mac or it takes a pasted key.</div>`);
       return;
     }
     selectedPluginId = selected.id;
     const navButton = (plugin) => `<button class="plugin-nav-button${plugin.id === selected.id ? " is-active" : ""}" type="button" data-plugin-id="${escapeHtml(plugin.id)}"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><span><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.category)}</small></span><span class="status-dot ${plugin.status === "connected" ? "success" : plugin.status === "installed" ? "attention" : ""}"></span></button>`;
-    // Providers (subscriptions and endpoints a user connects) lead; connectors follow.
-    const providers = state.plugins.filter((plugin) => plugin.group === "Providers");
-    const connectors = state.plugins.filter((plugin) => plugin.group !== "Providers");
-    const nav = `${providers.length ? `<div class="plugin-group-title">Providers</div>${providers.map(navButton).join("")}` : ""}${connectors.length ? `<div class="plugin-group-title">Connectors</div>${connectors.map(navButton).join("")}` : ""}`;
-    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Plugins are installed once for the Machine Room. Their individual tools can then be granted to agents or rooms through policy.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>`);
+    // Providers (subscriptions and endpoints a user connects) lead; the box's own MCP connectors
+    // follow; the chat listeners the host reports come last. Anything without a group is a
+    // connector, which is what the demo fixtures are.
+    const GROUPS = ["Providers", "Connectors", "Listeners"];
+    const nav = GROUPS.map((group) => {
+      const members = state.plugins.filter((plugin) => (plugin.group ?? "Connectors") === group);
+      return members.length ? `<div class="plugin-group-title">${group}</div>${members.map(navButton).join("")}` : "";
+    }).join("");
+    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Listeners are chat platforms the host binds to.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>`);
   }
 
   function agentProfilePanel(worker) {
     const model = modelById(worker.model);
     const routines = routinesForContext({ kind: "worker", id: worker.id });
-    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role)}</p><div class="tag-list"><span class="tag">${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section><section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript and the routines shown here belong to this agent. The model and the browser belong to the whole box and are shared with every other agent on it.</p><div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div><div class="setting-row"><div><strong>Browser</strong><small>${escapeHtml(worker.browser.url)}</small></div><button class="ghost-button" type="button" data-open-context-browser>Open</button></div></section></div>`;
+    // Role is the host's own per-agent title and updateAgent writes it, so this is a field rather
+    // than the literal words "not set". The endpoint is box-wide and says so.
+    // Every control here is drawn only where the adapter in front of this page actually
+    // implements it. The offline demo factory has no setRole, getMemories, forgetMemory or
+    // clearMemories, and an unguarded button would throw a TypeError out of the click handler
+    // and simply do nothing -- a control that looks live and is not.
+    const canWriteRole = typeof adapter.setRole === "function";
+    const canReadMemories = typeof adapter.getMemories === "function";
+    const role = `<div class="setting-row"><div><strong>Role</strong><small>The host's own per-agent title, stored on this agent's profile file. Blank is a real answer — the context card hides the row rather than printing the words 'not set'.</small></div><div class="field" style="margin:0;min-width:220px"><label class="sr-only" for="agent-role">Role</label><input id="agent-role" data-role-for="${escapeHtml(worker.id)}" value="${escapeHtml(worker.role)}"${canWriteRole ? "" : " readonly"} placeholder="e.g. Service desk specialist" /></div>${canWriteRole ? `<button class="ghost-button" type="button" data-save-role="${escapeHtml(worker.id)}">Save</button>` : `<span class="status-pill">read-only offline</span>`}</div>`;
+    const browser = `<div class="setting-row"><div><strong>Browser</strong><small data-browser-screen="${escapeHtml(worker.id)}">${escapeHtml(worker.browser.screen || "Asking the host which screen this agent has…")}</small></div><button class="ghost-button" type="button" data-open-context-browser>Open</button></div>`;
+    const memories = canReadMemories
+      ? `<section class="settings-section" data-memories-for="${escapeHtml(worker.id)}"><div class="setting-row"><div><strong>Memory</strong><small>What the host has remembered about this agent across conversations.</small></div>${typeof adapter.clearMemories === "function" ? `<button class="ghost-button" type="button" data-clear-memories="${escapeHtml(worker.id)}">Forget all</button>` : ""}</div><div class="context-detail-list" data-memory-list>Reading this agent's memories…</div></section>`
+      : "";
+    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role || "No role set on the host.")}</p><div class="tag-list"><span class="tag">endpoint (box-wide) · ${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section><section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, the role and the routines shown here belong to this agent. The endpoint and the box's screens belong to the whole box and are shared with every other agent on it.</p>${role}<div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div>${browser}</section>${memories}</div>`;
+  }
+
+  // The two async fills the panel above leaves placeholders for. Both are real host reads: the
+  // screen comes from ensureForeverBox, the memories from getAgentMemories.
+  function memoryRowsMarkup(rows) {
+    if (!rows.length) return `<div class="empty-state">The host holds no memories for this agent yet.</div>`;
+    return rows.map((row) => {
+      // The host returns a plain string for a memory with no envelope; the operator page handles
+      // that shape and this one used to JSON-quote it. A row with no id cannot be forgotten one
+      // at a time, so it gets no button rather than a button that posts an empty memoryId.
+      const plain = typeof row === "string";
+      const id = plain ? "" : row.id ?? row.memoryId ?? "";
+      const text = plain ? row : row.text ?? row.content ?? row.memory ?? JSON.stringify(row);
+      const forget = id && typeof adapter.forgetMemory === "function"
+        ? `<button class="ghost-button" type="button" data-forget-memory="${escapeHtml(String(id))}">Forget</button>`
+        : `<span class="status-pill">${id ? "read-only offline" : "no id — clear all only"}</span>`;
+      return `<div class="context-detail-row"><span>${escapeHtml(String(text))}</span>${forget}</div>`;
+    }).join("");
+  }
+
+  function fillAgentProfilePanel(worker) {
+    const screen = elements.panelContent.querySelector(`[data-browser-screen="${CSS.escape(worker.id)}"]`);
+    if (screen && adapter.describeScreen) {
+      adapter.describeScreen(worker.id)
+        .then((line) => { screen.textContent = line; })
+        .catch((error) => { screen.textContent = `The host could not say which screen this agent has: ${error.message}`; });
+    }
+    const list = elements.panelContent.querySelector("[data-memory-list]");
+    if (list && adapter.getMemories) {
+      adapter.getMemories(worker.id)
+        .then((rows) => { list.innerHTML = memoryRowsMarkup(rows); })
+        .catch((error) => { list.innerHTML = `<div class="empty-state">Could not read this agent's memories: ${escapeHtml(error.message)}</div>`; });
+    }
+  }
+
+  function openAgentProfile(worker) {
+    if (!worker) return;
+    openPanel("Agent details", worker.name, agentProfilePanel(worker));
+    fillAgentProfilePanel(worker);
   }
 
   function membersPanel() {
@@ -1110,15 +1198,6 @@
   function addPanel() {
     const options = state.workers.map((worker) => `<option value="${escapeHtml(worker.id)}">${escapeHtml(worker.name)}</option>`).join("");
     return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header"><span class="panel-card-icon">♙</span><span class="status-pill">agent</span></div><h3>Create an agent</h3><p>An agent gets its own direct conversation, model, files, browser session, and routines.</p><form data-add-worker><div class="field"><label for="worker-name">Name</label><input id="worker-name" name="name" required placeholder="e.g. Finance Reviewer" /></div><div class="field"><label for="worker-role">Role</label><input id="worker-role" name="role" placeholder="What this agent owns" /></div><div class="form-actions"><button class="primary-button" type="submit">Create agent</button></div></form></section><section class="panel-card"><div class="panel-card-header"><span class="panel-card-icon">◌</span><span class="status-pill">room</span></div><h3>Create a room</h3><p>A room is a group chat with a truthful roster and its own shared routines, files, and browser context.</p><form data-add-room><div class="field"><label for="room-name-input">Name</label><input id="room-name-input" name="name" required placeholder="e.g. Finance close" /></div><div class="field"><label for="room-first-member">First member</label><select id="room-first-member" name="memberId">${options}</select></div><div class="form-actions"><button class="primary-button" type="submit">Create room</button></div></form></section></div>`;
-  }
-
-  function simplePanel(type) {
-    const copy = {
-      notifications: ["Recent activity", "Notifications", "Atera finished its previous ticket review. Context7 access is waiting for approval in MSP Team."],
-      attachments: ["Current context", "Add files", `Attachments added here belong to ${contextName()}.`],
-      context: [activeContext().kind === "worker" ? "Agent context" : "Room context", `${contextName()} options`, activeContext().kind === "worker" ? "Manage this agent’s profile, model, direct conversation, files, browser, and routines." : "Rename this room, manage its roster, and review room-owned routines."],
-    }[type];
-    openPanel(copy[0], copy[1], `<div class="panel-card"><h3>${escapeHtml(copy[1])}</h3><p>${escapeHtml(copy[2])}</p><div class="form-actions"><button class="primary-button" type="button" data-demo-action>Continue in prototype</button></div></div>`);
   }
 
   // One iframe, reused. Asking the relay to put the app on the box's display is fire-and-forget:
@@ -1169,7 +1248,7 @@
 
     elements.desktopWindow.innerHTML = `<div class="empty-state">Opening ${escapeHtml(contextName())}'s screen… the first time takes about ten seconds while the host allocates one.</div>`;
     mountedDesktop = null;
-    adapter.ensureDesktop(agentId)
+    ensureDesktop(agentId)
       .then(async (desk) => {
         // A private display can exist with no desktop session on it: on this box image the fork
         // displays come up with an X server but no window manager. That renders as an empty grey
@@ -1206,8 +1285,6 @@
         ? record.files.map((file) => `<div class="file-tile">▱<strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(file.meta)}</small></div>`).join("")
         : `<div class="empty-state">Nothing has been attached to this conversation yet.</div>`;
       elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} files</h3><p>Files that passed through this conversation. This host keeps no per-worker directory — anything a worker writes with Shell goes to one /workspace shared by every agent on the box.</p></div><span class="status-pill">${record.files.length}</span></div><div class="file-grid">${files}</div></div>`;
-    } else if (activeDesktopApp === "sheets") {
-      elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} sheet</h3><p>Not wired to this host.</p></div><span class="status-pill">unwired</span></div><div class="empty-state">This gateway exposes no sheet for a worker. Nothing is being tracked here.</div></div>`;
     } else if (activeDesktopApp === "terminal") {
       mountBoxSurface("terminal", "Terminal");
     } else {
@@ -1236,24 +1313,45 @@
     if (!elements.desktopDialog.open) elements.desktopDialog.showModal();
   }
 
-  function openTeachMode() {
-    const lead = contextLead();
+  const clockText = (ms) => {
+    const seconds = Math.max(0, Math.floor(ms / 1000));
+    return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  };
+
+  // Shared by the button and by the boot-time resume, so a recording already running on the host
+  // shows the host's own elapsed time rather than restarting the clock at 00:00.
+  function showTeachDialog(worker, startedAt, maxDurationMs) {
     if (elements.desktopDialog.open) elements.desktopDialog.close();
-    adapter.startTeaching(lead.id);
-    elements.teachTitle.textContent = `Recording ${lead.name}'s screen`;
+    elements.teachTitle.textContent = `Recording ${worker.name}'s screen`;
     // The dialog used to draw a fake ticket queue. Show the screen actually being recorded.
-    adapter.ensureDesktop(lead.id).then((desk) => {
+    ensureDesktop(worker.id).then((desk) => {
       const live = document.getElementById("teach-live");
       if (live) live.innerHTML = `<iframe src="${escapeHtml(desk.url)}" title="The screen being recorded" style="width:100%;height:100%;border:0;background:#0b0f13"></iframe>`;
     }).catch(() => {});
-    elements.teachTimer.textContent = "00:00";
-    elements.teachDialog.showModal();
-    const startedAt = state.teaching?.startedAt ?? Date.now();
+    const cap = Number(maxDurationMs) > 0 ? ` / ${clockText(Number(maxDurationMs))}` : "";
+    const tick = () => { elements.teachTimer.textContent = `${clockText(Date.now() - startedAt)}${cap}`; };
+    tick();
+    if (!elements.teachDialog.open) elements.teachDialog.showModal();
     window.clearInterval(teachInterval);
-    teachInterval = window.setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-      elements.teachTimer.textContent = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
-    }, 250);
+    teachInterval = window.setInterval(tick, 250);
+  }
+
+  function openTeachMode() {
+    const lead = contextLead();
+    adapter.startTeaching(lead.id);
+    showTeachDialog(lead, state.teaching?.startedAt ?? Date.now(), state.teaching?.maxDurationMs);
+  }
+
+  // MR-14: the adapter seeds state.teaching from getTeachRecordingStatus and nothing read it, so a
+  // recording still running on the host was invisible after a reload -- and the only way back into
+  // the dialog was the button, which starts a second one.
+  function resumeTeachMode() {
+    const teaching = state.teaching;
+    if (!teaching?.active || !teaching.workerId) return;
+    const worker = workerById(teaching.workerId);
+    if (!worker) return;
+    showTeachDialog(worker, Number(teaching.startedAt) || Date.now(), teaching.maxDurationMs);
+    showToast(`${worker.name} is still recording — this is the run the host already has open.`);
   }
 
   function finishTeachMode() {
@@ -1300,7 +1398,7 @@
       if (action.dataset.contextAction === "routines") renderRoutinesPanel();
       else if (action.dataset.contextAction === "files") openDesktop("files");
       else if (action.dataset.contextAction === "members" && activeContext().kind === "room") openPanel("Room roster", `${contextName()} members`, membersPanel());
-      else if (action.dataset.contextAction === "profile" && activeContext().kind === "worker") openPanel("Agent details", contextName(), agentProfilePanel(contextRecord()));
+      else if (action.dataset.contextAction === "profile" && activeContext().kind === "worker") openAgentProfile(contextRecord());
       return;
     }
   }
@@ -1367,10 +1465,13 @@
       selectedPluginId = target.dataset.pluginId;
       renderPluginsPanel();
     } else if (target.dataset.installPlugin) {
-      adapter.setPluginState(target.dataset.installPlugin, "connect");
       selectedPluginId = target.dataset.installPlugin;
+      // The toast used to fire before the host had answered, on a call that for some cards always
+      // fails. It now reports whatever the adapter resolved with.
+      Promise.resolve(adapter.setPluginState(target.dataset.installPlugin, "connect"))
+        .then((result) => { if (typeof result === "string") showToast(result); })
+        .catch((error) => showToast(`Could not connect that plugin: ${error.message}`));
       renderPluginsPanel();
-      showToast("Plugin installed globally. Connect its account to enable tools.");
     } else if (target.dataset.toggleTool) {
       adapter.togglePluginTool(selectedPluginId, target.dataset.toggleTool);
       renderPluginsPanel();
@@ -1441,16 +1542,52 @@
       target.setAttribute("aria-pressed", target.getAttribute("aria-pressed") !== "true");
     } else if (target.hasAttribute("data-open-context-browser")) {
       openDesktop("browser");
+    } else if (target.dataset.saveRole) {
+      const input = elements.panelContent.querySelector(`[data-role-for="${CSS.escape(target.dataset.saveRole)}"]`);
+      // The adapter reads the saved profile back, so this reports the host's title and not the box.
+      adapter.setRole(target.dataset.saveRole, input ? input.value : "")
+        .then((role) => showToast(role ? `Role saved as “${role}”` : "Role cleared on the host"))
+        .catch((error) => showToast(`Role not saved: ${error.message}`));
+    } else if (target.dataset.revealHead) {
+      // One attestation at a time, and only on a click: the head goes into the DOM here and
+      // nowhere else.
+      const slot = elements.panelContent.querySelector(`[data-head-slot="${CSS.escape(target.dataset.revealHead)}"]`);
+      if (slot) slot.textContent = evidenceHeads[Number(target.dataset.revealHead)] || "The host stored no output for this attestation.";
+      target.remove();
+    } else if (target.dataset.forgetMemory) {
+      const worker = contextRecord();
+      adapter.forgetMemory(worker.id, target.dataset.forgetMemory)
+        .then((rows) => {
+          const list = elements.panelContent.querySelector("[data-memory-list]");
+          if (list) list.innerHTML = memoryRowsMarkup(rows);
+          showToast("The host forgot that memory");
+        })
+        .catch((error) => showToast(`That memory was not forgotten: ${error.message}`));
+    } else if (target.dataset.clearMemories) {
+      // Two clicks rather than confirm(): the same shape the routine delete uses, and a native
+      // dialog on top of a modal panel is not what the rest of this looks like.
+      const agentId = target.dataset.clearMemories;
+      if (armedClearMemoriesId !== agentId) {
+        armedClearMemoriesId = agentId;
+        target.textContent = "Confirm";
+        window.setTimeout(() => {
+          if (armedClearMemoriesId !== agentId) return;
+          armedClearMemoriesId = null;
+          target.textContent = "Forget all";
+        }, 4000);
+        showToast("Click again to forget every memory for this agent.");
+        return;
+      }
+      armedClearMemoriesId = null;
+      target.textContent = "Forget all";
+      adapter.clearMemories(agentId)
+        .then((rows) => {
+          const list = elements.panelContent.querySelector("[data-memory-list]");
+          if (list) list.innerHTML = memoryRowsMarkup(rows);
+          showToast("The host forgot every memory for this agent");
+        })
+        .catch((error) => showToast(`Memories not cleared: ${error.message}`));
     }
-  }
-
-  function handlePanelChange(event) {
-    const select = event.target.closest("[data-model-worker]");
-    if (!select) return;
-    adapter.setModel(select.dataset.modelWorker, select.value);
-    const worker = workerById(select.dataset.modelWorker);
-    const model = modelById(select.value);
-    showToast(`${worker.name} will use ${model.name} on the next turn`);
   }
 
   function handlePanelSubmit(event) {
@@ -1459,13 +1596,18 @@
     if (form.dataset.secretForm) {
       const input = form.elements.secret;
       const plugin = state.plugins.find((item) => item.id === form.dataset.secretForm);
-      const result = adapter.submitSecret(plugin.id, plugin.secretField, input.value);
+      // The adapter awaits the adoption and resolves with what the relay then holds, so the toast
+      // reports the outcome. It used to claim the value had been discarded while the relay stored it.
+      Promise.resolve(adapter.submitSecret(plugin.id, plugin.secretField, input.value))
+        .then((result) => {
+          if (!result) return;
+          if (result.accepted) { selectedPluginId = plugin.id; renderPluginsPanel(); }
+          showToast(result.message ?? (result.accepted
+            ? (isLiveGateway() ? `${plugin.name} connected` : `${plugin.name} connected in this offline view — the value was discarded, nothing was stored`)
+            : `${plugin.name} was not connected`));
+        })
+        .catch((error) => showToast(`${plugin.name} was not connected: ${error.message}`));
       input.value = "";
-      if (result.accepted) {
-        selectedPluginId = plugin.id;
-        renderPluginsPanel();
-        showToast(`${plugin.name} connected; the entered value was discarded by this demo`);
-      }
     } else if (form.hasAttribute("data-new-routine") || form.dataset.editRoutineForm) {
       const data = new FormData(form);
       const submit = form.querySelector("button[type=submit]");
@@ -1561,13 +1703,75 @@
     openPanel("Agent to agent", `${escapeHtml(message.self || "This agent")} ↔ ${escapeHtml(message.peer || "another agent")}`, `<div class="exchange-view">${rows}<div class="exchange-footer">🔒 This chat is view-only</div></div>`);
   }
 
+  // Receipts and attestations are raw host data: a receipt carries the shell command's own argv,
+  // and an attestation head is the first 600 chars of a tool result, which the host deliberately
+  // keeps out of model context (evidence-registry.ts). `cat ~/.api_keys`, an `env`, or a curl
+  // with an Authorization header would otherwise land verbatim on this page. Two rules follow:
+  // token-shaped runs are masked everywhere, and a result head is not put in the DOM at all
+  // until someone asks for that one attestation.
+  const SECRETISH = /(?:sk-|xai-|gsk_|ghp_|AIza|xox[abprs]-)[A-Za-z0-9_-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{12,}|[A-Za-z0-9_\-+/=]{32,}/g;
+  const maskSecrets = (value) => String(value ?? "").replace(SECRETISH, (hit) => `${hit.slice(0, 4)}…[redacted, ${hit.length} chars]`);
+  // Only shell_command receipts carry `command`; an mcp_tool_call carries toolName and
+  // serverIdentifier, a browser_navigation a url, a computer_use_session a toolCallId. Falling
+  // straight through to eventId printed a bare UUID for all three -- a receipt disclosing nothing.
+  const receiptLabel = (r) => {
+    if (r.command) return String(r.command);
+    if (r.toolName) return `${r.serverIdentifier ? `${r.serverIdentifier} · ` : ""}${r.toolName}`;
+    if (r.url) return String(r.url);
+    return String(r.target ?? r.toolCallId ?? r.eventId ?? "");
+  };
+  // Heads live here rather than in the markup so that the un-revealed ones are never serialised
+  // into the page at all.
+  let evidenceHeads = [];
+
+  // GW-13: the receipts behind an evidence verdict. Everything shown here is read back from
+  // getAgentEvidence for this attempt; nothing is derived from the pill's own sentence.
+  function openEvidenceViewer(messageId) {
+    const message = contextMessages().find((item) => item.id === messageId);
+    const attemptId = message?.evidence?.attemptId;
+    if (!attemptId) return;
+    const missing = (message.evidence.missing ?? []);
+    openPanel("Claim provenance", `Evidence · ${message.evidence.verdict}`,
+      `<div class="panel-intro"><p>The host checked this reply against the tool results of attempt <code>${escapeHtml(attemptId)}</code>.</p><span class="status-pill${message.evidence.verdict === "evidenced" ? " success" : ""}">${escapeHtml(message.evidence.verdict)}</span></div><div class="evidence-view" data-evidence-body>Reading the receipts from the host…</div>`);
+    adapter.getEvidence(activeContext().id, attemptId).then(({ receipts, attestations }) => {
+      const body = elements.panelContent.querySelector("[data-evidence-body]");
+      if (!body) return;
+      const tools = [...new Set(attestations.map((a) => a.tool).filter(Boolean))];
+      const receiptRows = receipts.length
+        ? receipts.map((r) => `<div class="context-detail-row"><span>${escapeHtml(r.type ?? "action")}</span><strong>${escapeHtml(maskSecrets(receiptLabel(r)))}</strong></div>`).join("")
+        : `<div class="empty-state">No action receipts were written for this attempt.</div>`;
+      evidenceHeads = attestations.map((a) => maskSecrets(String(a.head ?? "").slice(0, 600)));
+      const attRows = attestations.length
+        ? attestations.map((a, i) => `<div class="panel-card"><div class="setting-row"><div><strong>${escapeHtml(a.tool ?? "tool")}</strong><small>${a.ok ? "ok" : "failed"} · ${Number(a.bytes) || 0} bytes${a.truncated ? " · truncated" : ""}</small></div><span class="status-pill${a.ok ? " success" : ""}">${escapeHtml(String(a.sha256 ?? "").slice(0, 12))}</span></div><pre class="evidence-head" data-head-slot="${i}">The host kept this result out of model context. It is not on this page until you ask for it.</pre><div class="form-actions"><button class="ghost-button" type="button" data-reveal-head="${i}">Show output</button></div></div>`).join("")
+        : `<div class="empty-state">No tool result was attested for this attempt.</div>`;
+      body.innerHTML = `<div class="tag-list"><span class="tag">${receipts.length} receipt${receipts.length === 1 ? "" : "s"}</span><span class="tag">${attestations.length} attestation${attestations.length === 1 ? "" : "s"}</span>${tools.map((t) => `<span class="tag">tool · ${escapeHtml(t)}</span>`).join("")}</div>${missing.length ? `<div class="empty-state">Backed by no tool result this attempt: ${escapeHtml(missing.join(", "))}</div>` : ""}<div class="plugin-section-title"><span>Actions taken</span></div>${receiptRows}<div class="plugin-section-title"><span>Attested tool output</span></div>${attRows}`;
+    }).catch((error) => {
+      const body = elements.panelContent.querySelector("[data-evidence-body]");
+      if (body) body.innerHTML = `<div class="empty-state">The host could not return the receipts for this attempt: ${escapeHtml(error.message)}</div>`;
+    });
+  }
+
   elements.transcript.addEventListener("click", (event) => {
+    const evidence = event.target.closest("[data-evidence]");
+    if (evidence) { openEvidenceViewer(evidence.dataset.messageId); return; }
     const exchange = event.target.closest("[data-exchange]");
     if (exchange) { openExchangeViewer(exchange.dataset.messageId); return; }
     const action = event.target.closest("[data-decide]");
     if (!action) return;
     // No toast: the card itself reports what the host did, once the host has done it.
     adapter.decideApproval(activeContext(), action.dataset.messageId, action.dataset.decide);
+  });
+
+  // Both disclosures carry role="button" tabindex="0", so a keyboard user can focus them; without
+  // this they were focusable controls that did nothing on Enter or Space.
+  elements.transcript.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+    const evidence = event.target.closest?.("[data-evidence]");
+    const exchange = evidence ? null : event.target.closest?.("[data-exchange]");
+    if (!evidence && !exchange) return;
+    event.preventDefault();
+    if (evidence) openEvidenceViewer(evidence.dataset.messageId);
+    else openExchangeViewer(exchange.dataset.messageId);
   });
 
   document.querySelectorAll("[data-capability]").forEach((button) => button.addEventListener("click", () => {
@@ -1585,17 +1789,21 @@
   elements.panelContent.addEventListener("click", handlePanelClick);
   elements.panelContent.addEventListener("input", handleTriggerInput);
   elements.panelContent.addEventListener("change", handleTriggerInput);
-  elements.panelContent.addEventListener("change", handlePanelChange);
   elements.panelContent.addEventListener("submit", handlePanelSubmit);
 
   document.getElementById("settings-button").addEventListener("click", () => { openPanel("Global router & policy", "Operator settings", settingsPanel()); fillEndpoints(); });
   document.getElementById("shelf-settings").addEventListener("click", () => { openPanel("Global router & policy", "Operator settings", settingsPanel()); fillEndpoints(); });
   document.getElementById("people-button").addEventListener("click", () => {
     if (activeContext().kind === "room") openPanel("Room roster", `${contextName()} members`, membersPanel());
-    else openPanel("Agent details", contextName(), agentProfilePanel(contextRecord()));
+    else openAgentProfile(contextRecord());
   });
   document.getElementById("notifications-button").addEventListener("click", () => openPanel("Recent activity", "Unread", notificationsPanel()));
-  document.getElementById("room-menu").addEventListener("click", () => simplePanel("context"));
+  // MR-01: this used to open two hardcoded sentences and a button with no handler. Both surfaces
+  // it describes are live, so it opens the one that belongs to the context you are in.
+  document.getElementById("room-menu").addEventListener("click", () => {
+    if (activeContext().kind === "room") openPanel("Room roster", `${contextName()} members`, membersPanel());
+    else openAgentProfile(contextRecord());
+  });
   // Files staged for the next message. Uploaded on pick, so the send is instant and a failed
   // upload is reported while the operator is still looking at the picker.
   let pendingAttachments = [];
@@ -1651,7 +1859,7 @@
   document.getElementById("finish-teach").addEventListener("click", finishTeachMode);
   document.getElementById("pause-run").addEventListener("click", () => {
     adapter.setRunPaused(!state.desktop.paused);
-    showToast(state.desktop.paused ? "Context run paused" : "Context run resumed");
+    showToast(state.desktop.paused ? "Desktop view paused — the worker keeps running" : "Desktop view resumed");
   });
   document.getElementById("dismiss-now").addEventListener("click", () => {
     const routines = routinesForContext();
@@ -1689,4 +1897,5 @@
 
   renderAll(false);
   renderDesktop("browser");
+  resumeTeachMode();
 })();

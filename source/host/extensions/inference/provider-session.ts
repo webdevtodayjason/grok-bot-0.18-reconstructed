@@ -307,7 +307,10 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
         endpoint: "https://chatgpt.com/backend-api/codex/responses",
         model,
         ...(configuredCodexReasoningEffort() == null ? {} : { reasoningEffort: configuredCodexReasoningEffort()! }),
-        instructions: withBackendNote(conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions, settings),
+        // Pre-existing: `settings` was not in scope on this branch, so every codex-direct
+        // turn threw a ReferenceError before it reached the backend. The note wants the
+        // endpoint that is actually answering, and on this route that is fixed and known.
+        instructions: withBackendNote(conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions, { baseUrl: "https://chatgpt.com/backend-api/codex", model, apiKey: null, contextWindow: null, endpointName: "the ChatGPT/Codex subscription backend" }),
         input: conversationInput(messages).input,
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
