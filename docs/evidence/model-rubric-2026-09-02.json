@@ -1,6 +1,6 @@
 {
  "measuredOn": "this Mac + grok-bot-local-vm",
- "capturedAt": "2026-09-03T02:58:20.462Z",
+ "capturedAt": "2026-09-03T03:44:54.733Z",
  "results": [
   {
    "entry": "subscription:minimax",
@@ -151,6 +151,156 @@
    "subscription": "jbrashear@titaniumcomputing.com \u00b7 pro plan",
    "cost": "subscription",
    "wallMs": 146772
+  },
+  {
+   "entry": "subscription:alibaba",
+   "endpointId": "sub-alibaba",
+   "model": "qwen3.8-max",
+   "startedAt": "2026-09-03T03:37:51.551Z",
+   "tiers": {
+    "reach": {
+     "reachable": true,
+     "serves": true,
+     "ms": 749,
+     "models": 12
+    },
+    "speak": {
+     "passed": 2,
+     "of": 2,
+     "turnsMs": [
+      22139,
+      18126
+     ],
+     "failures": []
+    },
+    "latency": {
+     "medianMs": 22139
+    },
+    "work": {
+     "passed": 2,
+     "of": 2,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-dxcuh9ha; verdict evidenced, attestation holds it",
+      "PASS  round 2 \u2014 reported grokbot-verify-by270e3s; verdict evidenced, attestation holds it"
+     ]
+    },
+    "history": {
+     "growthTurns": 4,
+     "of": 4,
+     "passed": 1,
+     "of_rounds": 1,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-2rx0dggx; verdict evidenced, attestation holds it"
+     ]
+    }
+   },
+   "score": 95,
+   "notes": [
+    "Alibaba Model Studio token plan, pasted key, compatible-mode endpoint"
+   ],
+   "subscription": null,
+   "cost": "subscription",
+   "wallMs": 158212
+  },
+  {
+   "entry": "subscription:alibaba:qwen3.8-flash",
+   "endpointId": "sub-alibaba",
+   "model": "qwen3.8-flash",
+   "startedAt": "2026-09-03T03:40:30.806Z",
+   "tiers": {
+    "reach": {
+     "reachable": true,
+     "serves": true,
+     "ms": 1080,
+     "models": 12
+    },
+    "speak": {
+     "passed": 2,
+     "of": 2,
+     "turnsMs": [
+      26160,
+      8063
+     ],
+     "failures": []
+    },
+    "latency": {
+     "medianMs": 26160
+    },
+    "work": {
+     "passed": 2,
+     "of": 2,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-hickazv5; verdict evidenced, attestation holds it",
+      "PASS  round 2 \u2014 reported grokbot-verify-rvz2y4b9; verdict evidenced, attestation holds it"
+     ]
+    },
+    "history": {
+     "growthTurns": 4,
+     "of": 4,
+     "passed": 1,
+     "of_rounds": 1,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-l6z9438t; verdict evidenced, attestation holds it"
+     ]
+    }
+   },
+   "score": 95,
+   "notes": [
+    "Alibaba Model Studio token plan, pasted key, compatible-mode endpoint"
+   ],
+   "subscription": null,
+   "cost": "subscription",
+   "wallMs": 137498
+  },
+  {
+   "entry": "subscription:alibaba:deepseek-v4-pro",
+   "endpointId": "sub-alibaba",
+   "model": "deepseek-v4-pro",
+   "startedAt": "2026-09-03T03:42:50.559Z",
+   "tiers": {
+    "reach": {
+     "reachable": true,
+     "serves": true,
+     "ms": 1296,
+     "models": 12
+    },
+    "speak": {
+     "passed": 2,
+     "of": 2,
+     "turnsMs": [
+      18154,
+      8049
+     ],
+     "failures": []
+    },
+    "latency": {
+     "medianMs": 18154
+    },
+    "work": {
+     "passed": 2,
+     "of": 2,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-0jfqqcba; verdict evidenced, attestation holds it",
+      "PASS  round 2 \u2014 reported grokbot-verify-orq68wmi; verdict evidenced, attestation holds it"
+     ]
+    },
+    "history": {
+     "growthTurns": 4,
+     "of": 4,
+     "passed": 1,
+     "of_rounds": 1,
+     "lines": [
+      "PASS  round 1 \u2014 reported grokbot-verify-pseq3uk6; verdict evidenced, attestation holds it"
+     ]
+    }
+   },
+   "score": 95,
+   "notes": [
+    "Alibaba Model Studio token plan, pasted key, compatible-mode endpoint"
+   ],
+   "subscription": null,
+   "cost": "subscription",
+   "wallMs": 123246
   }
  ]
 }
