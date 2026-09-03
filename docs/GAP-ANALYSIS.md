@@ -11,6 +11,42 @@ stable so a wave can cite them.
 This document is the ranked backlog. `docs/PLUMBING-AUDIT.md` §5 remains the live open-problems
 ledger for the *host* and now points here; the living dashboard carries the current position.
 
+## 0. Status, 2026-09-03 03:00 CDT (measured on this Mac + the box, bundle from the working tree after `526a013`)
+
+**Waves A and B landed** (`526a013`, plus the browser-subagent follow-up commit). Every proof in
+§5 for those two waves ran green on the live box in one sequential pass: unit 126/126, source
+typecheck, `verify-toolset` in all four modes (chief 36 tools with GetMcpTools and CallMcpTool;
+computerUse child 3 tools; connector round trip stamped evidenced; browserUse child reads
+example.com and the parent reports "Example Domain"), subagent dispatch, evidence replay, work
+report with evidence required, dashboard 35 checks plus its leak arm, subscription leak scan.
+
+**Landed rows** are marked "landed" in §4. Left open from those waves, now their own rows:
+
+| Id | Finding | Next | Size |
+|---|---|---|---|
+| SP-1b | User and project memory stay null in the prompt: `createUserMemory` / `createProjectMemory` exist on no api; the two candidate classes have mismatched recall signatures | Decide whether the product wants user/project memory sections; if so, write the two factories against the memory service and re-hoist | M |
+| TOOLS-13 | The SetMcpInstructions round trip has no runnable proof: the prompt is never written out (by design, it carries memory), and the section report has no marker for connector instructions | Add an `mcpCustomInstructions` marker to the section report and a `verify-toolset --mcp-instructions` mode; needs CP-07 so `local:` ids validate | S |
+| SUB-2 | Browser tools return text only; the per-action screenshot the driver captures stays on the box | Carry `imageB64` as an image part the way the Computer adapter does (`createImageResult`) | S |
+| ENDPOINT-2 | The relay writes the `SAND_OPENAI_COMPATIBLE_*` pin into `box-secrets.json`, a store whose `SAND_` prefix is reserved, so `BoxSecretsApplier.applyPersisted` has always bailed on this box and no real box secret is ever injected | Move the pin to `sand-host-settings.json` in `provider-session.ts` and repoint `ui/server.mjs` at the same file in one change. Proof: `box-secrets.json` holds no `SAND_` key and the host log prints "applying N persisted box secret(s)" | M |
+| GW-15 | `setAgentUnread{isUnread:true}` errors with "this.tm.sessionStore.seedSessionActivityFromDbMtime is not a function"; the clear direction works, which is all MR-06 needs | Trace the session store method on the raise path; one host fix | S |
+| MR-11, MR-15 | Not in Wave B: the run rail's synthetic timeline, and the credential card (needs the secret-card work in Wave D1) | Wave C / Wave D1 | S / M |
+
+**How the browser subagent was actually broken, four faults deep.** The audit's "gated off" was
+the first layer only. With the gate open: (1) the prompt glue was built once with every identity
+flag false, so the child got the chief's desktop prompt with no Browser section and a ban on
+driving Chrome from Shell; (2) the fifteen browser tools declared no `parameters`, and the
+OpenAI-compatible executor silently drops such tools, so on the wire the child held Shell and Read
+only, which is why it truthfully said its browser tools were unavailable; (3) the tools kept
+Cursor's `execute(context, args, metadata)` order while this core calls `execute(ctx,
+interactionHandler, args, meta)`, so every call failed "url is required"; (4) the auto-review
+preflight probes Chrome on the agent's display before the driver has launched it, and this box's
+shell executor reports the refused connection as `failure` with an exit code, which the preflight
+read as a capture error instead of its own chrome-unreachable path. Each layer was found by
+instrumenting, not by reading: the `[sand][toolset]` line (what buildTurnTools offered), the new
+`[sand][wire]` line (what actually left for the provider), the child's own audit ledger, and a
+logged cause in the preflight. Both switches live in `/home/box/sand-data/sand-host-settings.json`
+(`SAND_TOOL_TRACE`, `SAND_BROWSER_USE`) and flip on a running box.
+
 ## 1. Executive summary
 
 The reconstruction is far more complete than a stub grep suggests, and the damage has one shape:
@@ -156,31 +192,31 @@ merged into one row and both ids kept.
 
 | Id | Finding | Fix | Size |
 |---|---|---|---|
-| TOOLS-01 · CP-01 · TOOLS-10 | GetMcpTools/CallMcpTool never built; connector tools discovered per turn and dropped | Bind an `mcp` projection on the production path from the per-turn discovered tools and the MCP executor (`createSandMcpMetaToolOptions` exists). Proof: wire shows the pair; a fresh agent reads a file through the localfiles server with evidence | M |
-| SP-1 | Memory, routines, skills, channels nulled in the production system prompt | Hoist the seven providers the way the agent directory was hoisted at `:1358-1395`; pass `session.memory`, snapshots, user/project memory, automations, workflows, channels. Proof: assembled prompt diff shows the sections | M |
-| SP-2 | Connector custom instructions and the discovery-unavailable notice never reach the model | Implement the three per-turn setters on the production turn owner; read that state instead of constants. Proof: SetMcpInstructions round-trips into the next prompt | M |
-| TOOLS-02 | computerUse subagent offered 12 tools instead of 3 | Derive `isBoxScopedSubagent` from the normalized subagent kind at `:2542` and `:2759`. Proof: subagent wire capture shows Shell, Read, Computer | S |
+| TOOLS-01 · CP-01 · TOOLS-10 · **landed** | GetMcpTools/CallMcpTool never built; connector tools discovered per turn and dropped | Bind an `mcp` projection on the production path from the per-turn discovered tools and the MCP executor (`createSandMcpMetaToolOptions` exists). Proof: wire shows the pair; a fresh agent reads a file through the localfiles server with evidence | M |
+| SP-1 · **landed** (memory, routines, skills, channels; user/project memory is SP-1b) | Memory, routines, skills, channels nulled in the production system prompt | Hoist the seven providers the way the agent directory was hoisted at `:1358-1395`; pass `session.memory`, snapshots, user/project memory, automations, workflows, channels. Proof: assembled prompt diff shows the sections | M |
+| SP-2 · **landed** | Connector custom instructions and the discovery-unavailable notice never reach the model | Implement the three per-turn setters on the production turn owner; read that state instead of constants. Proof: SetMcpInstructions round-trips into the next prompt | M |
+| TOOLS-02 · **landed** | computerUse subagent offered 12 tools instead of 3 | Derive `isBoxScopedSubagent` from the normalized subagent kind at `:2542` and `:2759`. Proof: subagent wire capture shows Shell, Read, Computer | S |
 | CP-10 | A submitted connector secret is stored where nothing reads it | Make `routeSecret` connector-aware: merge into that server's `env` in `connectors.json` (0600, atomic) and restart it; keep the channel branch for slack/github | M |
-| GW-13 | Evidence verdicts exist, are measured, and no UI shows the receipts behind them | Disclosure behind the pill: `getAgentEvidence{id, attemptId}` → receipt count, tool names, attestation heads | S |
+| GW-13 · **landed** | Evidence verdicts exist, are measured, and no UI shows the receipts behind them | Disclosure behind the pill: `getAgentEvidence{id, attemptId}` → receipt count, tool names, attestation heads | S |
 | GW-05 | Nine working skills commands called by nothing; teach has no product it can produce | Skills panel per agent mirroring Routines: list, enable, edit, delete, run, import text/URL | M |
 | GW-03 | Only the flat whole-transcript read is used; acceptance never checked | Poll `promptAcceptanceStatus` after every send; tail on refresh, page on scrollback; thread and react later | M |
-| MR-01 | Room ••• menu is hardcoded copy with a dead button | Point it at `agentProfilePanel` / `membersPanel`, which are live, or delete it | S |
-| MR-02 | Plugins Tools/Skills sections structurally empty | Fill Tools from `listRoutedMcpTools` matched by server name; give Skills the same empty-state sentence or drop it | M |
-| MR-03 | Key form says the value is discarded; the relay stores it | Branch the hint and the toast on `group === "Providers"`; report the adoption result the adapter awaits | S |
-| MR-05 | Browser row renders blank on every agent | Show the screen fact from `ensureForeverBox` or drop the sub-line | S |
-| MR-06 | Unread counts never clear | Call `openAgent{id}` (or `setAgentUnread`) after the transcript loads in `selectContext` | S |
+| MR-01 · **landed** | Room ••• menu is hardcoded copy with a dead button | Point it at `agentProfilePanel` / `membersPanel`, which are live, or delete it | S |
+| MR-02 · **landed** | Plugins Tools/Skills sections structurally empty | Fill Tools from `listRoutedMcpTools` matched by server name; give Skills the same empty-state sentence or drop it | M |
+| MR-03 · **landed** | Key form says the value is discarded; the relay stores it | Branch the hint and the toast on `group === "Providers"`; report the adoption result the adapter awaits | S |
+| MR-05 · **landed** | Browser row renders blank on every agent | Show the screen fact from `ensureForeverBox` or drop the sub-line | S |
+| MR-06 · **landed** | Unread counts never clear | Call `openAgent{id}` (or `setAgentUnread`) after the transcript loads in `selectContext` | S |
 
 ### P1 — wrong, misleading, or withheld (32 after the 3 refuted)
 
 | Id | Finding | Fix | Size |
 |---|---|---|---|
-| SUB-1 · TOOLS-03 | browserUse subagent unreachable; 15 browser tools dead | Third `subagentConfigs` entry from `createSandBrowserUseSubagentConfig`; `SAND_BROWSER_USE` env override mirroring `resolveMultitaskEnabled`. Proof: a dispatch returns a page read | M |
-| TOOLS-09 | CloudAgent's team gate never resolves | Point `cloudAgentsDisabledByTeam` at the cloud-agents service's `isDisabledByTeamAdmin` | S |
+| SUB-1 · TOOLS-03 · **landed** (four faults, §0) | browserUse subagent unreachable; 15 browser tools dead | Third `subagentConfigs` entry from `createSandBrowserUseSubagentConfig`; `SAND_BROWSER_USE` env override mirroring `resolveMultitaskEnabled`. Proof: a dispatch returns a page read | M |
+| TOOLS-09 · **landed** | CloudAgent's team gate never resolves | Point `cloudAgentsDisabledByTeam` at the cloud-agents service's `isDisabledByTeamAdmin` | S |
 | MODEL-1 | Per-agent and per-subagent model dead on every routed provider; §5's "no new plumbing" was wrong | Per-session model override in `createProviderPromptSession`, `resolveSandRequestedModel` threaded through the routed branch keyed on subagent kind and stored settings. Design item; enables seniority routing against the rubric | L |
-| COMPACT-1 | `compactionEpoch` hardcoded 0 at both sites | Per-session counter incremented where turn-settle logs "conversation compacted"; must land with SP-1 | S |
+| COMPACT-1 · **landed** | `compactionEpoch` hardcoded 0 at both sites | Per-session counter incremented where turn-settle logs "conversation compacted"; must land with SP-1 | S |
 | GC-1 | Stale-root GC unreachable on a self-hosted box | Env override matching the other two; decide local defaults | S |
 | GW-01 | Agent identity write path unwired: no edit, avatar, notifications, hygiene | Agent-detail panel on `updateAgent`, `setAgentAvatarBytes`, notify setters, hidden/unread, duplicate | M |
-| GW-06 | Memory only on the operator page | Port the three call sites into the Machine Room agent-detail panel | S |
+| GW-06 · **landed** | Memory only on the operator page | Port the three call sites into the Machine Room agent-detail panel | S |
 | GW-07 | Teach recording throws at a default-off gate | Dev-flags row through `setHostSettings{featureFlagOverrides}`; then settle the fork-window contradiction with one live call | M |
 | GW-08 | Six MCP reads unused; adapter's "no tool list" claim is false | `togglePluginTool` on `listRoutedMcpTools` + `listBoxMcpServers` + `setHostSettings{mcpDisabledToolsByServerId}`; `getAgentChannels` on the cards | M |
 | GW-09 | Attachments uploaded but never rendered | `readAttachmentImage` inline for screenshots, text/chunk previews; `searchMedia` behind Files | S |
@@ -194,11 +230,11 @@ merged into one row and both ids kept.
 | CP-07 | `local:<name>` ids fail the validator | Stable numeric ids per local server, persisted beside connectors.json | S |
 | CP-08 | Per-tool permissions have no read surface | `listMcpServerTools`, `toggleMcpToolDisabled` forwarding to the existing instructions-and-toggles methods; depends on CP-07 | M |
 | CP-13 | Remote http/sse servers run through Cursor's backend | Extend local-connectors to `{url,type,headers}` and add an HTTP transport to the box exec daemon; the only route to Cursor-free remote connectors. Gated on CP-14 | L |
-| MR-04 | Connect on a non-adoptable provider card always fails behind a success toast | Suppress the button for Providers with a non-adoptable route; move the toast to the resolution path | S |
-| MR-07 | "Now" island can never show a running routine | Derive running from `lastRun.status` or the owner's `isRunning`; otherwise delete the branch | S |
-| MR-08 | Model row is box-wide, Role reads "not set" and cannot be set | Label "Endpoint (box-wide)"; Role editable through `updateAgent` | S |
-| MR-09 | Files tab labelled "Not wired yet" over a working view | One-line label change | S |
-| MR-14 | A recording in progress is never surfaced after reload | On boot, if `state.teaching.active`, open teach mode seeded with the host's `startedAt` | S |
+| MR-04 · **landed** | Connect on a non-adoptable provider card always fails behind a success toast | Suppress the button for Providers with a non-adoptable route; move the toast to the resolution path | S |
+| MR-07 · **landed** | "Now" island can never show a running routine | Derive running from `lastRun.status` or the owner's `isRunning`; otherwise delete the branch | S |
+| MR-08 · **landed** | Model row is box-wide, Role reads "not set" and cannot be set | Label "Endpoint (box-wide)"; Role editable through `updateAgent` | S |
+| MR-09 · **landed** | Files tab labelled "Not wired yet" over a working view | One-line label change | S |
+| MR-14 · **landed** | A recording in progress is never surfaced after reload | On boot, if `state.teaching.active`, open teach mode seeded with the host's `startedAt` | S |
 | TOOLS-11 | The 34-vs-120 reconciliation was undocumented | Section 2 of this document; the audit doc's two "122" corrected to 123 | S |
 | BL-P1 · BL-W5 · BL-W7 | Backlog rows stale: P1 closed but written open; wave-5 item 11 fixed but open; §7 reads as standing policy | Closed in this commit, section 6 | S |
 
@@ -219,8 +255,8 @@ without the env lines or invert precedence; **TOOLS-12** keep multitask on and f
 **TOOLS-05** generate_image only if an image model is wanted; **GW-02 / GW-12 / TOOLS-06 /
 BACKEND-1 / CP-15** stay out of scope, said so here.
 
-Hygiene (S each): MR-10 remove the Sheets tab; MR-11 feed the outline's tool rows into the run
-rail; MR-12 toast string; MR-13 delete the unreachable builders; CP-11 connectors editor on the
+Hygiene (S each): MR-10 remove the Sheets tab (landed); MR-11 feed the outline's tool rows into the run
+rail; MR-12 toast string (landed); MR-13 delete the unreachable builders (landed); CP-11 connectors editor on the
 relay's existing `/connectors` route with a `refreshMcp` follow-up; CP-12 pass the agent id to
 `disconnectChannel`; DEAD-1 delete `production-turn-input-projection.ts`, `createTurnToolSession`,
 the duplicate spread; CHURN-1 / BL-P5 compare summaries before emitting `agent-upserted`; BOX-1 log
@@ -233,7 +269,7 @@ Each wave is one contract with a runnable proof, sized to a session, files bound
 touch disjoint trees and can run in parallel; their verification shares the one box and runs
 sequentially. Nothing goes live until the proof passes.
 
-**Wave A — the model gets what the host already has (host).** TOOLS-01/CP-01, SP-1, SP-2, COMPACT-1,
+**Wave A — landed 2026-09-03 — the model gets what the host already has (host).** TOOLS-01/CP-01, SP-1, SP-2, COMPACT-1,
 TOOLS-02, TOOLS-09, SUB-1/TOOLS-03. Files: `host-runner-composition.ts`, `turn-agent-composition.ts`,
 the sand-multitask-style flag helper, tests. Proof: `scripts/verify-toolset.mjs` (new) captures a
 chief wire request and asserts GetMcpTools and CallMcpTool are present and the count is 36; a fresh
@@ -241,7 +277,7 @@ agent reads `/workspace` through the localfiles server with an `evidenced` verdi
 prompt contains the memory and routines sections; a computerUse subagent wire shows three tools;
 suite green.
 
-**Wave B — the modals tell the truth (Machine Room).** MR-01, MR-02, MR-03, MR-04, MR-05, MR-06,
+**Wave B — landed 2026-09-03 — the modals tell the truth (Machine Room).** MR-01, MR-02, MR-03, MR-04, MR-05, MR-06,
 MR-07, MR-08, MR-09, MR-10, MR-12, MR-13, MR-14, GW-13 disclosure, GW-06 memory port. Files:
 `app.js`, `gateway-adapter.js`, `index.html`, `styles.css`, `verify-dashboard.mjs`. Proof:
 `verify-dashboard.mjs` in headless Chrome asserts none of the strings "Standalone demo",
@@ -249,7 +285,7 @@ MR-07, MR-08, MR-09, MR-10, MR-12, MR-13, MR-14, GW-13 disclosure, GW-06 memory 
 Browser row carries text; the evidence pill opens a disclosure with a receipt count; a Providers card
 with a non-adoptable route shows no Connect button.
 
-**Wave C — the working commands get a surface (Machine Room).** GW-03 (acceptance + tail), GW-05
+**Wave C — next — the working commands get a surface (Machine Room).** GW-03 (acceptance + tail), GW-05
 (Skills panel), GW-01 (agent detail edit), GW-09 (inline attachments), GW-10 (hand-back, Updates),
 GW-14 (palette), GW-08 (tool switches). Two sessions; C1 = GW-03, GW-05, GW-10 hand-back; C2 = the
 rest. Proof per command: the call appears in the adapter and a headless check exercises it against

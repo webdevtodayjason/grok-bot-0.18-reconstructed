@@ -110,6 +110,19 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-03 (Waves A and B, `526a013` + browser follow-up).** GetMcpTools/CallMcpTool reach the
+  model (the per-turn MCP projection is handed to the tools handoff); the production prompt carries
+  memory, routines, skills and channels; per-turn connector instructions and the discovery notice
+  are real; compaction epoch is real; computerUse subagent gets 3 tools; CloudAgent gate resolves;
+  browserUse subagent offered behind `SAND_BROWSER_USE` and proven end to end after four further
+  faults (prompt-glue identity, missing tool parameters, execute calling order, preflight
+  failure shape — `docs/GAP-ANALYSIS.md` §0). Subagents get their own prompt assembly and audit
+  identity. Machine Room: every modal truthful, Connectors group with real tool rows, evidence
+  pill opens receipts, memory panel, unread clears. New host switches in
+  `/home/box/sand-data/sand-host-settings.json` (`SAND_TOOL_TRACE`, `SAND_BROWSER_USE`); host-log
+  lines `[sand][toolset]` (offered) and `[sand][wire]` (sent). Gate: `scripts/verify-toolset.mjs`
+  (chief / --subagent / --connector / --browser). Suite 126/126.
+
 | commit | what |
 |---|---|
 | `4a54e9c` | Desktop iframe mounted once (no more VNC reconnect storm); `vnc_lite` (no control bar, interactive); Settings view (localToolPermission, auto-review, WebAuthn proxy, notifications, provider, TZ) |
@@ -1506,6 +1519,16 @@ in the findings; P1 closed with a named cause; explicit unverified-list present 
 wave's output; `npm test` still green; zero UI/feature diffs outside `docs/`.
 
 ## 8. Where things live
+
+- **Host switches (2026-09-03):** `/home/box/sand-data/sand-host-settings.json` (0600, flat
+  `{"NAME":"value"}`), re-read per call, so `SAND_TOOL_TRACE=1` and `SAND_BROWSER_USE=1` flip on a
+  running box. Never in `box-secrets.json`: the `SAND_` prefix is reserved there and a key with it
+  silently disables persisted box-secret injection (GAP-ANALYSIS ENDPOINT-2). Trace lines:
+  `[sand][toolset]` = what buildTurnTools offered (conversationId, flags, tool names),
+  `[sand][wire]` = what actually left for the provider (transport, model, offered, sent, names);
+  `sand-system-prompt-<agentId>.json` beside the settings file = section-presence report only, never
+  prompt text. Gate for all of it: `scripts/verify-toolset.mjs`.
+
 
 - Worktree `/Users/sem/orca/workspaces/grok-bot-0.18-reconstructed/gb`, branch `webdevtodayjason/gb`.
 - Session memories: `~/.claude-titanium/projects/-Users-sem-orca-grok-bot-0-18-reconstructed/memory/`
