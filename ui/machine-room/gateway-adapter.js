@@ -112,9 +112,12 @@
     if (item.kind === "user") return `u:${String(item.text ?? "").trim()}`;
     return null;
   }
+  // Rows are receipts of work. Progress updates, state edits and agent-to-agent sends are not
+  // work, and their arguments are internal JSON nobody should read in a conversation.
+  const NOT_A_RECEIPT = /communicate|update_state|todo|send.?to.?agent|react.?to.?message|sleep|wait/i;
   function weaveToolRows(transcript, outline) {
     const entries = [...(transcript ?? [])];
-    const items = Array.isArray(outline) ? outline : [];
+    const items = (Array.isArray(outline) ? outline : []).filter((i) => !(i?.kind === "tool-call" && NOT_A_RECEIPT.test(String(i.name ?? ""))));
     if (!items.some((item) => item?.kind === "tool-call")) return entries;
     const inserts = new Map();
     let cursor = 0;
@@ -135,11 +138,27 @@
     return woven;
   }
 
+  // Agent-to-agent traffic carries fromAgent (inbound) or toAgent (outbound) on the entry. The
+  // host stores it in the same transcript, but it is not this conversation: it is shown as the
+  // product does, one blurb per run ("2 messages with Chief of staff"), never as a bubble from you.
+  const peerOf = (e) => e.fromAgent?.name ?? e.toAgent?.name ?? null;
+  function collapseAgentExchanges(entries) {
+    const out = [];
+    for (const e of entries) {
+      const peer = e.kind === "message" ? peerOf(e) : null;
+      if (peer == null) { out.push(e); continue; }
+      const last = out.at(-1);
+      if (last?.kind === "agent-exchange" && last.peer === peer) { last.count += 1; last.timestampMs = e.timestampMs ?? last.timestampMs; continue; }
+      out.push({ kind: "agent-exchange", id: `exchange-${e.id}`, peer, count: 1, timestampMs: e.timestampMs });
+    }
+    return out;
+  }
   function messagesOf(transcript, fallbackName, outline) {
-    return weaveToolRows(transcript, outline)
-      .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || (e.kind === "message" && e.role === "user"))
+    return collapseAgentExchanges(weaveToolRows(transcript, outline))
+      .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || e.kind === "agent-exchange" || (e.kind === "message" && e.role === "user"))
       .map((e, i) => {
         if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text };
+        if (e.kind === "agent-exchange") return { id: e.id, type: "system", text: `${e.count} message${e.count === 1 ? "" : "s"} with ${e.peer}` };
         const mine = e.kind !== "send-message";
         const card = mine ? null : cardOf(e);
         const text = e.kind === "send-message"
