@@ -275,7 +275,7 @@ const server = createServer(async (req, res) => {
     // Static console: "/" and the handoff's assets (by extension, so the JSON API routes below stay
     // reachable), plus the old /machine-room/ paths for bookmarks.
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html" || url.pathname.startsWith("/machine-room/")
-      || (/\.(css|js|mjs|svg|png|jpg|jpeg|gif|ico|woff2?|ttf|map|webmanifest|txt)$/.test(url.pathname) && !url.pathname.startsWith("/api/")))) {
+      || (/\.(css|js|mjs|svg|png|jpg|jpeg|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|map|webmanifest|txt|md)$/.test(url.pathname) && !url.pathname.startsWith("/api/")))) {
       // Every asset in the handoff is referenced relatively, so at "/machine-room" (no trailing
       // slash) the browser resolves them against "/" and the page renders as unstyled HTML.
       // Redirect to the directory form the way a static server would.
@@ -285,7 +285,7 @@ const server = createServer(async (req, res) => {
       const file = path.resolve(HERE, "machine-room", rel);
       // Resolve first, then check: a path that escapes the directory never reaches readFile.
       if (!file.startsWith(path.join(HERE, "machine-room") + path.sep)) return fail(res, 403, "outside the frontend directory");
-      const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".md": "text/plain; charset=utf-8" };
+      const types = { ".webp": "image/webp", ".avif": "image/avif", ".mp4": "video/mp4", ".webm": "video/webm", ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".md": "text/plain; charset=utf-8" };
       try {
         const bytes = await readFile(file);
         res.writeHead(200, { "content-type": types[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-store" });

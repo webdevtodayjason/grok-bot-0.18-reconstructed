@@ -335,12 +335,22 @@
     return { default: current?.id ?? live?.model ?? "default", available };
   }
 
+  // The outline is the model's whole turn state (1,500 items on a long-lived agent) and it only
+  // moves when the transcript does, so it is refetched only when the transcript's tail changed.
+  const outlineCache = new Map();
   async function loadContext(context, name) {
-    const [transcript, automations, outline] = await Promise.all([
+    const [transcript, automations] = await Promise.all([
       call("getAgentTranscript", { id: context.id }).catch(() => null),
       call("getAgentAutomations", { id: context.id }).catch(() => null),
-      call("getConversationOutline", { id: context.id }).catch(() => null),
     ]);
+    const tail = transcript?.at?.(-1);
+    const sig = `${transcript?.length ?? 0}:${tail?.id ?? ""}:${tail?.timestampMs ?? ""}`;
+    const cached = outlineCache.get(context.id);
+    let outline = cached?.sig === sig ? cached.outline : null;
+    if (outline == null) {
+      outline = await call("getConversationOutline", { id: context.id }).catch(() => null);
+      outlineCache.set(context.id, { sig, outline });
+    }
     const latestAgentMs = (transcript ?? [])
       .filter((e) => e.kind === "send-message")
       .reduce((n, e) => Math.max(n, Number(e.timestampMs) || 0), 0);
@@ -453,6 +463,10 @@
 
   function createGatewayAdapter(state) {
     const listeners = new Set();
+    // Set by reloadRoster when a status, unread count or preview moved; reloadActive emits on it
+    // even when the transcript did not change.
+    let rosterChanged = false;
+    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.unread}:${x.preview}`).join("|");
     // app.js drives the "working" bubble from simulateReply's 1.15s timer, which is right for a
     // demo and wrong for a machine: a real reply takes tens of seconds, so the dots flashed and
     // died and the wait happened in silence. The adapter owns that bubble's lifetime instead --
@@ -514,6 +528,11 @@
     }
 
     async function reloadRoster() {
+      const before = rosterSig();
+      await reloadRosterInner();
+      if (rosterSig() !== before) rosterChanged = true;
+    }
+    async function reloadRosterInner() {
       const agents = await call("listAgents").catch(() => null);
       if (!agents) return;
       for (const a of agents) {
@@ -575,6 +594,10 @@
       const r = record(state.activeContext);
       if (!r) return;
       const loaded = await loadContext(state.activeContext, r.name);
+      // Emit only when something the transcript shows actually changed. Every emit makes the app
+      // rebuild the whole conversation, and an unconditional one on each stream event and each
+      // 15 s tick is a visible flash on a long conversation.
+      const before = `${r.messages?.length ?? 0}|${r.messages?.at?.(-1)?.id ?? ""}|${r.messages?.at?.(-1)?.text?.length ?? 0}|${r.files?.length ?? 0}|${r.awaiting ? 1 : 0}`;
       r.messages = loaded.messages;
       r.files = loaded.files;
       applyAwaiting(state.activeContext, r, loaded.latestAgentMs);
@@ -582,7 +605,9 @@
         ...state.routines.filter((x) => !same(x.scope, state.activeContext)),
         ...loaded.routines,
       ];
-      emit("message:created", { context: state.activeContext });
+      const after = `${r.messages.length}|${r.messages.at(-1)?.id ?? ""}|${r.messages.at(-1)?.text?.length ?? 0}|${r.files.length}|${r.awaiting ? 1 : 0}`;
+      if (after !== before || rosterChanged) emit("message:created", { context: state.activeContext });
+      rosterChanged = false;
     }
 
     // The gateway pushes; this adapter pulls what changed. Re-reading the active transcript on
@@ -592,7 +617,7 @@
       const events = new EventSource("/events");
       events.onmessage = () => {
         if (pending) return;
-        pending = setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, 400);
+        pending = setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, 900);
       };
     } catch { /* no stream: the UI still works, it just will not update on its own */ }
 
