@@ -5,12 +5,24 @@
 // directly. This process is the shim: it serves the UI and relays to the gateway
 // without an Origin, adding the Bearer token the browser must never hold.
 //
+// Reaching this process has always been equivalent to holding the gateway token, so it now has a
+// login of its own. ui/auth.json (0600, never in git) holds a scrypt hash and a cookie signing
+// secret; `node ui/set-password.mjs` writes it. With that file present every route except the
+// login itself needs a session cookie or the gateway bearer. Without it the server behaves exactly
+// as it always did on loopback, and refuses to start on any other address.
+//
 // Env:
 //   SAND_HOST_GATEWAY_URL    gateway origin, no trailing slash (paths are concatenated)
 //   SAND_HOST_GATEWAY_TOKEN  optional; sent as Bearer when set
 //   SAND_UI_PORT             listen port, default 7777
+//   SAND_UI_BIND_HOST        listen address, default 127.0.0.1; anything else needs ui/auth.json
 import { createServer } from "node:http";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
+import {
+  SESSION_LIFETIME_MS, createLoginThrottle, createSession, isLoopbackHost, isSecureRequest,
+  parseCookies, readAuthFile, readSession, safeEqual, safeNextPath, serializeCookie,
+  sourceAddress, verifyPassword,
+} from "./auth.mjs";
 import { readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -109,14 +121,195 @@ const HERE = path.dirname(new URL(import.meta.url).pathname);
 
 const upstreamHeaders = (extra = {}) => ({ ...(TOKEN.length > 0 ? { authorization: `Bearer ${TOKEN}` } : {}), ...extra });
 
-function fail(res, status, message) {
-  res.writeHead(status, { "content-type": "application/json" });
+function fail(res, status, message, headers = {}) {
+  res.writeHead(status, { "content-type": "application/json", ...headers });
   res.end(JSON.stringify({ error: message }));
 }
 
-async function readBody(req) {
+// ---- the login ------------------------------------------------------------------------------
+// AUTH is read once at boot rather than per request. A password change is therefore a restart,
+// which is what set-password.mjs prints, and it means a request path cannot be slowed down or
+// broken by a half-written file.
+const AUTH_FILE = path.join(HERE, "auth.json");
+const AUTH = readAuthFile(AUTH_FILE);
+const SESSION_COOKIE = "gb_session";
+const throttle = createLoginThrottle();
+
+// The bearer stays a way in because holding it is already full access: every /api call this
+// process forwards carries it. Requiring a session on top would only break the gates and the
+// scripts without taking any capability away from someone who has the token.
+function isAuthorized(req) {
+  if (AUTH == null) return true;
+  const header = String(req.headers.authorization ?? "");
+  if (TOKEN.length > 0 && header.startsWith("Bearer ") && safeEqual(header.slice(7).trim(), TOKEN)) return true;
+  const raw = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  return raw != null && readSession(raw, AUTH.cookieSecret) != null;
+}
+
+// The console bounces to /login on a 401 only when it carries this header. Without a marker the
+// page cannot tell OUR refusal from the gateway's, and a gateway 401 (a stale bearer, a box
+// recreated under a live relay) would send an operator who typed the right password straight back
+// to the login, forever, over a fault no password can fix.
+const RELAY_AUTH_HEADER = { "x-relay-auth": "required" };
+
+// A browser asking for a page gets sent to the login; anything else gets JSON it can act on. The
+// Accept header is the only honest way to tell those apart, because /api and a stylesheet and a
+// document all arrive as plain GETs.
+function denyUnauthenticated(req, res, url) {
+  const wantsHtml = req.method === "GET" && String(req.headers.accept ?? "").includes("text/html");
+  if (!wantsHtml) return fail(res, 401, "not signed in", RELAY_AUTH_HEADER);
+  res.writeHead(302, { location: `/login?next=${encodeURIComponent(url.pathname + url.search)}`, "cache-control": "no-store" });
+  return res.end();
+}
+
+const escapeHtml = (value) => String(value)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+// One field, one button, the error inline, and every byte of it in this response. Serving no
+// separate asset is not just tidiness: an asset path exempted from the session check would be a
+// hole in the thing this page exists to close.
+function loginPage({ error = "", next = "/" } = {}) {
+  return `<!doctype html>
+<html lang="en" data-theme="dusk">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sign in - Machine Room</title>
+<link rel="icon" href="data:," />
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: radial-gradient(1200px 700px at 20% -10%, #23323a 0%, #0f151a 60%) #0f151a;
+    color: rgba(255,255,255,0.94);
+    font: 400 14px/1.5 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  form { width: min(360px, calc(100vw - 48px)); padding: 28px; border-radius: 20px;
+    background: rgba(17,25,30,0.82); border: 1px solid rgba(255,255,255,0.1);
+    box-shadow: 0 30px 90px rgba(4,10,13,0.5), inset 0 1px 0 rgba(255,255,255,0.12); }
+  .lights { display: flex; gap: 6px; margin-bottom: 18px; }
+  .lights span { width: 10px; height: 10px; border-radius: 999px; background: rgba(255,255,255,0.18); }
+  h1 { margin: 0 0 4px; font-size: 17px; font-weight: 600; letter-spacing: 0.01em; }
+  p.sub { margin: 0 0 20px; font-size: 13px; color: rgba(233,239,239,0.46); }
+  label { display: block; font-size: 12px; color: rgba(233,239,239,0.68); margin-bottom: 6px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.18); background: rgba(31,42,47,0.46);
+    color: inherit; font: inherit; }
+  input:focus { outline: none; border-color: #8b69ea; box-shadow: 0 0 0 3px rgba(139,105,234,0.28); }
+  button { margin-top: 16px; width: 100%; padding: 10px 12px; border-radius: 10px; border: 0;
+    background: #8b69ea; color: #fffaf2; font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover { background: #9a7cf0; }
+  .error { margin-top: 14px; padding: 9px 11px; border-radius: 10px; font-size: 13px;
+    background: rgba(255,111,114,0.14); border: 1px solid rgba(255,111,114,0.38); color: #ffb3b4; }
+</style>
+</head>
+<body>
+<form method="post" action="/login">
+  <div class="lights" aria-hidden="true"><span></span><span></span><span></span></div>
+  <h1>Machine Room</h1>
+  <p class="sub">This console drives the box. Sign in to reach it.</p>
+  <input type="hidden" name="next" value="${escapeHtml(next)}" />
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" autofocus required />
+  <button type="submit">Sign in</button>
+  ${error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : ""}
+</form>
+</body>
+</html>
+`;
+}
+
+function sendLoginPage(res, status, options) {
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  return res.end(loginPage(options));
+}
+
+// A password and a next path. Anything larger than this is not a login, and /login is the one
+// route an unauthenticated caller may POST to on a published relay, so the body is capped rather
+// than buffered whole.
+const LOGIN_BODY_LIMIT = 8 * 1024;
+
+// Answering without having read the body leaves the client still uploading, so the answer has to
+// take the connection down with it. Ending the response first and destroying the request in its
+// callback is the difference between the caller seeing a status and seeing a reset socket.
+function endAndClose(req, res, status, headers, payload) {
+  res.writeHead(status, { "cache-control": "no-store", connection: "close", ...headers });
+  return res.end(payload, () => req.destroy());
+}
+
+async function handleLogin(req, res, url) {
+  const wantsHtml = String(req.headers.accept ?? "").includes("text/html");
+  const key = sourceAddress(req);
+
+  // Before the body, not after: a locked out address must not be able to make this process hold
+  // anything in memory on its behalf.
+  const waitMs = throttle.retryAfterMs(key);
+  if (waitMs > 0) {
+    const seconds = Math.ceil(waitMs / 1000);
+    const stalled = safeNextPath(url.searchParams.get("next"));
+    const headers = { "retry-after": String(seconds) };
+    if (!wantsHtml) return endAndClose(req, res, 429, { ...headers, "content-type": "application/json" }, JSON.stringify({ error: `too many attempts; wait ${seconds}s` }));
+    return endAndClose(req, res, 429, { ...headers, "content-type": "text/html; charset=utf-8" },
+      loginPage({ error: `Too many attempts. Wait ${seconds} seconds and try again.`, next: stalled }));
+  }
+
+  let body;
+  try { body = await readBody(req, LOGIN_BODY_LIMIT); }
+  catch (error) {
+    if (error?.code !== "BODY_TOO_LARGE") throw error;
+    // It counts as a failure: a flood of oversized bodies is an attack on this port, and the
+    // lockout is the only thing that makes any of it slow.
+    throttle.recordFailure(key);
+    if (!wantsHtml) return endAndClose(req, res, 413, { "content-type": "application/json" }, JSON.stringify({ error: "that is not a password" }));
+    return endAndClose(req, res, 413, { "content-type": "text/html; charset=utf-8" },
+      loginPage({ error: "That request was too large to be a password." }));
+  }
+  const isJson = String(req.headers["content-type"] ?? "").includes("application/json");
+  let fields = {};
+  if (isJson) { try { fields = JSON.parse(body || "{}") ?? {}; } catch { fields = {}; } }
+  else { fields = Object.fromEntries(new URLSearchParams(body)); }
+  const next = safeNextPath(fields.next ?? url.searchParams.get("next") ?? "/");
+
+  if (!verifyPassword(String(fields.password ?? ""), AUTH.password)) {
+    throttle.recordFailure(key);
+    // One message for a wrong password and for an empty one: naming which is wrong tells a
+    // guesser something, and tells the operator nothing they cannot see on their own screen.
+    if (!wantsHtml) return fail(res, 401, "that password did not work");
+    return sendLoginPage(res, 401, { error: "That password did not work.", next });
+  }
+
+  throttle.recordSuccess(key);
+  const cookie = serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret),
+    { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: isSecureRequest(req) });
+  res.writeHead(302, { location: next, "set-cookie": cookie, "cache-control": "no-store" });
+  return res.end();
+}
+
+function handleLogout(req, res) {
+  // Max-Age=0 with the same attributes is the only reliable way to delete a cookie; a browser
+  // matches on name, path and domain, so a Set-Cookie that differs in Path clears nothing.
+  const cookie = serializeCookie(SESSION_COOKIE, "", { maxAgeSeconds: 0, secure: isSecureRequest(req) });
+  if (String(req.headers.accept ?? "").includes("text/html")) {
+    res.writeHead(302, { location: "/login", "set-cookie": cookie, "cache-control": "no-store" });
+    return res.end();
+  }
+  res.writeHead(200, { "content-type": "application/json", "set-cookie": cookie, "cache-control": "no-store" });
+  return res.end(JSON.stringify({ loggedOut: true }));
+}
+
+// maxBytes defaults to no limit because the authenticated routes carry connector files and prompt
+// text and always have. The limit is for the unauthenticated one.
+async function readBody(req, maxBytes = Infinity) {
+  const declared = Number.parseInt(req.headers["content-length"] ?? "", 10);
+  const tooLarge = () => { req.pause(); return Object.assign(new Error("request body too large"), { code: "BODY_TOO_LARGE" }); };
+  if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge();
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    // A chunked body declares no length, so the count has to be kept while it arrives. Pausing
+    // rather than destroying leaves the socket alive long enough for the caller to answer on it.
+    if (size > maxBytes) throw tooLarge();
+    chunks.push(chunk);
+  }
   return Buffer.concat(chunks).toString("utf8");
 }
 
@@ -129,6 +322,13 @@ async function relayCommand(req, res, method) {
     body: body.length > 0 ? body : "{}",
   });
   const text = await upstream.text();
+  // The gateway refusing the relay's own bearer is not the operator being signed out, and passing
+  // its 401 through wearing our status code is how a correct password ends in a login loop. It is
+  // a broken deployment, so it answers as one, with the thing to go and look at.
+  if (upstream.status === 401 || upstream.status === 403) {
+    return fail(res, 502, `the gateway refused this relay's token (HTTP ${upstream.status}): ` +
+      `SAND_HOST_GATEWAY_TOKEN is stale or the box was recreated. Signing in again will not help.`);
+  }
   res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
   res.end(text);
 }
@@ -162,6 +362,30 @@ async function relayAvatar(req, res, pathname) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${PORT}`);
   try {
+    // Whether a password is configured is not a secret: the login page announces it to anyone who
+    // asks for it. The console reads this to decide whether to draw a Log out control.
+    if (req.method === "GET" && url.pathname === "/auth/state") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ required: AUTH != null, authenticated: isAuthorized(req) }));
+    }
+    if (AUTH == null) {
+      // No password configured, which only a loopback bind reaches (see the listen call below).
+      // Send /login somewhere useful rather than 404 at an operator who bookmarked it.
+      if (req.method === "GET" && url.pathname === "/login") { res.writeHead(302, { location: "/" }); return res.end(); }
+    } else {
+      if (url.pathname === "/login") {
+        if (req.method === "GET") return sendLoginPage(res, 200, { next: safeNextPath(url.searchParams.get("next")) });
+        if (req.method === "POST") return await handleLogin(req, res, url);
+        return fail(res, 405, "GET or POST");
+      }
+      if (url.pathname === "/logout") {
+        if (req.method === "POST") return handleLogout(req, res);
+        return fail(res, 405, "POST");
+      }
+      // Everything else, without exception. The login page carries its own CSS inline precisely so
+      // there is no asset list to exempt here.
+      if (!isAuthorized(req)) return denyUnauthenticated(req, res, url);
+    }
     // The Machine Room is the console at "/"; the operator page lives at /operator/ (2026-09-02).
     if (req.method === "GET" && (url.pathname === "/operator" || url.pathname === "/operator/" || url.pathname === "/operator/index.html")) {
       const html = await readFile(path.join(HERE, "index.html"));
@@ -176,9 +400,9 @@ const server = createServer(async (req, res) => {
     // safe is the fixed command table below: the operator's string picks a key, never reaches a
     // shell, and an unknown key is rejected. That is the whole argument, and it has to be, because
     // SAND_UI_BIND_HOST means this server is not necessarily on loopback any more -- the R750
-    // deploy binds it to 0.0.0.0 inside a container. Anyone who can reach this port already holds
-    // the full gateway surface through /api, so the exec table is not the boundary; it is simply
-    // not an extra hole in one.
+    // deploy binds it to 0.0.0.0 inside a container. Anyone who gets past the login above already
+    // holds the full gateway surface through /api, so the exec table is not the boundary; it is
+    // simply not an extra hole in one.
     // Did the window actually appear? The launch is detached and cannot report, so the UI asks
     // afterwards instead of trusting a 200 that only ever meant "the request was accepted".
     if (req.method === "GET" && url.pathname === "/box/surface") {
@@ -515,7 +739,19 @@ const server = createServer(async (req, res) => {
 // deploy runs the relay in a container, where 127.0.0.1 is the container's own loopback and
 // nothing outside it -- not even the published port -- could ever reach the server.
 const BIND = process.env.SAND_UI_BIND_HOST?.trim() || "127.0.0.1";
+// Refusing to start is the point. A relay on a reachable address with no password is the same
+// thing as publishing the gateway token, and there is no configuration that makes that safe, so
+// this is not a warning that scrolls past in a container log.
+if (AUTH == null && !isLoopbackHost(BIND)) {
+  console.error(`refusing to bind ${BIND}:${PORT} with no password.`);
+  console.error(`Reaching this server means holding the gateway token: /api forwards the bearer,`);
+  console.error(`which includes createAgent, deleteAgent, shell in the box, and secret writes.`);
+  console.error(`Set one and start again:   node ${path.join(HERE, "set-password.mjs")}`);
+  console.error(`It writes ${AUTH_FILE} at mode 0600. Loopback needs no password and is unchanged.`);
+  process.exit(1);
+}
 server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${GATEWAY}${TOKEN.length > 0 ? " (bearer)" : " (no auth)"}`);
+  console.log(`auth ${AUTH == null ? "none (loopback, no ui/auth.json)" : "password login, 12 h sessions"}`);
 });

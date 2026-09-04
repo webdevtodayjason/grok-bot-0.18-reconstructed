@@ -32,3 +32,4 @@ node_modules/
 /index.html
 ui/endpoints.json
 ui/subscriptions.json
+ui/auth.json

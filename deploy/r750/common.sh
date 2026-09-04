@@ -63,6 +63,16 @@ relay_run() {
     say "no previous $RELAY"
   fi
 
+  # The whole ui tree has to be mounted read-write, because server.mjs writes endpoints.json when
+  # the operator saves a model. The password file is bound over the top of it read-only, so
+  # nothing running in this container can rewrite the hash or the cookie signing secret. Only when
+  # it exists: docker creates a DIRECTORY at a bind source that is missing, and a directory named
+  # auth.json would fail to parse and take the relay down with it.
+  local -a authmount=()
+  if [ -f "$ROOT/ui/auth.json" ]; then
+    authmount=( --mount "type=bind,src=$ROOT/ui/auth.json,dst=/app/ui/auth.json,readonly" )
+  fi
+
   # The docker socket is mounted read-write and that makes this container root-equivalent on the
   # host. It is not optional: server.mjs reads and writes the box's secrets, connectors and window
   # surfaces exclusively through `docker exec`, because those files live in a volume with no host
@@ -80,6 +90,7 @@ relay_run() {
     --volume /var/run/docker.sock:/var/run/docker.sock \
     --volume "$ROOT/ui:/app/ui" \
     --volume "$ROOT/profile:/profile:ro" \
+    ${authmount[@]+"${authmount[@]}"} \
     "$RELAY_IMAGE" node /app/ui/server.mjs >/dev/null
 
   if route_enabled; then
@@ -105,9 +116,12 @@ relay_join_route_network() {
 # Printed wherever the route is turned on or off, because it is the one consequence that is not
 # visible in any command's output.
 route_exposure_warning() {
-  say "the relay has NO authentication of its own: it injects the gateway bearer into every"
-  say "/api call it forwards, so anything that can open a TCP connection to it holds the full"
-  say "gateway surface, including shell in the box. On the $ROUTE_NETWORK network that is every"
-  say "container on it, and Traefik's IP allowlist does not apply to container-to-container"
-  say "traffic. See deploy/r750/README.md item 4."
+  say "the relay asks for a password ($ROOT/ui/auth.json) and injects the gateway bearer into"
+  say "every /api call it forwards, so a caller needs the password or that bearer to reach the"
+  say "gateway surface, including shell in the box. That gate applies to every caller equally:"
+  say "the other containers on the $ROUTE_NETWORK network reach http://$RELAY:7777 directly,"
+  say "and Traefik's IP allowlist never sees container-to-container traffic, so the password is"
+  say "the only thing standing between them and the box. Guessing it is rate limited to five"
+  say "tries per thirty seconds per source; its strength is the operator's decision."
+  say "See deploy/r750/README.md item 4."
 }

@@ -12,9 +12,11 @@
 #   TITANBOT_HOST   ssh destination, default dell-remote
 #   TITANBOT_ROOT   install tree on the server, default /home/sem/titanbot
 #
-# Never copied: ui/endpoints.json and ui/subscriptions.json. The first carries API keys, the second
-# adopted OAuth tokens, and neither belongs on a server the operator has not chosen to put them on.
-# The Mac's gateway token is never copied either; install.sh mints the server its own.
+# Never copied: ui/endpoints.json, ui/subscriptions.json and ui/auth.json. The first carries API
+# keys, the second adopted OAuth tokens, the third the relay's password hash and cookie secret, and
+# none of them belongs on a machine the operator has not chosen to put them on. The Mac's gateway
+# token is never copied either; install.sh mints the server its own, and the server's relay
+# password is set on the server with ui/set-password.mjs.
 #
 # This does not publish anything. install.sh attaches no Traefik label unless the operator has
 # already run deploy/enable-route.sh, so a redeploy cannot put a route live by surprise -- and,
@@ -67,9 +69,13 @@ step "ship the relay"
 # nothing and would only make it look as though a filter were doing the work. If anyone ever
 # changes these arguments to ship "$REPO/ui/" wholesale, the excludes have to be added back at the
 # same time, and machine-room/ below is the reminder of what a directory copy looks like.
-rsync -a "$REPO/ui/server.mjs" "$REPO/ui/subscriptions.mjs" "$REPO/ui/index.html" "$HOST:$ROOT/ui/"
+rsync -a "$REPO/ui/server.mjs" "$REPO/ui/subscriptions.mjs" "$REPO/ui/auth.mjs" \
+  "$REPO/ui/set-password.mjs" "$REPO/ui/index.html" "$HOST:$ROOT/ui/"
 rsync -a --delete "$REPO/ui/machine-room/" "$HOST:$ROOT/ui/machine-room/"
-say "ui/{server.mjs,subscriptions.mjs,index.html,machine-room/}; endpoints.json and subscriptions.json are not shipped"
+say "ui/{server.mjs,subscriptions.mjs,auth.mjs,set-password.mjs,index.html,machine-room/}"
+# auth.json is the server's own password, set on the server by set-password.mjs and never held on
+# this Mac. It is on the same do-not-ship footing as the two files above, for the same reason.
+say "endpoints.json, subscriptions.json and auth.json are not shipped"
 
 step "ship the deploy scripts"
 rsync -a "$REPO/deploy/r750/common.sh" "$REPO/deploy/r750/install.sh" \

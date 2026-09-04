@@ -45,6 +45,8 @@ command -v curl >/dev/null || die "curl is not on PATH (needed for the readiness
 [ -f "$ROOT/runtime/box-exec-daemon/main.cjs" ] || die "$ROOT/runtime/box-exec-daemon/main.cjs is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/deploy/apply-start-window-fix.sh" ] || die "$ROOT/deploy/apply-start-window-fix.sh is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/ui/server.mjs" ] || die "$ROOT/ui/server.mjs is missing -- run deploy/r750/sync.sh from the Mac"
+[ -f "$ROOT/ui/auth.mjs" ] || die "$ROOT/ui/auth.mjs is missing -- run deploy/r750/sync.sh from the Mac"
+[ -f "$ROOT/ui/set-password.mjs" ] || die "$ROOT/ui/set-password.mjs is missing -- run deploy/r750/sync.sh from the Mac"
 say "host bundle $(stat -c %s "$ROOT/runtime/host-main.cjs") bytes, sha256 $(sha256sum "$ROOT/runtime/host-main.cjs" | cut -c1-16)..."
 say "exec daemon $(stat -c %s "$ROOT/runtime/box-exec-daemon/main.cjs") bytes, sha256 $(sha256sum "$ROOT/runtime/box-exec-daemon/main.cjs" | cut -c1-16)..."
 
@@ -198,6 +200,29 @@ docker build --quiet -t "$RELAY_IMAGE" -f "$ROOT/deploy/relay.Dockerfile" "$ROOT
   || die "the relay image failed to build; if apk could not find docker-cli, edit deploy/relay.Dockerfile per its comment"
 say "built $RELAY_IMAGE"
 
+step "relay login"
+# The relay binds 0.0.0.0 inside its container, so it refuses to start without a password. That is
+# by construction rather than by warning: reaching the relay is the same thing as holding the
+# gateway token, and there is no configuration of a published relay that makes no password safe.
+AUTH_JSON="$ROOT/ui/auth.json"
+if [ -f "$AUTH_JSON" ]; then
+  chmod 600 "$AUTH_JSON"
+  say "password already set in $AUTH_JSON (mode $(stat -c %a "$AUTH_JSON"); scrypt hash and cookie secret, never printed)"
+  say "to change it: node $ROOT/ui/set-password.mjs   then   docker restart $RELAY"
+else
+  say "NO PASSWORD IS SET, so the relay will start, refuse to bind, and exit. On this server, run:"
+  say "    node $ROOT/ui/set-password.mjs          prompts twice, no echo"
+  say "  or, with no terminal to prompt on, pipe it in:"
+  say "    printf '%s' '<password>' | node $ROOT/ui/set-password.mjs"
+  say "then re-run this script:  bash $ROOT/deploy/r750/install.sh"
+  # Re-running is the documented path rather than a restart because the read-only bind of the
+  # password file is added when the container is CREATED, and only when the file already exists.
+  # A bare restart brings the relay up reading the same file through the read-write ui/ mount, so
+  # the container could rewrite the hash and the cookie secret. It works; it is just weaker.
+  say "  (docker restart $RELAY also starts it, but the password file is then writable inside"
+  say "   the container until the next install.sh recreates it read-only)"
+fi
+
 step "relay container"
 if [ ! -f "$ROOT/ui/endpoints.json" ]; then
   say "WARNING: $ROOT/ui/endpoints.json is missing, so the model picker will be empty and no agent"
@@ -207,23 +232,43 @@ relay_run
 relay_join_route_network
 
 step "end-to-end readiness through the relay"
+if [ ! -f "$AUTH_JSON" ]; then
+  say "SKIPPED: no $AUTH_JSON, so the relay is refusing to bind on purpose. Its own words:"
+  docker logs --tail 6 "$RELAY" 2>&1 | sed 's/^/      /'
+  say "set a password (see the relay login step above), then re-run this script so the container"
+  say "is recreated with that file mounted read-only."
+else
 code=000
 for i in $(seq 1 30); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST -H 'content-type: application/json' -d '{}' \
+  # The gateway bearer, because the relay now wants a password or that token. A browser has
+  # neither and is sent to /login; scripts and gates carry the bearer, which is already full
+  # access, so requiring a session of them as well would cost work and buy nothing.
+  code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST \
+    -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}' \
     "http://$RELAY_BIND:$RELAY_PORT/api/getHostStatus" || true)"
   [ "$code" = 200 ] && break
   sleep 2
 done
 [ "$code" = 200 ] || { docker logs --tail 40 "$RELAY"; die "getHostStatus through the relay never returned 200 (last: HTTP $code)"; }
-# No authorization header was sent above, on purpose: a 200 proves the relay injected the bearer,
-# which is the whole reason it exists -- and is also exactly why reaching the relay is equivalent
-# to holding the gateway token. See route_exposure_warning in common.sh and README item 4.
-say "getHostStatus through the relay: HTTP 200 with no client-side auth header, so the relay is injecting the bearer"
-curl -s -m 5 -X POST -H 'content-type: application/json' -d '{}' \
+say "getHostStatus through the relay: HTTP 200"
+curl -s -m 5 -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}' \
   "http://$RELAY_BIND:$RELAY_PORT/api/getHostStatus" | head -c 300; echo
+# The same call with NO credential at all. 401 is the whole of AUTH-1 in one line: before it, this
+# returned 200 and anyone who could open the port held the gateway. That the relay still injects
+# the bearer upstream is proved by scripts/verify-deploy.mjs, which logs in and repeats this call
+# with a session cookie and no authorization header.
+naked="$(curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST -H 'content-type: application/json' -d '{}' \
+  "http://$RELAY_BIND:$RELAY_PORT/api/getHostStatus" || true)"
+[ "$naked" = 401 ] && say "the same call with no credential: HTTP 401, so the port is no longer the credential" \
+  || say "WARNING: the same call with no credential returned HTTP $naked, expected 401"
+fi
 # The docker socket is the piece most likely to be silently broken, and its failure mode is an
-# empty model picker rather than an error. Prove it here.
-if [ "$(docker exec "$RELAY" docker inspect "$BOX" --format '{{.State.Running}}' 2>/dev/null)" = true ]; then
+# empty model picker rather than an error. Prove it here. A relay that is refusing to bind cannot
+# run anything, so a failure there would be a second symptom of the missing password, not a socket
+# problem, and saying "the socket is broken" would send the operator to the wrong place.
+if [ ! -f "$AUTH_JSON" ]; then
+  say "the docker socket check needs a running relay; set a password first"
+elif [ "$(docker exec "$RELAY" docker inspect "$BOX" --format '{{.State.Running}}' 2>/dev/null)" = true ]; then
   say "the relay can drive docker (socket mount and CLI both work), so the endpoint picker will work"
 else
   say "WARNING: the relay cannot run 'docker inspect'. The console will load but the model picker and"
@@ -234,6 +279,11 @@ printf '\n== done\n'
 say "console      http://$RELAY_BIND:$RELAY_PORT/"
 say "operator     http://$RELAY_BIND:$RELAY_PORT/operator"
 say "token file   $TOKEN_FILE  (mode $(stat -c %a "$TOKEN_FILE"), never printed)"
+if [ -f "$AUTH_JSON" ]; then
+  say "login        password set in $AUTH_JSON, mounted read-only into $RELAY; sessions last 12 h"
+else
+  say "login        NOT SET, so $RELAY will not bind. node $ROOT/ui/set-password.mjs, then docker restart $RELAY"
+fi
 say "containers   $BOX, $RELAY  on network $NET"
 if route_enabled; then
   say "route        ON: https://$ROUTE_HOST is served through Coolify's proxy"

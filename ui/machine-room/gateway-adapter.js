@@ -22,8 +22,31 @@
   const demoFactory = global.createDemoAdapter;
   global.createDemoAdapterOffline = demoFactory;
 
+  // The relay now has a login, so a 401 means the session expired or was never established.
+  // Every relay call in this file goes through here, because the alternative is what the page
+  // used to do with any error: toast it, keep the 15s heartbeat running, and toast it again
+  // forever. One bounce to /login, once, and the flag makes sure concurrent calls do not each
+  // start their own navigation.
+  let bouncing = false;
+  function bounceToLogin() {
+    if (bouncing) return;
+    bouncing = true;
+    const here = `${global.location.pathname}${global.location.search}`;
+    global.location.assign(`/login?next=${encodeURIComponent(here)}`);
+  }
+  // Only the relay's OWN refusal is a signed-out session, and it says so with this header. A 401
+  // that came from the gateway instead means the relay's bearer is stale, which no password fixes:
+  // bouncing on that would send an operator who signed in correctly back to the login every time,
+  // with nothing on screen to say the fault is upstream. Those fall through and are reported.
+  async function relayFetch(input, init) {
+    const response = await fetch(input, init);
+    const ours = response.headers?.get?.("x-relay-auth") === "required";
+    if (response.status === 401 && ours) { bounceToLogin(); throw new Error("signed out"); }
+    return response;
+  }
+
   async function call(method, args = {}) {
-    const r = await fetch(`/api/${method}`, {
+    const r = await relayFetch(`/api/${method}`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args),
     });
     const text = await r.text();
@@ -456,7 +479,7 @@
   // carries the host's numeric id can be keyed; what it may still be missing is the write itself.
   const CONNECTOR_TOOLS_NO_COMMAND = "Read-only here: this host has no toggleMcpToolDisabled command yet, so a switch would have nowhere to write.";
   const CONNECTOR_CONFIG_NOTE = "Configured on the box in connectors.json. The box runs the process and the host discovers its tools; this page holds no credential in that file and does not show the ones it may carry.";
-  const connectorConfig = () => fetch("/connectors").then((r) => r.json()).catch(() => null);
+  const connectorConfig = () => relayFetch("/connectors").then((r) => r.json()).catch(() => null);
 
   // ui/server.mjs readConnectors answers { mcpServers: {} } for BOTH an empty file and a box it
   // could not `docker exec cat` into (the catch on a null read), so an empty map is ambiguous --
@@ -863,8 +886,8 @@
     const [agents, integrations, subscriptions, catalog, agentCount, searchEnabled, hostStatus] = await Promise.all([
       call("listAgents"),
       call("getListenerIntegrations").catch(() => null),
-      fetch("/subscriptions").then((r) => r.json()).then((b) => b.subscriptions).catch(() => null),
-      fetch("/endpoints").then((r) => r.json()).catch(() => null),
+      relayFetch("/subscriptions").then((r) => r.json()).then((b) => b.subscriptions).catch(() => null),
+      relayFetch("/endpoints").then((r) => r.json()).catch(() => null),
       call("countAgents").catch(() => null),
       call("isGlobalSearchEnabled").catch(() => false),
       call("getHostStatus").catch(() => null),
@@ -880,7 +903,7 @@
     // truth -- two numbers on one screen disagreeing about the same fact.
     let models = seed.models;
     try {
-      const live = await (await fetch("/model")).json();
+      const live = await (await relayFetch("/model")).json();
       if (live?.model) models = endpointModels(live, catalog);
     } catch { /* the model probe is a convenience, not a dependency */ }
 
@@ -1042,9 +1065,9 @@
     // After an adoption or an endpoint switch: re-read the scan and the catalog, redraw.
     async function refreshSubscriptions() {
       const [subscriptions, catalog, live] = await Promise.all([
-        fetch("/subscriptions").then((r) => r.json()).then((b) => b.subscriptions).catch(() => null),
-        fetch("/endpoints").then((r) => r.json()).catch(() => null),
-        fetch("/model").then((r) => r.json()).catch(() => null),
+        relayFetch("/subscriptions").then((r) => r.json()).then((b) => b.subscriptions).catch(() => null),
+        relayFetch("/endpoints").then((r) => r.json()).catch(() => null),
+        relayFetch("/model").then((r) => r.json()).catch(() => null),
       ]);
       if (live?.model) state.models = endpointModels(live, catalog);
       state.plugins = [...subscriptionPlugins(subscriptions, state.models.default), ...state.plugins.filter((p) => !String(p.id).startsWith("sub:"))];
@@ -1146,7 +1169,7 @@
     // /model route, and the catalog is re-read only when it actually moved.
     let liveModelKey = null;
     async function reloadLiveModel() {
-      const live = await fetch("/model").then((r) => r.json()).catch(() => null);
+      const live = await relayFetch("/model").then((r) => r.json()).catch(() => null);
       if (!live?.model) return;
       const key = `${live.endpoint ?? ""}|${live.model}`;
       if (key === liveModelKey) return;
@@ -1196,6 +1219,9 @@
     // every event is cheap next to a turn, and it means a reply from any surface shows up here.
     let pending = null;
     try {
+      // A 401 on this stream is invisible: EventSource exposes no status, only onerror. That is
+      // fine here because the heartbeat below calls the gateway every 15 seconds and relayFetch
+      // bounces to /login the first time one of those comes back unauthenticated.
       const events = new global.EventSource("/events");
       events.onmessage = () => {
         if (pending) return;
@@ -1954,7 +1980,7 @@
           if (!isKey && String(value).trim().toLowerCase() !== "adopt") {
             return Promise.resolve({ accepted: false, message: `Type adopt to confirm ${id}` });
           }
-          return fetch("/subscriptions/adopt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(isKey ? { id, apiKey: value } : { id }) })
+          return relayFetch("/subscriptions/adopt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(isKey ? { id, apiKey: value } : { id }) })
             .then(async (res) => {
               const body = await res.json().catch(() => ({}));
               if (!res.ok) {
@@ -2131,7 +2157,7 @@
         return this.writeConnectors(servers, `${name} removed`);
       },
       async writeConnectors(servers, what) {
-        const res = await fetch("/connectors", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mcpServers: servers }) });
+        const res = await relayFetch("/connectors", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mcpServers: servers }) });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
           failed(`connectors.json was not written: ${body?.error ?? res.status}`);
@@ -2247,7 +2273,7 @@
         // subscriptions included, so choosing here is the endpoint switch.
         const chosen = state.models.available.find((m) => m.id === modelId);
         if (!chosen || chosen.provider === "box") return notWired("Per-agent models — this host routes every agent through one endpoint");
-        fetch("/endpoints/use", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: modelId }) })
+        relayFetch("/endpoints/use", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: modelId }) })
           .then(async (res) => {
             const body = await res.json().catch(() => ({}));
             if (!res.ok) { failed(`Switching to ${chosen.name} failed: ${body?.error ?? res.status}`); return; }
@@ -2419,6 +2445,27 @@
       },
     };
   }
+
+  // The Log out control. It is drawn only where signing out means something: /auth/state says
+  // whether the relay has a password at all, and on this Mac's loopback console it does not.
+  // Wired here rather than in app.js so the handoff's own event layer stays as it was.
+  async function wireLogout() {
+    const button = global.document?.getElementById?.("logout-button");
+    if (button == null) return;
+    let state = null;
+    try { state = await (await fetch("/auth/state")).json(); } catch { return; }
+    if (state?.required !== true) return;
+    button.hidden = false;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      // The POST clears the cookie; the navigation is what the operator sees. Both happen even if
+      // the relay is unreachable, because a Log out that appears to do nothing is worse than one
+      // that leaves a dead cookie behind on a server that is already down.
+      try { await fetch("/logout", { method: "POST" }); } catch { /* going to /login regardless */ }
+      global.location.assign("/login");
+    });
+  }
+  wireLogout().catch(() => { /* no control drawn; the relay is the source of truth either way */ });
 
   // app.js constructs its adapter synchronously, so the gateway is read before it loads. If the
   // gateway is unreachable the demo adapter runs instead and the page still comes up.

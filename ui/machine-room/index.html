@@ -53,6 +53,9 @@
           <button class="quiet-button palette-hint" id="palette-hint" type="button" aria-label="Search messages, bots and files" hidden>Search <kbd>⌘K</kbd></button>
           <button class="icon-button" id="theme-toggle" type="button" aria-label="Toggle atmosphere">◐</button>
           <button class="icon-button" id="settings-button" type="button" aria-label="Open settings">⚙</button>
+          <!-- Shown only when the relay reports a password is configured, so the loopback console
+               on the Mac (no ui/auth.json) does not offer a sign-out that would do nothing. -->
+          <button class="icon-button" id="logout-button" type="button" aria-label="Log out" title="Log out" hidden>⏻</button>
         </div>
       </header>
 

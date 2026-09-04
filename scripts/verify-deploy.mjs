@@ -1,20 +1,25 @@
 #!/usr/bin/env node
 // verify-deploy.mjs -- the R750 deploy gate, run FROM THE MAC over the tailnet.
 //
-// It proves four things in order, because a failure in an earlier one explains every later one:
+// It proves six things in order, because a failure in an earlier one explains every later one:
 //   1. shape      both titanbot containers run, and their published ports are where they should
 //                 be: the relay on 100.110.83.82 only, the box on 127.0.0.1 only, nothing on 0.0.0.0
 //   2. gateway    getHostStatus and listAgents answer 200 through http://100.110.83.82:7787
-//   3. writes     a probe agent is created and deleted, and the roster returns to its baseline
-//   4. console    the Machine Room loads in real headless Chrome and paints the roster
+//   3. login      no credential is turned away, a wrong password is refused, the right one issues
+//                 a session, and that session reaches the gateway with no bearer of its own
+//   4. writes     a probe agent is created and deleted, and the roster returns to its baseline
+//   5. console    the Machine Room loads in real headless Chrome, the operator signs in, and the
+//                 roster paints
+//   6. lockout    six wrong passwords in a row hit the rate limit
 //
-// The server's bearer token is read over ssh at test time and held in memory only. It is never
-// written to disk on this Mac and never printed.
+// The server's bearer token and the probe password are both read over ssh at test time and held in
+// memory only. Neither is written to disk on this Mac and neither is printed.
 //
 //   node scripts/verify-deploy.mjs
 //
 // Env: TITANBOT_HOST (ssh destination, default dell-remote), TITANBOT_URL (default
-// http://100.110.83.82:7787), TITANBOT_ROOT, GROK_BOT_PLAYWRIGHT_DIR, GROK_BOT_CHROME.
+// http://100.110.83.82:7787), TITANBOT_ROOT, TITANBOT_UI_PASSWORD, GROK_BOT_PLAYWRIGHT_DIR,
+// GROK_BOT_CHROME.
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 
@@ -81,6 +86,14 @@ check(TOKEN.length === 64 && /^[0-9a-f]+$/.test(TOKEN), "the server's gateway to
 const mode = (await ssh(`stat -c %a ${ROOT}/profile/local-docker-vm.json`)).trim();
 check(mode === "600", "the token file is 0600 on the server", `mode ${mode}`);
 
+// The relay's login password. It cannot be derived from auth.json, which holds only a scrypt hash,
+// so the gate has to be told it. The operator keeps it beside the gateway token at the same mode,
+// which adds no capability to that directory: anything that can read the token there already holds
+// the full gateway surface, password or not. TITANBOT_UI_PASSWORD overrides for a one-off run.
+const PASSWORD = process.env.TITANBOT_UI_PASSWORD
+  ?? (await ssh(`cat ${ROOT}/profile/ui-password.probe 2>/dev/null || true`).catch(() => "")).replace(/\r?\n$/, "");
+const passwordMode = (await ssh(`stat -c %a ${ROOT}/profile/ui-password.probe 2>/dev/null || echo none`).catch(() => "none")).trim();
+
 step(`gateway through ${URL_BASE}`);
 const call = async (method, args = {}, headers = {}) => {
   const res = await fetch(`${URL_BASE}/api/${method}`, {
@@ -99,18 +112,86 @@ const status = await call("getHostStatus", {}, { authorization: `Bearer ${TOKEN}
 check(status.status === 200 && typeof status.body?.hostVersion === "string", "getHostStatus returns 200 with a hostVersion",
   status.status === 200 ? `hostVersion ${status.body?.hostVersion}, capabilities ${JSON.stringify(status.body?.capabilities ?? [])}` : `HTTP ${status.status} ${status.text.slice(0, 160)}`);
 
-// The relay exists to hold the bearer the browser must never see, so the unauthenticated call is
-// the one that proves it is doing its job.
+// This used to be the check that the same call with NO authorization header also returned 200,
+// which proved the relay injects the bearer and, in the same breath, that reaching the port was
+// the same thing as holding the token. The injection proof moved into the login step below, where
+// a session cookie stands in for the header; what belongs here now is the closed door.
 const unauth = await call("getHostStatus");
-check(unauth.status === 200 && typeof unauth.body?.hostVersion === "string",
-  "the same call with no authorization header also returns 200, so the relay is injecting the bearer",
-  `HTTP ${unauth.status}`);
+check(unauth.status === 401, "the same call with no credential is refused", `HTTP ${unauth.status}`);
+
+// The console sends itself to /login on a 401 only when this header is on it. Without the marker
+// it cannot tell the relay's refusal from the gateway's, and a stale gateway bearer would bounce
+// an operator who typed the right password back to the login forever.
+const marker = await fetch(`${URL_BASE}/api/getHostStatus`, {
+  method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(20_000),
+});
+check(marker.status === 401 && marker.headers.get("x-relay-auth") === "required",
+  "that refusal is marked as the relay's own, which is the only 401 the console treats as signed out",
+  `HTTP ${marker.status}, x-relay-auth ${marker.headers.get("x-relay-auth") ?? "absent"}`);
 
 const listed = await call("listAgents", {}, { authorization: `Bearer ${TOKEN}` });
 const roster = Array.isArray(listed.body) ? listed.body : listed.body?.agents ?? [];
 check(listed.status === 200 && Array.isArray(roster), "listAgents returns 200 with an array",
   listed.status === 200 ? `${roster.length} agent(s)` : `HTTP ${listed.status} ${listed.text.slice(0, 160)}`);
 const baseline = roster.map((a) => a.id).sort();
+
+step("the login in front of the relay");
+// redirect:"manual" throughout: a followed 302 hides the very thing under test, which is where the
+// relay sends a caller it does not recognise.
+const hit = (path, init = {}) => fetch(`${URL_BASE}${path}`, { redirect: "manual", signal: AbortSignal.timeout(20_000), ...init });
+const postForm = (path, fields, headers = {}) => hit(path, {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", ...headers },
+  body: new URLSearchParams(fields).toString(),
+});
+
+const authState = await hit("/auth/state").then((r) => r.json()).catch(() => null);
+check(authState?.required === true, "the relay reports that a password is configured", JSON.stringify(authState));
+check(PASSWORD.length > 0, "this gate has the probe password to test with",
+  PASSWORD.length > 0 ? `${PASSWORD.length} characters, from ${process.env.TITANBOT_UI_PASSWORD ? "TITANBOT_UI_PASSWORD" : `${ROOT}/profile/ui-password.probe mode ${passwordMode}`}` : `set TITANBOT_UI_PASSWORD or write ${ROOT}/profile/ui-password.probe`);
+
+const home = await hit("/", { headers: { accept: "text/html" } });
+check(home.status === 302 && String(home.headers.get("location") ?? "").startsWith("/login"),
+  "an unauthenticated browser asking for / is redirected to /login", `HTTP ${home.status} -> ${home.headers.get("location")}`);
+
+const loginPage = await hit("/login", { headers: { accept: "text/html" } });
+const loginHtml = loginPage.status === 200 ? await loginPage.text() : "";
+check(loginPage.status === 200 && loginHtml.includes('type="password"') && loginHtml.includes('action="/login"'),
+  "the login page renders one password field and posts to /login", `HTTP ${loginPage.status}, ${loginHtml.length} bytes`);
+
+const wrong = await postForm("/login", { password: `${PASSWORD}-not-it`, next: "/" });
+check(wrong.status === 401 && wrong.headers.get("set-cookie") == null,
+  "a wrong password is refused and issues no cookie", `HTTP ${wrong.status}, set-cookie ${wrong.headers.get("set-cookie") ?? "none"}`);
+
+// /login is the one route an unauthenticated caller may POST to on a published port, so it does
+// not buffer whatever it is sent. The next successful login clears the failure this records.
+const oversize = await hit("/login", {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
+  body: `password=${"a".repeat(64 * 1024)}`,
+});
+check(oversize.status === 413, "a login body too large to be a password is refused, not buffered", `HTTP ${oversize.status}`);
+
+const good = await postForm("/login", { password: PASSWORD, next: "/" });
+const setCookie = good.headers.get("set-cookie") ?? "";
+const session = /(?:^|,\s*)(gb_session=[^;]+)/.exec(setCookie)?.[1] ?? "";
+check(good.status === 302 && good.headers.get("location") === "/" && session.length > 0,
+  "the right password lands on / with a session cookie", `HTTP ${good.status} -> ${good.headers.get("location")}`);
+check(/HttpOnly/i.test(setCookie) && /SameSite=Strict/i.test(setCookie) && /Max-Age=43200/.test(setCookie),
+  "the session cookie is HttpOnly, SameSite=Strict and lasts 12 hours",
+  setCookie.replace(/gb_session=[^;]+/, "gb_session=<withheld>") || "no cookie");
+
+// The injection proof, moved: a session carries no gateway token of its own, so a 200 here can
+// only mean the relay added the bearer on the way upstream.
+const viaSession = await call("getHostStatus", {}, { cookie: session });
+check(viaSession.status === 200 && typeof viaSession.body?.hostVersion === "string",
+  "that session reaches the gateway with no authorization header, so the relay is still injecting the bearer",
+  viaSession.status === 200 ? `hostVersion ${viaSession.body?.hostVersion}` : `HTTP ${viaSession.status}`);
+
+const loggedOut = await hit("/logout", { method: "POST" });
+const cleared = loggedOut.headers.get("set-cookie") ?? "";
+check(loggedOut.status === 200 && /gb_session=;?\s*Path/i.test(cleared) && /Max-Age=0/.test(cleared),
+  "POST /logout clears the cookie", cleared || "no set-cookie");
 
 step("a probe agent, created and deleted");
 const tombstonesBefore = await tombstones();
@@ -174,8 +255,12 @@ try {
   page.on("console", (m) => { if (m.type() === "error") pageErrors.push(m.text()); });
   page.on("response", (r) => { if (r.status() >= 400) failedRequests.push(`${r.status()} ${r.url()}`); });
 
-  const response = await page.goto(`${URL_BASE}/`, { waitUntil: "load", timeout: 45_000 });
-  check(response?.status() === 200, "the console at / returns 200", `HTTP ${response?.status()}`);
+  // The console is behind the login now, so the browser check starts where an operator does.
+  await page.goto(`${URL_BASE}/`, { waitUntil: "load", timeout: 45_000 });
+  check(/\/login/.test(page.url()), "a browser opening / lands on the login page", page.url().replace(URL_BASE, ""));
+  await page.fill("#password", PASSWORD);
+  await Promise.all([page.waitForNavigation({ timeout: 30_000 }), page.click("button[type=submit]")]);
+  check(new URL(page.url()).pathname === "/", "signing in lands on the console", page.url().replace(URL_BASE, ""));
 
   // The roster is what the adapter paints from listAgents, so its cards are the honest signal
   // that the page reached the gateway rather than just rendering static markup.
@@ -213,11 +298,29 @@ try {
   check(gatewayErrors.length === 0, "no console error mentions the gateway", gatewayErrors.slice(0, 2).join(" | ") || "none");
   const apiFailures = failedRequests.filter((t) => /\/api\/|\/events/.test(t));
   check(apiFailures.length === 0, "no /api or /events request failed", apiFailures.slice(0, 3).join(" | ") || "none");
+  check(await page.isVisible("#logout-button"), "the console offers a Log out control");
 } catch (error) {
   check(false, "the browser check ran", String(error?.message ?? error).slice(0, 200));
 } finally {
   await browser?.close().catch(() => {});
 }
+
+// Last, deliberately: a pass here leaves this Mac's address locked out of the login for thirty
+// seconds, so nothing that needs to sign in may run after it.
+step("the lockout after repeated wrong passwords");
+const attempts = [];
+for (let i = 0; i < 6; i += 1) attempts.push((await postForm("/login", { password: `wrong-${i}` })).status);
+check(attempts.slice(0, 5).every((s) => s === 401) && attempts[5] === 429,
+  "five wrong passwords are refused and the sixth is rate limited", attempts.join(" "));
+// The lockout is not a filter on wrong passwords, it is a stop on the source, so the right one has
+// to be refused too or a guesser just alternates.
+const duringLockout = await postForm("/login", { password: PASSWORD });
+check(duringLockout.status === 429, "the right password is refused too while the lockout holds", `HTTP ${duringLockout.status}`);
+check(Number(duringLockout.headers.get("retry-after") ?? 0) > 0 && Number(duringLockout.headers.get("retry-after")) <= 30,
+  "the response says how long to wait", `retry-after ${duringLockout.headers.get("retry-after")}s`);
+// The bearer is not the login, so the lockout must not reach the gates themselves.
+const gateDuringLockout = await call("getHostStatus", {}, { authorization: `Bearer ${TOKEN}` });
+check(gateDuringLockout.status === 200, "the gateway bearer still works while a login lockout holds", `HTTP ${gateDuringLockout.status}`);
 
 console.log(`\n${failures === 0 ? "PASS" : "FAIL"}  ${failures} failing check(s)  ${URL_BASE}`);
 process.exit(failures === 0 ? 0 : 1);

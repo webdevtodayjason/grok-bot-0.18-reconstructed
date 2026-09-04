@@ -62,7 +62,8 @@ route_exposure_warning
 say ""
 say "Traefik's ipallowlist ($ROUTE_ALLOW) covers traffic that arrives through the proxy on 443."
 say "It does NOT cover the other containers on the $ROUTE_NETWORK network: they reach"
-say "http://$RELAY:7777/api/* directly, with no credential and no middleware in the path."
+say "http://$RELAY:7777/api/* directly, with no middleware in the path. What they still have to"
+say "get past is the relay's own login, which is the same password a person types."
 say "$(docker network inspect "$ROUTE_NETWORK" --format '{{len .Containers}}') containers are on that network right now."
 
 if [ "$ASSUME_YES" = no ]; then
