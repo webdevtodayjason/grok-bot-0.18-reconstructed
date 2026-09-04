@@ -7,6 +7,7 @@ import { acquireHostLock } from "./host-lock.js";
 import { getSandRootDir } from "./host-paths.js";
 import path from "node:path";
 import { installProcessCrashGuards } from "./process-crash-guard.js";
+import { narrowSandHostLogPermissions } from "./sand-host-log-permissions.js";
 import {
   createProductionSandHost,
   type ProductionSandHostPorts
@@ -203,6 +204,7 @@ export async function main(
     return;
   }
 
+  narrowSandHostLogPermissions();
   const crashGuards = deps.installProcessCrashGuards({ scope: "sand-host" });
   const lockResult = await deps.acquireHostLock();
   reportLockOutcome(lockResult, deps.getSandRootDir(), log);

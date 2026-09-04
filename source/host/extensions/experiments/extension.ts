@@ -1,7 +1,7 @@
 import { defineHostExtension } from "../../../internal/host-extensions.js";
 import { getSandRootDir } from "../../host-paths.js";
 import { resolveMultitaskEnabled } from "../../sand-multitask.js";
-import { readSandBoxSetting, resolveBrowserUseEnabled, resolveTeachEnabled, SAND_BROWSER_USE_SETTING, SAND_TEACH_SETTING } from "../../sand-box-setting.js";
+import { readSandBoxSetting, resolveAutoReviewEnforceEnabled, resolveBrowserUseEnabled, resolveMemoryDreamingEnabled, resolveTeachEnabled, SAND_AUTO_REVIEW_SETTING, SAND_BROWSER_USE_SETTING, SAND_MEMORY_DREAMING_SETTING, SAND_TEACH_SETTING } from "../../sand-box-setting.js";
 import { resolveSpotlightEnabled } from "../../../shared/sand-spotlight.js";
 import { SandExperimentService } from "../../../shared/node/experiments/cursor-experiments.js";
 import { HostExtensions } from "../extension-ids.generated.js";
@@ -28,20 +28,27 @@ export const experimentsExtension = defineHostExtension({
         : fromEnv(envName) ? `env ${envName}`
         : service.hasAuthenticatedStatsigBootstrap() ? "statsig" : "bundled default";
       const gate = (name: Parameters<typeof service.checkFeatureGate>[0]) => service.checkFeatureGate(name);
-      const rows: Record<string, { value: boolean; source: string }> = {
-        sand_browser_use_subagent: { value: resolveBrowserUseEnabled(readSandBoxSetting(SAND_BROWSER_USE_SETTING), () => gate("sand_browser_use_subagent")), source: source(undefined, SAND_BROWSER_USE_SETTING) },
+      // This table is printed once, at host start, but not every row means the same thing
+      // afterwards. A row marked live is re-resolved by its consumer on every call, so an operator
+      // who writes its switch into the host settings file changes behaviour on a running box while
+      // this printed value stays as it was -- a security switch that reads "off" here can be
+      // holding commands right now. A row without the mark is armed once, here, and only a restart
+      // moves it. Saying which is which is the difference between a snapshot and a lie.
+      const rows: Record<string, { value: boolean; source: string; live?: true }> = {
+        sand_browser_use_subagent: { value: resolveBrowserUseEnabled(readSandBoxSetting(SAND_BROWSER_USE_SETTING), () => gate("sand_browser_use_subagent")), source: source(undefined, SAND_BROWSER_USE_SETTING), live: true },
         grok_bot_dynamic_tools: { value: gate("grok_bot_dynamic_tools"), source: source() },
         sand_agent_network: { value: gate("sand_agent_network"), source: source() },
         sand_multitask: { value: resolveMultitaskEnabled(process.env.SAND_MULTITASK, () => gate("sand_multitask")), source: source("SAND_MULTITASK") },
         sand_spotlight: { value: resolveSpotlightEnabled(process.env.SAND_SPOTLIGHT, () => gate("sand_spotlight")), source: source("SAND_SPOTLIGHT") },
         sand_global_search: { value: gate("sand_global_search"), source: source() },
-        sand_teach_by_demonstration: { value: resolveTeachEnabled(readSandBoxSetting(SAND_TEACH_SETTING), () => gate("sand_teach_by_demonstration")), source: source(undefined, SAND_TEACH_SETTING) },
+        sand_teach_by_demonstration: { value: resolveTeachEnabled(readSandBoxSetting(SAND_TEACH_SETTING), () => gate("sand_teach_by_demonstration")), source: source(undefined, SAND_TEACH_SETTING), live: true },
         // FLAGS-2. Both decide whether a shipped feature runs at all, and neither was in the table:
-        // memory synthesis is armed once, from this gate, at authenticated bootstrap (memory
-        // extension), and auto-review only escalates past shadow when sand_auto_review is on
-        // (auto-review-service). Off here means the feature is silently inert, not broken.
-        sand_memory_dreaming: { value: gate("sand_memory_dreaming"), source: source() },
-        sand_auto_review: { value: gate("sand_auto_review"), source: source() },
+        // memory synthesis is armed once at host start (memory extension), and auto-review only
+        // escalates past shadow when sand_auto_review is on (auto-review-service). Off here means
+        // the feature is silently inert, not broken. Both read their own host switch now, because
+        // the gates behind them can never bootstrap without a Cursor login.
+        sand_memory_dreaming: { value: resolveMemoryDreamingEnabled(readSandBoxSetting(SAND_MEMORY_DREAMING_SETTING), () => gate("sand_memory_dreaming")), source: source(undefined, SAND_MEMORY_DREAMING_SETTING) },
+        sand_auto_review: { value: resolveAutoReviewEnforceEnabled(readSandBoxSetting(SAND_AUTO_REVIEW_SETTING), () => gate("sand_auto_review")), source: source(undefined, SAND_AUTO_REVIEW_SETTING), live: true },
         sand_stale_root_gc: { value: gate("sand_stale_root_gc"), source: source("SAND_STALE_ROOT_GC", "SAND_STALE_ROOT_GC") },
         grok_bot_conversation_gc: { value: gate("grok_bot_conversation_gc"), source: source("SAND_CONVERSATION_GC", "SAND_CONVERSATION_GC") },
         sand_legacy_store_blob_retirement: { value: gate("sand_legacy_store_blob_retirement"), source: source("SAND_RETIRE_LEGACY_STORE_BLOBS", "SAND_RETIRE_LEGACY_STORE_BLOBS") },

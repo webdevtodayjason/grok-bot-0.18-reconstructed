@@ -1,8 +1,15 @@
 const SAND_AUTO_REVIEW_SECRET_KEY_PATTERN = /(?:authorization|api.?key|credential|password|secret|token)/i;
 const SAND_AUTO_REVIEW_SECRET_VALUE_PATTERN = /^(?:bearer\s+)?[A-Za-z0-9_+\/-]{24,}={0,2}$/i;
 
-function redactSandAutoReviewInlineSecrets(value: string): string {
-  return value.replace(/(authorization|api.?key|password|secret|token)(\s*[:=]\s*)\S+/gi, "$1$2…");
+/**
+ * Exported because the local auto-review classifier writes a trace line about the very same
+ * argument text these summaries redact, and one wording for "a secret must not survive into
+ * something a person can read" is the only one worth having.
+ */
+export function redactSandAutoReviewInlineSecrets(value: string): string {
+  // The `bearer ` is part of the scheme, not the credential, so it must be swallowed with the
+  // value: stopping at the first token leaves the secret itself standing right behind it.
+  return value.replace(/(authorization|api.?key|password|secret|token)(\s*[:=]\s*)(?:bearer\s+)?\S+/gi, "$1$2…");
 }
 
 export function compact(value: string, maxChars: number): string {

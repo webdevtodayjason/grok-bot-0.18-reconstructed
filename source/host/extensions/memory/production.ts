@@ -70,7 +70,13 @@ export function createMemoryProductionExtras(
           isSummarizationSession: true,
           skipLabeling: true
         }).getExecutor(),
-        report: event => context.deps.telemetry.logs.reportMemorySynthesis(memorySynthesisTelemetryReport(event))
+        // Synthesis outcomes only ever went to structured telemetry, which leaves the box; on a
+        // host with no backend an inference failure, a rejected proposal or a stale snapshot was
+        // indistinguishable from "nothing happened". One line per run, in the host log.
+        report: event => {
+          console.log(`[sand][memory] ${JSON.stringify(event)}`);
+          context.deps.telemetry.logs.reportMemorySynthesis(memorySynthesisTelemetryReport(event));
+        }
       });
     }
   };

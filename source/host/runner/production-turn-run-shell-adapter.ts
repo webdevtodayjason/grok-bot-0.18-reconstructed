@@ -80,6 +80,11 @@ export interface ProductionTurnRunShellAdapterInput {
   readonly context: () => Context;
   readonly createSettleHost: () => TurnSettleHost;
   readonly profilePromptSnapshots: () => unknown;
+  // MEMORY-1. turn-run-shell asks its host for these when it builds the settle scope, and the
+  // production host never answered: the scope went out with no memory store, so a settled turn was
+  // never handed to memory and nothing could ever be written, armed synthesis or not.
+  readonly memoryStore?: TurnRunShellHost["memoryStore"];
+  readonly episodeProgress?: TurnRunShellHost["episodeProgress"];
   readonly isSubagentRunner: boolean;
   readonly subagentType?: string;
   readonly inheritedRequestSource?: string;
@@ -332,6 +337,8 @@ export function createProductionTurnRunShellAdapter(
     },
     createSettleHost: input.createSettleHost,
     profilePromptSnapshots: input.profilePromptSnapshots,
+    ...(input.memoryStore === undefined ? {} : { memoryStore: input.memoryStore }),
+    ...(input.episodeProgress === undefined ? {} : { episodeProgress: input.episodeProgress }),
     onRunUnwind: () => {
       const owner = activeOwner;
       activeOwner = undefined;

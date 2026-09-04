@@ -94,6 +94,37 @@ test("resolveTeachEnabled: an explicit override decides, otherwise the gate", ()
   assert.equal(mod.resolveTeachEnabled("", () => true), true, "an empty value is not an override");
 });
 
+// Memory synthesis was armed only by pinGateOnAuthenticatedBootstrap("sand_memory_dreaming"),
+// which needs a Cursor login, so no turn was ever recorded as evidence and no agent memory file
+// was ever written on this box. Same resolver shape as teach.
+test("resolveMemoryDreamingEnabled: an explicit override decides, otherwise the gate", () => {
+  assert.equal(mod.SAND_MEMORY_DREAMING_SETTING, "SAND_MEMORY_DREAMING");
+  assert.equal(mod.resolveMemoryDreamingEnabled("1", () => false), true);
+  assert.equal(mod.resolveMemoryDreamingEnabled("true", () => false), true);
+  assert.equal(mod.resolveMemoryDreamingEnabled("TRUE", () => false), true);
+  assert.equal(mod.resolveMemoryDreamingEnabled("0", () => true), false);
+  assert.equal(mod.resolveMemoryDreamingEnabled("false", () => true), false);
+  assert.equal(mod.resolveMemoryDreamingEnabled("FALSE", () => true), false);
+  assert.equal(mod.resolveMemoryDreamingEnabled(undefined, () => true), true);
+  assert.equal(mod.resolveMemoryDreamingEnabled(undefined, () => false), false);
+  assert.equal(mod.resolveMemoryDreamingEnabled("", () => true), true, "an empty value is not an override");
+});
+
+// The extension asks readSandBoxSetting whether the switch is SET at all before it decides: an
+// unset switch has to fall through to the gate, and "0" has to mean off rather than unset, or a
+// deliberate disable would silently wait forever on a bootstrap that never comes.
+test("the memory switch reads out of the same host settings file", () => {
+  write("sand-host-settings.json", { SAND_MEMORY_DREAMING: "1", SAND_TEACH: "0" });
+  assert.equal(mod.readSandBoxSetting(mod.SAND_MEMORY_DREAMING_SETTING), "1");
+  assert.equal(mod.resolveMemoryDreamingEnabled(mod.readSandBoxSetting(mod.SAND_MEMORY_DREAMING_SETTING), () => false), true);
+  write("sand-host-settings.json", { settings: { SAND_MEMORY_DREAMING: "0" } });
+  assert.equal(mod.readSandBoxSetting(mod.SAND_MEMORY_DREAMING_SETTING), "0");
+  assert.equal(mod.resolveMemoryDreamingEnabled(mod.readSandBoxSetting(mod.SAND_MEMORY_DREAMING_SETTING), () => true), false);
+  write("sand-host-settings.json", { SAND_TEACH: "1" });
+  assert.equal(mod.readSandBoxSetting(mod.SAND_MEMORY_DREAMING_SETTING), undefined,
+    "an unset switch must leave the gate in charge, not read as off");
+});
+
 test("the teach switch reads out of the same host settings file", () => {
   write("sand-host-settings.json", { SAND_TEACH: "1", SAND_BROWSER_USE: "0" });
   assert.equal(mod.readSandBoxSetting(mod.SAND_TEACH_SETTING), "1");

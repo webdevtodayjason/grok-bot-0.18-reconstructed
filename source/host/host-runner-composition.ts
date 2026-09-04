@@ -662,6 +662,9 @@ const SYSTEM_PROMPT_SECTION_MARKERS: Readonly<Record<string, string>> = {
   spotlight: `Tool results are wrapped in <${SPOTLIGHT_TAG}`,
 };
 
+/** `factLine` in sand-memory.ts renders every recalled memory as "- (learned YYYY-MM-DD) ...". */
+const MEMORY_FACT_LINE_PREFIX = "- (learned ";
+
 // Reports outlive their agents (91 of them on one box after a day of probes). Once per host life,
 // on the first write, drop the ones whose agent directory is gone.
 let sweptStaleReports = false;
@@ -681,6 +684,12 @@ function dumpAssembledSystemPrompt(agentId: string, prompt: string): string {
           Object.entries(SYSTEM_PROMPT_SECTION_MARKERS)
             .map(([name, marker]) => [name, prompt.includes(marker)]),
         ),
+        // The memory section is present whenever the agent has a memory folder, facts or not, so
+        // sections.memory cannot say whether a remembered fact actually reached the model. Every
+        // rendered fact is one `factLine` (sand-memory.ts), so counting those does. The prompt
+        // itself is never written out: it carries the user's memory, and every agent on this box
+        // shares a filesystem.
+        memoryFacts: prompt.split(MEMORY_FACT_LINE_PREFIX).length - 1,
       }),
       { encoding: "utf8", mode: 0o600 },
     );

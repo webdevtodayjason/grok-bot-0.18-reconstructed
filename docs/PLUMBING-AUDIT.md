@@ -110,6 +110,20 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-04 morning to midday (Wave U1: login, memory, auto review; and the R750's first hours).**
+  AUTH-1: a password on the relay (scrypt hash, signed session, lockout, bearer kept for scripts,
+  refusal to bind off loopback without it), shipped to the R750 and proven by the deploy gate.
+  MEMORY-1: `SAND_MEMORY_DREAMING` arms synthesis and the settle path finally hands the store to
+  the turn; a stated fact is committed and read back in the next prompt (`verify-memory.mjs`).
+  REVIEW-1: `SAND_AUTO_REVIEW` and `SAND_AUTO_REVIEW_MODE` read live, a local classifier
+  (deterministic layer then model), a redacted trace, the host log no longer world-readable; in
+  enforce a block instruction holds a command behind a real card (`verify-review.mjs`). The third
+  verifier's newline bypass fixed by hand. Jason's first hours on the R750 found: no endpoint pin
+  routed the provider (fixed: a pin routes by default), the classifier crash that hung a turn
+  (fixed), the desktop frame reaching for the viewer's own machine (VNC-2, open), the composer
+  status evicting the shelf utilities and a long endpoint name widening the Agent panel (both
+  fixed with gate checks), the default agent renamed Titan. Setup page published.
+
 - **2026-09-04 early morning (Wave T, teach mode; and the desktop wedge).** Learn was a Statsig
   gate with no local switch and a managed skill only Cursor hands out. `SAND_TEACH` host setting;
   the two real managed skills baked into the bundle and repaired by content in the cache; the
@@ -1568,6 +1582,11 @@ wave's output; `npm test` still green; zero UI/feature diffs outside `docs/`.
 
 ## 8. Where things live
 
+- **More host switches (2026-09-04, Wave U1):** `SAND_MEMORY_DREAMING` (start-time: read once when
+  the memory extension starts, so a restart applies it), `SAND_AUTO_REVIEW` (enforce override,
+  live per call) and `SAND_AUTO_REVIEW_MODE` (off, shadow, enforce; live). The gates table marks
+  live rows with `live: true`. Auto-review's own trace lines (`[sand][auto-review]`) appear only
+  with `SAND_TOOL_TRACE=1` and carry a redacted subject.
 - **Host switches (2026-09-04):** `/home/box/sand-data/sand-host-settings.json` (0600, flat
   `{"NAME":"value"}`), re-read per call, so `SAND_TOOL_TRACE=1`, `SAND_BROWSER_USE=1` and
   `SAND_TEACH=1` flip on a running box. Never in `box-secrets.json`: the `SAND_` prefix is reserved there and a key with it

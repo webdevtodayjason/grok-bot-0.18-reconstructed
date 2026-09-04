@@ -38,3 +38,6 @@ import "./workflow-frontmatter.test.mjs";
 import "./machine-room-teach.test.mjs";
 import "./window-assignments.test.mjs";
 import "./agent-delete-prompt-report.test.mjs";
+import "./relay-auth.test.mjs";
+import "./relay-login-guards.test.mjs";
+import "./auto-review-enforcement.test.mjs";

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { EpisodeProgress, TurnMemoryStore } from "./turn-memory.js";
 import { evidenceRegistry } from "../extensions/evidence/evidence-registry.js";
 import type { Context } from "../../packages/context/core.js";
 import { CONNECTOR_MANIFESTS, type ConnectorManifest } from "../../shared/channels.js";
@@ -260,6 +261,27 @@ export interface SandAgentRunnerOptions<T = unknown> {
   >;
 }
 
+/**
+ * MEMORY-1. The session wiring hands the runner these as `unknown`, and the settle scope wants
+ * real ones. Accept a value only when it answers what turn settlement will call: an unavailable
+ * memory stub, or an agent db from before pending episode turns existed, then reads as absent
+ * instead of throwing in the middle of a turn.
+ */
+function answers(value: unknown, methods: readonly string[]): boolean {
+  if (typeof value !== "object" || value == null) return false;
+  return methods.every((name) => typeof (value as Record<string, unknown>)[name] === "function");
+}
+function asTurnMemoryStore(value: unknown): TurnMemoryStore | undefined {
+  return answers(value, ["recall", "listMemories", "addMemory", "removeMemoryByContent"])
+    ? value as TurnMemoryStore
+    : undefined;
+}
+function asEpisodeProgress(value: unknown): EpisodeProgress | null {
+  return answers(value, ["clearPendingEpisodeTurns", "recordEpisodeTurn", "getPendingEpisodeTurns"])
+    ? value as EpisodeProgress
+    : null;
+}
+
 interface ActiveRun {
   readonly requestId: string;
   readonly controller: AbortController;
@@ -482,6 +504,12 @@ export class SandAgentRunner<T = unknown> {
         isAwaitingUserSelection: () => this.#awaitingUserSelection,
         emitRunLifecycle: event => this.emitRunLifecycle(event),
         emitUpdate: update => this.options.transport?.onUpdate(update),
+        // Both are set after this constructor runs (setMemoryStore / setEpisodeProgress from the
+        // session wiring), so they are read per turn rather than captured here. Only a store that
+        // answers the methods turn settlement calls is passed on: an unavailable-memory stub or a
+        // db that predates episode turns keeps the section absent instead of throwing mid-settle.
+        memoryStore: () => asTurnMemoryStore(this.#memoryStore),
+        episodeProgress: () => asEpisodeProgress(this.#episodeProgress),
         onRunUnwind: () => {
           this.#activeTurnRequestSource = undefined;
           this.#activeTurnAutomationId = undefined;

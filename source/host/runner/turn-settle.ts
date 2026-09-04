@@ -6,6 +6,7 @@ import {
   type TurnMemoryStore,
 } from "./turn-memory.js";
 import type { AgentProfilePromptSnapshot } from "./sand-agent-profile-prompt.js";
+import { isSandBoxSettingEnabled, SAND_TOOL_TRACE_SETTING } from "../sand-box-setting.js";
 
 export class TranscriptAppendAfterCheckpointError extends Error {
   readonly isTranscriptAppendAfterCheckpointError = true;
@@ -367,6 +368,21 @@ export function createTurnSettle(
         scope.memoryStore.recordMemoryEvidence != null
         || scope.isMemorableExchange?.(args.trimmedPrompt) === true
       );
+
+    // Whether a settled turn was handed to memory at all, and if not, which condition said no.
+    // Until this line the only symptom of an unarmed host was that no memory file ever appeared,
+    // which is indistinguishable from a model that found nothing worth remembering.
+    if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) {
+      console.log(`[sand][memory] turn ${JSON.stringify({
+        conversationId: scope.conversationId,
+        shouldRemember,
+        hasStore: scope.memoryStore != null,
+        hasEvidenceHook: scope.memoryStore?.recordMemoryEvidence != null,
+        superseded: host.isRunSuperseded(),
+        hidden: args.hidden,
+        promptChars: args.trimmedPrompt.length,
+      })}`);
+    }
 
     if (shouldRemember && scope.memoryStore != null) {
       const exchange = {

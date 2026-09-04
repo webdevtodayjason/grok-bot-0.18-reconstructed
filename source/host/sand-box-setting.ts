@@ -29,15 +29,17 @@ export function getSandHostSettingsPath(): string {
  * assembly on every render, so the parse is cached against the file's mtime and size. The file
  * is small and rewritten wholesale, so a stat per call is the cheap half of the read.
  */
-let cachedSettings: { path: string; mtimeMs: number; size: number; values: Record<string, string> }
+// The key is the nanosecond mtime, not the millisecond one: flipping "1" to "0" keeps the size,
+// and two such writes inside one millisecond would otherwise read stale on a security switch.
+let cachedSettings: { path: string; mtime: string; size: number; values: Record<string, string> }
   | undefined;
 
 function readSettingsFile(): Record<string, string> {
   const path = getSandHostSettingsPath();
-  let stat: { mtimeMs: number; size: number };
+  let stat: { mtime: string; size: number };
   try {
-    const stats = statSync(path);
-    stat = { mtimeMs: stats.mtimeMs, size: stats.size };
+    const stats = statSync(path, { bigint: true });
+    stat = { mtime: stats.mtimeNs.toString(), size: Number(stats.size) };
   } catch {
     cachedSettings = undefined;
     return {};
@@ -45,7 +47,7 @@ function readSettingsFile(): Record<string, string> {
   if (
     cachedSettings != null
     && cachedSettings.path === path
-    && cachedSettings.mtimeMs === stat.mtimeMs
+    && cachedSettings.mtime === stat.mtime
     && cachedSettings.size === stat.size
   ) return cachedSettings.values;
   const values: Record<string, string> = {};
@@ -114,6 +116,50 @@ export function resolveTeachEnabled(
 
 /** The name an operator writes into sand-host-settings.json (or the container env). */
 export const SAND_TEACH_SETTING = "SAND_TEACH";
+
+/**
+ * MEMORY-1. Memory synthesis is armed exactly once, from `sand_memory_dreaming`, at an
+ * authenticated Statsig bootstrap. That bootstrap never happens without a Cursor login, so the
+ * listener never fired here: no turn was ever recorded as evidence and no agent has ever written a
+ * memory file. Same shape as `resolveTeachEnabled`: an explicit local override wins, otherwise
+ * the gate decides.
+ */
+export function resolveMemoryDreamingEnabled(
+  envOverride: string | undefined,
+  checkStatsigGate: () => boolean,
+): boolean {
+  if (envOverride != null && envOverride.length > 0) return isSandOverrideTruthy(envOverride);
+  return checkStatsigGate();
+}
+
+/** The name an operator writes into sand-host-settings.json (or the container env). */
+export const SAND_MEMORY_DREAMING_SETTING = "SAND_MEMORY_DREAMING";
+
+/**
+ * REVIEW-1. Auto-review escalates past shadow only when `sand_auto_review` is on, and that gate
+ * cannot bootstrap without a Cursor login, so every review on this box was advisory: the tool call
+ * went ahead whatever the classifier said. Same shape as `resolveTeachEnabled`: an explicit local
+ * override wins, otherwise the gate decides.
+ */
+export function resolveAutoReviewEnforceEnabled(
+  envOverride: string | undefined,
+  checkStatsigGate: () => boolean,
+): boolean {
+  if (envOverride != null && envOverride.length > 0) return isSandOverrideTruthy(envOverride);
+  return checkStatsigGate();
+}
+
+/** The name an operator writes into sand-host-settings.json (or the container env). */
+export const SAND_AUTO_REVIEW_SETTING = "SAND_AUTO_REVIEW";
+
+/**
+ * The per-surface mode override. It used to be read once from `process.env` when the extension
+ * started, which on a running container means "recreate the box to change your mind"; read through
+ * `readSandBoxSetting` it is resolved per turn, so an operator can move a live box between off,
+ * shadow and enforce. The environment still wins where it is set, so nothing that already exports
+ * SAND_AUTO_REVIEW_MODE changes behaviour.
+ */
+export const SAND_AUTO_REVIEW_MODE_SETTING = "SAND_AUTO_REVIEW_MODE";
 
 /**
  * Gated turn tracing, off unless the operator asks for it. Turns on two things: one host-log
