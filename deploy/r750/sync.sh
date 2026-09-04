@@ -23,6 +23,13 @@
 # equally, cannot take a live one down.
 set -euo pipefail
 
+# What ships is what was verified. A dirty tree shipped mid-wave once (2026-09-04): production ran
+# an unverified tool withhold and a runaway agent loop for an hour. Refuse unless told otherwise.
+if [ "${TITANBOT_ALLOW_DIRTY:-0}" != "1" ] && [ -n "$(git -C "$(dirname "$0")/../.." status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  echo "sync.sh: refusing to ship a dirty tree; commit first, or build from a clean worktree of the commit, or set TITANBOT_ALLOW_DIRTY=1 for a deliberate exception" >&2
+  exit 3
+fi
+
 HOST="${TITANBOT_HOST:-dell-remote}"
 ROOT="${TITANBOT_ROOT:-/home/sem/titanbot}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

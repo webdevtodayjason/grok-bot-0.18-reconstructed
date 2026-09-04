@@ -54,7 +54,12 @@ const dockerOut = (args) => new Promise((resolve) =>
 // fall back to whatever is running with our own role label. The gateway URL never needs this: a
 // compose network answers the SERVICE name whatever the container is called.
 async function resolveBoxContainer() {
-  if (await dockerOut(["inspect", BOX, "--format", "{{.Name}}"]) != null) return;
+  // docker inspect prints "[]" on stdout for a missing container and exits 1, so a non-null
+  // answer is not proof the name exists: on the R750 that read the Mac's container name as
+  // found and every docker-backed route aimed at nothing (the desktop verdict, the endpoint
+  // label, the connectors file). Only a real name, which docker prints with a leading slash, counts.
+  const inspected = String(await dockerOut(["inspect", BOX, "--format", "{{.Name}}"]) ?? "").trim();
+  if (inspected.startsWith("/")) return;
   const found = String(await dockerOut(["ps", "--filter", "label=com.titanbot.role=box", "--format", "{{.Names}}"]) ?? "")
     .split("\n").map((name) => name.trim()).find((name) => name.length > 0);
   if (found == null) return;
