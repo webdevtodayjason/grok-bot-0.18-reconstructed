@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { SAND_DEFAULT_AGENT_NAME } from "../../../shared/agents/agents.js";
 import { isSandSubagentId } from "../../../shared/agents/subagents.js";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
@@ -65,7 +66,7 @@ export interface AgentSessionStoreOptions {
   onAgentRemoved?(agentId: string): void;
 }
 
-export function resolveProfileName(trimmedName: string, current?: { name?: string } | null): string { if (trimmedName) return trimmedName; if (current?.name?.trim()) return current.name; return "Grok"; }
+export function resolveProfileName(trimmedName: string, current?: { name?: string } | null): string { if (trimmedName) return trimmedName; if (current?.name?.trim()) return current.name; return SAND_DEFAULT_AGENT_NAME; }
 
 export class SandAgentSessionStore {
   private memory: SessionMemoryProvider = NO_SESSION_MEMORY;
@@ -105,7 +106,7 @@ export class SandAgentSessionStore {
   private async createLocalSession(profile: Partial<SandAgentProfile>, origin: "user" | "dev", purpose?: string): Promise<OpenAgentSession> {
     let id = randomUUID(); while (this.agentDirExists(id)) id = randomUUID();
     mkdirSync(this.getAgentDir(id), { recursive: true });
-    this.writeAgentProfileFile(id, { name: profile.name ?? "Grok", description: profile.description ?? "", ...(profile.title == null ? {} : { title: profile.title }), ...(profile.avatarShape == null ? {} : { avatarShape: profile.avatarShape }), ...(profile.avatarColor == null ? {} : { avatarColor: profile.avatarColor }) });
+    this.writeAgentProfileFile(id, { name: profile.name ?? SAND_DEFAULT_AGENT_NAME, description: profile.description ?? "", ...(profile.title == null ? {} : { title: profile.title }), ...(profile.avatarShape == null ? {} : { avatarShape: profile.avatarShape }), ...(profile.avatarColor == null ? {} : { avatarColor: profile.avatarColor }) });
     const dbPath = getAgentDbPath(this.rootDir, id), db = new SandAgentDb(dbPath); db.set("agentId", id); db.setAgentOrigin(origin); if (purpose != null) db.setAgentPurpose(purpose); db.setIntroductionPending(true);
     return { id, dbPath, db, agentStore: { dispose: async () => {} } };
   }

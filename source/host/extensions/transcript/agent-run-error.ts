@@ -34,7 +34,12 @@ export function walkForBackendConnectError(
     return null;
   seen.add(error);
   if (isConnectError(error)) {
-    if (error.findDetails().length > 0) return error;
+    // findDetails throws on a ConnectError that carries no details at all (a refused backend
+    // with nothing to say), and that throw escaped as an unhandled rejection that left the turn
+    // hanging with the typing indicator on. No details means keep walking.
+    let details: unknown[] = [];
+    try { details = error.findDetails(); } catch { details = []; }
+    if (details.length > 0) return error;
     first.value ??= error;
   }
   const cause = (error as { cause?: unknown }).cause,
