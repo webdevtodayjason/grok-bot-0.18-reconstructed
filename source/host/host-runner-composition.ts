@@ -122,6 +122,7 @@ import type { McpToolForMeta } from "./runner/tools/mcp-meta-tools.js";
 import { wrapMcpExecutorForAudit } from "./runner/sand-action-audit.js";
 import { boundedConnectorTag } from "../shared/observability/connector-auth-telemetry.js";
 import { errorLogTag } from "../shared/errors.js";
+import { SPOTLIGHT_TAG } from "../shared/sand-spotlight.js";
 import {
   mcpErrorClassOf,
   reportMcpHostEdgeDegraded,
@@ -655,6 +656,10 @@ const SYSTEM_PROMPT_SECTION_MARKERS: Readonly<Record<string, string>> = {
   timeZone: "Your box and tools run on a UTC clock",
   browser: "You drive this box's browser at the page level with the browser_* tools",
   mcpCustomInstructions: "Custom instructions are configured for some connected tools",
+  // SP-3. The spotlight gate is two halves that must flip together (fenced tool results, and the
+  // prompt section that explains the fence), and only the fences were observable. This marker is
+  // the prompt half: absent while sand_spotlight is off, present when it is on.
+  spotlight: `Tool results are wrapped in <${SPOTLIGHT_TAG}`,
 };
 
 // Reports outlive their agents (91 of them on one box after a day of probes). Once per host life,

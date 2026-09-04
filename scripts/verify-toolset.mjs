@@ -116,6 +116,17 @@ const wireLinesSince = async (from) => {
   });
 };
 
+// The gates table the host prints once at start: {gate: {value, source}}. Read the newest line,
+// so a restart mid-run reports the gate this turn actually ran under.
+const gateValue = async (name) => {
+  const out = await docker(["exec", BOX, "sh", "-c",
+    `grep -F '[sand][gates] ' /tmp/sand-host.log | tail -n 1 || true`]);
+  const at = out.indexOf("[sand][gates] ");
+  if (at < 0) return null;
+  try { return JSON.parse(out.slice(at + "[sand][gates] ".length))[name]?.value ?? null; }
+  catch { return null; }
+};
+
 const spoken = (entries) => entries.filter((entry) => entry.kind === "send-message");
 
 // A subagent's ledger directory once surfaced in the roster as a phantom "New Agent" with a
@@ -183,9 +194,13 @@ try {
     const missing = ["GetMcpTools", "CallMcpTool"].filter((name) => !chief.tools.includes(name));
     if (missing.length > 0) fail(`the MCP meta pair is still withheld: missing ${missing.join(", ")}`);
     // What the provider was actually sent must be what the toolset offered (CLOUD-1 was a silent 36 -> 35).
-    const chiefWire = (await wireLinesSince(from)).find((line) => line.offered === chief.count);
-    if (chiefWire == null) fail("no [sand][wire] line for the chief's request");
+    // Selected by conversation, not by count: matching on `offered === chief.count` accepted any
+    // request that happened to carry the same number of tools, so a tool dropped between the
+    // toolset build and the request would have been papered over by another agent's line.
+    const chiefWire = (await wireLinesSince(from)).find((line) => line.conversationId === agent.id);
+    if (chiefWire == null) fail(`no [sand][wire] line carrying conversationId ${agent.id}`);
     console.log(`wire: ${chiefWire.transport} ${chiefWire.model} offered ${chiefWire.offered} sent ${chiefWire.sent}`);
+    if (chiefWire.offered !== chief.count) fail(`the toolset built ${chief.count} tools but the request offered ${chiefWire.offered}`);
     if (chiefWire.sent !== chiefWire.offered) fail(`the provider request dropped ${chiefWire.offered - chiefWire.sent} tool(s): ${chief.tools.filter((name) => !chiefWire.tools.includes(name)).join(", ")}`);
 
     // The host never writes the prompt itself out (it carries the user's memory, and every
@@ -204,6 +219,23 @@ try {
     const absent = ["memory", "routines"].filter((name) => report.sections?.[name] !== true);
     if (absent.length > 0) {
       fail(`the assembled prompt is still missing the ${absent.join(" and ")} section(s)`);
+    }
+    // SP-3. The spotlight gate is two halves that must flip together: results wrapped in the
+    // untrusted-data fence, and the prompt section that tells the agent what a fence means. Only
+    // the fences were observable, so a prompt that promised nothing while results arrived fenced
+    // (or the reverse) looked identical from out here. The gates table says which way the gate is
+    // set on this box, and the prompt section has to agree with it.
+    const spotlightOn = await gateValue("sand_spotlight");
+    if (spotlightOn == null) {
+      console.log("  INFO  no [sand][gates] line on this box; the spotlight prompt section is unchecked");
+    } else {
+      const hasSection = report.sections?.spotlight === true;
+      console.log(`spotlight gate ${spotlightOn ? "on" : "off"}; untrusted-data prompt section ${hasSection ? "present" : "absent"}`);
+      if (spotlightOn !== hasSection) {
+        fail(spotlightOn
+          ? "sand_spotlight is on but the assembled prompt carries no untrusted-data section: results arrive fenced with nothing telling the agent what a fence means"
+          : "sand_spotlight is off but the assembled prompt still carries the untrusted-data section: it promises fences that never arrive");
+      }
     }
 
     if (wantSubagent) {
@@ -308,9 +340,24 @@ try {
       if (!/example domain/i.test(text)) console.log("WARN — the parent was revived but never relayed the heading (model behaviour; wiring proven by the child's receipt)");
       // SUB-2: the driver's screenshot reached the model as an image part at least once.
       const imageLines = (await docker(["exec", BOX, "sh", "-c",
-        `tail -n +${from + 1} /tmp/sand-host.log | grep -c -F '[sand][image] carried' || true`])).trim();
-      console.log(`screenshots carried to the model this run: ${imageLines}`);
+        `tail -n +${from + 1} /tmp/sand-host.log | grep -c -F '[sand][image] rendered' || true`])).trim();
+      console.log(`screenshots rendered for the model this run: ${imageLines}`);
       if (Number(imageLines) < 1) fail("no browser screenshot reached the model as an image part ([sand][image] never logged)");
+      // SUB-2b. That [sand][image] line is printed where the tool RENDERS its result; it proves
+      // the render, not the request. These two counts, off the [sand][wire] lines, are about the
+      // request: image parts sitting in the turn's message history, and image parts that survived
+      // into what left for the provider. On the runner path the second is structurally zero --
+      // conversationInput/flattenParts (source/host/extensions/inference/provider-session.ts)
+      // reads only a tool result's `result` string and has no image branch, so the rendered image
+      // in `experimental_content` never becomes an image_url part for responsesInput to turn into
+      // an input_image. Reported, not failed: the fix is a change to that flattening, not to this
+      // gate, and a gate that fails on a known hole stops telling anyone anything new.
+      const wireLines = await wireLinesSince(from);
+      const inHistory = Math.max(0, ...wireLines.map((line) => Number(line.historyImageParts ?? 0)));
+      const onWire = Math.max(0, ...wireLines.map((line) => Number(line.imageParts ?? 0)));
+      console.log(`image parts: ${inHistory} in the turn history, ${onWire} in the request that left`);
+      if (inHistory > 0 && onWire === 0) fail("SUB-2b: every rendered image was dropped before the request left; the history flattener lost the image part");
+      else if (inHistory > 0) console.log("PASS - the rendered screenshot left in the request as an image part");
       await assertNoPhantomAgents();
       console.log("PASS — browser");
     } finally {

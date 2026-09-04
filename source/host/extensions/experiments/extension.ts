@@ -36,6 +36,12 @@ export const experimentsExtension = defineHostExtension({
         sand_spotlight: { value: resolveSpotlightEnabled(process.env.SAND_SPOTLIGHT, () => gate("sand_spotlight")), source: source("SAND_SPOTLIGHT") },
         sand_global_search: { value: gate("sand_global_search"), source: source() },
         sand_teach_by_demonstration: { value: resolveTeachEnabled(readSandBoxSetting(SAND_TEACH_SETTING), () => gate("sand_teach_by_demonstration")), source: source(undefined, SAND_TEACH_SETTING) },
+        // FLAGS-2. Both decide whether a shipped feature runs at all, and neither was in the table:
+        // memory synthesis is armed once, from this gate, at authenticated bootstrap (memory
+        // extension), and auto-review only escalates past shadow when sand_auto_review is on
+        // (auto-review-service). Off here means the feature is silently inert, not broken.
+        sand_memory_dreaming: { value: gate("sand_memory_dreaming"), source: source() },
+        sand_auto_review: { value: gate("sand_auto_review"), source: source() },
         sand_stale_root_gc: { value: gate("sand_stale_root_gc"), source: source("SAND_STALE_ROOT_GC", "SAND_STALE_ROOT_GC") },
         grok_bot_conversation_gc: { value: gate("grok_bot_conversation_gc"), source: source("SAND_CONVERSATION_GC", "SAND_CONVERSATION_GC") },
         sand_legacy_store_blob_retirement: { value: gate("sand_legacy_store_blob_retirement"), source: source("SAND_RETIRE_LEGACY_STORE_BLOBS", "SAND_RETIRE_LEGACY_STORE_BLOBS") },

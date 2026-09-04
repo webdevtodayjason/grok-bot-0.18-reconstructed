@@ -121,9 +121,68 @@ function flattenParts(content: unknown): { text: string; toolCalls: Loose[]; res
         tool_call_id: typeof part.toolCallId === "string" ? part.toolCallId : "",
         content: typeof part.result === "string" ? part.result : stringifyArgs(part.result ?? ""),
       });
+      // SUB-2b. The screenshot a browser or computer tool rendered lives in `experimental_content`,
+      // not in `result`, and this flattener dropped it: 2 image parts in the history, 0 on the
+      // wire, measured. A tool message cannot carry an image, so it goes the way the transport's
+      // own in-line path sends one: a user message of image_url parts right after the result.
+      const images = historyImageParts(part.experimental_content);
+      if (images.length > 0) {
+        results.push({
+          role: "user",
+          content: [
+            { type: "text", text: images.length === 1 ? "Screenshot from the tool call above." : `${images.length} screenshots from the tool calls above.` },
+            ...images.map(image => ({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.b64}` } })),
+          ],
+        });
+      }
     }
   }
   return { text: text.join("\n"), toolCalls, results };
+}
+
+/**
+ * SUB-2b. `[sand][image] carried ...` is printed where a tool RENDERS its result, which proves the
+ * render and nothing about the request. These two counts are about the request: how many image
+ * parts the turn's message history holds, and how many survived into what leaves for the provider.
+ * They are reported side by side on the [sand][wire] line precisely because they can disagree.
+ */
+const HISTORY_IMAGE_B64_MAX = 8 * 1024 * 1024;
+/** The image parts a tool result rendered, in the shape the request needs. Oversized ones are left out rather than sent. */
+function historyImageParts(value: unknown): Array<{ b64: string; mediaType: string }> {
+  if (!Array.isArray(value)) return [];
+  const found: Array<{ b64: string; mediaType: string }> = [];
+  for (const raw of value) {
+    const part = asRecord(raw);
+    if (part == null || part.type !== "image") continue;
+    const b64 = typeof part.data === "string" ? part.data : typeof part.base64 === "string" ? part.base64 : typeof part.imageB64 === "string" ? part.imageB64 : "";
+    if (b64.length === 0 || b64.length > HISTORY_IMAGE_B64_MAX) continue;
+    const mediaType = typeof part.mimeType === "string" && part.mimeType.startsWith("image/") ? part.mimeType : typeof part.mediaType === "string" && part.mediaType.startsWith("image/") ? part.mediaType : "image/png";
+    found.push({ b64, mediaType });
+  }
+  return found;
+}
+function countHistoryImageParts(messages: readonly ProviderMessage[]): number {
+  let found = 0;
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) { for (const item of value) walk(item); return; }
+    const part = asRecord(value);
+    if (part == null) return;
+    if (part.type === "image" && typeof part.data === "string" && part.data.length > 0) { found += 1; return; }
+    // A tool result keeps its text in `result` and its rendered parts in `experimental_content`
+    // (tool-stream-executor). An image only ever lives in the latter.
+    if (part.type === "tool-result") { walk(part.experimental_content); walk(asRecord(part.result)?.content); }
+  };
+  for (const message of messages) walk(message.content);
+  return found;
+}
+
+function countWireImageParts(input: readonly Loose[]): number {
+  let found = 0;
+  for (const message of input) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content) if (asRecord(part)?.type === "image_url") found += 1;
+  }
+  return found;
 }
 
 function conversationInput(messages: readonly ProviderMessage[], hasSendMessage = false): { input: Loose[]; instructions: string } {
@@ -445,7 +504,7 @@ function configuredOpenAiCompatibleModel(): string {
   try { return openAiCompatibleSettings().model; } catch { return "openai-compatible"; }
 }
 
-function openAiCompatibleExecutor(messages: readonly ProviderMessage[], invocationId: string, definitions?: readonly Loose[], executeTool?: RoutedToolExecutor, onUsage?: (usage: UsageRecord) => void) {
+function openAiCompatibleExecutor(messages: readonly ProviderMessage[], invocationId: string, definitions?: readonly Loose[], executeTool?: RoutedToolExecutor, onUsage?: (usage: UsageRecord) => void, conversationId?: string) {
   const settings = openAiCompatibleSettings();
   const usage = deferred<{ promptTokens: number; completionTokens: number; totalTokens: number }>();
   const extendedUsage = deferred<{ inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; maxTokens: number }>();
@@ -495,9 +554,15 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
   // what buildTurnTools offered. openAiCompatibleTools drops any definition without parameters;
   // the browserUse subagent lost all fifteen browser tools that way and nobody could see it.
   if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) {
+    // conversationId so a reader can pair this line with the [sand][toolset] line for the same
+    // turn. Matching on the offered count alone let a request from another agent stand in.
     console.log(`[sand][wire] ${JSON.stringify({
+      conversationId: conversationId ?? null,
       transport: settings.transport ?? "chat", model: settings.model,
-      offered: (definitions ?? []).length, sent: (tools ?? []).length, tools: (tools ?? []).map(tool => tool.name),
+      offered: (definitions ?? []).length, sent: (tools ?? []).length,
+      historyImageParts: countHistoryImageParts(messages),
+      imageParts: countWireImageParts(conversationInput(messages).input),
+      tools: (tools ?? []).map(tool => tool.name),
     })}`);
   }
   const fullStream = (async function* () {
@@ -549,7 +614,7 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
 }
 
 class ProviderPromptExecutor extends BasePromptExecutor<ProviderMessage> {
-  constructor(readonly provider: RoutedProvider, initialMessages?: readonly ProviderMessage[], readonly onUsage?: (usage: UsageRecord) => void) { super(new BasePromptBuilder(initialMessages)); }
+  constructor(readonly provider: RoutedProvider, initialMessages?: readonly ProviderMessage[], readonly onUsage?: (usage: UsageRecord) => void, readonly conversationId?: string) { super(new BasePromptBuilder(initialMessages)); }
   stream(_ctx: unknown, invocationId = crypto.randomUUID(), definitions?: readonly Loose[]) {
     const execute = hostRoutedToolExecutor;
     if (this.provider === "codex") return codexExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
@@ -557,14 +622,14 @@ class ProviderPromptExecutor extends BasePromptExecutor<ProviderMessage> {
     // Deliberately no inline executor here: on the runner path tool calls belong to the
     // runner. Handing this one the routed-MCP executor made "did not provide an executor"
     // disappear while leaving every SendMessage unrunnable, so the turn finished silent.
-    if (this.provider === "openai-compatible") return openAiCompatibleExecutor(this.getMessages(), invocationId, definitions, undefined, this.onUsage);
+    if (this.provider === "openai-compatible") return openAiCompatibleExecutor(this.getMessages(), invocationId, definitions, undefined, this.onUsage, this.conversationId);
     return openRouterExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
   }
 }
 
-export function createProviderPromptSession(provider: RoutedProvider): { getModelId(): string; getExecutor(state?: unknown): PromptExecutor } {
+export function createProviderPromptSession(provider: RoutedProvider, conversationId?: string): { getModelId(): string; getExecutor(state?: unknown): PromptExecutor } {
   const modelId = provider === "codex" ? configuredCodexModel() : provider === "claude-code" ? "claude-code" : provider === "openai-compatible" ? configuredOpenAiCompatibleModel() : process.env.SAND_OPENROUTER_MODEL?.trim() || "openai/gpt-5.2";
-  return { getModelId: () => modelId, getExecutor: state => new ProviderPromptExecutor(provider, Array.isArray(state) ? state as ProviderMessage[] : undefined, usage => recordRoutedUsage(provider, usage)) };
+  return { getModelId: () => modelId, getExecutor: state => new ProviderPromptExecutor(provider, Array.isArray(state) ? state as ProviderMessage[] : undefined, usage => recordRoutedUsage(provider, usage), conversationId) };
 }
 
 export async function runRoutedProviderText(provider: RoutedProvider, messages: readonly ProviderMessage[], options?: {

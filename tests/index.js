@@ -36,3 +36,5 @@ import "./managed-seed-skills.test.mjs";
 import "./workflow-injected-body.test.mjs";
 import "./workflow-frontmatter.test.mjs";
 import "./machine-room-teach.test.mjs";
+import "./window-assignments.test.mjs";
+import "./agent-delete-prompt-report.test.mjs";

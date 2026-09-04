@@ -61,10 +61,11 @@ const TEACH = process.argv.includes("--teach");
 // agent is first in the roster at every host start. --keep-setting is how the sticky behaviour is
 // asked for, the same way scripts/verify-teach.mjs asks for it.
 const KEEP_TEACH_SETTING = process.argv.includes("--keep-setting");
-// A live turn on a fresh agent is the only honest way to raise an unread count on this host:
-// setAgentUnread{isUnread:true} answers {"error":"this.tm.sessionStore.seedSessionActivityFrom
-// DbMtime is not a function"} (the false direction works), so the badge cannot be raised
-// synthetically. The box answers through whatever endpoint it is already on, so this runs before
+// A live turn on a fresh agent is what this gate uses to raise an unread count. GW-15 landed
+// seedSessionActivityFromDbMtime on the session store, so setAgentUnread{isUnread:true} no longer
+// throws "is not a function" -- but a synthetic raise would prove only that the RPC returns, not
+// that a real message reaches the badge, which is what the check is for. The box answers through
+// whatever endpoint it is already on, so this runs before
 // the gate touches the endpoint -- and because that makes a DOM gate depend on a provider being
 // warm, a turn that does not come back inside the budget is a SKIP, not a failure. The whole gate
 // has to fit the 300s verify-runner ceiling (docs/PLUMBING-AUDIT.md).
@@ -1128,14 +1129,73 @@ try {
     const boxNow = ateraId ? await gw("getForeverBoxStatus", { id: ateraId }).catch(() => null) : null;
     const handBack = await page.evaluate(() => { const el = document.getElementById("hand-back"); return el ? { hidden: el.hidden, text: el.textContent } : null; });
     check(handBack != null && handBack.hidden === (boxNow?.handoff == null), "the hand-back control is in the desktop view and hidden exactly while no hand-off is pending", `hidden ${handBack?.hidden}, host handoff ${JSON.stringify(boxNow?.handoff ?? null)}`);
-    // A real click, aimed at the probe agent (no hand-off is pending there, so the host's
-    // endHandoff is a no-op): the handler's .finally used to read event.currentTarget, null by
-    // then, which threw out of the promise chain and left the button disabled for good.
+    // -- GW-10, the hand-back loop end to end, driven the way a user meets it. It used to force the DOM --
+    // set el.hidden = false, write the agent id into the dataset by hand, call el.click() -- on an
+    // agent with nothing pending, so handBackForeverBox answered null and the check proved only
+    // that the click handler does not throw. It could not tell a working control from one that
+    // never appears or never clears anything.
+    //
+    // request_box_help is the only writer of a pending hand-off (BoxHandoffService.start, reached
+    // through the session extension's startHandoff); no gateway command sets one. So this costs
+    // ONE model turn on the probe agent: ask it to call the tool, wait for the host to report the
+    // hand-off, then let the page paint the button itself, click that button, and check the host
+    // agrees the hand-off is gone. A turn that does not come back inside the budget is a SKIP, the
+    // same rule the unread probe follows -- a cold provider is not a dashboard defect. Handing the
+    // box back revives the agent, so the probe may spend one more turn of its own after this.
     if (probeAgentId) {
-      const errorsBefore = errors.length;
-      await page.evaluate((id) => { const el = document.getElementById("hand-back"); el.dataset.handBack = id; el.hidden = false; el.click(); }, probeAgentId);
-      const settled = await until(() => page.evaluate(() => { const el = document.getElementById("hand-back"); return el && !el.disabled ? { hidden: el.hidden } : null; }), 10_000, 400);
-      check(settled != null && settled.hidden === true && errors.length === errorsBefore && callsTo("handBackForeverBox") >= 1, "clicking hand-back calls handBackForeverBox, re-enables the button and re-hides it, with no page error", `${settled ? `hidden ${settled.hidden}` : "still disabled after 10s"}; ${errors.length - errorsBefore} new page error(s); ${callsTo("handBackForeverBox")} call(s)`);
+      const instruction = "Sign in to the gate demo account";
+      await gw("sendPrompt", {
+        agentId: probeAgentId,
+        prompt: `Call the request_box_help tool exactly once, with instruction "${instruction}". `
+          + "Call no other tool and do nothing else.",
+      }).catch(() => null);
+      const pending = await until(async () => {
+        const status = await gw("getForeverBoxStatus", { id: probeAgentId }).catch(() => null);
+        return status?.handoff ?? null;
+      }, TURN_TIMEOUT_MS, 3000);
+      if (pending == null) {
+        check(true, `hand-back probe skipped — the probe never called request_box_help inside the ${Math.round(TURN_TIMEOUT_MS / 1000)}s turn budget (the box's endpoint, not the dashboard)`);
+      } else {
+        check(true, "request_box_help put a real pending hand-off on the host", JSON.stringify(pending).slice(0, 140));
+        const errorsBefore = errors.length;
+        // The probe's name is not probeName by now: the GW-01 identity checks renamed it. Ask the
+        // roster what it is called, or openRoom waits out its whole budget on a title that moved.
+        const roomWas = await page.evaluate(() => document.querySelector(".worker-card.is-active")?.dataset.contextId ?? null);
+        const probeNow = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.id === probeAgentId)?.name ?? probeName;
+        const arrived = await openRoom(probeAgentId, probeNow);
+        const shown = await until(() => page.evaluate(() => {
+          const el = document.getElementById("hand-back");
+          if (!el || el.hidden) return null;
+          return { owner: el.dataset.handBack ?? "", note: document.getElementById("hand-back-note")?.textContent ?? "" };
+        }), 20_000, 700);
+        check(shown != null && shown.owner === probeAgentId, "the hand-back control appears on its own once a hand-off is pending, aimed at the agent that asked", shown ? `owner ${shown.owner}, room reached ${arrived}` : "still hidden after 20s");
+        check(shown != null && shown.note.includes(instruction), "and the note beside it repeats the instruction the agent asked for", (shown?.note ?? "").slice(0, 140));
+        if (shown != null) {
+          await page.click("#hand-back", { timeout: 10_000 });
+          const cleared = await until(async () => {
+            const status = await gw("getForeverBoxStatus", { id: probeAgentId }).catch(() => null);
+            return status != null && status.handoff == null ? true : null;
+          }, 20_000, 1000);
+          check(cleared === true && callsTo("handBackForeverBox") >= 1, "clicking it clears the pending hand-off on the host", `${cleared === true ? "cleared" : "the host still reports it pending after 20s"}; ${callsTo("handBackForeverBox")} handBackForeverBox call(s)`);
+          // Re-hiding follows the host's status event, so it lands as soon as the hand-off clears.
+          const rehid = await until(() => page.evaluate(() => document.getElementById("hand-back")?.hidden === true ? true : null), 15_000, 500);
+          check(rehid === true && errors.length === errorsBefore, "and the control hides itself again once nothing is pending, with no page error", `${rehid === true ? "hidden" : "still visible after 15s"}; ${errors.length - errorsBefore} new page error(s)`);
+          // Re-enabling waits on the RPC, and handBackForeverBox does not answer until the agent it
+          // revived has finished a turn (sand-host.ts awaits resumeAfterBoxHandoff), so this is a
+          // turn budget, not a UI one. The bug it guards is real: the handler's .finally used to
+          // read event.currentTarget, null by then, which threw out of the promise chain and left
+          // the button disabled for good. A revived turn that does not come back is a SKIP.
+          const reenabled = await until(() => page.evaluate(() => document.getElementById("hand-back")?.disabled === false ? true : null), TURN_TIMEOUT_MS, 1000);
+          if (reenabled === true) check(true, "and the button re-enables once handBackForeverBox answers");
+          else check(true, `button re-enable skipped — the revived turn did not finish inside the ${Math.round(TURN_TIMEOUT_MS / 1000)}s budget, so handBackForeverBox has not answered yet`);
+        }
+        // The checks below this block read Atera's conversation. Put the page back where it was,
+        // or they measure the probe and report Atera's evidence pills as missing.
+        if (roomWas && roomWas !== probeAgentId) {
+          const backName = await page.evaluate((id) => document.querySelector(`.worker-card[data-context-id="${id}"] .worker-name`)?.textContent?.trim() ?? "", roomWas);
+          check(await openRoom(roomWas, backName), "the gate is back on the agent the hand-back probe walked away from", backName);
+        }
+      }
     }
     await page.click("[data-desktop-app='files']"); await page.waitForTimeout(1200);
     await noDemoStrings("files view");

@@ -127,11 +127,12 @@ export const FLAGS = {
       // independent work stream, in parallel), so rapid-fire user messages get
       // timely replies instead of queueing behind long inline work. When ON, the
       // agent's system prompt teaches the orchestration pattern and the runner
-      // offers TodoWrite plus the executor subagent type; when OFF (the default
-      // for everyone) none of that surfaces and turns run inline exactly as
-      // before. Evaluated in the Sand host via its SandExperimentService (read
-      // live per turn so a rollout or kill applies without a runner rebuild).
-      // Default OFF.
+      // offers TodoWrite plus the executor subagent type; when OFF none of that
+      // surfaces and turns run inline exactly as before. Evaluated in the Sand host
+      // via its SandExperimentService (read live per turn so a rollout or kill
+      // applies without a runner rebuild).
+      // Default ON: this build ships the orchestration pattern to everyone, and
+      // SAND_MULTITASK is the operator switch that turns it back off.
       sand_multitask: {
         client: true,
         default: true
@@ -214,10 +215,10 @@ export const FLAGS = {
       // Server-controlled rollout of Sand's product-analytics pipeline (DAU / WAU,
       // messages-per-user, and the starter set of product events). When ON for the
       // signed-in Cursor user, the Sand host activates its analytics buffer and ships
-      // events to AnalyticsService.TrackEvents; when OFF (the default for everyone)
+      // events to AnalyticsService.TrackEvents; when OFF
       // the host holds then drops events and trackEvent is a no-op. Evaluated in the
       // Sand host via its SandExperimentService — a rollout/kill switch with no app
-      // rebuild. Default OFF.
+      // rebuild. Default ON in this build; the gates table names the source.
       sand_product_analytics: {
         client: true,
         default: true
@@ -693,8 +694,9 @@ export const FLAGS = {
       // Master switch for Sand spotlighting: wrapping every tool result in the
       // <cursor_untrusted_data_1337> fence and teaching the agent, in its system
       // prompt, that fenced content is outside DATA that must not drive unrequested
-      // actions. When OFF (the default for everyone) tool results reach the model
-      // exactly as before and the prompt section is omitted. Evaluated in the Sand
+      // actions. Default ON: results reach the model fenced and the prompt carries
+      // the section. When OFF (SAND_SPOTLIGHT, or a Statsig kill) tool results reach
+      // the model exactly as before and the prompt section is omitted. Evaluated in the Sand
       // host via its SandExperimentService and re-read per turn, so a rollout or
       // kill applies without a runner rebuild.
       //

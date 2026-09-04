@@ -269,7 +269,10 @@ export class WorkflowCommands {
       });
       return;
     }
+    // Without agentId the send lands on whichever agent happens to be active, so "run this
+    // workflow now" on a background agent ran the skill in someone else's room.
     await this.tm.sendPrompt(`@${workflow.name}`, {
+      agentId,
       richText: JSON.stringify({
         type: "doc",
         content: [

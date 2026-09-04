@@ -407,6 +407,10 @@ export class AgentLifecycle {
     this.tm.runLifecycle.closeSessionWhenIdle(active);
     await this.tm.sessionStore.deleteSession(active.id);
     await this.releaseBoxWindow(active.id);
+    // The same unlink the loop above does. Creating an agent makes it the active one, so an agent
+    // created and deleted in one breath only ever takes this branch, and its prompt report outlived
+    // it: six of the seven reports on the box belonged to ids with no agent directory left.
+    rmSync(join(getSandRootDir(), `sand-system-prompt-${active.id}.json`), { force: true });
     this.tm.onAgentForgotten?.(active.id);
     this.tm.pendingWakeStore?.clearAgent(active.id);
     this.tm.boxHandoff.boxHandoffs.delete(active.id);

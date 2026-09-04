@@ -87,7 +87,11 @@
         <aside class="context-space" aria-label="Current conversation context">
           <section class="context-island room-island" id="context-card"></section>
 
-          <section class="context-island now-island" aria-labelledby="now-heading">
+          <!-- MR-07. Shipped dismissed and empty: the placeholder copy that used to sit here was
+               painted for the ~76ms between DOMContentLoaded and the first renderNowAndSchedule,
+               so the operator's first glance showed a routine and a worker that do not exist. The
+               render fills every field and drops is-dismissed once the host has answered. -->
+          <section class="context-island now-island is-dismissed" aria-labelledby="now-heading">
             <div class="island-heading">
               <div><span class="spark">＋</span><strong id="now-heading">Now</strong></div>
               <button class="icon-button compact" id="dismiss-now" type="button" aria-label="Dismiss current activity">×</button>
@@ -95,9 +99,9 @@
             <div class="now-content">
               <div class="progress-orbit" aria-hidden="true"><span></span></div>
               <div>
-                <strong id="routine-title">Weekday ticket review</strong>
-                <p id="routine-worker">Atera Triage is working</p>
-                <small id="routine-meta">Started moments ago</small>
+                <strong id="routine-title"></strong>
+                <p id="routine-worker"></p>
+                <small id="routine-meta"></small>
               </div>
             </div>
           </section>

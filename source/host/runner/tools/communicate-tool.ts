@@ -133,7 +133,7 @@ export function makeRender() {
     const raw = output.result.value.currentStep;
     const image = (output as unknown as { [IMAGE_CARRIER]?: { data: string; mimeType: string } })[IMAGE_CARRIER];
     if (image != null && image.data.length > 0) {
-      if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) console.log(`[sand][image] carried ${image.mimeType} (${image.data.length} base64 chars) to the model`);
+      if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) console.log(`[sand][image] rendered ${image.mimeType} (${image.data.length} base64 chars) for the model; the [sand][wire] imageParts count says whether it left`);
       return createImageResult(image.data, image.mimeType, raw.length === 0 ? "Done." : raw);
     }
     return createStringResult(raw.length === 0 ? "Tool completed." : raw);

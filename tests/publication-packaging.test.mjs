@@ -103,7 +103,9 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(cursorBackend, /createProviderPromptSession\(routedProvider\)/);
   assert.doesNotMatch(rendererPatch, /ANTHROPIC_API_KEY|OPENAI_API_KEY/);
   assert.match(turnShell, /inferenceProvider === "cursor"/);
-  assert.match(turnShell, /createProviderPromptSession\(inferenceProvider\)/);
+  // The conversation id travels with the session so the [sand][wire] trace can be paired with
+  // the [sand][toolset] line for the same turn (SUB-2b/toolset gate).
+  assert.match(turnShell, /createProviderPromptSession\(inferenceProvider, input\.conversationId\)/);
   assert.match(coordinator, /method !== "sendPrompt" \|\| provider === "cursor"/);
   assert.match(coordinator, /executeTool: async \(definition, toolArgs, toolCallId\)/);
   assert.match(coordinatorMain, /command\(commands, "listRoutedMcpTools", args\)/);
