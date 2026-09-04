@@ -2674,10 +2674,26 @@ dialog[open] {
 
 /* Wave C1: send acceptance, transcript paging, skills, hand-back. */
 .composer-status {
-  padding: 0 18px 4px;
+  /* Not a grid cell. The shelf is three columns (chips, composer, utilities); as a fourth item
+     this wrapped the utilities onto a second row nobody can see and slid the composer into the
+     utilities' column the moment the status had any text. It floats above the composer instead. */
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  max-width: 60ch;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: rgba(15, 23, 27, 0.72);
+  border: 1px solid var(--glass-edge);
   font-size: 12px;
   color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
+.composer-status:empty { display: none; }
 
 .composer-status[data-composer-state="accepted"] {
   color: var(--teal-300);

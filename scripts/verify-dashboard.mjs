@@ -567,6 +567,19 @@ try {
       check(acceptance?.state === "accepted" && /Accepted by the host/.test(acceptance.text), "after a send the composer shows the host's acceptance, not the click", acceptance ? `${acceptance.state}: ${acceptance.text}` : "no acceptance state inside 20s");
       const ledger = acceptance?.nonce ? await gw("promptAcceptanceStatus", { accountSlot: "host", clientNonce: acceptance.nonce }).catch(() => null) : null;
       check(ledger?.outcome === "found" && ledger.record?.status === "accepted", "and promptAcceptanceStatus holds that nonce as accepted", JSON.stringify(ledger ?? null).slice(0, 120));
+      // MR-26. With that status on screen the shelf must still be one row: the status used to be
+      // a fourth item in a three-column grid, which wrapped the three utilities and the routine
+      // ring onto a row nobody can see and slid the composer into their column (seen on the R750).
+      const shelf = await page.evaluate(() => {
+        const r = (sel) => { const el = document.querySelector(sel); if (!el) return null; const b = el.getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) }; };
+        const bar = r(".control-shelf"), util = r(".shelf-utilities"), status = r("#composer-status"), composer = r(".composer");
+        const inside = !!(bar && util && util.w > 0 && util.y >= bar.y && util.y + util.h <= bar.y + bar.h + 1 && util.x + util.w <= bar.x + bar.w + 1);
+        const above = !!(status && bar && status.h > 0 && status.y + status.h <= bar.y + 2);
+        const composerLeftOfUtilities = !!(composer && util && composer.x + composer.w <= util.x + 1);
+        return { inside, above, composerLeftOfUtilities, buttons: document.querySelectorAll(".shelf-utilities .icon-button").length };
+      });
+      check(shelf.inside && shelf.composerLeftOfUtilities && shelf.buttons === 3, "the shelf keeps its three utilities beside the composer while the status shows", JSON.stringify(shelf));
+      check(shelf.above, "and the status floats above the shelf instead of taking a column", JSON.stringify(shelf));
       // Read somewhere else while the reply lands, so the unread is raised off screen.
       await clickText("Atera Triage").catch(() => {});
       const spoke = await until(async () => {
