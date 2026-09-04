@@ -340,8 +340,9 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
   materialized "hourly 8:28–6:28" as removable concrete times, emitted **"Created routine ◉"
   / "Updated routine ◉"** transcript chips, and confirmed in prose with a live pre-check
   ("Nothing named Brashear in Atera right now… which is what we want"). Plumbing hook:
-  `sand-state-tool.ts` (`update_state`, cronTrigger) — whether it reaches the local model
-  path is a Wave 2/3 question.
+  `sand-state-tool.ts` (`update_state`, cronTrigger) reaches the local model path: measured
+  2026-09-04, `update_state` is among the 35 tools offered and sent on every chief turn, and the
+  learn-from-demonstration recipe saves its skill through it.
 - **Webhook triggers are minted server-side on save:** fields show "Loading…" then fill
   with `POST to https://api2.cursor.sh/automations/webh…`, a `crsr_…` key, and an
   `Authorization: Bearer` header. Production use: "Atera new-ticket dispatch — When a
@@ -410,7 +411,7 @@ Two narrated recordings of the operator's live Grok Bot deployment, dissected wi
   → redirect to **`localhost:8767/callback?code=…&state=…`** → "Authorization complete!
   You can close this tab." → app flips the account to **Connected**.
   The desktop app runs a local OAuth callback server on **:8767**. Our gateway's
-  `completeMcpOAuth` is implemented (`host-gateway-api.ts:683-691`, validates stateId + code
+  `completeMcpOAuth` is implemented (`host-gateway-api.ts:768-776` at 4f83232, validates stateId + code
   and calls `mcp.completeOAuth`); corrected 2026-09-02, it was recorded here as a stub. What is
   missing is the callback server itself, which lived in the Electron main — a local
   re-implementation belongs in the relay (GAP-ANALYSIS CP-06, after the CP-14 substrate decision).
