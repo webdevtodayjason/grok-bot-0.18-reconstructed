@@ -4,8 +4,8 @@ import { parseGroupMentions } from "../../groups/group-chat.js";
 import {
   collectWorkflowReferences,
   deriveWorkflowNameFromUrl,
+  injectedWorkflowBody,
   limitSurfacedWorkflows,
-  WORKFLOW_INJECTED_BODY_LIMIT,
   workflowDir,
   workflowToAutomation,
   type WorkflowRecord,
@@ -14,6 +14,7 @@ import {
 import { WORKFLOW_REFERENCE_NODE_TYPE } from "../../../shared/workflows.js";
 import { AUTOMATION_WAKE_CUE } from "../../../shared/automations.js";
 import { formatTimestamp } from "../../../shared/automation-schedule.js";
+import { isSandBoxSettingEnabled, SAND_TOOL_TRACE_SETTING } from "../../sand-box-setting.js";
 import type { TranscriptManagerLike } from "./transcript-hub.js";
 
 function buildWorkflowRunPrompt(
@@ -40,10 +41,7 @@ function buildWorkflowRunPrompt(
   }
   if (workflow.description.length > 0)
     lines.push(`What it does: ${workflow.description}`);
-  lines.push(
-    "Recipe to follow:",
-    workflow.body.trim().slice(0, WORKFLOW_INJECTED_BODY_LIMIT),
-  );
+  lines.push("Recipe to follow:", injectedWorkflowBody(workflow).text);
   if (workflow.helperScripts.length > 0) {
     lines.push(
       `Helper files live beside this workflow in ${workflowDir(workflow.filePath)}: ${workflow.helperScripts.join(", ")}. Use them with Shell as the recipe directs.`,
@@ -317,13 +315,37 @@ export class WorkflowCommands {
         { trigger: "reference" },
         this.tm.sessionStore.getUserTimeZone(),
       );
-      blocks.push(
-        workflow.id === "learn-from-demonstration" &&
-          reference.teachQueueScope != null &&
-          /^[a-f0-9]{64}$/.test(reference.teachQueueScope)
-          ? `${block}\n\nTeach recording queue scope: ${reference.teachQueueScope}`
-          : block,
-      );
+      // This is the whole of the teach hand-off: the recorder dispatches a turn whose
+      // rich text is one workflowReference node carrying the skill id and the recording's queue
+      // scope, and it is HERE that the node becomes text the model can act on. The skill's recipe
+      // is inlined by buildWorkflowRunPrompt above (whole, or cut on a line break and said so), and
+      // the scope is appended in the exact wording SKILL.md tells the agent to look for -- it
+      // says "the host injects a `Teach recording queue scope` into this workflow invocation",
+      // and without that line the agent has no way to find the queue file it must claim. Both
+      // legs were already wired; what was missing on a box with no Cursor login was the skill
+      // itself, so `session.workflows.get(...)` returned null here and the whole block was
+      // silently skipped. Seeding the managed-skills cache is what makes this branch reachable.
+      const expanded = workflow.id === "learn-from-demonstration" &&
+        reference.teachQueueScope != null &&
+        /^[a-f0-9]{64}$/.test(reference.teachQueueScope)
+        ? `${block}\n\nTeach recording queue scope: ${reference.teachQueueScope}`
+        : block;
+      // Nothing else reports that an invocation actually carried its recipe: the outline stores
+      // the message the user (or the recorder) typed, not the expansion, and the wire trace
+      // deliberately logs no message content. One line per expansion, behind the usual switch.
+      if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) {
+        // inlinedChars is the half that matters: bodyChars says how long the recipe is, and only
+        // inlinedChars says how much of it the model was actually handed.
+        const injected = injectedWorkflowBody(workflow);
+        console.log(`[sand][workflow] ${JSON.stringify({
+          conversationId: session.id, id: workflow.id, source: workflow.source, name: workflow.name,
+          bodyHead: workflow.body.trimStart().split("\n", 1)[0]?.slice(0, 120) ?? "",
+          bodyChars: injected.bodyChars, inlinedChars: injected.inlinedChars,
+          isTruncated: injected.isTruncated, blockChars: expanded.length,
+          teachQueueScope: expanded === block ? null : reference.teachQueueScope,
+        })}`);
+      }
+      blocks.push(expanded);
     }
     if (blocks.length === 0) return prompt;
     return prompt.length > 0

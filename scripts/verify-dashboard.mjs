@@ -16,11 +16,19 @@
 // (GW-09), and the Cmd-K palette on isGlobalSearchEnabled / searchAgents (GW-14). Two model
 // turns on a probe agent it creates and deletes: the unread/acceptance prompt (which now carries
 // the two attachments) and the skill run.
+// --teach: the Learn flow is honest and stoppable (the operator's report: "there's no way to stop
+//   it, so I feel like that section is also stubbed"). On a probe with its own display: the modal
+//   opens only on a recording the host confirmed and its timer moves, every control in its footer
+//   is painted inside the frame and hit-tests to itself, Discard reaches stopTeachRecording and
+//   leaves no ffmpeg on the box, and with SAND_TEACH="0" no modal opens and the page says which
+//   switch to set, beside the button that was clicked. No model turn is spent. SAND_TEACH goes
+//   back to whatever the box held; --keep-setting leaves it at "1".
 // --leaks: no adopted secret, no connector argv, no attested tool output and no attachment
 //   preview carrying a secret in the dashboard DOM.
 // --offline: with the gateway blocked, the demo factory's copy says the value was discarded and
 //   the writes it does not implement are not drawn as live controls.
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +55,12 @@ const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:7777";
 const LEAKS = process.argv.includes("--leaks");
 // --offline: the same page with the gateway blocked in the browser, where the demo factory runs.
 const OFFLINE = process.argv.includes("--offline");
+const TEACH = process.argv.includes("--teach");
+// SAND_TEACH unset is the off state, so restoring "1" onto a box that held nothing is an
+// enablement, not a restore -- and an armed SAND_TEACH runs recoverPending against whichever
+// agent is first in the roster at every host start. --keep-setting is how the sticky behaviour is
+// asked for, the same way scripts/verify-teach.mjs asks for it.
+const KEEP_TEACH_SETTING = process.argv.includes("--keep-setting");
 // A live turn on a fresh agent is the only honest way to raise an unread count on this host:
 // setAgentUnread{isUnread:true} answers {"error":"this.tm.sessionStore.seedSessionActivityFrom
 // DbMtime is not a function"} (the false direction works), so the badge cannot be raised
@@ -75,6 +89,33 @@ const run = (args) => new Promise((resolve) => execFile("node", args, { maxBuffe
 // executable where the host will launch it from. Nothing else in this gate reaches past the relay.
 const BOX = process.env.GROK_BOT_BOX_CONTAINER ?? "grok-bot-local-vm";
 const box = (command) => new Promise((resolve) => execFile("docker", ["exec", BOX, "sh", "-lc", command], { maxBuffer: 8 << 20 }, (error, out, err) => resolve({ code: error?.code ?? 0, out: String(out) + String(err) })));
+// The host settings file the teach gate flips, written the way the host wrote it (0600, flat
+// string map). Same shape scripts/verify-teach.mjs uses, so the two gates cannot drift apart.
+const SAND_SETTINGS = "/home/box/sand-data/sand-host-settings.json";
+// readSettingsFile (source/host/sand-box-setting.ts) accepts either a flat object or
+// { settings: { ... } } and PREFERS the nested one when it is there. A helper that only ever
+// touched the top level would set a key the resolver never consults on an operator's nested file:
+// the switch would not move, the gate would fail as if the product were broken, and the restore
+// would delete a key it invented. So both helpers resolve the same container the reader picks.
+const settingsContainer = "const c=(d&&typeof d.settings==='object'&&d.settings!=null&&!Array.isArray(d.settings))?d.settings:d;";
+const readSetting = async (name) => {
+  const r = await box(`cat ${SAND_SETTINGS} 2>/dev/null || echo '{}'`);
+  try {
+    const parsed = JSON.parse(r.out);
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const nested = parsed.settings;
+    const source = nested != null && typeof nested === "object" && !Array.isArray(nested) ? nested : parsed;
+    return source[name];
+  } catch { return undefined; }
+};
+const writeSetting = (name, value) => new Promise((resolve) => execFile("docker", ["exec", BOX, "node", "-e",
+  `const fs=require('fs');const p=${JSON.stringify(SAND_SETTINGS)};`
+  + `let d={};try{const parsed=JSON.parse(fs.readFileSync(p,'utf8'));`
+  + `if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))d=parsed;}catch{}`
+  + settingsContainer
+  + (value == null ? `delete c[${JSON.stringify(name)}];` : `c[${JSON.stringify(name)}]=${JSON.stringify(value)};`)
+  + `fs.writeFileSync(p,JSON.stringify(d),{mode:0o600});`], (error) => resolve(error == null)));
+const teachSessionDirs = async () => (await box("ls -1d /workspace/teach-sessions/teach-* 2>/dev/null || true")).out.split("\n").filter(Boolean);
 // CP-11's probe: a one-file stdio MCP server with no dependencies, so the box can launch it with
 // bare `node` and the host discovers exactly one tool from it.
 const PROBE_CONNECTOR = "gateprobe";
@@ -176,6 +217,13 @@ let copyAgentId = null;
 // outlives the probe and shows up on every production agent. Snapshot the library once the probe
 // exists and delete everything the run added before the probe itself goes.
 let libraryBefore = null;
+// --teach flips SAND_TEACH to prove the refusal path; the finally puts the box back.
+let teachSettingBefore;
+let teachSettingTouched = false;
+let teachSessionDir = null;
+// Every session directory this pass created, so a run that records more than once still leaves
+// /workspace/teach-sessions the way it found it.
+const teachDirsMade = new Set();
 const libraryIds = async (id) => ((await gw("getAgentWorkflows", { id })) ?? []).filter((w) => w.source !== "automation").map((w) => w.id);
 try {
   if (OFFLINE) {
@@ -239,6 +287,241 @@ try {
     check(!secrets.some((s) => attachmentDom.includes(s)), `no adopted secret in attachment previews or avatar sources (${(await page.$$("[data-attachment]")).length} attachment(s) on screen)`);
     const rest = await run(["scripts/verify-subscription-scan.mjs", "--leaks"]);
     check(rest.code === 0, "no adopted secret in endpoints.json, host log, transcripts, scan", rest.code === 0 ? "" : rest.out.split("\n").filter((l) => /FAIL/.test(l)).join("; "));
+  } else if (TEACH) {
+    // The operator's report was that Learn could not be stopped, so this gate is about the two
+    // moments a click has to line up with the box: the modal opens only on a recording the host
+    // confirmed, and every way out of it reaches stopTeachRecording. Discard is the exit that
+    // costs no model turn, so the whole pass fits well inside the runner's ceiling.
+    teachSettingBefore = await readSetting("SAND_TEACH");
+    teachSettingTouched = true;
+    check(await writeSetting("SAND_TEACH", "1"), "SAND_TEACH can be set to 1 in the box settings file", `was ${JSON.stringify(teachSettingBefore ?? null)}`);
+
+    const probeName = `probe-teach-${Date.now()}`;
+    const created = await gw("createAgent", { name: probeName, description: "verify-dashboard teach probe" }).catch(() => null);
+    probeAgentId = created?.agent?.id ?? created?.id ?? null;
+    if (!probeAgentId) check(false, "a fresh agent could be created for the teach probe");
+    // The recorder refuses an agent without its own X display (fork window index >= 3), and the
+    // websockify token in the vnc url IS that display. Allocated under the page load, as the
+    // default pass does, because a cold box takes about 27s over it.
+    const screen = probeAgentId ? (async () => {
+      const deadline = Date.now() + 60_000;
+      for (;;) {
+        const status = await gw("ensureForeverBox", { id: probeAgentId }).catch(() => null);
+        const url = String(status?.vncUrl ?? "");
+        const display = Number(/token%3D(\d+)/i.exec(url)?.[1] ?? /token=(\d+)/i.exec(url)?.[1] ?? NaN);
+        if (Number.isInteger(display) && display >= 3) return display;
+        if (Date.now() > deadline) return null;
+        await sleep(3000);
+      }
+    })() : Promise.resolve(null);
+
+    await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
+    check(await page.evaluate(() => window.__machineRoomLive === true), "the page is on the live gateway, not the demo adapter");
+    const display = await screen;
+    check(display != null, "the teach probe has its own desktop window", display == null ? "no fork display within 60s" : `display :${display}`);
+
+    if (probeAgentId && display != null) {
+      const before = new Set(await teachSessionDirs());
+      await clickText(probeName);
+      await page.click("#open-desktop"); await page.waitForTimeout(1500);
+      await page.click("#teach-button");
+      // The start is a 6s round trip on a warm screen and 23s on a cold one, and the only thing
+      // that used to change on the page in that time was the button's disabled flag, which this
+      // stylesheet did not draw at all. Read the button while the round trip is still in flight.
+      const waiting = await page.evaluate(() => {
+        const button = document.getElementById("teach-button");
+        return {
+          text: button?.textContent ?? "",
+          busy: button?.getAttribute("aria-busy") ?? "",
+          line: document.getElementById("teach-progress")?.textContent ?? "",
+        };
+      });
+      check(/starting/i.test(waiting.text) && waiting.busy === "true" && /recording/i.test(waiting.line),
+        "the page says the box is starting while the start is still in flight", JSON.stringify(waiting));
+      // The modal is a claim that ffmpeg is rolling, so it must not appear before the host says so
+      // and it must appear once the host has. Both directions are one wait.
+      const opened = await until(() => page.evaluate(() => (document.getElementById("teach-dialog")?.open === true ? true : null)), 20_000, 500);
+      check(opened === true, "clicking Learn opens the recording dialog once the host confirms the recording");
+      const hostStatus = await gw("getTeachRecordingStatus").catch(() => null);
+      check(hostStatus?.state === "recording" && hostStatus?.agentId === probeAgentId, "and the host reports that same agent recording", JSON.stringify(hostStatus));
+      teachSessionDir = (await teachSessionDirs()).find((dir) => !before.has(dir)) ?? null;
+      if (teachSessionDir) teachDirsMade.add(teachSessionDir);
+      check(teachSessionDir != null, "a session directory appeared on the box for the recording", teachSessionDir ?? "");
+      // The positive control for the check after the discard: an empty pgrep only means something
+      // once it has been seen non-empty for this same recording.
+      const rolling = (await box("pgrep -a ffmpeg || true")).out.split("\n").filter((line) => teachSessionDir && line.includes(teachSessionDir));
+      check(rolling.length > 0, "and an ffmpeg on the box is writing it", rolling.join(" ").slice(0, 160));
+
+      // The timer has to be the recording's, not a still frame: two samples across a second.
+      const first = await page.evaluate(() => document.getElementById("teach-timer")?.textContent ?? "");
+      await page.waitForTimeout(1500);
+      const second = await page.evaluate(() => document.getElementById("teach-timer")?.textContent ?? "");
+      check(first !== "" && first !== second, "the dialog's timer is running", `${first} then ${second}`);
+
+      // A control whose textContent is right and whose pixels are off screen is the bug the
+      // operator reported, and the old checks could not tell the two apart: the frame is a fixed
+      // height that clips, Playwright clicks at viewport coordinates, so page.click succeeded on a
+      // button no human could see. Ask the two questions a person asks -- is it inside the frame,
+      // and does a click at its centre land on it.
+      const painted = await page.evaluate(() => {
+        const frame = document.querySelector(".teach-frame")?.getBoundingClientRect();
+        if (!frame) return { error: "no teach frame" };
+        const err = document.getElementById("teach-error");
+        const wasHidden = err?.hidden ?? true;
+        if (err) { err.hidden = false; err.textContent = "Clicking outside does not stop the recording."; }
+        const look = (id) => {
+          const el = document.getElementById(id);
+          if (!el || el.hidden) return { id, missing: true };
+          const box = el.getBoundingClientRect();
+          const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          return { id, inside: box.bottom <= frame.bottom + 1 && box.top >= frame.top - 1, hits: hit === el || el.contains(hit) };
+        };
+        const seen = ["discard-teach", "finish-teach", "teach-keyboard", "teach-error"].map(look);
+        if (err) err.hidden = wasHidden;
+        return { seen, clipped: document.querySelector(".teach-frame").scrollHeight > document.querySelector(".teach-frame").clientHeight + 1 };
+      });
+      const unpainted = (painted.seen ?? []).filter((el) => el.missing || !el.inside);
+      check(unpainted.length === 0 && painted.clipped === false, "every control in the dialog's footer is painted inside the frame", JSON.stringify(painted).slice(0, 240));
+      const unclickable = (painted.seen ?? []).filter((el) => (el.id === "discard-teach" || el.id === "finish-teach") && !el.hits);
+      check(unclickable.length === 0, "and a click at each stop button's centre lands on that button", JSON.stringify(unclickable));
+
+      // MR-14: a reload in the middle of a recording has to come back into that same recording,
+      // on the host's clock rather than a fresh 00:00, and the way out of the resumed dialog has
+      // to reach the box like any other.
+      const clockSeconds = (text) => { const m = /(\d+):(\d+)/.exec(String(text ?? "")); return m ? Number(m[1]) * 60 + Number(m[2]) : -1; };
+      await page.reload({ waitUntil: "load" }); await page.waitForTimeout(4500);
+      const resumed = await until(() => page.evaluate(() => (document.getElementById("teach-dialog")?.open === true ? document.getElementById("teach-timer")?.textContent ?? "" : null)), 20_000, 500);
+      check(resumed != null && clockSeconds(resumed) >= clockSeconds(second), "a reload during a recording reopens the dialog on the host's elapsed time", `${second} before the reload, ${resumed ?? "no dialog"} after`);
+
+      // Escape is the operator's habitual dismiss and it did nothing at all: the live screen is a
+      // VNC client served from another port, so its iframe is a separate process. It focuses
+      // itself on connect and then keeps every key -- blurring it moves document.activeElement
+      // back to this page and moves no keys, so activeElement is the one value a dead dialog also
+      // reports correctly. Ask instead what the operator would notice: whether a typed note
+      // arrives, and whether Escape reaches the box, with nothing in this dialog clicked.
+      const focusTag = () => page.evaluate(() => document.activeElement?.tagName ?? "");
+      const dialogFrames = () => page.evaluate(() => document.querySelectorAll("#teach-dialog iframe").length);
+      await page.waitForTimeout(3000);
+      const restingFocus = await focusTag();
+      check(restingFocus !== "IFRAME", "the live screen does not hold the keyboard while nobody asked it to", `activeElement ${restingFocus}`);
+      check(await page.evaluate(() => document.querySelector(".teach-shield")?.hidden === false), "and the screen is covered until the operator asks for it");
+      const restingFrames = await dialogFrames();
+      check(restingFrames === 0, "and no screen client is mounted behind the cover, which is what leaves the keys with the page", `${restingFrames} iframes in the dialog`);
+      // The proof activeElement cannot give: characters that arrive, and keydowns this page saw.
+      await page.evaluate(() => { window.__gateKeys = []; document.addEventListener("keydown", (event) => window.__gateKeys.push(event.key), true); });
+      const typedNote = "gate typed this with nothing clicked";
+      await page.keyboard.type(typedNote);
+      const typedState = await page.evaluate(() => ({ value: document.getElementById("teach-note")?.value ?? "", keys: (window.__gateKeys ?? []).length }));
+      check(typedState.value === typedNote, "a note typed on a dialog nobody has clicked reaches the dialog, not the recorded desktop", JSON.stringify(typedState).slice(0, 160));
+      check(typedState.keys >= typedNote.length, "and this page sees those keys rather than only believing it has them", `${typedState.keys} keydowns for ${typedNote.length} characters`);
+
+      // The fix itself: a way out that stops the box, pressed the way an operator presses it --
+      // first thing, nothing clicked. Taken from the resumed dialog, which is the harder half:
+      // nothing in this page started that recording.
+      await page.keyboard.press("Escape");
+      const escapeClosed = await until(() => page.evaluate(() => (document.getElementById("teach-dialog")?.open === false ? true : null)), 12_000, 500);
+      check(escapeClosed === true, "Escape closes the recording dialog");
+      const escapeIdle = await until(async () => ((await gw("getTeachRecordingStatus").catch(() => null))?.state === "idle" ? true : null), 15_000, 1000);
+      check(escapeIdle === true, "and the host reports the recording idle, so Escape reached the box");
+      // Asked without naming the path: the box's shell echoes the command it was given, so a
+      // grep for the video would match its own command line and never fail.
+      const afterEscape = (await box("pgrep -a ffmpeg || true")).out.split("\n").filter((line) => teachSessionDir && line.includes(teachSessionDir));
+      check(afterEscape.length === 0, "and no ffmpeg is still writing that recording", afterEscape.join(" ").slice(0, 160));
+
+      // Discard is the other way out, on a second recording this page did start. The reload above
+      // put the page back on its default agent, so the probe has to be selected again first:
+      // without that, this click starts a recording on a production agent's screen, and the host
+      // measured it as one -- {"agentId":"4ef9b708-..."} for a dialog titled with the probe.
+      await clickText(probeName); await page.waitForTimeout(1000);
+      await page.click("#open-desktop"); await page.waitForTimeout(1200);
+      const beforeSecond = new Set(await teachSessionDirs());
+      await page.click("#teach-button");
+      const reopened = await until(() => page.evaluate(() => (document.getElementById("teach-dialog")?.open === true ? true : null)), 30_000, 500);
+      check(reopened === true, "a second Learn click opens the dialog on a second recording");
+      teachSessionDir = (await teachSessionDirs()).find((dir) => !beforeSecond.has(dir)) ?? teachSessionDir;
+      if (teachSessionDir) teachDirsMade.add(teachSessionDir);
+      const secondRolling = (await box("pgrep -a ffmpeg || true")).out.split("\n").filter((line) => teachSessionDir && line.includes(teachSessionDir));
+      check(secondRolling.length > 0, "and an ffmpeg on the box is writing it", secondRolling.join(" ").slice(0, 160));
+      // The host's start() hands back whatever recording is already running, so a dialog can be
+      // titled for one agent over another agent's screen. Nothing but the host's own attribution
+      // says which agent this second recording belongs to.
+      const secondStatus = await gw("getTeachRecordingStatus").catch(() => null);
+      check(secondStatus?.state === "recording" && secondStatus?.agentId === probeAgentId, "and the host attributes it to the probe, not to another agent", JSON.stringify(secondStatus));
+
+      // Taking control has to work, or this dialog cannot be used to demonstrate anything -- and
+      // giving it back has to work, or the keyboard stays with the box for the rest of the
+      // recording. Both are measured on the frame, not on activeElement.
+      const coverReady = await until(() => page.evaluate(() => (/Click here to work on this screen/.test(document.querySelector(".teach-shield")?.textContent ?? "") ? true : null)), 40_000, 500);
+      check(coverReady === true, "the cover offers the screen once the box has given the probe one");
+      await page.click(".teach-shield"); await page.waitForTimeout(2500);
+      const control = await page.evaluate(() => ({ tag: document.activeElement?.tagName ?? "", frames: document.querySelectorAll("#teach-dialog iframe").length }));
+      check(control.frames === 1 && control.tag === "IFRAME", "clicking the cover mounts the screen and hands it the keyboard", JSON.stringify(control));
+      await page.click("#teach-note"); await page.waitForTimeout(1500);
+      const returned = await page.evaluate(() => {
+        const note = document.getElementById("teach-note");
+        if (note) note.value = "";
+        return { tag: document.activeElement?.tagName ?? "", frames: document.querySelectorAll("#teach-dialog iframe").length };
+      });
+      check(returned.frames === 0 && returned.tag !== "IFRAME", "clicking back into the dialog unmounts the screen and takes the keyboard back", JSON.stringify(returned));
+      await page.keyboard.type("back on the page");
+      const backOnPage = await page.evaluate(() => document.getElementById("teach-note")?.value ?? "");
+      check(backOnPage === "back on the page", "and typing lands in the dialog again, not on the recorded desktop", JSON.stringify(backOnPage));
+
+      // A click outside the frame used to throw the recording away with no confirmation. The
+      // dialog is modal, so every click on the page lands on it: measured, the frame is 1100x760
+      // in a 1440x1000 viewport, which made about 42% of the screen a silent destroy button.
+      await page.mouse.click(8, 8); await page.waitForTimeout(1500);
+      const afterStray = await gw("getTeachRecordingStatus").catch(() => null);
+      check(await page.evaluate(() => document.getElementById("teach-dialog")?.open === true), "a stray click outside the dialog does not close it");
+      check(afterStray?.state === "recording" && afterStray?.agentId === probeAgentId, "and the box is still recording", JSON.stringify(afterStray));
+      check(await page.evaluate(() => /does not stop the recording/i.test(document.getElementById("teach-error")?.textContent ?? "")), "and the dialog says so where it can be read, not in a toast behind the modal");
+
+      await page.click("#discard-teach");
+      const closed = await until(() => page.evaluate(() => (document.getElementById("teach-dialog")?.open === false ? true : null)), 20_000, 500);
+      check(closed === true, "Discard closes the dialog");
+      const idle = await until(async () => ((await gw("getTeachRecordingStatus").catch(() => null))?.state === "idle" ? true : null), 15_000, 1000);
+      check(idle === true, "and the host reports the recording idle, so the stop reached the box");
+      const ffmpeg = (await box("pgrep -a ffmpeg || true")).out.split("\n").filter((line) => teachSessionDir && line.includes(teachSessionDir));
+      check(ffmpeg.length === 0, "and no ffmpeg is still writing that agent's recording", ffmpeg.join(" ").slice(0, 160));
+      const toast = await page.evaluate(() => document.getElementById("toast")?.textContent ?? "");
+      check(/discard/i.test(toast), "and the page says the recording was discarded, not saved", toast.slice(0, 120));
+
+      // A saved recording ends in a learning turn that writes a skill, and an open Skills panel has
+      // to show it with no reload. Nothing polls for that: loadContext re-reads getAgentWorkflows
+      // on every refresh already. So put a workflow on the host the way the learning turn does and
+      // wait for the open panel to pick it up on its own. No model turn is spent to prove it.
+      libraryBefore = await libraryIds(probeAgentId).catch(() => null);
+      await page.click('[data-capability="skills"]'); await page.waitForTimeout(2500);
+      check(await page.evaluate(() => /skill library/i.test(document.getElementById("panel-content")?.innerText ?? "")), "the Skills panel opens for the probe");
+      const learnedName = `Gate learned skill ${Date.now()}`;
+      await gw("createAgentWorkflow", { id: probeAgentId, spec: { name: learnedName, description: "written the way a learning turn writes one", body: "Do the demonstrated task.", trigger: null } }).catch((e) => check(false, "a workflow could be written to the host", e.message));
+      const listed = await until(() => page.evaluate((name) => (document.getElementById("panel-content")?.innerText.includes(name) ? true : null), learnedName), 22_000, 1000);
+      check(listed === true, "a skill that lands on the host during a turn shows up in the open Skills panel with no reload");
+      await page.keyboard.press("Escape"); await page.waitForTimeout(600);
+
+      // With the switch off there is nothing to stop, so there must be no dialog -- and the page
+      // has to name the switch, because the operator is the only one who can flip it.
+      check(await writeSetting("SAND_TEACH", "0"), "SAND_TEACH can be set back to 0 for the refusal pass");
+      await page.click("#open-desktop"); await page.waitForTimeout(1200);
+      await page.click("#teach-button"); await page.waitForTimeout(3000);
+      check(await page.evaluate(() => document.getElementById("teach-dialog")?.open === false), "a refused start opens no dialog");
+      const refusal = await page.evaluate(() => ({
+        inline: document.getElementById("teach-refusal")?.textContent ?? "",
+        body: document.body.innerText,
+      }));
+      check(/SAND_TEACH/.test(refusal.inline), "the reason is on screen beside the button that was clicked", refusal.inline.slice(0, 140));
+      // "Beside" is a geometric claim, and it was 719px below the button and at the other end of
+      // the dialog, next to Pause. Measure it instead of asserting the text and calling it beside.
+      const beside = await page.evaluate(() => {
+        const line = document.getElementById("teach-refusal"), button = document.getElementById("teach-button");
+        if (!line || line.hidden || !button) return { missing: true };
+        const a = line.getBoundingClientRect(), b = button.getBoundingClientRect();
+        return { gap: Math.round(Math.min(Math.abs(b.left - a.right), Math.abs(a.left - b.right))), rows: Math.round(Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2)) };
+      });
+      check(beside.missing !== true && beside.gap <= 48 && beside.rows <= 40, "and it is drawn beside that button rather than at the far edge of the dialog", JSON.stringify(beside));
+      check(/Teach mode is off on this host/.test(refusal.body), "and the page text says teach mode is off on this host");
+      check((await gw("getTeachRecordingStatus").catch(() => null))?.state === "idle", "and nothing started on the box");
+    }
   } else {
     // -- MR-06 and GW-03(a): one probe turn serves both. The prompt goes through the composer, so
     // the acceptance state the composer shows is asserted against the host's own ledger for the
@@ -1020,7 +1303,21 @@ try {
     check(left.length === 0, "every skill the gate imported or ported is gone from the shared library", `${added.length} removed, ${left.length} left`);
   } else if (probeAgentId) console.log("  INFO  workflow library snapshot missing; imported skills NOT swept");
   if (copyAgentId) await gw("deleteAgent", { id: copyAgentId }).then(() => console.log("  INFO  duplicate copy swept")).catch((e) => console.log(`  INFO  duplicate copy NOT deleted: ${e.message}`));
-  if (probeAgentId) await gw("deleteAgent", { id: probeAgentId }).then(() => console.log("  INFO  unread probe agent deleted")).catch((e) => console.log(`  INFO  unread probe agent NOT deleted: ${e.message}`));
+  // The recording has to be stopped BEFORE the agent is deleted, and on every exit path. Any throw
+  // in the teach pass drops straight into this block with the host still holding `active`, and the
+  // host's start() short-circuits on any live recording: every later startTeachRecording, for any
+  // agent, comes back as that dead one for the full ten-minute cap. When the cap does fire it
+  // saves and dispatches a learning turn for an agent that no longer exists, leaving a signed
+  // queue file under a scope no live agent hashes to, which recoverPending can neither deliver nor
+  // quarantine. Same order scripts/verify-teach.mjs uses: stop, wait for idle, sweep the scope.
+  if (TEACH && probeAgentId) {
+    await gw("stopTeachRecording", { agentId: probeAgentId, save: false }).catch(() => {});
+    const idle = await until(async () => ((await gw("getTeachRecordingStatus").catch(() => null))?.state === "idle" ? true : null), 15_000, 1000);
+    console.log(`  INFO  teach recording ${idle ? "is idle on the host" : "is NOT idle on the host; the box may still be recording"}`);
+    const scope = createHash("sha256").update(probeAgentId).digest("hex");
+    await box(`rm -rf /workspace/teach-sessions/queues/${scope}`).then(() => console.log(`  INFO  teach queue scope ${scope.slice(0, 12)} swept`)).catch(() => {});
+  }
+  if (probeAgentId) await gw("deleteAgent", { id: probeAgentId }).then(() => console.log("  INFO  probe agent deleted")).catch((e) => console.log(`  INFO  probe agent NOT deleted: ${e.message}`));
   // The probe connector and anything the gate stored for it, in the one order that works: the
   // host resolves a connector secret through connectors.json, so the row has to be back in the
   // file before the value can be taken out of the store, and only then does the row go.
@@ -1052,7 +1349,15 @@ try {
       console.log(`  INFO  probe connector ${put?.ok ? "swept from" : "NOT removed from"} connectors.json`);
     }
   }
-  if (!OFFLINE && !LEAKS) await box(`rm -f /workspace/${PROBE_MCP_FILE}`).catch(() => {});
+  for (const dir of teachDirsMade) await box(`rm -rf ${dir}`).then(() => console.log(`  INFO  teach session ${dir} swept`)).catch(() => {});
+  if (teachSettingTouched) {
+    // Back to exactly what the box held. Restoring "1" onto a box that held nothing turned teach
+    // recording on for good and called it a restore in the log.
+    const ok = await writeSetting("SAND_TEACH", KEEP_TEACH_SETTING ? "1" : teachSettingBefore);
+    const left = KEEP_TEACH_SETTING ? "1" : (teachSettingBefore ?? null);
+    console.log(`  INFO  SAND_TEACH ${ok ? "left at" : "NOT restored to"} ${JSON.stringify(left)} (found ${JSON.stringify(teachSettingBefore ?? null)})`);
+  }
+  if (!OFFLINE && !LEAKS && !TEACH) await box(`rm -f /workspace/${PROBE_MCP_FILE}`).catch(() => {});
   if (previousRow) { await relay("/endpoints/use", { id: previousRow.id }).catch(() => {}); console.log(`  INFO  box restored to ${previousRow.name}`); }
   else console.log("  INFO  box left where the gate found it (no catalog row matched the live endpoint)");
 }

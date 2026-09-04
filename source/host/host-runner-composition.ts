@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getSandRootDir } from "./host-paths.js";
 import {
@@ -657,8 +657,15 @@ const SYSTEM_PROMPT_SECTION_MARKERS: Readonly<Record<string, string>> = {
   mcpCustomInstructions: "Custom instructions are configured for some connected tools",
 };
 
+// Reports outlive their agents (91 of them on one box after a day of probes). Once per host life,
+// on the first write, drop the ones whose agent directory is gone.
+let sweptStaleReports = false;
+function sweepStaleSystemPromptReports(root: string): void {
+  try { for (const name of readdirSync(root)) { const m = /^sand-system-prompt-(.+)\.json$/.exec(name); const agentId = m?.[1]; if (agentId != null && !existsSync(join(root, "agents", agentId))) rmSync(join(root, name), { force: true }); } } catch {}
+}
 function dumpAssembledSystemPrompt(agentId: string, prompt: string): string {
   if (!isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) return prompt;
+  if (!sweptStaleReports) { sweptStaleReports = true; sweepStaleSystemPromptReports(getSandRootDir()); }
   try {
     writeFileSync(
       join(getSandRootDir(), `sand-system-prompt-${agentId}.json`),

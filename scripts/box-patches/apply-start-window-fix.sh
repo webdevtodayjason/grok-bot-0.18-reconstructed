@@ -101,7 +101,7 @@ docker exec -i "$BOX" python3 - <<'PY'
 # subagent's seat after its run, a stopped fork that came back), and is torn down and rebuilt.
 p = "/usr/local/bin/start-window"
 s = open(p).read()
-if "refuse only a live seat" in s:
+if "refuse only a live seat" in s or "adopting the seat" in s:
     print("live-seat rule already patched")
 else:
     old = '''\telif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
@@ -132,3 +132,28 @@ PY
 docker exec "$BOX" sh -n /usr/local/bin/start-window
 docker exec "$BOX" sh -n /usr/local/bin/stop-window
 echo "start-window and stop-window patched and syntax-checked on $BOX"
+
+docker exec -i "$BOX" python3 - <<'PY'
+# DISPLAY-4 (2026-09-04). The host is the only allocator of fork windows, so a live seat whose token
+# the host did not issue is one the host lost (a bring-up that outlived its agent's deletion, or a
+# host restart that could not read its assignments). Refusing it wedged every new agent onto the
+# same lowest free index until the container restarted. Adopt it: tear the seat down and rebuild.
+p = "/usr/local/bin/start-window"
+s = open(p).read()
+if "adopting the seat" in s:
+    print("adopt rule already patched")
+else:
+    old = '''\telif [ "${current_binding}" != "${OWNER_TOKEN}" ] && daemon_alive; then
+\t\t# refuse only a live seat: a dead daemon means nobody is driving this display
+\t\techo "sand window ${DISPLAY_NUM}: display owned by a different token; refusing to adopt" >&2
+\t\texit "${WINDOW_UNAVAILABLE_EXIT_CODE}"
+\telif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
+\t\techo "sand window ${DISPLAY_NUM}: display held by a dead seat (token differs, no daemon); tearing it down" >&2'''
+    new = '''\telif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
+\t\t# the host is the only allocator: a seat it did not issue is one it lost, whether or not a daemon answers
+\t\techo "sand window ${DISPLAY_NUM}: display held by a token the host did not issue; tearing it down and adopting the seat" >&2'''
+    assert old in s, "live-seat refusal not found"
+    s = s.replace(old, new, 1)
+    open(p, "w").write(s)
+    print("adopt rule patched")
+PY

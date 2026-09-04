@@ -46,12 +46,9 @@ if [ -n "${OWNER_TOKEN}" ] && display_alive; then
 		pkill -f "DISPLAY=:${DISPLAY_NUM}" 2>/dev/null || true
 		sleep 1
 		rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
-	elif [ "${current_binding}" != "${OWNER_TOKEN}" ] && daemon_alive; then
-		# refuse only a live seat: a dead daemon means nobody is driving this display
-		echo "sand window ${DISPLAY_NUM}: display owned by a different token; refusing to adopt" >&2
-		exit "${WINDOW_UNAVAILABLE_EXIT_CODE}"
 	elif [ "${current_binding}" != "${OWNER_TOKEN}" ]; then
-		echo "sand window ${DISPLAY_NUM}: display held by a dead seat (token differs, no daemon); tearing it down" >&2
+		# the host is the only allocator: a seat it did not issue is one it lost, whether or not a daemon answers
+		echo "sand window ${DISPLAY_NUM}: display held by a token the host did not issue; tearing it down and adopting the seat" >&2
 		pkill -f "Xvfb :${DISPLAY_NUM} " 2>/dev/null || true
 		pkill -f "DISPLAY=:${DISPLAY_NUM}" 2>/dev/null || true
 		sleep 1

@@ -80,6 +80,31 @@ test("resolveBrowserUseEnabled: an explicit override decides, otherwise the gate
   assert.equal(mod.resolveBrowserUseEnabled(undefined, () => false), false);
 });
 
+// Teach recording read the Statsig gate directly, which is false on any box without a
+// Cursor login, so startTeachRecording could never succeed here. Same resolver shape as browser use.
+test("resolveTeachEnabled: an explicit override decides, otherwise the gate", () => {
+  assert.equal(mod.SAND_TEACH_SETTING, "SAND_TEACH");
+  assert.equal(mod.resolveTeachEnabled("1", () => false), true);
+  assert.equal(mod.resolveTeachEnabled("true", () => false), true);
+  assert.equal(mod.resolveTeachEnabled("0", () => true), false);
+  assert.equal(mod.resolveTeachEnabled("false", () => true), false);
+  assert.equal(mod.resolveTeachEnabled("FALSE", () => true), false);
+  assert.equal(mod.resolveTeachEnabled(undefined, () => true), true);
+  assert.equal(mod.resolveTeachEnabled(undefined, () => false), false);
+  assert.equal(mod.resolveTeachEnabled("", () => true), true, "an empty value is not an override");
+});
+
+test("the teach switch reads out of the same host settings file", () => {
+  write("sand-host-settings.json", { SAND_TEACH: "1", SAND_BROWSER_USE: "0" });
+  assert.equal(mod.readSandBoxSetting(mod.SAND_TEACH_SETTING), "1");
+  assert.equal(mod.resolveTeachEnabled(mod.readSandBoxSetting(mod.SAND_TEACH_SETTING), () => false), true);
+  // The resolver treats an empty string as "no override", and the reader never hands one out, so
+  // the gate table cannot credit a switch that decided nothing.
+  write("sand-host-settings.json", { SAND_TEACH: "", SAND_BROWSER_USE: "  " });
+  assert.equal(mod.readSandBoxSetting(mod.SAND_TEACH_SETTING), undefined);
+  assert.equal(mod.readSandBoxSetting(mod.SAND_BROWSER_USE_SETTING), undefined);
+});
+
 // GC-1. The maintenance switches (stale-root GC, legacy blob retirement, conversation GC) read an
 // env object; on a running box only the settings file can change, so the helpers now default to
 // process.env with the file's values layered in. Only the named keys are consulted.

@@ -295,16 +295,21 @@
         return emit("settings:auto-review", clone(state.settings.autoReview));
       },
 
+      // Both resolve the same shape the gateway adapter answers with, because the view waits on
+      // the host before it opens or closes the recording dialog. Nothing records offline; this
+      // path exists so the dialog can still be looked at with no gateway.
       startTeaching(workerId) {
-        state.teaching = { active: true, workerId, startedAt: Date.now() };
-        return emit("teaching:started", { workerId });
+        state.teaching = { active: true, workerId, startedAt: Date.now(), maxDurationMs: null };
+        emit("teaching:started", { workerId });
+        return Promise.resolve({ ok: true, workerId, startedAt: state.teaching.startedAt, maxDurationMs: null });
       },
 
-      finishTeaching() {
-        if (!state.teaching.active) return clone(state);
+      finishTeaching(save = true) {
+        if (!state.teaching.active) return Promise.resolve({ ok: true, saved: Boolean(save), workerId: null });
         const workerId = state.teaching.workerId;
         state.teaching = { active: false, workerId: null, startedAt: null };
-        return emit("teaching:finished", { workerId });
+        emit("teaching:finished", { workerId, saved: Boolean(save) });
+        return Promise.resolve({ ok: true, saved: Boolean(save), workerId });
       },
 
       setRunPaused(paused) {

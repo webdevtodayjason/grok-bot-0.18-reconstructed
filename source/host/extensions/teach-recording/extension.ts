@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { createDebouncePolicy, realClock } from "../../../internal/scheduling.js";
 import { SAND_TEACH_MAX_DURATION_MS } from "../../../shared/agents/teach-recording.js";
 import { getSandRootDir } from "../../host-paths.js";
+import { readSandBoxSetting, resolveTeachEnabled, SAND_TEACH_SETTING } from "../../sand-box-setting.js";
 import type { HostBox } from "../forever-box/host-box.js";
 import { createTeachRecordingService, LEARN_SKILL_NAME } from "./teach-recording-service.js";
 
@@ -31,7 +32,9 @@ export const teachRecordingExtension = {
     const analytics = context.deps.telemetry.analytics;
     const service = createTeachRecordingService({
       box: context.deps["forever-box"].box,
-      isEnabled: () => context.deps.experiments.checkFeatureGate("sand_teach_by_demonstration"),
+      // Read the switch on every call, never once at start: the operator flips
+      // sand-host-settings.json on a running box and must not have to restart the host to try it.
+      isEnabled: () => resolveTeachEnabled(readSandBoxSetting(SAND_TEACH_SETTING), () => context.deps.experiments.checkFeatureGate("sand_teach_by_demonstration")),
       capPolicy: createDebouncePolicy(realClock, { name: "teach-recording-cap", delayMs: SAND_TEACH_MAX_DURATION_MS + CAP_SLACK_MS }),
       sendLearningPrompt: (agentId, prompt) => context.deps.transcript.sendPrompt(prompt.content, { agentId, clientNonce: prompt.clientNonce, directAddressedAcceptance: true, awaitTurn: false, richText: prompt.richText }),
       listAgentIds: () => context.deps.transcript.listAgentIds(),

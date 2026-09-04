@@ -1,5 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { getSandRootDir } from "../../host-paths.js";
 import { isSandAgentLimitError } from "../../../shared/agents/agents.js";
 import { errorLogTag } from "../../../shared/errors.js";
 import {
@@ -388,6 +389,7 @@ export class AgentLifecycle {
       this.tm.sessions.pendingSessionOpens.delete(id);
       await this.tm.sessionStore.deleteSession(id);
       await this.releaseBoxWindow(id);
+      rmSync(join(getSandRootDir(), `sand-system-prompt-${id}.json`), { force: true });
       this.tm.onAgentForgotten?.(id);
       this.tm.pendingWakeStore?.clearAgent(id);
       this.tm.boxHandoff.boxHandoffs.delete(id);

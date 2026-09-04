@@ -130,8 +130,29 @@ One correction to the audit itself before you use it: the dock row "Dock button:
 **Needs a run-control command (gateway has none — the old UI said so and shipped a label instead):**
 - Pause / Resume — `setRunPaused()` comment: *"Presentation only: this pauses the operator's view of the desktop, not the worker."* Old UI, `index.html:367-368`: *"a pause … needs a stop command the gateway does not have -- so this reports state rather than pretending to control it."* That UI rendered a non-clickable "Running" label. This one shipped the button.
 
-**Needs a demonstration-capture pipeline (nothing exists, not even client-side):**
-- "● Teach this task", "■ Finish recording", and Esc-cancel (`app.js:1102-1104` runs the identical `finishTeachMode()` path — abandoning the dialog is indistinguishable from completing it and still fabricates the skill card).
+**Demonstration capture: CLOSED.** The host records with ffmpeg on the agent's own display behind
+the `SAND_TEACH` setting, queues the video and dispatches a learning turn (`scripts/verify-teach.mjs`).
+The page half followed: the dialog opens only on a confirmed `startTeachRecording`, Discard and
+Escape both call `stopTeachRecording {save:false}`, a click outside the modal deliberately calls
+nothing, and no skill card is fabricated. Escape works because nothing else in the dialog can hold
+the keyboard: the live screen is a VNC client served from another port, so its iframe is a separate
+process that focuses itself on connect and then keeps every key -- blurring it puts
+`document.activeElement` back on the page while the keys still go to the box, which was measured as
+a dead Escape and a note typed onto the recorded desktop. So the client is mounted only while the
+operator has asked for the screen, and asking for it back removes the frame. Covered by
+`node scripts/verify-dashboard.mjs --teach`, which now types a note and presses Escape on a dialog
+nothing has clicked.
+
+Three things about that dialog were still not true and now are. Its footer was laid out below the
+frame's clipped bottom edge -- `.teach-canvas` subtracted a header and a footer from a fixed-height
+frame that also holds the note field -- so both stop buttons, the Escape hint, the stop-error line
+and the sentence saying a saved demonstration leaves the machine were never painted; the frame is a
+flex column now and the gate hit-tests each control against the frame. The dialog never asked the
+host anything after it opened, so a recording the ten-minute cap had already saved kept a pulsing
+record dot and a running timer, and the next Discard click was announced as a discard of a
+recording that had been saved and handed to the model; the dialog polls `getTeachRecordingStatus`
+and a stop reads the host before it stops it. And the note's hint claimed it was read next to the
+extracted frames, which the seeded recipe never does.
 
 **Needs a policy/approval engine (gateway has no approval command; closest is host-wide `localToolPermission`):**
 - "✓ Allow once" / "↗ Always allow" — `decideApproval()` → `notWired("Approval cards")`, then `app.js:1049` fires `"Approval rule saved for Context7"` regardless.

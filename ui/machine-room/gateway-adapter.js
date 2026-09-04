@@ -2273,44 +2273,107 @@
       startTeaching(workerId) {
         const id = workerId ?? state.activeContext?.id;
         const worker = state.workers.find((w) => w.id === id);
-        if (!worker) return clone(state);
-        state.teaching = { active: true, workerId: id, startedAt: Date.now() };
-        const snapshot = emit("teaching:started", { workerId: id });
-        call("startTeachRecording", { agentId: id })
+        if (!worker) return Promise.resolve({ ok: false, reason: "unknown-agent", message: "That agent is not on this host." });
+        // The recording dialog is a claim that ffmpeg is rolling on the box, so nothing is set
+        // here until the host says it is. This used to flip state.teaching on the click and let
+        // the view open the modal beside a start the host had refused.
+        return call("startTeachRecording", { agentId: id })
           .then((status) => {
+            if (status?.state !== "recording") {
+              return { ok: false, reason: "not-recording", message: `The host answered ${JSON.stringify(status?.state ?? null)} instead of starting a recording.` };
+            }
+            // The host's start() short-circuits on any recording already running and answers with
+            // THAT recording, so a click on a second agent comes back as a success carrying the
+            // first agent's id. Taking it would title a dialog for this agent over another
+            // agent's screen, on a clock that started before the click.
+            const owner = status.agentId ?? id;
+            if (owner !== id) {
+              const other = state.workers.find((w) => w.id === owner);
+              const message = `${other?.name ?? "Another agent"} is already recording on this box. Finish or discard that recording before starting another.`;
+              emit("teaching:failed", { workerId: id, reason: "busy", message });
+              return { ok: false, reason: "busy", message };
+            }
             // Trust the host's clock, not ours: the elapsed time an operator reads has to be the
             // recording's, or a ten-minute cap arrives sooner than the timer says it will.
             state.teaching = {
-              active: status?.state === "recording",
-              workerId: status?.agentId ?? id,
-              startedAt: status?.startedAtMs ?? Date.now(),
-              maxDurationMs: status?.maxDurationMs ?? null,
+              active: true,
+              workerId: status.agentId ?? id,
+              startedAt: status.startedAtMs ?? Date.now(),
+              maxDurationMs: status.maxDurationMs ?? null,
             };
-            emit("teaching:started", { workerId: id });
+            emit("teaching:started", { workerId: state.teaching.workerId });
+            return { ok: true, workerId: state.teaching.workerId, startedAt: state.teaching.startedAt, maxDurationMs: state.teaching.maxDurationMs };
           })
           .catch((error) => {
+            const message = String(error?.message ?? error);
             state.teaching = { active: false, workerId: null, startedAt: null };
-            emit("teaching:finished", { workerId: id });
-            failed(`Recording could not start: ${error.message}`);
+            // The two refusals an operator can act on carry their own code; everything else keeps
+            // the host's sentence, because inventing a friendlier one would hide what happened.
+            const reason = /feature gate is off/i.test(message) ? "gate-off"
+              : /private desktop monitor/i.test(message) ? "no-monitor"
+                : "host";
+            const failure = { ok: false, reason, message };
+            emit("teaching:failed", { workerId: id, reason, message });
+            return failure;
           });
-        return snapshot;
       },
 
+      // Both buttons land here; save is the only difference. It resolves once the host has
+      // answered, so the view can hold the dialog and the timer open until the box is idle --
+      // a closed modal over a live ffmpeg is the bug this replaces.
       finishTeaching(save = true, note = "") {
         const id = state.teaching?.workerId ?? state.activeContext?.id;
-        state.teaching = { active: false, workerId: null, startedAt: null };
-        const snapshot = emit("teaching:finished", { workerId: id });
-        if (!id) return snapshot;
-        // save:true is what queues demo.mp4 and dispatches the learning prompt. The agent's reply
-        // arrives through the transcript like any other turn, so nothing is fabricated here.
-        call("stopTeachRecording", { agentId: id, save })
-          // The host queues the recording and dispatches its own learning prompt. The operator's
-          // note is the part the agent can actually use, so it follows as a normal message rather
-          // than being dropped on the floor.
-          .then(() => (note ? call("sendPrompt", { agentId: id, prompt: `I just recorded a demonstration on your screen. What I did: ${note}` }) : null))
-          .then(() => reloadActive())
-          .catch((error) => failed(`Recording could not be saved: ${error.message}`));
-        return snapshot;
+        if (!id) return Promise.resolve({ ok: false, reason: "unknown-agent", message: "There is no recording to stop." });
+        // Read the host before stopping it. stop() answers a bare {state:"idle"} whenever it holds
+        // no recording, which is the same shape a real stop returns, so a click on a recording the
+        // ten-minute cap already finished came back here as a success and was announced as
+        // "Recording discarded" -- for a recording the box had saved, queued and handed to the
+        // model. An explicit idle is the only value that means "there was nothing to stop"; an
+        // unreadable status falls through to the stop, because refusing to stop on a failed read
+        // is the worse of the two mistakes.
+        return call("getTeachRecordingStatus").catch(() => null).then((before) => {
+          if (before?.state === "idle") {
+            state.teaching = { active: false, workerId: null, startedAt: null };
+            emit("teaching:finished", { workerId: id, saved: null });
+            return {
+              ok: true, saved: null, alreadyStopped: true, workerId: id,
+              message: "This box was no longer recording, so nothing here stopped it. The ten-minute cap ends a recording by saving it and starting the learning turn, so read the agent's transcript before recording again.",
+            };
+          }
+          return call("stopTeachRecording", { agentId: id, save })
+            .then((status) => {
+              if (status?.state !== "idle") {
+                return { ok: false, reason: "not-idle", message: `The host still reports the recording as ${String(status?.state ?? "unknown")}.` };
+              }
+              state.teaching = { active: false, workerId: null, startedAt: null };
+              emit("teaching:finished", { workerId: id, saved: Boolean(save) });
+              // save:true is what queues demo.mp4 and dispatches the learning prompt. The agent's
+              // reply arrives through the transcript like any other turn, so nothing is fabricated
+              // here. The operator's note is the part the agent can use, so it follows as a normal
+              // message rather than being dropped on the floor.
+              const settled = save && note
+                ? call("sendPrompt", { agentId: id, prompt: `I just recorded a demonstration on your screen. What I did: ${note}` })
+                  .catch((error) => { failed(`The recording was saved, but your note was not sent: ${error.message}`); return false; })
+                : Promise.resolve(null);
+              return settled.then((sent) => {
+                void reloadActive().catch(() => {});
+                return { ok: true, saved: Boolean(save), workerId: id, noteSent: save && note ? sent !== false : null };
+              });
+            })
+            .catch((error) => ({ ok: false, reason: "host", message: String(error?.message ?? error) }));
+        });
+      },
+
+      // What the open dialog polls. The host is the only thing that knows a recording ended -- the
+      // cap fires on the box, and nothing pushes that to the page -- so a dialog with no way to
+      // ask keeps a red dot pulsing and a timer counting over a recording that is already saved.
+      // null means the question could not be asked, which is not the same answer as "idle".
+      teachStatus() {
+        return call("getTeachRecordingStatus")
+          .then((status) => (status?.state === "recording"
+            ? { active: true, workerId: status.agentId ?? null, startedAt: status.startedAtMs ?? null, maxDurationMs: status.maxDurationMs ?? null }
+            : { active: false, workerId: null, startedAt: null, maxDurationMs: null }))
+          .catch(() => null);
       },
 
       // The view layer calls these directly for local echo; keep them local.

@@ -29,7 +29,7 @@ thing to check before trusting anything on screen.
 | **Routines → ＋ New routine** | `createAgentAutomation`. Seven trigger kinds — schedule, Slack, Git, Linear, Sentry, PagerDuty, Teams — and several at once become a group. The host validates and describes them back. |
 | Routines → Test run | `runAgentAutomationNow`, then the card shows the host's own outcome and measured duration. |
 | **Browser / Terminal** | That worker's own X display when it has a desktop session; otherwise the shared screen, and the caption says which. |
-| **Teach this task** | ffmpeg records that worker's screen on the box. |
+| **Learn this task** | ffmpeg records that worker's screen on the box, and the dialog opens only once the host reports the recording running. Finish recording queues the video and dispatches the learning turn; Discard and Escape both stop the recording on the box. Clicking outside the dialog does nothing, on purpose: the dialog is modal, so a mis-aimed click anywhere on the page used to land on it and throw a live demonstration away. The dialog opens with a cover where the screen goes and **no client behind it**, so the note, Escape and the buttons all get your keys. Clicking the cover connects the live screen, and from then on the keyboard is the box's, Escape included, so stop with the buttons; clicking anywhere else in the dialog disconnects it and takes the keys back. Needs `SAND_TEACH=1` in `sand-host-settings.json` and a desktop window for that agent. |
 | **Plugins → Connect** | Opens the platform's own authorisation page. No credential passes through the browser. |
 | **Settings → Model** | Switches the whole box's inference endpoint. Takes effect on the next message. |
 | **Settings → auto-review** | Writes a real policy the host enforces. |
@@ -44,8 +44,17 @@ thing to check before trusting anything on screen.
 - **Sheets** is not wired. There is no host command behind it.
 - **Per-agent models do not exist.** `updateAgent` takes only name, description and title, and
   there is no `agentDefaultModel`. One endpoint serves the whole box.
-- **The agent does not watch your teach recording.** It is saved on the box, and the agent learns
-  from the note you type plus the browsing it can see. Describe the task.
+- **A saved teach recording leaves the box.** The recipe the host seeds extracts two frames and
+  hands the video to a subagent, and both are read by the model this box talks to, which is a
+  remote provider. Discard keeps the recording on the box and sends nothing.
+- **The note you type is not part of the recipe.** `learn-from-demonstration` never mentions it,
+  and the host dispatches the learning turn from inside `stopTeachRecording` before the page sends
+  the note at all. It arrives as an ordinary message to the agent, possibly after the skill has
+  already been written.
+- **A recording that runs to the ten-minute cap is saved, not dropped.** The cap fires on the box
+  and stops the recording with `save:true`. The dialog polls `getTeachRecordingStatus` and closes
+  itself when that happens; a stop clicked afterwards reports that the box had already finished it
+  rather than claiming a save or a discard of its own.
 
 ## Things that will look like bugs and are not
 

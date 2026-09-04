@@ -384,6 +384,22 @@
   let selectedPluginId = "context7";
   let activeDesktopApp = "browser";
   let teachInterval = null;
+  // The dialog's clock is local; only the box knows a recording has ended. The ten-minute cap
+  // fires there, saves the recording and dispatches the learning turn, and nothing pushes that to
+  // this page -- so without this poll the red dot keeps pulsing over a recording that is already
+  // finished, and the next Discard click reports a save as a discard.
+  let teachPoll = null;
+  // True from a stop click until the host has answered it, so a second click cannot fire a second
+  // stopTeachRecording at a recording that is already being torn down.
+  let teachStopping = false;
+  // The live screen in the recording dialog is a real VNC client on another port, so its iframe is
+  // a separate process. It focuses itself when it connects, and from then on Chromium delivers
+  // every key to it -- blurring the element puts document.activeElement back on this page while
+  // the keys keep going to the box, which is a dialog that looks like it has the keyboard and
+  // does not. The only signal that cannot lie is whether the frame exists, so it is mounted only
+  // while the operator has asked for the screen and removed the moment they ask for it back.
+  let teachScreenControl = false;
+  let teachScreenUrl = "";
   let countdownInterval = null;
   let toastTimer = null;
   let rosterHidden = false;
@@ -918,6 +934,9 @@
 
   function closeOpenDialogs(except) {
     [elements.panelDialog, elements.desktopDialog, elements.teachDialog].forEach((dialog) => {
+      // The recording dialog is not a view that can be tidied away: dismissing it without stopping
+      // the host leaves ffmpeg writing with nothing on screen that says so.
+      if (dialog === elements.teachDialog && state.teaching?.active) return;
       if (dialog !== except && dialog.open) dialog.close();
     });
   }
@@ -982,6 +1001,10 @@
   // in front of this page implements the write, the way the Agent details panel guards its own.
   let editingSkillId = null;
   let armedDeleteSkillId = null;
+  // What the open Skills panel is currently showing, so a refresh that changed nothing does not
+  // rebuild the markup under the operator's hands.
+  let paintedSkillsSig = "";
+  const skillsSig = (worker) => (worker?.skills ?? []).map((skill) => `${skill.id}:${skill.enabled ? 1 : 0}:${skill.name}`).join("|");
 
   function skillCardMarkup(skill) {
     const canToggle = typeof adapter.setSkillEnabled === "function";
@@ -1030,14 +1053,31 @@
     armedDeleteSkillId = null;
     const worker = contextRecord();
     if (editingSkillId && !(worker.skills ?? []).some((skill) => skill.id === editingSkillId)) editingSkillId = null;
+    paintedSkillsSig = skillsSig(worker);
     openPanel("Agent skills", `${worker.name} skills`, skillsPanel(worker));
     // What is drawn came from the last refresh; read the host again so the panel opens on the
     // list as it is now, not as it was at the last tick.
     adapter.getSkills(worker.id)
       // A repaint disarms the delete, as every repaint must: a button reading "Delete" is never
       // one click from deleting.
-      .then((skills) => { worker.skills = skills; armedDeleteSkillId = null; if (elements.panelDialog.open && elements.panelEyebrow.textContent === "Agent skills") elements.panelContent.innerHTML = skillsPanel(worker); })
+      .then((skills) => { worker.skills = skills; armedDeleteSkillId = null; paintedSkillsSig = skillsSig(worker); if (elements.panelDialog.open && elements.panelEyebrow.textContent === "Agent skills") elements.panelContent.innerHTML = skillsPanel(worker); })
       .catch((error) => showToast(`Could not read this agent's skills: ${error.message}`));
+  }
+
+  // A learning turn ends with a new skill in the box's library, and this panel was painted once,
+  // when it opened. Nothing new is polled for it: loadContext already reads getAgentWorkflows on
+  // every refresh and applyLoaded puts the list on the record, so the panel only has to redraw
+  // when that list actually moved -- and never while the operator is typing into it.
+  function refreshOpenSkillsPanel() {
+    if (!elements.panelDialog.open || elements.panelEyebrow.textContent !== "Agent skills") return;
+    if (activeContext().kind !== "worker") return;
+    const worker = contextRecord();
+    const sig = skillsSig(worker);
+    if (!worker || sig === paintedSkillsSig) return;
+    if (elements.panelContent.contains(document.activeElement)) return;
+    paintedSkillsSig = sig;
+    armedDeleteSkillId = null;
+    elements.panelContent.innerHTML = skillsPanel(worker);
   }
 
   // Only the gateway adapter stores a secret; the offline demo factory discards it and resolves
@@ -1649,23 +1689,203 @@
   function showTeachDialog(worker, startedAt, maxDurationMs) {
     if (elements.desktopDialog.open) elements.desktopDialog.close();
     elements.teachTitle.textContent = `Recording ${worker.name}'s screen`;
-    // The dialog used to draw a fake ticket queue. Show the screen actually being recorded.
+    // The dialog used to draw a fake ticket queue. What belongs here is the screen actually being
+    // recorded -- but connecting it hands the keyboard to the box, so it starts as a cover and the
+    // client is not mounted until the operator clicks it.
+    teachScreenUrl = "";
+    renderTeachCover("Connecting to this agent's screen takes a moment. Click to work on it once it is ready.");
     ensureDesktop(worker.id).then((desk) => {
-      const live = document.getElementById("teach-live");
-      if (live) live.innerHTML = `<iframe src="${escapeHtml(desk.url)}" title="The screen being recorded" style="width:100%;height:100%;border:0;background:#0b0f13"></iframe>`;
-    }).catch(() => {});
+      teachScreenUrl = desk.url;
+      if (!teachScreenControl) renderTeachCover();
+    }).catch((error) => {
+      renderTeachCover(`This box gave no screen to show: ${error.message}. The recording is still running.`);
+    });
     const cap = Number(maxDurationMs) > 0 ? ` / ${clockText(Number(maxDurationMs))}` : "";
     const tick = () => { elements.teachTimer.textContent = `${clockText(Date.now() - startedAt)}${cap}`; };
     tick();
     if (!elements.teachDialog.open) elements.teachDialog.showModal();
     window.clearInterval(teachInterval);
     teachInterval = window.setInterval(tick, 250);
+    window.clearInterval(teachPoll);
+    teachPoll = window.setInterval(pollTeachHost, 5000);
+    // The note is where the keys should land, and saying so with the caret is clearer than any
+    // sentence in the footer.
+    document.getElementById("teach-note")?.focus();
   }
 
-  function openTeachMode() {
+  function stopTeachTimers() {
+    window.clearInterval(teachInterval);
+    teachInterval = null;
+    window.clearInterval(teachPoll);
+    teachPoll = null;
+  }
+
+  // Asked of the host every few seconds while the dialog is open. Only an answer of "not
+  // recording" closes anything: a failed read is not evidence the box stopped, and closing on one
+  // would take the operator's way out away over a dropped request.
+  function pollTeachHost() {
+    if (teachStopping || !elements.teachDialog.open) return;
+    if (typeof adapter.teachStatus !== "function") return;
+    Promise.resolve(adapter.teachStatus()).then((status) => {
+      if (status == null || status.active !== false) return;
+      if (teachStopping || !elements.teachDialog.open) return;
+      stopTeachTimers();
+      closeTeachScreen();
+      elements.teachDialog.close();
+      // Said as what it is. The cap is a save, so calling this "discarded" would be the same lie
+      // the stop path used to tell.
+      showToast("The box ended this recording on its own. A recording that runs to the ten-minute cap is saved and handed to the agent, so check its transcript before recording again.");
+    }).catch(() => {});
+  }
+
+  // The cover the dialog opens on. No VNC client is mounted behind it: while this is what the
+  // canvas holds, nothing in the dialog can take the keys, so the note, Escape and the buttons all
+  // work. The sentence changes while the box is still allocating the screen.
+  function renderTeachCover(note) {
+    const live = document.getElementById("teach-live");
+    if (!live) return;
+    const ready = Boolean(teachScreenUrl);
+    const small = note ?? (ready
+      ? "The screen is not connected yet, so this dialog has the keyboard: type your note here, and Escape discards the recording. Clicking connects the screen and gives the box the keys, and Escape goes to the box too, so stop the recording with Discard or Finish recording. Click anywhere else in this dialog to take the keyboard back."
+      : "Connecting to this agent's screen takes a moment. Click to work on it once it is ready.");
+    live.innerHTML = `<div class="teach-screen"><button class="teach-shield" type="button" data-teach-control>`
+      + `<strong>${ready ? "Click here to work on this screen" : "Waiting for this agent's screen"}</strong>`
+      + `<small>${escapeHtml(small)}</small></button></div>`;
+    teachScreenControl = false;
+    setTeachKeyboardHint();
+  }
+
+  function setTeachKeyboardHint() {
+    const hint = document.getElementById("teach-keyboard");
+    if (!hint) return;
+    hint.textContent = teachScreenControl
+      ? "The screen has the keyboard. Escape goes to the box; use Discard or Finish recording to stop."
+      : "Escape discards this recording. Clicking outside the dialog does not stop it.";
+  }
+
+  // Handing the keyboard over is a deliberate click and taking it back is any click elsewhere in
+  // the dialog. Mounting and unmounting the client is what actually moves the keys: an iframe on
+  // another origin keeps them once it has them, whatever this page does to activeElement, so the
+  // page takes them back by removing it rather than by blurring it.
+  function setTeachScreenControl(on) {
+    const live = document.getElementById("teach-live");
+    if (!on) {
+      if (!teachScreenControl) return;
+      renderTeachCover();
+      // Deferred by a tick so the click that took the keyboard back keeps whatever it landed on.
+      // A click on the footer text lands on nothing, and the note is where the keys belong.
+      window.setTimeout(() => {
+        if (teachScreenControl || !elements.teachDialog.open) return;
+        const active = document.activeElement;
+        if (active && active !== document.body && elements.teachDialog.contains(active)) return;
+        document.getElementById("teach-note")?.focus();
+      }, 0);
+      return;
+    }
+    if (!teachScreenUrl) { renderTeachCover("The box has not given this agent's screen yet. The recording is running; try again in a moment."); return; }
+    if (!live) return;
+    live.innerHTML = `<div class="teach-screen"><iframe data-teach-vnc src="${escapeHtml(teachScreenUrl)}" title="The screen being recorded"></iframe></div>`;
+    teachScreenControl = true;
+    setTeachKeyboardHint();
+    // Deferred by a tick: the click that hands the screen the keyboard is still being processed,
+    // and the browser's own focus handling for that click runs after this listener. Focusing the
+    // frame first left the keyboard on the cover's button instead, measured on the gate.
+    window.setTimeout(() => {
+      if (!teachScreenControl) return;
+      elements.teachDialog.querySelector("iframe[data-teach-vnc]")?.focus();
+    }, 0);
+  }
+
+  // Closing the dialog takes the client down with it: a live VNC frame in a closed dialog is a
+  // socket to the box that nothing on screen accounts for.
+  function closeTeachScreen() {
+    teachScreenControl = false;
+    teachScreenUrl = "";
+    const live = document.getElementById("teach-live");
+    if (live) live.innerHTML = "";
+  }
+
+  // The two refusals an operator can do something about, said in words that name the fix. Anything
+  // else keeps the host's own sentence: a friendlier invention would hide what actually happened.
+  const TEACH_REFUSALS = {
+    "gate-off": "Teach mode is off on this host. Set SAND_TEACH to 1 in sand-host-settings.json and try again.",
+    // The host allocates a screen for an agent that has never had one, so this is not the
+    // first-recording case: it is an agent parked on the shared display, which has no private
+    // screen to record. Say the case that actually produces it. Measured on this box: two fresh
+    // agents that had never opened a screen were recorded rather than refused, and the Learn
+    // button calls ensureDesktop first anyway, so nothing an operator can click produces this
+    // sentence here. It stays because the host still has the refusal and can still send it.
+    "no-monitor": "The host could not give this agent a screen of its own to record on. Open its Browser once so it gets one, then Learn.",
+  };
+  const teachRefusalText = (result) => TEACH_REFUSALS[result?.reason]
+    ?? (result?.message ? String(result.message) : "The host refused the recording and gave no reason.");
+
+  function showTeachRefusal(text) {
+    const line = document.getElementById("teach-refusal");
+    if (!line) return;
+    line.textContent = text;
+    line.hidden = !text;
+  }
+
+  function showTeachError(text) {
+    const line = document.getElementById("teach-error");
+    if (!line) return;
+    line.textContent = text;
+    line.hidden = !text;
+  }
+
+  // startTeachRecording is 6s on a warm screen and 23s on one the box has never opened, and the
+  // only thing that used to change on the page in that time was the button's disabled flag, which
+  // this stylesheet did not draw. A wait with nothing on screen reads as a click that did nothing.
+  function showTeachProgress(text) {
+    const line = document.getElementById("teach-progress");
+    if (!line) return;
+    line.textContent = text;
+    line.hidden = !text;
+  }
+
+  // Both buttons drive one stop, so both have to be dead while one is in flight -- a second click
+  // during a stop is a second stopTeachRecording against a recording that is already going away.
+  function setTeachStopBusy(busy, save) {
+    const finish = document.getElementById("finish-teach");
+    const discard = document.getElementById("discard-teach");
+    if (finish) { finish.disabled = busy; finish.textContent = busy && save ? "Saving..." : "■ Finish recording"; }
+    if (discard) { discard.disabled = busy; discard.textContent = busy && !save ? "Discarding..." : "Discard"; }
+  }
+
+  // The modal is a claim that the box is recording, so it opens only on a status the host
+  // confirmed. A refused start is said twice: a toast, and a line that stays on the desktop beside
+  // the button that was clicked.
+  function openTeachMode(button) {
     const lead = contextLead();
-    adapter.startTeaching(lead.id);
-    showTeachDialog(lead, state.teaching?.startedAt ?? Date.now(), state.teaching?.maxDurationMs);
+    if (!lead) return;
+    showTeachRefusal("");
+    showTeachProgress(`Asking the box to start recording ${lead.name}'s screen. A screen it has not opened before takes about half a minute.`);
+    if (button) {
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "Starting...";
+    }
+    Promise.resolve(adapter.startTeaching(lead.id))
+      .then((result) => {
+        showTeachProgress("");
+        if (!result || result.ok !== true) {
+          const text = teachRefusalText(result);
+          showTeachRefusal(text);
+          showToast(text);
+          return;
+        }
+        showTeachError("");
+        setTeachStopBusy(false, true);
+        showTeachDialog(lead, Number(result.startedAt) || Date.now(), result.maxDurationMs);
+      })
+      .catch((error) => { showTeachProgress(""); showTeachRefusal(error.message); showToast(error.message); })
+      .finally(() => {
+        if (!button) return;
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.textContent = "● Learn this task";
+      });
   }
 
   // MR-14: the adapter seeds state.teaching from getTeachRecordingStatus and nothing read it, so a
@@ -1676,20 +1896,50 @@
     if (!teaching?.active || !teaching.workerId) return;
     const worker = workerById(teaching.workerId);
     if (!worker) return;
+    showTeachError("");
+    setTeachStopBusy(false, true);
     showTeachDialog(worker, Number(teaching.startedAt) || Date.now(), teaching.maxDurationMs);
-    showToast(`${worker.name} is still recording — this is the run the host already has open.`);
+    showToast(`${worker.name} is still recording. This is the run the host already has open.`);
   }
 
-  function finishTeachMode() {
-    window.clearInterval(teachInterval);
-    teachInterval = null;
-    const context = activeContext();
-    const lead = contextLead();
+  // Save and discard are the same stop with one flag. The dialog and its timer stay up until the
+  // host reports the recording idle: closing on the click was the bug -- the modal went away and
+  // ffmpeg kept writing, with no way back in but a reload.
+  function stopTeachMode(save) {
+    if (teachStopping) return;
+    teachStopping = true;
+    const lead = workerById(state.teaching?.workerId) ?? contextLead();
     const note = document.getElementById("teach-note");
-    adapter.finishTeaching(true, note ? note.value.trim() : "");
-    if (note) note.value = "";
-    elements.teachDialog.close();
-    showToast(`Recording saved — ${lead.name} is learning from it now.`);
+    const text = note ? note.value.trim() : "";
+    showTeachError("");
+    setTeachStopBusy(true, save);
+    Promise.resolve(adapter.finishTeaching(save, text))
+      .then((result) => {
+        if (!result || result.ok !== true) {
+          // A stop the host cannot complete is a dead end from here: it happens when the agent
+          // being recorded is gone, and every later click gets the same answer. Say what clears
+          // it rather than leaving the operator clicking a button that cannot work.
+          const why = result?.message ? `The recording is still running: ${result.message}` : "The host did not answer the stop. The recording is still running.";
+          showTeachError(`${why} If it keeps failing, the recording is stuck on the host and only a box restart clears it.`);
+          return;
+        }
+        stopTeachTimers();
+        closeTeachScreen();
+        // The note is only thrown away once the request carrying it has actually landed. It used
+        // to be cleared here on a send that was still in flight, so a failed send left the
+        // operator with a toast about text that was already gone.
+        if (note && result.noteSent !== false) note.value = "";
+        elements.teachDialog.close();
+        // A note the host never took is reported by the adapter's own failure toast, so it is not
+        // repeated here; what matters on this side is that the text was kept.
+        showToast(result.alreadyStopped
+          ? result.message
+          : save
+            ? `Recording saved. ${lead?.name ?? "the agent"} is learning from it now.`
+            : "Recording discarded");
+      })
+      .catch((error) => showTeachError(`The recording is still running: ${error.message}`))
+      .finally(() => { teachStopping = false; setTeachStopBusy(false, save); });
   }
 
   function simulateReply(context, userText) {
@@ -2250,6 +2500,7 @@
       return;
     }
     renderAll(event.type === "worker:status" || event.type.startsWith("plugin:") || event.type.startsWith("settings:"));
+    refreshOpenSkillsPanel();
     if (event.type === "desktop:pause") renderDesktop();
     // Not renderDesktop: that remounts the VNC frame. Only the hand-back control follows state.
     else if (elements.desktopDialog.open) renderHandBack();
@@ -2662,8 +2913,9 @@
 
   document.getElementById("open-desktop").addEventListener("click", () => openDesktop("browser"));
   elements.scheduleButton.addEventListener("click", renderRoutinesPanel);
-  document.getElementById("teach-button").addEventListener("click", openTeachMode);
-  document.getElementById("finish-teach").addEventListener("click", finishTeachMode);
+  document.getElementById("teach-button").addEventListener("click", (event) => openTeachMode(event.currentTarget));
+  document.getElementById("finish-teach").addEventListener("click", () => stopTeachMode(true));
+  document.getElementById("discard-teach").addEventListener("click", () => stopTeachMode(false));
   document.getElementById("hand-back").addEventListener("click", (event) => {
     // Captured now: currentTarget is null once dispatch ends, and the .finally below runs after.
     const button = event.currentTarget;
@@ -2698,18 +2950,41 @@
     elements.hideRoster.textContent = rosterHidden ? "Show" : "Hide";
   });
 
-  [elements.panelDialog, elements.desktopDialog, elements.teachDialog].forEach((dialog) => dialog.addEventListener("click", (event) => {
+  [elements.panelDialog, elements.desktopDialog].forEach((dialog) => dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   }));
+  // The recording dialog is the one that cannot just close: a way out that dismisses the modal
+  // without reaching the host leaves ffmpeg writing with nothing on screen that says so. Escape
+  // is that way out, and it is deliberate. A click on the backdrop is not: the dialog is modal,
+  // so every click on the page outside its frame lands here, and throwing a live demonstration
+  // away on a mis-aimed roster click is how the first run of this flow lost its take.
+  elements.teachDialog.addEventListener("click", (event) => {
+    if (event.target !== elements.teachDialog) return;
+    // Said in the dialog, not in a toast: this modal is in the top layer, so a toast fired while
+    // it is open renders behind its own backdrop where nobody reads it.
+    showTeachError("Clicking outside does not stop the recording. Stop it with Discard or Finish recording.");
+  });
   elements.teachDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
-    finishTeachMode();
+    stopTeachMode(false);
+  });
+  // Which side has the keyboard, decided by where the operator clicks. The cover hands it to the
+  // box; anything else in the dialog takes it back, and Escape works again the moment it is back.
+  elements.teachDialog.addEventListener("pointerdown", (event) => {
+    if (!(event.target instanceof Element)) return;
+    // The cover is handled on its click, not here: hiding it under the pointer would take the
+    // rest of the gesture with it.
+    if (event.target.closest(".teach-screen")) return;
+    setTeachScreenControl(false);
+  });
+  elements.teachDialog.addEventListener("click", (event) => {
+    if (event.target instanceof Element && event.target.closest(".teach-shield")) setTeachScreenControl(true);
   });
 
   countdownInterval = window.setInterval(renderNowAndSchedule, 30_000);
   window.addEventListener("beforeunload", () => {
     window.clearInterval(countdownInterval);
-    window.clearInterval(teachInterval);
+    stopTeachTimers();
     adapter.destroy();
   });
 

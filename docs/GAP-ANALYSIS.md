@@ -52,11 +52,47 @@ rail shows the turn's tool rows (MR-11). The relay answers 503 when the box cann
 of an empty map, and the installed-server id is a number on the wire. New gate:
 `scripts/verify-connector-plane.mjs`.
 
+**Wave T landed 2026-09-04 (teach by demonstration; Opus workflow, host then dashboard, each
+adversarially verified with fix rounds, two review lenses, a review fix; the full gate set re-run
+by the orchestrator).** Learn was never a stub: it was real code behind a Statsig gate this box can
+never bootstrap, and its stop-and-save needed a managed skill only Cursor's dashboard hands out.
+Host: `SAND_TEACH` in the host settings file resolves the gate the way `SAND_BROWSER_USE` does,
+read live on every start, and the `[sand][gates]` line names it as the source. The two real
+managed skills from the August backup (`learn-from-demonstration`, `add-connector`) are baked
+into the bundle as seeds; every managed-skills cache write is the union of seeds and fetched
+(fetched wins on an id), and `ensureSeeds` repairs `cache.json` and `skills/<id>/SKILL.md` by
+content at start (a hand-mangled row and a deleted file were both repaired live, measured by
+mutation). The learning turn arrives whole: `WORKFLOW_INJECTED_BODY_LIMIT` is raised from the
+shipped bundle's 8000 to 16000 (a knowing divergence, noted at the constant; the product truncates
+its own 9985-character recipe), the teach queue scope is injected, and one `[sand][workflow]` line
+per invocation records how much of the recipe the model was handed. Gate
+`scripts/verify-teach.mjs`, 8 checks on the live box: refused with the gate off; recording on the
+probe's own display with ffmpeg writing `demo.mp4`; discard leaves no session and no queue entry;
+save writes `session.json` and one signed queue entry and dispatches the learning turn carrying the
+whole recipe and the scope; the agent claimed the queue file within about two minutes on the box's
+live model. Dashboard: the modal opens only when the host confirms a recording, the reason sits
+beside the Learn button when it cannot (gate off, or the host's own message); the screen starts as a
+cover so the dialog keeps the keyboard, and a click connects the live desktop; Discard and Finish
+both call the host, are disabled while the call is in flight, and show a host error inside the
+dialog; a status poll every five seconds closes the dialog when the box ends the recording on its
+own and says that the cap is a save; the operator's note goes as an ordinary message once the
+learning turn is already dispatched, and the copy says the recipe does not read it; the button is
+"Learn this task"; the frame lays out its footer inside the dialog at three viewports. Gate
+`scripts/verify-dashboard.mjs --teach`. Also landed in this pass: DISPLAY-4 (below), a sweep of
+stale prompt-trace reports, sqlite3 in the box for the recipe's history step. Left open, own rows
+below: TEACH-2, TEACH-3, DISPLAY-5.
+
 | Id | Finding | Next | Size |
 |---|---|---|---|
 | CUSTODY-1 | The whole guarantee today is "the value is in exactly one 0600 file and the process env". The agent's shell runs as root in the same container, so `/proc/<pid>/environ` and that file are readable by the agent. This is the real custody fix and it is a box change | Run the agent shell as an unprivileged uid; keep connector processes and the sand-data root under another uid; extend `verify-connector-plane.mjs` (c) with a read of the connector's environ *as the agent shell* that must fail with EACCES | M, box image |
 | DISPLAY-3 · **landed** | A page kept asking for a probe's desktop while a gate deleted it; the bring-up outlived the delete and wrote an assignment nobody would release, leaving X servers and tokens behind (found in the D1 pass: two tombstoned ids still held windows) | A window brought up for an agent that is now gone is released at once and the call fails honestly; every ensure and status call reconciles assignments against the agents that still exist and logs each release | S |
-| DISPLAY-4 | A bring-up already in flight when its agent is deleted can still start an X server after the assignment was released, leaving a live seat with a token and no owner; the start script refuses that seat to the next agent while its daemon answers. Clears on any host restart; reproduced only by a page polling a deleted probe's desktop | Host reconcile should also stop token-holding windows that hold no assignment (list the token dir through the box shell, stop each unassigned index); until then a restart clears it | S |
+| DISPLAY-4 · **landed** | Measured by the Wave T fixer: after a probe was deleted its page kept polling `ensureForeverBox`; every poll brought a window up for nobody and the teardown that followed stopped `:7` under the live agent that had inherited it; the orphan seat's foreign token then made `start-window` refuse every new agent on the lowest free index until a container restart | Three fixes: a gone agent is refused before the box is touched; a window released while it was starting is torn down instead of orphaned; the box script adopts a seat the host did not issue (tears it down and rebuilds) instead of refusing it, since the host is the only allocator. Gate `scripts/verify-windows.mjs`. Residual: an X server can still outlive its agent with no assignment (`:8` after the 2026-09-04 gate pass); it wedges nothing now and is adopted by the next agent on that index, but costs memory until then (DISPLAY-6) | S |
+| DISPLAY-5 | Agent `12863856` ("Grok", blank, created 2026-08-26) is hidden by the roster (`includeBlank: false`) but real on disk; it held window `:5` and cost an Xvfb at every boot. Released once by hand in the Wave T pass | Decide whether a hidden blank agent may hold a window; the cheap rule is to release at host start any window whose agent has no conversation | S |
+| DISPLAY-6 | An orphan X server with a token and no assignment can survive a probe's deletion (seen on `:8` after the full gate pass). Harmless since the adopt rule, but it holds memory until an agent lands on that index | Host reconcile sweeps token-holding seats that hold no assignment, running `stop-window <n>` through the box shell the way the teach service runs its commands | S |
+| TEACH-2 | The operator's note in the Learn dialog is not read by the recipe: it is sent as an ordinary message after the learning turn is already dispatched (the copy now says so) | Thread the note through `stopTeachRecording` into the learning dispatch so the recipe gets it as an input; host change | S |
+| TEACH-3 | The recipe's outcome past the queue claim is unmeasured: the probe claimed the file within about two minutes, but ffprobe, the frame walk and the written skill happen after the gate's budget, on a probe the gate deletes | A long-running probe outside the 280 s budget, kept until the learned skill appears in `listWorkflows`; then the Skills panel proof | M |
+| REPORTS-1 · **landed** | 91 `sand-system-prompt-<id>.json` trace reports for agents that no longer existed | Swept on the first write per host life and unlinked on delete | S |
+| BOX-3 · **landed** | The recipe's URL step queries Chrome's History with `sqlite3`, which the image does not ship | Installed in the running box; `recreate-box.sh` installs it after the window patch | S |
 | SECRET-KIND-1 | The secret request's `target.platform` is one namespace for chat credentials and connectors, resolved by a hardcoded platform list | Give the request a `target.kind` decided when it is built; route on it; delete the list | S |
 
 **Wave C landed 2026-09-03 (two slices under the Fable workflow, each adversarially verified,
@@ -364,6 +400,11 @@ CP-03, CP-11, CP-12, CP-04, CP-05 short-term, secret card (GW-11/CP-09/MR-15). D
 OpenConnector as a stdio sidecar in the box, CP-13 local HTTP transport, CP-05 catalog through OpenConnector, CP-06 callback. Proof: a secret submitted from the
 Machine Room lands in that server's env and the server restarts with it; the connected connector
 shows on a card with its tool switches.
+
+**Wave T — teach by demonstration works end to end.** Landed 2026-09-04: `SAND_TEACH`, seeded
+managed skills with content repair, the recipe inlined whole with its queue scope, the honest
+dialog with Discard, `verify-teach.mjs` and `verify-dashboard.mjs --teach`. Open: TEACH-2 (the
+note into the dispatch), TEACH-3 (the learned skill measured on a long-running probe).
 
 **Wave E — gates, hygiene, and the model item.** FLAGS-1, GC-1, TOOLS-12, DEAD-1, CHURN-1, BOX-1,
 AUDIT-1, ENDPOINT-1 once the box is recreated, then MODEL-1 as its own design contract, tied to the

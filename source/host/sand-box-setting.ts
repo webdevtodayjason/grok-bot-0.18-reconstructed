@@ -100,6 +100,22 @@ export function resolveBrowserUseEnabled(
 export const SAND_BROWSER_USE_SETTING = "SAND_BROWSER_USE";
 
 /**
+ * Teach by demonstration sat behind a bare Statsig gate too, so on a box with no Cursor
+ * login the recorder refused every start and the whole feature was unreachable. Same shape as
+ * `resolveBrowserUseEnabled`: an explicit local override wins, otherwise the gate decides.
+ */
+export function resolveTeachEnabled(
+  envOverride: string | undefined,
+  checkStatsigGate: () => boolean,
+): boolean {
+  if (envOverride != null && envOverride.length > 0) return isSandOverrideTruthy(envOverride);
+  return checkStatsigGate();
+}
+
+/** The name an operator writes into sand-host-settings.json (or the container env). */
+export const SAND_TEACH_SETTING = "SAND_TEACH";
+
+/**
  * Gated turn tracing, off unless the operator asks for it. Turns on two things: one host-log
  * line per tool build naming every tool the model was offered (`buildTurnTools` is the only
  * place that knows), and a per-agent report of which sections the assembled system prompt

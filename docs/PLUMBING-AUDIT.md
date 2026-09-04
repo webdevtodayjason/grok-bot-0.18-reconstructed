@@ -110,6 +110,20 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-04 early morning (Wave T, teach mode; and the desktop wedge).** Learn was a Statsig
+  gate with no local switch and a managed skill only Cursor hands out. `SAND_TEACH` host setting;
+  the two real managed skills baked into the bundle and repaired by content in the cache; the
+  recipe inlined whole (`WORKFLOW_INJECTED_BODY_LIMIT` 8000 to 16000, a noted divergence) with the
+  teach queue scope; `[sand][workflow]` per invocation. Dashboard: modal only on the host's
+  confirmation, refusal beside the button, cover-then-click screen, Discard and Finish through the
+  host, a status poll that closes on the cap. Gates `verify-teach.mjs` (8 checks) and
+  `verify-dashboard.mjs --teach`. The wave's fixer hit DISPLAY-4 for real: polls of a deleted
+  agent's desktop brought windows up for nobody and their teardown stopped live agents' displays,
+  then a foreign-token seat wedged every new agent until a restart. Fixed at three layers (refuse
+  a gone agent before the box, tear down a window released mid-flight, the box script adopts a seat
+  the host did not issue), gate `verify-windows.mjs`. Stale prompt-trace reports swept; sqlite3 in
+  the box and the recreate script; the hidden blank agent's window released (DISPLAY-5 open).
+
 - **2026-09-03 evening (Wave D1, connector plane).** Connector secrets into the server's process
   env from a host-owned 0600 store (never `connectors.json`); stable numeric ids for local
   connectors; per-tool switches and installed-server reads on the gateway; honest empty catalog;
@@ -1553,14 +1567,62 @@ wave's output; `npm test` still green; zero UI/feature diffs outside `docs/`.
 
 ## 8. Where things live
 
-- **Host switches (2026-09-03):** `/home/box/sand-data/sand-host-settings.json` (0600, flat
-  `{"NAME":"value"}`), re-read per call, so `SAND_TOOL_TRACE=1` and `SAND_BROWSER_USE=1` flip on a
-  running box. Never in `box-secrets.json`: the `SAND_` prefix is reserved there and a key with it
+- **Host switches (2026-09-04):** `/home/box/sand-data/sand-host-settings.json` (0600, flat
+  `{"NAME":"value"}`), re-read per call, so `SAND_TOOL_TRACE=1`, `SAND_BROWSER_USE=1` and
+  `SAND_TEACH=1` flip on a running box. Never in `box-secrets.json`: the `SAND_` prefix is reserved there and a key with it
   silently disables persisted box-secret injection (GAP-ANALYSIS ENDPOINT-2). Trace lines:
   `[sand][toolset]` = what buildTurnTools offered (conversationId, flags, tool names),
   `[sand][wire]` = what actually left for the provider (transport, model, offered, sent, names);
   `sand-system-prompt-<agentId>.json` beside the settings file = section-presence report only, never
-  prompt text. Gate for all of it: `scripts/verify-toolset.mjs`.
+  prompt text. `[sand][workflow]` = one line per workflow reference an invocation expanded into the
+  turn's prompt (conversationId, skill id, source, body head, `bodyChars` how long the recipe is,
+  `inlinedChars` how much of it the model was handed, `isTruncated`, block size, teach queue
+  scope): the outline stores the message that was sent, not the expansion, and the wire trace
+  deliberately carries no message content, so this is the only place that shows a recipe actually
+  reached a turn. Gate for all of it: `scripts/verify-toolset.mjs`.
+- **Fork windows (2026-09-04):** the host is the only allocator. `ForeverBoxService.ensure`
+  refuses an agent that is deleted or tombstoned before the box is touched; `SharedDesktopSandBox`
+  tears down a window whose assignment vanished while it was starting; `start-window` in the box
+  tears down and adopts any live seat whose token the host did not issue (the old refusal wedged
+  the lowest free index until a container restart). `verify-windows.mjs` proves all three. Blank
+  agents are hidden by the roster but still hold windows (DISPLAY-5).
+- **Prompt-trace reports:** `sand-system-prompt-<id>.json` is swept on the first write per host
+  life for agents whose directory is gone, and unlinked when an agent is deleted.
+- **sqlite3** is installed in the box by `recreate-box.sh` after the window patch; the learn
+  recipe's history step needs it.
+- **Teach by demonstration (2026-09-04):** two things kept it off this box, both fixed.
+  `sand_teach_by_demonstration` is a Statsig gate that never bootstraps without a Cursor login, so
+  `SAND_TEACH` now resolves it the way `SAND_BROWSER_USE` resolves the browser subagent (read live
+  on every `isEnabled` call, so no restart). And stop-with-save calls
+  `ensureManagedSkill("learn-from-demonstration")`, a skill that only ever arrives from Cursor's
+  dashboard, so saving died at "learning workflow is unavailable". The two real managed skills are
+  now baked into the bundle (`source/host/extensions/managed-setup/seed-skills/<id>/SKILL.md` plus
+  `scripts/gen-seed-skills.mjs` emitting `seed-skills.gen.ts`) and every managed-skills cache write
+  is the union of seeds and fetched, fetched winning on an id collision. The seed write runs at
+  `managed-setup` start regardless of auth, because the skills service itself only starts once an
+  access token exists. The cache is two files and `ensureSeeds` repairs both: `cache.json`, which
+  is where an invocation reads the recipe, and `skills/<id>/SKILL.md`, which is the path the agent
+  is handed and the only copy it can read for itself. Both halves are checked **by content**:
+  `withSeedSkillsRestored` replaces any seed row that no longer matches the bundled copy and
+  `managedSkillFilesMatch` compares each file to the bytes its row would write. Checking that the
+  id was listed and the file existed was not enough - an edited recipe never reached a box that
+  already held the old one, a hand-mangled `cache.json` row stayed mangled, and a deleted skill
+  file stayed missing, all across every restart with nothing in the log to say so. A dashboard
+  copy is still not lost to this: the startup refresh follows the seed write and puts the fetched
+  version back on top.
+- **A dispatched recipe arrives whole (2026-09-04):** `buildWorkflowRunPrompt` inlines the skill
+  body capped at `WORKFLOW_INJECTED_BODY_LIMIT`, which was 8000 against a 9985-character
+  learn-from-demonstration recipe. The cut landed mid-sentence inside step 5 and dropped both the
+  write-the-skill payload and section 6, the only place that tells the agent to release the queue
+  file it claimed, so a teach run claimed work it was never told to finish or release. The cap is
+  16000, big enough for a real managed skill, and past it `injectedWorkflowBody`
+  (`source/shared/workflow-model.ts`) stops on a line break and says how much is shown and which
+  file holds the rest. That 16000 is a **deliberate divergence from the shipped bundle**, which
+  pins `WORKFLOW_INJECTED_BODY_LIMIT = 8e3` and cuts with the same bare slice: the product
+  truncates its own recipe, and a diff against it will show 8000 on that line by design, not by
+  transcription error. Gate: `scripts/verify-teach.mjs` (`--keep-setting` leaves `SAND_TEACH="1"`),
+  which fails unless the two on-box copies of the recipe are the same text, unless
+  `inlinedChars === bodyChars`, and unless the agent claims the queue file.
 - **Agent lifecycle facts (2026-09-03):** an agent is a directory under `agents/` with `store.db`;
   `deleted-agents.json` beside them is the tombstone list every reader consults; subagent ledgers
   live at `agents/sand-subagent-<id>/audit.jsonl` and are not agents; shared-desktop window

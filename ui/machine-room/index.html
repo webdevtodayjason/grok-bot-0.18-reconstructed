@@ -155,7 +155,16 @@
             <h2 id="desktop-title">Atera Triage’s desktop</h2>
           </div>
           <div class="desktop-header-actions">
-            <button class="secondary-button" id="teach-button" type="button">● Teach this task</button>
+            <!-- Both of these belong in this row and not in the footer. They were 719px below the
+                 button and at the other end of the dialog, next to Pause, so the operator watching
+                 Learn revert from "Starting..." saw nothing change anywhere near it. -->
+            <!-- A refused start writes its reason here, beside the button that was clicked, as well
+                 as into a toast: a modal that never opened cannot carry the explanation. -->
+            <span class="teach-refusal" id="teach-refusal" hidden></span>
+            <!-- Starting a recording is a round trip to the box: about 6 seconds on a screen it has
+                 already opened, about 23 on one it has not. This line is what says so while it runs. -->
+            <span class="teach-progress" id="teach-progress" hidden></span>
+            <button class="secondary-button" id="teach-button" type="button">● Learn this task</button>
             <button class="dialog-close" type="button" data-close-desktop aria-label="Close desktop">×</button>
           </div>
         </header>
@@ -185,24 +194,37 @@
     <dialog class="teach-dialog" id="teach-dialog" aria-labelledby="teach-title">
       <div class="teach-frame">
         <header>
-          <div><span class="record-dot"></span><strong id="teach-title">Atera Triage is watching and learning</strong></div>
+          <div><span class="record-dot"></span><strong id="teach-title">Recording this agent's screen</strong></div>
           <time id="teach-timer">00:00</time>
         </header>
         <div class="teach-canvas">
-          <!-- Was a drawing of an Atera ticket queue on a real customer URL, captioned as though the
-               agent would review the footage. The real capture is ffmpeg on this worker's own X
-               display, so the live screen belongs here and the note below is what the agent
-               actually learns from. -->
+          <!-- Was a drawing of an Atera ticket queue on a real customer URL. The real capture is
+               ffmpeg on this worker's own X display, so the live screen belongs here -- but the
+               VNC client for it is mounted only while the operator has asked for the screen,
+               because a client on another origin keeps every key once it has one. -->
           <div class="teach-live" id="teach-live"></div>
         </div>
         <div class="field">
           <label for="teach-note">Say what you are doing, as you would to a person</label>
           <textarea id="teach-note" rows="2" placeholder="e.g. Open Atera, filter to unassigned tickets, and flag anything for Jason Brashear"></textarea>
-          <span class="field-hint">The recording is saved on the box, but the agent does not watch it. It learns from this note and what it can see of the browsing you did — so describe the task, do not rely on the video.</span>
+          <span class="field-hint">Finish recording hands the video to this agent: the learn-from-demonstration skill claims it, steps through frames of the demo, and writes a skill it can run again. The recipe does not read this note. It is sent to the agent as an ordinary message once the learning turn has already started, so write it as something you would say to the agent and expect it to arrive alongside the work, not before it.</span>
         </div>
         <footer>
-          <span>Recorded on this worker's own screen, on the box. It never leaves the machine.</span>
-          <button class="danger-button" id="finish-teach" type="button">■ Finish recording</button>
+          <!-- "It never leaves the machine" used to stand here, and it was not true of the path
+               this dialog offers. The recipe the host seeds on save extracts frames, hands the
+               video to a subagent, and both are read by the model this box talks to. Discard is
+               the path that keeps the recording on the box. -->
+          <div class="teach-notes">
+            <span>Recorded on this worker's own screen and written to the box. Finish recording hands frames and the video to the model this box runs on, so a saved demonstration leaves the machine. Discard deletes it and sends nothing.</span>
+            <span class="teach-keyboard" id="teach-keyboard">Escape discards this recording. Clicking outside the dialog does not stop it.</span>
+          </div>
+          <!-- A stop the host refused says so here, in front of the operator, with both buttons
+               live again. Behind the modal is where nobody reads it. -->
+          <span class="teach-error" id="teach-error" hidden></span>
+          <div class="teach-actions">
+            <button class="ghost-button" id="discard-teach" type="button">Discard</button>
+            <button class="danger-button" id="finish-teach" type="button">■ Finish recording</button>
+          </div>
         </footer>
       </div>
     </dialog>

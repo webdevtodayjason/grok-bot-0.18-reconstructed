@@ -12,6 +12,10 @@ export class ForeverBoxService {
   start(): void { void this.seedImageUpdateAvailable(); void this.startImagePolling(); } subscribe(listener: (status: BoxStatus) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); } setBusy(value: boolean): void { this.isBusy = value; }
   async getStatus(input: { id: string }): Promise<BoxStatus> { void this.reconcileWindows(); return this.decorateStatus(await this.box.getStatus(this.ctx, input.id)); }
   async ensure(input: { id: string }): Promise<BoxStatus> {
+    // DISPLAY-4. A page that keeps polling a deleted agent's desktop must not cost a bring-up per
+    // poll: each one took a free index, started a display for nobody, and the teardown that followed
+    // stopped whichever live agent had inherited that index in between. Refuse before the box.
+    if (this.options.isAgentGone?.(input.id) === true) throw new SandForeverBoxError(`agent ${input.id} no longer exists; nothing to bring up`);
     const status = await this.box.ensure(this.ctx, input.id);
     // DISPLAY-3. A page kept asking for a probe's desktop while the gate deleted it; the bring-up
     // outlived the delete and wrote an assignment nobody would release. Release it here instead.

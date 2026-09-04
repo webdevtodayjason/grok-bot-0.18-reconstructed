@@ -1,7 +1,20 @@
 import { WORKFLOW_REFERENCE_NODE_TYPE } from "./workflows.js";
 import { cronTrigger } from "./automations.js";
 import { describeSchedule } from "./automation-schedule.js";
-export const WORKFLOW_FILENAME = "SKILL.md"; export const LEGACY_WORKFLOW_FILENAME = "workflow.md"; export const AGENT_READABLE_SKILL_DIR_MODE = 0o755; export const AGENT_READABLE_SKILL_FILE_MODE = 0o644; export const WORKFLOW_MAX_NAME_LENGTH = 80; export const WORKFLOW_MAX_DESCRIPTION_LENGTH = 1_536; export const WORKFLOW_MAX_BODY_LENGTH = 100_000; export const WORKFLOW_INJECTED_BODY_LIMIT = 8_000; export const WORKFLOW_UI_LIMIT = 100; export const WORKFLOW_MAX_PER_AGENT = 100;
+/**
+ * WORKFLOW_INJECTED_BODY_LIMIT caps how much of a skill's body is inlined into the turn that
+ * invokes it, so one workflow cannot swamp a prompt. It has to be big enough for a whole real
+ * skill: the managed learn-from-demonstration recipe is just under 10k characters and the host
+ * dispatches it on its own after a teach recording, so an 8k cap cut it mid-sentence and dropped
+ * both the part saying what skill to write and the part saying to release the queue claim.
+ *
+ * 16000 is a deliberate divergence from the shipped product, not a transcription of it: the
+ * released bundle pins `WORKFLOW_INJECTED_BODY_LIMIT = 8e3` and cuts with the same bare slice, so
+ * it truncates its own managed recipe too. Anyone diffing this file against that bundle will see
+ * 8000 there; the number is raised here on purpose, together with the line-break cut and the note
+ * saying where the rest of the file lives.
+ */
+export const WORKFLOW_FILENAME = "SKILL.md"; export const LEGACY_WORKFLOW_FILENAME = "workflow.md"; export const AGENT_READABLE_SKILL_DIR_MODE = 0o755; export const AGENT_READABLE_SKILL_FILE_MODE = 0o644; export const WORKFLOW_MAX_NAME_LENGTH = 80; export const WORKFLOW_MAX_DESCRIPTION_LENGTH = 1_536; export const WORKFLOW_MAX_BODY_LENGTH = 100_000; export const WORKFLOW_INJECTED_BODY_LIMIT = 16_000; export const WORKFLOW_UI_LIMIT = 100; export const WORKFLOW_MAX_PER_AGENT = 100;
 export interface WorkflowTrigger { schedule: string; isEnabled: boolean } export interface WorkflowSpec { name: string; description: string; body: string; trigger: WorkflowTrigger | null; sourceRef?: string | null } export interface ParsedWorkflow extends WorkflowSpec { sourceRef: string | null; data: Record<string, unknown> }
 export interface WorkflowRecord { id: string; name: string; description: string; body: string; trigger: WorkflowTrigger | null; source: "managed" | "plugin" | "workflow" | "automation"; sourceRef: string | null; pluginId?: string | null; publishedByCurrentUser?: boolean; isEnabledForAgent: boolean; disableModelInvocation?: boolean; scheduleDescription?: string | null; createdAt: number; lastRunAt?: number | null; nextRunAt?: number | null; helperScripts: readonly string[]; runs?: readonly unknown[]; filePath: string }
 export interface AutomationProjection { id: string; name: string; prompt: string; trigger: ReturnType<typeof cronTrigger>; schedule: string; triggerDescription: string; isEnabled: boolean; createdAt: number; lastRunAt: number | null; nextRunAt: number | null; runs: readonly unknown[]; filePath: string }
@@ -9,7 +22,25 @@ function clampLine(value: unknown, max: number): string { return typeof value ==
 export function clampWorkflowName(value: unknown): string { return clampLine(value, WORKFLOW_MAX_NAME_LENGTH); } export function clampWorkflowDescription(value: unknown): string { return clampLine(value, WORKFLOW_MAX_DESCRIPTION_LENGTH); } export function clampWorkflowBody(value: unknown): string { return clampBlock(value, WORKFLOW_MAX_BODY_LENGTH); }
 export function slugifyWorkflowName(name: string): string { const slug = name.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64).replace(/-+$/g, ""); return slug || "workflow"; }
 function scalar(raw: string): unknown { const value = raw.trim(); if (value === "true") return true; if (value === "false") return false; if (value === "null" || value === "~") return null; if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value); if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) { try { return value.startsWith('"') ? JSON.parse(value) : value.slice(1, -1).replace(/''/g, "'"); } catch {} } return value; }
-function parseFrontmatter(text: string): Record<string, unknown> { const root: Record<string, unknown> = {}; const stack: Array<{ indent: number; value: Record<string, unknown> }> = [{ indent: -1, value: root }]; for (const raw of text.split(/\r?\n/)) { if (raw.trim().length === 0 || raw.trimStart().startsWith("#")) continue; const match = /^(\s*)([^:#][^:]*):(?:\s*(.*))?$/.exec(raw); if (match == null) continue; const indent = match[1]?.length ?? 0; const key = match[2]?.trim(); if (!key) continue; while ((stack.at(-1)?.indent ?? -1) >= indent) stack.pop(); const parent = stack.at(-1)?.value ?? root; const tail = match[3] ?? ""; if (tail.trim().length === 0) { const nested: Record<string, unknown> = {}; parent[key] = nested; stack.push({ indent, value: nested }); } else parent[key] = scalar(tail); } return root; }
+/**
+ * A YAML block scalar: `|` keeps the line breaks, `>` folds each paragraph onto one line, and the
+ * trailing `-`/`+` clips or keeps the final newline. The lines arrive with their own indentation,
+ * which is measured from the first non-blank one and stripped from all of them.
+ */
+function blockScalar(lines: readonly string[], folded: boolean, chomp: string): string {
+  const first = lines.find((line) => line.trim().length > 0);
+  const strip = first == null ? 0 : first.length - first.trimStart().length;
+  const dedented = lines.map((line) => line.slice(strip).trimEnd());
+  const out: string[] = [];
+  for (const line of dedented) {
+    const previous = out.at(-1);
+    if (folded && line.length > 0 && previous != null && previous.length > 0) out[out.length - 1] = `${previous} ${line}`;
+    else out.push(line);
+  }
+  const text = out.join("\n");
+  return chomp === "+" ? text : chomp === "-" ? text.replace(/\n+$/, "") : `${text.replace(/\n+$/, "")}\n`;
+}
+function parseFrontmatter(text: string): Record<string, unknown> { const root: Record<string, unknown> = {}; const stack: Array<{ indent: number; value: Record<string, unknown> }> = [{ indent: -1, value: root }]; const lines = text.split(/\r?\n/); for (let index = 0; index < lines.length; index += 1) { const raw = lines[index] ?? ""; if (raw.trim().length === 0 || raw.trimStart().startsWith("#")) continue; const match = /^(\s*)([^:#][^:]*):(?:\s*(.*))?$/.exec(raw); if (match == null) continue; const indent = match[1]?.length ?? 0; const key = match[2]?.trim(); if (!key) continue; while ((stack.at(-1)?.indent ?? -1) >= indent) stack.pop(); const parent = stack.at(-1)?.value ?? root; const tail = match[3] ?? ""; const block = /^([|>])([+-]?)$/.exec(tail.trim()); if (block != null) { const body: string[] = []; while (index + 1 < lines.length) { const next = lines[index + 1] ?? ""; if (next.trim().length > 0 && next.length - next.trimStart().length <= indent) break; body.push(next); index += 1; } parent[key] = blockScalar(body, block[1] === ">", block[2] ?? ""); continue; } if (tail.trim().length === 0) { const nested: Record<string, unknown> = {}; parent[key] = nested; stack.push({ indent, value: nested }); } else parent[key] = scalar(tail); } return root; }
 function splitMatter(raw: string): { data: Record<string, unknown>; content: string } { if (!raw.startsWith("---")) return { data: {}, content: raw }; const lineEnd = raw.indexOf("\n"); if (lineEnd < 0) return { data: {}, content: raw }; const close = raw.indexOf("\n---", lineEnd); if (close < 0) return { data: {}, content: raw }; return { data: parseFrontmatter(raw.slice(lineEnd + 1, close)), content: raw.slice(close + 4).replace(/^\r?\n/, "") }; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value != null && !Array.isArray(value); } function sourceRefOf(data: Record<string, unknown>): string | null { const metadata = isRecord(data.metadata) ? data.metadata : {}; const raw = typeof metadata.source === "string" ? metadata.source : data.source; return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null; }
 function normalizeSchedule(value: string): string { return value.trim().replace(/\s+/g, " "); } function triggerOf(data: Record<string, unknown>): WorkflowTrigger | null { if (!isRecord(data.trigger)) return null; const schedule = normalizeSchedule(typeof data.trigger.schedule === "string" ? data.trigger.schedule : ""); return schedule.length === 0 ? null : { schedule, isEnabled: data.trigger.enabled !== false }; }
@@ -30,4 +61,17 @@ function handles(workflow: Pick<WorkflowRecord, "id" | "name">): string[] { cons
 export function collectMentionedWorkflows<T extends Pick<WorkflowRecord, "id" | "name">>(prompt: string, workflows: readonly T[]): T[] { const found = new Set<string>(); const byId = new Map(workflows.map((workflow) => [workflow.id.toLowerCase(), workflow])); for (const match of prompt.matchAll(/sand-workflow:([a-z0-9]+(?:-[a-z0-9]+)*)/gi)) if (match[1] != null && byId.has(match[1].toLowerCase())) found.add(match[1].toLowerCase()); const candidates = workflows.flatMap((workflow) => handles(workflow).map((handle) => ({ handle, id: workflow.id.toLowerCase() }))).sort((a, b) => b.handle.length - a.handle.length); const lower = prompt.toLowerCase(); const claimed: Array<{ start: number; end: number }> = []; for (const { handle, id } of candidates) { const needle = `@${handle}`; for (let index = lower.indexOf(needle); index >= 0; index = lower.indexOf(needle, index + 1)) { const end = index + needle.length; const word = (char: string | undefined) => char !== undefined && /[a-z0-9]/.test(char); if (!word(lower[index - 1]) && !word(lower[end]) && !claimed.some((range) => index < range.end && range.start < end)) { claimed.push({ start: index, end }); found.add(id); } } } return workflows.filter((workflow) => found.has(workflow.id.toLowerCase())); }
 export function promptReferencesWorkflow(prompt: string, workflow: Pick<WorkflowRecord, "id" | "name">): boolean { return collectMentionedWorkflows(prompt, [workflow]).length > 0; }
 export function workflowDir(filePath: string): string { const slash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\")); return slash === -1 ? filePath : filePath.slice(0, slash); }
+/**
+ * The body as the invoking turn sees it. A recipe that stops mid-word reads to the model like the
+ * recipe ended there, so anything past the cap stops on a line break and says what is missing and
+ * where the whole file is; `agentSkillsFromWorkflows` hands out that same path.
+ */
+export interface InjectedWorkflowBody { text: string; bodyChars: number; inlinedChars: number; isTruncated: boolean }
+export function injectedWorkflowBody(workflow: Pick<WorkflowRecord, "body" | "filePath">): InjectedWorkflowBody {
+  const body = workflow.body.trim();
+  if (body.length <= WORKFLOW_INJECTED_BODY_LIMIT) return { text: body, bodyChars: body.length, inlinedChars: body.length, isTruncated: false };
+  const cut = body.slice(0, WORKFLOW_INJECTED_BODY_LIMIT), lastBreak = cut.lastIndexOf("\n"), head = lastBreak > 0 ? cut.slice(0, lastBreak) : cut;
+  const rest = workflow.filePath.length > 0 ? `Read the rest from ${workflow.filePath} before you act on it.` : "Ask for the rest before you act on it.";
+  return { text: `${head}\n\n[This recipe is cut here: ${head.length} of ${body.length} characters are shown. ${rest}]`, bodyChars: body.length, inlinedChars: head.length, isTruncated: true };
+}
 export function renderWorkflowsSystemPrompt(location: string | null | undefined): string { return location == null ? "" : `Workflows are a GLOBAL, shared library across all of the user's assistants. User-created skills live as files at ${location}: one subfolder per workflow, each holding a SKILL.md. Prefer the update_state tool (target "workflow") to save, rewrite, and delete them. Reference workflows as [name](sand-workflow:<id>).`; }
