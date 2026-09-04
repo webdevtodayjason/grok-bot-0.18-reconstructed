@@ -110,6 +110,18 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-04 evening (Wave U2, and the first hours of public use).** Routines fire on the box's
+  own clock with the real schedule trigger and a slot-derived run id; the trigger editor says which
+  listener each event kind would need; the five local-machine tools are withheld unless the bridge
+  reports a computer (30 on the wire on the R750); a rooms gate; the Learn note opens the learning
+  turn; blank agents' windows released at start and orphan seats swept through the box shell. 27
+  gates green, shipped to the R750 from the committed tree. The first real task on the public
+  console found: the relay believing a container name docker never had (fixed), a bundle shipped
+  from a dirty tree (sync.sh refuses now), Coolify pruning the locally built relay image during a
+  restart (a keeper container pins it), a runaway SendMessage loop with no cap (LOOP-1) and the
+  model's AddMcpServer tool crashing on a bundling slip (CONNECT-1); the last two are Wave U3.
+  Coolify's service restart is asynchronous: poll the containers' start time before any gate.
+
 - **2026-09-04 afternoon (Wave S2 and the public switch-over).** Jason's call: public on the
   domain with the relay password as the lock, inside Coolify. AUTH-3: the lockout keyed on the
   real visitor behind Traefik and Cloudflare (trusted ranges, Cloudflare edges, forged headers

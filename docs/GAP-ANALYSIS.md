@@ -481,6 +481,18 @@ the tailnet and not from the internet; a teach recording and a routine run on th
 AUTOMATION-1, AUTOMATION-2, TOOLS-15 decision, TOOLS-17, GW-16, then TEACH-2 and TEACH-3. Proof
 per row is in its table above; each gets a gate.
 
+**Wave S2 — public through Coolify (landed 2026-09-04 16:12).** AUTH-3, the Coolify compose written
+against the installed parser, `verify-deploy.mjs --url`, the switch-over through the Coolify API;
+the TinyFish recipe. Residuals: IMAGE-1 (a git-backed build is Wave S3), AUTH-1's one shared
+password.
+
+**Wave U2 — routines, tools, rooms, the note, windows (landed 2026-09-04 17:19).** AUTOMATION-1,
+AUTOMATION-2 made honest, TOOLS-15, TOOLS-17, TEACH-2, DISPLAY-5 bounded, DISPLAY-6.
+
+**Wave U3 — what the first public hour taught (running).** LOOP-1 with a stub-driven gate,
+CONNECT-1 with a probe-turn gate, then TOOLS-18, TEACH-4, AUTOMATION-3, DISPLAY-7 and the S2
+minors.
+
 **Wave E — gates, hygiene, and the model item.** FLAGS-1, GC-1, TOOLS-12, DEAD-1, CHURN-1, BOX-1,
 AUDIT-1, ENDPOINT-1 once the box is recreated, then MODEL-1 as its own design contract, tied to the
 rubric (chief on the highest-scoring endpoint, workers on cheap ones).
