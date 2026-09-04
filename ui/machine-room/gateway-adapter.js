@@ -32,6 +32,25 @@
     return body;
   }
 
+  // Wave D1 lands its host half separately, so every command below may or may not exist on the
+  // box this page is talking to. The gateway answers an absent command with
+  // {"error":"unknown gateway method: <name>"} and nothing else does, so that one string is the
+  // difference between "this host cannot do it yet" (null, and the caller degrades to the
+  // read-only Wave B state) and "the host refused" (throw, and the caller says so out loud).
+  // Missing commands are remembered so a card does not re-ask on every tick.
+  const UNKNOWN_COMMAND = /unknown gateway method/i;
+  const unknownCommands = new Set();
+  const commandMissing = (method) => unknownCommands.has(method);
+  async function tryCall(method, args = {}) {
+    if (unknownCommands.has(method)) return null;
+    try {
+      return await call(method, args);
+    } catch (error) {
+      if (UNKNOWN_COMMAND.test(String(error?.message ?? ""))) { unknownCommands.add(method); return null; }
+      throw error;
+    }
+  }
+
   const AVATARS = [
     "assets/avatar-chief.svg", "assets/avatar-atera.svg", "assets/avatar-marketing.svg",
     "assets/avatar-clientsync.svg", "assets/avatar-coro.svg",
@@ -82,12 +101,28 @@
       detail: "", rule: null,
       options: Array.isArray(m.widget.options) ? m.widget.options : [],
     };
-    // Still refused, but silently dropping it meant the operator never learned it had been asked.
-    if (m.type === "secret-request") return {
-      kind: "secret", requestId: null, status: "pending",
-      title: "The agent asked for a credential",
-      detail: "This UI will not carry a secret. Answer it in the host app.", rule: null, options: [],
-    };
+    // CP-10 item 2: the masked secret request. The host asks by entry id and resumes the agent
+    // once submitSecret { entryId, value, agentId } has stored the value (widget-responses.ts
+    // submitSecret -> routeSecret -> storeConnectorCredential, then resumeWithHiddenPrompt), so
+    // the entry id has to travel with the card. `secretProvided` is the host's own stamp on the
+    // entry, which is why an answered request stops offering the input.
+    if (m.type === "secret-request") {
+      const request = m.secretRequest ?? m.secret ?? {};
+      const target = request.target ?? {};
+      const field = target.field ?? request.field ?? "credential";
+      const platform = target.platform ?? request.connector ?? null;
+      return {
+        kind: "secret", requestId: null, entryId: entry.id,
+        status: entry.secretProvided === true ? "provided" : "pending",
+        field, platform,
+        title: request.label ? `The agent asked for ${request.label}` : "The agent asked for a credential",
+        // Where the value goes, in the host's own terms. It never enters the transcript: the host
+        // stamps the entry and hands the model an acknowledgement, not the value.
+        detail: request.description
+          || `The value goes straight to the host's credential store${platform ? ` for ${platform}` : ""} as ${field}. It is never written into this conversation and never reaches the model.`,
+        rule: null, options: [],
+      };
+    }
     return null;
   }
 
@@ -417,11 +452,127 @@
   // is its name, so a write for it is accepted and silently discarded. Read-only until the host
   // has stable numeric ids for local servers.
   const CONNECTOR_TOOLS_READONLY = "Read-only here: the host keys per-tool disables by numeric server id and a local stdio server's id is its name, so a switch would be accepted and dropped.";
-  async function connectorPlugins() {
-    const [config, tools] = await Promise.all([
-      fetch("/connectors").then((r) => r.json()).catch(() => null),
-      call("listRoutedMcpTools").catch(() => null),
-    ]);
+  // Two different reasons a switch is absent, and they used to share one sentence. A card that
+  // carries the host's numeric id can be keyed; what it may still be missing is the write itself.
+  const CONNECTOR_TOOLS_NO_COMMAND = "Read-only here: this host has no toggleMcpToolDisabled command yet, so a switch would have nowhere to write.";
+  const CONNECTOR_CONFIG_NOTE = "Configured on the box in connectors.json. The box runs the process and the host discovers its tools; this page holds no credential in that file and does not show the ones it may carry.";
+  const connectorConfig = () => fetch("/connectors").then((r) => r.json()).catch(() => null);
+
+  // ui/server.mjs readConnectors answers { mcpServers: {} } for BOTH an empty file and a box it
+  // could not `docker exec cat` into (the catch on a null read), so an empty map is ambiguous --
+  // and a write derived from it during a box restart replaces every connector on the box with the
+  // one entry being added. Only an empty read is ambiguous, so only an empty read pays for a
+  // liveness probe: a gateway that answers means the file really is empty and the first connector
+  // can be written; a gateway that does not means the read was a failure wearing an empty object,
+  // and this returns null so the caller writes nothing at all.
+  const serversOf = (config) => {
+    const servers = config?.mcpServers;
+    return servers != null && typeof servers === "object" && !Array.isArray(servers) ? servers : null;
+  };
+  async function readableConnectorServers() {
+    const servers = serversOf(await connectorConfig());
+    if (servers == null) return null;
+    if (Object.keys(servers).length > 0) return servers;
+    const alive = await call("getHostStatus", {}).then(() => true).catch(() => false);
+    return alive ? servers : null;
+  }
+  const CONNECTORS_UNREADABLE = "connectors.json could not be read from the box; nothing was written.";
+
+  // CP-03: the connector cards the host itself installs. listInstalledMcpServers answers rows
+  // with a NUMERIC id -- the id mcpDisabledToolsByServerId is keyed by -- so the tool rows on
+  // these cards carry a real switch. listMcpServerTools { serverId } is the per-server tool list
+  // with its enabled flag, and listConnectorSecretFields { server } names the env values the host
+  // stores for it. All three may be absent on a host that has not landed them yet; connectorCards
+  // below is the Wave B read-only path they fall back to.
+  async function installedConnectorPlugins(installed, config) {
+    const canToggle = !commandMissing("toggleMcpToolDisabled");
+    return Promise.all(installed.map(async (server) => {
+      const name = String(server.name ?? server.id ?? "");
+      const serverId = server.id;
+      const numeric = typeof serverId === "number" || /^[1-9]\d*$/.test(String(serverId ?? ""));
+      // These two .catch(() => null) are not the mistake they look like: both commands genuinely
+      // throw for a server that is installed but not in connectors.json (an account server has no
+      // stdio spec and no secret fields), and a card that cannot list its tools is still a card
+      // worth drawing. The one that must NOT be swallowed is listInstalledMcpServers below --
+      // that is the difference between "no host half yet" and "the host refused".
+      const [tools, fields] = await Promise.all([
+        tryCall("listMcpServerTools", { serverId }).catch(() => null),
+        tryCall("listConnectorSecretFields", { server: name }).catch(() => null),
+      ]);
+      const rows = Array.isArray(tools) ? tools : [];
+      // { server, serverId, fields } on this host; an array is accepted too, so a host that
+      // answers the bare list does not silently lose the form.
+      const storedFields = (Array.isArray(fields) ? fields : Array.isArray(fields?.fields) ? fields.fields : [])
+        .map((f) => String(f?.name ?? f)).filter(Boolean);
+      const spec = config?.mcpServers?.[name] ?? null;
+      const status = server.status ?? "unknown";
+      const transport = server.transport ?? (spec?.command ? "stdio" : "mcp");
+      // The executable only, never its argv: connectors.json is the 0600 file ui/server.mjs calls
+      // out as carrying connector tokens in plaintext, and a stdio server is routinely launched
+      // with --api-key= in argv. The count says the file holds more without printing it.
+      const command = spec?.command ? String(spec.command) : null;
+      const argCount = Array.isArray(spec?.args) ? spec.args.length : 0;
+      const toolCount = Number.isFinite(Number(server.toolCount)) ? Number(server.toolCount) : rows.length;
+      return {
+        id: `mcp:${name}`, name, icon: (name[0] ?? "?").toUpperCase(),
+        group: "Connectors", serverId,
+        category: `${transport} · ${status}`,
+        description: [
+          `The box reports this server as ${status} — host id ${serverId}, ${transport}.`,
+          `${toolCount} tool(s) discovered.`,
+          command ? `Runs in the box as ${command} (${argCount} argument(s), configured in connectors.json).` : null,
+        ].filter(Boolean).join(" "),
+        status: status === "connected" ? "connected" : "available",
+        account: null,
+        // A connector is not a chat platform: getListenerConnectUrl has nothing to offer it. What
+        // it can take is its env values, and that is the key form below, not a connect button.
+        connectable: false,
+        connectNote: "This connector is launched from connectors.json on the box. Add or remove one with the editor below; its credentials go in the key form on this card.",
+        connectedNote: CONNECTOR_CONFIG_NOTE,
+        removable: spec != null,
+        tools: rows.map((t) => ({
+          id: `${name}::${t.name}`, name: t.name,
+          description: oneLine(t.description ?? "", 160) || "No description from the server.",
+          enabled: t.enabled !== false,
+          togglable: canToggle && numeric,
+        })),
+        toolsNote: CONNECTOR_TOOLS_NOTE,
+        toolsReadOnlyNote: numeric ? (canToggle ? null : CONNECTOR_TOOLS_NO_COMMAND) : CONNECTOR_TOOLS_READONLY,
+        // CP-10 item 1: one masked input per environment value this connector wants. The host
+        // answers { server, serverId, fields } and its `fields` are the names it ALREADY holds a
+        // value for -- an empty list on a connector nobody has filled in yet -- so the form is
+        // drawn from the env NAMES connectors.json declares as well, or there would be no way to
+        // store the first one. Only the keys are read from that file; its values stay off this page.
+        secretFields: [...new Set([...Object.keys(spec?.env ?? {}), ...storedFields])],
+        storedFields,
+        secretHint: `Stored by the host for ${name} in its own 0600 store and merged into the connector's environment when the box launches it. It never enters connectors.json, chat, model context or this page's markup.`,
+        skills: [], skillsNote: null,
+      };
+    }));
+  }
+
+  // onError is the transcript's `failed` where there is a conversation to say it in. tryCall
+  // already answers null for a host that has never heard of the command; anything it THROWS is a
+  // host that has the command and refused, and swallowing that rendered a 500 as though the
+  // command did not exist. The card still degrades to the Wave B read-only one -- there is nothing
+  // else to draw -- but the reason is said out loud instead of disappearing.
+  async function connectorPlugins(onError) {
+    const config = await connectorConfig();
+    let installed = null;
+    try {
+      installed = await tryCall("listInstalledMcpServers", {});
+    } catch (error) {
+      if (typeof onError === "function") onError(`The host could not list its connectors: ${error.message}`);
+      return connectorCards(config);
+    }
+    // A host that answers the command but reports nothing installed still has connectors.json,
+    // so the Wave B card is the honest fallback rather than an empty Connectors group.
+    if (Array.isArray(installed) && installed.length > 0) return installedConnectorPlugins(installed, config);
+    return connectorCards(config);
+  }
+
+  async function connectorCards(config) {
+    const tools = await call("listRoutedMcpTools").catch(() => null);
     const rows = Array.isArray(tools) ? tools : [];
     const ids = [...new Set([...Object.keys(config?.mcpServers ?? {}), ...rows.map((t) => t.providerIdentifier)])]
       .filter((id) => typeof id === "string" && id.length > 0);
@@ -454,10 +605,12 @@
         // getListenerConnectUrl is a chat-platform command; an MCP server is not one, and there is
         // no gateway command that installs one from here. connectors.json is where it is edited.
         connectable: false,
-        connectNote: "This connector is configured on the box in connectors.json, not from this page. Edit it there and the host re-reads it.",
+        connectNote: "This connector is configured on the box in connectors.json. Add or remove one with the editor below; this host has no per-connector credential command yet.",
         // "no credential here" means this page, not the box: connectors.json can carry env and
         // argv credentials, which is exactly why neither is echoed onto this card.
         connectedNote: "Configured on the box in connectors.json. The box runs the process and the host discovers its tools; this page holds no credential for it and does not show the ones connectors.json may carry.",
+        removable: spec != null,
+        secretFields: [],
         tools: mine.map((t) => ({
           id: `${id}::${t.toolName}`,
           name: t.toolName ?? t.name,
@@ -898,6 +1051,15 @@
       for (const w of state.workers) w.model = state.models.default;
       // "plugin:" is the prefix the app redraws its panels for; anything else only refreshes the transcript.
       emit("plugin:state", {});
+    }
+
+    // After a connectors.json write, a refreshMcp, or a per-tool toggle: rebuild only the
+    // Connectors cards from the host and leave the Provider and Listener cards alone. The nav is
+    // grouped by `group`, so their position in this array does not matter.
+    async function refreshConnectors() {
+      const connectors = await connectorPlugins(failed).catch(() => []);
+      state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("mcp:")), ...connectors];
+      return emit("plugin:state", {});
     }
 
     // Re-hangs the working bubble after a rebuild, for as long as we are genuinely still waiting.
@@ -1815,14 +1977,20 @@
               return { accepted: false, message: `Adopting ${id} failed: ${error.message}` };
             });
         }
-        // Connector cards have no host request to answer; this UI must not carry those credentials.
-        notWired("Answering a host secret request — the host asks by entryId and this UI has no request to answer");
-        return Promise.resolve({ accepted: false, message: "This UI has no host secret request to answer" });
+        // Not a provider card. A connector's env values go through setConnectorSecret (the key
+        // form on its own card) and a host secret request through submitSecretRequest (the masked
+        // input on the card in the conversation); neither lands here.
+        notWired(`Storing a secret for ${pluginId} — this card has no credential route`);
+        return Promise.resolve({ accepted: false, message: `This page has no place to store a ${field} for ${pluginId}` });
       },
       // Resolves with what happened, so the caller can toast the outcome instead of toasting the
       // click: this used to fire "Plugin installed globally" before the host had answered, and on
       // a card whose route the host always rejects the answer was always an error.
-      setPluginState(pluginId, status) {
+      // agentId is the caller's, not this page's guess. The card that draws the Disconnect button
+      // is labelled and read from app.js's contextLead(), which for a ROOM is the chief/first
+      // member worker and not the room itself -- so taking state.activeContext.id here unbound a
+      // channel on a different agent than the button named.
+      setPluginState(pluginId, status, agentId) {
         const plugin = state.plugins.find((p) => p.id === pluginId);
         if (!plugin) return Promise.resolve(`No such plugin: ${pluginId}`);
         const platform = plugin.id;
@@ -1830,7 +1998,11 @@
           return Promise.resolve(plugin.connectNote ?? `${plugin.name} cannot be connected from this page.`);
         }
         if (status === "available" || status === "disconnect") {
-          return call("disconnectChannel", { platform })
+          // CP-12: disconnectChannel is per agent (host-gateway-api.ts:557 -> manager
+          // .disconnectChannel(args.id, args.platform)). Sent without an id it unbound nothing.
+          const context = agentId ? { kind: "worker", id: agentId } : state.activeContext;
+          if (!context?.id) return Promise.resolve(`No agent is on screen, and a listener is unbound per agent.`);
+          return call("disconnectChannel", { id: context.id, platform })
             .then(() => hydrate(state)).then((next) => { state = next; emit("plugin:state", { pluginId, status: "available" }); return `${plugin.name} disconnected`; })
             .catch((error) => { failed(`Disconnecting ${plugin.name} failed: ${error.message}`); return `Disconnecting ${plugin.name} failed: ${error.message}`; });
         }
@@ -1853,12 +2025,190 @@
           })
           .catch((error) => { failed(`Connecting ${plugin.name} failed: ${error.message}`); return `Connecting ${plugin.name} failed: ${error.message}`; });
       },
-      togglePluginTool() {
-        // The tool list is real (listRoutedMcpTools), so the old "this host reports no tool list"
-        // was false. What is missing is the write: setHostSettings stores disables in
-        // mcpDisabledToolsByServerId, whose normaliser keeps only positive-integer server ids
-        // (sand-settings-store.ts), and a local stdio server's id is its name.
-        return notWired("Per-tool permissions — the host keys them by numeric server id and this box's connectors have name ids, so the write would be dropped");
+      // CP-03: a real per-tool switch. toggleMcpToolDisabled { serverId, toolName, disabled }
+      // writes the host's mcpDisabledToolsByServerId, whose normaliser keeps only positive-integer
+      // server ids -- which is why this is drawn only for a card that carries the host's numeric
+      // id. The row is never flipped from the click: the list is read back through
+      // listMcpServerTools and the switch shows whatever the host now holds.
+      togglePluginTool(pluginId, toolId) {
+        const plugin = state.plugins.find((p) => p.id === pluginId);
+        const tool = plugin?.tools?.find((t) => t.id === toolId);
+        if (!plugin || !tool) return Promise.resolve({ accepted: false, message: `No such tool: ${toolId}` });
+        if (plugin.serverId == null || tool.togglable === false) {
+          notWired(plugin.serverId == null
+            ? "Per-tool permissions — the host keys them by numeric server id and this connector has no numeric id here, so the write would be dropped"
+            : "Per-tool permissions — this host has no toggleMcpToolDisabled command, so there is nowhere to write the disable");
+          return Promise.resolve({ accepted: false, message: plugin.toolsReadOnlyNote ?? "This host cannot store a per-tool disable for this connector." });
+        }
+        const disabled = tool.enabled !== false;
+        const readBack = async () => {
+          const rows = await tryCall("listMcpServerTools", { serverId: plugin.serverId }).catch(() => null);
+          if (!Array.isArray(rows)) return null;
+          plugin.tools = rows.map((t) => ({
+            id: `${plugin.name}::${t.name}`, name: t.name,
+            description: oneLine(t.description ?? "", 160) || "No description from the server.",
+            enabled: t.enabled !== false, togglable: tool.togglable,
+          }));
+          emit("plugin:state", { pluginId, toolId });
+          return plugin.tools.find((t) => t.id === toolId) ?? null;
+        };
+        return tryCall("toggleMcpToolDisabled", { serverId: plugin.serverId, toolName: tool.name, disabled })
+          .then(async (answer) => {
+            if (answer === null) {
+              notWired("Per-tool permissions — this host has no toggleMcpToolDisabled command yet");
+              return { accepted: false, message: "This host has no toggleMcpToolDisabled command yet, so nothing was changed." };
+            }
+            const now = await readBack();
+            if (now == null) return { accepted: true, message: `The host took the change but reports no tool list for ${plugin.name}.` };
+            return {
+              accepted: now.enabled === !disabled,
+              message: now.enabled === !disabled
+                ? `${tool.name} is now ${now.enabled ? "enabled" : "disabled"} on the host`
+                : `The host still reports ${tool.name} as ${now.enabled ? "enabled" : "disabled"}`,
+            };
+          })
+          .catch((error) => {
+            failed(`That tool switch did not reach the host: ${error.message}`);
+            return { accepted: false, message: `${tool.name} was not changed: ${error.message}` };
+          });
+      },
+      // CP-10 item 1: a connector's own env credential. The host names the fields
+      // (listConnectorSecretFields) and stores the value (setConnectorSecret); this page holds it
+      // only for the length of the call and never paints it into the DOM.
+      setConnectorSecret(server, field, value) {
+        return tryCall("setConnectorSecret", { server, field, value })
+          .then((answer) => {
+            if (answer === null) return { accepted: false, message: `This host has no setConnectorSecret command yet, so ${field} was not stored.` };
+            const stored = answer?.stored !== false && answer?.ok !== false && answer?.error == null;
+            return {
+              accepted: stored,
+              message: typeof answer?.message === "string" ? answer.message
+                : answer?.error ? `${server} rejected ${field}: ${answer.error}`
+                : stored ? `${field} stored by the host for ${server} — it never entered chat or model context`
+                : `The host did not store ${field} for ${server}`,
+            };
+          })
+          .catch((error) => {
+            failed(`Storing ${field} for ${server} failed: ${error.message}`);
+            return { accepted: false, message: `${field} was not stored: ${error.message}` };
+          });
+      },
+
+      // -- CP-11: the connectors editor. The relay owns connectors.json (GET/POST /connectors);
+      // the host re-reads it on refreshMcp, so an added connector appears on its card without an
+      // operator running docker exec. Env VALUES are deliberately absent from this write: the
+      // form collects names only, and setConnectorSecret above carries the values.
+      listConnectors() {
+        return connectorConfig().then((c) => Object.entries(c?.mcpServers ?? {}).map(([name, spec]) => ({
+          name, command: spec?.command ?? null, argCount: Array.isArray(spec?.args) ? spec.args.length : 0,
+          envNames: Object.keys(spec?.env ?? {}),
+        })));
+      },
+      async addConnector(spec) {
+        const name = String(spec?.name ?? "").trim();
+        const command = String(spec?.command ?? "").trim();
+        if (!name) return { accepted: false, message: "A connector needs a name." };
+        if (!command) return { accepted: false, message: "A stdio connector needs a command; the relay rejects one without it." };
+        const args = Array.isArray(spec?.args) ? spec.args.map((a) => String(a)) : [];
+        const envNames = (Array.isArray(spec?.envNames) ? spec.envNames : []).map((n) => String(n).trim()).filter(Boolean);
+        // Never a map derived from a read that may have failed: this POST REPLACES the file.
+        const held = await readableConnectorServers();
+        if (held == null) return { accepted: false, message: CONNECTORS_UNREADABLE };
+        const servers = { ...held };
+        if (servers[name]) return { accepted: false, message: `${name} is already configured on the box.` };
+        // Names with no values: the file records which env the process wants, and the host's own
+        // store is where the value goes. Writing a value here would put it in a 0600 JSON file
+        // this page can read back, which is exactly what setConnectorSecret exists to avoid.
+        servers[name] = { command, args, env: Object.fromEntries(envNames.map((n) => [n, ""])) };
+        return this.writeConnectors(servers, `${name} added`);
+      },
+      async removeConnector(name) {
+        const held = await readableConnectorServers();
+        if (held == null) return { accepted: false, message: CONNECTORS_UNREADABLE };
+        const servers = { ...held };
+        if (!servers[name]) return { accepted: false, message: `${name} is not in connectors.json.` };
+        delete servers[name];
+        return this.writeConnectors(servers, `${name} removed`);
+      },
+      async writeConnectors(servers, what) {
+        const res = await fetch("/connectors", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mcpServers: servers }) });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          failed(`connectors.json was not written: ${body?.error ?? res.status}`);
+          return { accepted: false, message: `connectors.json was not written: ${body?.error ?? res.status}` };
+        }
+        // The host re-reads connectors.json and relaunches its stdio servers on refreshMcp
+        // (host-gateway-api.ts routes a bare call to the mcp extension's management.restart), so
+        // the card is current without a container restart.
+        const refreshed = await call("refreshMcp", {}).then(() => true).catch(() => false);
+        await refreshConnectors();
+        const names = Object.keys(servers);
+        return {
+          accepted: true, servers: names,
+          message: refreshed
+            ? `${what} — the host re-read connectors.json`
+            : `${what} in connectors.json, but refreshMcp did not answer; the card follows on the next host restart`,
+        };
+      },
+
+      // -- CP-04: a listener token, taken here and handed to the host for the agent on screen.
+      // connectChannel { id, platform, token } (host-gateway-api.ts:553) answers with that
+      // agent's channels, so the row under the form is the host's own state, not the click.
+      // agentId comes from the caller: the form is drawn for app.js's contextLead(), which on a
+      // group conversation is a member worker rather than the room. Reading state.activeContext
+      // here stored the token against the room the form never named.
+      connectListener(platform, token, agentId) {
+        const context = agentId ? { kind: "worker", id: agentId } : state.activeContext;
+        if (!context?.id) return Promise.resolve({ accepted: false, message: "No agent is on screen to bind this listener to." });
+        return call("connectChannel", { id: context.id, platform, token })
+          .then((answer) => {
+            const r = record(context);
+            if (r && answer) r.channels = channelsOf(answer);
+            const row = (r?.channels ?? []).find((c) => c.platform === platform) ?? null;
+            emit("plugin:state", { pluginId: platform, status: row?.connected ? "connected" : "available" });
+            return {
+              accepted: row?.connected === true,
+              message: row?.connected
+                ? `${platform} connected for ${r?.name ?? "this agent"} — the host holds the token, this page does not`
+                : `The host took the token but still lists no ${platform} channel for ${r?.name ?? "this agent"}`,
+            };
+          })
+          .catch((error) => {
+            failed(`Connecting ${platform} failed: ${error.message}`);
+            return { accepted: false, message: `${platform} was not connected: ${error.message}` };
+          });
+      },
+
+      // CP-10 item 2: the answer to a host secret request. submitSecret { entryId, value, agentId }
+      // is real (widget-responses.ts:355): the host routes the value to the connector credential
+      // store, stamps secretProvided on the entry and resumes the agent.
+      // It also returns void -- HTTP 200, empty body -- on EVERY failure path: no such entry, not
+      // a secret request, already answered, or routeSecret returning null. So a 200 is not an
+      // answer. The host's own stamp is: cardOf reads entry.secretProvided into card.status, so
+      // the transcript is re-read and that stamp is what decides what this reports.
+      submitSecretRequest(context, messageId, value) {
+        const target = context ?? state.activeContext;
+        const r = record(target);
+        const message = r?.messages.find((m) => m.id === messageId);
+        const card = message?.card;
+        if (!card || card.kind !== "secret") return Promise.reject(new Error("only a credential request can be answered this way"));
+        if (!String(value ?? "").trim()) return Promise.resolve({ accepted: false, message: "The host discards an empty value." });
+        card.status = "sending";
+        emit("message:created", { context: target });
+        return call("submitSecret", { entryId: card.entryId ?? messageId, value, agentId: target.id })
+          .then(() => reloadActive())
+          .then(() => {
+            const now = record(target)?.messages.find((m) => m.id === messageId)?.card ?? null;
+            if (now?.status === "provided") return { accepted: true, message: "The host stored it and resumed the agent" };
+            if (now) now.status = "pending";
+            emit("message:created", { context: target });
+            return { accepted: false, message: "The host took the call but still does not report this request as answered — nothing was stored." };
+          })
+          .catch((error) => {
+            card.status = "pending";
+            failed(`That credential did not reach the host: ${error.message}`);
+            return { accepted: false, message: `Not stored: ${error.message}` };
+          });
       },
       // Every argument name and resolution string below was read from host source, not guessed:
       // resolveAutoReviewApproval resolves "approved"|"denied" (runner/sand-auto-review.ts:9);
@@ -1888,7 +2238,9 @@
         if (card.kind === "widget") return sent(call("respondToWidget", {
           entryId: messageId, value: decision, agentId,
         }));
-        return notWired("Answering a credential request from this UI");
+        // A credential request is answered through submitSecretRequest, which carries the masked
+        // value; there is no decision button on that card to land here.
+        return notWired("Answering a credential request with a decision button — it takes a masked value, not a choice");
       },
       setModel(workerId, modelId) {
         // Box-wide: every agent answers through one endpoint. The menu lists the catalog, adopted

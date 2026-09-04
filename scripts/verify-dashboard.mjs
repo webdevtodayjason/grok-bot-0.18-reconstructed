@@ -71,6 +71,31 @@ const gw = async (method, args = {}) => {
   return text.length ? JSON.parse(text) : null;
 };
 const run = (args) => new Promise((resolve) => execFile("node", args, { maxBuffer: 16 << 20, env: process.env, cwd: repoRoot }, (error, out, err) => resolve({ code: error?.code ?? 0, out: String(out) + String(err) })));
+// A shell inside the box, for the one thing the relay cannot do: put the probe connector's own
+// executable where the host will launch it from. Nothing else in this gate reaches past the relay.
+const BOX = process.env.GROK_BOT_BOX_CONTAINER ?? "grok-bot-local-vm";
+const box = (command) => new Promise((resolve) => execFile("docker", ["exec", BOX, "sh", "-lc", command], { maxBuffer: 8 << 20 }, (error, out, err) => resolve({ code: error?.code ?? 0, out: String(out) + String(err) })));
+// CP-11's probe: a one-file stdio MCP server with no dependencies, so the box can launch it with
+// bare `node` and the host discovers exactly one tool from it.
+const PROBE_CONNECTOR = "gateprobe";
+const PROBE_MCP_FILE = "gate-probe-mcp.mjs";
+const PROBE_MCP_SOURCE = [
+  'const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");',
+  'let buffer = "";',
+  'process.stdin.on("data", (chunk) => {',
+  '  buffer += chunk;',
+  '  let at;',
+  '  while ((at = buffer.indexOf("\\n")) >= 0) {',
+  '    const line = buffer.slice(0, at); buffer = buffer.slice(at + 1);',
+  '    if (!line.trim()) continue;',
+  '    let msg; try { msg = JSON.parse(line); } catch { continue; }',
+  '    if (msg.method === "initialize") send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "gateprobe", version: "0.0.1" } } });',
+  '    else if (msg.method === "tools/list") send({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "probe_ping", description: "Answers pong.", inputSchema: { type: "object", properties: {} } }] } });',
+  '    else if (msg.method === "tools/call") send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "pong" }] } });',
+  '    else if (msg.id != null) send({ jsonrpc: "2.0", id: msg.id, result: {} });',
+  '  }',
+  '});',
+].join("\n");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (fn, ms, step = 2000) => {
   const deadline = Date.now() + ms;
@@ -92,8 +117,33 @@ const callsTo = (method) => apiCalls.filter((m) => m === method).length;
 const userTextOf = (e) => (typeof e?.content === "string" ? e.content : Array.isArray(e?.content) ? e.content.map((c) => c?.text ?? "").join("") : "");
 const clickText = async (text) => { const loc = page.getByText(text, { exact: false }).first(); const box = await loc.boundingBox(); if (!box) throw new Error(`not visible: ${text}`); await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2); await page.waitForTimeout(1200); };
 // A nav click by id, not by text: the sidebar scrolls, and a click at a stale coordinate lands on
-// the dialog backdrop, which closes the panel instead of selecting the card.
-const pickPlugin = async (id) => { await page.click(`[data-plugin-id="${id}"]`); await page.waitForTimeout(1200); };
+// the dialog backdrop, which closes the panel instead of selecting the card. Retried once through
+// a reopened panel. A run in this wave hit a 30s
+// "element is not visible" on a button the same click reaches in isolation, so the failure is
+// transient panel state rather than the card; the diagnostic says which ancestor was hiding it
+// instead of leaving the next reader with a bare timeout.
+const pluginNavState = (id) => page.evaluate((sel) => {
+  const el = document.querySelector(`[data-plugin-id="${sel}"]`);
+  if (!el) return { found: false, dialogOpen: document.getElementById("panel-dialog")?.open ?? null };
+  const rect = el.getBoundingClientRect();
+  const hidden = [];
+  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    const cs = getComputedStyle(node);
+    if (cs.display === "none" || cs.visibility === "hidden") hidden.push(`${node.tagName.toLowerCase()}${node.className ? `.${String(node.className).split(" ")[0]}` : ""}:${cs.display}/${cs.visibility}`);
+  }
+  return { found: true, w: Math.round(rect.width), h: Math.round(rect.height), hidden, dialogOpen: document.getElementById("panel-dialog")?.open ?? null };
+}, id);
+const pickPlugin = async (id) => {
+  try {
+    await page.click(`[data-plugin-id="${id}"]`, { timeout: 12_000 });
+  } catch (error) {
+    console.log(`  INFO  ${id} not clickable on the first try: ${JSON.stringify(await pluginNavState(id))}`);
+    await page.keyboard.press("Escape"); await page.waitForTimeout(600);
+    await clickText("Plugins");
+    await page.click(`[data-plugin-id="${id}"]`, { timeout: 12_000 });
+  }
+  await page.waitForTimeout(1200);
+};
 const domText = () => page.evaluate(() => document.documentElement.outerHTML);
 // The Agent details panel fills two rows asynchronously from the host. The screen row waits on
 // ensureForeverBox, which allocates a display on a cold box -- the adapter's own note says about
@@ -113,6 +163,12 @@ const noDemoStrings = async (where) => {
 const startCatalog = await relay("/endpoints").catch(() => null);
 const previousRow = startCatalog?.endpoints?.find((e) => e.baseUrl === startCatalog?.live?.baseUrl && e.model === startCatalog?.live?.model) ?? null;
 let probeAgentId = null;
+// CP-11: set while the gate's own connector is in connectors.json, so the finally block can take
+// it back out if an assertion threw between the write and the removal.
+let probeConnectorAdded = false;
+// Set once the key form has stored a throwaway value for that connector, so the finally block can
+// take it back out of the host's connector-secret store.
+let probeSecretStored = false;
 // The GW-01 Duplicate check's copy, deleted through the panel; swept here if that step did not.
 let copyAgentId = null;
 // The workflow library is GLOBAL on the box (workflow-store.ts GlobalWorkflowLibrary; per-agent
@@ -472,6 +528,142 @@ try {
     const skillsHeading = await page.evaluate(() => Array.from(document.querySelectorAll(".plugin-section-title")).some((e) => /Skills in package/.test(e.textContent)));
     check(skillsHeading === false, "no empty Skills heading over an empty div");
 
+    // -- Wave D1 (CP-03, CP-09, CP-10 item 1, CP-11): the connector plane. The host half of this
+    // wave lands separately, so each block is guarded on the command actually being there: a host
+    // that answers "unknown gateway method" gets an INFO line and the Wave B read-only card is
+    // what must still be on screen. tests/machine-room-connectors.test.mjs pins the same paths
+    // against a stub gateway so they are covered before the host arrives.
+    const hasCommand = async (method, args = {}) => {
+      try { await gw(method, args); return true; } catch (error) { return !/unknown gateway method/.test(error.message); }
+    };
+    const installedHere = await hasCommand("listInstalledMcpServers");
+    if (!installedHere) {
+      console.log("  INFO  listInstalledMcpServers is not on this host yet — the numeric-id card, the tool switch and the connector key form are covered by tests/machine-room-connectors.test.mjs until it lands");
+      const readOnly = await page.evaluate(() => document.querySelector(".plugin-detail .field-hint")?.textContent?.trim() ?? "");
+      check(/numeric server id/.test(readOnly) && (await page.$$(".plugin-detail [data-toggle-tool]")).length === 0,
+        "without the host half the connector card stays the read-only Wave B card", readOnly.slice(0, 110));
+    } else {
+      const installed = await gw("listInstalledMcpServers", {}).catch(() => null);
+      const server = (Array.isArray(installed) ? installed : []).find((row) => row?.name === "localfiles") ?? null;
+      check(server != null && server.id != null, "the host installs localfiles with an id of its own", `id ${server?.id}`);
+      await pickPlugin("mcp:localfiles");
+      const idBlurb = await page.evaluate(() => document.querySelector(".plugin-detail .plugin-hero-copy p")?.textContent ?? "");
+      check(server != null && idBlurb.includes(`host id ${server.id}`), "the localfiles card shows the host's numeric server id", idBlurb.slice(0, 120));
+      const hostTools = server ? await gw("listMcpServerTools", { serverId: server.id }).catch(() => null) : null;
+      const switches = await page.$$eval(".plugin-detail .tool-row [data-toggle-tool]", (els) => els.map((e) => e.dataset.toggleTool));
+      check(Array.isArray(hostTools) && switches.length === hostTools.length && switches.length > 0,
+        `every tool the host lists for localfiles is a switch (${Array.isArray(hostTools) ? hostTools.length : "?"})`, `${switches.length} switch(es)`);
+      // CP-03: the row moves because the host moved, not because the switch was clicked. Read the
+      // host's own list back, then flip it home so the box is left as the gate found it.
+      if (Array.isArray(hostTools) && hostTools.length > 0 && switches.length > 0) {
+        const first = hostTools[0].name;
+        const before = hostTools[0].enabled !== false;
+        await page.click(`.plugin-detail [data-toggle-tool="${switches[0]}"]`); await page.waitForTimeout(2500);
+        const rowAfter = await page.evaluate((sel) => document.querySelector(`[data-toggle-tool="${sel}"]`)?.getAttribute("aria-pressed") ?? "", switches[0]);
+        const hostAfter = await gw("listMcpServerTools", { serverId: server.id }).catch(() => null);
+        const hostRow = (Array.isArray(hostAfter) ? hostAfter : []).find((t) => t.name === first) ?? null;
+        check(hostRow != null && (hostRow.enabled !== false) === !before, `flipping ${first} changed the host's own tool list`, `${before} → ${hostRow?.enabled}`);
+        check(rowAfter === String(!before), "and the switch on the card followed the host, not the click", `aria-pressed ${rowAfter}`);
+        await page.click(`.plugin-detail [data-toggle-tool="${switches[0]}"]`).catch(() => {}); await page.waitForTimeout(2500);
+        const restored = ((await gw("listMcpServerTools", { serverId: server.id }).catch(() => [])) ?? []).find((t) => t.name === first) ?? null;
+        check(restored != null && (restored.enabled !== false) === before, `${first} is left as the gate found it`, `${restored?.enabled}`);
+      }
+      // CP-10 item 1: the key form exists on this card and names the environment values the
+      // connector wants -- but nothing is SUBMITTED here. setConnectorSecret stores the value and
+      // restarts the connector, and localfiles is the box's one working MCP server that other
+      // gates depend on; a probe value would go into its real environment. The submit is done
+      // below, on the throwaway connector this gate adds and removes.
+      const declared = await relay("/connectors").then((c) => Object.keys(c?.mcpServers?.localfiles?.env ?? {})).catch(() => []);
+      const held = await gw("listConnectorSecretFields", { server: "localfiles" }).catch(() => null);
+      const formFields = await page.$$eval("[data-connector-secret-form] input[type=password]", (els) => els.map((e) => e.name));
+      const expectedFields = [...new Set([...declared, ...(held?.fields ?? [])])];
+      check(expectedFields.length === 0 || formFields.sort().join(",") === expectedFields.sort().join(","),
+        `the key form names every environment value localfiles wants (${expectedFields.length})`, `form ${formFields.join(", ")} vs ${expectedFields.join(", ")}`);
+      const envValues = await relay("/connectors").then((c) => Object.values(c?.mcpServers?.localfiles?.env ?? {})).catch(() => []);
+      const formHtml = await page.evaluate(() => document.querySelector("[data-connector-secret-form]")?.outerHTML ?? "");
+      check(!envValues.filter((v) => String(v).length > 2).some((v) => formHtml.includes(String(v))), "and carries no value from connectors.json into its markup");
+    }
+
+    // -- CP-11: the connectors editor. The relay's /connectors route and refreshMcp both answer
+    // today, so this runs on every host. A stdio server the box can actually launch: node with a
+    // one-file MCP server written into /workspace, the same shape connectors.json already holds.
+    const editor = await page.$("[data-connector-editor]");
+    if (!editor) check(false, "the Plugins page offers a connectors editor");
+    else {
+      const before = await relay("/connectors").catch(() => null);
+      const wrote = await box(`cat > /workspace/${PROBE_MCP_FILE} <<'PROBEEOF'\n${PROBE_MCP_SOURCE}\nPROBEEOF`);
+      check(wrote.code === 0, "the gate can write its probe MCP server into /workspace", wrote.out.slice(0, 120));
+      // Opened rather than clicked: a click toggles, and a run that reached this block with the
+      // disclosure already open would close it and then fail to fill an invisible field.
+      await page.evaluate(() => document.querySelector("[data-connector-editor]")?.setAttribute("open", "open"));
+      await page.waitForTimeout(400);
+      await page.fill("#connector-name", PROBE_CONNECTOR);
+      await page.fill("#connector-command", "node");
+      await page.fill("#connector-args", `/workspace/${PROBE_MCP_FILE}`);
+      await page.fill("#connector-env", "PROBE_TOKEN");
+      probeConnectorAdded = true;
+      await page.click("[data-add-connector] button[type=submit]"); await page.waitForTimeout(6000);
+      const file = await relay("/connectors").catch(() => null);
+      const spec = file?.mcpServers?.[PROBE_CONNECTOR] ?? null;
+      check(spec?.command === "node", "the editor wrote the probe connector into connectors.json", JSON.stringify(spec ?? null).slice(0, 120));
+      // Env NAMES only: connectors.json is the 0600 plaintext file, so a value must never be
+      // written there by this form. The key form on the card is where a value goes.
+      check(spec != null && Object.values(spec.env ?? {}).every((v) => v === ""), "with the environment variable named and no value written into that file", JSON.stringify(spec?.env ?? null));
+      check(Object.keys(before?.mcpServers ?? {}).every((name) => file?.mcpServers?.[name]), "and the connectors already on the box survived the write");
+      // refreshMcp is what makes it appear without an operator docker exec. The host relaunches
+      // its stdio servers, so give it a beat and then read the card the page draws for it.
+      const connected = await until(async () => {
+        const servers = await gw("listBoxMcpServers", { serverIdentifiers: [PROBE_CONNECTOR] }).catch(() => null);
+        const row = (servers?.servers ?? []).find((row2) => row2.serverIdentifier === PROBE_CONNECTOR) ?? null;
+        return row && row.status === "connected" ? row : null;
+      }, 45_000, 3000);
+      check(connected != null, "and the host connects it after refreshMcp, with no docker exec", connected ? `status ${connected.status}, ${connected.toolCount} tool(s)` : "never reached connected");
+      // Reopened after the wait so the panel is drawn from the state the host reports NOW: the
+      // render right after the POST ran before the box had finished launching the process.
+      await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+      await clickText("Plugins"); await page.waitForTimeout(1500);
+      await pickPlugin(`mcp:${PROBE_CONNECTOR}`).catch(() => {});
+      const probeName = await page.evaluate(() => document.querySelector(".plugin-detail h3")?.textContent ?? "");
+      const probeCard = await page.evaluate(() => document.querySelector(".plugin-detail .plugin-hero-copy p")?.textContent ?? "");
+      check(probeName === PROBE_CONNECTOR, "the probe connector has its own card on the Plugins page", `${probeName} · ${probeCard.slice(0, 100)}`);
+      check(connected == null || /connected/.test(probeCard), "and that card says the box connected it", probeCard.slice(0, 110));
+      // -- CP-10 item 1, on a connector nothing else depends on: a throwaway value through the key
+      // form, stored by the host, and no trace of it left anywhere the page can be read from.
+      const secretForm = await page.$("[data-connector-secret-form]");
+      if (!secretForm) console.log(`  INFO  no key form on the ${PROBE_CONNECTOR} card; the host lists no secret field and connectors.json declared none`);
+      else {
+        probeSecretStored = true;
+        const probeValue = `PROBE-SECRET-${Math.random().toString(36).slice(2, 12)}`;
+        await page.fill(`[data-connector-secret-form] input[name="PROBE_TOKEN"]`, probeValue);
+        await page.click("[data-connector-secret-form] button[type=submit]"); await page.waitForTimeout(4000);
+        const stored = await gw("listConnectorSecretFields", { server: PROBE_CONNECTOR }).catch(() => null);
+        check((stored?.fields ?? []).includes("PROBE_TOKEN"), "the key form stored the value on the host", JSON.stringify(stored ?? null).slice(0, 120));
+        const afterSubmit = await page.evaluate(() => document.documentElement.outerHTML + " " + Array.from(document.querySelectorAll("input")).map((i) => i.value).join(" "));
+        check(!afterSubmit.includes(probeValue), `and left no trace of it in the DOM or in any input (${probeValue.length} chars)`);
+        const storage = await page.evaluate(() => JSON.stringify(window.localStorage) + JSON.stringify(window.sessionStorage));
+        check(!storage.includes(probeValue), "and nothing of it reaches browser storage");
+        // The 0600 file the form must never write to: the value belongs in the host's own store.
+        const file = await relay("/connectors").catch(() => null);
+        check(!JSON.stringify(file ?? {}).includes(probeValue), "and connectors.json still holds no value for it");
+        // Taken back out BEFORE the connector is removed: deleteConnectorSecret resolves the
+        // server through connectors.json, so once the row is gone the store cannot be reached and
+        // the value would sit in it for the life of the box.
+        const removed = await gw("deleteConnectorSecret", { server: PROBE_CONNECTOR, field: "PROBE_TOKEN" }).catch(() => null);
+        const left = await gw("listConnectorSecretFields", { server: PROBE_CONNECTOR }).catch(() => null);
+        check(removed?.removed === true && (left?.fields ?? []).length === 0, "and the gate takes its throwaway value back out of the host's store", JSON.stringify(left ?? removed ?? null).slice(0, 120));
+        if (removed?.removed === true) probeSecretStored = false;
+      }
+      // And the removal, through the same editor.
+      await page.evaluate(() => document.querySelector("[data-connector-editor]")?.setAttribute("open", "open"));
+      await page.click(`[data-connector-editor] [data-remove-connector="${PROBE_CONNECTOR}"]`).catch(async () => {
+        await page.click(`.plugin-detail [data-remove-connector="${PROBE_CONNECTOR}"]`);
+      });
+      await page.waitForTimeout(6000);
+      const afterRemove = await relay("/connectors").catch(() => null);
+      check(afterRemove?.mcpServers?.[PROBE_CONNECTOR] == null, "and Remove takes it back out of connectors.json", Object.keys(afterRemove?.mcpServers ?? {}).join(", "));
+      if (afterRemove?.mcpServers?.[PROBE_CONNECTOR] == null) probeConnectorAdded = false;
+    }
+
     // -- GW-08 item 2: a listener card shows getAgentChannels for the agent on screen.
     const onScreen = await page.evaluate(() => document.getElementById("room-title")?.textContent ?? "");
     const onScreenId = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.name === onScreen)?.id ?? null;
@@ -480,6 +672,20 @@ try {
     const channelRow = await page.evaluate(() => document.querySelector("[data-channel-state='slack']")?.textContent?.replace(/\s+/g, " ") ?? "");
     const slackConnected = (channels?.connections ?? []).some((c) => c.platform === "slack");
     check(channelRow.includes(onScreen) && new RegExp(slackConnected ? "connected" : "not connected").test(channelRow) && (slackConnected || !/: connected/.test(channelRow)), "the Slack listener card shows this agent's channel state from getAgentChannels", `${onScreen} → ${channelRow.slice(0, 110)}`);
+    // -- CP-04: Connect on a listener opens a local token form that calls connectChannel for the
+    // agent on screen. The Cursor-hosted route stays reachable and is labelled as the account this
+    // box does not have; it used to be the ONLY route, and clicking it could only end in a dead tab.
+    if (slackConnected) {
+      check((await page.$$("[data-disconnect-plugin='slack']")).length === 1, "a connected Slack listener offers to disconnect for this agent");
+    } else {
+      const localForm = await page.$("[data-connect-channel='slack']");
+      check(localForm != null, "Connect on the Slack listener opens a local token form, not cursor.com");
+      check((await page.$$("[data-connect-channel='slack'] input[type=password]")).length === 1, "and the token field is masked");
+      const cursorNote = await page.evaluate(() => document.querySelector(".plugin-detail")?.textContent ?? "");
+      check(/Cursor-hosted route/.test(cursorNote) && /account this box does not have/.test(cursorNote), "with the Cursor route kept as a labelled secondary", cursorNote.slice(cursorNote.indexOf("Cursor"), cursorNote.indexOf("Cursor") + 110));
+      // Not submitted: connectChannel with a made-up token would bind a real listener on a shared
+      // box. tests/machine-room-connectors.test.mjs pins the argument names against a stub.
+    }
 
     // -- MR-04: a provider whose route this host cannot adopt offers no Connect button.
     await pickPlugin("sub:claude");
@@ -561,6 +767,78 @@ try {
     check(filesTab === "Files from this conversation", "the Files tab is labelled for what it renders", filesTab);
     check((await page.$$("[data-desktop-app='sheets']")).length === 0, "the placeholder Sheets tab is gone");
     await page.click("#open-desktop"); await page.waitForTimeout(1200);
+    // -- MR-11: the "Current run" rail. It used to be one synthetic line ("Started — no step
+    // detail from this host") whatever the agent was doing. It is now this turn's tool rows, the
+    // same rows the adapter wove into the transcript from the conversation outline.
+    // The assertion is an EXACT match against the rule read off the rendered transcript: the tool
+    // rows after the last thing the operator sent, last twelve, in order. An earlier version of
+    // this check only asked that the rail carried no row the transcript lacked, which an idle
+    // agent satisfies with zero rows -- and zero rows is exactly what the PRE-change code drew
+    // ("Nothing running for this worker" is byte-identical in both), so it proved nothing. So the
+    // rail is asserted on an agent whose transcript actually carries tool rows for this turn: the
+    // roster is walked until one is found, and the agent that was on screen is put back.
+    const railRowsNow = () => page.$$eval("#desktop-timeline li", (els) => els.map((e) => e.textContent.trim()));
+    // The MR-11 rule, evaluated over the DOM rather than over the adapter's arrays, so the
+    // expectation is computed from the host's own rendered transcript and not from app.js.
+    const railExpectation = () => page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll(".message-row"));
+      let lastFromYou = -1;
+      rows.forEach((el, i) => { if (el.classList.contains("is-user")) lastFromYou = i; });
+      return rows.slice(lastFromYou + 1)
+        .filter((el) => el.classList.contains("is-system") && String(el.dataset.messageId ?? "").startsWith("tool-"))
+        .map((el) => el.textContent.trim())
+        .slice(-12);
+    });
+    const railOnScreenId = await page.evaluate(() => document.querySelector(".worker-card.is-active")?.dataset.contextId ?? null);
+    let railRows = await railRowsNow();
+    let expectedRail = await railExpectation();
+    let railAgent = await page.evaluate(() => document.getElementById("room-title")?.textContent ?? "");
+    // Escape does not reliably close the desktop dialog here, and a roster click that lands on a
+    // dialog backdrop selects nothing: every navigation in this block closes the open dialogs
+    // itself and then waits for the room title to be the agent it asked for.
+    const openRoom = async (id, name) => {
+      await page.evaluate(() => document.querySelectorAll("dialog[open]").forEach((d) => d.close()));
+      await page.waitForTimeout(400);
+      await page.click(`.worker-card[data-context-id="${id}"]`, { timeout: 10_000 }).catch(() => {});
+      const arrived = await until(() => page.evaluate((n) => (document.getElementById("room-title")?.textContent === n ? true : null), name), 20_000, 700);
+      await page.waitForTimeout(1500);
+      await page.click("#open-desktop", { timeout: 10_000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+      return arrived === true;
+    };
+    if (expectedRail.length === 0) {
+      // Nothing to discriminate on this agent. Try the others, then come back.
+      const roster = await page.$$eval(".worker-card[data-context-id]", (els) => els.map((e) => ({ id: e.dataset.contextId, name: e.querySelector(".worker-name")?.textContent?.trim() ?? "" })));
+      for (const worker of roster) {
+        if (worker.id === railOnScreenId) continue;
+        if (!(await openRoom(worker.id, worker.name))) continue;
+        expectedRail = (await until(async () => { const rows = await railExpectation(); return rows.length ? rows : null; }, 10_000, 1500)) ?? [];
+        if (expectedRail.length > 0) {
+          railRows = await railRowsNow();
+          railAgent = await page.evaluate(() => document.getElementById("room-title")?.textContent ?? "");
+          break;
+        }
+      }
+    }
+    check(!railRows.some((row) => /no step detail from this host/.test(row)),
+      "the Current run rail is not the old synthetic step", railRows.slice(0, 2).join(" | ").slice(0, 140));
+    if (expectedRail.length > 0) {
+      const same = railRows.length === expectedRail.length && railRows.every((row, i) => row === expectedRail[i]);
+      check(same, `the Current run rail is exactly this turn's tool rows from the transcript, in order (${expectedRail.length} row(s) on ${railAgent})`,
+        same ? expectedRail[0].slice(0, 110) : `rail ${JSON.stringify(railRows).slice(0, 140)} vs transcript ${JSON.stringify(expectedRail).slice(0, 140)}`);
+    } else {
+      // No agent on this box has a tool row after its last operator message, so the empty state is
+      // the only render available and it cannot tell the two versions apart. Say so rather than
+      // bank a vacuous PASS; the rule itself is pinned by tests/machine-room-connectors.test.mjs.
+      console.log(`  INFO  no agent on this box has a tool row after its last operator message (rail: ${JSON.stringify(railRows).slice(0, 100)}); the MR-11 rule is pinned by tests/machine-room-connectors.test.mjs`);
+      check(railRows.length === 1 && /Nothing running|no tool call for this turn/.test(railRows[0]),
+        "and the rail says so instead of inventing a step", railRows.join(" | ").slice(0, 120));
+    }
+    // Back to the agent the rest of this section reads (the evidence pills below are Atera's).
+    if (railOnScreenId && (await page.evaluate(() => document.querySelector(".worker-card.is-active")?.dataset.contextId ?? null)) !== railOnScreenId) {
+      const backName = await page.evaluate((id) => document.querySelector(`.worker-card[data-context-id="${id}"] .worker-name`)?.textContent?.trim() ?? "", railOnScreenId);
+      check(await openRoom(railOnScreenId, backName), "the gate is back on the agent it walked away from", backName);
+    }
     // -- GW-10(a): the hand-back control exists and is hidden while the host reports no pending
     // hand-off for this agent (getForeverBoxStatus.handoff is where pendingHandoff surfaces).
     const ateraId = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.name === "Atera Triage")?.id ?? null;
@@ -659,6 +937,66 @@ try {
     check(boxAfterArm?.state === boxNow?.state, "and the box is untouched after that click", `${boxNow?.state} → ${boxAfterArm?.state}`);
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);
 
+    // -- CP-10 item 2 / GW-11: the masked credential card. The host only writes a secret-request
+    // entry when an agent asks for one, which needs a model turn this gate will not spend, so the
+    // entry itself is synthetic: getAgentTranscriptTail's answer is intercepted on its way into
+    // the page and one entry is appended, in the host's own shape (send-message-tool.ts builds
+    // { type:"secret-request", secretRequest:{ label, description, target:{ kind, platform,
+    // field } } }). Everything downstream of that is the real thing -- the adapter's cardOf, the
+    // card render in app.js -- so this asserts the render, not a fixture. Nothing is submitted:
+    // the submit path is pinned against a stub in tests/machine-room-connectors.test.mjs.
+    const SECRET_PROBE_ENTRY = "gate-secret-request-probe";
+    await page.route("**/api/getAgentTranscriptTail", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json().catch(() => null);
+      if (body && Array.isArray(body.entries) && body.entries.length > 0) {
+        const last = body.entries.at(-1);
+        body.entries = [...body.entries, {
+          id: SECRET_PROBE_ENTRY,
+          kind: "send-message",
+          timestampMs: Number(last?.timestampMs ?? Date.now()) + 1,
+          author: last?.author ?? null,
+          message: {
+            type: "secret-request",
+            secretRequest: {
+              // No description: the card then has to write its own custody sentence, which is the
+              // half of this render worth asserting.
+              label: "the Slack bot token",
+              target: { kind: "channel-credential", platform: "slack", field: "bot_token" },
+            },
+          },
+        }];
+      }
+      // Only what the page needs. Spreading the upstream headers back over a rewritten body
+      // re-sends its framing (ui/server.mjs ends the response with no content-length, so Node
+      // frames it chunked) for a payload of a different length.
+      await route.fulfill({ status: response.status(), contentType: "application/json", body: JSON.stringify(body ?? {}) });
+    });
+    // Leave and come back so the adapter reads the tail again through the interception.
+    const secretProbeId = await page.evaluate(() => document.querySelector(".worker-card.is-active")?.dataset.contextId ?? null);
+    const otherId = await page.evaluate((id) => (Array.from(document.querySelectorAll(".worker-card[data-context-id]")).map((e) => e.dataset.contextId).find((x) => x !== id) ?? null), secretProbeId);
+    if (otherId) { await page.click(`.worker-card[data-context-id="${otherId}"]`).catch(() => {}); await page.waitForTimeout(3000); }
+    if (secretProbeId) { await page.click(`.worker-card[data-context-id="${secretProbeId}"]`).catch(() => {}); }
+    const secretCardHtml = await until(() => page.evaluate((entry) => {
+      const el = document.querySelector(`.message-row[data-message-id="${entry}"]`);
+      return el ? el.outerHTML : null;
+    }, SECRET_PROBE_ENTRY), 20_000, 1000);
+    check(secretCardHtml != null, "a host credential request renders as its own card in the transcript", secretCardHtml ? "drawn" : "no card after 20s");
+    if (secretCardHtml) {
+      check(/asked for/i.test(secretCardHtml) && /the Slack bot token/.test(secretCardHtml), "the card says what the agent asked for", (/<strong>([^<]*)<\/strong>/.exec(secretCardHtml) ?? ["", "?"])[1].slice(0, 90));
+      check(/type="password"/.test(secretCardHtml) && new RegExp(`data-secret-input="${SECRET_PROBE_ENTRY}"`).test(secretCardHtml), "and draws a masked input carrying the entry id submitSecret needs");
+      check(new RegExp(`data-submit-secret="${SECRET_PROBE_ENTRY}"`).test(secretCardHtml), "with a submit that names that same entry id");
+      check(!/Answer this in the host app/.test(secretCardHtml), "and no longer sends the operator to the host app");
+      check(!/value=/.test(secretCardHtml) && /credential store/.test(secretCardHtml) && /never reaches the model/.test(secretCardHtml), "the input carries no value and the card says where the value goes");
+    }
+    // The interception comes off and the tail is read once more, so nothing synthetic is on
+    // screen for the no-flash window below.
+    await page.unroute("**/api/getAgentTranscriptTail");
+    if (otherId) { await page.click(`.worker-card[data-context-id="${otherId}"]`).catch(() => {}); await page.waitForTimeout(3000); }
+    if (secretProbeId) { await page.click(`.worker-card[data-context-id="${secretProbeId}"]`).catch(() => {}); await page.waitForTimeout(4000); }
+    const secretGone = await until(() => page.evaluate((entry) => (document.querySelector(`.message-row[data-message-id="${entry}"]`) ? null : true), SECRET_PROBE_ENTRY), 20_000, 1000);
+    check(secretGone === true, "and the synthetic request is off the screen again before the idle window");
+
     // -- The screen must not flash: the adapter emits only when the transcript or roster moved,
     // so an idle window covering a 15s heartbeat must rebuild the transcript zero times.
     await page.evaluate(() => {
@@ -683,6 +1021,38 @@ try {
   } else if (probeAgentId) console.log("  INFO  workflow library snapshot missing; imported skills NOT swept");
   if (copyAgentId) await gw("deleteAgent", { id: copyAgentId }).then(() => console.log("  INFO  duplicate copy swept")).catch((e) => console.log(`  INFO  duplicate copy NOT deleted: ${e.message}`));
   if (probeAgentId) await gw("deleteAgent", { id: probeAgentId }).then(() => console.log("  INFO  unread probe agent deleted")).catch((e) => console.log(`  INFO  unread probe agent NOT deleted: ${e.message}`));
+  // The probe connector and anything the gate stored for it, in the one order that works: the
+  // host resolves a connector secret through connectors.json, so the row has to be back in the
+  // file before the value can be taken out of the store, and only then does the row go.
+  if (probeSecretStored || probeConnectorAdded) {
+    const writeConnectors = (servers) => fetch(`${GATEWAY}/connectors`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mcpServers: servers }) }).catch(() => null);
+    const held = await relay("/connectors").catch(() => null);
+    const map = held?.mcpServers;
+    // This POST REPLACES connectors.json, and ui/server.mjs readConnectors answers
+    // { mcpServers: {} } when its `docker exec cat` fails -- which is exactly what a box mid-
+    // restart looks like, and this wave's own deploy step restarts it. Rebuilding the file from
+    // that read would wipe the operator's connectors, localfiles included. This box always has at
+    // least localfiles configured, so an empty or non-object read here is a failed read, never an
+    // empty file: nothing is written and the probe row is left for the next run to sweep.
+    if (map == null || typeof map !== "object" || Array.isArray(map) || Object.keys(map).length === 0) {
+      console.log("  INFO  connectors.json came back empty or unreadable; probe connector NOT swept and nothing was written to the file");
+    } else {
+      const servers = { ...map };
+      if (probeSecretStored) {
+        if (servers[PROBE_CONNECTOR] == null) {
+          servers[PROBE_CONNECTOR] = { command: "node", args: [`/workspace/${PROBE_MCP_FILE}`], env: { PROBE_TOKEN: "" } };
+          await writeConnectors(servers);
+        }
+        const gone = await fetch(`${GATEWAY}/api/deleteConnectorSecret`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ server: PROBE_CONNECTOR, field: "PROBE_TOKEN" }) }).then((r) => r.ok).catch(() => false);
+        console.log(`  INFO  probe connector secret ${gone ? "deleted from" : "NOT deleted from"} the host store`);
+      }
+      delete servers[PROBE_CONNECTOR];
+      const put = await writeConnectors(servers);
+      await fetch(`${GATEWAY}/api/refreshMcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => null);
+      console.log(`  INFO  probe connector ${put?.ok ? "swept from" : "NOT removed from"} connectors.json`);
+    }
+  }
+  if (!OFFLINE && !LEAKS) await box(`rm -f /workspace/${PROBE_MCP_FILE}`).catch(() => {});
   if (previousRow) { await relay("/endpoints/use", { id: previousRow.id }).catch(() => {}); console.log(`  INFO  box restored to ${previousRow.name}`); }
   else console.log("  INFO  box left where the gate found it (no catalog row matched the live endpoint)");
 }

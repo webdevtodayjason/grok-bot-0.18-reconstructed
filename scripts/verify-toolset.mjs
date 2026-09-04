@@ -320,27 +320,66 @@ try {
 
   if (MODE === "mcp-instructions") {
     // TOOLS-13. A connector instruction stored in host settings must render into the next prompt.
+    //
+    // There are two stores behind that one section, and until CP-07 only one of them could be
+    // exercised here: instructions keyed by SERVER ID were unreachable for a local connector,
+    // because its id was `local:localfiles` and every id-keyed path runs the id through
+    // validateMcpServerId. So this drove the legacy name-keyed map and called it proven. Now that
+    // local connectors carry a real numeric id, both legs run: the name-keyed map first, then the
+    // id-keyed map alone (with the name-keyed one cleared), so the second leg cannot be carried by
+    // the first. SetMcpInstructions through a model turn is expensive; these are settings writes.
     const before = await call("getHostSettings");
     const previous = before?.mcpCustomInstructions ?? {};
+    const previousById = before?.mcpCustomInstructionsByServerId ?? {};
+    const installed = await call("listInstalledMcpServers").catch(() => []);
+    const localfiles = (Array.isArray(installed) ? installed : []).find((server) => server.serverIdentifier === "localfiles");
+    const serverId = localfiles == null ? null : String(localfiles.id);
+    if (serverId == null) fail("listInstalledMcpServers does not show the localfiles connector");
+    if (!/^[1-9]\d*$/.test(serverId)) fail(`localfiles id "${serverId}" is not a positive decimal string; the id-keyed store cannot be reached`);
+    console.log(`localfiles server id: ${serverId}`);
     const probe = `VERIFY-MCP-INSTRUCTIONS-${Math.random().toString(36).slice(2, 8)}`;
-    await call("setHostSettings", { mcpCustomInstructions: { ...previous, localfiles: probe } });
-    try {
-      agent = await freshAgent(`verify-mcpi-${Math.random().toString(36).slice(2, 8)}`);
-      await call("sendPrompt", { agentId: agent.id, prompt: "Reply with the single word READY." });
+    const reportPath = (id) => `${PROMPT_REPORTS}/sand-system-prompt-${id}.json`;
+    const awaitReport = async (id) => {
       const deadline = Date.now() + TIMEOUT_MS;
-      let report = null;
       while (Date.now() < deadline) {
         await sleep(4000);
-        const raw = await docker(["exec", BOX, "sh", "-c", `cat ${PROMPT_REPORTS}/sand-system-prompt-${agent.id}.json 2>/dev/null || true`]);
-        try { report = JSON.parse(raw); } catch { report = null; }
-        if (report != null) break;
+        const raw = await docker(["exec", BOX, "sh", "-c", `cat ${reportPath(id)} 2>/dev/null || true`]);
+        try { const parsed = JSON.parse(raw); if (parsed != null) return parsed; } catch {}
       }
+      return null;
+    };
+    try {
+      // Leg 1: the legacy name-keyed map.
+      await call("setHostSettings", { mcpCustomInstructions: { ...previous, localfiles: probe }, mcpCustomInstructionsByServerId: {} });
+      agent = await freshAgent(`verify-mcpi-${Math.random().toString(36).slice(2, 8)}`);
+      await docker(["exec", BOX, "sh", "-c", `rm -f ${reportPath(agent.id)}`]);
+      await call("sendPrompt", { agentId: agent.id, prompt: "Reply with the single word READY." });
+      const report = await awaitReport(agent.id);
       if (report == null) fail("no assembled prompt report was written for the probe agent");
-      console.log(`prompt sections: ${Object.entries(report.sections ?? {}).filter(([, has]) => has === true).map(([name]) => name).join(", ")}`);
-      if (report.sections?.mcpCustomInstructions !== true) fail("the stored connector instruction did not reach the assembled prompt (mcpCustomInstructions section absent)");
+      console.log(`by name — prompt sections: ${Object.entries(report.sections ?? {}).filter(([, has]) => has === true).map(([name]) => name).join(", ")}`);
+      if (report.sections?.mcpCustomInstructions !== true) fail("the name-keyed connector instruction did not reach the assembled prompt (mcpCustomInstructions section absent)");
+
+      // Leg 2: the id-keyed map ALONE. Nothing name-keyed is left to carry the section.
+      await call("setHostSettings", { mcpCustomInstructions: {}, mcpCustomInstructionsByServerId: { [serverId]: `${probe}-BY-ID` } });
+      await docker(["exec", BOX, "sh", "-c", `rm -f ${reportPath(agent.id)}`]);
+      await call("sendPrompt", { agentId: agent.id, prompt: "Reply with the single word READY again." });
+      const byId = await awaitReport(agent.id);
+      if (byId == null) fail("no assembled prompt report was written for the id-keyed leg");
+      console.log(`by id — prompt sections: ${Object.entries(byId.sections ?? {}).filter(([, has]) => has === true).map(([name]) => name).join(", ")}`);
+      if (byId.sections?.mcpCustomInstructions !== true) fail(`the instruction stored under mcpCustomInstructionsByServerId[${serverId}] did not reach the assembled prompt`);
       console.log("PASS — mcp-instructions");
     } finally {
-      await call("setHostSettings", { mcpCustomInstructions: previous }).catch(() => {});
+      // The report is written while the turn is still being built, so the checks above return with
+      // the agent mid-run and cleanUp's deleteAgent would be refused -- which is how a probe agent
+      // survived a passing run. Wait for idle before the roster check.
+      if (agent != null) {
+        const idleBy = Date.now() + 120000;
+        while (Date.now() < idleBy) {
+          if ((await call("listAgents").catch(() => [])).find((a) => a.id === agent.id)?.isRunning !== true) break;
+          await sleep(4000);
+        }
+      }
+      await call("setHostSettings", { mcpCustomInstructions: previous, mcpCustomInstructionsByServerId: previousById }).catch(() => {});
     }
   }
 

@@ -560,6 +560,17 @@ export class SandHost {
     optionalMethod(transcript, "setConnectorConnectCardObserver")?.(
       (event: unknown) => this.runtime.registerConnectorConnectCard(event)
     );
+    // CP-10. A secret the user submits for a LOCAL connector belongs in that connector's process
+    // environment, not in the per-agent channel store the agent can read back. The transcript
+    // layer cannot see the mcp extension, so the route is handed to it here.
+    optionalMethod(transcript, "setConnectorSecretSink")?.(
+      async (args: { server: string; field: string; value: string }) => {
+        const management = extensions.api("mcp").management as DynamicHostApi | undefined;
+        if (management == null) return null;
+        if (optionalMethod(management, "isLocalConnector")?.(args.server) !== true) return null;
+        return await optionalMethod(management, "setConnectorSecret")?.(args) ?? null;
+      }
+    );
     void optionalMethod(
       extensions.api("host-upgrade"),
       "resumeInterruptedUpgradeTurns"

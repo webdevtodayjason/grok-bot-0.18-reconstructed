@@ -110,6 +110,14 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-03 evening (Wave D1, connector plane).** Connector secrets into the server's process
+  env from a host-owned 0600 store (never `connectors.json`); stable numeric ids for local
+  connectors; per-tool switches and installed-server reads on the gateway; honest empty catalog;
+  connector cards with real switches, a connectors editor, key forms, the masked secret card
+  answered, local Connect/Disconnect. Gate `verify-connector-plane.mjs`. Residual owned:
+  CUSTODY-1 (agent shell runs as root in the same container). Tools §2 corrected against the
+  teardown's 40-function catalog; `AwaitExternalShell` restored as the wire name.
+
 - **2026-09-03 (Wave C, dashboard).** Acceptance status after every send, transcript tail with
   paged scroll-back, Skills panel on the nine workflow commands, hand-back and Updates, channel
   state on cards, agent editing with avatars and toggles, inline attachments, Cmd-K search, widget

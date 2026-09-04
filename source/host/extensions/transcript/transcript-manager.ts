@@ -172,6 +172,11 @@ export class TranscriptManager {
   xuserDelegate: any = null;
   channelActivity: ((...args: any[]) => unknown) | undefined;
   channelConfigChanged: (() => unknown) | undefined;
+  // CP-10. Set by the host once the mcp extension exists: routes a submitted secret into a local
+  // connector's process environment. Returns null when the named platform is not one.
+  connectorSecretSink:
+    | ((args: { server: string; field: string; value: string }) => Promise<{ server: string; serverId: string; field: string; stored: boolean; restarted: boolean } | null>)
+    | undefined;
   automationConfigChanged: (() => unknown) | undefined;
   shouldEmitAutomations = () => true;
   disposed = false;
@@ -256,6 +261,9 @@ export class TranscriptManager {
   }
   setChannelConfigChanged(onChanged: () => unknown): void {
     this.channelConfigChanged = onChanged;
+  }
+  setConnectorSecretSink(sink: NonNullable<TranscriptManager["connectorSecretSink"]>): void {
+    this.connectorSecretSink = sink;
   }
   setAutomationConfigChanged(onChanged: () => unknown): void {
     this.automationConfigChanged = onChanged;

@@ -48,8 +48,12 @@ const CONNECTORS_PATH = "/home/box/sand-data/connectors.json";
 // The connector file lives in the box's sand-data, which is a docker VOLUME -- there is no path on
 // the host to open it with. Read and write it through the box the same way the secrets file is
 // handled, so adding a connector is an edit in the UI rather than a docker exec.
+// null means "the box could not be read"; an empty or missing file is an empty map. The two used to
+// look the same, and the dashboard's connector sweep once rebuilt connectors.json from a hiccup.
 const readConnectors = async () => {
   const raw = await dockerOut(["exec", BOX, "cat", CONNECTORS_PATH]);
+  if (raw == null) return null;
+  if (String(raw).trim().length === 0) return { mcpServers: {} };
   try { return JSON.parse(raw); } catch { return { mcpServers: {} }; }
 };
 async function writeConnectors(next) {
@@ -297,7 +301,7 @@ const server = createServer(async (req, res) => {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify(value));
       };
-      if (req.method === "GET") return sendJson(await readConnectors());
+      if (req.method === "GET") { const current = await readConnectors(); return current == null ? fail(res, 503, "the box could not be read") : sendJson(current); }
       if (req.method === "POST") {
         let parsed;
         try { parsed = JSON.parse(await readBody(req)); } catch { return fail(res, 400, "body must be JSON"); }

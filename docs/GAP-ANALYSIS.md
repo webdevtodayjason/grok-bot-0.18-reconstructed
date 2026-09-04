@@ -31,6 +31,34 @@ report with evidence required, dashboard 35 checks plus its leak arm, subscripti
 | GW-15 · **landed** | `setAgentUnread{isUnread:true}` errors with "this.tm.sessionStore.seedSessionActivityFromDbMtime is not a function"; the clear direction works, which is all MR-06 needs | Trace the session store method on the raise path; one host fix | S |
 | MR-11, MR-15 | Not in Wave B: the run rail's synthetic timeline, and the credential card (needs the secret-card work in Wave D1) | Wave C / Wave D1 | S / M |
 
+**Wave D1 landed 2026-09-03 (Opus workflow, host and dashboard in parallel, each adversarially
+verified then reviewed and fixed; the full gate set re-run by the orchestrator).** The connector
+plane now runs on its own stdio spine. CP-10: a submitted connector secret goes into a host-owned
+`connector-env-secrets.json` (0600, written temp-file plus rename) and into that server's process
+env at spawn, never into `connectors.json`, never into a per-agent store, never into a log; the
+gateway gains `setConnectorSecret`, `deleteConnectorSecret` and `listConnectorSecretFields`
+(names only); process-control env names are refused; the chat platforms (slack, github) win the
+shared namespace so a channel token can never land in a connector process. CP-07: local
+connectors get stable numeric ids derived from their name, persisted beside `connectors.json`, so
+instructions, per-tool toggles and authenticate reach them for the first time. CP-08:
+`listMcpServerTools` and `toggleMcpToolDisabled`; a disabled tool vanishes from routed tools and
+from GetMcpTools. CP-03: `listInstalledMcpServers`, `listMcpPlugins`, `getMcpPlugin`. CP-05
+short term: the catalog path answers empty instead of throwing at the model. CP-12: disconnect
+requires the agent id. Dashboard: connector cards from the installed list with real per-tool
+switches, a connectors editor on the relay route with `refreshMcp` after a write, a key form per
+connector, the masked secret-request card answered through `submitSecret`, listener Connect
+through a local token form and a labelled Cursor link, Disconnect with the agent id, and the run
+rail shows the turn's tool rows (MR-11). The relay answers 503 when the box cannot be read instead
+of an empty map, and the installed-server id is a number on the wire. New gate:
+`scripts/verify-connector-plane.mjs`.
+
+| Id | Finding | Next | Size |
+|---|---|---|---|
+| CUSTODY-1 | The whole guarantee today is "the value is in exactly one 0600 file and the process env". The agent's shell runs as root in the same container, so `/proc/<pid>/environ` and that file are readable by the agent. This is the real custody fix and it is a box change | Run the agent shell as an unprivileged uid; keep connector processes and the sand-data root under another uid; extend `verify-connector-plane.mjs` (c) with a read of the connector's environ *as the agent shell* that must fail with EACCES | M, box image |
+| DISPLAY-3 · **landed** | A page kept asking for a probe's desktop while a gate deleted it; the bring-up outlived the delete and wrote an assignment nobody would release, leaving X servers and tokens behind (found in the D1 pass: two tombstoned ids still held windows) | A window brought up for an agent that is now gone is released at once and the call fails honestly; every ensure and status call reconciles assignments against the agents that still exist and logs each release | S |
+| DISPLAY-4 | A bring-up already in flight when its agent is deleted can still start an X server after the assignment was released, leaving a live seat with a token and no owner; the start script refuses that seat to the next agent while its daemon answers. Clears on any host restart; reproduced only by a page polling a deleted probe's desktop | Host reconcile should also stop token-holding windows that hold no assignment (list the token dir through the box shell, stop each unassigned index); until then a restart clears it | S |
+| SECRET-KIND-1 | The secret request's `target.platform` is one namespace for chat credentials and connectors, resolved by a hardcoded platform list | Give the request a `target.kind` decided when it is built; route on it; delete the list | S |
+
 **Wave C landed 2026-09-03 (two slices under the Fable workflow, each adversarially verified,
 then reviewed and fixed, then every gate re-run by the orchestrator).** GW-03 acceptance status
 after every send (composer reads `promptAcceptanceStatus`, "not accepted" carries the host's reason)
@@ -239,7 +267,7 @@ merged into one row and both ids kept.
 | SP-1 · **landed** (memory, routines, skills, channels; user/project memory is SP-1b) | Memory, routines, skills, channels nulled in the production system prompt | Hoist the seven providers the way the agent directory was hoisted at `:1358-1395`; pass `session.memory`, snapshots, user/project memory, automations, workflows, channels. Proof: assembled prompt diff shows the sections | M |
 | SP-2 · **landed** | Connector custom instructions and the discovery-unavailable notice never reach the model | Implement the three per-turn setters on the production turn owner; read that state instead of constants. Proof: SetMcpInstructions round-trips into the next prompt | M |
 | TOOLS-02 · **landed** | computerUse subagent offered 12 tools instead of 3 | Derive `isBoxScopedSubagent` from the normalized subagent kind at `:2542` and `:2759`. Proof: subagent wire capture shows Shell, Read, Computer | S |
-| CP-10 | A submitted connector secret is stored where nothing reads it | Make `routeSecret` connector-aware: merge into that server's `env` in `connectors.json` (0600, atomic) and restart it; keep the channel branch for slack/github | M |
+| CP-10 · **landed** | A submitted connector secret is stored where nothing reads it | Shipped design differs from the audit's suggestion: the value lives in a host-owned `connector-env-secrets.json` and the server's process env at spawn, never in `connectors.json` (`docs/CONNECTOR-PLUGIN-PLANE.md`). Residual: CUSTODY-1 | M |
 | GW-13 · **landed** | Evidence verdicts exist, are measured, and no UI shows the receipts behind them | Disclosure behind the pill: `getAgentEvidence{id, attemptId}` → receipt count, tool names, attestation heads | S |
 | GW-05 · **landed** | Nine working skills commands called by nothing; teach has no product it can produce | Skills panel per agent mirroring Routines: list, enable, edit, delete, run, import text/URL | M |
 | GW-03 · **landed** (acceptance, tail, page; react/thread later) | Only the flat whole-transcript read is used; acceptance never checked | Poll `promptAcceptanceStatus` after every send; tail on refresh, page on scrollback; thread and react later | M |
@@ -261,17 +289,17 @@ merged into one row and both ids kept.
 | GW-01 · **landed** | Agent identity write path unwired: no edit, avatar, notifications, hygiene | Agent-detail panel on `updateAgent`, `setAgentAvatarBytes`, notify setters, hidden/unread, duplicate | M |
 | GW-06 · **landed** | Memory only on the operator page | Port the three call sites into the Machine Room agent-detail panel | S |
 | GW-07 | Teach recording throws at a default-off gate | Dev-flags row through `setHostSettings{featureFlagOverrides}`; then settle the fork-window contradiction with one live call | M |
-| GW-08 · **landed** (channel state; switches wait on CP-07) | Six MCP reads unused; adapter's "no tool list" claim is false | `togglePluginTool` on `listRoutedMcpTools` + `listBoxMcpServers` + `setHostSettings{mcpDisabledToolsByServerId}`; `getAgentChannels` on the cards | M |
+| GW-08 · **landed** (switches live since D1) | Six MCP reads unused; adapter's "no tool list" claim is false | `togglePluginTool` on `listRoutedMcpTools` + `listBoxMcpServers` + `setHostSettings{mcpDisabledToolsByServerId}`; `getAgentChannels` on the cards | M |
 | GW-09 · **landed** | Attachments uploaded but never rendered | `readAttachmentImage` inline for screenshots, text/chunk previews; `searchMedia` behind Files | S |
 | GW-10 · **landed** (see BOX-2) | No hand-back after a takeover; no update/reset panel | Hand-back control driven by `pendingHandoff`; Updates panel on `getHostStatus` + `updateForeverBox` + `resetForeverBox` | M |
-| GW-11 · CP-09 · MR-15 | The masked secret card is complete on the host and dead in every UI | Carry `entryId` through `cardOf`, masked input, `submitSecret{entryId,value,agentId}`; wire `dismissWidget` on × | M |
+| GW-11 · CP-09 · MR-15 · **landed** | The masked secret card is complete on the host and dead in every UI | Carry `entryId` through `cardOf`, masked input, `submitSecret{entryId,value,agentId}`; wire `dismissWidget` on × | M |
 | GW-14 · **landed** | Global search index built and queried by nobody | Cmd-K palette on `isGlobalSearchEnabled`, `searchAgents`, `searchMedia` | M |
-| CP-03 | The one real connected connector is invisible in the UI | Three read commands wired to `mcp.management` (listInstalled, listPlugins, getPlugin); cards from listInstalled; listener rows in their own section | M |
-| CP-04 | Connect opens cursor.com for an account we do not own | Token form calling `connectChannel{id,platform,token}`; label the Cursor route honestly | S |
-| CP-05 | Marketplace/install are Cursor RPCs on an expired stub; catalog throws | Short term: return `[]` on catalog failure. Real: local manifest index + install into the plugin cache, routed at the connectors.json writer. Gated on CP-14 | L |
+| CP-03 · **landed** | The one real connected connector is invisible in the UI | Three read commands wired to `mcp.management` (listInstalled, listPlugins, getPlugin); cards from listInstalled; listener rows in their own section | M |
+| CP-04 · **landed** | Connect opens cursor.com for an account we do not own | Token form calling `connectChannel{id,platform,token}`; label the Cursor route honestly | S |
+| CP-05 · **short term landed** (local catalog is D2) | Marketplace/install are Cursor RPCs on an expired stub; catalog throws | Short term: return `[]` on catalog failure. Real: local manifest index + install into the plugin cache, routed at the connectors.json writer. Gated on CP-14 | L |
 | CP-06 | OAuth callback server was Electron-only | ~40 lines in the relay on 127.0.0.1:8787 → `completeMcpOAuth`. Only after CP-05 | M |
-| CP-07 | `local:<name>` ids fail the validator | Stable numeric ids per local server, persisted beside connectors.json | S |
-| CP-08 | Per-tool permissions have no read surface | `listMcpServerTools`, `toggleMcpToolDisabled` forwarding to the existing instructions-and-toggles methods; depends on CP-07 | M |
+| CP-07 · **landed** | `local:<name>` ids fail the validator | Stable numeric ids per local server, persisted beside connectors.json | S |
+| CP-08 · **landed** | Per-tool permissions have no read surface | `listMcpServerTools`, `toggleMcpToolDisabled` forwarding to the existing instructions-and-toggles methods; depends on CP-07 | M |
 | CP-13 | Remote http/sse servers run through Cursor's backend | Extend local-connectors to `{url,type,headers}` and add an HTTP transport to the box exec daemon; the only route to Cursor-free remote connectors. Gated on CP-14 | L |
 | MR-04 · **landed** | Connect on a non-adoptable provider card always fails behind a success toast | Suppress the button for Providers with a non-adoptable route; move the toast to the resolution path | S |
 | MR-07 · **landed** | "Now" island can never show a running routine | Derive running from `lastRun.status` or the owner's `isRunning`; otherwise delete the branch | S |
@@ -298,9 +326,7 @@ Decisions (operator): **CP-14** closed, the substrate was decided 2026-08-18 (se
 BACKEND-1 / CP-15** stay out of scope, said so here.
 
 Hygiene (S each): MR-10 remove the Sheets tab (landed); MR-11 feed the outline's tool rows into the run
-rail; MR-12 toast string (landed); MR-13 delete the unreachable builders (landed); DEAD-1, CHURN-1 / BL-P5, BOX-1, AUDIT-1, FLAGS-1 (all landed in E1); CP-11 connectors editor on the
-relay's existing `/connectors` route with a `refreshMcp` follow-up; CP-12 pass the agent id to
-`disconnectChannel`; DEAD-1 delete `production-turn-input-projection.ts`, `createTurnToolSession`,
+rail; MR-12 toast string (landed); MR-13 delete the unreachable builders (landed); DEAD-1, CHURN-1 / BL-P5, BOX-1, AUDIT-1, FLAGS-1 (all landed in E1); CP-11 connectors editor (landed in D1); CP-12 disconnect with the agent id (landed in D1); DEAD-1 delete `production-turn-input-projection.ts`, `createTurnToolSession`,
 the duplicate spread; CHURN-1 / BL-P5 compare summaries before emitting `agent-upserted`; BOX-1 log
 once that the standalone box has no windows or VNC; AUDIT-1 one `getAgentActionAudit` command beside
 the evidence panel; FLAGS-1 log the resolved gate table at startup; BL-P4 / BL-P6 rewordings.
@@ -333,7 +359,7 @@ GW-14 (palette), GW-08 (tool switches). Two sessions; C1 = GW-03, GW-05, GW-10 h
 rest. Proof per command: the call appears in the adapter and a headless check exercises it against
 the live box.
 
-**Wave D — own the connector plane on OpenConnector (`docs/CONNECTOR-PLUGIN-PLANE.md`).** D1 (no decision needed): CP-10, CP-07, CP-08,
+**Wave D — own the connector plane on OpenConnector (`docs/CONNECTOR-PLUGIN-PLANE.md`).** D1 landed 2026-09-03: CP-10, CP-07, CP-08,
 CP-03, CP-11, CP-12, CP-04, CP-05 short-term, secret card (GW-11/CP-09/MR-15). D2:
 OpenConnector as a stdio sidecar in the box, CP-13 local HTTP transport, CP-05 catalog through OpenConnector, CP-06 callback. Proof: a secret submitted from the
 Machine Room lands in that server's env and the server restarts with it; the connected connector

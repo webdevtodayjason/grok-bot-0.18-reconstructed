@@ -23,6 +23,12 @@ import type {
 
 type LiveSession = any;
 
+/**
+ * The chat platforms a `channel-credential` can name. Kept here because routeSecret has to tell a
+ * chat credential from a local connector credential and they arrive under the same field.
+ */
+const CHAT_CREDENTIAL_PLATFORMS = new Set(["slack", "github"]);
+
 export class WidgetResponses {
   constructor(readonly tm: TranscriptManagerLike) {}
 
@@ -371,7 +377,8 @@ export class WidgetResponses {
     )
       return;
     const request = (entry.message as any).secretRequest;
-    if (!this.routeSecret(session.id, request.target, trimmed)) {
+    const routed = await this.routeSecret(session.id, request.target, trimmed);
+    if (routed == null) {
       this.tm.trayErrors.pushError({
         agentId: session.id,
         title: "Could not store the secret",
@@ -387,21 +394,66 @@ export class WidgetResponses {
     session.db.updateTranscriptEntry(entryId, markProvided);
     await this.tm.boxHandoff.resumeWithHiddenPrompt(
       session.id,
-      buildSecretProvidedAck(request),
+      buildSecretProvidedAck(request, routed),
       "Agent failed to resume after secret submission",
     );
   }
 
-  routeSecret(agentId: string, target: any, value: string): boolean {
-    if (target.kind !== "channel-credential") return false;
+  /**
+   * CP-10. A submitted secret used to have exactly one destination: the per-agent chat-channel
+   * store under `connector-secrets/<agentId>/<platform>.json`, which no MCP code reads and the
+   * agent can read back. When the named platform is a local stdio connector instead of a chat
+   * channel, the value now goes to the host-owned connector store and into that server's process
+   * environment, and the server is restarted so it picks it up. Slack and GitHub keep the channel
+   * branch. Returns null when nothing accepted the value.
+   */
+  async routeSecret(
+    agentId: string,
+    target: any,
+    value: string,
+  ): Promise<{ destination: string; server?: string; restarted?: boolean } | null> {
+    if (target.kind !== "channel-credential") return null;
+    const platform = typeof target.platform === "string" ? target.platform.trim() : "";
+    // The connector route and the chat-channel route share ONE namespace -- `target.platform` --
+    // and the collision is not hypothetical: the worked example in local-connectors.ts is a local
+    // connector named `github`, and github is also one of the two chat platforms. On such a box a
+    // GitHub channel token tried first against the connector would land in an MCP server's process
+    // env, the channel would silently never connect, and the ack would report success. The chat
+    // platforms therefore win the name race; everything else may be a connector.
+    if (!CHAT_CREDENTIAL_PLATFORMS.has(platform.toLowerCase())) {
+      // A throw here used to escape submitSecret entirely: the value reached NO store, the entry
+      // was never marked provided, and the agent waited forever on the secret it had just asked
+      // for. The field name comes from the model unvalidated, so "api-key" or a missing field is
+      // ordinary input, not an edge case. Fall through to the channel store instead.
+      let connector: { server: string; restarted?: boolean } | null = null;
+      try {
+        connector = await this.tm.connectorSecretSink?.({
+          server: platform,
+          field: target.field,
+          value,
+        }) ?? null;
+      } catch (error) {
+        console.log(
+          `[sand:transcript] connector secret sink failed (${errorLogTag(error)}); falling back to the channel store`,
+        );
+      }
+      if (connector != null) {
+        return {
+          destination: "the connector's process environment",
+          server: connector.server,
+          restarted: connector.restarted === true,
+        };
+      }
+    }
     const stored = this.tm.sessionStore.storeConnectorCredential(
       agentId,
-      target.platform,
+      platform,
       target.field,
       value,
     );
-    if (stored) this.tm.channelConfigChanged?.();
-    return stored;
+    if (!stored) return null;
+    this.tm.channelConfigChanged?.();
+    return { destination: "channel-credential" };
   }
 
   recordWidgetResponse(entryId: string, value: string): boolean {

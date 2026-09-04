@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AccountMcpServer } from "../../../shared/node/cursor-backend/account-mcp.js";
@@ -18,6 +18,41 @@ import type { AccountMcpServer } from "../../../shared/node/cursor-backend/accou
  *   { "mcpServers": { "github": { "command": "npx", "args": [...], "env": { "TOKEN": "..." } } } }
  */
 export const LOCAL_CONNECTORS_FILENAME = "connectors.json";
+
+/**
+ * CP-07. Local connectors used to be given the id `local:<name>`, and every id-keyed operation in
+ * the MCP layer runs its argument through `validateMcpServerId`, whose pattern is /^[1-9]\d*$/.
+ * So SetMcpInstructions, the per-tool toggles and authenticate rejected exactly the connectors that
+ * actually work on this box. The fix is a real numeric id, minted once per server NAME and
+ * persisted beside connectors.json so it survives a host restart -- `serverIdentifier` stays the
+ * human name, which is what discovery, routing and the Connectors cards key on.
+ *
+ * The floor keeps these clear of the account-server ids the Cursor backend hands out (small
+ * int32s), and the whole range stays inside int32 so `parseInt32McpServerId` accepts it.
+ */
+export const LOCAL_CONNECTOR_IDS_FILENAME = "connectors.ids.json";
+export const LOCAL_CONNECTOR_ID_FLOOR = 1_000_000;
+/** `parseInt32McpServerId` is the far end of every id-keyed call, so ids stay inside int32. */
+const LOCAL_CONNECTOR_ID_CEILING = 2_147_483_647;
+
+/**
+ * The id is a function of the NAME, not of the name's position in a sorted list. That matters
+ * because the persisted map is best-effort: an unwritable data dir means every boot re-mints from
+ * an empty map, and a counter handed out in sorted order would then give "localfiles" a different
+ * id the moment a connector sorting before it appeared. `mcpDisabledToolsByServerId` and
+ * `mcpCustomInstructionsByServerId` are keyed by exactly this id, so a renumber silently moves one
+ * connector's disabled tools and custom instruction onto another. FNV-1a over the name cannot do
+ * that: the file only records what was minted (and resolves the rare collision).
+ */
+export function localConnectorIdForName(name: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < name.length; index += 1) {
+    const code = name.charCodeAt(index);
+    hash = Math.imul(hash ^ (code & 0xff), 0x01000193) >>> 0;
+    hash = Math.imul(hash ^ (code >>> 8), 0x01000193) >>> 0;
+  }
+  return LOCAL_CONNECTOR_ID_FLOOR + (hash % (LOCAL_CONNECTOR_ID_CEILING - LOCAL_CONNECTOR_ID_FLOOR));
+}
 
 type LocalServerConfig = {
   readonly command: string;
@@ -74,10 +109,78 @@ export function readLocalConnectorFile(rootDir: string): Record<string, LocalSer
   return result;
 }
 
-function asAccountServer(name: string, config: LocalServerConfig): AccountMcpServer {
-  const { disabled: _disabled, ...serverConfig } = config;
+/** The persisted name -> id map. A missing or malformed file mints everything fresh. */
+export function readLocalConnectorIds(rootDir: string): Record<string, number> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(join(rootDir, LOCAL_CONNECTOR_IDS_FILENAME), "utf8")); }
+  catch { return {}; }
+  const ids = record(record(parsed)?.ids);
+  if (ids == null) return {};
+  const result: Record<string, number> = {};
+  for (const [name, value] of Object.entries(ids)) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= LOCAL_CONNECTOR_ID_FLOOR) {
+      result[name] = value;
+    }
+  }
+  return result;
+}
+
+/**
+ * Ids for every named server, minting (and persisting) one for any name that has none. Ids are
+ * never reused or renumbered, so removing a connector and adding it back gets its old id.
+ *
+ * `readOnly` answers "what id would this name have?" without touching the disk -- a membership
+ * question from the secret sink must not mint and persist as a side effect.
+ */
+export function assignLocalConnectorIds(
+  rootDir: string,
+  names: readonly string[],
+  options?: { readOnly?: boolean; log?: (message: string) => void },
+): Record<string, string> {
+  const known = readLocalConnectorIds(rootDir);
+  const taken = new Set(Object.values(known));
+  let minted = false;
+  for (const name of [...names].sort()) {
+    if (known[name] !== undefined) continue;
+    let id = localConnectorIdForName(name);
+    // Two names hashing to the same id is a one-in-two-billion event, but it must resolve
+    // deterministically rather than hand two connectors one identity.
+    while (taken.has(id)) id = id >= LOCAL_CONNECTOR_ID_CEILING - 1 ? LOCAL_CONNECTOR_ID_FLOOR : id + 1;
+    known[name] = id;
+    taken.add(id);
+    minted = true;
+  }
+  if (minted && options?.readOnly !== true) {
+    try {
+      writeFileSync(
+        join(rootDir, LOCAL_CONNECTOR_IDS_FILENAME),
+        JSON.stringify({ ids: known }, null, 2),
+        { encoding: "utf8", mode: 0o600 },
+      );
+    } catch (error) {
+      // An unwritable data dir must not take the connectors down, but it must not be invisible
+      // either: nothing else in the system would ever report it.
+      options?.log?.(`local connector ids could not be persisted (${error instanceof Error ? error.name : typeof error}); ids are derived from the connector name, so they stay stable anyway`);
+    }
+  }
+  return Object.fromEntries(Object.entries(known).map(([name, id]) => [name, String(id)]));
+}
+
+function asAccountServer(
+  name: string,
+  config: LocalServerConfig,
+  id: string,
+  injectedEnv?: Record<string, string>,
+): AccountMcpServer {
+  const { disabled: _disabled, ...rest } = config;
+  // CP-10. The host-owned secret store is merged into the spawn spec HERE, on the way to the box,
+  // so the value reaches the connector process without ever being written into connectors.json.
+  const env = injectedEnv === undefined || Object.keys(injectedEnv).length === 0
+    ? rest.env
+    : { ...rest.env, ...injectedEnv };
+  const serverConfig = env === undefined ? rest : { ...rest, env };
   return {
-    id: `local:${name}`,
+    id,
     name,
     serverIdentifier: name,
     config: serverConfig,
@@ -94,8 +197,10 @@ function asAccountServer(name: string, config: LocalServerConfig): AccountMcpSer
 export function mergeLocalConnectors(
   remote: { servers: AccountMcpServer[]; cacheScope: string; unresolvedServerIds?: string[]; unavailable?: true } | null,
   localServers: Record<string, LocalServerConfig>,
+  options?: { ids?: Record<string, string>; secrets?: Record<string, Record<string, string>> },
 ): { servers: AccountMcpServer[]; cacheScope: string; unresolvedServerIds?: string[]; unavailable?: true } | null {
-  const local = Object.entries(localServers).map(([name, config]) => asAccountServer(name, config));
+  const local = Object.entries(localServers).map(([name, config]) =>
+    asAccountServer(name, config, options?.ids?.[name] ?? `local:${name}`, options?.secrets?.[name]));
   if (local.length === 0) return remote;
   const claimed = new Set(local.map((server) => server.serverIdentifier));
   const kept = (remote?.servers ?? []).filter((server) => !claimed.has(server.serverIdentifier));

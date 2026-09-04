@@ -697,6 +697,7 @@
         : card.status === "denied" ? "You denied this"
         : card.status === "answered" ? `You answered${card.answer != null ? `: ${String(card.answer)}` : ""}`
         : card.status === "dismissed" ? "You dismissed this"
+        : card.status === "provided" ? "You provided this — the host stored it and resumed the agent. The value is not in this conversation."
         : `Closed by the host — ${card.status}`;
       const accent = card.status === "approved" || card.status === "answered" ? "var(--green-500)" : "var(--amber-500)";
       return `<div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${card.status === "approved" || card.status === "answered" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">${escapeHtml(settled)}</small></span></div></div>`;
@@ -715,7 +716,12 @@
             const label = typeof option === "string" ? option : (option.label ?? option.value ?? String(index));
             return button(value, label, index === 0);
           }).join("")
-        : `<span class="field-hint">Answer this in the host app. This UI never carries a credential.</span>`;
+        : card.kind === "secret" && typeof adapter.submitSecretRequest === "function"
+          // CP-10 item 2: submitSecret { entryId, value, agentId } is a real host command, so the
+          // masked input belongs here. The value lives in the input's value property for the
+          // length of the call and is cleared on submit; it is never written into the markup.
+          ? `<div class="field"><label class="sr-only" for="secret-input-${escapeHtml(message.id)}">${escapeHtml(card.field ?? "credential")}</label><input id="secret-input-${escapeHtml(message.id)}" data-secret-input="${escapeHtml(message.id)}" type="password" autocomplete="off" placeholder="${escapeHtml(card.field ?? "credential")}" /></div><button class="card-action primary" type="button" data-submit-secret="${escapeHtml(message.id)}">Send securely</button>`
+          : `<span class="field-hint">Answer this in the host app. This page has no command to carry a credential to it.</span>`;
     return `<div class="inline-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span>${dismiss}</div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
   }
 
@@ -1051,6 +1057,29 @@
     return status === "connected" ? "connected" : status === "installed" ? "needs account" : "available";
   }
 
+  // CP-04: the local token form. connectChannel { id, platform, token } binds the listener to the
+  // agent on screen; the Cursor-hosted route stays reachable and is labelled for what it is.
+  function listenerConnectMarkup(plugin, lead) {
+    const who = lead ? escapeHtml(lead.name) : "the agent on screen";
+    const cursorRoute = `<div class="form-actions"><button class="ghost-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Use the Cursor-hosted route instead</button></div><span class="field-hint">That route opens cursor.com's connect page. It signs in to a Cursor account this box does not have, so it cannot finish here — the form above is the route that works.</span>`;
+    if (!lead) return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>A listener binds to one agent. Open an agent's conversation first, then connect it here.</small></div></div>${cursorRoute}</div>`;
+    return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)} for ${who}</strong><small>The token goes to the host as this agent's ${escapeHtml(plugin.name)} credential and is read back from getAgentChannels. It never enters chat or model context, and this page keeps no copy.</small></div></div><form data-connect-channel="${escapeHtml(plugin.id)}"><div class="field"><label for="channel-token-${escapeHtml(plugin.id)}">${escapeHtml(plugin.name)} token</label><input id="channel-token-${escapeHtml(plugin.id)}" name="token" type="password" autocomplete="off" required placeholder="Enter securely" /></div><div class="form-actions"><button class="primary-button" type="submit">Connect for ${who}</button></div></form>${cursorRoute}</div>`;
+  }
+  // CP-12: unbinding is per agent too, so the button says whose channel it drops.
+  function listenerConnectedMarkup(plugin, lead) {
+    const who = lead ? escapeHtml(lead.name) : "this agent";
+    return `<div class="demo-note"><strong>${escapeHtml(plugin.name)} is connected for ${who}</strong><br />The host holds the token. This page never received it and cannot show it.<div class="form-actions"><button class="ghost-button" type="button" data-disconnect-plugin="${escapeHtml(plugin.id)}">Disconnect for ${who}</button></div></div>`;
+  }
+  // CP-10 item 1: one masked input per field the host names for this connector.
+  function connectorSecretMarkup(plugin) {
+    const stored = new Set(plugin.storedFields ?? []);
+    const fields = plugin.secretFields.map((field) => `<div class="field"><label for="connector-secret-${escapeHtml(plugin.id)}-${escapeHtml(field)}">${escapeHtml(field)}</label><input id="connector-secret-${escapeHtml(plugin.id)}-${escapeHtml(field)}" name="${escapeHtml(field)}" type="password" autocomplete="off" placeholder="${stored.has(field) ? "The host holds a value — type to replace it" : "Enter securely"}" /></div>`).join("");
+    return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Credentials for ${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.secretHint || "The host stores these and hands them to the connector process.")}</small></div></div><form data-connector-secret-form="${escapeHtml(plugin.id)}">${fields}<div class="form-actions"><button class="primary-button" type="submit">Store on the host</button></div><span class="field-hint">Leave a field blank to leave what the host already holds for it untouched. Nothing you type here is written into this page.</span></form></div>`;
+  }
+  const connectorRemoveRow = (plugin) => (plugin.group === "Connectors" && plugin.removable && typeof adapter.removeConnector === "function"
+    ? `<div class="setting-row"><div><strong>Remove this connector</strong><small>Drops ${escapeHtml(plugin.name)} from connectors.json on the box and asks the host to re-read the file.</small></div><button class="ghost-button" type="button" data-remove-connector="${escapeHtml(plugin.name)}">Remove</button></div>`
+    : "");
+
   function pluginDetailMarkup(plugin) {
     if (!plugin) return `<div class="empty-state">Choose a plugin to inspect its tools and account.</div>`;
     // A tool row carries a switch only where the write exists. Where it does not, the row says
@@ -1062,9 +1091,23 @@
       ? plugin.tools.map(toolRow).join("") + (plugin.toolsReadOnlyNote ? `<span class="field-hint">${escapeHtml(plugin.toolsReadOnlyNote)}</span>` : "")
       : `<div class="empty-state">${escapeHtml(plugin.toolsNote || "No tools are reported for this plugin.")}</div>`;
     let account;
+    // CP-04: a listener binds per agent with a token the host takes (connectChannel). The local
+    // form is the route that works on this box; the Cursor-hosted flow stays as a labelled
+    // secondary, because getListenerConnectUrl answers with cursor.com's page for an account this
+    // box does not have and clicking it can only end in a dead tab.
+    const lead = contextLead();
+    // Only once getAgentChannels has actually been read for the agent on screen: until then this
+    // page does not know whether that agent holds a token, and drawing a Connect form on a
+    // listener it is already bound to would be a guess wearing a control.
+    const canConnectListener = plugin.group === "Listeners" && typeof adapter.connectListener === "function" && Array.isArray(lead?.channels);
+    const listenerChannel = canConnectListener ? lead.channels.find((c) => c.platform === plugin.id) : undefined;
+    const connectorSecrets = Array.isArray(plugin.secretFields) && plugin.secretFields.length && typeof adapter.setConnectorSecret === "function"
+      ? connectorSecretMarkup(plugin) : "";
+    if (canConnectListener && listenerChannel?.connected !== true) account = listenerConnectMarkup(plugin, lead);
+    else if (canConnectListener && listenerChannel?.connected === true) account = listenerConnectedMarkup(plugin, lead);
     // A card the host cannot connect gets no button. Clicking it ran getListenerConnectUrl with a
     // subscription id, which always errors -- behind a success toast fired before the answer came.
-    if (plugin.status === "available" && plugin.connectable === false) account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Not connectable from here</strong><small>${escapeHtml(plugin.connectNote || `This host has no connect flow for ${plugin.name}.`)}</small></div></div></div>`;
+    else if (plugin.status === "available" && plugin.connectable === false) account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Not connectable from here</strong><small>${escapeHtml(plugin.connectNote || `This host has no connect flow for ${plugin.name}.`)}</small></div></div></div>`;
     else if (plugin.status === "available") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>Opens ${escapeHtml(plugin.name)}'s own authorisation page. The credential is exchanged there and stored by the host — it never passes through this page.</small></div></div><div class="form-actions"><button class="primary-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Connect ${escapeHtml(plugin.name)}</button></div></div>`;
     else if (plugin.status === "pending") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Awaiting authorisation</strong><small>Finish approving ${escapeHtml(plugin.name)} in the tab that opened, then reopen this panel.</small></div></div></div>`;
     else if (plugin.status === "installed") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Secure value required</strong><small>Scoped to ${escapeHtml(plugin.name)} · ${escapeHtml(plugin.secretField)}. It never enters chat or model context.</small></div></div><form data-secret-form="${escapeHtml(plugin.id)}"><div class="field"><label for="secret-${escapeHtml(plugin.id)}">${escapeHtml(plugin.secretField)}</label><input id="secret-${escapeHtml(plugin.id)}" name="secret" type="password" autocomplete="off" required placeholder="Enter securely" /><span class="field-hint">${escapeHtml(plugin.secretHint || demoSecretNote)}</span></div><div class="form-actions"><button class="primary-button" type="submit">Connect account</button></div></form></div>`;
@@ -1076,8 +1119,7 @@
     // the agent on screen -- whether it holds a token for this platform -- and says which agent.
     let channelRow = "";
     if (plugin.group === "Listeners") {
-      const lead = contextLead();
-      const channel = Array.isArray(lead?.channels) ? lead.channels.find((c) => c.platform === plugin.id) : undefined;
+      const channel = listenerChannel;
       const line = !lead ? "No agent on screen to read a channel for."
         : lead.channels == null ? `Not read yet for ${lead.name} — the host answers getAgentChannels on the next refresh.`
         : !channel ? `${lead.name}: the host lists no ${plugin.name} channel manifest for this agent.`
@@ -1090,7 +1132,7 @@
     const skillsSection = plugin.skills.length
       ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${plugin.skills.map((skill) => `<span class="tag">✦ ${escapeHtml(skill)}</span>`).join("")}</div></section>`
       : plugin.skillsNote ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="empty-state">${escapeHtml(plugin.skillsNote)}</div></section>` : "";
-    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${providerSwitch}${channelRow}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
+    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${connectorSecrets}${providerSwitch}${channelRow}${connectorRemoveRow(plugin)}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
   }
 
   // The relay holds the endpoint catalogue and probes each one; the box holds which is in use.
@@ -1288,8 +1330,11 @@
     // returns an empty list. Reaching for plugins[0] threw and left the panel blank with no
     // explanation -- an empty capability set is a normal state, not an error.
     if (!selected) {
+      // CP-11: the editor belongs here most of all. This branch used to say connectors could only
+      // be added by editing connectors.json on the box -- which the editor made untrue -- and then
+      // offered no way to add the first one.
       openPanel("Global capabilities", "Plugins, connectors & skills",
-        `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Listeners are chat platforms the host binds to.</p><span class="status-pill">none installed</span></div><div class="empty-state">This box has no providers, connectors or listeners yet. Connectors are added to connectors.json on the box, not from this page; a provider appears here once its CLI holds a login on this Mac or it takes a pasted key.</div>`);
+        `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Listeners are chat platforms the host binds to.</p><span class="status-pill">none installed</span></div><div class="empty-state">This box has no providers, connectors or listeners yet. Add the first stdio connector with the editor below; a provider appears here once its CLI holds a login on this Mac or it takes a pasted key.</div>${connectorEditorMarkup()}`);
       return;
     }
     selectedPluginId = selected.id;
@@ -1302,7 +1347,21 @@
       const members = state.plugins.filter((plugin) => (plugin.group ?? "Connectors") === group);
       return members.length ? `<div class="plugin-group-title">${group}</div>${members.map(navButton).join("")}` : "";
     }).join("");
-    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Listeners are chat platforms the host binds to.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>`);
+    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Listeners are chat platforms the host binds to.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>${connectorEditorMarkup()}`);
+  }
+
+  // CP-11: adding a connector used to mean an operator editing connectors.json inside the
+  // container by hand. The relay owns that file (GET/POST /connectors) and the host re-reads it
+  // on refreshMcp, so this form is the whole round trip. Environment VALUES are deliberately not
+  // collected here -- the file is plaintext on the box; the values go through the key form on the
+  // connector's own card, which hands them to the host's store.
+  function connectorEditorMarkup() {
+    if (typeof adapter.addConnector !== "function") return "";
+    const configured = state.plugins.filter((p) => p.group === "Connectors" && p.removable);
+    const rows = configured.length
+      ? configured.map((p) => `<div class="setting-row"><div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.category)}</small></div><button class="ghost-button" type="button" data-remove-connector="${escapeHtml(p.name)}">Remove</button></div>`).join("")
+      : `<div class="empty-state">No stdio connector is configured on this box yet.</div>`;
+    return `<details class="panel-card" data-connector-editor><summary>Add or remove a connector</summary><p class="field-hint">Writes connectors.json on the box and calls refreshMcp, so the host relaunches its stdio servers without a container restart. Give the environment variable NAMES the process needs; their values go in the key form on the connector's card, where the host stores them instead of this file.</p><form data-add-connector><div class="field"><label for="connector-name">Name</label><input id="connector-name" name="name" required placeholder="e.g. localfiles" /></div><div class="field"><label for="connector-command">Command</label><input id="connector-command" name="command" required placeholder="e.g. npx" /></div><div class="field"><label for="connector-args">Arguments</label><input id="connector-args" name="args" placeholder="space separated, e.g. -y @modelcontextprotocol/server-filesystem /workspace" /></div><div class="field"><label for="connector-env">Environment variable names</label><input id="connector-env" name="envNames" placeholder="comma separated, names only" /></div><div class="form-actions"><button class="primary-button" type="submit">Add connector</button></div></form><div class="plugin-list">${rows}</div></details>`;
   }
 
   function agentProfilePanel(worker) {
@@ -1536,11 +1595,19 @@
     const runName = document.getElementById("desktop-run-name");
     const working = lead && lead.status === "working";
     if (runName) runName.textContent = working ? `${lead.name} is working` : "No run in progress";
-    // The host does not expose per-step run progress, so inventing four ticks would be the same
-    // fiction as the fixture it replaced. Say what is known: working, or not.
-    elements.desktopTimeline.innerHTML = working
-      ? `<li>Started — no step detail from this host</li>`
-      : `<li class="is-pending">Nothing running for this worker</li>`;
+    // MR-11: the host exposes no per-step run progress, but the conversation outline does carry
+    // this turn's tool calls, and the adapter has already woven them into the transcript as rows
+    // with a `tool-` id. "This turn" is everything after the last thing the operator sent; older
+    // rows belong to earlier runs and would read as steps of the one on screen.
+    const rows = Array.isArray(record.messages) ? record.messages : [];
+    let lastFromYou = -1;
+    rows.forEach((m, i) => { if (m.authorId === "you") lastFromYou = i; });
+    const steps = rows.slice(lastFromYou + 1).filter((m) => m.type === "system" && String(m.id ?? "").startsWith("tool-"));
+    elements.desktopTimeline.innerHTML = steps.length
+      ? steps.slice(-12).map((step) => `<li>${escapeHtml(step.text)}</li>`).join("")
+      : working
+        ? `<li>Started — the outline reports no tool call for this turn yet</li>`
+        : `<li class="is-pending">Nothing running for this worker</li>`;
     // Naming it honestly: this hides the view, it does not stop the worker. There is no host
     // command to halt a turn in flight, and a button labelled Pause promises exactly that.
     elements.pauseRun.textContent = state.desktop.paused ? "Resume view" : "Pause view";
@@ -1728,13 +1795,36 @@
       selectedPluginId = target.dataset.installPlugin;
       // The toast used to fire before the host had answered, on a call that for some cards always
       // fails. It now reports whatever the adapter resolved with.
-      Promise.resolve(adapter.setPluginState(target.dataset.installPlugin, "connect"))
+      // The agent id the card was drawn for, not whatever context is active: on a room these are
+      // different agents, and a listener binds to one agent.
+      Promise.resolve(adapter.setPluginState(target.dataset.installPlugin, "connect", contextLead()?.id))
         .then((result) => { if (typeof result === "string") showToast(result); })
         .catch((error) => showToast(`Could not connect that plugin: ${error.message}`));
       renderPluginsPanel();
     } else if (target.dataset.toggleTool) {
-      adapter.togglePluginTool(selectedPluginId, target.dataset.toggleTool);
-      renderPluginsPanel();
+      // CP-03: the switch is not flipped by the click. The adapter writes
+      // toggleMcpToolDisabled, re-reads listMcpServerTools, and the row is redrawn from whatever
+      // the host now holds -- so a write the host drops shows as a switch that did not move.
+      target.disabled = true;
+      Promise.resolve(adapter.togglePluginTool(selectedPluginId, target.dataset.toggleTool))
+        .then((result) => {
+          renderPluginsPanel();
+          if (result && typeof result === "object" && result.message) showToast(result.message);
+        })
+        .catch((error) => { renderPluginsPanel(); showToast(`That tool was not changed: ${error.message}`); });
+    } else if (target.dataset.removeConnector) {
+      const name = target.dataset.removeConnector;
+      target.disabled = true;
+      Promise.resolve(adapter.removeConnector(name))
+        .then((result) => { renderPluginsPanel(); showToast(result?.message ?? `${name} removed`); })
+        .catch((error) => { target.disabled = false; showToast(`${name} was not removed: ${error.message}`); });
+    } else if (target.dataset.disconnectPlugin) {
+      const pluginId = target.dataset.disconnectPlugin;
+      target.disabled = true;
+      // listenerConnectedMarkup names contextLead(); the unbind has to be the same agent.
+      Promise.resolve(adapter.setPluginState(pluginId, "disconnect", contextLead()?.id))
+        .then((result) => { renderPluginsPanel(); if (typeof result === "string") showToast(result); })
+        .catch((error) => { target.disabled = false; showToast(`That listener was not disconnected: ${error.message}`); });
     } else if (target.dataset.runRoutine) {
       const routineId = target.dataset.runRoutine;
       adapter.runRoutine(routineId).catch((error) => {
@@ -1995,6 +2085,8 @@
     if (form.dataset.secretForm) {
       const input = form.elements.secret;
       const plugin = state.plugins.find((item) => item.id === form.dataset.secretForm);
+      // Same as the connector key form below: the card can be replaced between render and submit.
+      if (!plugin) { showToast("That card is no longer on this page; nothing was sent."); input.value = ""; return; }
       // The adapter awaits the adoption and resolves with what the relay then holds, so the toast
       // reports the outcome. It used to claim the value had been discarded while the relay stored it.
       Promise.resolve(adapter.submitSecret(plugin.id, plugin.secretField, input.value))
@@ -2007,6 +2099,67 @@
         })
         .catch((error) => showToast(`${plugin.name} was not connected: ${error.message}`));
       input.value = "";
+    } else if (form.dataset.connectorSecretForm) {
+      // CP-10 item 1: one setConnectorSecret per filled field. Every input is cleared before the
+      // calls resolve, so no value sits in a control while the writes are in flight, and none of
+      // them is ever written into the markup.
+      const plugin = state.plugins.find((item) => item.id === form.dataset.connectorSecretForm);
+      // refreshConnectors and refreshSubscriptions replace state.plugins wholesale, so the card
+      // can be gone between render and submit. Reading plugin.name after the inputs were cleared
+      // threw synchronously out of the .map callback, past Promise.all's .catch: the typed value
+      // was lost, the button stayed disabled and nothing was said.
+      if (!plugin) { showToast("That connector is no longer on this page; nothing was sent."); return; }
+      const entries = Array.from(form.querySelectorAll("input[type=password]"))
+        .map((input) => ({ field: input.name, value: input.value }))
+        .filter((entry) => entry.value.length > 0);
+      form.querySelectorAll("input[type=password]").forEach((input) => { input.value = ""; });
+      if (!entries.length) { showToast("Nothing to store — every field was blank"); return; }
+      const submit = form.querySelector("button[type=submit]");
+      if (submit) submit.disabled = true;
+      Promise.all(entries.map((entry) => Promise.resolve(adapter.setConnectorSecret(plugin.name, entry.field, entry.value))))
+        .then((results) => {
+          if (submit) submit.disabled = false;
+          const bad = results.find((r) => r && r.accepted === false);
+          showToast(bad?.message ?? results[0]?.message ?? `${plugin.name} credentials stored on the host`);
+        })
+        .catch((error) => { if (submit) submit.disabled = false; showToast(`Not stored: ${error.message}`); });
+    } else if (form.hasAttribute("data-add-connector")) {
+      const data = new FormData(form);
+      const submit = form.querySelector("button[type=submit]");
+      if (submit) submit.disabled = true;
+      const spec = {
+        name: String(data.get("name") ?? "").trim(),
+        command: String(data.get("command") ?? "").trim(),
+        args: String(data.get("args") ?? "").trim().split(/\s+/).filter(Boolean),
+        envNames: String(data.get("envNames") ?? "").split(",").map((n) => n.trim()).filter(Boolean),
+      };
+      Promise.resolve(adapter.addConnector(spec))
+        .then((result) => {
+          if (submit) submit.disabled = false;
+          if (result?.accepted) form.reset();
+          renderPluginsPanel();
+          showToast(result?.message ?? `${spec.name} written to connectors.json`);
+        })
+        .catch((error) => { if (submit) submit.disabled = false; showToast(`${spec.name} was not added: ${error.message}`); });
+    } else if (form.dataset.connectChannel) {
+      // CP-04: the token goes straight to connectChannel for the agent on screen and the input is
+      // cleared first, so it is never left sitting in a control on a page anyone can walk up to.
+      const platform = form.dataset.connectChannel;
+      const input = form.elements.token;
+      const token = input?.value ?? "";
+      if (input) input.value = "";
+      if (!token.trim()) { showToast("The host stores nothing for an empty token"); return; }
+      const submit = form.querySelector("button[type=submit]");
+      if (submit) submit.disabled = true;
+      // listenerConnectMarkup says "Connect Slack for <contextLead().name>"; the token must be
+      // stored against that same agent, which on a group is a member worker and not the room.
+      Promise.resolve(adapter.connectListener(platform, token, contextLead()?.id))
+        .then((result) => {
+          if (submit) submit.disabled = false;
+          renderPluginsPanel();
+          showToast(result?.message ?? `${platform} connect sent to the host`);
+        })
+        .catch((error) => { if (submit) submit.disabled = false; showToast(`${platform} was not connected: ${error.message}`); });
     } else if (form.hasAttribute("data-new-routine") || form.dataset.editRoutineForm) {
       const data = new FormData(form);
       const submit = form.querySelector("button[type=submit]");
@@ -2215,6 +2368,21 @@
     if (evidence) { openEvidenceViewer(evidence.dataset.messageId); return; }
     const exchange = event.target.closest("[data-exchange]");
     if (exchange) { openExchangeViewer(exchange.dataset.messageId); return; }
+    const secret = event.target.closest("[data-submit-secret]");
+    if (secret) {
+      const id = secret.dataset.submitSecret;
+      const input = elements.transcript.querySelector(`[data-secret-input="${CSS.escape(id)}"]`);
+      const value = input?.value ?? "";
+      // Cleared before the call resolves: the value must not sit in a control on screen while a
+      // request is in flight, and nothing ever writes it back into the markup.
+      if (input) input.value = "";
+      if (!value.trim()) { showToast("The host discards an empty value"); return; }
+      secret.disabled = true;
+      Promise.resolve(adapter.submitSecretRequest(activeContext(), id, value))
+        .then((result) => { if (result?.message) showToast(result.message); })
+        .catch((error) => { secret.disabled = false; showToast(`That credential was not stored: ${error.message}`); });
+      return;
+    }
     const action = event.target.closest("[data-decide]");
     if (!action) return;
     // No toast: the card itself reports what the host did, once the host has done it.

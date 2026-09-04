@@ -27,7 +27,19 @@ import type { CapableBox } from "../../box/box-capabilities.js";
 import { createSandMcpStateExecutor } from "../../ports/mcp-state-executor.js";
 import { createBoxSandMcpExec } from "./box-mcp-exec.js";
 import { getSandRootDir } from "../../host-paths.js";
-import { mergeLocalConnectors, readLocalConnectorFile } from "./local-connectors.js";
+import {
+  assignLocalConnectorIds,
+  LOCAL_CONNECTORS_FILENAME,
+  mergeLocalConnectors,
+  readLocalConnectorFile,
+} from "./local-connectors.js";
+import {
+  deleteConnectorEnvSecret,
+  isConnectorEnvFieldName,
+  listConnectorEnvSecretFields,
+  readConnectorEnvSecrets,
+  writeConnectorEnvSecret,
+} from "./connector-secrets.js";
 
 export interface McpServerSummary { id: string; name: string; serverIdentifier: string; accountKey: string; pluginId?: string | null; isTeamServer: boolean; status: string; statusDetail?: string; transport: string; toolCount: number; disabledToolCount?: number; customInstructions: string }
 export interface CatalogField { key: string; label: string; hint: string; isRequired?: boolean; isSecret?: boolean }
@@ -71,6 +83,8 @@ interface McpManagerRuntime {
   listEffectivePlugins(): Promise<EffectivePlugin[]>;
   uninstallPlugin(id: string): Promise<{ removed: boolean; reason?: string }>;
   setServerCustomInstructions(args: { serverId: string; instructions: string }): Promise<ServerState>;
+  listServerTools(serverId: string): Promise<Array<{ name: string; title?: string; description?: string; isDisabled: boolean }>>;
+  toggleMcpToolDisabled(args: { serverId: string; toolName: string }): Promise<Array<{ name: string; title?: string; description?: string; isDisabled: boolean }>>;
   installEntry(args: { entryId: string; values?: Record<string, string> }, getAccessToken: () => Promise<string | null>): Promise<ServerState>;
   addServer(args: { name: string; configJson: string }): Promise<ServerState>;
   removeServer(id: string): Promise<{ removed: boolean; reason?: string; state: ServerState }>;
@@ -119,18 +133,108 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
   if (deps.onServerAuthenticated != null) manager.setAuthCompletionObserver(deps.onServerAuthenticated);
   const readEffective = async (): Promise<EffectivePlugin[] | null> => { try { return await manager.listEffectivePlugins(); } catch (error) { log(`effective-plugins read degraded to attributed rows: ${error instanceof Error ? error.message : String(error)}`); return null; } };
   const mutate = async <T>(fn: () => Promise<T>): Promise<T> => { const result = await fn(); deps.onServersMutated?.(); return result; };
+  // CP-05. `getCatalog` rethrows when the Cursor marketplace read fails, and on this box it always
+  // fails: there is no usable Cursor account. That threw straight out of SearchPlugins at the
+  // model. A catalog nobody can reach is an empty catalog with a logged reason, not an exception.
+  const readCatalog = async (options?: { forceRefresh?: boolean }): Promise<CatalogPlugin[]> => {
+    try { return await manager.getCatalog(token, options); }
+    catch (error) { log(`plugin catalog unavailable on this box: ${error instanceof Error ? error.message : String(error)}`); return []; }
+  };
+  const localConnectorRoot = () => getSandRootDir();
+  /**
+   * Accepts either the human connector name or the numeric id CP-07 mints for it. `caller` names
+   * the command in the error, because three commands share this and being told to fix the
+   * arguments of one you never called is its own small lie. `readOnly` keeps a membership question
+   * (isLocalConnector) from minting and persisting ids as a side effect of asking.
+   */
+  const resolveLocalConnector = (server: unknown, caller: string, readOnly = false): { name: string; id: string } => {
+    const wanted = typeof server === "string" ? server.trim() : typeof server === "number" ? String(server) : "";
+    if (wanted.length === 0) throw new Error(`${caller} needs a server name or id`);
+    const root = localConnectorRoot();
+    const configured = readLocalConnectorFile(root);
+    // `configured` is a plain object, so a membership test by truthiness answers yes for
+    // "constructor", "toString" and every other Object.prototype key -- which then routed a
+    // submitted secret at a connector that does not exist, with an undefined id.
+    const ids = assignLocalConnectorIds(root, Object.keys(configured), { readOnly, log });
+    const name = Object.hasOwn(configured, wanted)
+      ? wanted
+      : Object.keys(configured).find((candidate) => ids[candidate] === wanted);
+    if (name == null) throw new Error(`no connector named or numbered "${wanted}" in ${LOCAL_CONNECTORS_FILENAME}`);
+    const id = ids[name];
+    if (id === undefined) throw new Error(`connector "${name}" has no id in ${LOCAL_CONNECTORS_FILENAME}`);
+    return { name, id };
+  };
+  /**
+   * CP-10. Stopping the server and letting the next discovery spawn it is what makes the injected
+   * env actually take: `loadServers` carries removeMissing, so a push that omits the server stops
+   * it, and the push that follows starts it from the freshly merged spawn spec.
+   */
+  const restartLocalConnector = async (name: string): Promise<boolean> => {
+    const boxExec = deps.boxMcpExec as { loadServers(configJson: string): Promise<void> } | undefined;
+    if (boxExec == null) return false;
+    try {
+      // Inside the try: the value is already on disk by the time this runs, so a reload failure is
+      // "stored but not restarted", never a rejection that unwinds the caller's whole turn.
+      await mutate(() => manager.reloadServers());
+      const stdio = await (manager.definitionSourceView() as { getStdioServerConfigs(): Promise<Record<string, unknown>> }).getStdioServerConfigs();
+      const { [name]: _stopped, ...others } = stdio;
+      await boxExec.loadServers(JSON.stringify({ mcpServers: others }));
+      discovery.resetPushState();
+      await discovery.getTools({});
+      return true;
+      // Class only, never the message: the failing leg's argument is the merged connector config,
+      // env and all, and an error that echoes its input would write the secret into a host log
+      // that is neither 0600 nor unread.
+    } catch (error) { log(`connector restart failed for ${name}: ${error instanceof Error ? error.name : typeof error}`); return false; }
+  };
   const management = {
     listInstalled: async () => toInstalledServers(await manager.listServers()),
-    listPlugins: async () => { const [views, state, effective] = await Promise.all([manager.getCatalog(token), manager.listServers(), readEffective()]); return views.map((view) => toPluginSummary(view, effective, state.servers)); },
+    listPlugins: async () => { const [views, state, effective] = await Promise.all([readCatalog(), manager.listServers(), readEffective()]); return views.map((view) => toPluginSummary(view, effective, state.servers)); },
+    listServerTools: async (serverId: string) => (await manager.listServerTools(serverId)).map((tool) => ({ ...tool, enabled: tool.isDisabled !== true })),
+    /**
+     * CP-08. The shared method is a pure toggle; the gateway command carries a desired state, so
+     * the desired state is resolved here and the toggle fires only when it would change something.
+     */
+    setToolDisabled: async (args: { serverId: string; toolName: string; disabled?: boolean }) => {
+      const before = await manager.listServerTools(args.serverId);
+      const current = before.find((tool) => tool.name === args.toolName);
+      if (current == null) throw new Error(`MCP server ${args.serverId} has no tool "${args.toolName}".`);
+      const wanted = args.disabled === undefined ? current.isDisabled !== true : args.disabled === true;
+      const after = wanted === (current.isDisabled === true)
+        ? before
+        : await mutate(() => manager.toggleMcpToolDisabled({ serverId: args.serverId, toolName: args.toolName }));
+      return after.map((tool) => ({ ...tool, enabled: tool.isDisabled !== true }));
+    },
+    /** Does this name (or numeric id) belong to a local stdio connector on this box? */
+    isLocalConnector: (server: unknown) => { try { resolveLocalConnector(server, "isLocalConnector", true); return true; } catch { return false; } },
+    listConnectorSecretFields: (server: unknown) => {
+      const { name, id } = resolveLocalConnector(server, "listConnectorSecretFields");
+      return { server: name, serverId: id, fields: listConnectorEnvSecretFields(localConnectorRoot(), name) };
+    },
+    setConnectorSecret: async (args: { server: unknown; field: unknown; value: unknown }) => {
+      const { name, id } = resolveLocalConnector(args.server, "setConnectorSecret");
+      if (!isConnectorEnvFieldName(args.field)) throw new Error("setConnectorSecret needs an environment variable name as `field` (process-control names such as PATH, NODE_OPTIONS and LD_* are refused)");
+      if (typeof args.value !== "string" || args.value.length === 0) throw new Error("setConnectorSecret needs a non-empty `value`");
+      if (!writeConnectorEnvSecret(localConnectorRoot(), name, args.field, args.value)) throw new Error("the connector secret store could not be written");
+      const restarted = await restartLocalConnector(name);
+      return { server: name, serverId: id, field: args.field, stored: true, restarted, fields: listConnectorEnvSecretFields(localConnectorRoot(), name) };
+    },
+    deleteConnectorSecret: async (args: { server: unknown; field: unknown }) => {
+      const { name, id } = resolveLocalConnector(args.server, "deleteConnectorSecret");
+      if (!isConnectorEnvFieldName(args.field)) throw new Error("deleteConnectorSecret needs an environment variable name as `field`");
+      const removed = deleteConnectorEnvSecret(localConnectorRoot(), name, args.field);
+      const restarted = removed ? await restartLocalConnector(name) : false;
+      return { server: name, serverId: id, field: args.field, removed, restarted, fields: listConnectorEnvSecretFields(localConnectorRoot(), name) };
+    },
     getPlugin: async (pluginId: string) => {
-      let views = await manager.getCatalog(token), view = views.find((entry) => entry.id === pluginId);
-      if (view == null) { views = await manager.getCatalog(token, { forceRefresh: true }); view = views.find((entry) => entry.id === pluginId); }
+      let views = await readCatalog(), view = views.find((entry) => entry.id === pluginId);
+      if (view == null) { views = await readCatalog({ forceRefresh: true }); view = views.find((entry) => entry.id === pluginId); }
       if (view == null) return null;
       const [state, effective] = await Promise.all([manager.listServers(), readEffective()]);
       return { ...toPluginSummary(view, effective, state.servers), fields: toCatalogFields(view.fields), servers: state.servers.filter((server) => server.pluginId === view.id).map(toInstalledServer) };
     },
     uninstallPlugin: async (pluginId: string) => {
-      let urls: string[] = []; try { urls = (await manager.getCatalog(token)).find((view) => view.id === pluginId)?.skills?.flatMap((skill) => skill.sourceUrl == null ? [] : [skill.sourceUrl]) ?? []; } catch {}
+      let urls: string[] = []; try { urls = (await readCatalog()).find((view) => view.id === pluginId)?.skills?.flatMap((skill) => skill.sourceUrl == null ? [] : [skill.sourceUrl]) ?? []; } catch {}
       const result = await mutate(() => manager.uninstallPlugin(pluginId));
       if (uninstallClearedInstallRecord(result)) { try { deps.pluginSkills?.removeLiveReferences?.(urls); } catch {} syncPluginSkillsInBackground(deps.pluginSkills, "uninstall"); }
       return { removed: result.removed, ...(result.reason == null ? {} : { reason: result.reason }) };
@@ -138,7 +242,7 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
     setInstructions: async (args: { serverId: string; instructions: string }) => toInstalledServers(await mutate(() => manager.setServerCustomInstructions(args))),
     install: async (args: { id: string; values?: Record<string, string> }) => {
       const servers = toInstalledServers(await mutate(() => manager.installEntry({ entryId: args.id, ...(args.values == null ? {} : { values: args.values }) }, token)));
-      try { const urls = (await manager.getCatalog(token)).find((view) => view.id === args.id)?.skills?.flatMap((skill) => skill.sourceUrl == null ? [] : [skill.sourceUrl]) ?? []; deps.pluginSkills?.removeLiveReferences?.(urls); } catch {}
+      try { const urls = (await readCatalog()).find((view) => view.id === args.id)?.skills?.flatMap((skill) => skill.sourceUrl == null ? [] : [skill.sourceUrl]) ?? []; deps.pluginSkills?.removeLiveReferences?.(urls); } catch {}
       syncPluginSkillsInBackground(deps.pluginSkills, "install"); return servers;
     },
     add: async (args: { name: string; configJson: string }) => toInstalledServers(await mutate(() => manager.addServer(args))),
@@ -209,10 +313,16 @@ export class McpHostService {
       // connector depended on a Cursor login. Local stdio servers are merged over it here and stand
       // on their own when the account is unreachable -- a connector configured on this machine must
       // not stop working because a remote login expired.
-      accountServersProvider: async () => mergeLocalConnectors(
-        await fetchAccountMcpServers(accountMcpDeps).catch(() => null),
-        readLocalConnectorFile(getSandRootDir()),
-      ),
+      accountServersProvider: async () => {
+        const root = getSandRootDir(), local = readLocalConnectorFile(root);
+        return mergeLocalConnectors(
+          await fetchAccountMcpServers(accountMcpDeps).catch(() => null),
+          local,
+          // CP-07 gives each local connector a stable numeric id; CP-10 merges the host-owned
+          // secret store into its env on the way to the box.
+          { ids: assignLocalConnectorIds(root, Object.keys(local), { log: deps.log }), secrets: readConnectorEnvSecrets(root) },
+        );
+      },
       accountMcpWriter: createAccountMcpWriter(accountMcpDeps),
       effectivePluginsProvider: () => fetchEffectiveUserPlugins(accountMcpDeps),
       backendMcpExec,

@@ -2825,3 +2825,39 @@ dialog[open] {
   display: block;
   color: var(--text-secondary);
 }
+
+/* CP-11: the connectors editor under the Plugins browser. Same disclosure affordance as the
+   hidden-agents list in the roster, so a collapsed section reads the same way in both places. */
+[data-connector-editor] {
+  margin-top: 14px;
+}
+
+[data-connector-editor] > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+
+[data-connector-editor] > summary::-webkit-details-marker {
+  display: none;
+}
+
+[data-connector-editor] > summary::before {
+  content: "▸ ";
+}
+
+[data-connector-editor][open] > summary::before {
+  content: "▾ ";
+}
+
+[data-connector-editor] .field-hint {
+  display: block;
+  margin: 8px 0 12px;
+}
+
+[data-connector-editor] .plugin-list {
+  margin-top: 12px;
+}

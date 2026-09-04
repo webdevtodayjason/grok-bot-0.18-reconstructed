@@ -550,13 +550,32 @@ export function createHostGatewayApi(
 
     getAgentChannels: (args: any) =>
       method(automations, "getAgentChannels")(args.id),
+    // CP-12. Same guard as its pair below: the id, the platform and the token were read straight
+    // off the body, so a call with no id reached storeConnectorCredential(undefined, ...) and only
+    // failed safe by accident, deep inside the store, with nothing said about why.
     connectChannel: async (args: any) => {
-      method(manager, "connectChannel")(args.id, args.platform, args.token);
-      return method(automations, "getAgentChannels")(args.id);
+      const agentId = typeof args?.id === "string" ? args.id.trim() : "";
+      const platform = typeof args?.platform === "string" ? args.platform.trim() : "";
+      if (agentId.length === 0) throw new TypeError("connectChannel needs the agent id");
+      if (platform.length === 0) throw new TypeError("connectChannel needs a platform");
+      if (typeof args?.token !== "string" || args.token.length === 0) {
+        throw new TypeError("connectChannel needs a token");
+      }
+      method(manager, "connectChannel")(agentId, platform, args.token);
+      return method(automations, "getAgentChannels")(agentId);
     },
+    // CP-12. `disconnectChannel` is per-agent, but the id was read straight off the body: a call
+    // with no `id` disconnected against `undefined`, which reads to a caller as an account-wide
+    // disconnect nobody asked for. The id is now required, and so is the platform.
     disconnectChannel: async (args: any) => {
-      method(manager, "disconnectChannel")(args.id, args.platform);
-      return method(automations, "getAgentChannels")(args.id);
+      const agentId = typeof args?.id === "string" ? args.id.trim() : "";
+      if (agentId.length === 0) throw new TypeError("disconnectChannel needs the agent id");
+      const platform = typeof args?.platform === "string" ? args.platform.trim() : "";
+      if (platform.length === 0) throw new TypeError("disconnectChannel needs a platform");
+      // Trimmed on the way in, like the id: " slack" and "slack" are one platform to a user and
+      // must not be two folders to the store.
+      method(manager, "disconnectChannel")(agentId, platform);
+      return method(automations, "getAgentChannels")(agentId);
     },
     refreshChannel: (args: any) =>
       method(automations, "getAgentChannels")(args.id),
@@ -698,6 +717,54 @@ export function createHostGatewayApi(
         }))
       };
     },
+    // Wave D1 connector plane. Every one of these forwards to a method the Electron IPC already
+    // called; only the gateway lacked a door. CP-07's numeric ids are what make the id-keyed ones
+    // work for the connectors that actually run on this box.
+    listInstalledMcpServers: async () =>
+      // Ids are numbers on the wire (the dashboard and its fixtures key on that); the store keeps strings.
+      ((await method(deps.extensions.api("mcp").management, "listInstalled")()) ?? []).map((row: any) =>
+        row != null && typeof row === "object" && typeof row.id === "string" && /^[1-9]\d*$/.test(row.id) ? { ...row, id: Number(row.id) } : row),
+    listMcpPlugins: () => method(deps.extensions.api("mcp").management, "listPlugins")(),
+    getMcpPlugin: (args: any) =>
+      method(deps.extensions.api("mcp").management, "getPlugin")(
+        typeof args?.id === "string" ? args.id : args?.pluginId
+      ),
+    listMcpServerTools: (args: any) => {
+      const serverId = args?.serverId ?? args?.id;
+      if (typeof serverId !== "string" && typeof serverId !== "number") {
+        throw new TypeError("listMcpServerTools needs serverId");
+      }
+      return method(deps.extensions.api("mcp").management, "listServerTools")(String(serverId));
+    },
+    toggleMcpToolDisabled: (args: any) => {
+      const serverId = args?.serverId ?? args?.id;
+      if (typeof serverId !== "string" && typeof serverId !== "number") {
+        throw new TypeError("toggleMcpToolDisabled needs serverId");
+      }
+      if (typeof args?.toolName !== "string" || args.toolName.length === 0) {
+        throw new TypeError("toggleMcpToolDisabled needs toolName");
+      }
+      return method(deps.extensions.api("mcp").management, "setToolDisabled")({
+        serverId: String(serverId),
+        toolName: args.toolName,
+        ...(args.disabled === undefined ? {} : { disabled: args.disabled === true })
+      });
+    },
+    listConnectorSecretFields: (args: any) =>
+      method(deps.extensions.api("mcp").management, "listConnectorSecretFields")(
+        args?.server ?? args?.serverId
+      ),
+    setConnectorSecret: (args: any) =>
+      method(deps.extensions.api("mcp").management, "setConnectorSecret")({
+        server: args?.server ?? args?.serverId,
+        field: args?.field,
+        value: args?.value
+      }),
+    deleteConnectorSecret: (args: any) =>
+      method(deps.extensions.api("mcp").management, "deleteConnectorSecret")({
+        server: args?.server ?? args?.serverId,
+        field: args?.field
+      }),
     completeMcpOAuth: async (args: any) => {
       const stateId = typeof args?.stateId === "string" ? args.stateId : "";
       const code = typeof args?.code === "string" ? args.code : args?.authorizationCode;

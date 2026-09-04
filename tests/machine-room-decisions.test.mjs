@@ -81,10 +81,32 @@ test("a widget question keeps the host's own options", () => {
   assert.deepEqual(card.options, ["#44845", "#44613"]);
 });
 
-test("a credential request is surfaced even though this UI refuses to answer it", () => {
-  const card = cardOf({ kind: "send-message", message: { type: "secret-request" } });
+// CP-10 item 2: this UI used to refuse the request and tell the operator to answer it in the
+// host app. submitSecret { entryId, value, agentId } is a real host command
+// (widget-responses.ts:355 -> routeSecret -> storeConnectorCredential, then the agent resumes),
+// so the card now carries the entry id the host asks by, plus the field and connector it names.
+test("a credential request carries the entry id, field and connector the host asks by", () => {
+  const card = cardOf({
+    kind: "send-message", id: "entry-7",
+    message: { type: "secret-request", secretRequest: { label: "the Linear API key", target: { kind: "channel-credential", platform: "linear", field: "apiKey" } } },
+  });
   assert.equal(card.kind, "secret");
-  assert.match(card.detail, /will not carry a secret/i);
+  assert.equal(card.entryId, "entry-7");
+  assert.equal(card.field, "apiKey");
+  assert.equal(card.platform, "linear");
+  assert.equal(card.status, "pending");
+  assert.match(card.title, /the Linear API key/);
+  assert.match(card.detail, /never written into this conversation/i);
+});
+
+// The host's own stamp on the entry, not anything this page remembers: an answered request stops
+// offering the input on the next read, the same way an answered widget does.
+test("a credential request the host has already taken is not still asking", () => {
+  const card = cardOf({
+    kind: "send-message", id: "entry-8", secretProvided: true,
+    message: { type: "secret-request", secretRequest: { label: "a token", target: { kind: "channel-credential", platform: "slack", field: "token" } } },
+  });
+  assert.equal(card.status, "provided");
 });
 
 test("ordinary agent speech is not mistaken for a decision", () => {

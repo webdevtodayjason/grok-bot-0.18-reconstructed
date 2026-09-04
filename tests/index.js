@@ -30,3 +30,5 @@ import "./sand-host-setting.test.mjs";
 import "./browser-tool-parameters.test.mjs";
 import "./machine-room-gateway.test.mjs";
 import "./machine-room-identity.test.mjs";
+import "./connector-plane.test.mjs";
+import "./machine-room-connectors.test.mjs";

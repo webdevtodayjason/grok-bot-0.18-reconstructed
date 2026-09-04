@@ -1,0 +1,353 @@
+// Wave D1. The connector plane, checked against the live box rather than described.
+//
+// What this proves, in order:
+//   CP-07  a local connector has a positive-integer id that is the SAME after a docker restart,
+//          and the id-keyed operations that used to reject `local:<name>` now work.
+//   CP-08  listMcpServerTools returns every tool with an enabled flag; disabling one makes it
+//          vanish from listRoutedMcpTools and from what a fresh agent's GetMcpTools can see.
+//   CP-10  a secret set through setConnectorSecret reaches the connector PROCESS (a probe stdio
+//          server that answers with its own process.env), and the value exists nowhere under
+//          /home/box/sand-data except the 0600 store -- not connectors.json, not the per-agent
+//          connector-secrets/ tree, not the host log.
+//   CP-05  the plugin catalog path answers with an array instead of throwing.
+//   CP-12  disconnectChannel without an agent id is refused.
+//
+// Integration check, not a unit test: needs the box up. Only step (b)'s GetMcpTools leg spends a
+// model turn; everything else drives the gateway directly.
+//
+//   node scripts/verify-connector-plane.mjs            all of it
+//   node scripts/verify-connector-plane.mjs --no-restart   skip the docker restart in (a)
+//   node scripts/verify-connector-plane.mjs --no-model     skip the one model turn in (b)
+import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
+
+const GATEWAY = process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:7777";
+const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
+const DATA = "/home/box/sand-data";
+const CONNECTORS = `${DATA}/connectors.json`;
+const PROBE_SERVER = "envprobe";
+const PROBE_SCRIPT = "/workspace/mcp-env-probe.mjs";
+const PROBE_FIELD = "PROBE_SECRET";
+const SKIP_RESTART = process.argv.includes("--no-restart");
+const SKIP_MODEL = process.argv.includes("--no-model");
+const TURN_TIMEOUT_MS = 300_000;
+
+class VerificationFailed extends Error {}
+const fail = (message) => { throw new VerificationFailed(message); };
+const ok = (message) => console.log(`  ok  ${message}`);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function token() {
+  const explicit = process.env.SAND_HOST_GATEWAY_TOKEN?.trim();
+  if (explicit) return explicit;
+  for (const dir of (process.env.SAND_PROFILE_DIRS ?? "").split(":")) {
+    if (!dir) continue;
+    try { return JSON.parse(readFileSync(`${dir}/local-docker-vm.json`, "utf8")).token; } catch {}
+  }
+  throw new Error("no gateway token: set SAND_HOST_GATEWAY_TOKEN or SAND_PROFILE_DIRS");
+}
+const TOKEN = token();
+
+const call = async (method, args = {}) => {
+  const res = await fetch(`${GATEWAY}/api/${method}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${method} -> ${res.status} ${text.slice(0, 300)}`);
+  let parsed; try { parsed = JSON.parse(text); } catch { return text; }
+  if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.error === "string") {
+    throw new Error(`${method} -> ${parsed.error}`);
+  }
+  return parsed;
+};
+const callRaw = async (method, args = {}) => {
+  try { return { ok: true, value: await call(method, args) }; }
+  catch (error) { return { ok: false, message: error.message }; }
+};
+
+const docker = (args) => new Promise((resolve, reject) =>
+  execFile("docker", args, { maxBuffer: 64 << 20 }, (error, out, err) =>
+    (error ? reject(new Error(`docker ${args.slice(0, 3).join(" ")}: ${err || error.message}`)) : resolve(out))));
+const inBox = (script) => docker(["exec", BOX, "sh", "-c", script]);
+
+const waitForHost = async (label) => {
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    const status = await callRaw("getHostStatus");
+    if (status.ok) return;
+    await sleep(5000);
+  }
+  fail(`the host never came back after ${label}`);
+};
+
+// The probe connector: a stdio MCP server whose only tool hands back its own process environment.
+// That is the whole point -- a value that reaches this tool reached the connector PROCESS, which a
+// file beside connectors.json never would have.
+const PROBE_SOURCE = `const send=(m)=>process.stdout.write(JSON.stringify(m)+"\\n");
+let buf="";
+process.stdin.on("data",(d)=>{buf+=d;let i;while((i=buf.indexOf("\\n"))>=0){const line=buf.slice(0,i).trim();buf=buf.slice(i+1);if(!line)continue;let m;try{m=JSON.parse(line)}catch{continue}
+if(m.method==="initialize")send({jsonrpc:"2.0",id:m.id,result:{protocolVersion:m.params&&m.params.protocolVersion||"2024-11-05",capabilities:{tools:{}},serverInfo:{name:"envprobe",version:"0.0.1"}}});
+else if(m.method==="tools/list")send({jsonrpc:"2.0",id:m.id,result:{tools:[{name:"env_probe",description:"Returns this server process's ${PROBE_FIELD}.",inputSchema:{type:"object",properties:{},additionalProperties:false}}]}});
+else if(m.method==="tools/call")send({jsonrpc:"2.0",id:m.id,result:{content:[{type:"text",text:String(process.env.${PROBE_FIELD}||"(unset)")}],isError:false}});
+else if(m.id!==undefined)send({jsonrpc:"2.0",id:m.id,result:{}});}});
+`;
+
+const readConnectorsJson = async () => JSON.parse(await inBox(`cat ${CONNECTORS}`));
+const writeConnectorsJson = async (value) => {
+  await docker(["exec", BOX, "node", "-e",
+    `require('fs').writeFileSync(${JSON.stringify(CONNECTORS)},${JSON.stringify(JSON.stringify(value, null, 2))},{mode:0o600})`]);
+};
+
+const routedTools = async () => {
+  const tools = await call("listRoutedMcpTools");
+  return Array.isArray(tools) ? tools : [];
+};
+const waitForRoutedTool = async (toolName, timeoutMs) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = (await routedTools()).find((tool) => tool.toolName === toolName);
+    if (found != null) return found;
+    await sleep(4000);
+  }
+  return null;
+};
+
+const waitForServerTools = async (serverId, timeoutMs) => {
+  const deadline = Date.now() + timeoutMs;
+  let seen = [];
+  while (Date.now() < deadline) {
+    seen = await call("listMcpServerTools", { serverId }).catch(() => []);
+    if (Array.isArray(seen) && seen.length > 0) return seen;
+    await sleep(4000);
+  }
+  return seen;
+};
+
+let probeSecretSet = false;
+let probeInstalled = false;
+let probeAgentId = null;
+let originalConnectors = null;
+
+try {
+  console.log(`gateway ${GATEWAY}  box ${BOX}`);
+
+  // ---------------------------------------------------------------- (a) CP-07 stable numeric id
+  console.log("\n(a) CP-07 — a stable numeric id for a local connector");
+  const installedBefore = await call("listInstalledMcpServers");
+  if (!Array.isArray(installedBefore)) fail("listInstalledMcpServers did not return an array");
+  const localfiles = installedBefore.find((server) => server.serverIdentifier === "localfiles");
+  if (localfiles == null) fail("listInstalledMcpServers does not show the localfiles connector");
+  if (!/^[1-9]\d*$/.test(String(localfiles.id))) {
+    fail(`localfiles id "${localfiles.id}" is not a positive decimal string; validateMcpServerId would reject it`);
+  }
+  const SERVER_ID = String(localfiles.id);
+  ok(`localfiles id=${SERVER_ID} transport=${localfiles.transport} status=${localfiles.status} tools=${localfiles.toolCount}`);
+
+  if (SKIP_RESTART) console.log("  --  docker restart skipped (--no-restart)");
+  else {
+    await docker(["restart", BOX]);
+    await sleep(10_000);
+    await waitForHost("docker restart");
+    const after = (await call("listInstalledMcpServers")).find((server) => server.serverIdentifier === "localfiles");
+    if (after == null) fail("localfiles disappeared after the restart");
+    if (String(after.id) !== SERVER_ID) fail(`the id moved across a restart: ${SERVER_ID} -> ${after.id}`);
+    ok(`the id is still ${after.id} after a docker restart`);
+  }
+
+  // ------------------------------------------------------- (b) CP-08 per-tool permission reads
+  console.log("\n(b) CP-08 — per-tool enablement, keyed by that id");
+  // A stdio connector is spawned and discovered lazily, so straight after a restart the server
+  // exists with an id and no tools yet. Waiting for the first non-empty read is the difference
+  // between checking the toggle path and checking how fast the box boots.
+  const tools = await waitForServerTools(SERVER_ID, 180_000);
+  if (!Array.isArray(tools) || tools.length !== 14) {
+    fail(`listMcpServerTools returned ${Array.isArray(tools) ? tools.length : "a non-array"}, expected 14 tools`);
+  }
+  if (tools.some((tool) => typeof tool.enabled !== "boolean")) fail("a tool row has no enabled flag");
+  ok(`${tools.length} tools, all with an enabled flag (${tools.filter((tool) => tool.enabled).length} enabled)`);
+
+  const VICTIM = "search_files";
+  if (!tools.some((tool) => tool.name === VICTIM)) fail(`localfiles has no ${VICTIM} tool to toggle`);
+  const disabled = await call("toggleMcpToolDisabled", { serverId: SERVER_ID, toolName: VICTIM, disabled: true });
+  if (disabled.find((tool) => tool.name === VICTIM)?.enabled !== false) fail(`${VICTIM} did not come back disabled`);
+  if ((await routedTools()).some((tool) => tool.toolName === VICTIM)) {
+    fail(`${VICTIM} is still in listRoutedMcpTools after being disabled`);
+  }
+  ok(`${VICTIM} disabled and gone from listRoutedMcpTools`);
+
+  if (SKIP_MODEL) console.log("  --  the GetMcpTools leg is skipped (--no-model)");
+  else {
+    const created = await call("createAgent", { name: `verify-cp-${Math.random().toString(36).slice(2, 8)}` });
+    probeAgentId = created?.agent?.id ?? created?.id;
+    if (probeAgentId == null) fail("createAgent returned no agent id");
+    await call("sendPrompt", {
+      agentId: probeAgentId,
+      prompt: `Call GetMcpTools for the server "localfiles" and reply with ONLY the comma-separated tool names it lists. Do not call any other tool.`,
+    });
+    const deadline = Date.now() + TURN_TIMEOUT_MS;
+    let outlineRow = null;
+    let reply = null;
+    while (Date.now() < deadline) {
+      await sleep(6000);
+      const outline = await call("getConversationOutline", { id: probeAgentId }).catch(() => []);
+      outlineRow = (Array.isArray(outline) ? outline : []).find((row) =>
+        row.kind === "tool-call" && /getMcpTools/i.test(String(row.name ?? ""))) ?? outlineRow;
+      const running = (await call("listAgents")).find((agent) => agent.id === probeAgentId)?.isRunning === true;
+      const spoken = (await call("getAgentTranscript", { id: probeAgentId })).filter((entry) => entry.kind === "send-message");
+      reply = spoken.at(-1) ?? reply;
+      if (outlineRow != null && reply != null && !running) break;
+    }
+    if (outlineRow == null) fail("the probe agent never called GetMcpTools");
+    const answer = `${String(reply?.message?.content ?? "")} ${String(outlineRow.summary ?? "")}`;
+    console.log(`  GetMcpTools answer: ${answer.replace(/\s+/g, " ").slice(0, 220)}`);
+    if (new RegExp(`\\b${VICTIM}\\b`).test(answer)) fail(`the model's GetMcpTools answer still names ${VICTIM}`);
+    if (!/list_directory|read_text_file|directory_tree/.test(answer)) {
+      fail("the GetMcpTools answer names no localfiles tool at all; the check proved nothing");
+    }
+    ok(`a fresh agent's GetMcpTools answer omits ${VICTIM}`);
+  }
+
+  const reenabled = await call("toggleMcpToolDisabled", { serverId: SERVER_ID, toolName: VICTIM, disabled: false });
+  if (reenabled.find((tool) => tool.name === VICTIM)?.enabled !== true) fail(`${VICTIM} did not come back enabled`);
+  if (!(await routedTools()).some((tool) => tool.toolName === VICTIM)) fail(`${VICTIM} did not return to listRoutedMcpTools`);
+  ok(`${VICTIM} re-enabled and back in listRoutedMcpTools`);
+
+  // ------------------------------------------ (c) CP-10 the secret reaches the connector process
+  console.log("\n(c) CP-10 — a secret into the connector process, and nowhere else");
+  const SECRET = `PROBE-SECRET-${Math.random().toString(36).slice(2, 12).toUpperCase()}`;
+  console.log(`  probe value: ${SECRET.length} characters (never printed)`);
+
+  originalConnectors = await readConnectorsJson();
+  await docker(["exec", BOX, "node", "-e",
+    `require('fs').writeFileSync(${JSON.stringify(PROBE_SCRIPT)},${JSON.stringify(PROBE_SOURCE)})`]);
+  await writeConnectorsJson({
+    mcpServers: {
+      ...originalConnectors.mcpServers,
+      [PROBE_SERVER]: { command: "node", args: [PROBE_SCRIPT] },
+    },
+  });
+  probeInstalled = true;
+  await call("refreshMcp", {});
+  const probeTool = await waitForRoutedTool("env_probe", 120_000);
+  if (probeTool == null) fail("the probe connector never appeared in listRoutedMcpTools");
+  ok(`the probe connector is routed: ${probeTool.name}`);
+
+  const probeInstalledRow = (await call("listInstalledMcpServers")).find((server) => server.serverIdentifier === PROBE_SERVER);
+  if (probeInstalledRow == null || !/^[1-9]\d*$/.test(String(probeInstalledRow.id))) {
+    fail("the probe connector got no numeric id");
+  }
+  ok(`the probe connector's id is ${probeInstalledRow.id}`);
+
+  const runProbe = async () => {
+    const result = await call("executeRoutedMcpTool", {
+      providerIdentifier: PROBE_SERVER,
+      toolName: probeTool.name,
+      name: probeTool.toolName,
+      args: {},
+      toolCallId: `verify-connector-plane-${Date.now()}`,
+    });
+    return JSON.stringify(result);
+  };
+
+  const before = await runProbe();
+  if (before.includes(SECRET)) fail("the probe already answers with the secret; the check would prove nothing");
+  ok(`before the secret is set, env_probe answers without it`);
+
+  probeSecretSet = true;
+  const stored = await call("setConnectorSecret", { server: PROBE_SERVER, field: PROBE_FIELD, value: SECRET });
+  if (stored?.stored !== true) fail("setConnectorSecret did not report the value stored");
+  if (JSON.stringify(stored).includes(SECRET)) fail("setConnectorSecret echoed the value back");
+  ok(`setConnectorSecret stored=${stored.stored} restarted=${stored.restarted} fields=[${stored.fields.join(", ")}]`);
+
+  const fields = await call("listConnectorSecretFields", { server: PROBE_SERVER });
+  if (!fields.fields.includes(PROBE_FIELD)) fail("listConnectorSecretFields does not list the field");
+  if (JSON.stringify(fields).includes(SECRET)) fail("listConnectorSecretFields returned the value, not just the name");
+  ok(`listConnectorSecretFields returns names only: [${fields.fields.join(", ")}]`);
+
+  // Two refusals on the same path, because both used to be accepted. A plain object answers a
+  // truthiness membership test for every Object.prototype key, so "constructor" resolved to a
+  // connector that does not exist (with an undefined id); and a POSIX-legal env name is not enough
+  // when the model picks the name -- NODE_OPTIONS on a `node` connector is code execution wearing
+  // a credential's clothes.
+  const ghost = await callRaw("setConnectorSecret", { server: "constructor", field: PROBE_FIELD, value: "PROBE-SECRET-GHOST" });
+  if (ghost.ok) fail("setConnectorSecret accepted an Object.prototype key as a connector name");
+  ok(`a prototype key is not a connector: ${ghost.message.split("->").at(-1).trim().slice(0, 90)}`);
+  const control = await callRaw("setConnectorSecret", { server: PROBE_SERVER, field: "NODE_OPTIONS", value: "PROBE-SECRET-CONTROL" });
+  if (control.ok) fail("setConnectorSecret accepted NODE_OPTIONS as a field name");
+  ok("process-control env names (NODE_OPTIONS, LD_*, PATH) are refused as fields");
+
+  let answered = "";
+  const probeDeadline = Date.now() + 90_000;
+  while (Date.now() < probeDeadline) {
+    answered = await runProbe();
+    if (answered.includes(SECRET)) break;
+    await sleep(5000);
+  }
+  if (!answered.includes(SECRET)) {
+    fail(`env_probe never saw ${PROBE_FIELD} after the restart; the value did not reach the connector process`);
+  }
+  ok(`env_probe answers with the stored value: the secret reached the connector process`);
+
+  // Custody: the value must exist under sand-data ONLY in the 0600 host store.
+  const grep = await inBox(`grep -rl -- ${SECRET} ${DATA} 2>/dev/null || true`);
+  const hits = grep.split("\n").map((line) => line.trim()).filter(Boolean);
+  console.log(`  files under ${DATA} containing the value: ${hits.join(", ") || "(none)"}`);
+  if (hits.length !== 1 || !hits[0].endsWith("/connector-env-secrets.json")) {
+    fail(`the value is in ${hits.length} file(s); expected only connector-env-secrets.json`);
+  }
+  const mode = (await inBox(`stat -c %a ${hits[0]}`)).trim();
+  if (mode !== "600") fail(`the connector secret store is mode ${mode}, expected 600`);
+  ok(`only ${hits[0]} holds it, mode ${mode}`);
+  // `grep -c` prints 0 AND exits 1 on no match, so an `|| echo 0` fallback would double the line.
+  const logHit = (await inBox(`grep -c -- ${SECRET} /tmp/sand-host.log 2>/dev/null | head -1`)).trim();
+  if (logHit !== "" && logHit !== "0") fail(`the host log contains the value ${logHit} time(s)`);
+  ok("the host log does not contain the value");
+
+  const removed = await call("deleteConnectorSecret", { server: PROBE_SERVER, field: PROBE_FIELD });
+  probeSecretSet = removed?.removed !== true;
+  if (removed?.removed !== true) fail("deleteConnectorSecret did not remove the field");
+  const leftover = (await inBox(`grep -rl -- ${SECRET} ${DATA} 2>/dev/null || true`)).trim();
+  if (leftover.length > 0) fail(`the value survives deletion in: ${leftover}`);
+  ok("deleteConnectorSecret removes it from the store");
+
+  // ----------------------------------------------------------- (d) CP-05 the catalog cannot throw
+  console.log("\n(d) CP-05 — the plugin catalog path answers instead of throwing");
+  const plugins = await call("listMcpPlugins");
+  if (!Array.isArray(plugins)) fail("listMcpPlugins did not return an array");
+  ok(`listMcpPlugins returned ${plugins.length} plugin(s) with no throw`);
+  const missing = await call("getMcpPlugin", { id: "definitely-not-a-plugin-id" });
+  if (missing !== null) fail("getMcpPlugin invented a plugin for an unknown id");
+  ok("getMcpPlugin answers null for an unknown id");
+
+  // --------------------------------------------------- (e) CP-12 disconnectChannel needs an agent
+  console.log("\n(e) CP-12 — disconnectChannel refuses a call with no agent id");
+  const refused = await callRaw("disconnectChannel", { platform: "slack" });
+  if (refused.ok) fail("disconnectChannel accepted a call with no agent id");
+  if (!/agent id/i.test(refused.message)) fail(`disconnectChannel failed for the wrong reason: ${refused.message}`);
+  ok(`refused: ${refused.message.split("->").at(-1).trim()}`);
+
+  console.log("\nPASS — connector plane");
+} catch (error) {
+  if (!(error instanceof VerificationFailed)) throw error;
+  console.error(`\nFAIL — ${error.message}`);
+  process.exitCode = 1;
+} finally {
+  // Leave the box exactly as it was found: no probe server, no probe file, no probe agent.
+  // A failure anywhere between setConnectorSecret and its delete must not leave a live value in
+  // the store; the probe connector is about to stop existing either way.
+  try {
+    if (probeSecretSet) await callRaw("deleteConnectorSecret", { server: PROBE_SERVER, field: PROBE_FIELD });
+  } catch (error) { console.error(`cleanup: probe secret — ${error.message}`); }
+  try {
+    if (probeInstalled && originalConnectors != null) {
+      await writeConnectorsJson(originalConnectors);
+      await inBox(`rm -f ${PROBE_SCRIPT}`);
+      await callRaw("refreshMcp", {});
+    }
+  } catch (error) { console.error(`cleanup: connectors.json — ${error.message}`); }
+  try {
+    if (probeAgentId != null) await call("deleteAgent", { id: probeAgentId });
+  } catch (error) { console.error(`cleanup: probe agent — ${error.message}`); }
+}

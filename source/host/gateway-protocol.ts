@@ -125,7 +125,17 @@ export const SAND_GATEWAY_COMMANDS = {
   refreshMcp: (api: GatewayApi, body: string) => api.refreshMcp(parseCommandArgs(body)),
   listRoutedMcpTools: (api: GatewayApi) => api.listRoutedMcpTools(),
   executeRoutedMcpTool: (api: GatewayApi, body: string) => api.executeRoutedMcpTool(parseCommandArgs(body)),
-  listBoxMcpServers: (api: GatewayApi, body: string) => api.listBoxMcpServers(parseCommandArgs(body))
+  listBoxMcpServers: (api: GatewayApi, body: string) => api.listBoxMcpServers(parseCommandArgs(body)),
+  // Wave D1. The connector plane the Electron IPC always had and the gateway never did:
+  // CP-03 reads, CP-08 per-tool permissions, CP-10 connector-process secrets.
+  listInstalledMcpServers: (api: GatewayApi) => api.listInstalledMcpServers(),
+  listMcpPlugins: (api: GatewayApi) => api.listMcpPlugins(),
+  getMcpPlugin: (api: GatewayApi, body: string) => api.getMcpPlugin(parseCommandArgs(body)),
+  listMcpServerTools: (api: GatewayApi, body: string) => api.listMcpServerTools(parseCommandArgs(body)),
+  toggleMcpToolDisabled: (api: GatewayApi, body: string) => api.toggleMcpToolDisabled(parseCommandArgs(body)),
+  listConnectorSecretFields: (api: GatewayApi, body: string) => api.listConnectorSecretFields(parseCommandArgs(body)),
+  setConnectorSecret: (api: GatewayApi, body: string) => api.setConnectorSecret(parseCommandArgs(body)),
+  deleteConnectorSecret: (api: GatewayApi, body: string) => api.deleteConnectorSecret(parseCommandArgs(body))
 };
 export const GATEWAY_PREPARE_UPGRADE_PATH = "/prepare-upgrade";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
