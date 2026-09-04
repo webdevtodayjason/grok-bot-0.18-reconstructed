@@ -28,7 +28,7 @@ import type {
   PromptSnapshotStore,
 } from "./system-prompt-assembly.js";
 import type { SummarizationPromptSession } from "../../packages/agent-summarization/summarization-handler.js";
-import { createProviderPromptSession } from "../extensions/inference/provider-session.js";
+import { createProviderPromptSession, hasOpenAiCompatiblePin } from "../extensions/inference/provider-session.js";
 import { getSandRootDir } from "../host-paths.js";
 import { SandSettingsStore } from "../../shared/node/settings/sand-settings-store.js";
 import type { AgentProfilePromptSnapshot } from "./sand-agent-profile-prompt.js";
@@ -182,7 +182,11 @@ export async function createTurnAgentRunContext<ContextValue>(
     skipLabeling: input.isSubagentRunner || input.hidden === true,
     ...(input.lineage === undefined ? {} : { lineage: input.lineage }),
   };
-  const inferenceProvider = new SandSettingsStore(join(getSandRootDir(), "settings.json")).getInferenceProvider();
+  // A fresh install pins an endpoint through the relay but nobody sets the provider, and the
+  // store's default is Cursor's backend, which answers "unauthenticated" and looks like a hung
+  // turn. A pin with no explicit choice means: use the pin.
+  const chosenProvider = new SandSettingsStore(join(getSandRootDir(), "settings.json")).getChosenInferenceProvider();
+  const inferenceProvider = chosenProvider ?? (hasOpenAiCompatiblePin() ? "openai-compatible" : "cursor");
   const agent = inferenceProvider === "cursor"
     ? input.inference.createSession(input.onRequestId, sessionOptions)
     // The conversation id rides along so the [sand][wire] trace can be paired with the

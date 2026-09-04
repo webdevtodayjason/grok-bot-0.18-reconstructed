@@ -219,6 +219,8 @@ function recordRoutedUsage(provider: RoutedProvider, usage: UsageRecord): void {
   new SandSettingsStore(join(getSandRootDir(), "settings.json")).recordInferenceUsage(provider, usage);
 }
 
+/** True when the relay has pinned an OpenAI-compatible endpoint into the box's secrets store. */
+export function hasOpenAiCompatiblePin(): boolean { return (persistedSecrets().SAND_OPENAI_COMPATIBLE_BASE_URL ?? "").trim().length > 0; }
 function persistedSecrets(): Record<string, string> {
   try {
     const parsed = JSON.parse(readFileSync(getBoxSecretsStorePath(), "utf8")) as unknown;
