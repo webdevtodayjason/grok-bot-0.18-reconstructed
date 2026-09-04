@@ -11,6 +11,10 @@ import { routineNoticesToRaise } from "../../automations/routine-notices.js";
 import { readSandGroupConfig } from "../../groups/group-store.js";
 import { isTransientStreamError } from "../../runner/transient-stream-error.js";
 import { sandErrorDetail } from "../../ports/telemetry.js";
+import {
+  isSandBoxSettingEnabled,
+  SAND_TOOL_TRACE_SETTING,
+} from "../../sand-box-setting.js";
 import { errorMessage } from "../../../shared/errors.js";
 import { formatRemoteAgentId } from "../../../shared/agents/sharing.js";
 import { describeAgentRunError } from "./agent-run-error.js";
@@ -223,8 +227,24 @@ export class AutomationRunPath {
                   args.automation.id,
                   notice.id,
                 );
+              const wakePrompt = `${buildAutomationWakePrompt(currentAutomation, { timeZone: this.tm.sessionStore.getUserTimeZone(), ...(isEventFire ? { events: eventBatch } : {}), ...(args.trigger === "manual" ? { trigger: "manual" as const } : {}) })}${spendGuardReminder == null ? "" : `\n\n${spendGuardReminder}`}`;
+              // SAND_TOOL_TRACE: the fire, as the agent receives it. The run row records a trigger
+              // and the wake prompt states one, and for every scheduled fire on this box they
+              // disagreed -- the row said manual and the prompt told the agent someone had pressed
+              // Run now. Nothing anywhere printed either, so the only way to see it was to read the
+              // model's reply and guess. The opening line is the whole claim, so that is what goes out.
+              if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING))
+                console.log(`[sand][automation-wake] ${JSON.stringify({
+                  conversationId: session.id,
+                  automationId: args.automation.id,
+                  trigger: args.trigger,
+                  runId,
+                  runUuid: args.runUuid ?? null,
+                  scheduledForMs: args.scheduledForMs ?? null,
+                  opening: wakePrompt.split("\n", 1)[0],
+                })}`);
               const result = await runner.run(
-                `${buildAutomationWakePrompt(currentAutomation, { timeZone: this.tm.sessionStore.getUserTimeZone(), ...(isEventFire ? { events: eventBatch } : {}), ...(args.trigger === "manual" ? { trigger: "manual" as const } : {}) })}${spendGuardReminder == null ? "" : `\n\n${spendGuardReminder}`}`,
+                wakePrompt,
                 {
                   hidden: true,
                   isSilenceAllowed: true,
@@ -410,21 +430,30 @@ export class AutomationRunPath {
     runUuid?: string;
     coalescedRunUuids?: string[];
   }): string | null {
+    // A null here is a turn that runs with nothing to show for it afterwards: finishAutomationRun
+    // no-ops on a null id, so the routine's history simply skips the run. The store returns null
+    // for exactly two reasons and both are worth naming out loud rather than swallowing.
     try {
-      return (
-        args.session.automations.beginRun({
-          id: args.automationId,
-          trigger: args.trigger,
-          ...(args.eventSummary === undefined
-            ? {}
-            : { event: args.eventSummary }),
-          ...(args.runUuid === undefined ? {} : { runId: args.runUuid }),
-          ...(args.coalescedRunUuids === undefined
-            ? {}
-            : { coalescedRunIds: args.coalescedRunUuids }),
-        })?.id ?? null
+      const run = args.session.automations.beginRun({
+        id: args.automationId,
+        trigger: args.trigger,
+        ...(args.eventSummary === undefined
+          ? {}
+          : { event: args.eventSummary }),
+        ...(args.runUuid === undefined ? {} : { runId: args.runUuid }),
+        ...(args.coalescedRunUuids === undefined
+          ? {}
+          : { coalescedRunIds: args.coalescedRunUuids }),
+      });
+      if (run != null) return run.id;
+      console.warn(
+        `[sand:automation] no run row for "${args.automationId}" on ${args.session.id} (${args.trigger}): the store refused to open one, so either the id is not one it will write a folder for or the routine's automation.json is missing or unreadable. The turn still runs and this line is the only record of it.`,
       );
-    } catch {
+      return null;
+    } catch (error) {
+      console.warn(
+        `[sand:automation] run row for "${args.automationId}" on ${args.session.id} (${args.trigger}) could not be written: ${errorMessage(error)}. The turn still runs and this line is the only record of it.`,
+      );
       return null;
     }
   }

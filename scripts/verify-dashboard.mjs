@@ -1251,6 +1251,39 @@ try {
       await page.keyboard.press("Escape"); await page.waitForTimeout(500);
     }
 
+    // -- The routines panel, and the trigger editor's honesty about event triggers. The picker
+    // offered seven kinds; six of them are event triggers and this host can serve none of them.
+    // It builds exactly two event sources (createBackendRelaySources: Slack and GitHub), hands the
+    // trigger hub those two and nothing else, and both are polled out of Cursor's backend relay,
+    // which needs a login this box does not have. A routine saved on one took the form, showed the
+    // word "trigger" where its countdown goes, and never fired. Nothing here saves a routine or
+    // touches an existing one: the panel is opened, read, and closed.
+    await page.click("#schedule-button"); await page.waitForTimeout(1500);
+    const routinesTitle = await page.evaluate(() => document.getElementById("room-title")?.textContent ?? "");
+    const routinesFor = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.name === routinesTitle)?.id ?? null;
+    const cardNames = await page.$$eval(".routine-card h3", (els) => els.map((e) => e.textContent.trim()));
+    const hostRoutines = routinesFor == null ? [] : ((await gw("getAgentAutomations", { id: routinesFor }).catch(() => [])) ?? []);
+    check(routinesFor != null && cardNames.length === hostRoutines.length && hostRoutines.every((r) => cardNames.includes(r.name)),
+      "the routines panel lists exactly the routines the host reports for this agent",
+      `page ${JSON.stringify(cardNames)} vs host ${JSON.stringify(hostRoutines.map((r) => r.name))}`);
+    await page.click(".routine-create > summary").catch(() => {}); await page.waitForTimeout(800);
+    const triggerNote = await page.evaluate(() => document.querySelector("[data-event-triggers-note]")?.textContent?.replace(/\s+/g, " ") ?? "");
+    const integrations = await gw("getListenerIntegrations").catch(() => null);
+    // Same id and same case the page derives (gateway-adapter pluginsOf), so a host that answered
+    // "Slack" rather than "slack" cannot make a correctly offered kind look misoffered here.
+    const connectedListeners = new Set((integrations?.integrations ?? integrations ?? []).filter((p) => p.isConnected ?? p.connected)
+      .map((p) => String(p.id ?? p.platform ?? p.name ?? "").toLowerCase()));
+    check(/need a listener this box has not connected/.test(triggerNote) && /backend relay/.test(triggerNote),
+      "the trigger editor says event triggers need a listener this box does not have, and names why", triggerNote.slice(0, 200));
+    const kindOptions = await page.$$eval("#trigger-stack select[data-trig-field='type'] option", (els) => els.map((e) => ({ value: e.value, disabled: e.disabled, label: e.textContent.trim() })));
+    const misoffered = kindOptions.filter((o) => (o.value === "cron" || connectedListeners.has(o.value) ? o.disabled : !o.disabled));
+    check(kindOptions.length > 1 && misoffered.length === 0,
+      "a schedule and every connected listener stay selectable; the kinds this box cannot serve do not",
+      `${kindOptions.length} kind(s), ${connectedListeners.size} connected listener(s), wrong: ${JSON.stringify(misoffered)}`);
+    check(kindOptions.filter((o) => o.disabled).every((o) => /no listener on this box/.test(o.label)),
+      "and a kind that cannot be chosen says so in its own label", JSON.stringify(kindOptions.filter((o) => o.disabled).map((o) => o.label)));
+    await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+
     // -- The exchange viewer (docs/DASHBOARD-CONTRACT.md) still opens view-only.
     const blurbs = await page.$$(".message-row.is-exchange");
     check(blurbs.length > 0, "an agent-to-agent blurb is present in Atera's conversation", `${blurbs.length} blurb(s)`);

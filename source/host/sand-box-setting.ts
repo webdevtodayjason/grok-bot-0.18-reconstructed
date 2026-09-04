@@ -181,3 +181,38 @@ export function envWithSandBoxSettings(names: readonly string[], env: NodeJS.Pro
   return layered;
 }
 export const SAND_MAINTENANCE_SETTINGS = ["SAND_STALE_ROOT_GC", "SAND_RETIRE_LEGACY_STORE_BLOBS", "SAND_CONVERSATION_GC"] as const;
+
+/**
+ * TOOLS-15. Whether the five host-machine tools (ExternalShell, ExternalRead, AwaitExternalShell,
+ * CopyToBox, CopyFromBox) are offered. They all travel the local-exec bridge, so the honest answer
+ * is the bridge's own: is a computer announced on it right now. This override exists because that
+ * answer cannot be staged -- it is a live 30 s liveness window fed by a daemon the operator runs on
+ * their own machine -- and a withhold nobody can force is a withhold nobody can verify. Written to
+ * the host settings file it pins either world on a running box: "0" withholds the five whatever the
+ * bridge says, "1" offers them whatever the bridge says. "1" with no daemon attached restores the
+ * behaviour this change removed (each call blocks until the response watchdog gives up), so it is
+ * for a gate pinning the connected leg, not for daily operation. Unset, which is the normal state,
+ * means the bridge decides.
+ */
+export function resolveLocalMachineOffered(
+  envOverride: string | undefined,
+  hasAnnouncedComputer: () => boolean,
+): boolean {
+  if (envOverride != null && envOverride.length > 0) return isSandOverrideTruthy(envOverride);
+  return hasAnnouncedComputer();
+}
+
+/** The name an operator writes into sand-host-settings.json (or the container env). */
+export const SAND_LOCAL_MACHINE_SETTING = "SAND_LOCAL_MACHINE";
+
+/**
+ * TOOLS-17. Whether a member answering in a shared room keeps the box tools alongside SendMessage.
+ * The room's promise is that only SendMessage text crosses to the other members, so with this off a
+ * member is offered SendMessage and nothing else; with it on the four box tools ride along as
+ * private scratch space. It was read straight from `process.env`, which on a running container
+ * means "recreate the box to change your mind" -- and since nothing here ever sets it, the
+ * text-only half of the filter had no way to be exercised at all. Read through readSandBoxSetting
+ * it is resolved per tool build, so an operator (or a gate) can move a live box between the two
+ * rooms. The environment still wins where it is set. Unset means the box tools ride along.
+ */
+export const SAND_SHARED_ROOM_BOX_TOOLS_SETTING = "SAND_SHARED_ROOM_BOX_TOOLS";

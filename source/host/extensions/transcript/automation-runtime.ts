@@ -4,7 +4,10 @@ import {
   type AutomationRecord,
   type AutomationSpec,
 } from "../../automations/automation.js";
-import { stableAutomationId } from "../../automations/automation-id.js";
+import {
+  localScheduleRunUuid,
+  stableAutomationId,
+} from "../../automations/automation-id.js";
 import {
   compileCronMatcher,
   computeNextRunAt,
@@ -26,6 +29,14 @@ import {
 } from "./automation-snapshot.js";
 import { AutomationSpendGuardRuntime } from "./automation-spend-guard-runtime.js";
 import type { TranscriptManagerLike } from "./transcript-hub.js";
+
+/** What a locally scheduled fire actually did, so its caller never logs a fire that did nothing. */
+export interface LocalScheduledFireReport {
+  runUuid: string;
+  fired: boolean;
+  reason?: string;
+  outcome?: FireAutomationOutcome;
+}
 
 type AutomationLifecycleSource =
   "agent" | "automations_ui" | "workflow_ui" | "spend_guard";
@@ -443,19 +454,82 @@ export class AutomationRuntime {
     }
   }
 
+  async findAutomationForFire(
+    agentId: string,
+    automationId: string,
+  ): Promise<AutomationRecord | null> {
+    const active = this.tm.sessions.activeSession;
+    return active?.id === agentId
+      ? active.automations.get(automationId)
+      : ((await this.tm.sessionStore.listAgentAutomations(agentId)).find(
+          (entry: AutomationRecord) => entry.id === automationId,
+        ) ?? null);
+  }
   async runAgentAutomationNow(
     agentId: string,
     automationId: string,
   ): Promise<void> {
-    const active = this.tm.sessions.activeSession;
-    const automation =
-      active?.id === agentId
-        ? active.automations.get(automationId)
-        : ((await this.tm.sessionStore.listAgentAutomations(agentId)).find(
-            (entry: AutomationRecord) => entry.id === automationId,
-          ) ?? null);
+    const automation = await this.findAutomationForFire(agentId, automationId);
     if (automation != null)
       await this.fireAutomation({ agentId, automation, trigger: "manual" });
+  }
+  /**
+   * The local clock's own way in. The tick used to call runAgentAutomationNow, which hardcodes
+   * trigger "manual" -- so every scheduled run was filed as a manual one and the agent was woken
+   * with "the user pressed Run now", which was not true and told it the wrong thing about why it
+   * was awake. That method also drops out silently when the definition cannot be read, which is a
+   * fire that leaves nothing behind: no run row, no log line, and a caller that believes it fired.
+   *
+   * This says what it is, carries a run id derived from the due slot so a second fire for the same
+   * slot lands on the run that already exists, and reports what happened so the tick logs the fire
+   * it got rather than the fire it asked for.
+   *
+   * Two behaviours wake up with the honest trigger, because "schedule" is a background trigger
+   * (isBackgroundAutomationTrigger) and "manual" is not, and both are how the shipped product
+   * treats a run nobody is watching. The away-spend guard now applies to a locally scheduled fire,
+   * so an agent whose chat has gone unread long enough can have all of its routines switched off
+   * rather than burning turns at nobody; that is the guard doing its job, and the switch-off is
+   * recorded, but on this box it was unreachable while the clock lied about being manual. And a
+   * failing scheduled run no longer raises a tray error, because a background failure is reported
+   * through the run record rather than an alert about a run the operator did not start; the run row
+   * carries the failure either way.
+   */
+  async runLocalScheduledAutomation(args: {
+    agentId: string;
+    automationId: string;
+    slotMs: number;
+  }): Promise<LocalScheduledFireReport> {
+    const runUuid = localScheduleRunUuid({
+      agentId: args.agentId,
+      localId: args.automationId,
+      slotMs: args.slotMs,
+    });
+    const automation = await this.findAutomationForFire(
+      args.agentId,
+      args.automationId,
+    );
+    if (automation == null)
+      return {
+        runUuid,
+        fired: false,
+        reason:
+          "its definition could not be read, so there is no folder to record a run in (deleted, renamed, or automation.json is unparseable)",
+      };
+    const outcome = await this.fireAutomation({
+      agentId: args.agentId,
+      automation,
+      trigger: "schedule",
+      runUuid,
+      scheduledForMs: args.slotMs,
+    });
+    return outcome === undefined
+      ? {
+          runUuid,
+          fired: false,
+          reason:
+            "the host declined the fire: it is not executable yet, a run of this routine was already in flight, or the away-spend guard paused it",
+        }
+      : { runUuid, fired: true, outcome };
   }
   runServerScheduledAutomation(args: {
     agentId: string;

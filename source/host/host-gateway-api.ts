@@ -663,6 +663,9 @@ export function createHostGatewayApi(
 
     startTeachRecording: (args: any) =>
       method(deps.extensions.api("teach-recording"), "start")(args),
+    // {agentId, save, note}. The note is the operator's own sentence from the Learn dialog, and it
+    // has to arrive here rather than as a later message: the host dispatches the learning turn from
+    // inside this call, so anything sent afterwards reaches the agent after it has already started.
     stopTeachRecording: (args: any) =>
       method(deps.extensions.api("teach-recording"), "stop")(args),
     getTeachRecordingStatus: () =>

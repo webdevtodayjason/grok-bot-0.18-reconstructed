@@ -1411,6 +1411,15 @@ export interface TurnToolsetHost {
   cloudAgentsDisabledByTeam(): boolean;
   /** CLOUD-1: cloud agents are a Cursor product surface; on a self-hosted box the tool can only fail. Undefined means offered. */
   cloudAgentsAvailable?(): boolean;
+  /**
+   * TOOLS-15: whether a computer is connected over the local-exec bridge. The five host-machine
+   * tools (ExternalShell, ExternalRead, AwaitExternalShell, CopyToBox, CopyFromBox) all travel
+   * that one channel, so with nothing on the far end the model waits out a request nobody
+   * answers. Undefined means offered.
+   */
+  localMachineConnected?(): boolean;
+  /** TOOLS-15: "bridge" when the answer is the live local-exec liveness window, "setting" when an operator pinned it. */
+  localMachineSource?(): "bridge" | "setting";
   spotlightEnabled(): boolean;
   isDynamicToolsEnabled?(): boolean;
   isMultitaskEnabled?(): boolean;
@@ -1556,13 +1565,39 @@ export function buildTurnTools(
       action,
     );
 
+  // Named here, reported on the trace line below: a tool the build could have offered and did
+  // not, with the reason, so an operator reading "30 tools" can tell a withheld tool from a
+  // missing one.
+  const withheld: { readonly tool: string; readonly reason: string }[] = [];
+
+  // TOOLS-15. ExternalShell, ExternalRead, AwaitExternalShell, CopyToBox and CopyFromBox all reach
+  // the operator's own computer over the local-exec bridge, and every one of them blocks until a
+  // registered provider answers. With no computer connected there is nothing on the far end, so
+  // the model spent its turn waiting on a channel that never replies. An operator connects one by
+  // running the local-exec provider (the desktop app's daemon) against this gateway's
+  // /local-exec/requests stream and saying hello on it; until then these five stay out of the
+  // toolset, and the prompt's two-machines paragraphs drop with them. The host resolves the fact,
+  // so SAND_LOCAL_MACHINE can pin either world on a running box.
+  const localMachineConnected = host.localMachineConnected?.() !== false;
+  const withholdForNoLocalMachine = (...names: readonly string[]) => {
+    for (const tool of names) withheld.push({ tool, reason: "no_local_machine" });
+  };
+
   if (!host.isBoxScopedSubagent) {
-    const externalShell = scoped(factories.externalShell?.(), "run-command");
-    if (externalShell !== undefined) tools.push(externalShell);
-    const externalRead = scoped(factories.externalRead?.(), "read-file");
-    if (externalRead !== undefined) tools.push(externalRead);
-    const externalAwait = scoped(factories.externalAwait?.(), "read-file");
-    if (externalAwait !== undefined) tools.push(externalAwait);
+    if (localMachineConnected) {
+      const externalShell = scoped(factories.externalShell?.(), "run-command");
+      if (externalShell !== undefined) tools.push(externalShell);
+      const externalRead = scoped(factories.externalRead?.(), "read-file");
+      if (externalRead !== undefined) tools.push(externalRead);
+      const externalAwait = scoped(factories.externalAwait?.(), "read-file");
+      if (externalAwait !== undefined) tools.push(externalAwait);
+    } else {
+      withholdForNoLocalMachine(
+        SAND_EXTERNAL_SHELL_TOOL_NAME,
+        SAND_EXTERNAL_READ_TOOL_NAME,
+        SAND_EXTERNAL_AWAIT_SHELL_TOOL_NAME,
+      );
+    }
     const webSearch = factories.webSearch?.();
     if (webSearch !== undefined) tools.push(webSearch);
     const webFetch = factories.webFetch?.();
@@ -1578,13 +1613,13 @@ export function buildTurnTools(
   // OpenAI-compatible executor dropped it from every request while the toolset counted it: 36
   // offered, 35 sent, for as long as the wire trace has existed. It manages Cursor cloud agents,
   // which this box cannot reach; withhold it unless the host says cloud agents are available.
-  if (
-    !host.isBoxScopedSubagent
-    && !host.cloudAgentsDisabledByTeam()
-    && host.cloudAgentsAvailable?.() !== false
-  ) {
-    const cloudAgent = factories.cloudAgent?.();
-    if (cloudAgent !== undefined) tools.push(cloudAgent);
+  if (!host.isBoxScopedSubagent) {
+    if (host.cloudAgentsDisabledByTeam()) withheld.push({ tool: "CloudAgent", reason: "disabled_by_team" });
+    else if (host.cloudAgentsAvailable?.() === false) withheld.push({ tool: "CloudAgent", reason: "cloud_agents_unavailable" });
+    else {
+      const cloudAgent = factories.cloudAgent?.();
+      if (cloudAgent !== undefined) tools.push(cloudAgent);
+    }
   }
 
   if (host.getRemoteBoxAvailable()) {
@@ -1595,8 +1630,11 @@ export function buildTurnTools(
     if (!host.isBoxScopedSubagent) {
       const boxAwait = scoped(factories.boxAwait?.());
       if (boxAwait !== undefined) tools.push(boxAwait);
-      const fileTransfer = factories.fileTransfer?.();
-      if (fileTransfer !== undefined) tools.push(...fileTransfer.map((tool) => withLocalToolScope(tool, agentId, host.localToolPermission)));
+      // Both transfers cross to the operator's computer, so they go with the other three.
+      if (localMachineConnected) {
+        const fileTransfer = factories.fileTransfer?.();
+        if (fileTransfer !== undefined) tools.push(...fileTransfer.map((tool) => withLocalToolScope(tool, agentId, host.localToolPermission)));
+      } else withholdForNoLocalMachine("CopyToBox", "CopyFromBox");
     }
   }
 
@@ -1699,9 +1737,17 @@ export function buildTurnTools(
       isComputerUseSubagent: host.isComputerUseSubagent,
       isBrowserUseSubagent: host.isBrowserUseSubagent,
       isSharedRoomRunner: host.isSharedRoomRunner,
+      // Which of the two room filters ran. Without it a room turn that came back with the box
+      // tools is ambiguous: the switch may have been on, or it may never have reached the host.
+      sharedRoomBoxTools: host.isSharedRoomRunner
+        ? host.isSharedRoomBoxToolsEnabled?.() !== false
+        : null,
       subagentTypes: (turn.subagentConfigs ?? []).map(subagentConfigName),
       count: guarded.length,
       tools: guarded.map(tool => tool.name),
+      localMachineConnected,
+      localMachineSource: host.localMachineSource?.() ?? "bridge",
+      withheld,
     })}`);
   }
 

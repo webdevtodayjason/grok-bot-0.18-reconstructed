@@ -225,6 +225,10 @@ export interface ProductionTurnToolsetHostInput {
   readonly cloudAgentsDisabledByTeam: () => boolean;
   /** CLOUD-1: undefined means offered; false withholds the CloudAgent tool. */
   readonly cloudAgentsAvailable?: () => boolean;
+  /** TOOLS-15: undefined means offered; false withholds the five host-machine tools. */
+  readonly localMachineConnected?: () => boolean;
+  /** TOOLS-15: where that answer came from, for the trace line. */
+  readonly localMachineSource?: () => "bridge" | "setting";
   readonly spotlightEnabled: () => boolean;
   readonly isDynamicToolsEnabled?: () => boolean;
   readonly isMultitaskEnabled?: () => boolean;
@@ -262,6 +266,8 @@ export function createProductionTurnToolsetHost(
     getRemoteBoxAvailable: input.getRemoteBoxAvailable,
     cloudAgentsDisabledByTeam: input.cloudAgentsDisabledByTeam,
     ...(input.cloudAgentsAvailable === undefined ? {} : { cloudAgentsAvailable: input.cloudAgentsAvailable }),
+    ...(input.localMachineConnected === undefined ? {} : { localMachineConnected: input.localMachineConnected }),
+    ...(input.localMachineSource === undefined ? {} : { localMachineSource: input.localMachineSource }),
     spotlightEnabled: input.spotlightEnabled,
     ...(input.isDynamicToolsEnabled === undefined ? {} : { isDynamicToolsEnabled: input.isDynamicToolsEnabled }),
     ...(input.isMultitaskEnabled === undefined ? {} : { isMultitaskEnabled: input.isMultitaskEnabled }),

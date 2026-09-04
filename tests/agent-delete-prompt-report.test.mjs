@@ -18,7 +18,10 @@ import { build } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const root = mkdtempSync(path.join(tmpdir(), "sand-delete-report-"));
-process.env.SAND_DATA_ROOT = root;
+// Pinned per case: tests/index.js loads every suite into one process, so another suite pointing
+// SAND_DATA_ROOT at its own temp root would decide where these cases look for the report.
+const useRoot = () => { process.env.SAND_DATA_ROOT = root; };
+useRoot();
 const result = await build({
   entryPoints: [path.join(repoRoot, "source/host/extensions/transcript/agent-lifecycle.ts")],
   bundle: true, write: false, format: "cjs", platform: "node", target: "es2022",
@@ -93,6 +96,7 @@ function fakeManager(activeId, otherIds = []) {
 }
 
 test("deleting the ACTIVE agent removes its prompt report", async () => {
+  useRoot();
   const id = "3882b623-02f3-40c0-b369-250b09162968";
   const survivor = "4ef9b708-d531-4a17-b711-711862d4d9a3";
   writeReport(id);
@@ -102,6 +106,7 @@ test("deleting the ACTIVE agent removes its prompt report", async () => {
 });
 
 test("deleting a non-active agent removes its prompt report too", async () => {
+  useRoot();
   const active = "4ef9b708-d531-4a17-b711-711862d4d9a3";
   const other = "5cbb25f9-6a6f-44a9-8a6e-82c35fd984cb";
   writeReport(other);
@@ -110,6 +115,7 @@ test("deleting a non-active agent removes its prompt report too", async () => {
 });
 
 test("a report belonging to an agent nobody deleted is left alone", async () => {
+  useRoot();
   const active = "9508a4ae-fb50-49f4-8ba3-45356e6f1374";
   const bystander = "c161aaf0-3485-4822-869d-af42f7f1ebac";
   writeReport(active);

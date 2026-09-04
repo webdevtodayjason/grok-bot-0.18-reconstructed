@@ -2377,25 +2377,19 @@
               message: "This box was no longer recording, so nothing here stopped it. The ten-minute cap ends a recording by saving it and starting the learning turn, so read the agent's transcript before recording again.",
             };
           }
-          return call("stopTeachRecording", { agentId: id, save })
+          return call("stopTeachRecording", save && note ? { agentId: id, save, note } : { agentId: id, save })
             .then((status) => {
               if (status?.state !== "idle") {
                 return { ok: false, reason: "not-idle", message: `The host still reports the recording as ${String(status?.state ?? "unknown")}.` };
               }
               state.teaching = { active: false, workerId: null, startedAt: null };
               emit("teaching:finished", { workerId: id, saved: Boolean(save) });
-              // save:true is what queues demo.mp4 and dispatches the learning prompt. The agent's
-              // reply arrives through the transcript like any other turn, so nothing is fabricated
-              // here. The operator's note is the part the agent can use, so it follows as a normal
-              // message rather than being dropped on the floor.
-              const settled = save && note
-                ? call("sendPrompt", { agentId: id, prompt: `I just recorded a demonstration on your screen. What I did: ${note}` })
-                  .catch((error) => { failed(`The recording was saved, but your note was not sent: ${error.message}`); return false; })
-                : Promise.resolve(null);
-              return settled.then((sent) => {
-                void reloadActive().catch(() => {});
-                return { ok: true, saved: Boolean(save), workerId: id, noteSent: save && note ? sent !== false : null };
-              });
+              // save:true is what queues demo.mp4 and dispatches the learning prompt. The note
+              // travels in the stop above, because the host dispatches that prompt from inside the
+              // stop: the note used to follow as a second message and reached the agent after the
+              // learning turn had already begun. A stop that answered idle carried it.
+              void reloadActive().catch(() => {});
+              return { ok: true, saved: Boolean(save), workerId: id, noteSent: save && note ? true : null };
             })
             .catch((error) => ({ ok: false, reason: "host", message: String(error?.message ?? error) }));
         });

@@ -17,7 +17,11 @@ export function createLocalExecExtension<Client = unknown, Accessor = unknown>(c
       const bridge = new SandLocalExecBridge({ clock: realClock, responseWatchdog: createIdleWatchdogPolicy(realClock, { name: "sand-local-exec-response", idleMs: SAND_LOCAL_EXEC_RESPONSE_TIMEOUT_MS }), blockedReason: () => gate.blockedReason(), report: { refused: (report) => logs.reportLocalExecRefused(report), provider: (report) => logs.reportLocalExecProvider(report) } });
       const offRetirement = context.host.events.on("local-tool-permission.approval-retired", (payload) => { if (typeof payload === "object" && payload != null && typeof (payload as { approvalId?: unknown }).approvalId === "string") bridge.retireApproval((payload as { approvalId: string }).approvalId); }); context.onStop(offRetirement);
       const options = { gate, codec, reportFailure: (report: unknown) => logs.reportLocalExecFailed(report) };
-      return { box: new GatewayLocalExecSandBox(bridge, options), userComputers: createBridgeUserComputers(bridge, options), registerProvider: (send: (frame: LocalExecBridgeFrame) => void) => bridge.registerProvider(send), submitResponses: (batch: Parameters<SandLocalExecBridge["submitResponses"]>[0]) => bridge.submitResponses(batch), checkLiveComputerForAsk: (agentId?: string) => bridge.checkLiveComputerForAsk(agentId) };
+      return { box: new GatewayLocalExecSandBox(bridge, options), userComputers: createBridgeUserComputers(bridge, options), registerProvider: (send: (frame: LocalExecBridgeFrame) => void) => bridge.registerProvider(send), submitResponses: (batch: Parameters<SandLocalExecBridge["submitResponses"]>[0]) => bridge.submitResponses(batch), checkLiveComputerForAsk: (agentId?: string) => bridge.checkLiveComputerForAsk(agentId),
+        // TOOLS-15. The plain question, with none of checkLiveComputerForAsk's refusal telemetry:
+        // is a computer answering on the bridge right now? The turn toolset and the system prompt
+        // both ask it once per turn, and neither is a refusal.
+        hasLiveComputer: () => bridge.hasAnnouncedComputer() };
     }
   });
 }

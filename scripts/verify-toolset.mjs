@@ -11,11 +11,20 @@
 // is a reserved box-secret prefix, and one reserved key in box-secrets.json makes the applier
 // drop every real secret at host start.
 //
-//   node scripts/verify-toolset.mjs              chief: the pair is offered, prompt has its sections
+//   node scripts/verify-toolset.mjs              chief: both local-machine worlds, 30 and 35 tools, prompt sections
 //   node scripts/verify-toolset.mjs --connector  a real CallMcpTool round trip, stamped evidenced
 //   node scripts/verify-toolset.mjs --subagent   a computerUse subagent is offered 3 tools
 //   node scripts/verify-toolset.mjs --browser    SAND_BROWSER_USE on: a browserUse subagent reads a page
 //   node scripts/verify-toolset.mjs --mcp-instructions  a stored connector instruction reaches the next prompt
+//   node scripts/verify-toolset.mjs --room       a shared room: members answer text only
+//
+// TOOLS-17. The room leg exists because the shared-room runner had never run. Of the 4,840 toolsets
+// traced on this box, not one carries isSharedRoomRunner, so the filter that cuts a room member
+// down to SendMessage (turn-toolset.ts SHARED_ROOM_TEXT_ONLY_TOOL_NAMES) was code nobody had
+// executed. Two things had to be staged for it to run at all, and both are named in the output:
+// the room binding, because a real one is installed by the cross-user relay and that needs an xAI
+// login this box does not have; and the box-tools switch, which decides which of the two room sets
+// applies.
 //
 // Integration check, not a unit test: needs the box up and a provider configured.
 import { execFile } from "node:child_process";
@@ -29,11 +38,12 @@ const MODE = process.argv.includes("--connector")
   ? "connector"
   : process.argv.includes("--mcp-instructions") ? "mcp-instructions"
   : process.argv.includes("--browser") ? "browser"
+  : process.argv.includes("--room") ? "room"
   : process.argv.includes("--subagent") ? "subagent" : "chief";
 const flag = (name, fallback) => (process.argv.includes(name)
   ? process.argv[process.argv.indexOf(name) + 1]
   : fallback);
-const DEFAULT_TIMEOUT_MS = MODE === "chief" ? 180000 : 420000;
+const DEFAULT_TIMEOUT_MS = MODE === "chief" ? 180000 : MODE === "room" ? 240000 : 420000;
 const requestedTimeoutMs = Number.parseInt(flag("--timeout-ms", String(DEFAULT_TIMEOUT_MS)), 10);
 if (!Number.isFinite(requestedTimeoutMs) || requestedTimeoutMs <= 0) {
   console.warn(`--timeout-ms was not a positive number; using the ${MODE} default of ${DEFAULT_TIMEOUT_MS}ms`);
@@ -90,6 +100,18 @@ const writeSetting = async (name, value) => {
 };
 const readTrace = () => readSetting("SAND_TOOL_TRACE");
 const writeTrace = (value) => writeSetting("SAND_TOOL_TRACE", value);
+// TOOLS-15. The pin. The five host-machine tools swing on whether a computer is answering on the
+// local-exec bridge, which is a 30 s liveness window fed by a daemon on the operator's own machine:
+// nothing this gate can stage, and on a box with the desktop app running it is stuck at "connected"
+// forever. So the host reads SAND_LOCAL_MACHINE first ("0" withholds, "1" offers, unset means ask
+// the bridge) and the chief run drives BOTH worlds -- the live one, then the other one pinned --
+// rather than asserting whichever one this box happens to be in.
+const LOCAL_MACHINE = "SAND_LOCAL_MACHINE";
+// TOOLS-17. The same shape for the room: whether a member answering in a shared room keeps the box
+// tools beside SendMessage. It used to be read from the container environment, where nothing on a
+// running box can change it, so the text-only room could never be driven at all.
+const SHARED_ROOM_BOX_TOOLS = "SAND_SHARED_ROOM_BOX_TOOLS";
+const AGENTS_DIR = "/home/box/sand-data/agents";
 
 const hostLogLines = async () =>
   Number.parseInt((await docker(["exec", BOX, "sh", "-c", "wc -l < /tmp/sand-host.log"])).trim(), 10);
@@ -127,6 +149,28 @@ const gateValue = async (name) => {
   catch { return null; }
 };
 
+// The host never writes the prompt itself out (it carries the user's memory, and every agent on
+// this box shares a filesystem) -- it reports which sections it carried. Rewritten on every
+// assembly, so after a turn it describes that turn.
+const readPromptReport = async (id) => {
+  const raw = await docker(["exec", BOX, "sh", "-c",
+    `cat ${PROMPT_REPORTS}/sand-system-prompt-${id}.json 2>/dev/null || true`]);
+  try { return JSON.parse(raw); } catch { return null; }
+};
+
+// TOOLS-15. The five tools bound with surface "host_machine": every one of them reaches the
+// operator's own computer over the local-exec bridge, and every one of them blocks until a
+// provider on that bridge answers. They are offered only while a computer is announced there. An
+// operator connects one by running the desktop app's local-exec daemon against this gateway: it
+// streams GET /local-exec/requests with the gateway bearer token and POSTs its frames, starting
+// with a hello, back to /local-exec/responses. With the daemon down (or before its stream has
+// reconnected after a host restart) nothing answers, and the five are withheld.
+const HOST_MACHINE_TOOLS = ["ExternalShell", "ExternalRead", "AwaitExternalShell", "CopyToBox", "CopyFromBox"];
+// Exact counts, not a range: with a computer announced the chief is offered 35 tools, without one
+// 30, and anything else is a tool that appeared or vanished for some other reason.
+const CHIEF_TOOL_COUNT_WITH_COMPUTER = 35;
+const CHIEF_TOOL_COUNT_WITHOUT_COMPUTER = 30;
+
 const spoken = (entries) => entries.filter((entry) => entry.kind === "send-message");
 
 // A subagent's ledger directory once surfaced in the roster as a phantom "New Agent" with a
@@ -136,9 +180,9 @@ const assertNoPhantomAgents = async () => {
   if (phantoms.length > 0) fail(`${phantoms.length} subagent id(s) surfaced in the roster as agents: ${phantoms.map((a) => a.id).join(", ")}`);
 };
 
-const freshAgent = async (name) => {
+const freshAgent = async (name, description = "") => {
   const made = await call("createAgent", {
-    name, description: "", origin: "user", isKickstartRequested: false,
+    name, description, origin: "user", isKickstartRequested: false,
   });
   const agent = made?.agent ?? made;
   if (agent?.id == null) throw new Error("createAgent returned no agent");
@@ -152,6 +196,26 @@ const cleanUp = async (agentId) => {
   await docker(["exec", BOX, "sh", "-c", `rm -f ${PROMPT_REPORTS}/sand-system-prompt-${agentId}.json`]).catch(() => {});
 };
 
+// The room leg's probes: two members and the room that holds them. A room will not delete while
+// its turn is still running (deleteAgent is refused mid-run, which is how a probe survived a
+// passing run once), so each one is waited to idle first, room before members.
+const probeIds = [];
+const waitForIdle = async (id, timeoutMs = 150000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const running = (await call("listAgents").catch(() => [])).find((a) => a.id === id)?.isRunning === true;
+    if (!running) return true;
+    await sleep(4000);
+  }
+  return false;
+};
+const deleteProbe = async (id) => {
+  if (KEEP || id == null) return;
+  await waitForIdle(id);
+  await call("deleteAgent", { id }).catch(() => {});
+  await docker(["exec", BOX, "sh", "-c", `rm -f ${PROMPT_REPORTS}/sand-system-prompt-${id}.json`]).catch(() => {});
+};
+
 // Throw rather than exit: the finally below still has to delete the probe agent and put the
 // operator's SAND_TOOL_TRACE back the way it found it, and process.exit skips finally blocks.
 class VerificationFailed extends Error {}
@@ -159,6 +223,8 @@ const fail = (message) => { throw new VerificationFailed(message); };
 
 const previousTrace = await readTrace();
 if (previousTrace !== "1") await writeTrace("1");
+const previousLocalMachine = await readSetting(LOCAL_MACHINE);
+let pinnedLocalMachine = false;
 // Agents that appear during the run and are not the probe are the model's doing (CreateAgent) or a
 // phantom; either way they are reported and removed so the roster ends as it started.
 const rosterBefore = new Set((await call("listAgents")).map((a) => a.id));
@@ -167,49 +233,104 @@ try {
   if (MODE === "chief" || MODE === "subagent") {
     const wantSubagent = MODE === "subagent";
     agent = await freshAgent(`verify-toolset-${Math.random().toString(36).slice(2, 8)}`);
-    const from = await hostLogLines();
-    await call("sendPrompt", {
-      agentId: agent.id,
-      prompt: wantSubagent
-        ? "Dispatch one computerUse subagent whose only job is to take a single screenshot of "
-          + "your box desktop and report what it sees. Do not do it yourself."
-        : "Reply with the single word READY.",
-    });
-
-    const deadline = Date.now() + TIMEOUT_MS;
-    let chief;
-    let boxScoped;
-    while (Date.now() < deadline) {
-      await sleep(4000);
-      const lines = await traceLinesSince(from);
-      chief = lines.find((line) => line.conversationId === agent.id && !line.isSubagentRunner);
-      boxScoped = lines.find((line) => line.isBoxScopedSubagent && line.isComputerUseSubagent);
-      if (chief != null && (!wantSubagent || boxScoped != null)) break;
-    }
+    // One real turn, and the trace lines it wrote. Factored out because the chief run drives two.
+    const driveTurn = async (prompt) => {
+      const from = await hostLogLines();
+      await call("sendPrompt", { agentId: agent.id, prompt });
+      const deadline = Date.now() + TIMEOUT_MS;
+      let chief;
+      let boxScoped;
+      while (Date.now() < deadline) {
+        await sleep(4000);
+        const lines = await traceLinesSince(from);
+        chief = lines.find((line) => line.conversationId === agent.id && !line.isSubagentRunner);
+        boxScoped = lines.find((line) => line.isBoxScopedSubagent && line.isComputerUseSubagent);
+        if (chief != null && (!wantSubagent || boxScoped != null)) break;
+      }
+      return { from, chief, boxScoped };
+    };
+    const READY = "Reply with the single word READY.";
+    const first = await driveTurn(wantSubagent
+      ? "Dispatch one computerUse subagent whose only job is to take a single screenshot of "
+        + "your box desktop and report what it sees. Do not do it yourself."
+      : READY);
+    const { from, chief, boxScoped } = first;
     if (chief == null) fail("no [sand][toolset] line for the chief; is SAND_TOOL_TRACE readable in the box?");
 
     console.log(`chief offered ${chief.count} tools:`);
     console.log(`  ${chief.tools.join(", ")}`);
     console.log(`Task subagent types: ${chief.subagentTypes.join(", ") || "(none)"}`);
+    const withheld = chief.withheld ?? [];
+    console.log(`withheld: ${withheld.map((entry) => `${entry.tool} (${entry.reason})`).join(", ") || "(none)"}`);
     const missing = ["GetMcpTools", "CallMcpTool"].filter((name) => !chief.tools.includes(name));
     if (missing.length > 0) fail(`the MCP meta pair is still withheld: missing ${missing.join(", ")}`);
+    // TOOLS-15. The five host-machine tools used to be offered whether or not anything was on the
+    // far end of the local-exec bridge, so a model that reached for one waited out a request nobody
+    // would answer. They now swing on one fact, which the trace line reports. Asserted as the whole
+    // invariant rather than a number: connected means all five offered, not connected means all
+    // five absent AND each one named on the withheld list with its reason. `expected` is what this
+    // leg was supposed to produce, so a host that quietly stopped answering the question fails.
+    const assertLocalMachineTools = (line, expected) => {
+      const seen = line.localMachineConnected;
+      if (typeof seen !== "boolean") {
+        fail("the toolset line does not report localMachineConnected: the withhold cannot be checked against the fact that drives it");
+      }
+      if (seen !== expected) {
+        fail(`this turn was meant to run with ${expected ? "a computer connected" : "no computer connected"}, `
+          + `but the toolset line reports localMachineConnected=${seen}`);
+      }
+      const named = new Map((line.withheld ?? []).map((entry) => [entry.tool, entry.reason]));
+      if (expected) {
+        const absent = HOST_MACHINE_TOOLS.filter((name) => !line.tools.includes(name));
+        if (absent.length > 0) fail(`a computer is connected, yet ${absent.join(", ")} ${absent.length === 1 ? "was" : "were"} withheld`);
+      } else {
+        const offeredOfTheFive = HOST_MACHINE_TOOLS.filter((name) => line.tools.includes(name));
+        if (offeredOfTheFive.length > 0) {
+          fail(`no computer is connected to this box, yet the model was offered ${offeredOfTheFive.join(", ")}: `
+            + "each one blocks on a local-exec channel nobody answers");
+        }
+        const unexplained = HOST_MACHINE_TOOLS.filter((name) => named.get(name) !== "no_local_machine");
+        if (unexplained.length > 0) {
+          fail(`the toolset line does not say why ${unexplained.join(", ")} ${unexplained.length === 1 ? "is" : "are"} missing: `
+            + "a withheld tool has to be reported with its reason, not just absent");
+        }
+      }
+      const expectedCount = expected ? CHIEF_TOOL_COUNT_WITH_COMPUTER : CHIEF_TOOL_COUNT_WITHOUT_COMPUTER;
+      if (line.count !== expectedCount) {
+        fail(`chief offered ${line.count} tools, expected ${expectedCount} with ${expected ? "a computer connected" : "no computer connected"}`);
+      }
+    };
+    // The prompt half. The base prompt used to spend paragraphs on the two machines and the file
+    // transfers between them whether or not either tool was in the toolset. The section marker is
+    // the "separate machines" paragraph of the box section, and it has to move with the five tools:
+    // teaching a tool the model was never handed is the whole failure.
+    const assertLocalMachinePrompt = (promptReport, expected) => {
+      const hasSection = promptReport.sections?.localMachine === true;
+      console.log(`two-machines prompt section: ${hasSection ? "present" : "absent"}`);
+      if (expected !== hasSection) {
+        fail(expected
+          ? "a computer is connected and the five host-machine tools were offered, but the assembled prompt dropped the \"separate machines\" paragraph that explains them"
+          : "no computer is connected, yet the assembled prompt still carries the \"separate machines\" paragraph: "
+            + "it teaches ExternalShell, ExternalRead and CopyToBox/CopyFromBox, none of which were offered");
+      }
+    };
+    const connected = chief.localMachineConnected;
+    console.log(`local machine: ${connected ? "announced on the local-exec bridge" : "none connected"}`
+      + ` (source: ${chief.localMachineSource ?? "(absent)"})`);
+    assertLocalMachineTools(chief, connected);
     // What the provider was actually sent must be what the toolset offered (CLOUD-1 was a silent 36 -> 35).
     // Selected by conversation, not by count: matching on `offered === chief.count` accepted any
     // request that happened to carry the same number of tools, so a tool dropped between the
     // toolset build and the request would have been papered over by another agent's line.
-    const chiefWire = (await wireLinesSince(from)).find((line) => line.conversationId === agent.id);
-    if (chiefWire == null) fail(`no [sand][wire] line carrying conversationId ${agent.id}`);
-    console.log(`wire: ${chiefWire.transport} ${chiefWire.model} offered ${chiefWire.offered} sent ${chiefWire.sent}`);
-    if (chiefWire.offered !== chief.count) fail(`the toolset built ${chief.count} tools but the request offered ${chiefWire.offered}`);
-    if (chiefWire.sent !== chiefWire.offered) fail(`the provider request dropped ${chiefWire.offered - chiefWire.sent} tool(s): ${chief.tools.filter((name) => !chiefWire.tools.includes(name)).join(", ")}`);
-
-    // The host never writes the prompt itself out (it carries the user's memory, and every
-    // agent on this box shares a filesystem) -- it reports which sections it carried.
-    const readPromptReport = async (id) => {
-      const raw = await docker(["exec", BOX, "sh", "-c",
-        `cat ${PROMPT_REPORTS}/sand-system-prompt-${id}.json 2>/dev/null || true`]);
-      try { return JSON.parse(raw); } catch { return null; }
+    const assertWire = async (line, from) => {
+      const wire = (await wireLinesSince(from)).find((entry) => entry.conversationId === agent.id);
+      if (wire == null) fail(`no [sand][wire] line carrying conversationId ${agent.id}`);
+      console.log(`wire: ${wire.transport} ${wire.model} offered ${wire.offered} sent ${wire.sent}`);
+      if (wire.offered !== line.count) fail(`the toolset built ${line.count} tools but the request offered ${wire.offered}`);
+      if (wire.sent !== wire.offered) fail(`the provider request dropped ${wire.offered - wire.sent} tool(s): ${line.tools.filter((name) => !wire.tools.includes(name)).join(", ")}`);
     };
+    await assertWire(chief, from);
+
     const report = await readPromptReport(agent.id);
     if (report == null) fail("no assembled system prompt report was written for this agent");
     const present = Object.entries(report.sections ?? {})
@@ -237,6 +358,35 @@ try {
           : "sand_spotlight is off but the assembled prompt still carries the untrusted-data section: it promises fences that never arrive");
       }
     }
+    assertLocalMachinePrompt(report, connected);
+
+    // TOOLS-15, the second leg. The turn above ran in whichever world this box happens to be in,
+    // and on a box with the desktop app attached that is always the connected one -- so on its own
+    // it cannot tell the withhold working from a host that answers "connected" no matter what.
+    // This pins the OTHER world with SAND_LOCAL_MACHINE and drives a second turn, so both legs are
+    // measured on every run and a change gone inert fails here. The pin is put back in the finally.
+    if (!wantSubagent) {
+      const pin = connected ? "0" : "1";
+      console.log(`pinning ${LOCAL_MACHINE}=${pin}: driving the ${connected ? "withheld" : "connected"} world`);
+      pinnedLocalMachine = true;
+      await writeSetting(LOCAL_MACHINE, pin);
+      const second = await driveTurn(READY);
+      if (second.chief == null) fail(`no [sand][toolset] line for the turn pinned with ${LOCAL_MACHINE}=${pin}`);
+      if (second.chief.localMachineSource !== "setting") {
+        fail(`${LOCAL_MACHINE}=${pin} was written into the host settings file but the toolset line still reports `
+          + `its source as ${JSON.stringify(second.chief.localMachineSource ?? null)}: the pin never reached the host`);
+      }
+      console.log(`pinned: chief offered ${second.chief.count} tools; withheld: `
+        + `${(second.chief.withheld ?? []).map((entry) => `${entry.tool} (${entry.reason})`).join(", ") || "(none)"}`);
+      assertLocalMachineTools(second.chief, !connected);
+      await assertWire(second.chief, second.from);
+      const secondReport = await readPromptReport(agent.id);
+      if (secondReport == null) fail("no assembled system prompt report was written for the pinned turn");
+      console.log(`pinned assembled system prompt: ${secondReport.length} chars`);
+      assertLocalMachinePrompt(secondReport, !connected);
+      await writeSetting(LOCAL_MACHINE, previousLocalMachine ?? null);
+      pinnedLocalMachine = false;
+    }
 
     if (wantSubagent) {
       if (boxScoped == null) fail("no box-scoped computerUse toolset line; the dispatch never ran");
@@ -260,6 +410,128 @@ try {
     }
     await assertNoPhantomAgents();
     console.log(`PASS — ${MODE}`);
+  }
+
+  if (MODE === "room") {
+    // The switch that picks the room's tool set. Off for this run and restored below: with it on a
+    // member keeps the box surface as private scratch, off it is offered SendMessage and nothing
+    // else, which is the set the product's own promise describes ("Bot-to-group handoff messages
+    // are currently text-only" -- vendor-docs/chat-and-collaboration.md). Both sets are pinned as
+    // units in tests/turn-toolset-projection.test.mjs; this leg proves the one a real turn gets.
+    const previousRoomBoxTools = await readSetting(SHARED_ROOM_BOX_TOOLS);
+    await writeSetting(SHARED_ROOM_BOX_TOOLS, "0");
+    try {
+      const stamp = Math.random().toString(36).slice(2, 8);
+      const alphaName = `probe-u2-room-alpha-${stamp}`;
+      const bravoName = `probe-u2-room-bravo-${stamp}`;
+      const alpha = await freshAgent(alphaName, "A probe that opens the exchange and hands off.");
+      probeIds.push(alpha.id);
+      const bravo = await freshAgent(bravoName, "A probe that answers the handoff and stops.");
+      probeIds.push(bravo.id);
+      const madeRoom = await call("createGroup", {
+        name: `probe-u2-room-${stamp}`,
+        description: "Shared-room toolset probe.",
+        memberAgentIds: [alpha.id, bravo.id],
+      });
+      const room = madeRoom?.agent ?? madeRoom;
+      if (room?.id == null) fail("createGroup returned no room agent");
+      probeIds.unshift(room.id);
+      console.log(`room ${room.id} holds ${alpha.id} (${alphaName}) and ${bravo.id} (${bravoName})`);
+
+      // What makes this room a SHARED room rather than a local group: a sharedRoomId in the room's
+      // group.json. In the product that field is written by the cross-user relay when it installs a
+      // room (ensureHostedSharedRoom), which needs an xAI login and the sand_multiplayer gate --
+      // neither of which exists on this box, and the reason this path had never run here. The
+      // binding is staged the way the relay writes it; everything after this point is the host's
+      // own code deciding what a room member may reach.
+      const sharedRoomId = `probe-u2-shared-${stamp}`;
+      const groupPath = `${AGENTS_DIR}/${room.id}/group.json`;
+      await docker(["exec", BOX, "node", "-e",
+        `const fs=require('fs');const p=${JSON.stringify(groupPath)};`
+        + `const d=JSON.parse(fs.readFileSync(p,'utf8'));d.sharedRoomId=${JSON.stringify(sharedRoomId)};`
+        + `fs.writeFileSync(p,JSON.stringify(d));`]);
+      const bound = await docker(["exec", BOX, "sh", "-c", `cat ${groupPath}`]);
+      console.log(`room binding: ${bound.trim()}`);
+      if (!bound.includes(sharedRoomId)) fail("the shared-room binding did not stick in the room's group.json");
+
+      const from = await hostLogLines();
+      const memberIds = new Set([alpha.id, bravo.id]);
+      await call("sendPrompt", {
+        agentId: room.id,
+        prompt: `@${alphaName} say exactly "ALPHA ${stamp}" and hand the turn to @${bravoName} by name. `
+          + `@${bravoName} reply with exactly "BRAVO ${stamp}". One short message each, then "(pass)" on any later turn.`,
+      });
+      const deadline = Date.now() + TIMEOUT_MS;
+      const memberLines = new Map();
+      let roomLine;
+      let spokenByMembers = [];
+      let running = true;
+      while (Date.now() < deadline) {
+        await sleep(4000);
+        for (const line of await traceLinesSince(from)) {
+          if (line.conversationId === room.id) roomLine ??= line;
+          if (memberIds.has(line.conversationId)) memberLines.set(line.conversationId, line);
+        }
+        spokenByMembers = spoken(await call("getAgentTranscript", { id: room.id }).catch(() => []))
+          .filter((entry) => memberIds.has(entry.author?.id));
+        running = (await call("listAgents")).find((a) => a.id === room.id)?.isRunning === true;
+        const authors = new Set(spokenByMembers.map((entry) => entry.author.id));
+        if (memberLines.size === 2 && authors.size === 2 && !running) break;
+      }
+      console.log(`room turn ${running ? "still running at the deadline" : "finished"}; `
+        + `${memberLines.size} member toolset line(s), ${spokenByMembers.length} member message(s)`);
+
+      // (a) The runner ran as a room runner at all.
+      for (const [id, name] of [[alpha.id, alphaName], [bravo.id, bravoName]]) {
+        const line = memberLines.get(id);
+        if (line == null) fail(`no [sand][toolset] line for ${name} (${id}): its member turn never built a toolset`);
+        console.log(`${name} offered ${line.count} tool(s): ${line.tools.join(", ")} `
+          + `(isSharedRoomRunner=${line.isSharedRoomRunner}, sharedRoomBoxTools=${String(line.sharedRoomBoxTools)})`);
+        if (line.isSharedRoomRunner !== true) {
+          fail(`${name} answered in a room bound to ${sharedRoomId} but its toolset line reports `
+            + "isSharedRoomRunner=false: the member ran with the full chief toolset");
+        }
+        // (b) The set is the text-only room set, exactly. The switch is reported on the line, so a
+        // run where the pin never reached the host says so instead of blaming the filter.
+        if (line.sharedRoomBoxTools !== false) {
+          fail(`${SHARED_ROOM_BOX_TOOLS}=0 was written into the host settings file but ${name}'s toolset line `
+            + `reports sharedRoomBoxTools=${String(line.sharedRoomBoxTools)}: the pin never reached the host`);
+        }
+        if (line.tools.length !== 1 || line.tools[0] !== "SendMessage") {
+          fail(`${name} was offered ${line.tools.join(", ") || "(nothing)"} in a text-only room, expected SendMessage alone`);
+        }
+      }
+      // The room agent itself never takes a model turn; it orders the members and holds the
+      // transcript. A toolset built against the room's own id would mean an extra paid turn.
+      if (roomLine != null) fail(`the room agent built its own toolset (${roomLine.count} tools): a room must not run a turn of its own`);
+
+      // (c) Both replies landed in the room transcript, under their own author ids.
+      for (const entry of spokenByMembers) {
+        console.log(`  ${entry.author.name} (${entry.author.id}): ${String(entry.message?.content ?? "").slice(0, 120)}`);
+      }
+      const authors = new Set(spokenByMembers.map((entry) => entry.author.id));
+      if (authors.size !== 2) {
+        fail(`the room transcript carries messages from ${authors.size} member(s), expected both: `
+          + `${[...authors].join(", ") || "(none)"}`);
+      }
+      // (d) Nothing a member did reached the box. Structurally it could not -- no box tool was
+      // offered -- and the members' own ledgers are the receipt: a fresh probe that ran a shell or
+      // any tool but SendMessage would have a row here.
+      for (const [id, name] of [[alpha.id, alphaName], [bravo.id, bravoName]]) {
+        const ledger = await docker(["exec", BOX, "sh", "-c",
+          `cat ${AGENTS_DIR}/${id}/audit.jsonl 2>/dev/null || true`]);
+        const rows = ledger.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+        const reached = rows.filter((row) => row.type === "shell_command" || (row.tool != null && row.tool !== "SendMessage"));
+        console.log(`${name} action ledger: ${rows.length} row(s), ${reached.length} of them a tool that touches the box`);
+        if (reached.length > 0) {
+          fail(`${name} reached the box from a text-only room: ${reached.map((row) => row.tool ?? row.type).join(", ")}`);
+        }
+      }
+      await assertNoPhantomAgents();
+      console.log("PASS — room");
+    } finally {
+      await writeSetting(SHARED_ROOM_BOX_TOOLS, previousRoomBoxTools ?? null).catch(() => {});
+    }
   }
 
   if (MODE === "browser") {
@@ -483,6 +755,9 @@ try {
   process.exitCode = 1;
 } finally {
   await cleanUp(agent?.id);
+  // Room before members: deleting a member out from under a live room turn leaves the room holding
+  // an id that no longer exists.
+  for (const id of probeIds) await deleteProbe(id);
   try {
     const extras = (await call("listAgents")).filter((a) => !rosterBefore.has(a.id) && a.id !== agent?.id);
     for (const extra of extras) {
@@ -491,4 +766,7 @@ try {
     }
   } catch {}
   if (previousTrace !== "1") await writeTrace(previousTrace).catch(() => {});
+  // The pin is the operator's box-wide switch, so it goes back exactly as found, deleted if it was
+  // never there. A run that dies mid-leg must not leave the five withheld on a live box.
+  if (pinnedLocalMachine) await writeSetting(LOCAL_MACHINE, previousLocalMachine ?? null).catch(() => {});
 }

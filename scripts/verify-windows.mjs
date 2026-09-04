@@ -3,7 +3,9 @@
 //   1. a deleted agent's ensureForeverBox is refused without a bring-up: no new X server, no assignment
 //   2. a fresh agent still gets a window right after that (nothing wedged on the lowest free index)
 //   3. a seat the host did not issue (a stray X server with a foreign token) is adopted, not refused
-//   4. everything the gate started is gone at the end: assignments, X servers, tokens
+//   4. no window is held by an agent the roster does not show, and no seat is up that no assignment holds (DISPLAY-5, DISPLAY-6)
+//   5. a planted orphan seat -- a live display with a token and no assignment -- is stopped by the reconcile
+//   6. everything the gate started is gone at the end: assignments, X servers, tokens
 // Usage: SAND_PROFILE_DIRS=... node scripts/verify-windows.mjs
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -23,6 +25,21 @@ const mint = async (tag) => { const made = await call("createAgent", { name: `pr
 
 const before = await seats();
 console.log(`before: Xvfb ${JSON.stringify(before.xvfb)} tokens ${JSON.stringify(before.tokens)} assignments ${Object.keys(before.assigned).length}`);
+
+// DISPLAY-5 and DISPLAY-6, read on the box as the deploy left it, before this gate touches anything.
+// The host releases the seats of agents the roster hides at start, and stops seats no assignment holds.
+const visibleAgentIds = async () => new Set((await call("listAgents", {})).map((agent) => String(agent.id)));
+const seatsHeldByHiddenAgents = async () => { const { assigned } = await seats(); const visible = await visibleAgentIds(); return Object.keys(assigned).filter((id) => !id.startsWith("sand-subagent-") && !visible.has(id)); };
+const unheldSeats = async () => { const state = await seats(), held = Object.values(state.assigned); return { held, allTokens: state.tokens, allDisplays: state.xvfb, tokens: state.tokens.filter((index) => index >= 2 && !held.includes(index)), displays: state.xvfb.filter((index) => index >= 2 && !held.includes(index)) }; };
+// No gateway call nudges these: a bring-up that raced the start sweep is the host's own to clean up,
+// on a box where nobody has opened a page.
+let hiddenHolders = await seatsHeldByHiddenAgents(), unheld = await unheldSeats();
+for (let i = 0; i < 30 && (hiddenHolders.length > 0 || unheld.tokens.length > 0 || unheld.displays.length > 0); i += 1) { await sleep(3000); hiddenHolders = await seatsHeldByHiddenAgents(); unheld = await unheldSeats(); }
+check(hiddenHolders.length === 0, "no window is held by an agent the roster does not show", hiddenHolders.join(", ") || "every assignment belongs to a visible agent");
+check(unheld.tokens.length === 0, "no seat carries a token that no assignment holds", `unheld ${JSON.stringify(unheld.tokens)} of tokens ${JSON.stringify(unheld.allTokens)}, assignments ${JSON.stringify(unheld.held)}`);
+check(unheld.displays.length === 0, "no X server runs for a seat no assignment holds", `unheld ${JSON.stringify(unheld.displays)} of Xvfb ${JSON.stringify(unheld.allDisplays)}`);
+
+const ORPHAN_INDEX = 30; // far above the lowest free index, so the allocator never hands it out mid-gate
 const made = [];
 try {
   // 1. a deleted agent is refused before the box is touched
@@ -56,10 +73,19 @@ try {
   check(cStatus?.state === "running" && Number.isInteger(cIndex), "the next agent is not refused a seat that carried a token the host did not issue", cStatus?.error ?? `index ${cIndex}`);
   const bound = (await sh(`cat /tmp/sand-window-tokens.d/${cIndex} 2>/dev/null`)).out;
   check(bound.length > 0 && bound !== "not-the-hosts-token", "the seat now carries the host's own token", `token length ${bound.length}`);
+  // 5. an orphan seat: a live display with a token that no assignment holds. Nothing ever stopped one,
+  // because every teardown path started from an assignment, so it held its memory until the box died.
+  await sh(`/usr/local/bin/start-window ${ORPHAN_INDEX} plantedbythegate`);
+  const planted = await seats();
+  check(planted.xvfb.includes(ORPHAN_INDEX) && planted.tokens.includes(ORPHAN_INDEX) && !Object.values(planted.assigned).includes(ORPHAN_INDEX), "an orphan seat was planted", `Xvfb ${JSON.stringify(planted.xvfb)} tokens ${JSON.stringify(planted.tokens)}`);
+  let sweptOrphan = false;
+  for (let i = 0; i < 25 && !sweptOrphan; i += 1) { await call("getForeverBoxStatus", { id: c.id }).catch(() => {}); await sleep(3000); const now = await seats(); sweptOrphan = !now.xvfb.includes(ORPHAN_INDEX) && !now.tokens.includes(ORPHAN_INDEX); }
+  check(sweptOrphan, "the reconcile stopped the orphan seat", `index ${ORPHAN_INDEX}`);
 } catch (error) {
   check(false, `gate crashed: ${error.message}`);
 } finally {
   for (const id of made) { try { await call("deleteAgents", { ids: [id] }); } catch {} }
+  await sh(`/usr/local/bin/stop-window ${ORPHAN_INDEX}`);
   await sleep(4000);
   const after = await seats();
   const leaked = after.xvfb.filter((d) => !before.xvfb.includes(d));

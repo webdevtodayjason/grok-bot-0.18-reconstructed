@@ -1,13 +1,16 @@
 import { DeadlineExceededError, type DeadlinePolicy, type ExpiryPolicy, type PollingPolicy, type RetryPolicy } from "../../../internal/scheduling.js";
+import { setTimeout as delay } from "node:timers/promises";
 import { createContext, type Context } from "../../../packages/context/core.js";
+import { isSandSubagentId } from "../../../shared/agents/subagents.js";
 import { HostBox, type BoxStatus } from "./host-box.js";
 
 export class SandForeverBoxError extends Error {}
 export const RECREATE_UNAVAILABLE_MESSAGE = "Couldn't reach the service that updates this computer. It is unchanged. Try again in a moment; if it keeps failing, the backend may need to be updated.";
+export const FOREVER_BOX_WINDOW_SWEEP_INTERVAL_MS = 60_000; export const FOREVER_BOX_WINDOW_SWEEP_START_ATTEMPTS = 6; export const FOREVER_BOX_WINDOW_SWEEP_RETRY_MS = 10_000;
 export const FOREVER_BOX_MIGRATION_TTL_MS = 5 * 60_000; export const FOREVER_BOX_SCREENSHOT_TIMEOUT_MS = 5_000; export const FOREVER_BOX_RECREATE_FLUSH_WAIT_MS = 10_000; export const FOREVER_BOX_IMAGE_WATCH_INTERVAL_MS = 24 * 60 * 60_000; export const FOREVER_BOX_IMAGE_CHECK_TIMEOUT_MS = 30_000;
 export interface ForeverBoxOptions { box: HostBox; /** DISPLAY-3: true when the agent no longer exists (deleted or tombstoned); a window brought up for it is released at once. */ isAgentGone?: (agentId: string) => boolean; lifecycleClient: { recreateInBox(options: { preserveData: boolean; force?: boolean }): Promise<{ started: boolean; reason?: string }>; fetchImageUpdateAvailable(signal: AbortSignal): Promise<boolean | undefined> }; trays: { pushError(value: { agentId: string; title: string; detail: string }): void }; telemetry: { reportBoxRecreateDecided(value: Record<string, string>): void; reportBoxImageCheck(value: Record<string, unknown>): void }; imagePolling: PollingPolicy; imagePollingStartDelay: RetryPolicy; imageSeedRetry: RetryPolicy; imageCheckDeadline: DeadlinePolicy; migrationExpiry: ExpiryPolicy; screenshotDeadline: DeadlinePolicy; recreateFlushWaitDeadline: DeadlinePolicy; flushPendingUploads(): Promise<void>; autoUpdateEnabled: boolean; hostBundleAutoUpdateEnabled: boolean; isInBox(): boolean; log(message: string): void; captureScreenshot?(connection: Awaited<ReturnType<HostBox["ensureReady"]>>, signal: AbortSignal): Promise<Uint8Array | null>; ctx?: Context; now?: () => number }
 export class ForeverBoxService {
-  readonly box: HostBox; readonly isAutoUpdateEnabled: boolean; private readonly ctx: Context; private readonly listeners = new Set<(status: BoxStatus) => void>(); private readonly abort = new AbortController(); private readonly unsubscribeBox: () => void; private imagePolling: { dispose(): void } | undefined; private imagePollingStartDelay: { elapsed: Promise<void>; dispose(): void } | undefined; private migrationExpiry: { dispose(): void } | undefined; private isBusy = false; private updateInFlight = false; private updateFailureNotified = false; private imageRefreshInFlight = false; private migrating = false; private stopped = false; private readonly now: () => number;
+  readonly box: HostBox; readonly isAutoUpdateEnabled: boolean; private readonly ctx: Context; private readonly listeners = new Set<(status: BoxStatus) => void>(); private readonly abort = new AbortController(); private readonly unsubscribeBox: () => void; private imagePolling: { dispose(): void } | undefined; private imagePollingStartDelay: { elapsed: Promise<void>; dispose(): void } | undefined; private migrationExpiry: { dispose(): void } | undefined; private isBusy = false; private updateInFlight = false; private updateFailureNotified = false; private imageRefreshInFlight = false; private migrating = false; private stopped = false; private readonly now: () => number; private readVisibleAgentIds: (() => Promise<Set<string>>) | undefined; private lastWindowSweepAt = Number.NEGATIVE_INFINITY;
   constructor(readonly options: ForeverBoxOptions) { this.box = options.box; this.ctx = options.ctx ?? createContext().withName("foreverBox"); this.now = options.now ?? (() => performance.now()); this.isAutoUpdateEnabled = options.autoUpdateEnabled; this.unsubscribeBox = this.box.subscribe((status) => this.emit(this.decorateStatus(status))); }
   start(): void { void this.seedImageUpdateAvailable(); void this.startImagePolling(); } subscribe(listener: (status: BoxStatus) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); } setBusy(value: boolean): void { this.isBusy = value; }
   async getStatus(input: { id: string }): Promise<BoxStatus> { void this.reconcileWindows(); return this.decorateStatus(await this.box.getStatus(this.ctx, input.id)); }
@@ -24,10 +27,57 @@ export class ForeverBoxService {
     void this.maybeAutoUpdate(input.id, status.imageUpdateAvailable); return this.decorateStatus(status);
   }
   private reconciling = false;
+  /**
+   * DISPLAY-5: the roster is the only thing that can say an agent holds no conversation, and it
+   * starts after this service, so it hands its reader in here. The first sweep runs at that moment,
+   * which is host start, before any page has asked for a desktop.
+   */
+  useRosterReader(readVisibleAgentIds: () => Promise<Set<string>>): Promise<void> { this.readVisibleAgentIds = readVisibleAgentIds; return this.sweepWindowsAtStart(); }
+  private async sweepWindowsAtStart(): Promise<void> {
+    for (let attempt = 1; attempt <= FOREVER_BOX_WINDOW_SWEEP_START_ATTEMPTS && !this.stopped; attempt += 1) {
+      this.lastWindowSweepAt = Number.NEGATIVE_INFINITY;
+      await this.reconcileWindows();
+      if (this.lastWindowSweepAt !== Number.NEGATIVE_INFINITY) { void this.sweepAgainOnceStartSettles(); return; }
+      try { await delay(FOREVER_BOX_WINDOW_SWEEP_RETRY_MS, undefined, { signal: this.abort.signal }); } catch { return; }
+    }
+  }
+  /**
+   * A bring-up already in flight when the first sweep ran leaves its seat behind it, and on an idle
+   * box nothing would look again until someone opened a page. One more pass once boot has settled.
+   */
+  private async sweepAgainOnceStartSettles(): Promise<void> {
+    try { await delay(FOREVER_BOX_WINDOW_SWEEP_INTERVAL_MS, undefined, { signal: this.abort.signal }); } catch { return; }
+    if (this.stopped) return;
+    this.lastWindowSweepAt = Number.NEGATIVE_INFINITY;
+    await this.reconcileWindows();
+  }
   /** Release every window whose agent is gone. Cheap: a map walk plus a stat per entry. */
   async reconcileWindows(): Promise<void> {
-    if (this.reconciling || this.options.isAgentGone == null) return; this.reconciling = true;
-    try { for (const agentId of this.box.listAssignedAgentIds()) { if (this.options.isAgentGone(agentId)) { console.log(`[sand][window] releasing the window of gone agent ${agentId}`); await this.releaseAgent(agentId).catch(() => {}); } } } finally { this.reconciling = false; }
+    if (this.reconciling) return; this.reconciling = true;
+    try {
+      if (this.options.isAgentGone != null) for (const agentId of this.box.listAssignedAgentIds()) { if (this.options.isAgentGone(agentId)) { console.log(`[sand][window] releasing the window of gone agent ${agentId}`); await this.releaseAgent(agentId).catch(() => {}); } }
+      if (this.now() - this.lastWindowSweepAt < FOREVER_BOX_WINDOW_SWEEP_INTERVAL_MS) return;
+      // Both sweeps below talk to the box, so they run on a leash rather than on every status poll.
+      if (!await this.releaseWindowsWithoutConversation()) return;
+      this.lastWindowSweepAt = this.now();
+      for (const index of await this.box.sweepUnassignedWindows(this.ctx).catch(() => [] as number[])) console.log(`[sand][window] stopped :${index}: a live seat that no assignment held`);
+    } finally { this.reconciling = false; }
+  }
+  /**
+   * DISPLAY-5: an agent with no conversation is hidden from the roster but keeps its seat, and the
+   * seat is an X server the box pays for at every boot. Release the window; the agent itself stays
+   * on disk, exactly as the roster leaves it.
+   */
+  async releaseWindowsWithoutConversation(): Promise<boolean> {
+    const readVisibleAgentIds = this.readVisibleAgentIds; if (readVisibleAgentIds == null || this.stopped) return true;
+    try {
+      await this.box.loadAssignments(this.ctx);
+      const assigned = this.box.listAssignedAgentIds().filter((agentId) => !isSandSubagentId(agentId));
+      if (assigned.length === 0) return true;
+      const visible = await readVisibleAgentIds();
+      for (const agentId of assigned) { if (visible.has(agentId)) continue; console.log(`[sand][window] releasing the window of ${agentId}: the roster shows no conversation for it`); await this.releaseAgent(agentId).catch(() => {}); }
+      return true;
+    } catch (error) { this.options.log(`window reconcile against the roster failed: ${String(error)}`); return false; }
   }
   reset(input: { id: string }): Promise<BoxStatus> { return this.recreate(input.id, { preserveData: false }); } update(input: { id: string; force?: boolean }): Promise<BoxStatus> { return this.recreate(input.id, { preserveData: true, ...(input.force === undefined ? {} : { force: input.force }) }); }
   async autoUpdateNow(): Promise<{ started: boolean; reason?: string }> { if (!this.options.isInBox()) return { started: false, reason: "not-in-box" }; if (!this.options.autoUpdateEnabled) return { started: false, reason: "auto-update-disabled" }; if (this.isBusy) return { started: false, reason: "busy" }; if (this.updateInFlight) return { started: false, reason: "update-in-flight" }; this.updateInFlight = true; try { const imageCheck = await this.refreshImageUpdateAvailable("pre_hibernation", { coalesce: false }); if (imageCheck.outcome === "failed" || imageCheck.outcome === "timeout") return { started: false, reason: "staleness-check-failed" }; if (imageCheck.available !== true) return { started: false, reason: "no-update-required" }; this.options.telemetry.reportBoxRecreateDecided({ trigger: "hibernation_auto_update", mode: "pod_recreate", preserved: "true" }); try { const result = await this.requestRecreate({ preserveData: true }); if (result.started) this.updateFailureNotified = false; return result; } catch { return { started: false, reason: "recreate-unavailable" }; } } finally { this.updateInFlight = false; } }

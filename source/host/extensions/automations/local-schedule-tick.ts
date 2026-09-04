@@ -8,7 +8,7 @@ import type { PollingPolicy } from "../../../internal/scheduling.js";
  * manual "Test run" path fires a routine and records the run without a backend hop.
  *
  * So this is the missing half-hour of work, not a subsystem: a clock that notices a routine is due
- * and calls the fire path the Test-run button already uses.
+ * and calls the host's scheduled fire path with the slot it is serving.
  */
 export interface LocalScheduleAutomation {
   readonly id: string;
@@ -17,10 +17,17 @@ export interface LocalScheduleAutomation {
   readonly runs?: readonly { readonly startedAt?: number }[];
 }
 
+/** What the fire reported back: enough for the log line to say what happened, not what was asked. */
+export interface LocalScheduleFireReport {
+  readonly runUuid: string;
+  readonly fired: boolean;
+  readonly reason?: string;
+}
+
 export interface LocalScheduleTickDeps {
   readonly polling: PollingPolicy;
   listAutomations(): Promise<readonly { readonly agentId: string; readonly automation: LocalScheduleAutomation }[]>;
-  fire(agentId: string, automationId: string): Promise<unknown>;
+  fire(args: { agentId: string; automationId: string; slotMs: number }): Promise<LocalScheduleFireReport>;
   isReady(): boolean | Promise<boolean>;
   /** Firing into an agent mid-turn aborts its work; a busy agent's slot waits for a later tick. */
   isAgentBusy?(agentId: string): boolean;
@@ -65,11 +72,16 @@ export function startLocalScheduleTick(deps: LocalScheduleTickDeps): { dispose()
         // Not marked as fired: the slot stays due and is picked up once the agent is free.
         if (deps.isAgentBusy?.(agentId) === true) continue;
         lastFired.set(`${agentId}:${automationId}`, slot);
+        const due = new Date(slot).toISOString();
         try {
-          await deps.fire(agentId, automationId);
-          deps.log(`[automations] fired ${automationId} locally (due ${new Date(slot).toISOString()})`);
+          // The fire says whether anything was recorded. Logging "fired" on the strength of a call
+          // that returned is how a slot came to look served when it had left no run behind.
+          const report = await deps.fire({ agentId, automationId, slotMs: slot });
+          deps.log(report.fired
+            ? `[automations] fired ${automationId} on its schedule (slot ${due}, run ${report.runUuid})`
+            : `[automations] scheduled fire for ${automationId} (slot ${due}, run ${report.runUuid}) recorded nothing: ${report.reason ?? "no reason reported"}`);
         } catch (error) {
-          deps.log(`[automations] local fire failed for ${automationId}: ${error instanceof Error ? error.message : String(error)}`);
+          deps.log(`[automations] local fire failed for ${automationId} (slot ${due}): ${error instanceof Error ? error.message : String(error)}`);
         }
       }
     } catch (error) {

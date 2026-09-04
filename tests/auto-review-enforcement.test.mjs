@@ -24,6 +24,7 @@
 // differently and the asymmetry is what the cases below pin.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test, { after } from "node:test";
@@ -32,7 +33,12 @@ import { build } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stage = mkdtempSync(path.join(repoRoot, "node_modules", ".auto-review-test-"));
-after(() => rmSync(stage, { recursive: true, force: true }));
+// A data root with no sand-host-settings.json in it. The trace switch reads the env and then that
+// file, so "unset" only means unset while both are: under tests/index.js another suite points
+// SAND_DATA_ROOT at a root whose settings file has SAND_TOOL_TRACE in it, and the quiet case below
+// would read the switch as on.
+const noSettingsRoot = mkdtempSync(path.join(tmpdir(), "auto-review-no-settings-"));
+after(() => { rmSync(stage, { recursive: true, force: true }); rmSync(noSettingsRoot, { recursive: true, force: true }); });
 
 const load = async (relative, name) => {
   const result = await build({
@@ -469,11 +475,13 @@ test("the host narrows the log its trace lines land in", async () => {
 test("the default reporter says nothing unless the operator asked for tracing", async () => {
   const trace = settings.SAND_TOOL_TRACE_SETTING;
   const previous = process.env[trace];
+  const previousRoot = process.env.SAND_DATA_ROOT;
   const lines = [];
   const realLog = console.log;
   console.log = (line) => { lines.push(String(line)); };
   try {
     delete process.env[trace];
+    process.env.SAND_DATA_ROOT = noSettingsRoot;
     const quiet = classifier.createSandLocalAutoReviewClassifierExecutor({});
     await quiet.execute(ctx, targetFor("rm -rf /workspace/probe", ["never run rm -rf"]));
     assert.deepEqual(lines, [], "every reviewed call reaches this, in shadow too: it must be silent by default");
@@ -488,6 +496,8 @@ test("the default reporter says nothing unless the operator asked for tracing", 
     console.log = realLog;
     if (previous === undefined) delete process.env[trace];
     else process.env[trace] = previous;
+    if (previousRoot === undefined) delete process.env.SAND_DATA_ROOT;
+    else process.env.SAND_DATA_ROOT = previousRoot;
   }
 });
 

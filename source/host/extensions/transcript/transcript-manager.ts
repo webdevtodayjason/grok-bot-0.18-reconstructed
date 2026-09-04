@@ -594,6 +594,7 @@ const delegations: ReadonlyArray<[string, keyof TranscriptManager]> = [
   ["updateAgentAutomation", "automationRuntime"],
   ["deleteAgentAutomation", "automationRuntime"],
   ["runAgentAutomationNow", "automationRuntime"],
+  ["runLocalScheduledAutomation", "automationRuntime"],
   ["runServerScheduledAutomation", "automationRuntime"],
   ["runAutomationForEvent", "automationRuntime"],
   ["runServerAutomationForEvent", "automationRuntime"],

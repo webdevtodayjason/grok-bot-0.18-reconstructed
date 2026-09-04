@@ -25,6 +25,7 @@ interface AutomationTranscript {
   listAllAutomationDefinitions(): Promise<readonly { agentId: string; automation: ScheduledCloudAutomation & { runs?: readonly { id: string; status: string; detail?: string; coalescedRunIds?: readonly string[] }[] } }[]>;
   listAllAutomations(): Promise<readonly { agentId: string; automation: { id: string; isEnabled: boolean; nextRunAt: number | null; runs?: readonly { startedAt?: number }[] } }[]>;
   runAgentAutomationNow(agentId: string, automationId: string): Promise<unknown>;
+  runLocalScheduledAutomation(args: { agentId: string; automationId: string; slotMs: number }): Promise<{ runUuid: string; fired: boolean; reason?: string }>;
   isAgentBusy(agentId: string): boolean;
   runAutomationForEvent(agentId: string, automation: ScheduledCloudAutomation, event: Record<string, unknown>): Promise<unknown>;
   runServerScheduledAutomation(args: { agentId: string; automation: ScheduledCloudAutomation; runUuid: string; scheduledForMs?: number }): Promise<string | undefined>;
@@ -86,13 +87,14 @@ export const automationsExtension = defineHostExtension({
     /**
      * Cron triggers are routed to the cloud by `shouldScheduleLocally`, and on a self-hosted box
      * there is no cloud to route them to -- so a routine's countdown ran down and nothing fired.
-     * Everything below the trigger is already local, including the fire path the Test-run button
-     * uses, so this is just the clock that was missing.
+     * Everything below the trigger is already local, so this is just the clock that was missing.
+     * It goes through the scheduled entry point rather than the Test-run one, which is what the
+     * first version borrowed: a slot the clock served was being filed and prompted as manual.
      */
     const localSchedule = startLocalScheduleTick({
       polling: createRealPollingPolicy({ name: "automations.local-schedule", intervalMs: LOCAL_SCHEDULE_TICK_INTERVAL_MS }),
       listAutomations: () => deps.transcript.listAllAutomations(),
-      fire: (agentId, automationId) => deps.transcript.runAgentAutomationNow(agentId, automationId),
+      fire: (args) => deps.transcript.runLocalScheduledAutomation(args),
       isReady: () => deps["turn-execution"].isRunReady(),
       isAgentBusy: (agentId) => deps.transcript.isAgentBusy(agentId),
       log: (message) => host.log(message),

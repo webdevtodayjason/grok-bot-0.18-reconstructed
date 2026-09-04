@@ -59,6 +59,10 @@ export interface PromptCollectorHost<Context = unknown> {
   readonly isComputerUseSubagent?: boolean | undefined;
   readonly isBrowserUseSubagent?: boolean | undefined;
   readonly remoteBoxHasDesktop?: boolean | undefined;
+  /** TOOLS-15. False when no computer is connected over the local-exec bridge, which is also when
+   * the turn toolset withholds ExternalShell, ExternalRead, AwaitExternalShell and the two file
+   * transfers. The "Your box" section stops describing them on the same fact. */
+  readonly isLocalMachineConnected?: (() => boolean) | undefined;
   readonly remoteBox?: TransferBox | undefined;
   resolveBoxId?(): string;
   readonly requestContext?: AutomationStatusReminderRequestContext | undefined;
@@ -187,17 +191,22 @@ export function createPromptCollectorGlue<Context = unknown>(host: PromptCollect
   function getRemoteBoxSection(): string {
     if (host.isComputerUseSubagent === true) return getComputerUseRemoteBoxSection();
     if (host.isBrowserUseSubagent === true) return getBrowserUseRemoteBoxSection();
+    const localMachineConnected = host.isLocalMachineConnected?.() !== false;
     return [
       "## Your box",
-      "Alongside the user's computer you have the box, with structured file reads (Read), a shell (Shell), and your own desktop with a browser. The box is ONE persistent Linux machine shared by all of this user's agents — same filesystem and machine state, so a file, installed tool, or browser login set up by any agent is there for every agent — while the desktop is per-agent: each agent gets its own screen and browser window on that shared machine, and none sees or drives another's. Keep the two apart when explaining how this works: agents share the computer; they do not share desktops (never claim each agent has its own machine). It is a full computer: install tools, run code, and generate files (spreadsheets, CSVs, documents, images, archives) with Shell. Nothing on it touches the user's filesystem, sessions, or accounts, and anything set up there persists across turns, including files, installed tools, and especially browser logins. The user can open your desktop to watch or help.",
-      "- Use ExternalRead and ExternalShell for the user's own computer (their files and local environment).",
+      `${localMachineConnected ? "Alongside the user's computer you have the box" : "You work on the box"}, with structured file reads (Read), a shell (Shell), and your own desktop with a browser. The box is ONE persistent Linux machine shared by all of this user's agents — same filesystem and machine state, so a file, installed tool, or browser login set up by any agent is there for every agent — while the desktop is per-agent: each agent gets its own screen and browser window on that shared machine, and none sees or drives another's. Keep the two apart when explaining how this works: agents share the computer; they do not share desktops (never claim each agent has its own machine). It is a full computer: install tools, run code, and generate files (spreadsheets, CSVs, documents, images, archives) with Shell. Nothing on it touches the user's filesystem, sessions, or accounts, and anything set up there persists across turns, including files, installed tools, and especially browser logins. The user can open your desktop to watch or help.`,
+      ...(localMachineConnected
+        ? ["- Use ExternalRead and ExternalShell for the user's own computer (their files and local environment)."]
+        : ["- The user's own computer is not reachable from here: no computer is connected, so you have no tool that reads their files or runs a command on their machine. The box is the only filesystem you have."]),
       "- Use Read for line-numbered, paged text on the box, and for box images you need to see inline. Use Shell for commands, scratch work, risky operations, generating files, or anything that shouldn't run on the user's machine. Shell starts in /workspace, your scratch space on the box.",
       "- Use poppler-utils to read PDFs.",
       "- Read, Shell, and the box's browser share one filesystem, so a file you create with Shell can be opened, uploaded, or imported in the browser, and browser downloads can be inspected with Read or processed with Shell. Move data between code and web apps through files on the box.",
+      ...(!localMachineConnected ? [] : [
       "- Your box and the user's computer are separate machines with separate filesystems, so a path on one is not visible to the other: don't hand an ExternalRead/ExternalShell path from the user's computer to Read/Shell, or a box path to ExternalRead/ExternalShell. Move files across with CopyToBox / CopyFromBox.",
       "- CopyToBox (their computer -> your box): copies a file from the user's computer into your box, verbatim (any type or size, binaries included). Give the file's absolute ExternalRead/ExternalShell path; it lands in /workspace/uploads by default, or at a box_path you pick, then open it with Read or process it with Shell. Use this whenever you need to work on a user's file with your box's tools — you don't need them to drag it into chat first. (Files they do attach in chat are still copied into /workspace/uploads for you automatically, and the attached-files note lists both paths.)",
       "- CopyFromBox (your box -> their computer): copies a file from your box onto the user's actual computer, verbatim, where ExternalRead, ExternalShell, their editor, and apps can reach it. Give the box_path; it lands under its own name in the ExternalShell working directory, or at a computer_path you pick. Expand any glob in Shell first and pass concrete paths. This is for putting a file ON their disk; to instead show a file inline in chat (an image or video, or hand over a downloadable file) attach it by its box path with SendMessage.",
       "- Both transfers default to your single connected computer; pass `computer` only if you're told about more than one.",
+      ]),
     ].join("\n");
   }
   function getComputerUseRemoteBoxSection(): string {
@@ -345,7 +354,7 @@ export function createPromptCollectorGlue<Context = unknown>(host: PromptCollect
     const reply = buildReplyContextNote(options.replyContext);
     let text = [address, reply].filter(Boolean).join("\n");
     text = text.length > 0 && args.trimmedPrompt.length > 0 ? `${text}\n${args.trimmedPrompt}` : text || args.trimmedPrompt;
-    const attachments = buildAttachedFilesNote(files, staged, options.attachedFileSizes);
+    const attachments = buildAttachedFilesNote(files, staged, options.attachedFileSizes, host.isLocalMachineConnected?.() !== false);
     if (attachments.length > 0) text = text.length > 0 ? `${text}\n\n${attachments}` : attachments;
     const epoch = args.compactionEpoch();
     const reminder = getAutomationStatusReminderForTurn(epoch, options.automationWake?.id);
@@ -385,7 +394,7 @@ export function createPromptCollectorGlue<Context = unknown>(host: PromptCollect
     const reply = buildReplyContextNote(options.replyContext);
     let text = [address, reply].filter(Boolean).join("\n");
     text = text.length > 0 && args.trimmedPrompt.length > 0 ? `${text}\n${args.trimmedPrompt}` : text || args.trimmedPrompt;
-    const attachments = buildAttachedFilesNote(files, staged, options.attachedFileSizes);
+    const attachments = buildAttachedFilesNote(files, staged, options.attachedFileSizes, host.isLocalMachineConnected?.() !== false);
     if (attachments.length > 0) text = text.length > 0 ? `${text}\n\n${attachments}` : attachments;
     const epoch = args.compactionEpoch();
     const reminder = getAutomationStatusReminderForTurn(epoch, options.automationWake?.id);

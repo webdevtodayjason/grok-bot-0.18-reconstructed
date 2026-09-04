@@ -46,6 +46,13 @@ export class SandLocalExecBridge {
     return () => { if (!this.providers.delete(provider)) return; this.byId.delete(provider.id); const now = this.deps.clock.now(); if (this.providers.size === 0) this.emptySince = now; this.deps.report?.provider?.({ phase: "detached", providerId: provider.id, providerCount: this.providers.size, ageMs: now - provider.registeredAt, hadHello: provider.info !== undefined, hasHeartbeat: provider.hasHeartbeat, wasLive: this.isLive(provider, now), emptied: this.providers.size === 0 }); };
   }
   hasProvider(): boolean { return this.providers.size > 0; }
+  /**
+   * TOOLS-15. Live AND announced. A provider that has opened the request stream but never posted
+   * its hello has not shown the response half of the channel works, and `isLive` counts it as live
+   * forever precisely because it has no heartbeat yet -- so a tool routed to it blocks until the
+   * watchdog gives up. The turn toolset asks this before offering the five host-machine tools.
+   */
+  hasAnnouncedComputer(): boolean { return this.resolveProvider(undefined)?.info !== undefined; }
   isComputerLive(computerId: string): boolean { return this.resolveProvider(computerId) !== undefined; }
   assertComputerAvailable(computerId: string | undefined, gate: { readonly site: string; readonly agentId?: string }): void { this.requireProvider(computerId, gate); }
   checkLiveComputerForAsk(agentId?: string): boolean { if (this.resolveProvider(undefined) !== undefined) return true; this.reportRefused(this.providers.size === 0 ? "no_providers" : "stale_heartbeat", { site: "ask_gate", ...(agentId === undefined ? {} : { agentId }) }); return false; }

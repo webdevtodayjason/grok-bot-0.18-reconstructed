@@ -7,7 +7,9 @@
 //   startTeachRecording {agentId}          -> { state:"recording", agentId, startedAtMs, maxDurationMs }
 //                                          or 500 { error:"teach-recording: the feature gate is off" }
 //                                          or 500 { error:"Teach recording requires a private desktop monitor." }
-//   stopTeachRecording {agentId,save}      -> { state:"idle", maxDurationMs }
+//   stopTeachRecording {agentId,save,note} -> { state:"idle", maxDurationMs }
+//     note is the operator's sentence from the dialog. The host dispatches the learning turn from
+//     inside this call, so a note sent after it lands behind the turn it was meant to steer.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -163,7 +165,9 @@ test("teach: Discard stops the recording on the host with save:false and sends n
   adapter.destroy();
 });
 
-test("teach: Finish saves, then the operator's note follows as a normal message", async () => {
+test("teach: Finish carries the operator's note in the stop, not in a message behind it", async () => {
+  // The note used to be a sendPrompt fired after the stop resolved. The host dispatches the
+  // learning turn from inside that stop, so the note always arrived after the turn had begun.
   const { createGatewayAdapter, calls } = await loadAdapter({
     startTeachRecording: { state: "recording", agentId: "w1", startedAtMs: Date.now(), maxDurationMs: 600_000 },
     stopTeachRecording: { state: "idle", maxDurationMs: 600_000 },
@@ -173,12 +177,24 @@ test("teach: Finish saves, then the operator's note follows as a normal message"
   const adapter = createGatewayAdapter(state);
   await adapter.startTeaching("w1");
   const result = await adapter.finishTeaching(true, "filter to unassigned tickets");
-  assert.deepEqual({ ok: result.ok, saved: result.saved }, { ok: true, saved: true });
-  assert.deepEqual(only(calls, "stopTeachRecording")[0].args, { agentId: "w1", save: true });
+  assert.deepEqual({ ok: result.ok, saved: result.saved, noteSent: result.noteSent }, { ok: true, saved: true, noteSent: true });
+  assert.deepEqual(only(calls, "stopTeachRecording")[0].args, { agentId: "w1", save: true, note: "filter to unassigned tickets" });
   await settle(40);
-  const sent = only(calls, "sendPrompt");
-  assert.equal(sent.length, 1);
-  assert.match(sent[0].args.prompt, /filter to unassigned tickets/);
+  assert.equal(only(calls, "sendPrompt").length, 0, "the note rides the stop, so nothing follows it");
+  adapter.destroy();
+});
+
+test("teach: a save with nothing typed sends no note at all", async () => {
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    startTeachRecording: { state: "recording", agentId: "w1", startedAtMs: Date.now(), maxDurationMs: 600_000 },
+    stopTeachRecording: { state: "idle", maxDurationMs: 600_000 },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.startTeaching("w1");
+  const result = await adapter.finishTeaching(true, "");
+  assert.deepEqual({ ok: result.ok, saved: result.saved, noteSent: result.noteSent }, { ok: true, saved: true, noteSent: null });
+  assert.deepEqual(only(calls, "stopTeachRecording")[0].args, { agentId: "w1", save: true }, "an empty note is not a note");
   adapter.destroy();
 });
 
@@ -360,18 +376,20 @@ test("teach: teachStatus answers the host's own state, and null when it cannot b
   third.destroy();
 });
 
-test("teach: the operator's note is only cleared once the request carrying it has landed", async () => {
-  const { createGatewayAdapter } = await loadAdapter({
+test("teach: a stop the host never took leaves the operator's text where they typed it", async () => {
+  // The note and the recording now fail together, because they are one request. The view still
+  // reads noteSent before clearing the field, and a refused stop never gets that far.
+  const { createGatewayAdapter, calls } = await loadAdapter({
     startTeachRecording: { state: "recording", agentId: "w1", startedAtMs: Date.now(), maxDurationMs: 600_000 },
-    stopTeachRecording: { state: "idle", maxDurationMs: 600_000 },
-    sendPrompt: new Error("gateway unreachable"),
+    stopTeachRecording: new Error("gateway unreachable"),
   });
   const state = seed();
   const adapter = createGatewayAdapter(state);
   await adapter.startTeaching("w1");
   const result = await adapter.finishTeaching(true, "filter to unassigned tickets");
-  assert.equal(result.ok, true, "the recording was saved; only the note failed");
-  assert.equal(result.noteSent, false, "the answer says so, so the view can keep the text");
+  assert.equal(result.ok, false, "the recording is still running, so nothing was learned from it");
+  assert.equal(result.noteSent, undefined, "no answer about the note, because the stop carrying it never landed");
+  assert.deepEqual(only(calls, "stopTeachRecording")[0].args, { agentId: "w1", save: true, note: "filter to unassigned tickets" });
   const app = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
   assert.match(app, /if \(note && result\.noteSent !== false\) note\.value = "";/);
   adapter.destroy();
@@ -389,17 +407,18 @@ test("teach: the dialog polls the host, because only the box knows the cap has f
   assert.match(app, /teachPoll = window\.setInterval\(pollTeachHost/);
 });
 
-test("teach: the note's hint does not claim the recipe reads it", async () => {
-  // learn-from-demonstration never mentions an operator note, and the host dispatches the learning
-  // turn from inside stopTeachRecording before the page sends the note at all.
+test("teach: the note's hint says where the note actually goes", async () => {
+  // The hint used to warn the operator that the note arrived after the learning turn started,
+  // which was true of the old second message. It rides the stop now, so it is in the prompt that
+  // starts the turn, and the hint has to say that instead.
   const html = await readFile(path.join(repoRoot, "ui/machine-room/index.html"), "utf8");
   const start = html.indexOf('id="teach-dialog"');
   const dialog = html.slice(start, html.indexOf("</dialog>", start)).replace(/<!--[\s\S]*?-->/g, "");
-  assert.equal(/read next to those frames/i.test(dialog), false);
-  assert.match(dialog, /The recipe does not read this note/);
-  const recipe = await readFile(path.join(repoRoot, "source/host/extensions/managed-setup/seed-skills/learn-from-demonstration/SKILL.md"), "utf8");
-  assert.equal(/operator.s note|the note you typed|user.s note/i.test(recipe), false,
-    "if the recipe ever does read the note, this test and that hint both have to change");
+  assert.match(dialog, /sent in the message that starts that learning turn/);
+  assert.equal(/does not read this note|once the learning turn has already started/i.test(dialog), false);
+  const adapter = await readFile(path.join(repoRoot, "ui/machine-room/gateway-adapter.js"), "utf8");
+  assert.match(adapter, /stopTeachRecording", save && note \? \{ agentId: id, save, note \}/,
+    "the hint is only true while the note is an argument of the stop");
 });
 
 test("teach: the refusal and the progress line are drawn beside the button that was clicked", async () => {

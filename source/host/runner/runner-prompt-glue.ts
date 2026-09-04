@@ -33,6 +33,7 @@ export interface RunnerPromptGlueOwner {
   readonly isSpotlightEnabled?: () => boolean;
   readonly uploadAttachmentsIntoBox?: (paths: readonly string[]) => Promise<ReadonlyMap<string, string>>;
   readonly getRemoteBoxAvailable?: () => boolean;
+  readonly isLocalMachineConnected?: () => boolean;
   getConversationId(): string;
   resolveBoxId(): string;
   resolveBoxBrowser?(): { readonly display: string; readonly cdpUrl: string } | null;
@@ -64,6 +65,7 @@ export function createRunnerPromptGlue(owner: RunnerPromptGlueOwner) {
     get isSpotlightEnabled() { return owner.isSpotlightEnabled; },
     get uploadAttachmentsIntoBox() { return owner.uploadAttachmentsIntoBox; },
     get getRemoteBoxAvailable() { return owner.getRemoteBoxAvailable; },
+    get isLocalMachineConnected() { return owner.isLocalMachineConnected; },
     get mcp() { return owner.mcp; },
     get resolveBoxId() { return owner.resolveBoxId; },
     get shellWatchHost() { return owner.shellWatchHost; },

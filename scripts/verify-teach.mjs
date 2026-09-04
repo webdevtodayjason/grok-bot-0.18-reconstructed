@@ -1,13 +1,17 @@
 // Teach by demonstration, end to end, on a box that has never logged in to Cursor.
 //
-// Three things had to be true before this could pass, and none of them were:
+// Four things had to be true before this could pass, and none of them were:
 //   1. The recorder read the Statsig gate `sand_teach_by_demonstration` directly. Gates default
 //      false and only bootstrap with a Cursor login, so every startTeachRecording was refused.
 //      There is now a host setting, SAND_TEACH, read live on each call the way SAND_BROWSER_USE is.
 //   2. Stop-with-save calls ensureManagedSkill("learn-from-demonstration"), and managed skills
 //      come from Cursor's dashboard. With no login the cache stayed empty, so a saved recording
 //      died at "learning workflow is unavailable". The two real skills are baked into the bundle.
-//   3. Nothing reported whether the dispatched learning turn actually carried the skill's recipe
+//   3. The operator's note from the Learn dialog was not in that turn at all: the page sent it as
+//      an ordinary message after the stop resolved, and the host dispatches the learning turn from
+//      inside the stop, so the note always landed behind the turn it was meant to steer. It is an
+//      argument of stopTeachRecording now, and this gate reads it back off the dispatched prompt.
+//   4. Nothing reported whether the dispatched learning turn actually carried the skill's recipe
 //      and the recording's queue scope. It does -- expandWorkflowReferences has always appended
 //      "Teach recording queue scope:" for this skill -- but the only surface that could show it
 //      was a [sand][workflow] trace line, added behind SAND_TOOL_TRACE for this gate. That line
@@ -33,11 +37,17 @@ const SESSIONS = "/workspace/teach-sessions";
 const QUEUES = `${SESSIONS}/queues`;
 const KEEP_SETTING = process.argv.includes("--keep-setting");
 // Budgeted against the 300s warden ceiling, worst case, including the cleanup in the finally:
-// window 45 + expansion 45 + claim 120 + idle wait 25 leaves room for the two real turns.
+// window 45 + expansion 45 + claim 120 + idle wait 25 leaves room for the two real turns. The
+// prompt wait shares its 45 with the expansion wait: both are waiting on the same dispatch, so
+// whichever runs first is the one that spends the time.
 const CLAIM_TIMEOUT_MS = 120_000;
 const EXPANSION_TIMEOUT_MS = 45_000;
 const WINDOW_TIMEOUT_MS = 45_000;
 const PROBE_IDLE_TIMEOUT_MS = 25_000;
+const PROMPT_TIMEOUT_MS = 45_000;
+// What the Learn dialog's note field sends. The host has to put it in the prompt that starts the
+// learning turn: it used to follow as a second message, dispatched after that turn had begun.
+const OPERATOR_NOTE = "flag the unassigned tickets for Jason Brashear";
 
 function token() {
   const explicit = process.env.SAND_HOST_GATEWAY_TOKEN?.trim();
@@ -113,6 +123,18 @@ const jsonLinesSince = async (from, tag) => {
     if (at < 0) return [];
     try { return [JSON.parse(line.slice(at + tag.length + 1))]; } catch { return []; }
   });
+};
+
+// The transcript comes back as a bare array from some hosts and as { entries } from others, and a
+// reader that knows only one of those shapes reports an empty conversation instead of failing.
+const transcriptEntries = async (agentId) => {
+  const answer = await call("getAgentTranscript", { id: agentId }).catch(() => []);
+  return Array.isArray(answer) ? answer : Array.isArray(answer?.entries) ? answer.entries : [];
+};
+const entryText = (entry) => {
+  const value = entry?.message?.content ?? entry?.content;
+  if (typeof value === "string") return value;
+  return Array.isArray(value) ? value.map((part) => (typeof part === "string" ? part : part?.text ?? "")).join("") : "";
 };
 
 // queueScope in teach-recording-service.ts: sha256 of the agent id, hex.
@@ -237,7 +259,7 @@ try {
   const saveStart = await call("startTeachRecording", { agentId: probe.id });
   if (saveStart?.state !== "recording") fail(`the second startTeachRecording returned ${JSON.stringify(saveStart?.state)}`);
   await sleep(6000);
-  const saved = await call("stopTeachRecording", { agentId: probe.id, save: true });
+  const saved = await call("stopTeachRecording", { agentId: probe.id, save: true, note: OPERATOR_NOTE });
   if (saved?.state !== "idle") fail(`stopTeachRecording{save:true} returned state ${JSON.stringify(saved?.state)}`);
   const savedDir = (await sessionDirs()).find((dir) => !beforeSave.has(dir));
   if (savedDir == null) fail("the saved recording produced no session directory");
@@ -248,7 +270,13 @@ try {
   if (!(videoBytes > 0)) fail(`${savedDir}/demo.mp4 is missing or empty (${videoBytes} bytes)`);
   const sessionMeta = (await sh(`cat ${savedDir}/session.json 2>/dev/null || true`)).trim();
   if (sessionMeta.length === 0) fail(`${savedDir}/session.json was never written`);
-  pass(`the saved recording holds session.json and a ${videoBytes}-byte demo.mp4`);
+  // The note is persisted here and nowhere else: the queue file is what the recipe claims and is
+  // signed, so the note stays out of it, but a recording recovered after a restart has only this
+  // file to read the operator's sentence back from.
+  const parsedMeta = (() => { try { return JSON.parse(sessionMeta); } catch { return null; } })();
+  if (parsedMeta == null) fail(`${savedDir}/session.json is not valid JSON: ${sessionMeta.slice(0, 200)}`);
+  if (parsedMeta.note !== OPERATOR_NOTE) fail(`session.json holds note ${JSON.stringify(parsedMeta.note)}, expected the note the stop was given`);
+  pass(`the saved recording holds session.json (carrying the operator's note), and a ${videoBytes}-byte demo.mp4`);
 
   const queued = await pendingFiles(scope);
   const claimedAlready = await claimedFiles(scope);
@@ -259,7 +287,31 @@ try {
   if (queueEntry.agentId !== probe.id || !/^[0-9a-f]{64}$/.test(String(queueEntry.signature ?? ""))) {
     fail(`the queue entry is not a signed record for this agent: ${JSON.stringify(queueEntry).slice(0, 200)}`);
   }
+  if (JSON.stringify(queueEntry).includes(OPERATOR_NOTE)) fail("the note is inside the signed queue entry; it is not part of what the recipe claims");
   pass(`exactly one signed queue entry under scope ${scope.slice(0, 12)} (${queued[0] ?? claimedAlready[0]})`);
+
+  // The dispatched prompt itself, read back off the transcript. The operator's note has to be in
+  // the message that starts the learning turn, and it has to be the ONLY message this stop sent:
+  // the page used to send a second one behind it, which reached the agent mid-turn.
+  const userMessages = async () => (await transcriptEntries(probe.id))
+    .filter((entry) => entry.kind === "message" && entry.role === "user")
+    .map(entryText);
+  let prompts = [];
+  const promptBy = Date.now() + PROMPT_TIMEOUT_MS;
+  while (Date.now() < promptBy) {
+    prompts = await userMessages();
+    if (prompts.length > 0) break;
+    await sleep(3000);
+  }
+  if (prompts.length === 0) fail(`no user message reached the probe within ${PROMPT_TIMEOUT_MS / 1000}s; the learning turn was never dispatched`);
+  console.log(`user messages on the probe (${prompts.length}):\n${prompts.map((text) => `  ${text.replace(/\s+/g, " ").slice(0, 240)}`).join("\n")}`);
+  const learningPrompt = prompts.find((text) => text.includes("The recording is finished."));
+  if (learningPrompt == null) fail(`no dispatched message says the recording is finished: ${JSON.stringify(prompts).slice(0, 300)}`);
+  if (!learningPrompt.includes(`The operator says: ${OPERATOR_NOTE}`)) {
+    fail(`the learning turn's prompt does not carry the operator's note: ${JSON.stringify(learningPrompt).slice(0, 300)}`);
+  }
+  if (prompts.length !== 1) fail(`the save sent ${prompts.length} user messages, not one: ${JSON.stringify(prompts).slice(0, 400)}`);
+  pass(`the learning turn's prompt carries the operator's note, in the one message the save sent: ${JSON.stringify(learningPrompt.slice(0, 160))}`);
 
   // The learning turn: did the dispatched prompt actually carry the recipe and the scope?
   let expansion = null;
@@ -292,15 +344,14 @@ try {
     if (claimed.length > 0) break;
     await sleep(5000);
   }
-  const transcript = await call("getAgentTranscript", { id: probe.id }).catch(() => []);
-  const said = (Array.isArray(transcript) ? transcript : [])
+  const said = (await transcriptEntries(probe.id))
     .filter((entry) => entry.kind === "message").slice(-4)
-    .map((entry) => `  ${entry.role ?? "?"}: ${String(entry.message?.content ?? entry.content ?? "").replace(/\s+/g, " ").slice(0, 300)}`);
+    .map((entry) => `  ${entry.role ?? "?"}: ${entryText(entry).replace(/\s+/g, " ").slice(0, 300)}`);
   console.log(`probe's last messages (${elapsed()}):\n${said.join("\n") || "  (nothing said yet)"}`);
   if (claimed.length === 0) fail(`the agent never claimed the queue file within ${CLAIM_TIMEOUT_MS / 1000}s; the loop does not close`);
   pass(`the agent claimed the recording: ${claimed.join(", ")}`);
 
-  console.log(`SUMMARY: teach recording works with SAND_TEACH=1 and no Cursor login. Refused when off, recorded, discarded clean, saved with a signed queue entry, dispatched a learning turn carrying the whole recipe and scope ${scope.slice(0, 12)}, and the agent claimed the work (${elapsed()}).`);
+  console.log(`SUMMARY: teach recording works with SAND_TEACH=1 and no Cursor login. Refused when off, recorded, discarded clean, saved with a signed queue entry, dispatched one learning turn carrying the operator's note, the whole recipe and scope ${scope.slice(0, 12)}, and the agent claimed the work (${elapsed()}).`);
 } catch (error) {
   failure = error;
   console.log(`FAIL - ${error.message}`);

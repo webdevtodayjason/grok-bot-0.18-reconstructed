@@ -46,6 +46,8 @@ interface SessionProductionDeps {
         remoteAccessor?: unknown;
       }>;
     };
+    /** DISPLAY-5: reads back the ids the roster is willing to show, so a seat held by a blank agent can be released. */
+    useRosterReader?(readVisibleAgentIds: () => Promise<Set<string>>): void;
   };
   settings: SessionExtensionContext["deps"]["settings"];
   experiments: SessionExtensionContext["deps"]["experiments"];
@@ -164,7 +166,7 @@ export function createSessionProductionExtras(
     rootDir,
     getTranscriptsDir: getSandTranscriptsDir,
     createStore(resolveUserTimeZone) {
-      return new SandAgentSessionStore(rootDir, resolveUserTimeZone, {
+      const store = new SandAgentSessionStore(rootDir, resolveUserTimeZone, {
         createMaterialization(store) {
           let materialization: SandSessionMaterialization;
           materialization = new SandSessionMaterialization({
@@ -219,6 +221,13 @@ export function createSessionProductionExtras(
           }) as unknown as ConversationStatePort;
         },
       });
+      // DISPLAY-5: the window allocator cannot tell an agent that never held a conversation from a
+      // busy one, so a blank agent kept a seat and an X server across every boot. The roster is the
+      // one place that test lives, and it exists only here, so hand the reader down.
+      context.deps["forever-box"].useRosterReader?.(
+        async () => new Set((await store.listAgents()).map(agent => String(agent.id))),
+      );
+      return store;
     },
     createHandoffDeps(): BoxHandoffDeps {
       const box = context.deps["forever-box"].box;

@@ -10,16 +10,16 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-async function loadEditor() {
+async function loadEditor(stateStub = { editor: { menu: null, triggers: [] } }) {
   const html = await readFile(path.join(repoRoot, "ui/index.html"), "utf8");
   const start = html.indexOf("/* ---- routine editor");
   const end = html.indexOf("/* ---- actions ---", start);
   assert.ok(start > 0 && end > start, "routine editor block not found in ui/index.html");
   const block = html.slice(start, end);
-  const exports = "return { readSchedule, buildSchedule, triggerProblem, blankTrigger, applyTrig, TRIGGER_KINDS };";
+  const exports = "return { readSchedule, buildSchedule, triggerProblem, blankTrigger, applyTrig, TRIGGER_KINDS, triggerUnavailable, trigMenu };";
   // The block assigns handlers onto window and reaches for page globals; stub what it touches.
   return new Function("window", "state", "esc", "$", "guard", "call", "render",
-    `${block}\n${exports}`)({}, {}, String, () => null, () => {}, () => {}, () => {});
+    `${block}\n${exports}`)({}, stateStub, String, () => null, () => {}, () => {}, () => {});
 }
 
 test("every schedule shape round-trips through the cron string", async () => {
@@ -88,4 +88,27 @@ test("editing a control rewrites only its own field of the schedule", async () =
   applyTrig(cron, "cron.time", "17:45");
   assert.equal(cron.schedule, "45 17 * * 5");
   assert.deepEqual(readSchedule(cron.schedule).dow, 5);
+});
+
+// This host can deliver none of the event triggers this menu lists: it builds one Slack event
+// source and one GitHub one (createBackendRelaySources), hands its trigger hub those two and
+// nothing else, and both are polled out of Cursor's backend relay, which needs a login this box
+// does not have. A menu that offers them anyway sells a routine that saves and never fires.
+test("an event trigger with no source on this box cannot be picked, and the menu says why", async () => {
+  const { triggerUnavailable, trigMenu, TRIGGER_KINDS } = await loadEditor({ editor: { menu: null, triggers: [] }, integrations: { integrations: [{ platform: "slack", isConnected: false }, { platform: "github", isConnected: false }] } });
+  assert.equal(triggerUnavailable("cron"), null);
+  for (const [kind] of TRIGGER_KINDS.slice(1)) assert.equal(typeof triggerUnavailable(kind), "string", `${kind} was offered with nothing to deliver it`);
+  assert.match(triggerUnavailable("slack"), /backend relay/);
+  assert.match(triggerUnavailable("linear"), /Nothing on this box delivers Linear events/);
+  const menu = trigMenu();
+  assert.equal((menu.match(/<button disabled/g) ?? []).length, TRIGGER_KINDS.length - 1);
+  assert.ok(!/onclick="addTrigger/.test(menu), "no unserved kind may still be clickable");
+  assert.match(menu, /need a listener this box has not connected/);
+});
+
+test("a connected listener is offered again, and only that one", async () => {
+  const { triggerUnavailable, trigMenu } = await loadEditor({ editor: { menu: null, triggers: [] }, integrations: { integrations: [{ platform: "slack", isConnected: true }, { platform: "github", isConnected: false }] } });
+  assert.equal(triggerUnavailable("slack"), null);
+  assert.match(trigMenu(), /onclick="addTrigger\('slack'\)"/);
+  assert.equal(typeof triggerUnavailable("github"), "string");
 });

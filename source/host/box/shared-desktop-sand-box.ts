@@ -3,7 +3,7 @@ import type { Context } from "../../packages/context/core.js";
 import { boxApplyEnvironment, boxDescription, boxIsAvailable, boxIsPreparing, boxLoadMcpServers, boxMaxWindows, boxMcpResourceAccessor, boxTerminalsFolder, type CapableBox } from "./box-capabilities.js";
 import { SAND_BOX_FIRST_FORK_WINDOW_INDEX, SAND_BOX_PRIMARY_WINDOW_INDEX, isPrimaryWindowIndex } from "../ports/box.js";
 import { BoxFileUnreadableError } from "./box-transfer.js";
-import { mintSandWindowOwnerToken } from "./box-windows.js";
+import { listSandWindowTokenIndexes, mintSandWindowOwnerToken, type ShellAccessor } from "./box-windows.js";
 import { isSandWindowOwnerId } from "../../shared/agents/subagents.js";
 
 export class SandBoxCapabilityError extends Error { constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "SandBoxCapabilityError"; } }
@@ -35,6 +35,24 @@ export class SharedDesktopSandBox<Accessor = unknown> {
   async ensureReady(ctx: Context, agentId: string) { await this.ensureAssignmentsLoaded(ctx); const isNewAssignment = !this.agentWindows.has(agentId), assigned = this.assignWindow(agentId), primary = await this.inner.ensureReady(ctx, this.sharedBoxId); if (assigned == null) return this.gateComputerUse(primary); const index = this.migrateLegacyPrimarySeat(agentId, assigned), isMigration = index !== assigned; if (isPrimaryWindowIndex(index)) return primary; let tokenIsNew = false; if (!this.agentWindowTokens.has(agentId)) { this.agentWindowTokens.set(agentId, mintSandWindowOwnerToken()); tokenIsNew = true; } if (isNewAssignment || tokenIsNew || isMigration) this.queuePersistAssignments(ctx); if (this.inner.ensureWindow == null) { await this.rollbackFailedBringup(ctx, agentId, { isNewAssignment, forkBringupAttempted: false }); return this.gateComputerUse(primary); } let window; try { window = await this.inner.ensureWindow(ctx, this.sharedBoxId, index, { ownerToken: this.agentWindowTokens.get(agentId)! }); } catch (error) { if (isMigration && !this.establishedForks.has(agentId)) { await this.restorePrimarySeat(ctx, agentId, index); return primary; } await this.rollbackFailedBringup(ctx, agentId, { isNewAssignment: isNewAssignment, forkBringupAttempted: true }); throw error; } if (this.agentWindows.get(agentId) !== index) { /* DISPLAY-4: released while it was starting (the agent was deleted mid-flight); the row is gone, so nothing would ever stop this display */ try { await this.inner.releaseWindow?.(ctx, this.sharedBoxId, index); } catch {} throw new Error(`window ${index} was released while it was starting for ${agentId}`); } this.establishedForks.add(agentId); return { remoteAccessor: window.computerUse, vncUrl: window.vncUrl, terminalsFolder: primary.terminalsFolder }; }
   async hibernate(): Promise<void> {} async recreateInBox(ctx: Context, options: { preserveData: boolean; force?: boolean }): Promise<{ started: boolean; reason?: string }> { if (this.inner.recreateInBox == null) throw new SandBoxCapabilityError("This box backend does not support an in-box recreate."); return this.inner.recreateInBox(ctx, options); } async applyEnvironment(ctx: Context, update: unknown): Promise<void> { await boxApplyEnvironment(this.inner, ctx, update); } async loadMcpServers(ctx: Context, configJson: string): Promise<unknown> { return boxLoadMcpServers(this.inner, ctx, configJson); } async mcpResourceAccessor(ctx: Context): Promise<unknown> { return boxMcpResourceAccessor(this.inner, ctx); }
   async releaseWindow(ctx: Context, agentId: string): Promise<void> { const index = this.agentWindows.get(agentId); this.agentWindows.delete(agentId); this.agentWindowTokens.delete(agentId); this.establishedForks.delete(agentId); if (index != null) this.queuePersistAssignments(ctx); if (index != null && index >= SAND_BOX_FIRST_FORK_WINDOW_INDEX) { this.windowsTearingDown.add(index); try { await this.inner.releaseWindow?.(ctx, this.sharedBoxId, index); } finally { this.windowsTearingDown.delete(index); } } }
+  /**
+   * DISPLAY-6: a seat can outlive the assignment that opened it -- a bring-up that raced a delete,
+   * or a host that died between start-window and the persist. Nothing then holds its memory to
+   * account, because every teardown path starts from an assignment. The token directory is the
+   * box's own record of which seats are up, so it is the honest list to reconcile against.
+   */
+  async sweepUnassignedWindows(ctx: Context): Promise<number[]> {
+    if (this.inner.releaseWindow == null) return [];
+    const accessor = (await this.inner.ensureReady(ctx, this.sharedBoxId)).remoteAccessor as ShellAccessor | undefined;
+    if (accessor == null || typeof accessor.get !== "function") return [];
+    const held = new Set(this.agentWindows.values()), stopped: number[] = [];
+    for (const index of await listSandWindowTokenIndexes(ctx, accessor)) {
+      if (index < SAND_BOX_FIRST_FORK_WINDOW_INDEX || held.has(index) || this.windowsTearingDown.has(index)) continue;
+      this.windowsTearingDown.add(index);
+      try { await this.inner.releaseWindow(ctx, this.sharedBoxId, index); stopped.push(index); } catch {} finally { this.windowsTearingDown.delete(index); }
+    }
+    return stopped;
+  }
   getAgentWindowIndex(agentId: string): number | undefined { return this.agentWindows.get(agentId); } getTerminalsFolder(): string | undefined { return boxTerminalsFolder(this.inner); } async runState(ctx: Context): Promise<string> { return this.inner.runState(ctx, this.sharedBoxId); } async isAvailable(): Promise<boolean> { return boxIsAvailable(this.inner); } describe(): unknown { return boxDescription(this.inner); } isPreparing(): boolean { return boxIsPreparing(this.inner, this.sharedBoxId); }
   async listBoxes(): Promise<Array<{ agentId: string; running: boolean }>> { const running = (await this.inner.listBoxes()).some((box) => box.running); return [...this.agentWindows.keys()].map((agentId) => ({ agentId, running })); } async uploadFile(ctx: Context, _agentId: string, path: string, data: Uint8Array): Promise<void> { await this.inner.uploadFile(ctx, this.sharedBoxId, path, data); } async downloadFile(ctx: Context, _agentId: string, path: string): Promise<Uint8Array> { return this.inner.downloadFile(ctx, this.sharedBoxId, path); }
   async flushPersistence(): Promise<void> { await this.persistChain; }

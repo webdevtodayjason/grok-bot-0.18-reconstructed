@@ -45,6 +45,19 @@ export const queueScope = (agentId: string): string => createHash("sha256").upda
 export const signQueueEntry = (key: Uint8Array, agentId: string, file: string): string => createHmac("sha256", key).update(`${agentId}\n${file}`).digest("hex");
 export const queueFileForSessionDir = (dir: string): string => `${dir.split("/").at(-1) ?? ""}.json`;
 export const learningPromptNonce = (recording: Recording): string => `teach-recording:${queueScope(recording.agentId)}:${queueFileForSessionDir(recording.sessionDir)}`;
+export const LEARNING_PROMPT = "The recording is finished. Learn the task from it.";
+export const MAX_OPERATOR_NOTE_CHARS = 2_000;
+// The dialog's note is free text an operator typed. Trim it, cap it so one paste cannot dominate
+// the learning turn's prompt, and treat anything else as no note at all.
+export const normalizeOperatorNote = (note: unknown): string => typeof note === "string" ? note.trim().slice(0, MAX_OPERATOR_NOTE_CHARS) : "";
+// The note rides the same message that starts the learning turn, because a note that arrives after
+// the turn is dispatched is read too late to change what the agent does with the recording.
+export const learningPromptContent = (note: string): string => note.length === 0 ? LEARNING_PROMPT : `${LEARNING_PROMPT} The operator says: ${note}`;
+// session.json is written through a heredoc whose delimiter is unquoted, so ffmpeg's pid can
+// expand inside it. That leaves $, ` and \\ live for the box's shell, and the note is operator
+// text, so spell those three as JSON escapes: the file still parses to exactly what was typed and
+// nothing in it runs.
+export const heredocSafeJson = (json: string): string => json.replace(/\\\\/g, "\\u005c").replace(/\$/g, "\\u0024").replace(/`/g, "\\u0060");
 export function learningPromptRichText(agentId: string): string { return JSON.stringify({ type: "doc", content: [{ type: "paragraph", content: [{ type: WORKFLOW_REFERENCE_NODE_TYPE, attrs: { id: LEARN_SKILL_NAME, label: "Learn from demonstration", teachQueueScope: queueScope(agentId) } }] }] }); }
 
 function startFailureKind(error: unknown): string {
@@ -64,7 +77,7 @@ export function createTeachRecordingService(deps: TeachRecordingDeps) {
   let active: Recording | null = null, failedStart: Recording | null = null;
   let startInFlight: Promise<TeachStatus> | null = null, stopInFlight: Promise<TeachStatus> | null = null, disposeInFlight: Promise<void> | null = null;
   let capWake: ((() => void) & CapHandle) | null = null, isDisposing = false, queuePersisted = false;
-  type FinalizationState = { endedAtMs: number; intent: "save" | "discard"; phase: "preparing" | "winding-down" | "checking-workflow" | "dispatching-prompt" };
+  type FinalizationState = { endedAtMs: number; intent: "save" | "discard"; note: string; phase: "preparing" | "winding-down" | "checking-workflow" | "dispatching-prompt" };
   let finalizing: FinalizationState | null = null;
   let queueKeyPromise: Promise<Uint8Array> | null = null;
   const queueKey = (): Promise<Uint8Array> => queueKeyPromise ??= deps.queueSignatureKey();
@@ -75,7 +88,7 @@ export function createTeachRecordingService(deps: TeachRecordingDeps) {
     if (result.result.case !== "success") throw new SandTeachRecordingError("shell", `teach-recording shell failed: ${result.result.case}`);
     return result.result.value;
   };
-  const sessionJson = (recording: Recording, end?: { endedAtMs: number; endReason: string }): string => JSON.stringify({ startedAt: new Date(recording.startedAtMs).toISOString(), display: recording.displayLabel, maxDurationMs: SAND_TEACH_MAX_DURATION_MS, videoPath: `${recording.sessionDir}/demo.mp4`, ffmpegPid: "__FFMPEG_PID__", ...(end == null ? {} : { endedAt: new Date(end.endedAtMs).toISOString(), endReason: end.endReason }) }, null, 2).replace('"__FFMPEG_PID__"', "$pid");
+  const sessionJson = (recording: Recording, end?: { endedAtMs: number; endReason: string; note: string }): string => heredocSafeJson(JSON.stringify({ startedAt: new Date(recording.startedAtMs).toISOString(), display: recording.displayLabel, maxDurationMs: SAND_TEACH_MAX_DURATION_MS, videoPath: `${recording.sessionDir}/demo.mp4`, ffmpegPid: "__FFMPEG_PID__", ...(end == null ? {} : { endedAt: new Date(end.endedAtMs).toISOString(), endReason: end.endReason, ...(end.note.length === 0 ? {} : { note: end.note }) }) }, null, 2)).replace('"__FFMPEG_PID__"', "$pid");
   const completedSessionJson = (recording: Recording, endedAtMs: number, signature: string): string => JSON.stringify({ agentId: recording.agentId, sessionDir: recording.sessionDir, clientNonce: learningPromptNonce(recording), signature, startedAt: new Date(recording.startedAtMs).toISOString(), endedAt: new Date(endedAtMs).toISOString() }, null, 2);
   const queueFile = (recording: Recording): string => queueFileForSessionDir(recording.sessionDir);
   const ffmpegCmdlineOwnsVideo = (pidExpr: string, videoPath: string): string => `kill -0 ${pidExpr} 2>/dev/null && tr '\\0' ' ' < /proc/${pidExpr}/cmdline 2>/dev/null | grep -qF ${JSON.stringify(videoPath)}`;
@@ -128,6 +141,22 @@ export function createTeachRecordingService(deps: TeachRecordingDeps) {
     if (result.exitCode !== 0) throw new SandTeachRecordingError("finalize_failed", `teach-recording: failed to verify queue authenticity: ${result.stdout} ${result.stderr}`);
     await quarantineQueueFiles(connection, parseQueueScan(result.stdout, key, new Map([[scope, agentId]])).filter(entry => entry.recording == null));
   };
+  // A recording that survived a restart still has its note in session.json, and the operator will
+  // not be there to type it again. Failing to read it is not worth losing the learning turn over.
+  const readOperatorNotes = async (connection: TeachBoxConnection, pending: readonly PendingRecording[]): Promise<Map<string, string>> => {
+    const notes = new Map<string, string>();
+    if (pending.length === 0) return notes;
+    try {
+      const result = await runShell(connection, pending.map(entry => `printf '%s\\t' ${JSON.stringify(entry.queueFile)}; base64 ${TEACH_SESSIONS_DIR}/${entry.queueFile.slice(0, -5)}/session.json 2>/dev/null | tr -d '\\n'; printf '\\n'`).join("\n"), "sand-teach-recording-read-notes");
+      if (result.exitCode !== 0) return notes;
+      for (const line of result.stdout.split("\n")) {
+        const [file, content, ...rest] = line.split("\t");
+        if (rest.length > 0 || file == null || content == null || content.length === 0) continue;
+        try { notes.set(file, normalizeOperatorNote((JSON.parse(Buffer.from(content, "base64").toString("utf8")) as Record<string, unknown>).note)); } catch {}
+      }
+    } catch {}
+    return notes;
+  };
   const recoverPending = async (): Promise<void> => {
     if (!deps.isEnabled()) return;
     const agentIds = await deps.listAgentIds(), firstAgentId = agentIds[0]; if (firstAgentId == null) return;
@@ -136,7 +165,8 @@ export function createTeachRecordingService(deps: TeachRecordingDeps) {
     if (result.exitCode !== 0) throw new SandTeachRecordingError("recover_failed", `teach-recording: failed to recover pending recordings: ${result.stdout} ${result.stderr}`);
     const entries = parseQueueScan(result.stdout, key, agentsByScope); await quarantineQueueFiles(connection, entries.filter(entry => entry.recording == null));
     const pending = entries.flatMap(entry => entry.recording != null && !entry.delivered ? [entry.recording] : []); if (pending.length === 0 || !await deps.ensureLearningWorkflow()) return;
-    for (const recording of pending) { await deps.sendLearningPrompt(recording.agentId, { content: "The recording is finished. Learn the task from it.", richText: learningPromptRichText(recording.agentId), clientNonce: recording.clientNonce }); await markPromptDelivered(connection, recording); }
+    const notes = await readOperatorNotes(connection, pending);
+    for (const recording of pending) { await deps.sendLearningPrompt(recording.agentId, { content: learningPromptContent(notes.get(recording.queueFile) ?? ""), richText: learningPromptRichText(recording.agentId), clientNonce: recording.clientNonce }); await markPromptDelivered(connection, recording); }
   };
   const startRecording = async (args: { agentId: string; entryPoint?: string }): Promise<TeachStatus> => {
     await recoverFailedStart(); const connection = await deps.box.ensureReady(ctx, args.agentId), windowIndex = deps.box.getAgentWindowIndex?.(args.agentId);
@@ -160,15 +190,15 @@ export function createTeachRecordingService(deps: TeachRecordingDeps) {
     if (active != null) return statusOf(); if (startInFlight != null) return startInFlight;
     const startup = startRecording(args); startInFlight = startup; try { return await startup; } catch (error) { reportStartFailure(args, error); throw error; } finally { if (startInFlight === startup) startInFlight = null; }
   };
-  const stop = async ({ agentId, save, trackCompletion }: { agentId: string; save: boolean; trackCompletion: boolean }): Promise<TeachStatus> => {
+  const stop = async ({ agentId, save, note, trackCompletion }: { agentId: string; save: boolean; note?: string | undefined; trackCompletion: boolean }): Promise<TeachStatus> => {
     const recording = active; if (recording != null && recording.agentId !== agentId) throw new SandTeachRecordingError("agent_mismatch", "teach-recording: recording belongs to a different agent");
     if (finalizing != null) { if (!save && finalizing.phase !== "dispatching-prompt") finalizing.intent = "discard"; return await stopInFlight ?? statusOf(); }
     if (recording == null) return statusOf();
-    const state: FinalizationState = { endedAtMs: Date.now(), intent: save ? "save" : "discard", phase: "preparing" }; finalizing = state;
+    const state: FinalizationState = { endedAtMs: Date.now(), intent: save ? "save" : "discard", note: normalizeOperatorNote(note), phase: "preparing" }; finalizing = state;
     const operation = (async (): Promise<TeachStatus> => {
       const connection = await deps.box.ensureReady(ctx, recording.agentId), videoPath = `${recording.sessionDir}/demo.mp4`, readPid = `pid=$(tr -d '[:space:]' < ${recording.sessionDir}/ffmpeg.pid) || exit 1`, validatePid = `case "$pid" in ''|*[!0-9]*) exit 1 ;; esac`, verifyCmdline = ffmpegCmdlineOwnsVideo('"$pid"', videoPath), shouldDiscard = () => state.intent === "discard";
       state.phase = "winding-down"; const windDownWasSave = state.intent === "save", signature = windDownWasSave ? signQueueEntry(await queueKey(), recording.agentId, queueFile(recording)) : "";
-      const windDown = windDownWasSave ? runShell(connection, ["set -e", readPid, validatePid, `if ${verifyCmdline}; then kill -INT "$pid"; fi`, `cat > ${recording.sessionDir}/session.json <<SESSION_JSON`, sessionJson(recording, { endedAtMs: state.endedAtMs, endReason: "stopped" }), "SESSION_JSON", `queue_dir=${TEACH_QUEUES_DIR}/${queueScope(recording.agentId)}`, `queue_file="$queue_dir/pending/${queueFile(recording)}"`, `mkdir -p "$queue_dir/pending" "$queue_dir/claimed"`, `cat > "$queue_file.tmp.$$" <<COMPLETED_SESSION_JSON`, completedSessionJson(recording, state.endedAtMs, signature), "COMPLETED_SESSION_JSON", `if [ ! -e "$queue_file" ] && [ ! -e "$queue_dir/claimed/$(basename "$queue_file")" ]; then mv "$queue_file.tmp.$$" "$queue_file"; else rm -f "$queue_file.tmp.$$"; fi`].join("\n"), "sand-teach-recording-stop") : discardRecording(connection, recording, verifyCmdline);
+      const windDown = windDownWasSave ? runShell(connection, ["set -e", readPid, validatePid, `if ${verifyCmdline}; then kill -INT "$pid"; fi`, `cat > ${recording.sessionDir}/session.json <<SESSION_JSON`, sessionJson(recording, { endedAtMs: state.endedAtMs, endReason: "stopped", note: state.note }), "SESSION_JSON", `queue_dir=${TEACH_QUEUES_DIR}/${queueScope(recording.agentId)}`, `queue_file="$queue_dir/pending/${queueFile(recording)}"`, `mkdir -p "$queue_dir/pending" "$queue_dir/claimed"`, `cat > "$queue_file.tmp.$$" <<COMPLETED_SESSION_JSON`, completedSessionJson(recording, state.endedAtMs, signature), "COMPLETED_SESSION_JSON", `if [ ! -e "$queue_file" ] && [ ! -e "$queue_dir/claimed/$(basename "$queue_file")" ]; then mv "$queue_file.tmp.$$" "$queue_file"; else rm -f "$queue_file.tmp.$$"; fi`].join("\n"), "sand-teach-recording-stop") : discardRecording(connection, recording, verifyCmdline);
       const result = await windDown; queuePersisted = windDownWasSave && result.exitCode === 0;
       if (shouldDiscard() && windDownWasSave) { const discarded = await discardRecording(connection, recording, verifyCmdline); queuePersisted = false; if (discarded.exitCode !== 0) throw new SandTeachRecordingError("finalize_failed", `teach-recording: failed to finalize recording: ${discarded.stdout} ${discarded.stderr}`); }
       else if (result.exitCode !== 0) throw new SandTeachRecordingError("finalize_failed", `teach-recording: failed to finalize recording: ${result.stdout} ${result.stderr}`);
@@ -176,7 +206,7 @@ export function createTeachRecordingService(deps: TeachRecordingDeps) {
         state.phase = "checking-workflow"; const workflowAvailable = await deps.ensureLearningWorkflow();
         if (shouldDiscard()) { const discarded = await discardRecording(connection, recording, verifyCmdline); queuePersisted = false; if (discarded.exitCode !== 0) throw new SandTeachRecordingError("finalize_failed", `teach-recording: failed to finalize recording: ${discarded.stdout} ${discarded.stderr}`); }
         else if (!workflowAvailable) throw new SandTeachRecordingError("workflow_unavailable", "teach-recording: learning workflow is unavailable");
-        else { state.phase = "dispatching-prompt"; await ensureAuthenticQueue(connection, recording.agentId); const pending = { agentId: recording.agentId, queueFile: queueFile(recording), clientNonce: learningPromptNonce(recording) }; await deps.sendLearningPrompt(recording.agentId, { content: "The recording is finished. Learn the task from it.", richText: learningPromptRichText(recording.agentId), clientNonce: pending.clientNonce }); await markPromptDelivered(connection, pending); }
+        else { state.phase = "dispatching-prompt"; await ensureAuthenticQueue(connection, recording.agentId); const pending = { agentId: recording.agentId, queueFile: queueFile(recording), clientNonce: learningPromptNonce(recording) }; await deps.sendLearningPrompt(recording.agentId, { content: learningPromptContent(state.note), richText: learningPromptRichText(recording.agentId), clientNonce: pending.clientNonce }); await markPromptDelivered(connection, pending); }
       }
       active = null; disposeCap(); emit(); if (trackCompletion) deps.trackRecordingStopped({ agent_id: recording.agentId, outcome: state.intent === "save" ? "saved" : "discarded", duration_seconds: Math.round((state.endedAtMs - recording.startedAtMs) / 1_000) }); return statusOf();
     })();
@@ -187,5 +217,5 @@ export function createTeachRecordingService(deps: TeachRecordingDeps) {
     const teardown = (async (): Promise<void> => { try { if (startInFlight != null) try { await startInFlight; } catch { await recoverFailedStart(); } if (stopInFlight != null) try { await stopInFlight; } catch { if (active != null && !queuePersisted) await stop({ agentId: active.agentId, save: false, trackCompletion: false }); } else if (active != null && !queuePersisted) await stop({ agentId: active.agentId, save: false, trackCompletion: false }); } finally { disposeCap(); listeners.clear(); } })();
     disposeInFlight = teardown; return teardown;
   };
-  return { api: { start, stop: ({ agentId, save }: { agentId: string; save: boolean }) => stop({ agentId, save, trackCompletion: true }), getStatus: statusOf, subscribe(listener: (status: TeachStatus) => void) { listeners.add(listener); return () => listeners.delete(listener); } }, recoverPending, dispose };
+  return { api: { start, stop: ({ agentId, save, note }: { agentId: string; save: boolean; note?: string | undefined }) => stop({ agentId, save, note, trackCompletion: true }), getStatus: statusOf, subscribe(listener: (status: TeachStatus) => void) { listeners.add(listener); return () => listeners.delete(listener); } }, recoverPending, dispose };
 }

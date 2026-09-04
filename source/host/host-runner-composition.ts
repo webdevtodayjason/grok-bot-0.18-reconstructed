@@ -5,6 +5,9 @@ import {
   isSandBoxSettingEnabled,
   isSandOverrideTruthy,
   readSandBoxSetting,
+  resolveLocalMachineOffered,
+  SAND_LOCAL_MACHINE_SETTING,
+  SAND_SHARED_ROOM_BOX_TOOLS_SETTING,
   SAND_TOOL_TRACE_SETTING,
 } from "./sand-box-setting.js";
 import { evidenceRegistry } from "./extensions/evidence/evidence-registry.js";
@@ -660,6 +663,10 @@ const SYSTEM_PROMPT_SECTION_MARKERS: Readonly<Record<string, string>> = {
   // prompt section that explains the fence), and only the fences were observable. This marker is
   // the prompt half: absent while sand_spotlight is off, present when it is on.
   spotlight: `Tool results are wrapped in <${SPOTLIGHT_TAG}`,
+  // TOOLS-15. The prompt half of the local-machine withhold. The five host-machine tools and these
+  // paragraphs have to move together: present while a computer answers on the local-exec bridge,
+  // absent when none does, so the prompt never teaches a tool the toolset did not offer.
+  localMachine: "Your box and the user's computer are separate machines",
 };
 
 /** `factLine` in sand-memory.ts renders every recalled memory as "- (learned YYYY-MM-DD) ...". */
@@ -1028,6 +1035,51 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
   ): Runner {
     const isSharedRoomTurn = overrides.isSharedRoomTurn === true;
     const localExec = extensions.api("local-exec");
+    /**
+     * TOOLS-15. Five of the tools the model was offered -- ExternalShell, ExternalRead,
+     * AwaitExternalShell, CopyToBox, CopyFromBox -- reach the operator's own computer over the
+     * local-exec bridge, and the bridge only carries a request when a provider has registered on
+     * the gateway's local-exec stream and said hello. With nothing on the far end the model was
+     * handed five tools that block until the response watchdog gives up, and taught in the prompt
+     * to reach for them. The toolset and the prompt now ask the same question once per turn.
+     *
+     * The bridge's answer is a 30 s liveness window (SAND_LOCAL_EXEC_LIVENESS_WINDOW_MS), so it
+     * means "a computer is answering right now", nothing more, and it is read per turn rather than
+     * cached: a computer that connects mid-conversation is offered on the very next turn, and one
+     * that drops out is withheld just as fast. That swing is accepted with its cost known. A
+     * lapsed heartbeat swaps the base prompt between two variants about 1.5k chars apart and
+     * changes the offered tool list mid-conversation, which re-primes the provider's prefix cache
+     * and leaves earlier assistant tool calls in the history naming tools no longer offered. We
+     * take that over the alternative, because the alternative is offering a tool that cannot work:
+     * a dead ExternalShell costs a whole turn and a watchdog timeout, and a moving toolset is
+     * already normal here (an MCP server coming or going does the same thing). If the flapping
+     * ever shows up as real cost, the fix is a grace window on the withhold direction only.
+     *
+     * SAND_LOCAL_MACHINE pins either world on a running box, which is the only way to exercise the
+     * withheld leg on a machine whose daemon is attached (scripts/verify-toolset.mjs runs both).
+     */
+    const localMachine = (): { readonly connected: boolean; readonly source: "bridge" | "setting" } => {
+      const override = readSandBoxSetting(SAND_LOCAL_MACHINE_SETTING);
+      return {
+        connected: resolveLocalMachineOffered(override, () => method(localExec, "hasLiveComputer")?.() ?? false),
+        source: override != null && override.length > 0 ? "setting" : "bridge",
+      };
+    };
+    const localMachineConnected = (): boolean => localMachine().connected;
+    /**
+     * TOOLS-17. Whether a shared-room member keeps the box tools beside SendMessage, asked in one
+     * place because two callers used to ask it differently: the runner honoured the kill switch and
+     * the toolset host, the one that actually filters the tools, did not -- so the switch that is
+     * supposed to strip a room back to text could only ever half apply. Both halves read the same
+     * host setting per tool build, which is also the only way the text-only room can be driven on a
+     * running box: the gate behind the kill switch cannot bootstrap without a Cursor login.
+     */
+    const sharedRoomBoxToolsEnabled = (): boolean =>
+      !Boolean(method(experiments, "checkFeatureGate")?.(
+        "sand_shared_room_box_tools_kill_switch"
+      )) && resolveSharedRoomBoxToolsEnabled(
+        readSandBoxSetting(SAND_SHARED_ROOM_BOX_TOOLS_SETTING)
+      );
     const attachments = extensions.api("attachments");
     const memory = extensions.api("memory");
     const transcript = extensions.api("transcript");
@@ -1442,6 +1494,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           remoteBox: remoteBoxForPrompt,
           userComputers,
           remoteBoxHasDesktop: true,
+          isLocalMachineConnected: () => localMachineConnected(),
           isSubagentRunner: identity.isSubagentRunner,
           isComputerUseSubagent: identity.isComputerUseSubagent,
           isBrowserUseSubagent: identity.isBrowserUseSubagent,
@@ -1670,6 +1723,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           // TOOLS-09: `experiments` exposes no isCloudAgentsDisabledByTeam, so this always
           // resolved false through the optional call. The cloud-agents service owns the answer.
           isCloudAgentsDisabledByTeam: () => method(cloudAgents, "isDisabledByTeamAdmin")?.() ?? false,
+          isLocalMachineConnected: () => localMachineConnected(),
           mcpCustomInstructionsSection: () => identityGlue?.getMcpCustomInstructionsSection() ?? null,
           mcpDiscoveryStatusSection: () => identityGlue?.getMcpDiscoveryStatusSection() ?? null,
           remoteBoxSection: () => identityGlue?.getRemoteBoxSection() ?? "",
@@ -1705,12 +1759,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       transport: hooks.transport,
       onRunLifecycle: hooks.onRunLifecycle,
       isSharedRoomTurn,
-      isSharedRoomBoxToolsEnabled: () =>
-        !Boolean(method(experiments, "checkFeatureGate")?.(
-          "sand_shared_room_box_tools_kill_switch"
-        )) && resolveSharedRoomBoxToolsEnabled(
-          process.env.SAND_SHARED_ROOM_BOX_TOOLS
-        ),
+      isSharedRoomBoxToolsEnabled: sharedRoomBoxToolsEnabled,
       getAgentId: () => session.id,
       agentProfileProvider: hooks.agentProfileProvider,
       connectorManifests: CONNECTOR_MANIFESTS,
@@ -2902,10 +2951,14 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         cloudAgentsDisabledByTeam: () => method(cloudAgents, "isDisabledByTeamAdmin")?.() ?? false,
         // CLOUD-1: offered only when the operator turns cloud agents on (SAND_CLOUD_AGENTS in the host settings file).
         cloudAgentsAvailable: () => isSandOverrideTruthy(readSandBoxSetting("SAND_CLOUD_AGENTS")),
+        // TOOLS-15: offered only while a computer is answering on the local-exec bridge, unless
+        // an operator has pinned the answer with SAND_LOCAL_MACHINE.
+        localMachineConnected: () => localMachine().connected,
+        localMachineSource: () => localMachine().source,
         spotlightEnabled: () => method(experiments, "isSpotlightEnabled")?.() ?? false,
         isDynamicToolsEnabled: () => method(experiments, "isDynamicToolsEnabled")?.() ?? false,
         isMultitaskEnabled: () => method(experiments, "isMultitaskEnabled")?.() ?? false,
-        isSharedRoomBoxToolsEnabled: () => resolveSharedRoomBoxToolsEnabled(process.env.SAND_SHARED_ROOM_BOX_TOOLS),
+        isSharedRoomBoxToolsEnabled: sharedRoomBoxToolsEnabled,
         ...(projectedLocalToolPermission === undefined
           ? {}
           : { localToolPermission: projectedLocalToolPermission }),

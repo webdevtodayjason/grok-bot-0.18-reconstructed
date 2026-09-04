@@ -18,7 +18,13 @@ import { build } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const root = mkdtempSync(path.join(tmpdir(), "sand-host-setting-"));
-process.env.SAND_DATA_ROOT = root;
+// Pinned per case, not once at import. The module under test reads SAND_DATA_ROOT on every call,
+// and tests/index.js loads every suite into one process before any of them run, so a later suite
+// that points the same variable at its own temp root wins for all of them: five of these cases
+// failed under that runner while passing under `node --test tests/*.test.mjs`, where each file has
+// a process to itself.
+const useRoot = () => { process.env.SAND_DATA_ROOT = root; };
+useRoot();
 after(() => {
   delete process.env.SAND_DATA_ROOT;
   rmSync(root, { recursive: true, force: true });
@@ -42,6 +48,7 @@ const write = (file, value) => {
 };
 
 test("the settings file, not box-secrets.json, is what an operator flips", () => {
+  useRoot();
   assert.equal(mod.getSandHostSettingsPath(), path.join(root, "sand-host-settings.json"));
   write("box-secrets.json", { version: 1, secrets: { SAND_BROWSER_USE: "1" } });
   assert.equal(mod.readSandBoxSetting("SAND_BROWSER_USE"), undefined,
@@ -52,6 +59,7 @@ test("the settings file, not box-secrets.json, is what an operator flips", () =>
 });
 
 test("the nested shape reads too, and a falsy value is off", () => {
+  useRoot();
   write("sand-host-settings.json", { settings: { SAND_TOOL_TRACE: "0", SAND_BROWSER_USE: "yes" } });
   assert.equal(mod.readSandBoxSetting("SAND_TOOL_TRACE"), "0");
   assert.equal(mod.isSandBoxSettingEnabled("SAND_TOOL_TRACE"), false);
@@ -59,6 +67,7 @@ test("the nested shape reads too, and a falsy value is off", () => {
 });
 
 test("a missing or unparseable file means no overrides, never a throw", () => {
+  useRoot();
   rmSync(path.join(root, "sand-host-settings.json"), { force: true });
   assert.equal(mod.readSandBoxSetting("SAND_TOOL_TRACE"), undefined);
   writeFileSync(path.join(root, "sand-host-settings.json"), "{ not json");
@@ -66,6 +75,7 @@ test("a missing or unparseable file means no overrides, never a throw", () => {
 });
 
 test("the environment still wins over the file", () => {
+  useRoot();
   write("sand-host-settings.json", { SAND_TOOL_TRACE: "0", SAND_BROWSER_USE: "0" });
   process.env.SAND_TOOL_TRACE = "1";
   try {
@@ -114,6 +124,7 @@ test("resolveMemoryDreamingEnabled: an explicit override decides, otherwise the 
 // unset switch has to fall through to the gate, and "0" has to mean off rather than unset, or a
 // deliberate disable would silently wait forever on a bootstrap that never comes.
 test("the memory switch reads out of the same host settings file", () => {
+  useRoot();
   write("sand-host-settings.json", { SAND_MEMORY_DREAMING: "1", SAND_TEACH: "0" });
   assert.equal(mod.readSandBoxSetting(mod.SAND_MEMORY_DREAMING_SETTING), "1");
   assert.equal(mod.resolveMemoryDreamingEnabled(mod.readSandBoxSetting(mod.SAND_MEMORY_DREAMING_SETTING), () => false), true);
@@ -126,6 +137,7 @@ test("the memory switch reads out of the same host settings file", () => {
 });
 
 test("the teach switch reads out of the same host settings file", () => {
+  useRoot();
   write("sand-host-settings.json", { SAND_TEACH: "1", SAND_BROWSER_USE: "0" });
   assert.equal(mod.readSandBoxSetting(mod.SAND_TEACH_SETTING), "1");
   assert.equal(mod.resolveTeachEnabled(mod.readSandBoxSetting(mod.SAND_TEACH_SETTING), () => false), true);
@@ -140,10 +152,30 @@ test("the teach switch reads out of the same host settings file", () => {
 // env object; on a running box only the settings file can change, so the helpers now default to
 // process.env with the file's values layered in. Only the named keys are consulted.
 test("maintenance switches read the host settings file through envWithSandBoxSettings", () => {
+  useRoot();
   write("sand-host-settings.json", { SAND_STALE_ROOT_GC: "1", SAND_TOOL_TRACE: "1" });
   const env = mod.envWithSandBoxSettings(["SAND_STALE_ROOT_GC", "SAND_CONVERSATION_GC"], { HOME: "/x" });
   assert.equal(env.SAND_STALE_ROOT_GC, "1");
   assert.equal(env.SAND_CONVERSATION_GC, undefined);
   assert.equal(env.SAND_TOOL_TRACE, undefined, "keys that were not asked for are not layered in");
   assert.equal(env.HOME, "/x");
+});
+
+// TOOLS-15. The five host-machine tools swing on a live 30 s bridge-liveness fact, which no gate
+// can stage: on a box with the desktop app attached it is stuck at "connected". This switch pins
+// either world so both legs can be driven and measured. Unset has to fall through to the bridge,
+// and "0" has to mean withheld rather than unset, or the withhold is unverifiable again.
+test("the local-machine switch pins either world and otherwise asks the bridge", () => {
+  useRoot();
+  write("sand-host-settings.json", { SAND_LOCAL_MACHINE: "0" });
+  assert.equal(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), "0");
+  assert.equal(mod.resolveLocalMachineOffered(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), () => true), false,
+    "the pin withholds even while a computer is announced");
+  write("sand-host-settings.json", { SAND_LOCAL_MACHINE: "1" });
+  assert.equal(mod.resolveLocalMachineOffered(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), () => false), true,
+    "the pin offers even while none is");
+  write("sand-host-settings.json", {});
+  assert.equal(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), undefined);
+  assert.equal(mod.resolveLocalMachineOffered(undefined, () => true), true, "unset asks the bridge");
+  assert.equal(mod.resolveLocalMachineOffered(undefined, () => false), false, "unset asks the bridge");
 });

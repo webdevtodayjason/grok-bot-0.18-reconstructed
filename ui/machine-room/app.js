@@ -1217,6 +1217,33 @@
     ["linear", "Linear issue"], ["sentry", "Sentry alert"], ["pagerduty", "PagerDuty incident"],
     ["microsoftTeams", "Teams message"],
   ];
+  // What can actually deliver an event on this box. The host builds exactly two event sources
+  // (createBackendRelaySources: a Slack one and a GitHub one), hands those two to the trigger hub
+  // and nothing else, and both are polled out of Cursor's backend relay -- which needs a Cursor
+  // login this deployment does not have. So Linear, Sentry, PagerDuty and Teams have no source at
+  // all here, and Slack and GitHub only work while the host reports that listener connected. The
+  // picker used to offer all six as though they worked: the routine saved, its card showed the
+  // word "trigger" where a countdown goes, and nothing ever fired it.
+  const EVENT_TRIGGER_PLATFORM = {
+    slack: "Slack", github: "GitHub", linear: "Linear",
+    sentry: "Sentry", pagerduty: "PagerDuty", microsoftTeams: "Teams",
+  };
+  const RELAY_SOURCED_TRIGGERS = ["slack", "github"];
+  function listenerRow(platform) {
+    return (state.plugins ?? []).find((plugin) => plugin.group === "Listeners" && plugin.id === platform) ?? null;
+  }
+  // Null means this box can serve the trigger. A string is the reason it cannot, written to be
+  // read by whoever is about to save a routine on it.
+  function triggerUnavailable(kind) {
+    if (kind === "cron") return null;
+    const platform = EVENT_TRIGGER_PLATFORM[kind] ?? kind;
+    if (!RELAY_SOURCED_TRIGGERS.includes(kind))
+      return `Nothing on this box delivers ${platform} events. The host wires its trigger hub to a Slack source and a GitHub source and to nothing else, so a routine on this trigger would save and then wait forever.`;
+    const row = listenerRow(kind);
+    if (row && row.status === "connected") return null;
+    return `${platform} events reach a routine only through Cursor's backend relay, and the host reports ${row ? `its ${platform} listener ${row.category.toLowerCase()}` : `no ${platform} listener at all`}. Connecting one needs a Cursor login this box does not have, so a routine on this trigger would save and then wait forever.`;
+  }
+
   const GITHUB_EVENTS = [
     ["pr-opened", "PR opened"], ["pr-merged", "PR merged"], ["review-requested", "Review requested"],
     ["issue-assigned", "Issue assigned"], ["ci-failed", "CI failed"], ["ci-passed", "CI passed"],
@@ -1347,9 +1374,32 @@
   }
 
   function triggerStackMarkup() {
-    return draftTriggers.map((t, i) => {
+    // An unserved kind stays in the list, because a routine that already carries one has to be
+    // editable, but it cannot be picked and it says why. A schedule is served by the box itself.
+    // The note is built from what triggerUnavailable actually said, not from a fixed sentence: a
+    // listener the host reports connected drops out of the list and out of the prose with it,
+    // rather than being offered in the picker under a paragraph still calling it unavailable.
+    const blocked = TRIGGER_KINDS.filter(([kind]) => triggerUnavailable(kind) != null);
+    const unsourced = blocked.filter(([kind]) => !RELAY_SOURCED_TRIGGERS.includes(kind)).map(([, label]) => label);
+    const unconnected = blocked.filter(([kind]) => RELAY_SOURCED_TRIGGERS.includes(kind)).map(([, label]) => label);
+    const sentences = blocked.length === 0 ? [] : [
+      `${blocked.length} of the trigger kinds below need a listener this box has not connected, so ${blocked.length === 1 ? "it is" : "they are"} listed and cannot be chosen.`,
+      "The host wires its trigger hub to one Slack event source and one GitHub event source and to nothing else, and both are polled out of Cursor\u2019s backend relay, which needs a login this box does not have.",
+      ...(unsourced.length ? [`${unsourced.join(", ")} have no event source here at all.`] : []),
+      ...(unconnected.length ? [`${unconnected.join(" and ")} would work only while the host reports that listener connected, and it does not.`] : []),
+      "A schedule is run by the box itself and always works.",
+    ];
+    const intro = sentences.length
+      ? `<p class="field-hint" data-event-triggers-note>${escapeHtml(sentences.join(" "))}</p>`
+      : "";
+    return intro + draftTriggers.map((t, i) => {
       const problem = triggerProblem(t);
-      return `<div class="panel-card" style="${problem ? "outline:1px solid var(--amber-500)" : ""}"><div class="setting-row"><select data-trig="${i}" data-trig-field="type">${TRIGGER_KINDS.map(([v, l]) => `<option value="${v}" ${t.type === v ? "selected" : ""}>${escapeHtml(l)}</option>`).join("")}</select>${draftTriggers.length > 1 ? `<button class="ghost-button" type="button" data-drop-trigger="${i}">Remove</button>` : ""}</div>${triggerFields(t, i)}${problem ? `<span class="field-hint">${escapeHtml(problem)} — the host accepts an incomplete trigger and then never fires it.</span>` : ""}</div>`;
+      const unavailable = triggerUnavailable(t.type);
+      const options = TRIGGER_KINDS.map(([v, l]) => {
+        const why = triggerUnavailable(v);
+        return `<option value="${v}" ${t.type === v ? "selected" : ""}${why && t.type !== v ? " disabled" : ""}>${escapeHtml(why ? `${l} (no listener on this box)` : l)}</option>`;
+      }).join("");
+      return `<div class="panel-card" style="${problem || unavailable ? "outline:1px solid var(--amber-500)" : ""}"><div class="setting-row"><select data-trig="${i}" data-trig-field="type">${options}</select>${draftTriggers.length > 1 ? `<button class="ghost-button" type="button" data-drop-trigger="${i}">Remove</button>` : ""}</div>${unavailable ? `<span class="field-hint" data-trigger-unavailable="${escapeHtml(t.type)}">${escapeHtml(unavailable)}</span>` : ""}${triggerFields(t, i)}${problem ? `<span class="field-hint">${escapeHtml(problem)}: the host accepts an incomplete trigger and then never fires it.</span>` : ""}</div>`;
     }).join("") + `<button class="ghost-button" type="button" data-add-trigger>＋ Another trigger</button>`;
   }
 
@@ -1936,8 +1986,8 @@
         // operator with a toast about text that was already gone.
         if (note && result.noteSent !== false) note.value = "";
         elements.teachDialog.close();
-        // A note the host never took is reported by the adapter's own failure toast, so it is not
-        // repeated here; what matters on this side is that the text was kept.
+        // The note travels in the stop itself now, so there is no second request that can fail on
+        // its own: a stop this page could not complete returned above with the text still here.
         showToast(result.alreadyStopped
           ? result.message
           : save
