@@ -110,6 +110,18 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-04 afternoon (Wave S2 and the public switch-over).** Jason's call: public on the
+  domain with the relay password as the lock, inside Coolify. AUTH-3: the lockout keyed on the
+  real visitor behind Traefik and Cloudflare (trusted ranges, Cloudflare edges, forged headers
+  ignored, HSTS). The Coolify compose written against the parser as installed: no named volumes
+  (renamed even when external, so Titan's data is mounted from the volumes' own directories), no
+  single-file binds (copied into Coolify's records), no container names (overwritten; the relay
+  finds the box by label), the bundle copied in by the entrypoint. Created and configured through
+  the Coolify API (service, token, the relay's domain through the service `urls` field, since the
+  sub-application route 404s on 4.0.0), the tailnet DNS record deleted, deployed; the public gate
+  40/40 against https://tb.semfreak.dev. The TinyFish recipe in docs/CONNECTORS-TINYFISH.md.
+  Also VNC-2 and AUTH-2 (the desktop through the relay; a bearer mints a session).
+
 - **2026-09-04 morning to midday (Wave U1: login, memory, auto review; and the R750's first hours).**
   AUTH-1: a password on the relay (scrypt hash, signed session, lockout, bearer kept for scripts,
   refusal to bind off loopback without it), shipped to the R750 and proven by the deploy gate.
