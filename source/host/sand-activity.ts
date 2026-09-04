@@ -2,7 +2,7 @@ import { clampLine } from "../shared/sand-text.js";
 export const MAX_ACTIVITY_DETAIL_CHARS = 80, NAMED_ACTIVITY_MAX_HOLD_MS = 2500;
 export const THINKING_ACTIVITY = { kind: "thinking" } as const;
 export const SEND_MESSAGE_TOOL_CALL_OUTLINE_NAME = "SendMessage";
-export const SAND_BOX_SHELL_TOOL_NAME = "Shell", SAND_EXTERNAL_SHELL_TOOL_NAME = "ExternalShell", SAND_BOX_READ_TOOL_NAME = "Read", SAND_EXTERNAL_READ_TOOL_NAME = "ExternalRead", SAND_BOX_AWAIT_SHELL_TOOL_NAME = "AwaitShell", SAND_EXTERNAL_AWAIT_SHELL_TOOL_NAME = "ExternalAwaitShell";
+export const SAND_BOX_SHELL_TOOL_NAME = "Shell", SAND_EXTERNAL_SHELL_TOOL_NAME = "ExternalShell", SAND_BOX_READ_TOOL_NAME = "Read", SAND_EXTERNAL_READ_TOOL_NAME = "ExternalRead", SAND_BOX_AWAIT_SHELL_TOOL_NAME = "AwaitShell", SAND_EXTERNAL_AWAIT_SHELL_TOOL_NAME = "AwaitExternalShell"; // the real product's name (teardown §7.5, 2026-08-15) and shared/agents/agent-tool-names.ts; this copy had drifted to "ExternalAwaitShell"
 export type AgentActivity = typeof THINKING_ACTIVITY | { kind: "tool"; tool: string; detail?: string; target?: string; callId: string };
 export type ActivityTransition = { type: "keep" | "clear" } | { type: "set"; activity: AgentActivity };
 export type ActivityUpdate = { type: "thinking-delta" } | { type: "text-delta"; text: string } | { type: "tool-call"; id: string; name: string; status: string; args?: string; summary?: string } | { type: "send-message" | "turn-ended" } | { type: string; [key: string]: unknown };

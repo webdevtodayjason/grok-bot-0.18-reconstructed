@@ -137,53 +137,40 @@ the handoff between layers:
 
 The two numbers the operator asked about reconcile as follows.
 
-## 2. Thirty-four tools versus "a hundred and twenty"
+## 2. Thirty-five tools versus "a hundred and twenty", corrected against the primary source
 
-**The 120-something is the gateway, not a toolset.** `SAND_GATEWAY_COMMANDS` registers exactly 123
-entries (`source/host/gateway-protocol.ts:4-128`), served as `POST /api/<command>` to the desktop
-app and the Machine Room. That is the operator API. The model never sees it, and the two UIs call 41
-of them. Its gap is a UI-wiring gap (section 4, GW-*), not a model-capability gap.
+**Correction 2026-09-03 19:30 CDT.** The first version of this section put the real product's
+ceiling at "about 36" from this codebase's factory table. The research folder holds the primary
+source: `~/grock bot research/01-grok-bot-teardown.md` §7.5, the live product's catalog printed by
+its own agent on 2026-08-15, **40 functions verbatim**. The audit did not consult it. Here is the
+reconciliation against what this box offers today.
 
-**The model's ceiling in this role is about 36, and we offer 34.** `TurnToolFactories`
-(`turn-toolset.ts:551-578`) declares 26 factory slots. Five expand to arrays, so the whole tree
-defines 55 distinct model-facing tool names across all agent roles. No single agent can ever see all
-55: the chief, the computerUse subagent, the browserUse subagent and a group bot each get a
-different projection. For the chief with the box up, `buildTurnTools` offers 34:
+**The 120-something is two things, neither a chief toolset.** `SAND_GATEWAY_COMMANDS` registers
+123 operator commands (`gateway-protocol.ts:4-128`), which the model never sees. And the real
+product's connector tools ride inside the two-function meta pair (GetMcpTools, CallMcpTool); the
+teardown observed 22 MCP servers on the account, so the tools reachable *through* that pair ran to
+a hundred or more. Both are real; neither is a function on the wire.
 
-| Group | Count | Tools |
+**Name by name, real product (40) against this box (35 sent, 36 offered):**
+
+| Real product, 2026-08-15 | This box | Status |
 |---|---|---|
-| Conversational | 8 | Task, TodoWrite, SendMessage, SendToAgent, ReactToMessage, CreateAgent, UpdateAgent, update_state |
-| External and web | 5 | ExternalShell, ExternalRead, ExternalAwaitShell, WebSearch, WebFetch |
-| Box | 3 | Shell, Read, AwaitShell |
-| File transfer | 2 | CopyToBox, CopyFromBox |
-| Desktop | 2 | Screenshot, request_box_help |
-| MCP management | 10 | SearchPlugins, GetPlugin, InstallPlugin, UninstallPlugin, AddMcpServer, UninstallMcpServer, GetMcpServerStatus, SetMcpInstructions, RestartMcpServers, AuthenticateMcpServer |
-| Subagent management | 3 | CheckSubagent, MessageSubagent, StopSubagent |
-| Cloud | 1 | CloudAgent (the unnamed 34th; its team-policy gate never resolves, TOOLS-09) |
+| Task, TodoWrite, SendMessage, SendToAgent, ReactToMessage, CreateAgent, UpdateAgent, update_state | same | present |
+| ExternalShell, ExternalRead, **AwaitExternalShell**, WebSearch, WebFetch | same, but the third had drifted to `ExternalAwaitShell` | renamed to match 2026-09-03 |
+| Shell, Read, AwaitShell, CopyToBox, CopyFromBox, Screenshot, request_box_help | same | present |
+| GetMcpTools, CallMcpTool | same, since Wave A | present |
+| SearchPlugins, GetPlugin, InstallPlugin, AddMcpServer, UninstallMcpServer, UninstallPlugin, GetMcpServerStatus, SetMcpInstructions, RestartMcpServers, AuthenticateMcpServer | same | present (Cursor-backed verbs answer empty or error here, CP-05) |
+| CheckSubagent, MessageSubagent, StopSubagent | same | present |
+| CloudAgent | withheld unless `SAND_CLOUD_AGENTS=1` | Cursor-only; was silently dropped from the wire anyway (CLOUD-1) |
+| **GenerateImage** | factory exists, no provider bound | **real gap**, TOOLS-05: the prompt tells the model to use it (`system-prompt.ts:139-140`) and it is not offered; needs an image endpoint on the routed path (xAI or Alibaba both serve one) |
+| **SendFeedback** | absent from the tree | Cursor product feedback; not worth a local stub (TOOLS-14) |
+| **RemoveMcpAccount, RenameMcpAccount** | withheld by `mcp_multi_account` | Cursor account plumbing; the real product had them on by 2026-08-15 (TOOLS-06) |
 
-The 26 in `docs/evidence/wire-request-0.json` were captured before the box was up; the eight added
-since are exactly the box-gated and subagent-management tools plus CloudAgent.
-
-**The 21 withheld, and why:**
-
-| Tools | Count | Why | Verdict |
-|---|---|---|---|
-| Computer | 1 | By design: only the computerUse subagent gets it, via Task | correct (TOOLS-04) |
-| browser_* | 15 | The browserUse subagent is never offered in Task's enum, and its Statsig gate defaults false with no env override | **gap** (TOOLS-03, SUB-1) |
-| GetMcpTools, CallMcpTool | 2 | `mcpMeta` is never populated on the production projection | **the real gap** (TOOLS-01, CP-01) |
-| generate_image | 1 | No provider anywhere in the tree | decision (TOOLS-05) |
-| RemoveMcpAccount, RenameMcpAccount | 2 | `mcp_multi_account` must stay off until a backend index exists | correct (TOOLS-06) |
-
-Connector tools never appear as individual functions on the wire, in this codebase or upstream's
-design. They ride inside the two-tool meta pair (`mcp-tool-registry.ts:17-38`): GetMcpTools lists
-them, CallMcpTool invokes them. A fully connected upstream agent in this role therefore sees ~36
-tools, not 120. Dynamic-tools mode (`grok_bot_dynamic_tools`, default false) moves tools *out* of
-the wire list behind a dispatch pair and lowers the count further. Group bots are filtered to 5
-tools (or 1 for text-only rooms) by `SHARED_ROOM_TOOL_NAMES` (TOOLS-07).
-
-So: the real tool gap is **two tools** (the MCP meta pair, which unlocks every connector) plus the
-**browser subagent** behind a gate. Everything else the operator remembers as "tools" is either the
-gateway (section 4) or the seven prompt sections the model is not shown (section 3).
+So the honest count: the real product offers 40 to its chief; this box offers 35 on the wire. Of
+the five missing, one is a functional gap in a feature the prompt promises (GenerateImage), one is
+a deliberate withhold of a tool that cannot work here (CloudAgent), and three are Cursor account
+or product surfaces (SendFeedback, the two account verbs). The 15 `browser_*` tools and Computer
+are not in the real chief catalog either: there, as here, they belong to the Task subtypes.
 
 ## 3. The shape of the damage
 
@@ -291,7 +278,7 @@ merged into one row and both ids kept.
 | MR-08 · **landed** | Model row is box-wide, Role reads "not set" and cannot be set | Label "Endpoint (box-wide)"; Role editable through `updateAgent` | S |
 | MR-09 · **landed** | Files tab labelled "Not wired yet" over a working view | One-line label change | S |
 | MR-14 · **landed** | A recording in progress is never surfaced after reload | On boot, if `state.teaching.active`, open teach mode seeded with the host's `startedAt` | S |
-| TOOLS-11 | The 34-vs-120 reconciliation was undocumented | Section 2 of this document; the audit doc's two "122" corrected to 123 | S |
+| TOOLS-11 | The 34-vs-120 reconciliation was undocumented, and its first version missed the primary source | Section 2, corrected against the teardown's 40-function catalog | S |
 | BL-P1 · BL-W5 · BL-W7 | Backlog rows stale: P1 closed but written open; wave-5 item 11 fixed but open; §7 reads as standing policy | Closed in this commit, section 6 | S |
 
 Refuted, kept for the record: **TOOLS-08** (the empty `toolsGenerator` at `turn-toolset.ts:1459` is
