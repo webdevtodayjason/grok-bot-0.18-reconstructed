@@ -1582,6 +1582,11 @@ wave's output; `npm test` still green; zero UI/feature diffs outside `docs/`.
 
 ## 8. Where things live
 
+- **The desktop through the relay (2026-09-04):** `ui/server.mjs` serves `/vnc/<display>/` from the
+  box's noVNC and proxies `/vnc/<display>/websockify` (6080 for the primary, 6081 with the token
+  for a fork display), authenticated like every other route; the adapter builds the frame on the
+  page's own origin. A gateway bearer on a page request mints the session cookie, which is how
+  `verify-deploy.mjs` logs in without a password.
 - **More host switches (2026-09-04, Wave U1):** `SAND_MEMORY_DREAMING` (start-time: read once when
   the memory extension starts, so a restart applies it), `SAND_AUTO_REVIEW` (enforce override,
   live per call) and `SAND_AUTO_REVIEW_MODE` (off, shadow, enforce; live). The gates table marks

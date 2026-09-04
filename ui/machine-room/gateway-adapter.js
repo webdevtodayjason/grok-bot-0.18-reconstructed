@@ -1702,15 +1702,26 @@
           // The websockify token IS the display number, so one parse gives both the frame to show
           // and the display to launch apps on.
           const token = /token%3D(\d+)/i.exec(url)?.[1] ?? /token=(\d+)/i.exec(url)?.[1] ?? null;
+          const display = token ? Number(token) : 1;
+          // The host's answer names its own loopback (127.0.0.1:6081), which is the right address
+          // only for a browser on the same machine as the box. Through the R750 that sent the
+          // operator's browser at his own Mac, and the frame read "Failed to connect to downstream
+          // server". So the frame is asked for on the page's own origin instead: the relay proxies
+          // the box's noVNC at /vnc/<display>/, behind the same login as everything else. It is
+          // still the box's own vnc.html, not a copy -- vnc_lite ignores resize=scale, so the
+          // framebuffer rendered at native size inside a smaller iframe and showed the top-left
+          // corner of the screen with the rest cropped away.
+          //
+          // The path query is what noVNC opens its websocket on, and this client resolves it with
+          // `new URL(path, location.href)` -- relative to the PAGE, not to the host -- so it is
+          // given as an absolute path or it would land at /vnc/N/vnc/N/websockify.
+          const src = `${global.location.origin}/vnc/${display}/vnc.html`
+            + `?path=${encodeURIComponent(`/vnc/${display}/websockify`)}`
+            + "&autoconnect=1&resize=scale&reconnect=1&bell=0";
           return {
             state: status?.state ?? "unknown",
-            display: token ? Number(token) : 1,
-            // Keep the host's own vnc.html. vnc_lite ignores resize=scale, so the framebuffer
-            // rendered at the desktop's native size inside a smaller iframe and you saw the
-            // top-left corner of the screen with the rest cropped away. The full client scales
-            // to fit and keeps its control bar collapsed, which is what the real product shows.
-            url: url ? url + "&autoconnect=1&resize=scale&reconnect=1&bell=0"
-                     : "http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale&reconnect=1&bell=0",
+            display,
+            url: src,
             shared: !token,
           };
         });

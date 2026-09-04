@@ -320,18 +320,26 @@ loads with an empty model picker and a connector editor that saves nothing, with
 
 Know this before cutover rather than after. It is also what makes item 4's second path serious.
 
-### 9. Optional: the `/operator` desktop
+### 9. The desktop, and the one page that still needs a tunnel
 
-`ui/index.html` hardcodes `http://127.0.0.1:6080/vnc_lite.html`, so the embedded desktop on
-`/operator` is dead through `tb.semfreak.dev`. The box publishes 6080 on the server's loopback, so
-the working route today is an ssh tunnel:
+The Machine Room's desktop needs nothing from you. The relay proxies it: the frame is asked for at
+`/vnc/<display>/vnc.html` on whatever origin the page itself is on, the relay serves the box's own
+noVNC through, and `/vnc/<display>/websockify` carries the socket to the box's websockify (6080 for
+the shared seat on `:1`, 6081 with the display as its token for every agent's own screen). Both
+halves sit behind the same login as the rest of the console, the upgrade included, and nothing is
+copied out of the box image.
 
-```
-ssh -L 6080:localhost:6080 dell-remote
-```
+That is a change from what this file used to say. The host answers `ensureForeverBox` with a URL on
+its OWN loopback (`http://127.0.0.1:6081/...`), which is the right address only for a browser
+running on the server. Jason's browser resolved it against his Mac, which runs a box of its own on
+6081, and got the wrong machine's screen or `Failed to connect to downstream server`. **No ssh
+tunnel is needed for the Machine Room desktop, and none ever helped: the address was wrong, not
+unreachable.**
 
-then open `/operator` from the Mac. The Machine Room at `/` does not need any of this. The real
-fix is a relay route for the VNC path.
+The `/operator` page is the exception. `ui/index.html` still hardcodes
+`http://127.0.0.1:6080/vnc_lite.html`, so its embedded desktop is dead through `tb.semfreak.dev`
+and an ssh tunnel (`ssh -L 6080:localhost:6080 dell-remote`) is still the only way to see it. The
+Machine Room at `/` is the console; `/operator` is the older page kept beside it.
 
 ## What to verify
 
@@ -344,28 +352,42 @@ fix is a relay route for the VNC path.
 3. the login: the relay reports a password is configured, an unauthenticated browser asking for
    `/` is redirected to `/login`, the page renders one password field, a wrong password is refused
    with no cookie, a login body too large to be a password is refused `413` rather than buffered,
-   the right one returns a 302 and an `HttpOnly; SameSite=Strict; Max-Age=43200`
-   cookie, and that cookie reaches `getHostStatus` with no authorization header of its own, which
-   is what now proves the relay is still injecting the bearer. `POST /logout` clears the cookie
+   a page request carrying the gateway bearer is served AND given an `HttpOnly; SameSite=Strict;
+   Max-Age=43200` cookie while an `/api` call with the same bearer is given none, and that cookie
+   reaches `getHostStatus` with no authorization header of its own, which is what proves the relay
+   is still injecting the bearer. `POST /logout` clears the cookie
 4. `listAgents` 200; a probe agent created, seen in the roster, deleted, the roster back to its
    baseline with no strays, and exactly one new id in the box's `deleted-agents.json`, which is
    the permanent residue every probe run leaves
-5. the Machine Room in real headless Chrome: opening `/` lands on the login page, signing in lands
-   on the console, the roster paints cards from the live gateway, the cards carry names, the header
-   shows the host's agent count, the Log out control is on screen, and no console error or failed
-   `/api` request mentions the gateway
-6. the lockout: five wrong passwords refused, the sixth rate limited with a `Retry-After`, the
-   right password refused too while it holds, and the gateway bearer unaffected by any of it
+5. the Machine Room in real headless Chrome: a browser carrying the bearer lands on the console
+   rather than the login and is holding the session the relay minted, the roster paints cards from
+   the live gateway, the cards carry names, the header shows the host's agent count, the Log out
+   control is on screen, and no console error or failed `/api` request mentions the gateway
+6. the desktop: a second probe agent is created, the host gives it a screen, the console opens it,
+   and the frame is on the page's own origin under `/vnc/` (not on the viewer's `127.0.0.1`),
+   carries the box's own noVNC, draws a framebuffer, and a websocket to
+   `/vnc/<display>/websockify` reaches open state. Sixty seconds, then the probe is deleted
+7. the lockout: wrong passwords refused until the fifth failure from this address (the login step
+   above already spent two of the five, and only a successful login clears them, which this gate
+   cannot do), then rate limited with a `Retry-After`, a
+   request that answered `413` a moment earlier refused unread with a `429` while it holds (which
+   is how a gate that does not know the password still proves the lockout stops the source rather
+   than judging the password), and the gateway bearer unaffected by any of it
 
 Exit 0 is a pass. It reads the server's bearer token over ssh at test time and holds it in memory
 only; it never writes it to the Mac's disk and never prints it.
 
-The gate needs the login password, which cannot be read out of `auth.json` (that file holds a hash).
-It takes it from `TITANBOT_UI_PASSWORD`, or from `/home/sem/titanbot/profile/ui-password.probe` at
-mode 0600 beside the gateway token. Keeping it there adds no capability to that directory: anything
-that can read the token already holds the whole gateway surface. It is never printed, only its
-length. Step 6 leaves this Mac's address locked out of the login for 30 seconds, so a second gate
-run started immediately will fail its login step; wait half a minute.
+The gate does not know the console password and no longer asks for one. It used to read a copy from
+`/home/sem/titanbot/profile/ui-password.probe`, which was a second secret to keep in step with the
+real one, and it drifted the first time the password changed. Delete that file if it is still
+there; nothing reads it. What the gate proves now is the shape of the door -- the wrong password
+refused, the lockout holding -- and it gets in with the gateway bearer, which it reads over ssh
+anyway and which is already full access. The last step leaves this Mac's address locked out of the
+login for 30 seconds, so a second gate run started immediately will fail its login step; wait half
+a minute.
+
+Each run creates two probe agents and deletes both, so it adds two ids to the box's
+`deleted-agents.json`, which is permanent by design.
 
 The header can read `0 / 50 agents` with a card on screen. That is not a phantom: `countAgents` is
 `sessionStore.listAgents()` with no active-agent id, and a blank, unnamed, non-active agent is

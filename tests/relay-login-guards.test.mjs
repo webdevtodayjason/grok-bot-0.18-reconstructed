@@ -1,4 +1,4 @@
-// The two login guards that exist only as behaviour, so a helper test cannot reach them.
+// The login guards that exist only as behaviour, so a helper test cannot reach them.
 //
 // The first is the relay refusing to bind a reachable address with no password. That refusal is
 // the whole "by construction" claim: a titanbot install without a password serves nothing rather
@@ -7,9 +7,14 @@
 // The second is which 401 sends the console to the login. The relay marks its own refusal; the
 // gateway's 401 means the relay's bearer is stale, and bouncing on that is a loop the operator
 // cannot escape by typing the right password.
+//
+// The third is the bearer minting a session, and the fourth is the desktop proxy sitting behind
+// the same login on both of its halves. Both are further down, after the helper that starts a
+// relay copy on a real port.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
+import net from "node:net";
 import { copyFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -99,4 +104,112 @@ test("a 401 the gateway produced is reported, not turned into a login loop", asy
   const response = await upstream.relayFetch("/api/getHostStatus");
   assert.equal(response.status, 401);
   assert.deepEqual(upstream.navigations, []);
+});
+
+// The third guard: a bearer on a page request mints a session cookie.
+//
+// A browser handed the gateway token as a header lands on the console and then does browser
+// things -- an EventSource with no custom header, an iframe with none either -- and every one of
+// those was refused. Holding the token is already full access, so the cookie takes nothing away;
+// it puts the access somewhere the browser keeps sending it. The gates depend on this: headless
+// Chrome cannot type a password nobody but the operator knows.
+const TEST_TOKEN = "a".repeat(64);
+
+// A relay listening on a real port, with a real auth.json, so the tests below exercise the
+// request path rather than a helper. The port is picked at random and retried, because there is
+// no way to read back the port from a server started with SAND_UI_PORT=0: it prints the value it
+// was given, not the one the kernel chose.
+async function startRelay() {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const entry = serverCopy();
+    const dir = path.dirname(entry);
+    const { newAuthRecord, writeAuthFile } = await import("../ui/auth.mjs");
+    writeAuthFile(path.join(dir, "auth.json"), newAuthRecord("a password no test types"));
+    const port = 34000 + Math.floor(Math.random() * 8000);
+    const child = spawn(process.execPath, [entry], {
+      env: { ...process.env, SAND_UI_PORT: String(port), SAND_UI_BIND_HOST: "127.0.0.1",
+        SAND_HOST_GATEWAY_TOKEN: TEST_TOKEN,
+        // Nothing must answer here. Every call in these tests is decided by the login before the
+        // relay ever reaches upstream, and a 502 from an unreachable gateway is itself the proof
+        // that a request got past the door.
+        SAND_HOST_GATEWAY_URL: "http://127.0.0.1:1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const listening = await new Promise((resolve) => {
+      let out = "";
+      child.stdout.on("data", (chunk) => { out += chunk; if (out.includes("auth password login")) resolve(true); });
+      child.on("exit", () => resolve(false));
+      setTimeout(() => resolve(false), 10_000).unref();
+    });
+    if (listening) return { base: `http://127.0.0.1:${port}`, stop: () => child.kill("SIGKILL") };
+    child.kill("SIGKILL");
+  }
+  throw new Error("the relay copy would not start on any of five ports");
+}
+
+test("a bearer on a page request mints a session, and that session works on its own", async () => {
+  const relay = await startRelay();
+  try {
+    const page = await fetch(`${relay.base}/`, {
+      redirect: "manual", headers: { accept: "text/html", authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    const setCookie = page.headers.get("set-cookie") ?? "";
+    const cookie = /(?:^|,\s*)(gb_session=[^;]+)/.exec(setCookie)?.[1] ?? "";
+    assert.ok(cookie.length > 0, `no session cookie was set: ${setCookie || "(no set-cookie)"}`);
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /SameSite=Strict/i);
+    assert.match(setCookie, /Max-Age=43200/);
+
+    // The cookie alone, with no authorization header at all. A 401 would mean the mint was
+    // decoration; anything else means the request got past the login. This copy's gateway is a
+    // dead port, so what it gets past the login to is a 502.
+    const replay = await fetch(`${relay.base}/api/getHostStatus`, {
+      method: "POST", headers: { "content-type": "application/json", cookie }, body: "{}",
+    });
+    assert.notEqual(replay.status, 401);
+    assert.equal(replay.headers.get("x-relay-auth"), null);
+  } finally { relay.stop(); }
+});
+
+test("no bearer mints nothing, and an /api call with one is not given a session it never asked for", async () => {
+  const relay = await startRelay();
+  try {
+    const anonymous = await fetch(`${relay.base}/`, { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(anonymous.status, 302);
+    assert.match(String(anonymous.headers.get("location")), /^\/login/);
+    assert.equal(anonymous.headers.get("set-cookie"), null);
+
+    const api = await fetch(`${relay.base}/api/getHostStatus`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TEST_TOKEN}` },
+      body: "{}",
+    });
+    assert.equal(api.headers.get("set-cookie"), null);
+  } finally { relay.stop(); }
+});
+
+// The desktop route carries the box's screen and its keyboard, and a websocket upgrade never
+// reaches the request handler that checks the login. So it is checked again on the upgrade, and
+// this is the test that says so: without a credential neither half of /vnc answers.
+test("the desktop proxy is behind the same login, over HTTP and over the upgrade", async () => {
+  const relay = await startRelay();
+  try {
+    const asset = await fetch(`${relay.base}/vnc/2/vnc.html`, { redirect: "manual", headers: { accept: "*/*" } });
+    assert.equal(asset.status, 401);
+    assert.equal(asset.headers.get("x-relay-auth"), "required");
+
+    const { port } = new URL(relay.base);
+    const answer = await new Promise((resolve) => {
+      const socket = net.connect(Number(port), "127.0.0.1", () => {
+        socket.write("GET /vnc/2/websockify HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n"
+          + "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+      });
+      let seen = "";
+      socket.on("data", (chunk) => { seen += chunk; });
+      socket.on("close", () => resolve(seen));
+      socket.on("error", () => resolve(seen));
+      setTimeout(() => { socket.destroy(); resolve(seen); }, 5000).unref();
+    });
+    assert.match(answer, /^HTTP\/1\.1 401/);
+  } finally { relay.stop(); }
 });

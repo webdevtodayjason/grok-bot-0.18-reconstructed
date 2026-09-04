@@ -5,21 +5,29 @@
 //   1. shape      both titanbot containers run, and their published ports are where they should
 //                 be: the relay on 100.110.83.82 only, the box on 127.0.0.1 only, nothing on 0.0.0.0
 //   2. gateway    getHostStatus and listAgents answer 200 through http://100.110.83.82:7787
-//   3. login      no credential is turned away, a wrong password is refused, the right one issues
-//                 a session, and that session reaches the gateway with no bearer of its own
+//   3. login      no credential is turned away, a wrong password is refused, and a request
+//                 carrying the gateway bearer is given a session that reaches the gateway on its
+//                 own
 //   4. writes     a probe agent is created and deleted, and the roster returns to its baseline
-//   5. console    the Machine Room loads in real headless Chrome, the operator signs in, and the
+//   5. console    the Machine Room loads in real headless Chrome, on the bearer alone, and the
 //                 roster paints
-//   6. lockout    six wrong passwords in a row hit the rate limit
+//   6. desktop    a probe agent's screen opens through the relay's own /vnc route, the frame is
+//                 noVNC, and its websocket reaches the box
+//   7. lockout    six wrong passwords in a row hit the rate limit
 //
-// The server's bearer token and the probe password are both read over ssh at test time and held in
-// memory only. Neither is written to disk on this Mac and neither is printed.
+// This gate does not know the console password and no longer asks for one. Jason's password is
+// his; a file holding a copy of it beside the token was a second secret to keep in step, and it
+// drifted. What the gate proves instead is the shape of the door: the wrong password is refused,
+// the lockout holds, and the way IN is the bearer, which this gate reads over ssh anyway and
+// which is already full access. Holding it and being let in is not a privilege the gate invented.
+//
+// The server's bearer token is read over ssh at test time and held in memory only. It is never
+// written to disk on this Mac and never printed.
 //
 //   node scripts/verify-deploy.mjs
 //
 // Env: TITANBOT_HOST (ssh destination, default dell-remote), TITANBOT_URL (default
-// http://100.110.83.82:7787), TITANBOT_ROOT, TITANBOT_UI_PASSWORD, GROK_BOT_PLAYWRIGHT_DIR,
-// GROK_BOT_CHROME.
+// http://100.110.83.82:7787), TITANBOT_ROOT, GROK_BOT_PLAYWRIGHT_DIR, GROK_BOT_CHROME.
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 
@@ -86,13 +94,9 @@ check(TOKEN.length === 64 && /^[0-9a-f]+$/.test(TOKEN), "the server's gateway to
 const mode = (await ssh(`stat -c %a ${ROOT}/profile/local-docker-vm.json`)).trim();
 check(mode === "600", "the token file is 0600 on the server", `mode ${mode}`);
 
-// The relay's login password. It cannot be derived from auth.json, which holds only a scrypt hash,
-// so the gate has to be told it. The operator keeps it beside the gateway token at the same mode,
-// which adds no capability to that directory: anything that can read the token there already holds
-// the full gateway surface, password or not. TITANBOT_UI_PASSWORD overrides for a one-off run.
-const PASSWORD = process.env.TITANBOT_UI_PASSWORD
-  ?? (await ssh(`cat ${ROOT}/profile/ui-password.probe 2>/dev/null || true`).catch(() => "")).replace(/\r?\n$/, "");
-const passwordMode = (await ssh(`stat -c %a ${ROOT}/profile/ui-password.probe 2>/dev/null || echo none`).catch(() => "none")).trim();
+// A password this gate invented, and therefore certainly wrong. Nothing here needs the real one:
+// every check below is either about a credential being refused or about the bearer being accepted.
+const WRONG = `not-the-console-password-${Math.random().toString(36).slice(2, 10)}`;
 
 step(`gateway through ${URL_BASE}`);
 const call = async (method, args = {}, headers = {}) => {
@@ -147,8 +151,6 @@ const postForm = (path, fields, headers = {}) => hit(path, {
 
 const authState = await hit("/auth/state").then((r) => r.json()).catch(() => null);
 check(authState?.required === true, "the relay reports that a password is configured", JSON.stringify(authState));
-check(PASSWORD.length > 0, "this gate has the probe password to test with",
-  PASSWORD.length > 0 ? `${PASSWORD.length} characters, from ${process.env.TITANBOT_UI_PASSWORD ? "TITANBOT_UI_PASSWORD" : `${ROOT}/profile/ui-password.probe mode ${passwordMode}`}` : `set TITANBOT_UI_PASSWORD or write ${ROOT}/profile/ui-password.probe`);
 
 const home = await hit("/", { headers: { accept: "text/html" } });
 check(home.status === 302 && String(home.headers.get("location") ?? "").startsWith("/login"),
@@ -159,9 +161,13 @@ const loginHtml = loginPage.status === 200 ? await loginPage.text() : "";
 check(loginPage.status === 200 && loginHtml.includes('type="password"') && loginHtml.includes('action="/login"'),
   "the login page renders one password field and posts to /login", `HTTP ${loginPage.status}, ${loginHtml.length} bytes`);
 
-const wrong = await postForm("/login", { password: `${PASSWORD}-not-it`, next: "/" });
+const wrong = await postForm("/login", { password: WRONG, next: "/" });
 check(wrong.status === 401 && wrong.headers.get("set-cookie") == null,
   "a wrong password is refused and issues no cookie", `HTTP ${wrong.status}, set-cookie ${wrong.headers.get("set-cookie") ?? "none"}`);
+// Counted, because the lockout step at the bottom needs to know how many of this address's five
+// failures this run has already spent. Nothing here clears them: the throttle resets on a
+// successful login, and this gate never types the right password.
+let refusals = 1;
 
 // /login is the one route an unauthenticated caller may POST to on a published port, so it does
 // not buffer whatever it is sent. The next successful login clears the failure this records.
@@ -171,18 +177,31 @@ const oversize = await hit("/login", {
   body: `password=${"a".repeat(64 * 1024)}`,
 });
 check(oversize.status === 413, "a login body too large to be a password is refused, not buffered", `HTTP ${oversize.status}`);
+// A flood of oversized bodies is an attack on this port, so the relay records it as a failure too.
+refusals += 1;
 
-const good = await postForm("/login", { password: PASSWORD, next: "/" });
-const setCookie = good.headers.get("set-cookie") ?? "";
+// The way in, without the password. A page request carrying the gateway bearer is answered AND
+// given a session cookie: holding that token is already full access, so the cookie takes nothing
+// away, it puts the access somewhere a browser will keep sending. That is what lets headless
+// Chrome below reach a console whose password nobody but Jason knows.
+const withBearer = await hit("/", { headers: { accept: "text/html", authorization: `Bearer ${TOKEN}` } });
+const setCookie = withBearer.headers.get("set-cookie") ?? "";
 const session = /(?:^|,\s*)(gb_session=[^;]+)/.exec(setCookie)?.[1] ?? "";
-check(good.status === 302 && good.headers.get("location") === "/" && session.length > 0,
-  "the right password lands on / with a session cookie", `HTTP ${good.status} -> ${good.headers.get("location")}`);
+check(withBearer.status === 200 && session.length > 0,
+  "a page request carrying the gateway bearer is served and given a session", `HTTP ${withBearer.status}, cookie ${session.length > 0 ? "set" : "absent"}`);
 check(/HttpOnly/i.test(setCookie) && /SameSite=Strict/i.test(setCookie) && /Max-Age=43200/.test(setCookie),
   "the session cookie is HttpOnly, SameSite=Strict and lasts 12 hours",
   setCookie.replace(/gb_session=[^;]+/, "gb_session=<withheld>") || "no cookie");
+// And that mint is for pages only: a script calling /api with the bearer is not handed a session
+// it never asked for.
+const apiWithBearer = await hit("/api/getHostStatus", {
+  method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: "{}",
+});
+check(apiWithBearer.headers.get("set-cookie") == null, "an /api call with the same bearer is given no cookie",
+  apiWithBearer.headers.get("set-cookie") ?? "none");
 
-// The injection proof, moved: a session carries no gateway token of its own, so a 200 here can
-// only mean the relay added the bearer on the way upstream.
+// The injection proof: a session carries no gateway token of its own, so a 200 here can only mean
+// the relay added the bearer on the way upstream.
 const viaSession = await call("getHostStatus", {}, { cookie: session });
 check(viaSession.status === 200 && typeof viaSession.body?.hostVersion === "string",
   "that session reaches the gateway with no authorization header, so the relay is still injecting the bearer",
@@ -248,19 +267,28 @@ let browser = null;
 try {
   const { chromium } = require("playwright-core");
   browser = await chromium.launch({ executablePath: CHROME, headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  // The bearer as a header on every request this context makes. A gate cannot type a password
+  // nobody but Jason knows, and it does not need to: the relay answers a page request carrying
+  // the token and hands back a session, which is what the checks below then run on.
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 1000 },
+    extraHTTPHeaders: { authorization: `Bearer ${TOKEN}` },
+  });
+  const page = await context.newPage();
   const pageErrors = [];
   const failedRequests = [];
   page.on("pageerror", (e) => pageErrors.push(String(e)));
   page.on("console", (m) => { if (m.type() === "error") pageErrors.push(m.text()); });
   page.on("response", (r) => { if (r.status() >= 400) failedRequests.push(`${r.status()} ${r.url()}`); });
 
-  // The console is behind the login now, so the browser check starts where an operator does.
   await page.goto(`${URL_BASE}/`, { waitUntil: "load", timeout: 45_000 });
-  check(/\/login/.test(page.url()), "a browser opening / lands on the login page", page.url().replace(URL_BASE, ""));
-  await page.fill("#password", PASSWORD);
-  await Promise.all([page.waitForNavigation({ timeout: 30_000 }), page.click("button[type=submit]")]);
-  check(new URL(page.url()).pathname === "/", "signing in lands on the console", page.url().replace(URL_BASE, ""));
+  check(new URL(page.url()).pathname === "/", "a browser carrying the bearer lands on the console, not the login",
+    page.url().replace(URL_BASE, ""));
+  // And it is holding a session, not riding the header on every request: the cookie is what an
+  // EventSource and an iframe carry, and neither of those can add a header of its own.
+  const cookies = await context.cookies();
+  check(cookies.some((c) => c.name === "gb_session"), "and the browser is holding the session the relay minted",
+    cookies.map((c) => c.name).join(", ") || "no cookies");
 
   // The roster is what the adapter paints from listAgents, so its cards are the honest signal
   // that the page reached the gateway rather than just rendering static markup.
@@ -305,17 +333,147 @@ try {
   await browser?.close().catch(() => {});
 }
 
+step("the desktop through the relay's own /vnc route");
+// The failure this closes, measured on the R750 before the change: ensureForeverBox answers
+// `http://127.0.0.1:6081/vnc.html?path=websockify%3Ftoken%3D3`, and the page used that string as
+// its iframe src -- so a browser anywhere but on the box's own machine reached for ITS OWN
+// loopback. Jason's Mac runs a box of its own on 6081, so what he got was either his Mac's screen
+// or "Failed to connect to downstream server". The frame now comes from the relay, on the page's
+// own origin, behind the same login, and the box's noVNC is proxied rather than copied.
+let vncProbeId = null;
+let vncBrowser = null;
+const DESKTOP_DEADLINE = Date.now() + 60_000;
+const untilDeadline = async (fn, everyMs = 1000) => {
+  for (;;) {
+    const value = await fn().catch(() => null);
+    if (value != null && value !== false) return value;
+    if (Date.now() > DESKTOP_DEADLINE) return null;
+    await sleep(everyMs);
+  }
+};
+try {
+  const probeName = `probe-vnc-${Math.random().toString(36).slice(2, 7)}`;
+  const made = await call("createAgent", {
+    name: probeName, description: "", origin: "user", isKickstartRequested: false,
+  }, { authorization: `Bearer ${TOKEN}` });
+  vncProbeId = (made.body?.agent ?? made.body)?.id ?? null;
+  check(vncProbeId != null, "a probe agent for the desktop was created", vncProbeId ?? `HTTP ${made.status}`);
+
+  // The host allocates the screen. Cold that is about thirteen seconds, and the websockify token
+  // in the URL it answers with IS the display number.
+  const desk = vncProbeId
+    ? await call("ensureForeverBox", { id: vncProbeId }, { authorization: `Bearer ${TOKEN}` })
+    : { body: {} };
+  const hostUrl = String(desk.body?.vncUrl ?? "");
+  const display = Number(/token%3D(\d+)/i.exec(hostUrl)?.[1] ?? /token=(\d+)/i.exec(hostUrl)?.[1] ?? 1);
+  check(hostUrl.length > 0 && Number.isInteger(display),
+    "ensureForeverBox answers with a screen, on the host's own loopback as it always has",
+    `box ${desk.body?.state ?? "?"}, display :${display}, host url ${hostUrl || "none"}`);
+
+  const { chromium } = require("playwright-core");
+  vncBrowser = await chromium.launch({ executablePath: CHROME, headless: true });
+  const context = await vncBrowser.newContext({
+    viewport: { width: 1440, height: 1000 },
+    extraHTTPHeaders: { authorization: `Bearer ${TOKEN}` },
+  });
+  const page = await context.newPage();
+  await page.goto(`${URL_BASE}/`, { waitUntil: "load", timeout: 45_000 });
+
+  const selected = await untilDeadline(() => page.evaluate((name) => {
+    const card = Array.from(document.querySelectorAll(".worker-card[data-context-id]"))
+      .find((el) => el.textContent.includes(name));
+    if (!card) return null;
+    card.click();
+    return true;
+  }, probeName));
+  check(selected === true, "the probe agent is on the roster and can be selected", selected ? probeName : "no card within the deadline");
+  await page.waitForTimeout(1200);
+  await page.click("#open-desktop");
+
+  // One read of the frame, once its document has finished loading. Same origin now, so the parent
+  // can see inside it -- which is itself part of the proof: a frame on 127.0.0.1:6081 could not be
+  // read from a page on the relay at all.
+  const frame = await untilDeadline(() => page.evaluate(() => {
+    const el = document.querySelector("iframe[data-box-vnc]");
+    if (!el) return null;
+    const doc = el.contentDocument;
+    if (!doc || doc.readyState === "loading") return null;
+    return {
+      src: el.getAttribute("src"),
+      title: doc.title,
+      container: doc.getElementById("noVNC_container") != null,
+      canvas: doc.querySelector("#noVNC_container canvas") != null,
+    };
+  }));
+  check(frame != null, "the desktop pane mounts a frame", frame ? "" : "no iframe[data-box-vnc] within the deadline");
+  if (frame != null) {
+    check(frame.src.startsWith(`${URL_BASE}/vnc/`),
+      "the frame is asked for on the page's own origin, under /vnc/, not on the viewer's 127.0.0.1",
+      frame.src);
+    // noVNC renames the document to the desktop's own name once it is connected, so the title is
+    // "<box hostname>:<display> - noVNC" rather than a constant. The substring is the assertion.
+    check(/noVNC/.test(frame.title) && frame.container,
+      "and what loaded there is the box's own noVNC, served through the relay",
+      `title ${JSON.stringify(frame.title)}, #noVNC_container ${frame.container}`);
+    // The canvas exists only once RFB has a framebuffer, so this is the client actually connected
+    // rather than the page merely loaded.
+    const painted = await untilDeadline(() => page.evaluate(() =>
+      (document.querySelector("iframe[data-box-vnc]")?.contentDocument?.querySelector("#noVNC_container canvas") != null ? true : null)));
+    check(painted === true, "the noVNC client in that frame reached the box and drew its framebuffer",
+      painted ? "canvas present" : "no canvas within the deadline");
+  }
+
+  // And the websocket half on its own, from the page, so a canvas drawn from cache could not
+  // stand in for a live socket. The cookie the relay minted is what authenticates it.
+  const socket = await page.evaluate((d) => new Promise((resolve) => {
+    const url = `${location.origin.replace(/^http/, "ws")}/vnc/${d}/websockify`;
+    const ws = new WebSocket(url);
+    const done = (value) => { try { ws.close(); } catch { /* already closing */ } resolve({ url, ...value }); };
+    ws.onopen = () => done({ open: true });
+    ws.onerror = () => done({ open: false, why: "the socket errored" });
+    ws.onclose = (event) => done({ open: false, why: `closed ${event.code}` });
+    setTimeout(() => done({ open: ws.readyState === 1, why: `readyState ${ws.readyState}` }), 10_000);
+  }), display);
+  check(socket.open === true, "a websocket to the relay's /vnc/<display>/websockify reaches open state",
+    `${socket.url}${socket.why ? ` -- ${socket.why}` : ""}`);
+} catch (error) {
+  check(false, "the desktop check ran", String(error?.message ?? error).slice(0, 200));
+} finally {
+  await vncBrowser?.close().catch(() => {});
+  if (vncProbeId) {
+    const gone = await call("deleteAgent", { id: vncProbeId }, { authorization: `Bearer ${TOKEN}` }).catch((e) => ({ status: 0, text: String(e) }));
+    // Like the probe above, this leaves one permanent id in the box's deleted-agents.json.
+    check(gone.status === 200, "the desktop probe agent is deleted", `HTTP ${gone.status}`);
+  }
+}
+
 // Last, deliberately: a pass here leaves this Mac's address locked out of the login for thirty
 // seconds, so nothing that needs to sign in may run after it.
 step("the lockout after repeated wrong passwords");
+// Five failures per source address. The login step above already spent some of them and there is
+// no way back: the counter resets on a successful login, which this gate cannot perform. So what
+// is asserted is the rule -- refusals until the fifth, then the limiter -- counted from where the
+// run actually is rather than from a fixed six.
+const left = Math.max(0, 5 - refusals);
 const attempts = [];
-for (let i = 0; i < 6; i += 1) attempts.push((await postForm("/login", { password: `wrong-${i}` })).status);
-check(attempts.slice(0, 5).every((s) => s === 401) && attempts[5] === 429,
-  "five wrong passwords are refused and the sixth is rate limited", attempts.join(" "));
+for (let i = 0; i <= left; i += 1) attempts.push((await postForm("/login", { password: `${WRONG}-${i}` })).status);
+check(attempts.slice(0, left).every((s) => s === 401) && attempts[left] === 429,
+  `${left} more wrong passwords are refused and the next is rate limited`,
+  `${attempts.join(" ")} (${refusals} of the five failures were already spent above)`);
 // The lockout is not a filter on wrong passwords, it is a stop on the source, so the right one has
 // to be refused too or a guesser just alternates.
-const duringLockout = await postForm("/login", { password: PASSWORD });
-check(duringLockout.status === 429, "the right password is refused too while the lockout holds", `HTTP ${duringLockout.status}`);
+// The lockout is a stop on the SOURCE, not a verdict on the password, and this gate does not know
+// the right password to prove that the direct way. It proves it sideways instead: an oversized
+// body answered 413 a moment ago, because the relay read the body and found it too large. Under a
+// lockout the same request answers 429, which it can only do by refusing the address before it
+// looks at anything the caller sent.
+const duringLockout = await hit("/login", {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
+  body: `password=${"a".repeat(64 * 1024)}`,
+});
+check(duringLockout.status === 429, "a request that would otherwise be a 413 is refused unread while the lockout holds",
+  `HTTP ${duringLockout.status}, was 413 before the lockout`);
 check(Number(duringLockout.headers.get("retry-after") ?? 0) > 0 && Number(duringLockout.headers.get("retry-after")) <= 30,
   "the response says how long to wait", `retry-after ${duringLockout.headers.get("retry-after")}s`);
 // The bearer is not the login, so the lockout must not reach the gates themselves.

@@ -17,6 +17,7 @@
 //   SAND_UI_PORT             listen port, default 7777
 //   SAND_UI_BIND_HOST        listen address, default 127.0.0.1; anything else needs ui/auth.json
 import { createServer } from "node:http";
+import net from "node:net";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
 import {
   SESSION_LIFETIME_MS, createLoginThrottle, createSession, isLoopbackHost, isSecureRequest,
@@ -138,12 +139,33 @@ const throttle = createLoginThrottle();
 // The bearer stays a way in because holding it is already full access: every /api call this
 // process forwards carries it. Requiring a session on top would only break the gates and the
 // scripts without taking any capability away from someone who has the token.
-function isAuthorized(req) {
-  if (AUTH == null) return true;
+function bearerMatches(req) {
   const header = String(req.headers.authorization ?? "");
-  if (TOKEN.length > 0 && header.startsWith("Bearer ") && safeEqual(header.slice(7).trim(), TOKEN)) return true;
+  return TOKEN.length > 0 && header.startsWith("Bearer ") && safeEqual(header.slice(7).trim(), TOKEN);
+}
+function hasSession(req) {
+  if (AUTH == null) return false;
   const raw = parseCookies(req.headers.cookie)[SESSION_COOKIE];
   return raw != null && readSession(raw, AUTH.cookieSecret) != null;
+}
+function isAuthorized(req) {
+  if (AUTH == null) return true;
+  return bearerMatches(req) || hasSession(req);
+}
+
+// A bearer on a page request also mints a session, so a browser handed the token as a header can
+// go on to do the things a browser does: an EventSource carries no custom header, an iframe
+// carries none either, and a page opened with the bearer would otherwise paint and then be
+// refused on its own subresources. Holding the token is already full access -- every /api call
+// this process forwards carries it -- so the cookie adds no capability, it only puts the access
+// somewhere the browser will keep sending. /api is excluded because a script calling the API is
+// not a session and does not want one.
+function mintSessionFromBearer(req, res, url) {
+  if (AUTH == null) return;
+  if (url.pathname.startsWith("/api/")) return;
+  if (!bearerMatches(req) || hasSession(req)) return;
+  res.setHeader("set-cookie", serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret),
+    { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: isSecureRequest(req) }));
 }
 
 // The console bounces to /login on a 401 only when it carries this header. Without a marker the
@@ -359,6 +381,69 @@ async function relayAvatar(req, res, pathname) {
   res.end(bytes);
 }
 
+// ---- the desktop ----------------------------------------------------------------------------
+// The host answers ensureForeverBox with a vnc URL on ITS OWN loopback (127.0.0.1:6081), which is
+// the right address for exactly one browser: one running on the same machine as the box. Through
+// the R750 the operator's browser resolved that against his Mac and the frame said "Failed to
+// connect to downstream server". So the relay proxies the desktop the same way it proxies the
+// gateway: /vnc/<display>/... is served from the box's own websockify, assets and all, behind the
+// same session the rest of this server requires. Nothing is vendored -- noVNC's files still come
+// from the box, so the box image stays the one source of that client.
+//
+// :1 is the shared seat and the box serves it on 6080 with no token. Every fork display is behind
+// the token-websockify on 6081, where the token IS the display number.
+const BOX_HOST = new URL(GATEWAY).hostname;
+const VNC_ROUTE = /^\/vnc\/([1-9][0-9]?)\/(.*)$/;
+const vncTarget = (display) => (display === 1 ? { port: 6080, query: "" } : { port: 6081, query: `?token=${display}` });
+
+async function relayVnc(req, res, display, rest, search) {
+  const { port } = vncTarget(display);
+  // Only what the box needs to answer. The browser's cookie and the relay's bearer are ours, not
+  // the box's, and forwarding either would hand a credential to a process that never asked.
+  const upstream = await fetch(`http://${BOX_HOST}:${port}/${rest}${search}`,
+    { headers: { accept: String(req.headers.accept ?? "*/*") } });
+  if (!upstream.ok) return fail(res, upstream.status, `the box did not serve ${rest} (HTTP ${upstream.status})`);
+  const bytes = Buffer.from(await upstream.arrayBuffer());
+  res.writeHead(200, {
+    "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
+    "content-length": bytes.byteLength,
+    "cache-control": "no-store",
+  });
+  return res.end(bytes);
+}
+
+// The websocket half, in node builtins because this process has no node_modules at all. The
+// handshake is rewritten rather than forwarded: the client's key and version go through so the
+// browser's own accept check still holds end to end, and everything else (Origin, cookies, the
+// extension offer) is dropped, which leaves both ends negotiating a plain binary socket. After the
+// request line the two sockets are simply piped, including the upstream's 101 -- nothing here
+// parses a frame, so there is no framing bug to have.
+const WS_KEY = /^[A-Za-z0-9+/=]{16,32}$/;
+function relayVncSocket(req, socket, head, display) {
+  const key = String(req.headers["sec-websocket-key"] ?? "");
+  const version = String(req.headers["sec-websocket-version"] ?? "13");
+  if (!WS_KEY.test(key) || !/^\d{1,3}$/.test(version)) return socket.destroy();
+  const { port, query } = vncTarget(display);
+  const target = net.connect(port, BOX_HOST, () => {
+    const lines = [
+      `GET /websockify${query} HTTP/1.1`,
+      `Host: ${BOX_HOST}:${port}`,
+      "Connection: Upgrade",
+      "Upgrade: websocket",
+      `Sec-WebSocket-Version: ${version}`,
+      `Sec-WebSocket-Key: ${key}`,
+    ];
+    const protocol = String(req.headers["sec-websocket-protocol"] ?? "");
+    if (/^[A-Za-z0-9\-_.,+ ]{1,120}$/.test(protocol)) lines.push(`Sec-WebSocket-Protocol: ${protocol}`);
+    target.write(`${lines.join("\r\n")}\r\n\r\n`);
+    if (head?.length) target.write(head);
+    target.pipe(socket);
+    socket.pipe(target);
+  });
+  target.on("error", () => socket.destroy());
+  socket.on("error", () => target.destroy());
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${PORT}`);
   try {
@@ -385,6 +470,16 @@ const server = createServer(async (req, res) => {
       // Everything else, without exception. The login page carries its own CSS inline precisely so
       // there is no asset list to exempt here.
       if (!isAuthorized(req)) return denyUnauthenticated(req, res, url);
+      mintSessionFromBearer(req, res, url);
+    }
+    // Before the static branch below, which claims every path ending in .js or .css and would
+    // otherwise swallow the box's own noVNC assets at /vnc/<display>/app/ui.js.
+    if (req.method === "GET" && VNC_ROUTE.test(url.pathname)) {
+      const [, display, rest] = VNC_ROUTE.exec(url.pathname);
+      // The rest is pasted into a URL aimed at the box's web server, so a traversal segment never
+      // gets to be its problem.
+      if (rest.length === 0 || rest.split("/").includes("..")) return fail(res, 400, "bad vnc path");
+      return await relayVnc(req, res, Number(display), rest, url.search);
     }
     // The Machine Room is the console at "/"; the operator page lives at /operator/ (2026-09-02).
     if (req.method === "GET" && (url.pathname === "/operator" || url.pathname === "/operator/" || url.pathname === "/operator/index.html")) {
@@ -732,6 +827,19 @@ const server = createServer(async (req, res) => {
   } catch (error) {
     return fail(res, 502, `gateway unreachable: ${error instanceof Error ? error.message : String(error)}`);
   }
+});
+
+// The desktop's websocket. An upgrade never reaches the request handler above, so the login has to
+// be checked again here, on the same cookie the browser sends with it -- otherwise the one route
+// that carries the box's screen and keyboard would be the one route with no password on it.
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(req.url ?? "/", `http://127.0.0.1:${PORT}`);
+  const match = VNC_ROUTE.exec(url.pathname);
+  if (match == null || match[2] !== "websockify") return socket.destroy();
+  // A refusal a browser can read, rather than a reset socket: noVNC reports "failed to connect"
+  // either way, but the operator opening devtools sees which of the two it was.
+  if (!isAuthorized(req)) return socket.end("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n");
+  return relayVncSocket(req, socket, head, Number(match[1]));
 });
 
 // Loopback by default: this process holds the gateway token, so it must not be reachable off-box

@@ -392,8 +392,8 @@
   // True from a stop click until the host has answered it, so a second click cannot fire a second
   // stopTeachRecording at a recording that is already being torn down.
   let teachStopping = false;
-  // The live screen in the recording dialog is a real VNC client on another port, so its iframe is
-  // a separate process. It focuses itself when it connects, and from then on Chromium delivers
+  // The live screen in the recording dialog is a real VNC client, proxied through the relay, so its
+  // iframe is a separate process. It focuses itself when it connects, and from then on Chromium delivers
   // every key to it -- blurring the element puts document.activeElement back on this page while
   // the keys keep going to the box, which is a dialog that looks like it has the keyboard and
   // does not. The only signal that cannot lie is whether the frame exists, so it is mounted only
@@ -1582,7 +1582,13 @@
       }, 16_000);
     };
 
-    const SHARED = "http://127.0.0.1:6080/vnc_lite.html?autoconnect=1&resize=scale&reconnect=1";
+    // The shared seat on display :1, on this page's own origin. The relay proxies the box's noVNC
+    // at /vnc/1/, and the absolute 127.0.0.1 this used to be was the VIEWER's own machine, which
+    // is the box only when the console happens to be open on the box's host. Same reasoning as
+    // ensureDesktop in the adapter, and the same reason this is vnc.html rather than vnc_lite:
+    // the lite client ignores resize=scale and renders the framebuffer at native size inside a
+    // smaller frame, so you see the top-left corner and nothing else.
+    const SHARED = `${window.location.origin}/vnc/1/vnc.html?path=${encodeURIComponent("/vnc/1/websockify")}&autoconnect=1&resize=scale&reconnect=1&bell=0`;
     if (!agentId) { paint(SHARED, 1, true); return; }
 
     elements.desktopWindow.innerHTML = `<div class="empty-state">Opening ${escapeHtml(contextName())}'s screen… the first time takes about ten seconds while the host allocates one.</div>`;
@@ -1764,8 +1770,8 @@
   }
 
   // Handing the keyboard over is a deliberate click and taking it back is any click elsewhere in
-  // the dialog. Mounting and unmounting the client is what actually moves the keys: an iframe on
-  // another origin keeps them once it has them, whatever this page does to activeElement, so the
+  // the dialog. Mounting and unmounting the client is what actually moves the keys: an iframe holding a
+  // real VNC client keeps them once it has them, whatever this page does to activeElement, so the
   // page takes them back by removing it rather than by blurring it.
   function setTeachScreenControl(on) {
     const live = document.getElementById("teach-live");

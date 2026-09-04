@@ -2279,7 +2279,7 @@ dialog[open] {
 }
 
 /* The live screen and the cover that decides which side has the keyboard. Only one of the two is
-   ever in the canvas: a VNC client on another origin keeps the keys once it has them, so the cover
+   ever in the canvas: a VNC client in an iframe keeps the keys once it has them, so the cover
    is not a lid over a running client, it is what stands there instead of one. */
 .teach-screen {
   position: relative;
