@@ -847,6 +847,16 @@ select:focus-visible {
   gap: 14px;
   min-width: 0;
 }
+/* The column shrinks, but a panel inside it did not: a grid item's min-width is auto, so one long
+   endpoint value ("Alibaba Model Studio (token plan) · qwen3.8-max") widened the Agent panel and
+   the Desktop capsule past the window edge (seen on the R750). Every panel takes the column's width
+   and the value row's text ellipsizes instead. */
+.context-space > * { min-width: 0; max-width: 100%; }
+.context-detail-row { min-width: 0; }
+.context-detail-row strong { flex: 1 1 0%; }
+/* The hidden attribute loses to display: grid on .icon-button, so a hidden control (Log out on a
+   loopback page with no login) still painted. */
+.icon-button[hidden] { display: none; }
 
 .context-island,
 .desktop-capsule {

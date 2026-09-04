@@ -580,6 +580,18 @@ try {
       });
       check(shelf.inside && shelf.composerLeftOfUtilities && shelf.buttons === 3, "the shelf keeps its three utilities beside the composer while the status shows", JSON.stringify(shelf));
       check(shelf.above, "and the status floats above the shelf instead of taking a column", JSON.stringify(shelf));
+      // MR-27. A long box-wide endpoint name widened the Agent panel past the window edge on the
+      // R750. Put the long value in and measure the panel, not the column.
+      const panel = await page.evaluate(() => {
+        const r = (el) => { if (!el) return null; const b = el.getBoundingClientRect(); return { right: Math.round(b.right), w: Math.round(b.width) }; };
+        const aside = document.querySelector("aside.context-space"); const island = aside?.querySelector(".context-island"); const capsule = aside?.querySelector(".desktop-capsule");
+        const strong = [...(aside?.querySelectorAll(".context-detail-row") ?? [])].find((row) => /Endpoint/.test(row.textContent))?.querySelector("strong");
+        const kept = strong?.textContent ?? null; if (strong) strong.textContent = "Alibaba Model Studio (token plan) · qwen3.8-max";
+        const out = { column: r(aside), island: r(island), capsule: r(capsule), viewport: document.documentElement.clientWidth };
+        if (strong && kept != null) strong.textContent = kept;
+        return out;
+      });
+      check(!!panel.island && panel.island.w <= panel.column.w + 1 && panel.island.right <= panel.viewport && (!panel.capsule || panel.capsule.w <= panel.column.w + 1), "a long endpoint name cannot widen the Agent panel past its column", JSON.stringify(panel));
       // Read somewhere else while the reply lands, so the unread is raised off screen.
       await clickText("Atera Triage").catch(() => {});
       const spoke = await until(async () => {
