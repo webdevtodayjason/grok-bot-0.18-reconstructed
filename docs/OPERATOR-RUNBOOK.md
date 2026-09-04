@@ -98,3 +98,21 @@ node --test tests/
 `verify-agent-identity` is worth re-running after any model switch: on the frontier model both
 agents name themselves correctly; on Nemotron they do not answer the question at all, which is
 the "agents think they are Grok" report and is a model-quality problem, not a prompt bug.
+
+## Your own skills after you deploy
+
+The August 15 backup of the original install holds eleven global workflow skills written for
+Titanium Computing (Operate Atera, Operate Huntress, Operate Coro, Operate SpearTip, Titanium
+Backup agent jobs, SaaS Alerts OVA triage, GDAP audit and plan, Dark-web client notify, Ticket
+customer ack, Technician guide standard, Titanium ops chain of command). They are operator data,
+not product: four drive live vendor consoles and three send client mail, so they are not in this
+tree and never seeded. After you stand up your own instance, restore them one of two ways:
+
+- Copy each `workflows/<id>/SKILL.md` from the backup into the box at
+  `/home/box/sand-data/workflows/<id>/SKILL.md` (the global workflow library; every agent sees it,
+  and the Skills panel lists it with its switch).
+- Or paste each file's text into the Skills panel's import, which calls `importAgentWorkflowText`.
+
+Agents keep the ability to write skills themselves: the model's `update_state` tool with target
+`workflow` is on the wire (it is how the learn-from-demonstration recipe saves what it learned),
+and a saved skill shows in the Skills panel and runs by `@name` mention or from the panel.
