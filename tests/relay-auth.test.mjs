@@ -9,9 +9,9 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  createLoginThrottle, createSession, hashPassword, isLoopbackHost, isSecureRequest,
-  newAuthRecord, parseCookies, readAuthFile, readSession, safeNextPath, serializeCookie,
-  signSession, sourceAddress, verifyPassword, writeAuthFile,
+  clientAddress, createLoginThrottle, createSession, hashPassword, isLoopbackHost, isSecureRequest,
+  newAuthRecord, parseCookies, parseTrustedProxies, readAuthFile, readSession, safeNextPath,
+  serializeCookie, signSession, sourceAddress, verifyPassword, writeAuthFile,
 } from "../ui/auth.mjs";
 
 // Cheap scrypt parameters: these tests derive keys dozens of times and the production cost factor
@@ -141,11 +141,20 @@ test("cookies parse out of a real header, including one with an equals sign in t
   assert.equal(parseCookies("novalue").novalue, undefined);
 });
 
-test("Secure comes from a TLS socket or a forwarded https, and nothing else", () => {
+// This used to accept a forwarded https from anyone, on the argument that the header can only ADD
+// the Secure flag and so can only ever hurt the liar. That argument stopped holding the moment the
+// same signal started deciding whether a response carries HSTS: a stranger could then make a
+// browser refuse plain HTTP to a host they do not own. So the forwarded scheme is now believed
+// only from a peer the operator has named, and from nobody by default.
+test("Secure comes from a TLS socket, or a forwarded https from a TRUSTED peer, and nothing else", () => {
+  const trusted = parseTrustedProxies("10.0.2.0/24");
   assert.equal(isSecureRequest({ socket: { encrypted: true }, headers: {} }), true);
-  assert.equal(isSecureRequest({ socket: {}, headers: { "x-forwarded-proto": "https" } }), true);
-  assert.equal(isSecureRequest({ socket: {}, headers: { "x-forwarded-proto": "https, http" } }), true);
-  assert.equal(isSecureRequest({ socket: {}, headers: { "x-forwarded-proto": "http" } }), false);
+  assert.equal(isSecureRequest({ socket: { remoteAddress: "10.0.2.7" }, headers: { "x-forwarded-proto": "https" } }, trusted), true);
+  assert.equal(isSecureRequest({ socket: { remoteAddress: "10.0.2.7" }, headers: { "x-forwarded-proto": "https, http" } }, trusted), true);
+  assert.equal(isSecureRequest({ socket: { remoteAddress: "10.0.2.7" }, headers: { "x-forwarded-proto": "http" } }, trusted), false);
+  // The same claim from an address nobody vouched for, and with no trusted list at all.
+  assert.equal(isSecureRequest({ socket: { remoteAddress: "203.0.113.9" }, headers: { "x-forwarded-proto": "https" } }, trusted), false);
+  assert.equal(isSecureRequest({ socket: {}, headers: { "x-forwarded-proto": "https" } }), false);
   assert.equal(isSecureRequest({ socket: {}, headers: {} }), false);
 });
 
@@ -153,6 +162,9 @@ test("the throttle key is the socket address, never a forwarded header", () => {
   const req = { socket: { remoteAddress: "10.0.0.9" }, headers: { "x-forwarded-for": "1.2.3.4" } };
   assert.equal(sourceAddress(req), "10.0.0.9");
   assert.equal(sourceAddress({ headers: {} }), "unknown");
+  // And that is still what the login keys on when no proxy is trusted, which is the default.
+  assert.equal(clientAddress(req), "10.0.0.9");
+  assert.equal(clientAddress(req, parseTrustedProxies("")), "10.0.0.9");
 });
 
 test("only a path on this site survives as a redirect target", () => {

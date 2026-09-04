@@ -16,13 +16,17 @@
 //   SAND_HOST_GATEWAY_TOKEN  optional; sent as Bearer when set
 //   SAND_UI_PORT             listen port, default 7777
 //   SAND_UI_BIND_HOST        listen address, default 127.0.0.1; anything else needs ui/auth.json
+//   SAND_UI_TRUSTED_PROXIES  comma list of CIDRs, or "any"; empty (the default) reads no
+//                            forwarded header at all. See the block above TRUSTED_PROXIES.
+//   SAND_UI_CLOUDFLARE_RANGES  comma list of CIDRs; empty (the default) never reads
+//                            CF-Connecting-IP. See the block above CLOUDFLARE_RANGES.
 import { createServer } from "node:http";
 import net from "node:net";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
 import {
-  SESSION_LIFETIME_MS, createLoginThrottle, createSession, isLoopbackHost, isSecureRequest,
-  parseCookies, readAuthFile, readSession, safeEqual, safeNextPath, serializeCookie,
-  sourceAddress, verifyPassword,
+  SESSION_LIFETIME_MS, clientAddress, createLoginThrottle, createSession, edgeAddress,
+  isLoopbackHost, isSecureRequest, parseCookies, parseTrustedProxies, readAuthFile, readSession,
+  safeEqual, safeNextPath, serializeCookie, verifyPassword,
 } from "./auth.mjs";
 import { readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
@@ -34,7 +38,7 @@ import path from "node:path";
 // with readFileSync on every single request -- so writing it takes effect on the next message,
 // with no restart and no container recreate. The gateway's own setBoxSecrets refuses
 // SAND_-prefixed names, which is why this writes the file directly instead of going through it.
-const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
+let BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const SECRETS_PATH = "/home/box/sand-data/box-secrets.json";
 const ENDPOINTS_FILE = path.join(path.dirname(new URL(import.meta.url).pathname), "endpoints.json");
 const PROVIDER_KEYS = ["SAND_OPENAI_COMPATIBLE_BASE_URL", "SAND_OPENAI_COMPATIBLE_MODEL",
@@ -42,6 +46,21 @@ const PROVIDER_KEYS = ["SAND_OPENAI_COMPATIBLE_BASE_URL", "SAND_OPENAI_COMPATIBL
 
 const dockerOut = (args) => new Promise((resolve) =>
   execFile("docker", args, { maxBuffer: 8 << 20 }, (err, out) => resolve(err != null && !out ? null : out)));
+
+// Under a compose orchestrator the container is not necessarily called what the compose file calls
+// it: Coolify names a service's container after its own resource id. Every `docker exec` below
+// would then find nothing, and the failure is invisible -- the console loads and the model picker
+// and the connector editor just return nothing. So if the configured name is not a container here,
+// fall back to whatever is running with our own role label. The gateway URL never needs this: a
+// compose network answers the SERVICE name whatever the container is called.
+async function resolveBoxContainer() {
+  if (await dockerOut(["inspect", BOX, "--format", "{{.Name}}"]) != null) return;
+  const found = String(await dockerOut(["ps", "--filter", "label=com.titanbot.role=box", "--format", "{{.Names}}"]) ?? "")
+    .split("\n").map((name) => name.trim()).find((name) => name.length > 0);
+  if (found == null) return;
+  console.log(`box  no container named ${BOX}; using ${found}, which carries com.titanbot.role=box`);
+  BOX = found;
+}
 
 const readSecrets = async () => {
   const raw = await dockerOut(["exec", BOX, "cat", SECRETS_PATH]);
@@ -136,6 +155,34 @@ const AUTH = readAuthFile(AUTH_FILE);
 const SESSION_COOKIE = "gb_session";
 const throttle = createLoginThrottle();
 
+// Which peers may tell this process who its caller is. Empty by default, which is the loopback and
+// tailnet shape: no header is read and the socket address is the client. Inside Coolify the socket
+// address is Traefik's on a docker network, one address for the entire internet, so the lockout
+// would be a single bucket every visitor shares and a stranger's five typos would lock Jason out.
+// Naming the docker ranges here moves the lockout back onto the real caller. It is deliberately
+// not the default: a relay reachable from anywhere with this set to "any" would let a guesser mint
+// a fresh five attempts per forged header.
+const TRUSTED_PROXIES = parseTrustedProxies(process.env.SAND_UI_TRUSTED_PROXIES);
+
+// Which of those forwarded addresses may in turn hand over a CF-Connecting-IP.
+//
+// Traefik rewrites the X-Forwarded-* family from what it actually saw, so the address it reports
+// is not something a caller can choose. CF-Connecting-IP is not in that family and arrives
+// untouched, so it is only worth anything when the request really did come through Cloudflare --
+// and nothing forces it to. The origin address of a proxied name is public, and a request sent
+// straight there carries whatever CF-Connecting-IP its sender felt like writing. Naming
+// Cloudflare's published ranges here is what separates the two: header believed on the path
+// Cloudflare owns, ignored on the path anyone can reach. Empty, the default, never reads it.
+const CLOUDFLARE_RANGES = parseTrustedProxies(process.env.SAND_UI_CLOUDFLARE_RANGES);
+const clientOf = (req) => clientAddress(req, TRUSTED_PROXIES, CLOUDFLARE_RANGES);
+const edgeOf = (req) => edgeAddress(req, TRUSTED_PROXIES);
+const secureOf = (req) => isSecureRequest(req, TRUSTED_PROXIES);
+// One year, and only ever on a response that really did arrive over TLS. A browser that sees this
+// refuses plain HTTP to the name for that long, which is the point on a public domain and is also
+// why secureOf ignores a forwarded scheme from an untrusted peer: the header would otherwise be a
+// way for a stranger to break someone else's access to a host they do not own.
+const HSTS = "max-age=31536000; includeSubDomains";
+
 // The bearer stays a way in because holding it is already full access: every /api call this
 // process forwards carries it. Requiring a session on top would only break the gates and the
 // scripts without taking any capability away from someone who has the token.
@@ -165,7 +212,7 @@ function mintSessionFromBearer(req, res, url) {
   if (url.pathname.startsWith("/api/")) return;
   if (!bearerMatches(req) || hasSession(req)) return;
   res.setHeader("set-cookie", serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret),
-    { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: isSecureRequest(req) }));
+    { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: secureOf(req) }));
 }
 
 // The console bounces to /login on a 401 only when it carries this header. Without a marker the
@@ -259,13 +306,14 @@ function endAndClose(req, res, status, headers, payload) {
 
 async function handleLogin(req, res, url) {
   const wantsHtml = String(req.headers.accept ?? "").includes("text/html");
-  const key = sourceAddress(req);
+  const key = clientOf(req);
 
   // Before the body, not after: a locked out address must not be able to make this process hold
   // anything in memory on its behalf.
   const waitMs = throttle.retryAfterMs(key);
   if (waitMs > 0) {
     const seconds = Math.ceil(waitMs / 1000);
+    console.log(`login rate limited for ${key}, ${seconds}s left`);
     const stalled = safeNextPath(url.searchParams.get("next"));
     const headers = { "retry-after": String(seconds) };
     if (!wantsHtml) return endAndClose(req, res, 429, { ...headers, "content-type": "application/json" }, JSON.stringify({ error: `too many attempts; wait ${seconds}s` }));
@@ -292,6 +340,11 @@ async function handleLogin(req, res, url) {
 
   if (!verifyPassword(String(fields.password ?? ""), AUTH.password)) {
     throttle.recordFailure(key);
+    // The address, never the password, and the address is the client's rather than the proxy's
+    // wherever a trusted proxy said so. On a public console this line is the only record that
+    // anyone is knocking.
+    const edge = edgeOf(req);
+    console.log(`login refused from ${key}${edge === key ? "" : ` (via ${edge})`}`);
     // One message for a wrong password and for an empty one: naming which is wrong tells a
     // guesser something, and tells the operator nothing they cannot see on their own screen.
     if (!wantsHtml) return fail(res, 401, "that password did not work");
@@ -300,7 +353,7 @@ async function handleLogin(req, res, url) {
 
   throttle.recordSuccess(key);
   const cookie = serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret),
-    { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: isSecureRequest(req) });
+    { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: secureOf(req) });
   res.writeHead(302, { location: next, "set-cookie": cookie, "cache-control": "no-store" });
   return res.end();
 }
@@ -308,7 +361,7 @@ async function handleLogin(req, res, url) {
 function handleLogout(req, res) {
   // Max-Age=0 with the same attributes is the only reliable way to delete a cookie; a browser
   // matches on name, path and domain, so a Set-Cookie that differs in Path clears nothing.
-  const cookie = serializeCookie(SESSION_COOKIE, "", { maxAgeSeconds: 0, secure: isSecureRequest(req) });
+  const cookie = serializeCookie(SESSION_COOKIE, "", { maxAgeSeconds: 0, secure: secureOf(req) });
   if (String(req.headers.accept ?? "").includes("text/html")) {
     res.writeHead(302, { location: "/login", "set-cookie": cookie, "cache-control": "no-store" });
     return res.end();
@@ -444,8 +497,31 @@ function relayVncSocket(req, socket, head, display) {
   socket.on("error", () => target.destroy());
 }
 
+// ui/index.html still aims its desktop frame at http://127.0.0.1:6080, which was the right
+// address for exactly one arrangement: a browser on the same machine as the box. Served from here
+// it is wrong twice over. The loopback is the VIEWER's, not the box's, and on the public domain a
+// plain-http frame inside an https page is mixed content, which the browser blocks before it can
+// even fail to connect -- so the page would have shipped one http-only asset on the very
+// deployment this work exists for. The Machine Room already went through this and answers it with
+// the relay's own /vnc route; ui/index.html belongs to a different part of the tree, so the fix
+// goes where the responsibility is: this server owns what it publishes, and rewrites the address
+// on the way out rather than editing a file that is not its own.
+//
+// :1 is the shared seat, which is what the operator page has always shown. `path` is set because
+// noVNC opens its socket against that value instead of guessing one from the page URL, and
+// guessing is what breaks behind a proxy.
+const LOOPBACK_DESKTOP = /https?:\/\/127\.0\.0\.1:6080\/([A-Za-z0-9_.-]+)(\?[^"']*)?/g;
+const sameOriginDesktop = (html) => String(html).replace(LOOPBACK_DESKTOP, (_, file, query) => {
+  const params = new URLSearchParams((query ?? "").slice(1));
+  params.set("path", "/vnc/1/websockify");
+  return `/vnc/1/${file}?${params}`;
+});
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${PORT}`);
+  // Set before anything answers, so it is on every response including the login page and the
+  // refusals. writeHead's own header object is merged over this rather than replacing it.
+  if (secureOf(req)) res.setHeader("strict-transport-security", HSTS);
   try {
     // Whether a password is configured is not a secret: the login page announces it to anyone who
     // asks for it. The console reads this to decide whether to draw a Log out control.
@@ -483,7 +559,7 @@ const server = createServer(async (req, res) => {
     }
     // The Machine Room is the console at "/"; the operator page lives at /operator/ (2026-09-02).
     if (req.method === "GET" && (url.pathname === "/operator" || url.pathname === "/operator/" || url.pathname === "/operator/index.html")) {
-      const html = await readFile(path.join(HERE, "index.html"));
+      const html = sameOriginDesktop(await readFile(path.join(HERE, "index.html"), "utf8"));
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       return res.end(html);
     }
@@ -720,7 +796,7 @@ const server = createServer(async (req, res) => {
       }));
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ endpoints, live, pinned,
-        pinnedBy: pinned ? "container env — recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin" : null }));
+        pinnedBy: pinned ? "container env; recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin" : null }));
     }
     // Save the catalog the operator edits in the browser.
     if (req.method === "POST" && url.pathname === "/endpoints") {
@@ -858,8 +934,22 @@ if (AUTH == null && !isLoopbackHost(BIND)) {
   console.error(`It writes ${AUTH_FILE} at mode 0600. Loopback needs no password and is unchanged.`);
   process.exit(1);
 }
+await resolveBoxContainer();
 server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${GATEWAY}${TOKEN.length > 0 ? " (bearer)" : " (no auth)"}`);
   console.log(`auth ${AUTH == null ? "none (loopback, no ui/auth.json)" : "password login, 12 h sessions"}`);
+  console.log(`prox ${TRUSTED_PROXIES.any ? "any peer may forward a client address" : (TRUSTED_PROXIES.ranges.length === 0
+    ? "none, so the socket address is the client and no forwarded header is read"
+    : `${TRUSTED_PROXIES.ranges.length} trusted range(s) from SAND_UI_TRUSTED_PROXIES`)}`);
+  if (TRUSTED_PROXIES.ignored?.length > 0) {
+    console.log(`prox IGNORED, not an address or prefix: ${TRUSTED_PROXIES.ignored.join(" ")}`);
+  }
+  console.log(`cfip ${CLOUDFLARE_RANGES.any ? "ANY forwarded address may send CF-Connecting-IP, which is a header anyone can write"
+    : (CLOUDFLARE_RANGES.ranges.length === 0
+      ? "none, so CF-Connecting-IP is never read and the forwarded address is the client"
+      : `${CLOUDFLARE_RANGES.ranges.length} Cloudflare range(s) from SAND_UI_CLOUDFLARE_RANGES`)}`);
+  if (CLOUDFLARE_RANGES.ignored?.length > 0) {
+    console.log(`cfip IGNORED, not an address or prefix: ${CLOUDFLARE_RANGES.ignored.join(" ")}`);
+  }
 });

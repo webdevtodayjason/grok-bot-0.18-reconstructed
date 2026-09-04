@@ -2,8 +2,10 @@
 // verify-deploy.mjs -- the R750 deploy gate, run FROM THE MAC over the tailnet.
 //
 // It proves six things in order, because a failure in an earlier one explains every later one:
-//   1. shape      both titanbot containers run, and their published ports are where they should
-//                 be: the relay on 100.110.83.82 only, the box on 127.0.0.1 only, nothing on 0.0.0.0
+//   1. shape      both titanbot containers run, their published ports are where they should be
+//                 (the relay on 100.110.83.82 only, the box on 127.0.0.1 only, nothing on 0.0.0.0),
+//                 the box's four data mounts are the titanbot volumes' own directories, and the
+//                 host bundle running inside the box is the one on the server
 //   2. gateway    getHostStatus and listAgents answer 200 through http://100.110.83.82:7787
 //   3. login      no credential is turned away, a wrong password is refused, and a request
 //                 carrying the gateway bearer is given a session that reaches the gateway on its
@@ -14,6 +16,18 @@
 //   6. desktop    a probe agent's screen opens through the relay's own /vnc route, the frame is
 //                 noVNC, and its websocket reaches the box
 //   7. lockout    six wrong passwords in a row hit the rate limit
+//
+// With --url it runs against any base URL instead of the tailnet one, which is what the Coolify
+// deployment needs: https://tb.semfreak.dev goes through Cloudflare and Traefik, so the published
+// ports it would otherwise assert do not exist and the containers are not necessarily called what
+// this file calls them (they are found by their com.titanbot.role label instead). Four checks come
+// with it: the certificate is valid for the name asked for, HSTS is on a TLS response, a forged
+// forwarded header does NOT buy a guesser a fresh lockout bucket, and -- the one that matters --
+// neither does going around Cloudflare to the origin, which is the path a guesser would actually
+// take.
+//
+//   node scripts/verify-deploy.mjs --url https://tb.semfreak.dev
+//   node scripts/verify-deploy.mjs --url https://tb.semfreak.dev --origin 66.90.191.45
 //
 // This gate does not know the console password and no longer asks for one. Jason's password is
 // his; a file holding a copy of it beside the token was a second secret to keep in step, and it
@@ -27,23 +41,57 @@
 //   node scripts/verify-deploy.mjs
 //
 // Env: TITANBOT_HOST (ssh destination, default dell-remote), TITANBOT_URL (default
-// http://100.110.83.82:7787), TITANBOT_ROOT, GROK_BOT_PLAYWRIGHT_DIR, GROK_BOT_CHROME.
+// http://100.110.83.82:7787), TITANBOT_ROOT, TITANBOT_ORIGIN (the address behind the proxy, default
+// 66.90.191.45), GROK_BOT_PLAYWRIGHT_DIR, GROK_BOT_CHROME.
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
+import https from "node:https";
+import tls from "node:tls";
+
+// --url <base> or --url=<base>. Everything else about the run is unchanged, including reading the
+// server's bearer over ssh: the gate still needs the token, and the token still lives on the
+// server rather than on this Mac.
+const urlFlag = (() => {
+  const inline = process.argv.find((arg) => arg.startsWith("--url="));
+  if (inline != null) return inline.slice("--url=".length);
+  const at = process.argv.indexOf("--url");
+  return at === -1 ? null : process.argv[at + 1];
+})();
+
+// The address the proxied name actually lands on, used only by the origin-bypass check below.
+const originFlag = (() => {
+  const inline = process.argv.find((arg) => arg.startsWith("--origin="));
+  if (inline != null) return inline.slice("--origin=".length);
+  const at = process.argv.indexOf("--origin");
+  return at === -1 ? null : process.argv[at + 1];
+})();
 
 const HOST = process.env.TITANBOT_HOST ?? "dell-remote";
+const ORIGIN_IP = originFlag ?? process.env.TITANBOT_ORIGIN ?? "66.90.191.45";
 const ROOT = process.env.TITANBOT_ROOT ?? "/home/sem/titanbot";
 const BIND = process.env.TITANBOT_BIND ?? "100.110.83.82";
 const PORT = process.env.TITANBOT_PORT ?? "7787";
-const URL_BASE = process.env.TITANBOT_URL ?? `http://${BIND}:${PORT}`;
+const URL_BASE = (urlFlag ?? process.env.TITANBOT_URL ?? `http://${BIND}:${PORT}`).replace(/\/+$/, "");
+// A base this gate was pointed at rather than the tailnet publish it knows the shape of.
+const EXTERNAL = urlFlag != null;
+const OVER_TLS = URL_BASE.startsWith("https://");
 const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR
   ?? "/private/tmp/claude-501/-Users-sem-orca-workspaces-grok-bot-0-18-reconstructed-gb/5d8b03a4-9c9b-4e51-af12-2606d5d99b44/scratchpad/pw";
 const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 let failures = 0;
+let inconclusive = 0;
 const check = (ok, label, detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` -- ${detail}` : ""}`);
   if (!ok) failures += 1;
+};
+// Not every leg of this gate can reach a verdict from this Mac. A check that could not run is a
+// third outcome and it is printed as one: calling it a PASS is how a gate starts lying, and
+// calling it a FAIL is how a gate starts being ignored. It is counted, and the summary line says
+// so, so a run that proved less than usual cannot look like a run that proved everything.
+const unresolved = (label, detail) => {
+  console.log(`  ????  ${label} -- INCONCLUSIVE: ${detail}`);
+  inconclusive += 1;
 };
 const step = (title) => console.log(`\n== ${title}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -56,36 +104,102 @@ const ssh = (command) => new Promise((resolve, reject) =>
 // deleteAgent records the id in the box's deleted-agents.json and never removes it, so this list
 // is the one piece of state a probe run leaves behind for good. Reading it lets the gate assert
 // how much it left rather than assume none.
-const BOX_CONTAINER = process.env.TITANBOT_BOX ?? "titanbot-box";
 const tombstones = async () => {
   const raw = await ssh(
-    `docker exec ${BOX_CONTAINER} cat /home/box/sand-data/agents/deleted-agents.json 2>/dev/null || echo '[]'`,
+    `docker exec ${BOX_NAME} cat /home/box/sand-data/agents/deleted-agents.json 2>/dev/null || echo '[]'`,
   ).catch(() => "[]");
   try { const value = JSON.parse(raw.trim() || "[]"); return Array.isArray(value) ? value : []; } catch { return []; }
 };
 
 step(`shape of the install on ${HOST}`);
+// By label first, by name second. A compose orchestrator names a service's container after its own
+// resource id, so the label is the only identifier that survives the move into Coolify -- and the
+// gate looking for a name that no longer exists would report an install that is missing when it is
+// merely renamed.
+const byRole = async (role, fallback) => {
+  const found = (await ssh(`docker ps --filter label=com.titanbot.role=${role} --format '{{.Names}}' | head -n 1`)
+    .catch(() => "")).trim();
+  return found.length > 0 ? found : fallback;
+};
+const BOX_NAME = process.env.TITANBOT_BOX ?? await byRole("box", "titanbot-box");
+const RELAY_NAME = process.env.TITANBOT_RELAY ?? await byRole("relay", "titanbot-relay");
 const running = JSON.parse(await ssh(
-  `docker inspect titanbot-box titanbot-relay --format '{{json .State.Running}}' 2>/dev/null | paste -sd, - | sed 's/^/[/;s/$/]/'`,
+  `docker inspect ${BOX_NAME} ${RELAY_NAME} --format '{{json .State.Running}}' 2>/dev/null | paste -sd, - | sed 's/^/[/;s/$/]/'`,
 ).catch(() => "[]"));
-check(running.length === 2 && running.every((r) => r === true), "titanbot-box and titanbot-relay are both running",
+check(running.length === 2 && running.every((r) => r === true), `${BOX_NAME} and ${RELAY_NAME} are both running`,
   running.length === 2 ? `${running}` : "one or both containers are missing");
 
 // Port bindings, read as docker's own JSON rather than parsed out of `docker ps` text.
 const ports = JSON.parse(await ssh(
-  `docker inspect titanbot-relay titanbot-box --format '{{json .NetworkSettings.Ports}}' | paste -sd, - | sed 's/^/[/;s/$/]/'`,
+  `docker inspect ${RELAY_NAME} ${BOX_NAME} --format '{{json .NetworkSettings.Ports}}' | paste -sd, - | sed 's/^/[/;s/$/]/'`,
 ).catch(() => "[{},{}]"));
 const [relayPorts, boxPorts] = ports;
 const bindingsOf = (map) => Object.entries(map ?? {}).flatMap(([container, list]) =>
   (list ?? []).map((b) => ({ container, host: `${b.HostIp}:${b.HostPort}` })));
 const relayBindings = bindingsOf(relayPorts);
 const boxBindings = bindingsOf(boxPorts);
-check(relayBindings.length === 1 && relayBindings[0].container === "7777/tcp" && relayBindings[0].host === `${BIND}:${PORT}`,
-  `the relay publishes exactly 7777 on ${BIND}:${PORT}`, relayBindings.map((b) => `${b.container}->${b.host}`).join(" ") || "nothing published");
-check(boxBindings.length > 0 && boxBindings.every((b) => b.host.startsWith("127.0.0.1:")),
-  "every box port is bound on the server's loopback only", boxBindings.map((b) => b.host).join(" ") || "nothing published");
+if (EXTERNAL) {
+  // Where the publish is concerned there is nothing to assert POSITIVELY against an arbitrary
+  // base: inside Coolify the right answer is no published port at all, because only the proxy
+  // reaches the relay. What still has to hold is that nothing is on a public interface, which is
+  // the check below this one.
+  check(true, "published ports are not asserted against a base URL this gate was handed",
+    `relay ${relayBindings.map((b) => `${b.container}->${b.host}`).join(" ") || "nothing published"}; box ${boxBindings.map((b) => b.host).join(" ") || "nothing published"}`);
+} else {
+  check(relayBindings.length === 1 && relayBindings[0].container === "7777/tcp" && relayBindings[0].host === `${BIND}:${PORT}`,
+    `the relay publishes exactly 7777 on ${BIND}:${PORT}`, relayBindings.map((b) => `${b.container}->${b.host}`).join(" ") || "nothing published");
+  check(boxBindings.length > 0 && boxBindings.every((b) => b.host.startsWith("127.0.0.1:")),
+    "every box port is bound on the server's loopback only", boxBindings.map((b) => b.host).join(" ") || "nothing published");
+}
 const wideOpen = [...relayBindings, ...boxBindings].filter((b) => b.host.startsWith("0.0.0.0:") || b.host.startsWith(":::"));
 check(wideOpen.length === 0, "no titanbot port is published on 0.0.0.0", wideOpen.map((b) => b.host).join(" ") || "none");
+
+// ---- the four data mounts, which is the one thing that fails silently ------------------------
+// Every agent, transcript and workspace on this box lives in four docker volumes. The hand install
+// mounts them by name; the Coolify stack cannot, because Coolify's compose parser renames a named
+// volume to "{service-uuid}_{slug}" and creates it empty, so that stack mounts the same volumes by
+// the directory the local driver keeps them in. Both are correct only if the container's mount
+// source is the volume's own mountpoint, and when it is not, everything below this line still
+// passes: the console loads, the gateway answers, and there is simply nobody on the roster.
+//
+// So the gate asks docker for both halves and compares them. This replaces an operator squinting
+// at `docker inspect` after a deploy, which is a check nobody performs twice.
+const DATA_MOUNTS = {
+  "/workspace": "titanbot-box-workspace",
+  "/home/box/sand-data": "titanbot-box-data",
+  "/var/lib/sand-box-store": "titanbot-box-store",
+  "/home/box/chrome-profile": "titanbot-box-chrome",
+};
+const boxMounts = JSON.parse(await ssh(`docker inspect ${BOX_NAME} --format '{{json .Mounts}}'`).catch(() => "[]"));
+const mountpoints = Object.fromEntries(
+  (await ssh(`docker volume inspect ${Object.values(DATA_MOUNTS).join(" ")} --format '{{.Name}} {{.Mountpoint}}' 2>/dev/null || true`)
+    .catch(() => "")).trim().split("\n").filter((line) => line.trim().length > 0)
+    .map((line) => line.trim().split(/\s+/)));
+const misdirected = Object.entries(DATA_MOUNTS).filter(([destination, volume]) => {
+  const source = boxMounts.find((m) => m.Destination === destination)?.Source ?? "";
+  return source.length === 0 || source !== mountpoints[volume];
+});
+check(misdirected.length === 0,
+  "the box's four data mounts are the titanbot volumes' own directories",
+  misdirected.length === 0
+    ? Object.values(DATA_MOUNTS).map((v) => `${v} -> ${mountpoints[v]}`).join(", ")
+    : misdirected.map(([destination, volume]) =>
+      `${destination} comes from "${boxMounts.find((m) => m.Destination === destination)?.Source ?? "nothing"}" `
+      + `and ${volume} lives at "${mountpoints[volume] ?? "no such volume"}"`).join("; ")
+      + " -- this box has none of Jason's agents on it");
+
+// And the host bundle, for the same reason and with the same failure mode. install.sh bind-mounts
+// the file; the Coolify stack copies it in from a mounted directory at the box's start, because a
+// single-file bind is what makes Coolify copy the file into its own database. Either way the only
+// thing that matters is that the bytes running in the box are the bytes on the server, and a box
+// quietly running the image's stock bundle looks entirely healthy from outside.
+const bundleOnServer = (await ssh(`sha256sum ${ROOT}/runtime/host-main.cjs | cut -c1-64`).catch(() => "")).trim();
+const bundleInBox = (await ssh(`docker exec ${BOX_NAME} sha256sum /home/box/sand-host/host-main.cjs | cut -c1-64`)
+  .catch(() => "")).trim();
+check(bundleOnServer.length === 64 && bundleInBox === bundleOnServer,
+  "the box is running the host bundle that is on the server",
+  bundleInBox === bundleOnServer ? `sha256 ${bundleInBox.slice(0, 16)}...`
+    : `the box has ${bundleInBox.slice(0, 16) || "nothing"}... and the server has ${bundleOnServer.slice(0, 16) || "nothing"}...`);
 
 // The token file is the single source of truth for the gateway bearer. Read it here, hold it in
 // memory, and never let it reach this Mac's disk or this script's output.
@@ -97,6 +211,34 @@ check(mode === "600", "the token file is 0600 on the server", `mode ${mode}`);
 // A password this gate invented, and therefore certainly wrong. Nothing here needs the real one:
 // every check below is either about a credential being refused or about the bearer being accepted.
 const WRONG = `not-the-console-password-${Math.random().toString(36).slice(2, 10)}`;
+
+if (OVER_TLS) {
+  step(`the certificate on ${new URL(URL_BASE).hostname}`);
+  // rejectUnauthorized with a servername is the whole check: node verifies the chain AND matches
+  // the name against the certificate's SAN, wildcards included, and refuses the socket otherwise.
+  // Reading the fields afterwards is for the message, not for the verdict.
+  const host = new URL(URL_BASE).hostname;
+  const port = Number(new URL(URL_BASE).port || 443);
+  const peer = await new Promise((resolve) => {
+    const socket = tls.connect({ host, port, servername: host, rejectUnauthorized: true }, () => {
+      const certificate = socket.getPeerCertificate();
+      const authorized = socket.authorized;
+      socket.end();
+      resolve({ authorized, certificate });
+    });
+    socket.setTimeout(20_000, () => { socket.destroy(); resolve({ authorized: false, error: "timed out" }); });
+    socket.on("error", (error) => resolve({ authorized: false, error: error.message }));
+  });
+  const certificate = peer.certificate ?? {};
+  const expires = Date.parse(certificate.valid_to ?? "");
+  check(peer.authorized === true,
+    `the certificate is valid and issued for ${host}`,
+    peer.authorized === true
+      ? `issuer ${certificate.issuer?.O ?? certificate.issuer?.CN ?? "?"}, subject ${certificate.subject?.CN ?? "?"}, names ${certificate.subjectaltname ?? "none"}`
+      : peer.error ?? "the handshake was refused");
+  check(Number.isFinite(expires) && expires > Date.now(),
+    "and it has not expired", certificate.valid_to ?? "no notAfter");
+}
 
 step(`gateway through ${URL_BASE}`);
 const call = async (method, args = {}, headers = {}) => {
@@ -160,6 +302,19 @@ const loginPage = await hit("/login", { headers: { accept: "text/html" } });
 const loginHtml = loginPage.status === 200 ? await loginPage.text() : "";
 check(loginPage.status === 200 && loginHtml.includes('type="password"') && loginHtml.includes('action="/login"'),
   "the login page renders one password field and posts to /login", `HTTP ${loginPage.status}, ${loginHtml.length} bytes`);
+
+if (OVER_TLS) {
+  // A response that arrived over TLS carries HSTS, so a browser that has seen this console once
+  // will not try plain HTTP to the name again. It is on the refusals as well as the pages, which
+  // is why the login page is what this reads it off.
+  const hsts = loginPage.headers.get("strict-transport-security");
+  check(/max-age=\d+/.test(String(hsts)) && Number(/max-age=(\d+)/.exec(String(hsts))?.[1] ?? 0) >= 15_552_000,
+    "the login page carries HSTS with at least a six month max-age", hsts ?? "absent");
+  // A page that pulls in a plain HTTP asset is a page a browser paints half of. The login page
+  // carries its own CSS inline precisely so there is nothing to pull in.
+  check(!/(?:src|href)\s*=\s*["']http:/i.test(loginHtml), "and it asks for no http asset",
+    (/(?:src|href)\s*=\s*["']http:[^"']*/i.exec(loginHtml) ?? ["none"])[0]);
+}
 
 const wrong = await postForm("/login", { password: WRONG, next: "/" });
 check(wrong.status === 401 && wrong.headers.get("set-cookie") == null,
@@ -476,9 +631,114 @@ check(duringLockout.status === 429, "a request that would otherwise be a 413 is 
   `HTTP ${duringLockout.status}, was 413 before the lockout`);
 check(Number(duringLockout.headers.get("retry-after") ?? 0) > 0 && Number(duringLockout.headers.get("retry-after")) <= 30,
   "the response says how long to wait", `retry-after ${duringLockout.headers.get("retry-after")}s`);
+if (EXTERNAL) {
+  // The forged header, and what this check is and is not worth.
+  //
+  // Traefik rewrites the X-Forwarded-* family from the connection it actually accepted: measured
+  // against traefik:v3.6 started with this server's own arguments, "X-Forwarded-For: 1.2.3.4,
+  // 5.6.7.8, 9.9.9.9" reached the backend as a single hop that was the caller's real address. So
+  // through a live chain this asserts the CHAIN sanitizes, not that the relay would have. The
+  // relay's own half is proved in tests/relay-trusted-proxies.test.mjs, which drives the address
+  // logic directly with peers this gate cannot spoof from the outside. Both halves matter, and
+  // this one is the one that can only be seen from here.
+  const forged = await hit("/login", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", "x-forwarded-for": "203.0.113.7" },
+    body: new URLSearchParams({ password: `${WRONG}-forged` }).toString(),
+  });
+  check(forged.status === 429, "a forged X-Forwarded-For lands in the same lockout bucket, so it buys nothing",
+    `HTTP ${forged.status}${forged.status === 401 ? " -- the forged hop was believed, which is the bug this checks for" : ""}`);
+  const secondForgery = await hit("/login", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", "x-forwarded-for": "198.51.100.42, 203.0.113.7" },
+    body: new URLSearchParams({ password: `${WRONG}-forged-2` }).toString(),
+  });
+  check(secondForgery.status === 429, "and so does a second, different one",
+    `HTTP ${secondForgery.status}`);
+
+  // And the check the one above cannot make: the guesser's real path.
+  //
+  // CF-Connecting-IP is not in the X-Forwarded-* family, so Traefik passes it through byte for
+  // byte. Sent through Cloudflare it is worthless to a guesser, because Cloudflare overwrites it
+  // before Traefik ever sees it -- which is exactly why a forgery aimed at the front door proves
+  // nothing. Nothing forces anyone through the front door. The origin address is in certificate
+  // transparency and is shared with every other site on the host, so the request below goes
+  // straight there, with the right SNI and Host and a CF-Connecting-IP this gate invented, and a
+  // different one each time.
+  //
+  // Two outcomes are a pass and they are different sentences. If the origin answers, the request
+  // has to land in the same bucket as everything above -- this Mac's own address, which Traefik
+  // reports and no header can change -- and answer 429. If the origin refuses the connection
+  // outright, the bypass does not exist to be tested, which is a stronger result than passing it.
+  // Only "the origin answered 401" is a failure, and it means a guesser has unlimited attempts.
+  step(`the origin behind the proxy, at ${ORIGIN_IP}`);
+  const hostname = new URL(URL_BASE).hostname;
+  const direct = (forgedIp) => new Promise((resolve) => {
+    const body = new URLSearchParams({ password: `${WRONG}-origin-${forgedIp}` }).toString();
+    const req = https.request({
+      host: ORIGIN_IP,
+      port: 443,
+      servername: hostname,
+      path: "/login",
+      method: "POST",
+      // rejectUnauthorized stays on: a certificate this Mac would not accept is a different
+      // finding, and it would be reported as a refused connection rather than hidden.
+      rejectUnauthorized: true,
+      headers: {
+        host: hostname,
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "text/html",
+        "content-length": Buffer.byteLength(body),
+        "cf-connecting-ip": forgedIp,
+      },
+    }, (res) => { res.resume(); resolve({ status: res.statusCode }); });
+    // The code matters as much as the message. ECONNREFUSED and its neighbours are the ORIGIN
+    // answering "no"; a timeout, a DNS failure or a certificate this Mac would not accept are
+    // this end failing, and they say nothing whatever about whether a guesser somewhere else can
+    // reach 66.90.191.45 on 443. Round one of this gate treated all of them alike and printed a
+    // certificate mismatch as proof the bypass did not exist.
+    req.setTimeout(15_000, () => { req.destroy(); resolve({ status: 0, code: "ETIMEDOUT", why: "timed out" }); });
+    req.on("error", (error) => resolve({ status: 0, code: error.code ?? "ERR", why: error.message }));
+    req.end(body);
+  });
+  const LABEL = "a forged CF-Connecting-IP sent straight to the origin does not escape the lockout";
+  // An IP literal as the base cannot be tested this way and must not be reported as if it had
+  // been. The request would carry that literal as SNI and Host to a different address, so every
+  // outcome is about the certificate rather than about the lockout.
+  if (/^[0-9.]+$/.test(hostname) || hostname.includes(":")) {
+    unresolved(LABEL, `the base URL names ${hostname} rather than a hostname, so a request to `
+      + `${ORIGIN_IP} carrying it would be judged by the certificate and not by the lockout`);
+  } else {
+    const bypass = [];
+    for (const forgedIp of ["203.0.113.11", "203.0.113.12", "203.0.113.13"]) bypass.push(await direct(forgedIp));
+    // The three outcomes, in the order they matter. Answered and rate limited: the forged header
+    // bought nothing and the guesser is in this Mac's own bucket. Refused at the TCP level: the
+    // origin itself turned the connection away, which is a stronger result than passing the test.
+    // Anything else -- a timeout, a name that would not resolve, a certificate this Mac declines
+    // -- happened on this end and decides nothing.
+    const REFUSED = new Set(["ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "EPIPE"]);
+    const allLimited = bypass.every((r) => r.status === 429);
+    const allRefused = bypass.every((r) => r.status === 0 && REFUSED.has(r.code));
+    const answered = bypass.filter((r) => r.status !== 0);
+    const seen = bypass.map((r) => (r.status !== 0 ? `HTTP ${r.status}` : `${r.code} ${r.why}`)).join("; ");
+    if (allLimited || allRefused) {
+      check(true, LABEL, allRefused
+        ? `the origin refused every connection at the transport (${bypass[0].code}), so there is no bypass to take`
+        : `${seen} -- every attempt landed in this Mac's own lockout bucket`);
+    } else if (answered.length > 0) {
+      check(false, LABEL, `${seen}${answered.some((r) => r.status === 401)
+        ? " -- a 401 means the forged header was believed and a guesser has unlimited attempts" : ""}`);
+    } else {
+      unresolved(LABEL, `${seen} -- that is this Mac failing to reach ${ORIGIN_IP}, not the origin `
+        + "refusing anyone; run this again from a host that can reach it");
+    }
+  }
+}
+
 // The bearer is not the login, so the lockout must not reach the gates themselves.
 const gateDuringLockout = await call("getHostStatus", {}, { authorization: `Bearer ${TOKEN}` });
 check(gateDuringLockout.status === 200, "the gateway bearer still works while a login lockout holds", `HTTP ${gateDuringLockout.status}`);
 
-console.log(`\n${failures === 0 ? "PASS" : "FAIL"}  ${failures} failing check(s)  ${URL_BASE}`);
+console.log(`\n${failures === 0 ? "PASS" : "FAIL"}  ${failures} failing check(s)`
+  + `${inconclusive > 0 ? `, ${inconclusive} inconclusive` : ""}  ${URL_BASE}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -10,6 +10,13 @@
 #   bash /home/sem/titanbot/deploy/uninstall.sh --keep-volumes  never asks, keeps the data
 #   bash /home/sem/titanbot/deploy/uninstall.sh --volumes       never asks, DELETES the data
 #   bash /home/sem/titanbot/deploy/uninstall.sh --purge-image   also drops the 5.2 GB box image
+#   bash /home/sem/titanbot/deploy/uninstall.sh --keep-tree     leaves /home/sem/titanbot alone
+#
+# --keep-tree is what the Coolify switch-over uses (deploy/coolify/README.md). That stack does not
+# replace the install tree, it bind-mounts it: the runtime bundle, the ui with its password file,
+# the profile with the gateway token and the credential placeholder all stay exactly where they
+# are and the compose file points at them. Removing the tree there would delete the password and
+# the token that the box in the volumes still authenticates with.
 #
 # It writes no Traefik configuration file, creates no Coolify record, and touches no DNS entry or
 # certificate. It does end the tb.semfreak.dev route, because that route is nothing but labels on
@@ -36,11 +43,13 @@ step() { printf '\n== %s\n' "$*"; }
 
 DROP_VOLUMES=ask
 PURGE_IMAGE=no
+DROP_TREE=yes
 for arg in "$@"; do
   case "$arg" in
     --volumes) DROP_VOLUMES=yes ;;
     --keep-volumes) DROP_VOLUMES=no ;;
     --purge-image) PURGE_IMAGE=yes ;;
+    --keep-tree) DROP_TREE=no ;;
     *) printf 'unknown flag: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -87,7 +96,9 @@ else
 fi
 
 step "install tree"
-if [ -d "$ROOT" ]; then
+if [ "$DROP_TREE" = no ]; then
+  say "kept $ROOT, including the gateway token and the relay password (--keep-tree)"
+elif [ -d "$ROOT" ]; then
   rm -rf "$ROOT"
   say "removed $ROOT (including the gateway token file; a later install mints a new one)"
 else

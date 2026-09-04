@@ -82,7 +82,11 @@ rsync -a "$REPO/deploy/r750/common.sh" "$REPO/deploy/r750/install.sh" \
   "$REPO/deploy/r750/uninstall.sh" "$REPO/deploy/r750/enable-route.sh" \
   "$REPO/deploy/r750/disable-route.sh" "$REPO/deploy/r750/relay.Dockerfile" "$HOST:$ROOT/deploy/"
 rsync -a "$REPO/scripts/box-patches/apply-start-window-fix.sh" "$HOST:$ROOT/deploy/"
-say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,apply-start-window-fix.sh}"
+# The Coolify stack's init service runs this from the same directory, bind-mounted read-only. It
+# lives here rather than under deploy/coolify on the server because that is the directory the
+# compose file mounts and the only one the container can see.
+rsync -a "$REPO/deploy/coolify/init-box.sh" "$HOST:$ROOT/deploy/"
+say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,apply-start-window-fix.sh,init-box.sh}"
 
 if [ "$INSTALL" = no ]; then
   printf '\n== shipped, not installed\n'

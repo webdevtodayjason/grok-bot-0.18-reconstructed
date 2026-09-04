@@ -1,0 +1,280 @@
+# The titanbot stack as a Coolify resource. Paste this whole file into New Resource ->
+# Docker Compose Empty, set the domain on titanbot-relay, deploy. README.md in this directory is
+# the operator's copy of that sentence with the clicks written out.
+#
+# READ THIS FIRST, because it is the thing that makes this file look strange.
+#
+# Coolify does not deploy the compose file you paste. It parses it, rewrites parts of it, stores
+# the result, and deploys that. Two of its rewrites decide the whole shape of this file, and both
+# were read out of the parser running on this server (Coolify 4.0.0,
+# /var/www/html/bootstrap/helpers/shared.php) rather than out of anyone's documentation:
+#
+#   named volumes are renamed.  In the volume branch the only exemption is a cifs driver. Every
+#     other named volume becomes "{service-uuid}_{slug}", a fresh top-level entry is added for it,
+#     and the service's mount source is repointed at the new name. `external: true` is not read at
+#     all. So a compose that names titanbot-box-data gets a brand new empty volume, and the console
+#     comes up beautifully with no agents, no transcripts and no workspace on it. That is why the
+#     four data mounts below are host PATHS. The paths are the existing volumes' own directories,
+#     so this stack and the hand install address the identical bytes and neither can drift from the
+#     other. See "the four data mounts" below.
+#
+#   bind mounts become Coolify storage records.  Every bind except /var/run/docker.sock and /tmp
+#     gets a LocalFileVolume row, and a short-syntax bind is assumed to be a DIRECTORY (the
+#     parser's own comment: "we cannot determine if the bind is a directory or not, so we set it to
+#     directory"). For a directory that assumption is harmless: saving the record runs mkdir -p on
+#     a directory that already exists. For a FILE it is not. LocalFileVolume::saveStorageOnServer
+#     hits `$isFile === 'OK' && $this->is_directory`, cats the file into Coolify's database, and
+#     throws. A 434-byte ui/auth.json would land in that database as the scrypt password hash and
+#     the cookie signing secret; the 19 MB host-main.cjs would land there as the string
+#     "[binary file]", and one Save from the Storages UI would then write those 13 bytes over the
+#     bundle. So there is not one file bind in this file. Only directories, and the socket.
+#     (Long-syntax binds are worse, not better: they parse as is_directory=false, and saving one
+#     whose path is a directory on the server runs `rm -fr` on it.)
+#
+# What else is different from deploy/r750/install.sh, and why:
+#
+#   no ports        The hand install publishes the box on the server's loopback and the relay on
+#                   the tailnet address. Here nothing is published at all. The relay reaches the
+#                   gateway, the noVNC pages and the websockify sockets as http://titanbot-box:...
+#                   over the network Coolify makes for this stack, and Coolify's Traefik reaches
+#                   the relay the same way. A `ports:` entry here would put the console on a
+#                   server interface with no proxy in front of it, which is the one thing this
+#                   deployment must not do.
+#   no networks     Coolify creates a network for the stack and attaches its proxy to it. Its docs
+#                   say in as many words not to declare your own: a container on two networks
+#                   makes Traefik pick an address non-deterministically, and the symptom is a site
+#                   that works after one deploy and hangs after the next.
+#   no traefik      Coolify writes the router, the certificate resolver and the http-to-https
+#   labels          redirect itself from the Domains field. Measured on this server: a Coolify
+#                   application carries traefik.http.routers.https-0-<uuid>-<service>.tls.
+#                   certresolver=letsencrypt that Coolify put there. Labels of our own would be a
+#                   second router competing with that one.
+#   no container    Both services carry a com.titanbot.role label instead. Coolify overwrites
+#   names           container_name with "<service>-<resource uuid>" unconditionally, so nothing
+#                   here, in init-box.sh, in ui/server.mjs or in the gate may look a container up
+#                   by name. Custom labels survive the rewrite untouched; the service name survives
+#                   as a network alias, which is why http://titanbot-box:1340 still resolves.
+#
+# The relay image is built ONCE on the server, by hand:
+#
+#   docker build -t titanbot-relay:local -f /home/sem/titanbot/deploy/relay.Dockerfile /home/sem/titanbot/deploy
+#
+# It is not built from here. A Docker Compose Empty resource is a user-defined Service with no Git
+# source and no build context on disk, so a `build:` section has nothing to build from; only the
+# Git-backed Docker Compose build pack can build. `pull_policy: never` is what keeps Coolify's
+# pull step from failing on an image that exists only on this host: measured on the R750,
+# `docker compose pull` prints "Skipped" for that service and exits 0.
+
+services:
+  # ---- the box ---------------------------------------------------------------------------------
+  # Pinned by digest, not by tag: the :sand-box-latest tag has moved once already, and an image
+  # that quietly differs from the host bundle it is mounted with is a debugging nightmare nobody
+  # would think to look for. pull_policy: missing keeps a redeploy from re-fetching 5.2 GB;
+  # measured on the R750, `docker compose pull` answers "Skipped - Image is already present
+  # locally" in 0.12 s.
+  titanbot-box:
+    image: public.ecr.aws/k0i0n2g5/cursorenvironments/universal@sha256:d0bb69285340df19d73f106492c7aabb723e8a950809b9f53a884888e2b4c709
+    pull_policy: missing
+    restart: unless-stopped
+    # Everything that has to find this container finds it by this label: init-box.sh, the relay's
+    # resolveBoxContainer, and scripts/verify-deploy.mjs. See "no container names" above.
+    labels:
+      com.titanbot.role: box
+    environment:
+      SAND_SUPERVISOR_ENABLED: "1"
+      SAND_BOX_AUTO_UPDATE: "0"
+      SAND_USE_EXISTING_BOX_EXEC_DAEMON: "1"
+      SAND_TREE_SITTER_NODE_DEPS: /home/box/deps
+      NODE_PATH: /home/box/deps
+      SAND_GATEWAY_BIND_HOST: 0.0.0.0
+      SAND_HOST_PORT: "1340"
+      # The SAME 64-hex value the existing install minted. It is in
+      # /home/sem/titanbot/profile/local-docker-vm.json and must not be regenerated: the data
+      # directories below carry a box that already authenticates with it.
+      #
+      # Plain ${VAR}, deliberately not ${VAR:?}. Coolify turns a $-prefixed value into an
+      # environment variable you fill in on the resource page, and it builds that variable's NAME
+      # by taking everything between the braces: with :? the name would literally be
+      # "TITANBOT_GATEWAY_TOKEN:?", which is not a legal shell name, so the .env line would be
+      # dropped and the deploy would fail on a missing required variable that no field in the UI
+      # can set. The entrypoint below refuses to start on an empty token instead, which fails in
+      # the same direction with a message that says what to do.
+      SAND_GATEWAY_TOKEN: ${TITANBOT_GATEWAY_TOKEN}
+      SAND_BOX_STORE_SYNC: "1"
+      SAND_BOX_STORE_LOCAL_DIR: /var/lib/sand-box-store
+      SAND_DEV_INFERENCE_TOKEN_FILE: /run/grok-bot/inference.json
+      SAND_BACKEND_URL: https://api2.cursor.sh/
+    volumes:
+      # ---- the four data mounts ------------------------------------------------------------
+      # These are the docker volumes titanbot-box-{workspace,data,store,chrome}, addressed by the
+      # directory the local driver keeps them in rather than by name, because a name would be
+      # renamed (see the top of this file) and a rename means an empty box.
+      #
+      # They are not a copy and they are not a migration. `docker volume inspect
+      # titanbot-box-data --format '{{.Mountpoint}}'` prints exactly the path below, so this stack
+      # and deploy/r750/install.sh, which still mounts them by name, read and write the same
+      # bytes. That is the property that makes the rollback in README section 8 free: whichever
+      # of the two is running, the agents are in one place.
+      #
+      # The /data/docker prefix is this host's docker data-root, not a constant. Measured
+      # 2026-09-04: `docker info --format '{{.DockerRootDir}}'` is /data/docker. If docker is ever
+      # reconfigured onto a different root these four lines go stale, and the failure mode is
+      # docker helpfully creating empty directories and the console coming up with no agents --
+      # which is why scripts/verify-deploy.mjs asserts the running container's mount sources
+      # against `docker volume inspect` on every run rather than leaving it to an operator's eye.
+      - /data/docker/volumes/titanbot-box-workspace/_data:/workspace
+      - /data/docker/volumes/titanbot-box-data/_data:/home/box/sand-data
+      - /data/docker/volumes/titanbot-box-store/_data:/var/lib/sand-box-store
+      - /data/docker/volumes/titanbot-box-chrome/_data:/home/box/chrome-profile
+      # The host bundle and the exec daemon are built on the Mac and shipped by
+      # deploy/r750/sync.sh. The daemon is a directory and mounts straight onto its place in the
+      # box. host-main.cjs is a single file, and a single-file bind is the Coolify storage trap at
+      # the top of this file, so the whole runtime directory is mounted somewhere harmless and the
+      # entrypoint copies the one file into place before the box starts. See `entrypoint` below.
+      - /home/sem/titanbot/runtime:/opt/titanbot-runtime:ro
+      - /home/sem/titanbot/runtime/box-exec-daemon:/home/box/box-exec-daemon:ro
+      # A placeholder credential, not a real one. box-store-sync throws on the way in when neither
+      # inference file is set; the model that actually answers comes from the endpoint picker.
+      - /home/sem/titanbot/credential:/run/grok-bot:ro
+    # Two lines of shell in front of the image's own entrypoint, /usr/local/bin/start-sand-box.
+    #
+    # The copy is how the Mac's host bundle gets to /home/box/sand-host/host-main.cjs without a
+    # single-file bind mount. It runs before the supervisor starts, so the box never executes the
+    # image's stock bundle even briefly, and it is one `cp` of a 19 MB file inside the container.
+    # Measured on the R750 against this exact image: the image ships host-main.cjs with sha256
+    # a69652a8dcc33682..., the copy leaves b64262cf76022754..., which is the bundle sync.sh put on
+    # the server.
+    #
+    # The token guard is here because ${TITANBOT_GATEWAY_TOKEN} above cannot be marked required
+    # (see the comment there). An empty token starts a box that answers 401 to the relay and to
+    # every gate, which looks like a networking problem for an hour. This says so in one line and
+    # stops.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -z "$$SAND_GATEWAY_TOKEN" ]; then
+          echo "SAND_GATEWAY_TOKEN is empty. Set TITANBOT_GATEWAY_TOKEN on this resource to the" >&2
+          echo "64-hex token in /home/sem/titanbot/profile/local-docker-vm.json and redeploy." >&2
+          exit 1
+        fi
+        cp /opt/titanbot-runtime/host-main.cjs /home/box/sand-host/host-main.cjs || exit 1
+        exec /usr/local/bin/start-sand-box
+
+  # ---- the console -----------------------------------------------------------------------------
+  titanbot-relay:
+    image: titanbot-relay:local
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      - titanbot-box
+    labels:
+      com.titanbot.role: relay
+    environment:
+      SAND_UI_PORT: "7777"
+      # 0.0.0.0 inside the container, which is the container's own interface and not a server one.
+      # The relay refuses to start on a reachable address with no ui/auth.json, so this line and
+      # the password file in the mounted ui directory are a pair.
+      SAND_UI_BIND_HOST: 0.0.0.0
+      # By service name. Coolify's network answers the service name whatever it ends up calling
+      # the container, so this is the one piece of addressing the container renaming cannot break.
+      # The relay reaches the box's noVNC pages and websockify sockets through this same hostname.
+      SAND_HOST_GATEWAY_URL: http://titanbot-box:1340
+      # Deliberately NOT SAND_BOX_CONTAINER. That variable names a container for `docker exec`, and
+      # the container is called titanbot-box-<uuid> here. ui/server.mjs falls back to the
+      # com.titanbot.role=box label when the name it holds does not exist, and its startup log says
+      # which container it settled on.
+      #
+      # And NOT SAND_HOST_GATEWAY_TOKEN either. The relay falls back to reading the token out of
+      # local-docker-vm.json in the first SAND_PROFILE_DIRS entry (ui/server.mjs, tokenFromProfile),
+      # which is the 0600 file mounted read-only below. Setting the env var as well would copy a
+      # 64-hex root-equivalent secret into Coolify's environment store and into the output of
+      # `docker inspect` on this container, for nothing. The box service does need it as a
+      # variable, because that is the only way the image takes it.
+      SAND_PROFILE_DIRS: /profile
+      # Everything reaching this process now arrives from Traefik on the stack's docker network,
+      # so without this line the login lockout would be ONE bucket shared by the whole internet
+      # and a stranger's five typos would lock Jason out of his own console. Inside these ranges
+      # the relay reads the address Traefik observed out of X-Forwarded-For, and reads
+      # X-Forwarded-Proto to decide the Secure cookie flag and the HSTS header. Both are values
+      # Traefik writes from the connection it actually accepted: measured against traefik:v3.6 with
+      # this server's own arguments, a request carrying "X-Forwarded-For: 1.2.3.4, 5.6.7.8" and
+      # "X-Forwarded-Proto: https" over a plain connection reached the backend as
+      # "X-Forwarded-For: <the caller's real address>" and "X-Forwarded-Proto: http". The forged
+      # list was gone.
+      #
+      # It is the docker private ranges rather than one subnet because Coolify allocates a fresh
+      # network per resource at deploy time and its address is not knowable in advance. Measured
+      # on the R750: the coolify network is 10.0.2.0/24 and the per-stack networks sit in
+      # 172.18.0.0/16 through 172.30.0.0/16. Nothing outside a docker network can reach this
+      # process at all -- no port is published -- so widening to the private ranges trusts exactly
+      # the peers that were already the only possible peers. "any" would be the wrong answer even
+      # here: it would still be wrong the day somebody adds a `ports:` line.
+      SAND_UI_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fd00::/8
+      # Which of those forwarded addresses may go on to hand over a CF-Connecting-IP.
+      #
+      # This is the line that decides whether the password lock can be walked around. Traefik
+      # rewrites the X-Forwarded-* family, but CF-Connecting-IP is not one of those names and
+      # arrives exactly as its sender wrote it. Nothing forces a visitor through Cloudflare: the
+      # origin address behind a proxied name is published in certificate transparency and is shared
+      # with every other site on this host, and a request sent straight to it reaches Traefik and
+      # then this relay. If any forwarded address could hand over a CF-Connecting-IP, that visitor
+      # would write a fresh one per guess and the lockout would never fire for him at all.
+      #
+      # Naming Cloudflare's own ranges here means the header is read on the one path where
+      # Cloudflare overwrote it and ignored on every other. On the direct path the client is the
+      # address Traefik observed, which is the sender's real one, and five wrong passwords lock it.
+      #
+      # This is the published list from https://www.cloudflare.com/ips-v4 and /ips-v6 as fetched
+      # 2026-09-04. It changes rarely; refresh it when Cloudflare announces a range, and note the
+      # failure direction if it goes stale: a visitor arriving through an unlisted new edge is
+      # counted as that edge rather than as himself, so a group of visitors shares one lockout
+      # bucket. That is an annoyance, not a way in.
+      SAND_UI_CLOUDFLARE_RANGES: 173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32
+    volumes:
+      # Root-equivalent on this host, and not optional. ui/server.mjs reads and writes the box's
+      # box-secrets.json (the model picker) and connectors.json (the connector editor) through
+      # `docker exec`, because those files live in a directory the relay container cannot see, and
+      # the desktop surface buttons put applications on the box's X display the same way. Without
+      # it the console loads and those three surfaces silently return nothing. It is also the one
+      # bind Coolify's parser exempts from its storage records, along with /tmp.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Read-write, because the operator saving a model writes ui/endpoints.json. ui/auth.json is
+      # inside this directory and is NOT separately bound read-only over the top of it any more:
+      # that was a single-file bind, and a single-file bind is how the password hash and the cookie
+      # signing secret would have been copied into Coolify's database (see the top of this file).
+      # What still protects the file is what protected it before the relay was ever containerised:
+      # it is 0600 on the host, the relay only ever reads it, and nothing in the console's surface
+      # writes it. deploy/r750/set-password.mjs is how it changes.
+      - /home/sem/titanbot/ui:/app/ui
+      # The token file the hand install wrote, and the relay's ONLY source for the gateway bearer:
+      # nothing in the environment above sets it. Read-only, and 0600 on the host.
+      - /home/sem/titanbot/profile:/profile:ro
+      # The two post-start box repairs, run from this container's own start. See the command below.
+      - /home/sem/titanbot/deploy:/init:ro
+    # install.sh does the box repairs inline after `docker run`, because it is a script and can
+    # just keep going. A compose file has no "and then", and the obvious answer -- a one-shot
+    # service that runs and exits -- is a service that is permanently "exited" on a platform whose
+    # health display does not expect that. Coolify has an `exclude_from_hc: true` for exactly that
+    # case, but it is a Coolify extension that plain compose rejects outright: measured with
+    # docker compose v2.40.3 on the R750 and v5.1.4 on the Mac, a file carrying it fails validation
+    # with "additional properties 'exclude_from_hc' not allowed", so a compose carrying it can
+    # never be checked before it is pasted. Running the repairs from the console's own start avoids
+    # the whole question: no service exits, nothing needs a Coolify-only key, and the file
+    # validates with stock compose.
+    #
+    # In the BACKGROUND, so the console answers immediately and a box that takes two minutes to
+    # come up never holds the login page hostage. init-box.sh waits for the box itself and both of
+    # its steps check before they act, so this is a no-op on an already-repaired box. Its output
+    # goes to this container's log, which is the log an operator already has open.
+    command:
+      - sh
+      - -c
+      - |
+        { sh /init/init-box.sh || echo "init-box.sh failed; the lines above say where"; } &
+        exec node /app/ui/server.mjs
+
+# No top-level `volumes:` key, and that is the point of the whole file. Anything named here would
+# be renamed to "{service-uuid}_{name}" by Coolify's parser and created empty, and Jason's agents
+# would still be sitting in the volumes nothing was pointing at any more. The four data mounts in
+# titanbot-box address those volumes' directories directly instead.
