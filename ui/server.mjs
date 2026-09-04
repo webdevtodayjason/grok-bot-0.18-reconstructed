@@ -172,10 +172,13 @@ const server = createServer(async (req, res) => {
       res.writeHead(302, { location: "/" });
       return res.end();
     }
-    // Put an app on the box's X display so the VNC view has something to show. Strictly two
-    // fixed commands, no operator string ever reaches a shell, and the relay only listens on
-    // loopback -- the box is already the agent's sandbox, but that is no reason to hand a
-    // browser tab arbitrary exec on it.
+    // Put an app on the box's X display so the VNC view has something to show. What keeps this
+    // safe is the fixed command table below: the operator's string picks a key, never reaches a
+    // shell, and an unknown key is rejected. That is the whole argument, and it has to be, because
+    // SAND_UI_BIND_HOST means this server is not necessarily on loopback any more -- the R750
+    // deploy binds it to 0.0.0.0 inside a container. Anyone who can reach this port already holds
+    // the full gateway surface through /api, so the exec table is not the boundary; it is simply
+    // not an extra hole in one.
     // Did the window actually appear? The launch is detached and cannot report, so the UI asks
     // afterwards instead of trusting a 200 that only ever meant "the request was accepted".
     if (req.method === "GET" && url.pathname === "/box/surface") {
@@ -507,8 +510,12 @@ const server = createServer(async (req, res) => {
   }
 });
 
-// Loopback only. This process holds the gateway token, so it must not be reachable off-box.
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`ui   http://127.0.0.1:${PORT}`);
+// Loopback by default: this process holds the gateway token, so it must not be reachable off-box
+// unless the operator says so. SAND_UI_BIND_HOST is that say-so, and it exists because the R750
+// deploy runs the relay in a container, where 127.0.0.1 is the container's own loopback and
+// nothing outside it -- not even the published port -- could ever reach the server.
+const BIND = process.env.SAND_UI_BIND_HOST?.trim() || "127.0.0.1";
+server.listen(PORT, BIND, () => {
+  console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${GATEWAY}${TOKEN.length > 0 ? " (bearer)" : " (no auth)"}`);
 });

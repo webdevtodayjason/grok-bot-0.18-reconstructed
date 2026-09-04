@@ -99,6 +99,14 @@ node --test tests/
 agents name themselves correctly; on Nemotron they do not answer the question at all, which is
 the "agents think they are Grok" report and is a model-quality problem, not a prompt bug.
 
+## Your own instance on the R750
+
+The install lives in `deploy/r750/` and its README is the checklist: `sync.sh` from this Mac builds
+and ships everything and runs the install over ssh; `enable-route.sh` on the server publishes
+`tb.semfreak.dev` through Coolify's proxy after the DNS-01 resolver exists; `disable-route.sh`
+takes it down; `scripts/verify-deploy.mjs` proves the instance from here. Until `ui/endpoints.json`
+exists on the server no agent can answer.
+
 ## Your own skills after you deploy
 
 The August 15 backup of the original install holds eleven global workflow skills written for
