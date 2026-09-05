@@ -1795,9 +1795,9 @@
       elements.teachDialog.close();
       // Said as what it is. The cap is a save, so calling this "discarded" would be the same lie
       // the stop path used to tell. It is a save the host makes with nothing from this dialog in
-      // it, so the note is still in the textarea and was never sent: saying so here is the only
-      // moment the operator can act on it.
-      showToast("The box ended this recording on its own. A recording that runs to the ten-minute cap is saved and handed to the agent without the note typed here, so check its transcript before recording again. The note you typed is still in the field.");
+      // it, so the note is still in the textarea and was never sent. One sentence, because a toast
+      // is a pill that clears itself in under three seconds: anything longer is not read at all.
+      showToast("The ten-minute cap ended this recording: the box saved it and handed it to the agent without the note typed here, which is still in the field.");
     }).catch(() => {});
   }
 

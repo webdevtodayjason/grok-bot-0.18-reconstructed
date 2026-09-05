@@ -301,16 +301,17 @@ try {
     const created = await gw("createAgent", { name: probeName, description: "verify-dashboard teach probe" }).catch(() => null);
     probeAgentId = created?.agent?.id ?? created?.id ?? null;
     if (!probeAgentId) check(false, "a fresh agent could be created for the teach probe");
-    // The recorder refuses an agent without its own X display (fork window index >= 3), and the
-    // websockify token in the vnc url IS that display. Allocated under the page load, as the
-    // default pass does, because a cold box takes about 27s over it.
+    // The recorder refuses an agent without its own X display; fork windows start at 2
+    // (SAND_BOX_FIRST_FORK_WINDOW_INDEX), and the websockify token in the vnc url IS that display.
+    // Allocated under the page load, as the default pass does, because a cold box takes about 27s
+    // over it.
     const screen = probeAgentId ? (async () => {
       const deadline = Date.now() + 60_000;
       for (;;) {
         const status = await gw("ensureForeverBox", { id: probeAgentId }).catch(() => null);
         const url = String(status?.vncUrl ?? "");
         const display = Number(/token%3D(\d+)/i.exec(url)?.[1] ?? /token=(\d+)/i.exec(url)?.[1] ?? NaN);
-        if (Number.isInteger(display) && display >= 3) return display;
+        if (Number.isInteger(display) && display >= 2) return display;
         if (Date.now() > deadline) return null;
         await sleep(3000);
       }

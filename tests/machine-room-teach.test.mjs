@@ -414,7 +414,7 @@ test("teach: the note's hint says where the note actually goes", async () => {
   const html = await readFile(path.join(repoRoot, "ui/machine-room/index.html"), "utf8");
   const start = html.indexOf('id="teach-dialog"');
   const dialog = html.slice(start, html.indexOf("</dialog>", start)).replace(/<!--[\s\S]*?-->/g, "");
-  assert.match(dialog, /sent in the message that starts that learning turn/);
+  assert.match(dialog, /Finish recording sends this note in the message that starts that learning turn/);
   assert.equal(/does not read this note|once the learning turn has already started/i.test(dialog), false);
   const adapter = await readFile(path.join(repoRoot, "ui/machine-room/gateway-adapter.js"), "utf8");
   assert.match(adapter, /stopTeachRecording", save && note \? \{ agentId: id, save, note \}/,

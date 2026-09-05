@@ -229,15 +229,16 @@ try {
   await writeSetting("SAND_TEACH", "1");
   if (previousTrace !== "1") await writeSetting("SAND_TOOL_TRACE", "1");
 
-  // The recorder refuses an agent without its own X display (fork window index >= 3); the
-  // websockify token in the vnc url IS that display number.
+  // The recorder refuses an agent without its own X display; fork windows start at 2
+  // (SAND_BOX_FIRST_FORK_WINDOW_INDEX), and the websockify token in the vnc url IS that display
+  // number. This once demanded 3 because Chief happened to hold :2 when it was written.
   let display = null;
   const windowBy = Date.now() + WINDOW_TIMEOUT_MS;
   while (Date.now() < windowBy) {
     const status = await call("ensureForeverBox", { id: probe.id }).catch(() => null);
     const url = String(status?.vncUrl ?? "");
     const parsed = Number(/token%3D(\d+)/i.exec(url)?.[1] ?? /token=(\d+)/i.exec(url)?.[1] ?? NaN);
-    if (Number.isInteger(parsed) && parsed >= 3) { display = parsed; break; }
+    if (Number.isInteger(parsed) && parsed >= 2) { display = parsed; break; }
     await sleep(3000);
   }
   if (display == null) fail(`the probe never got its own display within ${WINDOW_TIMEOUT_MS / 1000}s; the recorder requires a private monitor`);
