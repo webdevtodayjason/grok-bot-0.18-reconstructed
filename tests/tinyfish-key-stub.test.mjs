@@ -122,3 +122,53 @@ test("the key is in no response body and in nothing the stub printed", async () 
   assert.equal(output.includes(KEY), false, `the stub printed the key: ${output.slice(0, 200)}`);
   assert.match(output.trim(), /^listening \d+$/, `the stub printed more than its port: ${output.slice(0, 200)}`);
 });
+
+// GitHub's preset carries three headers that are configuration rather than credentials
+// (X-MCP-Toolsets, X-MCP-Tools, X-MCP-Readonly), and they are what decides which tools the operator
+// gets. A bridge that dropped them would leave the connector working and the catalogue wrong, which
+// "it connected" never catches -- so the gate's --github-key arm makes the stub demand them, and
+// this is that demand, checked here rather than only inside the box.
+test("MCP_STUB_HEADERS: a request missing or mismatching a required header is refused like a bad bearer", async () => {
+  const headers = { "X-MCP-Toolsets": "repos,issues,pull_requests", "X-MCP-Readonly": "true" };
+  let said = "";
+  const second = spawn(process.execPath, [STUB, "--port", "0"], {
+    env: { ...process.env, MCP_STUB_KEY: KEY, MCP_STUB_HEADERS: JSON.stringify(headers) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  second.stdout.setEncoding("utf8");
+  second.stderr.setEncoding("utf8");
+  second.stdout.on("data", (chunk) => { said += chunk; });
+  second.stderr.on("data", (chunk) => { said += chunk; });
+  try {
+    const secondPort = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`the stub never printed a port; it said: ${said.slice(0, 300)}`)), 10_000);
+      const check = () => {
+        const found = /^listening (\d+)$/m.exec(said);
+        if (found == null) return;
+        clearTimeout(timer);
+        resolve(Number(found[1]));
+      };
+      second.stdout.on("data", check);
+      second.on("exit", (code) => { clearTimeout(timer); reject(new Error(`the stub exited with ${code}: ${said.slice(0, 300)}`)); });
+      check();
+    });
+    const ask = async (extra) => {
+      const res = await fetch(`http://127.0.0.1:${secondPort}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${KEY}`, ...extra },
+        body: JSON.stringify(LIST),
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    assert.equal((await ask({})).status, 401, "the bearer alone was accepted");
+    assert.equal((await ask({ "X-MCP-Toolsets": headers["X-MCP-Toolsets"] })).status, 401, "one of the two headers was enough");
+    assert.equal((await ask({ ...headers, "X-MCP-Readonly": "false" })).status, 401, "a wrong header value was accepted");
+    const all = await ask(headers);
+    assert.equal(all.status, 200);
+    assert.deepEqual(JSON.parse(all.text).result.tools.map((tool) => tool.name), ["search", "fetch_content"]);
+    // Same habit as the bearer: nothing the stub says repeats what arrived.
+    assert.equal(said.includes(KEY), false, `the stub printed the key: ${said.slice(0, 200)}`);
+  } finally {
+    second.kill("SIGKILL");
+  }
+});
