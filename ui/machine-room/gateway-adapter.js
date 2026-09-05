@@ -1226,6 +1226,13 @@
       liveModelKey = key;
       await refreshSubscriptions();
     }
+    // The routines of one context, as the routine cards draw them: identity, enabled state, the
+    // countdown, and the last run's outcome. Named so a heartbeat can tell a moved list from a
+    // repainted one.
+    const routinesSig = (context) => state.routines
+      .filter((x) => same(x.scope, context))
+      .map((x) => `${x.id}:${x.status ?? ""}:${x.nextRunAt ?? ""}:${x.lastRun?.status ?? ""}:${x.lastRun?.at ?? ""}:${x.name ?? ""}`)
+      .join(",");
     async function reloadActive() {
       // Trays first: reloadRoster stamps every status through statusOf, which needs the tray set
       // already current. The other order let the roster paint over attention on every tick.
@@ -1239,13 +1246,18 @@
       // rebuild the whole conversation, and an unconditional one on each stream event and each
       // 15 s tick is a visible flash on a long conversation.
       const before = recordSig(r);
+      // AUTOMATION-3: the routines the host holds for this context are part of what the views show,
+      // and the host writes them on its own (a scheduled run finishing, a run failing, a routine
+      // filed by another client). The app renders the last snapshot it was handed, so a change here
+      // that emits nothing is a card the operator never sees.
+      const routinesBefore = routinesSig(state.activeContext);
       applyLoaded(r, loaded);
       applyAwaiting(state.activeContext, r, loaded.latestAgentMs);
       state.routines = [
         ...state.routines.filter((x) => !same(x.scope, state.activeContext)),
         ...loaded.routines,
       ];
-      if (recordSig(r) !== before || rosterChanged) emit("message:created", { context: state.activeContext });
+      if (recordSig(r) !== before || rosterChanged || routinesSig(state.activeContext) !== routinesBefore) emit("message:created", { context: state.activeContext });
       rosterChanged = false;
     }
 
