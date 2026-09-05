@@ -223,14 +223,27 @@ export interface LocalMachineAnswer {
  * that lapsed between the two reads sent a prompt teaching ExternalShell, ExternalRead and the
  * CopyToBox/CopyFromBox pair on a wire that withheld all five (or the reverse -- five tools offered
  * with no paragraph explaining the two machines). The answer is now computed once and held for the
- * turn, so both halves of a turn describe the same world. `beginTurn` is called when the run shell
+ * turn, so both halves of a turn describe the same world. `beginTurn` is called when a run shell
  * emits "started", which is why a computer that connects mid-conversation is still picked up by the
  * very next turn: the value is per turn, not per session.
+ *
+ * `beginTurn` takes the conversation whose run started, and only the owner's own start drops the
+ * held answer. The reader belongs to one conversation, but every run in that session -- the chief
+ * and each subagent it dispatches -- emits "started" through the same lifecycle seam, so an
+ * unscoped boundary let a Task dispatch re-read the bridge in the middle of the parent's turn:
+ * the parent's prompt stayed frozen on the pre-dispatch answer while its next tool build took a
+ * fresh one, which is the split this whole mechanism exists to prevent. A subagent run therefore
+ * reads the world its parent turn was built on and never resets it.
  */
 export function createTurnLocalMachineReader(deps: {
   readonly readOverride: () => string | undefined;
   readonly hasAnnouncedComputer: () => boolean;
-}): { readonly read: () => LocalMachineAnswer; readonly beginTurn: () => void } {
+  /** The conversation this reader holds an answer for; a foreign run's start is ignored. */
+  readonly ownerConversationId: string;
+}): {
+  readonly read: () => LocalMachineAnswer;
+  readonly beginTurn: (conversationId: string) => void;
+} {
   let held: LocalMachineAnswer | undefined;
   return {
     read: (): LocalMachineAnswer => {
@@ -242,7 +255,9 @@ export function createTurnLocalMachineReader(deps: {
       };
       return held;
     },
-    beginTurn: (): void => { held = undefined; },
+    beginTurn: (conversationId: string): void => {
+      if (conversationId === deps.ownerConversationId) held = undefined;
+    },
   };
 }
 

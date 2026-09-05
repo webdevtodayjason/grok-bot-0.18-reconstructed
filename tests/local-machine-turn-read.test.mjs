@@ -13,6 +13,11 @@
 // off one `createTurnLocalMachineReader`, with a bridge that flips its answer on every call. On the
 // old behaviour the two disagree within a single turn and the pin offers the five with nothing on
 // the far end.
+//
+// The turn boundary is scoped to the conversation the reader belongs to, because a subagent's run
+// emits "started" through the same lifecycle seam as the chief's: an unscoped boundary re-read the
+// bridge in the middle of the parent's turn the moment a Task dispatched, which is the same split
+// wearing a different hat. The third case drives that dispatch.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -46,6 +51,10 @@ const HOST_MACHINE_TOOLS = ["ExternalShell", "ExternalRead", "AwaitExternalShell
 // The marker the host reports as the `localMachine` prompt section: the paragraph that teaches the
 // two machines and the CopyToBox / CopyFromBox pair between them.
 const TWO_MACHINES = "Your box and the user's computer are separate machines";
+
+// The chief conversation the reader belongs to, and a child dispatched inside one of its turns.
+const CHIEF = "agent-under-test";
+const CHILD = "agent-under-test-subagent-1";
 
 const turn = { autoReviewModes: { hostShell: "off", boxShell: "off", mcp: "off", computer: "off", automationWrite: "off", cloudAgent: "off", subagentLaunch: "off" } };
 const props = { mcp: { mcpMeta: { getMcpTools: () => [], callOptions: {} } } };
@@ -107,6 +116,7 @@ test("the toolset and the prompt see one answer per turn, so a lapsed heartbeat 
   const reader = setting.createTurnLocalMachineReader({
     readOverride: () => undefined,
     hasAnnouncedComputer: bridge,
+    ownerConversationId: CHIEF,
   });
   const first = turnHalves(reader);
   assert.equal(bridge.calls(), 1, "the bridge is asked once for the turn, not once per consumer");
@@ -115,11 +125,47 @@ test("the toolset and the prompt see one answer per turn, so a lapsed heartbeat 
 
   // The turn boundary, and only the turn boundary, re-reads: a computer that drops out (or
   // connects) mid-conversation still moves the toolset and the prompt together on the next turn.
-  reader.beginTurn();
+  reader.beginTurn(CHIEF);
   const second = turnHalves(reader);
   assert.equal(bridge.calls(), 2, "the next turn asks the bridge again");
   assert.equal(second.toolsWithheld, true, "the bridge went quiet, so the five are withheld");
   assert.equal(second.promptTeaches, false, "and the two-machines paragraph goes with them");
+});
+
+test("a subagent starting mid-turn does not re-read the bridge under its parent", () => {
+  const bridge = flappingBridge();
+  const reader = setting.createTurnLocalMachineReader({
+    readOverride: () => undefined,
+    hasAnnouncedComputer: bridge,
+    ownerConversationId: CHIEF,
+  });
+  // The parent's turn: prompt rendered once, toolset built from the same held answer.
+  const beforeDispatch = turnHalves(reader);
+  assert.equal(bridge.calls(), 1);
+  assert.equal(beforeDispatch.toolsOffered, true);
+  assert.equal(beforeDispatch.promptTeaches, true);
+
+  // The Task dispatch. A child runner and its run shell emit "started" through the same lifecycle
+  // seam as the chief, so an unscoped boundary dropped the parent's answer here -- and the very
+  // next tool build in the parent's turn read a bridge whose heartbeat had lapsed, against a
+  // prompt frozen on the read above. The boundary carries the conversation that started, so a
+  // foreign one is ignored.
+  reader.beginTurn(CHILD);
+  const afterDispatch = turnHalves(reader);
+  assert.equal(bridge.calls(), 1, "a child's start does not re-read the bridge mid-parent-turn");
+  assert.equal(afterDispatch.toolsOffered, true, "the parent's post-subagent steps keep the five");
+  assert.equal(afterDispatch.promptTeaches, beforeDispatch.promptTeaches,
+    "and still match the prompt the parent turn was sent with");
+  // The child reads its parent's world too: one answer for the whole turn, nested runs included.
+  assert.equal(reader.read().connected, true);
+  assert.equal(bridge.calls(), 1);
+
+  // The parent's own next turn is still the boundary.
+  reader.beginTurn(CHIEF);
+  const nextTurn = turnHalves(reader);
+  assert.equal(bridge.calls(), 2, "the owner's next turn asks the bridge again");
+  assert.equal(nextTurn.toolsWithheld, true);
+  assert.equal(nextTurn.promptTeaches, false);
 });
 
 test("the pin cannot offer the five with no daemon answering", () => {
@@ -132,6 +178,7 @@ test("the pin cannot offer the five with no daemon answering", () => {
   const reader = setting.createTurnLocalMachineReader({
     readOverride: () => "1",
     hasAnnouncedComputer: () => false,
+    ownerConversationId: CHIEF,
   });
   const answer = reader.read();
   assert.equal(answer.connected, false);
@@ -145,6 +192,7 @@ test("the pin still withholds while a daemon answers, and unset is the bridge al
   const pinnedOff = setting.createTurnLocalMachineReader({
     readOverride: () => "0",
     hasAnnouncedComputer: () => true,
+    ownerConversationId: CHIEF,
   }).read();
   assert.equal(pinnedOff.connected, false, "the withhold pin is the leg a gate can still drive");
   assert.equal(pinnedOff.source, "setting");
@@ -152,6 +200,7 @@ test("the pin still withholds while a daemon answers, and unset is the bridge al
   const unset = setting.createTurnLocalMachineReader({
     readOverride: () => undefined,
     hasAnnouncedComputer: () => true,
+    ownerConversationId: CHIEF,
   }).read();
   assert.equal(unset.connected, true);
   assert.equal(unset.source, "bridge");

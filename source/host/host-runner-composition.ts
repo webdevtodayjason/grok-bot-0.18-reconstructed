@@ -1067,26 +1067,36 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
      * TOOLS-18. "Once per turn" used to be a claim, not a mechanism: the toolset builder and the
      * prompt assembly each called this, and with a 30 s liveness window between them a lapsed
      * heartbeat split the turn -- a prompt teaching five tools the wire had already withheld. The
-     * answer is now read once and held until the run shell emits the next "started" (see
-     * `noteRunLifecycle`), so every consumer in a turn gets the same value, and the next turn still
-     * re-reads: a computer that connects mid-conversation is offered on the turn after it connects.
+     * answer is now read once and held until this conversation's own run shell emits the next
+     * "started" (see `noteRunLifecycleFor`), so every consumer in a turn gets the same value, and
+     * the next turn still re-reads: a computer that connects mid-conversation is offered on the
+     * turn after it connects.
      */
     const localMachineReader = createTurnLocalMachineReader({
       readOverride: () => readSandBoxSetting(SAND_LOCAL_MACHINE_SETTING),
       hasAnnouncedComputer: () => method(localExec, "hasLiveComputer")?.() ?? false,
+      ownerConversationId: session.id,
     });
     const localMachine = () => localMachineReader.read();
     const localMachineConnected = (): boolean => localMachine().connected;
     /**
      * TOOLS-18. The turn boundary the held answer is dropped on. Both run paths (the runner's own
      * and the production run shell's) emit "started" through the caller's hook, so wrapping it here
-     * is the one seam that sees every turn begin.
+     * is the one seam that sees every turn begin -- including a subagent's, which is why the
+     * wrapper is made per run identity. A child runner is built from this same `runnerOptions` and
+     * its run shell forwards here too, so one shared wrapper dropped the parent's held answer the
+     * moment a Task dispatched: the parent's prompt was already frozen on the pre-dispatch answer
+     * while its post-subagent tool builds took a fresh read. Only the conversation the reader
+     * belongs to resets it; a nested or background subagent runs inside its parent's answer.
      */
-    const noteRunLifecycle = (event: unknown): void => {
+    const noteRunLifecycleFor = (runConversationId: string) => (event: unknown): void => {
       if (typeof event === "object" && event !== null
-        && (event as { readonly type?: unknown }).type === "started") localMachineReader.beginTurn();
+        && (event as { readonly type?: unknown }).type === "started") {
+        localMachineReader.beginTurn(runConversationId);
+      }
       hooks.onRunLifecycle?.(event);
     };
+    const noteRunLifecycle = noteRunLifecycleFor(session.id);
     /**
      * TOOLS-17. Whether a shared-room member keeps the box tools beside SendMessage, asked in one
      * place because two callers used to ask it differently: the runner honoured the kill switch and
@@ -3025,6 +3035,9 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         isComputerUseSubagent: normalizeSubagentKind(shellSubagentKind) === "computeruse",
         isBrowserUseSubagent: normalizeSubagentKind(shellSubagentKind) === "browseruse",
       });
+      // TOOLS-18. This shell's own turn boundary: it drops the held local-machine answer only when
+      // the run that started is the one the reader belongs to.
+      const noteShellRunLifecycle = noteRunLifecycleFor(shellConversationId);
       /**
        * TOOLS-01 / CP-01 / TOOLS-10. Connectors were discovered every turn and then dropped on
        * the floor: `mcpMeta` was never bound on this path, so `buildTurnTools` never offered
@@ -3241,6 +3254,9 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                   // child the same production run shell the parent runs on; its own
                   // conversationId/transcriptId keep its turns distinct.
                   productionTurnRunShell: makeRunShell(args.subagentType, agentId),
+                  // TOOLS-18. The child inherits the parent's hooks through the spread above,
+                  // and its "started" would otherwise arrive on the parent's turn boundary.
+                  onRunLifecycle: noteRunLifecycleFor(agentId),
                 });
                 bindSessionOwnedRunner(child);
                 ownedRunners.add(child);
@@ -3405,7 +3421,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         setActiveRunInterrupted: () => {},
         setAwaitingUserSelection: () => {},
         isAwaitingUserSelection: () => false,
-        emitRunLifecycle: event => noteRunLifecycle(event),
+        emitRunLifecycle: noteShellRunLifecycle,
         emitUpdate: update => hooks.transport.onUpdate(update),
         ...(hooks.transport.lastReactionApplied === undefined
           ? {}
