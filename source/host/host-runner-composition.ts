@@ -2357,24 +2357,32 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       const subagentManagement = dependencies.subagentManagement;
       const startHandoff = method(extensions.api("session"), "startHandoff");
       const provider: TurnToolsetHostFactoryProvider = {
-      createSendMessageToolInputs: turn => ({
-        dependencies: turn.emitUpdate === undefined
-          ? dependencies.sendMessage
-          : {
-              ...dependencies.sendMessage,
-              onSendMessage: (message, timestampMs) => {
-                turn.emitUpdate?.({
-                  type: "send-message",
-                  message: { ...message, type: String(message.type ?? "text") },
-                  timestampMs,
-                  ...(turn.ackToken === undefined
-                    ? {}
-                    : { ackToken: turn.ackToken }),
-                });
-                return hooks.transport.lastSentMessageId?.();
+      createSendMessageToolInputs: turn => {
+        // LOOP-2: the send cap and the duplicate suppressor count per turn, and these inputs are
+        // rebuilt every step, so the counting state has to come off the turn rather than the tool.
+        const budget = turn.sendBudget === undefined
+          ? {}
+          : { turnSendBudget: turn.sendBudget };
+        return {
+          dependencies: turn.emitUpdate === undefined
+            ? { ...dependencies.sendMessage, ...budget }
+            : {
+                ...dependencies.sendMessage,
+                ...budget,
+                onSendMessage: (message, timestampMs) => {
+                  turn.emitUpdate?.({
+                    type: "send-message",
+                    message: { ...message, type: String(message.type ?? "text") },
+                    timestampMs,
+                    ...(turn.ackToken === undefined
+                      ? {}
+                      : { ackToken: turn.ackToken }),
+                  });
+                  return hooks.transport.lastSentMessageId?.();
+                },
               },
-            },
-      }),
+        };
+      },
       createSendToAgentToolInputs: () => ({
         dependencies: dependencies.sendToAgent,
       }),

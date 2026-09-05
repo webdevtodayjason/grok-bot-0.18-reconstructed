@@ -97,6 +97,7 @@ import {
 import {
   createSendMessageTool,
   type SendMessageDependencies,
+  type TurnSendBudget,
 } from "./send-message-tool.js";
 import {
   createSendToAgentTool,
@@ -263,6 +264,12 @@ export interface TurnToolsetTurnInput {
   readonly endThisRunAwaitingUser?: (reason: string) => void;
   /** Per-turn MCP descriptors used by the generated discovery/call pair. */
   readonly mcpTools?: readonly McpToolForMeta[];
+  /**
+   * LOOP-2. The send cap and the duplicate suppressor count per turn, but the toolset is rebuilt
+   * every step, so their state cannot live in the tool. It rides on the turn instead and reaches
+   * SendMessage through the host's tool inputs.
+   */
+  readonly sendBudget?: TurnSendBudget;
   /** Optional live Shell Smart Mode identities, supplied per turn by the host. */
   readonly shellAutoReview?: {
     readonly host?: TurnShellAutoReviewInput;

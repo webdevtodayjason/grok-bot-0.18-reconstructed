@@ -18,6 +18,8 @@ const SAND_SEND_MESSAGE_TOOL_DESCRIPTION = `Say something to the user in the Gro
 export const SAND_AWAITING_USER_SEND_MESSAGE_BLOCKED = "This turn is already waiting on the user (you sent a question widget or handed the box back to them), so this message was not delivered. Wait for the user — their response arrives as the next message — then say this on your next turn.";
 export interface SandOutgoingMessage extends Record<string, unknown> { readonly type: SendMessageInput["type"]; }
 export interface SendMessageDependencies<Context> {
+  /** The turn's send budget. Absent means the tool keeps its own, which lasts one step. */
+  readonly turnSendBudget?: TurnSendBudget;
   readonly isAwaitingUserSelection?: () => boolean;
   readonly resolveCloudAgentTitle?: (ctx: Context, bcId: string) => Promise<string | undefined>;
   readonly getIngestAttachment: () => ((sourcePath: string) => Promise<string>) | undefined;
@@ -65,13 +67,50 @@ function errorResult(error: string): SendMessageResult {
 }
 
 // P1c (2026-09-02): a model once emitted hundreds of identical SendMessage calls in one completion
-// and the host delivered every one. The tool is built per turn, so these counters are per turn.
+// and the host delivered every one.
 // Never silent: the model gets an error result it can read, and the host log gets one line.
 const MAX_SENDS_PER_TURN = 20;
 
-export function createSendMessageTool(deps: SendMessageDependencies<Context>) {
+/**
+ * LOOP-2. The counters used to live in the tool's own closure with a comment claiming the tool is
+ * built per turn. It is not: the runner calls its toolsGenerator once per model STEP, so every
+ * step handed the model a fresh tool with the counter back at zero and the previous message
+ * forgotten. Measured before the cap existed, one turn delivered thirty sends; with the cap in the
+ * tool it would still deliver twenty per step, and the duplicate suppressor never saw across a step
+ * boundary at all. The state therefore hangs off the turn, exactly like the self-talk cap: one
+ * budget is created per turn, every step of that turn shares it, and the next turn gets a new one.
+ */
+export interface TurnSendBudget {
+  /** The refusal to hand back to the model, or null when this message may be delivered. */
+  admit(fingerprint: string): string | null;
+  /** Called only after the message actually went out, so a failed send costs nothing. */
+  recordDelivered(fingerprint: string): void;
+}
+
+export function createTurnSendBudget(max: number = MAX_SENDS_PER_TURN): TurnSendBudget {
   let sentThisTurn = 0;
   let lastDelivered: string | null = null;
+  return {
+    admit(fingerprint) {
+      if (lastDelivered === fingerprint) {
+        console.warn("[sand][send-cap] duplicate SendMessage suppressed: identical to the previous message this turn");
+        return "This exact message was already delivered a moment ago and was not sent again. Say something new, or stop.";
+      }
+      if (sentThisTurn >= max) {
+        console.warn(`[sand][send-cap] cap reached: ${sentThisTurn} messages delivered this turn; further sends refused`);
+        return `Send cap reached: ${max} messages were already delivered in this turn. Stop sending and finish.`;
+      }
+      return null;
+    },
+    recordDelivered(fingerprint) {
+      sentThisTurn += 1;
+      lastDelivered = fingerprint;
+    },
+  };
+}
+
+export function createSendMessageTool(deps: SendMessageDependencies<Context>) {
+  const budget = deps.turnSendBudget ?? createTurnSendBudget();
   const execute = async (
     ctx: Context,
     interactionHandler: SendMessageInteractionHandler<Context>,
@@ -86,18 +125,11 @@ export function createSendMessageTool(deps: SendMessageDependencies<Context>) {
         return errorResult(SAND_AWAITING_USER_SEND_MESSAGE_BLOCKED);
       }
       const fingerprint = JSON.stringify(input);
-      if (lastDelivered === fingerprint) {
-        console.warn("[sand][send-cap] duplicate SendMessage suppressed: identical to the previous message this turn");
-        return errorResult("This exact message was already delivered a moment ago and was not sent again. Say something new, or stop.");
-      }
-      if (sentThisTurn >= MAX_SENDS_PER_TURN) {
-        console.warn(`[sand][send-cap] cap reached: ${sentThisTurn} messages delivered this turn; further sends refused`);
-        return errorResult(`Send cap reached: ${MAX_SENDS_PER_TURN} messages were already delivered in this turn. Stop sending and finish.`);
-      }
+      const refusal = budget.admit(fingerprint);
+      if (refusal !== null) return errorResult(refusal);
       const timestampMs = Date.now();
       const messageId = deps.onSendMessage(message, timestampMs);
-      sentThisTurn += 1;
-      lastDelivered = fingerprint;
+      budget.recordDelivered(fingerprint);
       return new SendMessageResult({
         result: {
           case: "success",

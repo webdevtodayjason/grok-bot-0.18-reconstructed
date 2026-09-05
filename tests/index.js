@@ -49,3 +49,4 @@ import "./relay-trusted-proxies.test.mjs";
 import "./local-machine-prompt.test.mjs";
 import "./local-machine-turn-read.test.mjs";
 import "./self-talk-cap.test.mjs";
+import "./send-cap-per-turn.test.mjs";
