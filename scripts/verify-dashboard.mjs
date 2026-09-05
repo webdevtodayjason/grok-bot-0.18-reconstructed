@@ -241,6 +241,24 @@ let copyAgentId = null;
 // outlives the probe and shows up on every production agent. Snapshot the library once the probe
 // exists and delete everything the run added before the probe itself goes.
 let libraryBefore = null;
+// BOTS-1: the agent Import Bot minted, and the box-wide workflow library as it stood before that
+// import. Both are set while the imported agent exists, so an assertion that throws between the
+// click and the delete still leaves the box the way the run found it.
+let botAgentId = null;
+let botLibraryBefore = null;
+// A SIGTERM never reaches the finally block -- Node's default handler ends the process outright --
+// and this gate is run under `timeout`, which sends exactly that. The imported agent is a real
+// agent on a shared box, so it is swept on the way out. A sweep that cannot finish in two seconds
+// is abandoned rather than left hanging a run that has already been told to stop.
+let sweepingOnSignal = false;
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => {
+    if (sweepingOnSignal) process.exit(143);
+    sweepingOnSignal = true;
+    const swept = botAgentId ? gw("deleteAgent", { id: botAgentId }).catch(() => {}) : Promise.resolve();
+    void Promise.race([swept, new Promise((resolve) => setTimeout(resolve, 2000))]).finally(() => process.exit(143));
+  });
+}
 // --teach flips SAND_TEACH to prove the refusal path; the finally puts the box back.
 let teachSettingBefore;
 let teachSettingTouched = false;
@@ -1213,6 +1231,82 @@ try {
       if (after?.mcpServers?.tinyfish == null) tinyfishAdded = false;
     }
 
+    // -- BOTS-1: the Marketplace's Bots tab, the bot page and Import Bot. The catalog is data in
+    // the host bundle served by listMarketplace, and this page reads it only through the gateway,
+    // so what the tab lists is what the agents' own SearchPlugins sees. Import Bot is a real write
+    // on a shared box -- a new agent, and its skills in the box-wide workflow library -- so the
+    // agent is deleted here as soon as it has been read back, and again in the finally if a later
+    // assertion threw first.
+    const marketCatalog = await gw("listMarketplace", {}).catch((error) => ({ error: error.message }));
+    const marketBots = Array.isArray(marketCatalog?.bots) ? marketCatalog.bots : [];
+    check(marketBots.length === 6, "listMarketplace serves the six bot templates",
+      marketCatalog?.error ?? `${marketBots.length}: ${marketBots.map((b) => b.name).join(", ")}`);
+    const researchDesk = marketBots.find((b) => String(b?.name ?? "") === "Research desk") ?? null;
+    if (marketBots.length === 0) {
+      console.log("  INFO  this host serves no bot catalog; the Bots-tab checks below are skipped");
+    } else {
+      await openMarketplace();
+      const opened = await page.click("#panel-dialog [data-marketplace-tab='bots']", { timeout: 4000 }).then(() => true).catch(() => false)
+        || await page.locator("#panel-dialog button", { hasText: /^Bots$/ }).first().click({ timeout: 4000 }).then(() => true).catch(() => false);
+      await page.waitForTimeout(2000);
+      const listed = await page.$$eval("[data-marketplace-bots] [data-bot-id]", (els) => [...new Set(els.map((e) => e.dataset.botId))]).catch(() => []);
+      check(listed.length === marketBots.length, "the Bots tab lists every template the catalog serves",
+        `${listed.length} on screen of ${marketBots.length} in the catalog${opened ? "" : " (no Bots tab to click)"}`);
+      if (researchDesk == null) check(false, "the catalog carries the Research desk template", marketBots.map((b) => b.name).join(", "));
+      else if (listed.includes(String(researchDesk.id))) {
+        await page.click(`[data-bot-id="${researchDesk.id}"]`); await page.waitForTimeout(1000);
+        const tabs = await page.$$eval("[data-bot-tab]", (els) => els.map((e) => e.dataset.botTab));
+        check(["instructions", "skills", "integrations"].every((t) => tabs.includes(t)), "the bot page carries its three left tabs", tabs.join(", "));
+        check((await page.$$(`[data-import-bot="${researchDesk.id}"]`)).length === 1, "and one Import Bot button");
+        // Tools it can use: one row per integration the template names, each either already
+        // installed or carrying the Add that goes through the Plugins tab's own install path.
+        await page.click(`[data-bot-tab="integrations"]`).catch(() => {}); await page.waitForTimeout(800);
+        const integrationRows = await page.$$eval("[data-integration]", (els) => els.map((e) => ({
+          id: e.dataset.integration,
+          add: e.querySelector("[data-add-integration]") != null,
+          installed: /installed/i.test(e.textContent ?? ""),
+        })));
+        const wantedIntegrations = (researchDesk.integrations ?? []).map(String);
+        check(integrationRows.length === wantedIntegrations.length && wantedIntegrations.every((id) => integrationRows.some((r) => r.id === id)),
+          "the Integrations tab lists every plugin the template needs", `${integrationRows.map((r) => r.id).join(", ")} vs ${wantedIntegrations.join(", ")}`);
+        check(integrationRows.every((r) => r.add || r.installed), "and every one of them is either installed or offers Add",
+          integrationRows.map((r) => `${r.id}:${r.installed ? "installed" : r.add ? "add" : "neither"}`).join(", "));
+
+        // The import itself. The workflow library is box-wide, so what it adds is snapshotted
+        // before the click and swept in the finally.
+        const anyAgentId = (((await gw("listAgents").catch(() => [])) ?? [])[0] ?? {}).id ?? null;
+        botLibraryBefore = anyAgentId ? await libraryIds(anyAgentId).catch(() => null) : null;
+        const idsBefore = new Set(((await gw("listAgents").catch(() => [])) ?? []).map((a) => a.id));
+        await page.click(`[data-import-bot="${researchDesk.id}"]`);
+        const importedId = await until(async () => (((await gw("listAgents").catch(() => null)) ?? []).find((a) => !idsBefore.has(a.id)) ?? {}).id ?? null, 60_000, 2000);
+        check(importedId != null, "Import Bot creates the agent on the host", importedId ?? "no new agent after 60s");
+        if (importedId != null) {
+          botAgentId = importedId;
+          const row = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.id === importedId) ?? {};
+          // This host stores an agent as { name, description, title } and feeds the model only
+          // name + description as its identity, so the template's description and its
+          // instructions share that one field, description first (docs/MARKETPLACE.md).
+          const wantedDescription = `${String(researchDesk.description ?? "").trim()}\n\n${String(researchDesk.instructions ?? "").trim()}`.trim();
+          check(String(row.description ?? "").trim() === wantedDescription,
+            "and its description is the template's description followed by its instructions",
+            `${String(row.description ?? "").slice(0, 90)}…`);
+          const held = (((await gw("getAgentWorkflows", { id: importedId }).catch(() => [])) ?? []).filter((w) => w.source !== "automation")).map((w) => w.name);
+          const wantedSkills = (researchDesk.skills ?? []).map((s) => String(s?.name ?? ""));
+          check(wantedSkills.length > 0 && wantedSkills.every((name) => held.includes(name)),
+            "and its skills are the template's skills, read back from the host", `${held.join(", ")} vs ${wantedSkills.join(", ")}`);
+          const shown = await until(() => page.evaluate(() => document.querySelector("[data-imported-agent]")?.textContent?.replace(/\s+/g, " ") ?? null), 20_000, 1000);
+          check(shown != null && shown.includes(String(row.name ?? "")), "and the bot page shows the agent it just imported", (shown ?? "no imported card on screen").slice(0, 140));
+          // Deleted here rather than only in the finally: this is a shared box and every later
+          // check in this run would otherwise see a template agent in the roster.
+          await gw("deleteAgent", { id: importedId }).catch(() => {});
+          const gone = await until(async () => ((((await gw("listAgents").catch(() => null)) ?? []).some((a) => a.id === importedId)) ? null : true), 20_000, 1000);
+          check(gone === true, "and the gate deletes the agent it imported");
+          if (gone === true) botAgentId = null;
+        }
+      } else check(false, "the Bots tab draws a card for Research desk", listed.join(", "));
+      await openMarketplace();
+    }
+
     // -- PROVIDERS-1: the providers and the chat listeners the Marketplace no longer carries are
     // sections in Settings, built from the same cards. Everything below this line used to run on
     // the Plugins page; only the panel it is read from changed.
@@ -1728,6 +1822,18 @@ try {
   check(false, "dashboard gate", error.message);
 } finally {
   await browser.close();
+  // BOTS-1's leftovers first: the imported agent, and the skills that import added to the
+  // box-wide library. The library sweep uses the imported agent while it still exists, because
+  // getAgentWorkflows is addressed by agent id and the library outlives the agent.
+  if (botAgentId || botLibraryBefore) {
+    const reader = botAgentId ?? probeAgentId ?? (((await gw("listAgents").catch(() => [])) ?? [])[0] ?? {}).id ?? null;
+    if (reader && botLibraryBefore) {
+      const added = (await libraryIds(reader).catch(() => [])).filter((id) => !botLibraryBefore.includes(id));
+      for (const workflowId of added) await gw("deleteAgentWorkflow", { id: reader, workflowId }).catch((e) => console.log(`  INFO  imported bot skill ${workflowId} NOT deleted: ${e.message}`));
+      console.log(`  INFO  ${added.length} skill(s) the bot import added swept from the shared library`);
+    } else if (botLibraryBefore == null) console.log("  INFO  no library snapshot for the bot import; its skills were NOT swept");
+    if (botAgentId) await gw("deleteAgent", { id: botAgentId }).then(() => console.log("  INFO  imported bot agent deleted")).catch((e) => console.log(`  INFO  imported bot agent NOT deleted: ${e.message}`));
+  }
   if (probeAgentId && libraryBefore) {
     const added = (await libraryIds(probeAgentId).catch(() => [])).filter((id) => !libraryBefore.includes(id));
     for (const workflowId of added) await gw("deleteAgentWorkflow", { id: probeAgentId, workflowId }).catch((e) => console.log(`  INFO  workflow ${workflowId} NOT deleted: ${e.message}`));

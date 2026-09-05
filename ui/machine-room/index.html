@@ -260,6 +260,9 @@
 
     <script src="adapter.js"></script>
     <script src="gateway-adapter.js"></script>
+    <!-- The Marketplace's Bots tab. It only attaches window.__marketplaceBots at load and reads
+         the adapter lazily, so it can come before app.js builds one. -->
+    <script src="marketplace-bots.js"></script>
     <script>
       // app.js builds its adapter synchronously, so the gateway is read first and app.js is
       // loaded after. If the gateway is unreachable the demo adapter runs and the page still

@@ -3527,6 +3527,15 @@
     adapter.destroy();
   });
 
+  // ===== Marketplace: the Bots tab's one hook into this file =====
+  // marketplace-bots.js renders the Bots tab into whatever element the Marketplace panel hands it.
+  // It needs the live adapter for three things and nothing else -- listMarketplace where the
+  // adapter carries it, addConnector/installShellTool for an Add on a missing integration, and
+  // selectContext/refresh so an imported agent is on screen rather than only on the box. Handing
+  // it the adapter here keeps that module out of this file's internals entirely.
+  window.__machineRoomAdapter = adapter;
+  // ===== end Marketplace hook =====
+
   renderAll(false);
   renderDesktop("browser");
   resumeTeachMode();
