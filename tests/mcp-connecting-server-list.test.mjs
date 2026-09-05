@@ -114,3 +114,106 @@ test("a connector whose connect never resolves does not hold listServers open", 
     await loaded.dispose();
   }
 });
+
+// CONNECT-2. The placeholder is a promise, not a verdict: "loading" is what the manager itself
+// writes down for a server nobody has heard back from, so remembering it as a known state would
+// skip the wait forever and leave the list serving that placeholder for the life of the page.
+test("a server that finishes connecting replaces the placeholder on the next list", async () => {
+  const loaded = await loadModule("source/shared/node/mcp/mcp-manager.ts");
+  try {
+    const answers = [
+      [{ serverIdentifier: READY, status: "loading", toolCount: 0, tools: [] }],
+      [
+        {
+          serverIdentifier: READY,
+          status: "error",
+          statusDetail: "spawn node ENOENT",
+          toolCount: 0,
+          tools: [],
+        },
+      ],
+    ];
+    const manager = new loaded.module.SandMcpManager({
+      includeBuiltins: false,
+      accountServersProvider: async () => ({
+        servers: [displayRow("1", READY)],
+        cacheScope: "test",
+      }),
+      effectivePluginsProvider: async () => [],
+      backendMcpExec: { listServers: async () => [], listTools: async () => [] },
+      getMachineId: async () => "test-machine",
+    });
+    manager.setBoxRuntime({
+      isBoxExecWired: () => true,
+      getToolsRaw: async () => [],
+      // A real tick before answering, so a list that does not wait genuinely misses this answer.
+      listBoxServers: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return answers.shift() ?? [];
+      },
+      invalidateToolsCache: () => {},
+      resetPushState: () => {},
+    });
+
+    const first = await manager.listServers();
+    assert.equal(first.servers[0].status, "initializing");
+
+    // Without the wait this second call answers "initializing" again, forever: the box has moved
+    // on and nothing else re-lists.
+    const second = await manager.listServers();
+    assert.equal(second.servers[0].status, "error", "the settled answer never landed");
+    assert.equal(second.servers[0].statusDetail, "spawn node ENOENT");
+  } finally {
+    await loaded.dispose();
+  }
+});
+
+// CONNECT-2. Answering from the last known state must not outlive the box that reported it: a
+// server last seen connected says nothing about a box that has stopped answering.
+test("a box that stops answering is reported unreachable, not last connected", async () => {
+  const loaded = await loadModule("source/shared/node/mcp/mcp-manager.ts");
+  try {
+    let reachable = true;
+    const manager = new loaded.module.SandMcpManager({
+      includeBuiltins: false,
+      accountServersProvider: async () => ({
+        servers: [displayRow("1", READY)],
+        cacheScope: "test",
+      }),
+      effectivePluginsProvider: async () => [],
+      backendMcpExec: { listServers: async () => [], listTools: async () => [] },
+      getMachineId: async () => "test-machine",
+    });
+    manager.setBoxRuntime({
+      isBoxExecWired: () => true,
+      getToolsRaw: async () => [],
+      listBoxServers: async (identifiers) => {
+        if (!reachable) throw new Error("box exec is gone");
+        return identifiers.map((serverIdentifier) => ({
+          serverIdentifier,
+          status: "connected",
+          toolCount: 1,
+          tools: [{ toolName: "read_text_file" }],
+        }));
+      },
+      invalidateToolsCache: () => {},
+      resetPushState: () => {},
+    });
+
+    const first = await manager.listServers();
+    assert.equal(first.servers[0].status, "connected");
+    assert.equal(first.servers[0].toolCount, 1);
+
+    // The read this list kicks off is the one that discovers the box is gone.
+    reachable = false;
+    await manager.listServers();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const third = await manager.listServers();
+    assert.equal(third.servers[0].status, "error", "a dead box kept reporting connected");
+    assert.equal(third.servers[0].statusDetail, "Grok Bot's computer unreachable");
+    assert.equal(third.servers[0].toolCount, 0);
+  } finally {
+    await loaded.dispose();
+  }
+});

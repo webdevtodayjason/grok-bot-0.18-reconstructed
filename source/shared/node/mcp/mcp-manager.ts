@@ -268,12 +268,15 @@ export class SandMcpManager {
     if (this.boxRuntime?.isBoxExecWired()) {
       const identifiers = stdio.map((item: any) => item.serverIdentifier);
       await this.readBoxServersWithinBudget(identifiers);
-      for (const identifier of identifiers) {
-        const known = this.lastBoxServers.get(identifier);
-        if (known != null) boxByName.set(identifier, known);
-        else if (!this.boxServersUnreachable)
-          boxByName.set(identifier, BOX_SERVER_CONNECTING);
-      }
+      // A box we could not reach is reported as unreachable, remembered state and all: an entry
+      // last seen connected says nothing about a box that is not answering now, and rendering it
+      // would keep a dead box looking healthy with its old tool count.
+      if (!this.boxServersUnreachable)
+        for (const identifier of identifiers)
+          boxByName.set(
+            identifier,
+            this.lastBoxServers.get(identifier) ?? BOX_SERVER_CONNECTING,
+          );
       // A server that is no longer configured stops being remembered here, so a removal is gone
       // from the next list instead of surviving until the box is restarted.
       for (const identifier of [...this.lastBoxServers.keys()])
@@ -308,8 +311,10 @@ export class SandMcpManager {
   /**
    * CONNECT-2. The box read runs in the background and a list call waits for it only until the
    * budget runs out; a server that is still connecting is REPORTED as connecting, never awaited.
-   * Once every requested server has a known state the wait is skipped entirely, so the steady
+   * Once every requested server has a SETTLED state the wait is skipped entirely, so the steady
    * state costs nothing and one connector stuck on its sign-in cannot hold the console's boot.
+   * "loading" is not a settled state: remembering it as known would skip the budget forever and
+   * leave the list one answer behind, so a connector that has since connected never lands.
    */
   private async readBoxServersWithinBudget(
     identifiers: string[],
@@ -317,7 +322,10 @@ export class SandMcpManager {
     const read = this.startBoxServersRead(identifiers);
     if (
       this.boxListBudgetMs <= 0 ||
-      identifiers.every((identifier) => this.lastBoxServers.has(identifier))
+      identifiers.every((identifier) => {
+        const known = this.lastBoxServers.get(identifier);
+        return known != null && known.status !== "loading";
+      })
     )
       return;
     let timer: any;

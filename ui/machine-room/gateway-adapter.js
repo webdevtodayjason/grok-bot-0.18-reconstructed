@@ -550,6 +550,9 @@
       return {
         id: `mcp:${name}`, name, icon: (name[0] ?? "?").toUpperCase(),
         group: "Connectors", serverId,
+        // The box's own word for this server, kept beside the card's connected/available so the
+        // settle poll below can tell a card that is still connecting from one that has landed.
+        boxStatus: status,
         category: `${transport} · ${status}`,
         description: [
           `The box reports this server as ${status} — host id ${serverId}, ${transport}.`,
@@ -627,7 +630,7 @@
       const argCount = Array.isArray(spec?.args) ? spec.args.length : 0;
       return {
         id: `mcp:${id}`, name: id, icon: id[0].toUpperCase(),
-        group: "Connectors",
+        group: "Connectors", boxStatus: status,
         category: `${command ? "stdio" : "mcp"} · ${status}`,
         description: [
           `The box reports this server as ${status}${server?.statusDetail ? ` — ${server.statusDetail}` : ""}.`,
@@ -1087,13 +1090,49 @@
       emit("plugin:state", {});
     }
 
+    // CONNECT-2. A server the box has only just started is reported as initializing, and the
+    // Plugins panel is drawn from state.plugins with no fetch of its own -- the 15 s heartbeat
+    // refreshes trays, roster, model and transcript, never the connector cards. So a card built
+    // in that window would say "initializing, 0 tool(s)" for the life of the page. Poll the cheap
+    // installed list until the statuses it reports differ from the ones on the cards, then
+    // rebuild the cards from it.
+    const CONNECTOR_SETTLE_INTERVAL_MS = 1500, CONNECTOR_SETTLE_CAP_MS = 30000;
+    let connectorSettleGeneration = 0;
+    const stillConnecting = (plugin) => plugin.boxStatus === "initializing" || plugin.boxStatus === "loading";
+    const connectorSignature = (rows) => rows.map((row) => `${row?.name ?? row?.id ?? ""}:${row?.status ?? ""}`).sort().join(",");
+    const cardSignature = (cards) => connectorSignature(cards.map((card) => ({ name: card.name, status: card.boxStatus })));
     // After a connectors.json write, a refreshMcp, or a per-tool toggle: rebuild only the
     // Connectors cards from the host and leave the Provider and Listener cards alone. The nav is
     // grouped by `group`, so their position in this array does not matter.
     async function refreshConnectors() {
+      const generation = ++connectorSettleGeneration;
       const connectors = await connectorPlugins(failed).catch(() => []);
       state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("mcp:")), ...connectors];
-      return emit("plugin:state", {});
+      const emitted = emit("plugin:state", {});
+      // Deliberately not awaited: the write that asked for this refresh answers the operator now,
+      // and the card catches up by itself while the box finishes the connect.
+      if (connectors.some(stillConnecting)) void settleConnectors(generation, cardSignature(connectors));
+      return emitted;
+    }
+    async function settleConnectors(generation, drawn) {
+      const deadline = Date.now() + CONNECTOR_SETTLE_CAP_MS;
+      let seen = drawn;
+      while (Date.now() < deadline && generation === connectorSettleGeneration) {
+        await new Promise((resolve) => setTimeout(resolve, CONNECTOR_SETTLE_INTERVAL_MS));
+        if (generation !== connectorSettleGeneration) return;
+        const installed = await tryCall("listInstalledMcpServers", {}).catch(() => null);
+        // Nothing cheap to settle on: this host has no installed list, so the cards came from the
+        // read-only fallback and the only way to refresh them is to rebuild them all.
+        if (!Array.isArray(installed) || installed.length === 0) return;
+        const signature = connectorSignature(installed);
+        if (signature === seen) continue;
+        seen = signature;
+        const connectors = await connectorPlugins(null).catch(() => []);
+        if (generation !== connectorSettleGeneration) return;
+        state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("mcp:")), ...connectors];
+        emit("plugin:state", {});
+        if (!connectors.some(stillConnecting)) return;
+      }
     }
 
     // Re-hangs the working bubble after a rebuild, for as long as we are genuinely still waiting.
