@@ -363,6 +363,13 @@ select:focus-visible {
 .worker-stack {
   display: grid;
   gap: 12px;
+  /* MR-31: the roster never scrolled, so past eight cards its Hidden group sat under the control
+     shelf (z-index 30, the bottom 110 px) and could not be clicked. The stack, which holds the cards
+     and the Hidden group, is bounded above the shelf and scrolls on its own. */
+  max-height: calc(100vh - 330px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
 }
 
 .worker-card {

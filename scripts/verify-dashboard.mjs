@@ -550,6 +550,19 @@ try {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     check(await page.evaluate(() => window.__machineRoomLive === true), "the page is on the live gateway, not the demo adapter", await page.evaluate(() => window.__machineRoomError ?? ""));
 
+    // -- MR-31: the roster scrolls above the control shelf instead of running under it, so the Hidden
+    // group at its bottom stays clickable however many agents the box holds.
+    {
+      const geometry = await page.evaluate(() => {
+        const stack = document.getElementById("worker-stack"), shelf = document.querySelector("footer.control-shelf, .control-shelf");
+        if (!stack || !shelf) return null;
+        const cs = getComputedStyle(stack), s = stack.getBoundingClientRect(), f = shelf.getBoundingClientRect();
+        return { overflowY: cs.overflowY, maxHeight: cs.maxHeight, stackBottom: Math.round(s.bottom), shelfTop: Math.round(f.top), scrolls: stack.scrollHeight > stack.clientHeight };
+      });
+      check(geometry != null && geometry.overflowY === "auto" && geometry.maxHeight !== "none", "the roster stack is bounded and scrolls on its own", JSON.stringify(geometry));
+      check(geometry != null && geometry.stackBottom <= geometry.shelfTop, "and its bottom stays above the control shelf", JSON.stringify(geometry));
+    }
+
     // -- MR-28/29/30 and the real-time roster. An agent minted on any surface after the page loaded
     // (Titan minted "Scribe" from a turn) has to reach the sidebar from the host's own event stream,
     // not from a browser reload; its long description stays out of the status line, the header and
