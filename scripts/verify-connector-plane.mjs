@@ -22,11 +22,18 @@
 //              removing it takes effect on a refresh instead of needing a box restart. Off by
 //              default because it installs a deliberately broken connector: --stalled-server.
 //
+//   CONNECT-3/4  a remote connector whose credential is an API key: the preset entry goes in
+//              through the console's own POST /connectors, the EMPTY-valued env key is the one
+//              credential field offered, the connector stays out of the way until the key is
+//              stored, and storing it through setConnectorSecret is what makes it connect. Off by
+//              default because it runs a server inside the box: --tinyfish-key.
+//
 //   node scripts/verify-connector-plane.mjs            all of it
 //   node scripts/verify-connector-plane.mjs --no-restart   skip the docker restart in (a)
 //   node scripts/verify-connector-plane.mjs --no-model     skip the one model turn in (b)
 //   node scripts/verify-connector-plane.mjs --model-tool   add (f), the AddMcpServer turn
 //   node scripts/verify-connector-plane.mjs --stalled-server  add (g), the stalled connector
+//   node scripts/verify-connector-plane.mjs --tinyfish-key    add (h), the API-key connector
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -34,6 +41,7 @@ const GATEWAY = process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:7777";
 const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const DATA = "/home/box/sand-data";
 const CONNECTORS = `${DATA}/connectors.json`;
+const SECRET_STORE = `${DATA}/connector-env-secrets.json`;
 const PROBE_SERVER = "envprobe";
 const PROBE_SCRIPT = "/workspace/mcp-env-probe.mjs";
 const PROBE_FIELD = "PROBE_SECRET";
@@ -41,8 +49,14 @@ const SKIP_RESTART = process.argv.includes("--no-restart");
 const SKIP_MODEL = process.argv.includes("--no-model");
 const MODEL_TOOL = process.argv.includes("--model-tool");
 const STALLED_SERVER = process.argv.includes("--stalled-server");
+const TINYFISH_KEY = process.argv.includes("--tinyfish-key");
 const PROBE_PREFIX = "probe-u3";
 const TURN_TIMEOUT_MS = 300_000;
+// CONNECT-3. The preset the console's "TinyFish (API key)" button writes, name and all. The gate
+// swaps the URL for the stub's and adds --allow-http; everything else is the entry an operator gets.
+const TINYFISH_SERVER = "tinyfish";
+const TINYFISH_FIELD = "TINYFISH_API_KEY";
+const STUB_SOURCE = readFileSync(new URL("./lib/mcp-bearer-stub.mjs", import.meta.url), "utf8");
 
 class VerificationFailed extends Error {}
 const fail = (message) => { throw new VerificationFailed(message); };
@@ -110,6 +124,10 @@ const readConnectorsJson = async () => JSON.parse(await inBox(`cat ${CONNECTORS}
 // Byte-exact, because (f) promises to put the file back exactly as it found it and a JSON
 // round-trip is not that: it loses key order, trailing newline and indentation.
 const readConnectorsBase64 = async () => (await inBox(`base64 < ${CONNECTORS} | tr -d '\\n'`)).trim();
+// null means the file is not there at all, which is a different answer from "empty" and has to
+// survive the round trip: the secret store does not exist until the first secret is stored.
+const readFileBase64 = async (path) =>
+  (await inBox(`test -f ${path} && base64 < ${path} | tr -d '\\n' || true`)).trim() || null;
 const restoreConnectorsBase64 = async (encoded) => {
   await docker(["exec", BOX, "node", "-e",
     `require('fs').writeFileSync(${JSON.stringify(CONNECTORS)},Buffer.from(${JSON.stringify(encoded)},'base64'),{mode:0o600})`]);
@@ -141,6 +159,46 @@ const runTurn = async (agentId, prompt, timeoutMs) => {
 const writeConnectorsJson = async (value) => {
   await docker(["exec", BOX, "node", "-e",
     `require('fs').writeFileSync(${JSON.stringify(CONNECTORS)},${JSON.stringify(JSON.stringify(value, null, 2))},{mode:0o600})`]);
+};
+
+// The console does not write connectors.json through the gateway -- it POSTs the whole map to the
+// relay, which is the only path with the box's file behind it. (h) uses that path rather than a
+// docker write, because the claim being made is about what the operator's Save button does.
+const saveConnectorsThroughRelay = async (servers) => {
+  const res = await fetch(`${GATEWAY}/connectors`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ mcpServers: servers }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`POST /connectors -> ${res.status} ${text.slice(0, 300)}`);
+  return JSON.parse(text);
+};
+
+// The stub server (scripts/lib/mcp-bearer-stub.mjs) runs INSIDE the box, because the connector that
+// has to reach it runs there too. The key travels in the environment, never in an argument: the
+// box's own ps would otherwise carry it, which is the failure this whole arm is about.
+const startStub = async (path, port, key) => {
+  await docker(["exec", BOX, "node", "-e",
+    `require('fs').writeFileSync(${JSON.stringify(path)},${JSON.stringify(STUB_SOURCE)})`]);
+  await docker(["exec", "-d", "-e", `MCP_STUB_KEY=${key}`, BOX, "sh", "-c",
+    `node ${path} --port ${port} > ${path}.log 2>&1`]);
+};
+// One request at the stub from inside the box, printed as "<status> <body>". Used to know the stub
+// is up before a connector is pointed at it, so a connector that never connects means the connector.
+const askStub = async (port, authorization) => {
+  const out = await docker(["exec", "-e", `STUB_AUTH=${authorization}`, BOX, "node", "-e",
+    `fetch("http://127.0.0.1:${port}/mcp",{method:"POST",headers:{"content-type":"application/json",accept:"application/json, text/event-stream",` +
+    `...(process.env.STUB_AUTH?{authorization:process.env.STUB_AUTH}:{})},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})})` +
+    `.then((r)=>r.text().then((t)=>console.log(r.status+" "+t.replace(/\\s+/g," ").slice(0,300)))).catch((e)=>console.log("ERR "+e.message))`]);
+  return out.trim();
+};
+// The pattern goes in through the environment so pkill's own command line does not match it. The
+// .auth directory is mcp-remote's own store, pointed here by MCP_REMOTE_CONFIG_DIR so that a gate
+// run leaves nothing in the box user's home either.
+const stopStub = async (path) => {
+  await docker(["exec", "-e", `STUB_PATH=${path}`, BOX, "sh", "-c",
+    'pkill -f "$STUB_PATH" >/dev/null 2>&1; rm -f "$STUB_PATH" "$STUB_PATH.log"; rm -rf "$STUB_PATH.auth"; exit 0']);
 };
 
 const routedTools = async () => {
@@ -176,6 +234,9 @@ let modelToolAgentId = null;
 let connectorsSnapshot = null;
 let stalledSnapshot = null;
 let stalledMarker = null;
+let tinyfishSnapshot = null;
+let tinyfishSecretSet = false;
+let stubPath = null;
 
 try {
   console.log(`gateway ${GATEWAY}  box ${BOX}`);
@@ -497,6 +558,182 @@ try {
     ok(`${stalledMarker} is gone after refreshMcp (${refreshElapsed} ms), with no box restart`);
   }
 
+  // ---------------------------------------- (h) CONNECT-3/4 a connector whose credential is a key
+  // The operator installed TinyFish by hand, then pasted his key into a field the card should never
+  // have offered (MCP_REMOTE_CONFIG_DIR, a path). The mechanism has to exist without him: a preset
+  // that carries the key as an EMPTY env value, a host that treats exactly that emptiness as "this
+  // is the credential", and a connector that will not connect until the key is stored -- without
+  // ever holding the operator's real key open to a page, a log or connectors.json.
+  //
+  // The far end is a stub inside the box, not agent.tinyfish.ai, so the arm needs no real key and
+  // no network: the same 401-unless-Bearer shape, with an invented key that lives for one run.
+  if (!TINYFISH_KEY) console.log("\n(h) CONNECT-3/4 — the API-key connector arm is skipped (pass --tinyfish-key)");
+  else {
+    console.log("\n(h) CONNECT-3/4 — an API-key connector: the preset, the credential field, the key");
+    const KEY = `tf-stub-${Math.random().toString(36).slice(2, 12).toUpperCase()}`;
+    const PORT = 39_000 + Math.floor(Math.random() * 2000);
+    const ECHO = `tinyfish-echo-${Math.random().toString(36).slice(2, 10)}`;
+    console.log(`  invented key: ${KEY.length} characters (never printed), stub on 127.0.0.1:${PORT}`);
+
+    // Refuse rather than clobber. If this box has a real TinyFish key stored, setConnectorSecret
+    // below would overwrite it with the invented one and nothing could put it back.
+    const storeBefore = await inBox(`cat ${SECRET_STORE} 2>/dev/null || echo '{}'`);
+    let storedFields = [];
+    try { storedFields = Object.keys(JSON.parse(storeBefore)?.servers?.[TINYFISH_SERVER] ?? {}); } catch {}
+    if (storedFields.includes(TINYFISH_FIELD)) {
+      fail(`this box already holds a stored ${TINYFISH_FIELD} for "${TINYFISH_SERVER}"; this arm would overwrite a real key, so it stops here`);
+    }
+
+    tinyfishSnapshot = await readConnectorsBase64();
+    const secretsSnapshot = await readFileBase64(SECRET_STORE);
+    const beforeTinyfish = await readConnectorsJson();
+
+    stubPath = `/tmp/mcp-bearer-stub-${Math.random().toString(36).slice(2, 8)}.mjs`;
+    await startStub(stubPath, PORT, KEY);
+    let unauthorised = "";
+    let authorised = "";
+    const stubDeadline = Date.now() + 30_000;
+    while (Date.now() < stubDeadline) {
+      unauthorised = await askStub(PORT, "");
+      authorised = await askStub(PORT, `Bearer ${KEY}`);
+      if (unauthorised.startsWith("401") && authorised.startsWith("200")) break;
+      await sleep(2000);
+    }
+    if (!unauthorised.startsWith("401")) fail(`the stub answered "${unauthorised.slice(0, 120)}" with no bearer, expected 401`);
+    if (!authorised.startsWith("200")) fail(`the stub answered "${authorised.slice(0, 120)}" with the bearer, expected 200`);
+    if (!/search/.test(authorised) || !/fetch_content/.test(authorised)) fail("the stub's tool list names neither search nor fetch_content");
+    if (`${unauthorised}${authorised}`.includes(KEY)) fail("the stub echoed the key back in an answer");
+    ok(`the stub refuses without the bearer (401) and lists search + fetch_content with it`);
+
+    // The preset entry, with the URL pointed at the stub and --allow-http for a plain http
+    // endpoint. The key is NOT here: `${TINYFISH_FIELD}` goes in as an empty env value, which is
+    // the whole of CONNECT-4's rule -- empty means credential, non-empty means configuration.
+    //
+    // MCP_REMOTE_CONFIG_DIR is the second env key on purpose. It is a PATH, and it is the exact key
+    // the card offered as a credential on the day the operator pasted his real key into it; a field
+    // list that answers [TINYFISH_API_KEY] with this sitting beside it is the rule being enforced
+    // rather than a coincidence of there being only one key. Pointing it at the stub's own
+    // directory also keeps mcp-remote's auth store out of the box user's home.
+    const entry = {
+      command: "npx",
+      args: ["-y", "mcp-remote", `http://127.0.0.1:${PORT}/mcp`, "--transport", "http-only",
+        "--header", `Authorization:Bearer \${${TINYFISH_FIELD}}`, "--allow-http"],
+      env: { [TINYFISH_FIELD]: "", MCP_REMOTE_CONFIG_DIR: `${stubPath}.auth` },
+    };
+    const saved = await saveConnectorsThroughRelay({ ...beforeTinyfish.mcpServers, [TINYFISH_SERVER]: entry });
+    if (!Array.isArray(saved.saved) || !saved.saved.includes(TINYFISH_SERVER)) {
+      fail(`POST /connectors did not report ${TINYFISH_SERVER} saved: ${JSON.stringify(saved).slice(0, 200)}`);
+    }
+    await call("refreshMcp", {});
+    // The literal has to reach disk unexpanded: mcp-remote is what expands it, from the environment
+    // the host merged the stored secret into. Anything expanded here is a key written into a file.
+    const written = (await readConnectorsJson()).mcpServers?.[TINYFISH_SERVER];
+    if (JSON.stringify(written) !== JSON.stringify(entry)) {
+      fail(`connectors.json holds a different entry than the preset: ${JSON.stringify(written).slice(0, 200)}`);
+    }
+    ok(`the preset entry is in connectors.json through the console's POST /connectors, with \${${TINYFISH_FIELD}} unexpanded`);
+
+    const fieldsBefore = await call("listConnectorSecretFields", { server: TINYFISH_SERVER });
+    if (JSON.stringify(fieldsBefore.fields) !== JSON.stringify([TINYFISH_FIELD])) {
+      fail(`listConnectorSecretFields answers [${(fieldsBefore.fields ?? []).join(", ")}] with nothing stored, expected exactly [${TINYFISH_FIELD}]: an empty-valued env key is the credential field, and a non-empty one (MCP_REMOTE_CONFIG_DIR, a path) is configuration that must never be offered as one`);
+    }
+    ok(`listConnectorSecretFields answers exactly [${TINYFISH_FIELD}], with MCP_REMOTE_CONFIG_DIR on the entry and not offered`);
+
+    // Thirty seconds of watching it NOT connect. The list is read the whole time because a
+    // connector waiting on a credential must not be something the console waits on: that is what
+    // made the Plugins panel take a minute to paint.
+    let keyless = null;
+    let slowest = 0;
+    const keylessDeadline = Date.now() + 30_000;
+    while (Date.now() < keylessDeadline) {
+      const started = Date.now();
+      const installed = await call("listInstalledMcpServers");
+      slowest = Math.max(slowest, Date.now() - started);
+      keyless = installed.find((server) => server.serverIdentifier === TINYFISH_SERVER) ?? keyless;
+      if (keyless?.status === "connected") fail(`${TINYFISH_SERVER} reached connected with no key stored; the stub would have had to accept an empty bearer`);
+      await sleep(3000);
+    }
+    if (keyless == null) fail(`${TINYFISH_SERVER} never appeared in listInstalledMcpServers`);
+    if (!["initializing", "error"].includes(String(keyless.status))) {
+      fail(`with no key stored ${TINYFISH_SERVER} reports status=${keyless.status}, expected initializing or error`);
+    }
+    if (slowest > 5000) fail(`listInstalledMcpServers took ${slowest} ms while the keyless connector was mid-connect`);
+    ok(`with no key stored: status=${keyless.status}${keyless.statusDetail ? ` (${keyless.statusDetail})` : ""}, and the list never took longer than ${slowest} ms`);
+
+    tinyfishSecretSet = true;
+    const storedKey = await call("setConnectorSecret", { server: TINYFISH_SERVER, field: TINYFISH_FIELD, value: KEY });
+    if (storedKey?.stored !== true) fail("setConnectorSecret did not report the key stored");
+    if (JSON.stringify(storedKey).includes(KEY)) fail("setConnectorSecret echoed the key back");
+    ok(`setConnectorSecret stored=${storedKey.stored} restarted=${storedKey.restarted}`);
+
+    let connected = null;
+    const connectDeadline = Date.now() + 30_000;
+    while (Date.now() < connectDeadline) {
+      connected = (await call("listInstalledMcpServers")).find((server) => server.serverIdentifier === TINYFISH_SERVER) ?? connected;
+      if (connected?.status === "connected") break;
+      await sleep(3000);
+    }
+    if (connected?.status !== "connected") {
+      // The keyless window above is also what warms npx, so mcp-remote is normally already
+      // downloaded by the time the key lands. A box that cannot reach the npm registry fails here
+      // rather than at the credential, and the detail is the only place that says which it was.
+      fail(`${TINYFISH_SERVER} did not reach connected within 30 s of the key being stored: status=${connected?.status}${connected?.statusDetail ? ` (${connected.statusDetail})` : ""} — if the detail names npx or the registry, this box could not fetch mcp-remote and the credential path is untested rather than broken`);
+    }
+    ok(`storing the key restarted the connector and it reached connected, id=${connected.id}`);
+
+    const tinyfishTools = await waitForServerTools(String(connected.id), 60_000);
+    const toolNames = (Array.isArray(tinyfishTools) ? tinyfishTools : []).map((tool) => tool.name).sort();
+    if (JSON.stringify(toolNames) !== JSON.stringify(["fetch_content", "search"])) {
+      fail(`listMcpServerTools for ${TINYFISH_SERVER} lists [${toolNames.join(", ")}], expected exactly fetch_content and search`);
+    }
+    ok(`listMcpServerTools lists exactly [${toolNames.join(", ")}]`);
+
+    const searchTool = await waitForRoutedTool("search", 60_000);
+    if (searchTool == null) fail("the stub's search tool never reached listRoutedMcpTools");
+    const echoed = JSON.stringify(await call("executeRoutedMcpTool", {
+      providerIdentifier: TINYFISH_SERVER,
+      toolName: searchTool.name,
+      name: searchTool.toolName,
+      args: { query: ECHO },
+      toolCallId: `verify-connector-plane-tinyfish-${Date.now()}`,
+    }));
+    if (!echoed.includes(ECHO)) fail(`the search call did not come back with its own arguments: ${echoed.slice(0, 240)}`);
+    if (echoed.includes(KEY)) fail("the tool answer carried the key");
+    ok(`a search call through executeRoutedMcpTool came back with its own arguments`);
+
+    const removedKey = await call("deleteConnectorSecret", { server: TINYFISH_SERVER, field: TINYFISH_FIELD });
+    tinyfishSecretSet = removedKey?.removed !== true;
+    if (removedKey?.removed !== true) fail("deleteConnectorSecret did not remove the key");
+    // The field is still OFFERED after the value is gone, because the entry's empty env value is
+    // what names it. A card that stopped offering it would have no way to put a new key in.
+    const fieldsAfter = await call("listConnectorSecretFields", { server: TINYFISH_SERVER });
+    if (JSON.stringify(fieldsAfter.fields) !== JSON.stringify([TINYFISH_FIELD])) {
+      fail(`after the delete listConnectorSecretFields answers [${(fieldsAfter.fields ?? []).join(", ")}], expected the empty env value to keep naming [${TINYFISH_FIELD}]`);
+    }
+    const survivors = (await inBox(`grep -rl -- ${KEY} ${DATA} 2>/dev/null || true`)).trim();
+    if (survivors.length > 0) fail(`the key survives the delete in: ${survivors}`);
+    ok(`the key is gone from ${DATA} and the field is still offered: [${fieldsAfter.fields.join(", ")}]`);
+
+    await saveConnectorsThroughRelay(beforeTinyfish.mcpServers ?? {});
+    await call("refreshMcp", {});
+    if ((await call("listInstalledMcpServers")).some((server) => server.serverIdentifier === TINYFISH_SERVER)) {
+      fail(`${TINYFISH_SERVER} survived its removal from connectors.json`);
+    }
+    await stopStub(stubPath);
+    stubPath = null;
+    ok(`the entry is out of connectors.json and the stub is stopped`);
+
+    // Byte-identical, not equivalent: the arm went in through the console's own write path, so the
+    // file it leaves behind has to be the file it found, key order and whitespace included.
+    if (await readConnectorsBase64() !== tinyfishSnapshot) fail("connectors.json is not byte-identical to what this arm found");
+    const secretsNow = await readFileBase64(SECRET_STORE);
+    if (secretsNow !== secretsSnapshot) {
+      fail(`connector-env-secrets.json is not byte-identical to what this arm found (${secretsSnapshot == null ? "it did not exist" : "it existed"} before, ${secretsNow == null ? "it does not exist" : "it exists"} now)`);
+    }
+    tinyfishSnapshot = null;
+    ok("connectors.json and connector-env-secrets.json are byte-identical to before the arm");
+  }
+
   console.log("\nPASS — connector plane");
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
@@ -506,6 +743,24 @@ try {
   // Leave the box exactly as it was found: no probe server, no probe file, no probe agent.
   // A failure anywhere between setConnectorSecret and its delete must not leave a live value in
   // the store; the probe connector is about to stop existing either way.
+  //
+  // (h) unwinds FIRST, before (c) puts the pre-probe connectors.json back. Both orderings restore a
+  // file, and the later write wins: (h)'s snapshot still carries (c)'s probe connector, so undoing
+  // (h) last would put the probe entry back after (c) had removed it. Deleting (h)'s key also has
+  // to happen while its entry is still in connectors.json, because that file is what
+  // deleteConnectorSecret resolves the connector through.
+  try {
+    if (tinyfishSecretSet) await callRaw("deleteConnectorSecret", { server: TINYFISH_SERVER, field: TINYFISH_FIELD });
+  } catch (error) { console.error(`cleanup: tinyfish key — ${error.message}`); }
+  try {
+    if (tinyfishSnapshot != null && await readConnectorsBase64() !== tinyfishSnapshot) {
+      await restoreConnectorsBase64(tinyfishSnapshot);
+      await callRaw("refreshMcp", {});
+    }
+  } catch (error) { console.error(`cleanup: tinyfish connector entry — ${error.message}`); }
+  try {
+    if (stubPath != null) await stopStub(stubPath);
+  } catch (error) { console.error(`cleanup: stub MCP server — ${error.message}`); }
   try {
     if (probeSecretSet) await callRaw("deleteConnectorSecret", { server: PROBE_SERVER, field: PROBE_FIELD });
   } catch (error) { console.error(`cleanup: probe secret — ${error.message}`); }
