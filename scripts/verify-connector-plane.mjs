@@ -629,14 +629,30 @@ async function runStdioTokenArm(arm) {
   const seconds = Math.round((Date.now() - started) / 1000);
   ok(`${arm.server} reached a terminal status=${terminal} in ${seconds} s, and the list never took longer than ${slowest} ms`);
 
+  // Whatever is left of the ninety seconds belongs to the branch below: a connector that says
+  // "connected" three seconds in has not necessarily listed or routed a tool yet, and the answer
+  // this arm is after is the first call, not the status.
+  const left = () => Math.max(deadline - Date.now(), 0);
+
   if (terminal === "error") {
-    // The honest outcome for a refused credential on a server that authenticates at startup.
-    ok(`the invented credential ends as an error an operator can read: ${String(row.statusDetail ?? "(no detail reported)").slice(0, 200)}`);
-  } else {
-    const listed = await waitForServerTools(String(row.id), 30_000);
-    if (!Array.isArray(listed) || listed.length === 0) {
-      fail(`${arm.server} reports connected but listed no tools, so there is no first call to make and nothing says the credential was refused`);
+    // The honest outcome for a refused credential on a server that authenticates at startup. But a
+    // spawn, registry or npx failure ends in the same status=error with a detail like "Connection
+    // closed", so the detail has to read as a refused credential: without that, this arm would go
+    // green on a run that never downloaded the package or reached the credential path at all.
+    const detail = String(row.statusDetail ?? "").replace(/\s+/g, " ");
+    if (!arm.refusal.test(detail)) {
+      fail(`${arm.server} ended status=error, but the detail does not report a refused credential, so nothing in this run exercised the credential path: ${detail.slice(0, 300) || "(no detail reported)"}`);
     }
+    ok(`the invented credential ends as an error an operator can read: ${detail.slice(0, 200)}`);
+  } else {
+    const listed = await waitForServerTools(String(row.id), left());
+    if (!Array.isArray(listed) || listed.length === 0) {
+      fail(`${arm.server} reports connected but listed no tools within ${Math.round((Date.now() - started) / 1000)} s, so there is no first call to make and nothing says the credential was refused`);
+    }
+    // Listed is not routed. Wait for the smoke tool to reach the routing table rather than reading
+    // it once and calling a lost race a failure; a server that routes something else instead falls
+    // through to the first routed tool below, as it always did.
+    await waitForRoutedTool(arm.smoke.tool, left());
     const routed = (await routedTools()).filter((tool) => tool.providerIdentifier === arm.server);
     const chosen = routed.find((tool) => tool.toolName === arm.smoke.tool) ?? routed[0];
     if (chosen == null) fail(`${arm.server} listed ${listed.length} tool(s) but none of them reached listRoutedMcpTools`);
