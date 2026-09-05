@@ -11,6 +11,7 @@ import {
   createTurnToolsetFactoriesForTurn,
   resolveTurnShellAutoReviewInputs,
 } from "./tools/turn-toolset.js";
+import { createTurnSendBudget } from "./tools/send-message-tool.js";
 import type { Context } from "../../packages/context/core.js";
 import { requestIdKey } from "../../packages/chat-inference-proto/client.js";
 import { AnysphereAgent } from "../../packages/agent/index.js";
@@ -317,12 +318,16 @@ export function createTurnAgentToolsHandoff(input: {
   readonly mcpProjection?: TurnMcpProjectionInput;
 }): TurnAgentToolsHandoff {
   let activeStateHandler: TurnAgentStateHandler | undefined;
-  const turn = input.turnScope === undefined
-    ? input.turn
-    : {
-      ...input.turn,
-      ...createTurnScopeToolHooks(input.turnScope),
-    };
+  // LOOP-2. This handoff is built once per turn and its toolsGenerator runs once per step, so this
+  // is the innermost scope that still spans the whole turn: the send budget is created here and
+  // every step's SendMessage tool shares it. A caller that already carries one keeps it.
+  const turn: TurnToolsetTurnInput = {
+    ...input.turn,
+    sendBudget: input.turn.sendBudget ?? createTurnSendBudget(),
+    ...(input.turnScope === undefined
+      ? {}
+      : createTurnScopeToolHooks(input.turnScope)),
+  };
 
   const createPerTurnToolHost = (props: TurnToolsetBuildProps): TurnToolsetHost => {
     const resolvedShellAutoReview = turn.shellAutoReview === undefined

@@ -47,3 +47,4 @@ import "./auto-review-enforcement.test.mjs";
 import "./relay-trusted-proxies.test.mjs";
 import "./local-machine-prompt.test.mjs";
 import "./self-talk-cap.test.mjs";
+import "./send-cap-per-turn.test.mjs";
