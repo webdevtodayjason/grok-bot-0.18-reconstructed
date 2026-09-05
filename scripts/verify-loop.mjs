@@ -10,7 +10,14 @@
 // Nothing here is permanent: the stub endpoint row is deleted and the endpoint that was live
 // before is pinned back in a finally, whatever happened.
 //
-// Usage: node scripts/verify-loop.mjs [--cap 5] [--timeout-ms 60000] [--port 18777]
+// --send-cap swaps the stub's sentence for one constant line and measures LOOP-2 instead: the
+// send cap and its duplicate suppressor count per TURN, not per model step. Every step after the
+// first then repeats a message already delivered in the same turn, so the deployed host must
+// deliver exactly one and refuse the rest with a [sand][send-cap] line. With the counters in the
+// tool's own closure -- one tool per step -- each step got a fresh suppressor that had never seen
+// the previous message, and all five went out.
+//
+// Usage: node scripts/verify-loop.mjs [--cap 5] [--send-cap] [--timeout-ms 60000] [--port 18777]
 import { execFile } from "node:child_process";
 import http from "node:http";
 import { readFileSync } from "node:fs";
@@ -26,6 +33,9 @@ const PORT = Number.parseInt(flag("--port", "18777"), 10);
 // stops feeding it tool calls well before the agent's 5000-step ceiling; the count it reached
 // is the measurement.
 const STUB_LIMIT = Number.parseInt(flag("--stub-limit", "30"), 10);
+// The LOOP-2 arm. The refusal the host hands back is a different tool result from the ack, so the
+// self-talk streak restarts once and the turn runs one step longer than the plain arm.
+const DUPLICATE = process.argv.includes("--send-cap");
 const STUB_ID = "probe-u3-loop";
 const STUB_MODEL = "probe-u3-loop-model";
 
@@ -91,7 +101,7 @@ const stub = http.createServer((req, res) => {
       return res.end();
     }
     toolRequests += 1;
-    const args = JSON.stringify({ type: "text", content: `Standing by, beat ${toolRequests}.` });
+    const args = JSON.stringify({ type: "text", content: DUPLICATE ? "Standing by." : `Standing by, beat ${toolRequests}.` });
     sse(res, chunk({ role: "assistant", tool_calls: [{ index: 0, id: `call_${toolRequests}`, type: "function", function: { name: "SendMessage", arguments: args } }] }));
     sse(res, { ...chunk({}, "tool_calls"), usage: { prompt_tokens: 12, completion_tokens: 6, total_tokens: 18 } });
     res.write("data: [DONE]\n\n");
@@ -99,7 +109,7 @@ const stub = http.createServer((req, res) => {
   });
 });
 await new Promise((resolve, reject) => { stub.once("error", reject); stub.listen(PORT, "0.0.0.0", resolve); });
-console.log(`  INFO  stub listening on 0.0.0.0:${PORT}`);
+console.log(`  INFO  stub listening on 0.0.0.0:${PORT} (${DUPLICATE ? "LOOP-2 arm: one identical message every step" : "LOOP-1 arm: a new sentence every step"})`);
 
 const reachable = (await docker(["exec", BOX, "sh", "-lc", `curl -s -m 5 -o /dev/null -w '%{http_code}' http://host.docker.internal:${PORT}/v1/models`])).trim();
 check(reachable === "200", "the box reaches the stub on this Mac", `host.docker.internal:${PORT}/v1/models -> ${reachable || "no answer"}`);
@@ -167,15 +177,27 @@ try {
   for (const notice of notices.slice(-1)) console.log(`        notice: ${String(notice.text ?? "").slice(0, 160)}`);
 
   check(newNotices >= 1, "the turn ended on the cap inside the window", newNotices >= 1 ? `${elapsed}ms` : `no cap notice after ${elapsed}ms; the stub fed ${calls} SendMessage calls`);
-  check(sends === CAP, `exactly ${CAP} SendMessage rows`, `saw ${sends}`);
+  if (DUPLICATE) {
+    // The first send of the turn goes out -- the previous turn's identical message is forgotten,
+    // as it must be -- and every repeat after it is refused for the rest of the turn.
+    check(sends === 1, "exactly one message is delivered; the identical repeats later in the turn are refused", `saw ${sends}`);
+    check(calls >= 2, "the model really got a second step, so a cross-step repeat happened", `${calls} tool-bearing model calls`);
+  } else {
+    check(sends === CAP, `exactly ${CAP} SendMessage rows`, `saw ${sends}`);
+  }
   check(newNotices === 1, "the cap row is written once, and the host does not redrive the loop", `${newNotices} notice rows for this turn`);
   check(notices.some((n) => /cap/i.test(String(n.text ?? ""))), "a transcript row says the turn was ended on the cap");
 
   const logAfter = await docker(["exec", BOX, "sh", "-lc", `tail -n +${logBefore + 1} ${HOST_LOG}`]);
   const wire = logAfter.split("\n").filter((line) => line.includes("[sand][wire]") && line.includes(`"conversationId":"${agentId}"`));
-  check(wire.length <= CAP + 1, `the box stopped calling the model at ${CAP + 1} wire requests at most`, `${wire.length} for this conversation`);
+  const wireCeiling = CAP + (DUPLICATE ? 2 : 1);
+  check(wire.length <= wireCeiling, `the box stopped calling the model at ${wireCeiling} wire requests at most`, `${wire.length} for this conversation`);
   const capLine = logAfter.split("\n").filter((line) => line.includes("[sand][turn]") && /self-talk/i.test(line));
   check(capLine.length >= 1, "the host log names the cap", capLine[0]?.trim().slice(0, 160) ?? "no [sand][turn] self-talk line");
+  if (DUPLICATE) {
+    const sendCap = logAfter.split("\n").filter((line) => line.includes("[sand][send-cap]") && /duplicate/i.test(line));
+    check(sendCap.length >= 1, "the host log names the send cap's duplicate suppressor", sendCap[0]?.trim().slice(0, 160) ?? "no [sand][send-cap] duplicate line");
+  }
 } catch (error) {
   check(false, "self-talk cap", error.message);
 } finally {

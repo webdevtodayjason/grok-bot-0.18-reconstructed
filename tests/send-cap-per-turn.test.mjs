@@ -19,10 +19,12 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const stage = mkdtempSync(path.join(repoRoot, "node_modules", ".send-cap-test-"));
 after(() => rmSync(stage, { recursive: true, force: true }));
 const entry = path.join(stage, "entry.ts");
-// The tool needs a real Context to open its spans, so the entry hands back both.
+// The tool needs a real Context to open its spans, so the entry hands back both. The handoff comes
+// along too: the last case drives the real wiring, not a hand-injected budget.
 writeFileSync(entry, [
   `export * from ${JSON.stringify(path.join(repoRoot, "source/host/runner/tools/send-message-tool.js"))};`,
   `export { createContext } from ${JSON.stringify(path.join(repoRoot, "source/packages/context/core.js"))};`,
+  `export { createTurnAgentToolsHandoff } from ${JSON.stringify(path.join(repoRoot, "source/host/runner/turn-agent-composition.js"))};`,
   "",
 ].join("\n"), "utf8");
 const result = await build({
@@ -32,7 +34,7 @@ const result = await build({
 });
 const bundlePath = path.join(stage, "send-message-tool.cjs");
 writeFileSync(bundlePath, result.outputFiles[0].text, "utf8");
-const { createSendMessageTool, createTurnSendBudget, createContext } =
+const { createSendMessageTool, createTurnSendBudget, createContext, createTurnAgentToolsHandoff } =
   createRequire(import.meta.url)(bundlePath);
 
 const ctx = createContext();
@@ -158,4 +160,54 @@ test("a tool built with no turn budget still caps itself, so an unwired caller i
     }
   });
   assert.equal(delivered.length, 20);
+});
+
+/**
+ * The wiring, not just the tool. Everything above hands the budget to createSendMessageTool by
+ * hand, which proves the tool honours a shared budget and nothing about whether one is ever
+ * created per turn or reaches the tool -- and both ends of that wire are optional, so a dropped
+ * one is silent: no type error, no log line, a green suite, and the per-step bug back exactly as
+ * it was. This case drives the real chain. `toolsGenerator` is what the runner calls once per
+ * model step; the provider below is the shape host-runner-composition installs, reading
+ * `turn.sendBudget` and passing it through as the tool's `turnSendBudget`.
+ */
+const handoffFor = (seen) => createTurnAgentToolsHandoff({
+  turn: { autoReviewModes: { hostShell: "off", boxShell: "off", mcp: "off", computer: "off", automationWrite: "off", cloudAgent: "off", subagentLaunch: "off" } },
+  toolHost: {
+    isSubagentRunner: false,
+    isSharedRoomRunner: false,
+    isBoxScopedSubagent: false,
+    isComputerUseSubagent: false,
+    isBrowserUseSubagent: false,
+    isSystemPromptOverridden: false,
+    remoteBoxHasDesktop: false,
+    getConversationId: () => "agent-under-test",
+    getRemoteBoxAvailable: () => false,
+    cloudAgentsDisabledByTeam: () => true,
+    spotlightEnabled: () => false,
+    factories: {},
+    factoryProvider: {
+      createSendMessageToolInputs: turn => {
+        const budget = turn.sendBudget === undefined ? {} : { turnSendBudget: turn.sendBudget };
+        const dependencies = { getIngestAttachment: () => undefined, onSendMessage: () => "m1", ...budget };
+        seen.push(dependencies.turnSendBudget);
+        return { dependencies };
+      },
+    },
+  },
+});
+
+test("one budget is created per turn and every step's SendMessage tool is handed that same one", () => {
+  const seen = [];
+  const handoff = handoffFor(seen);
+  const names = handoff.toolsGenerator({}).getAllTools().map(entry => entry.name);
+  handoff.toolsGenerator({});
+  assert.ok(names.includes("SendMessage"), `the step built a SendMessage tool (got ${names.join(", ")})`);
+  assert.equal(seen.length, 2);
+  assert.notEqual(seen[0], undefined, "the turn carries a send budget");
+  assert.equal(seen[0], seen[1], "both steps of the turn share one budget instance");
+  const next = [];
+  handoffFor(next).toolsGenerator({});
+  assert.notEqual(next[0], undefined);
+  assert.notEqual(next[0], seen[0], "the next turn gets its own budget");
 });
