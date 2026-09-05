@@ -214,7 +214,12 @@
         <div class="field">
           <label for="teach-note">Say what you are doing, as you would to a person</label>
           <textarea id="teach-note" rows="2" placeholder="e.g. Open Atera, filter to unassigned tickets, and flag anything for Jason Brashear"></textarea>
-          <span class="field-hint">Finish recording hands the video to this agent: the learn-from-demonstration skill claims it, steps through frames of the demo, and writes a skill it can run again. This note is sent in the message that starts that learning turn, so the agent reads it before it opens a single frame. Write it as the sentence you would say to a person you had just shown the task to.</span>
+          <!-- The ten-minute cap is the host's own timer, not a click: it calls the same stop this
+               button calls and has nothing from this dialog to hand it, so a recording left to run
+               out is saved and dispatched with the note still sitting in the textarea. The hint
+               promised the note always reached the learning turn, which was only ever true of
+               Finish recording. -->
+          <span class="field-hint">Finish recording hands the video to this agent: the learn-from-demonstration skill claims it, steps through frames of the demo, and writes a skill it can run again. This note is sent in the message that starts that learning turn, so the agent reads it before it opens a single frame. Finish recording is what carries it: a recording left running to the ten-minute cap is saved by the box itself, and that save starts the learning turn without this note. Write it as the sentence you would say to a person you had just shown the task to.</span>
         </div>
         <footer>
           <!-- "It never leaves the machine" used to stand here, and it was not true of the path

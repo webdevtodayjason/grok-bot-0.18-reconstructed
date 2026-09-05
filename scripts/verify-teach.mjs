@@ -192,6 +192,21 @@ try {
   }
   pass(`the learning skill exists with no Cursor login and both copies say the same thing (${learn.body.length} chars in cache.json, the same ${fileBody.length} in SKILL.md, heading ${JSON.stringify(learn.body.split("\n", 1)[0])})`);
 
+  // The other half of the note story, and the only half no run on this box can measure: the
+  // ten-minute cap fires inside the host, calls the same stop the Finish button calls, and has
+  // nothing from the Learn dialog to hand it -- so a capped recording is saved and dispatched with
+  // the operator note still sitting in the textarea. Waiting ten minutes to watch that happen does
+  // not fit this gate, and the surface that can lie about it is the dialog, so the hint is read
+  // here beside the note the run below proves the button does carry.
+  const teachHtml = readFileSync(new URL("../ui/machine-room/index.html", import.meta.url), "utf8");
+  const teachDialogAt = teachHtml.indexOf('id="teach-dialog"');
+  if (teachDialogAt < 0) fail("ui/machine-room/index.html has no teach dialog to read the hint from");
+  const teachDialog = teachHtml.slice(teachDialogAt, teachHtml.indexOf("</dialog>", teachDialogAt)).replace(/<!--[\s\S]*?-->/g, "");
+  if (!/ten-minute cap[^<]*without this note/i.test(teachDialog)) {
+    fail(`the Learn dialog does not say the ten-minute cap saves without the note: ${JSON.stringify(teachDialog.replace(/\s+/g, " ").slice(0, 400))}`);
+  }
+  pass("the Learn dialog says the note rides Finish recording and that a recording left to the ten-minute cap is saved without it");
+
   // (b) With the switch off the recorder must refuse, and say why.
   await writeSetting("SAND_TEACH", "0");
   probe = await call("createAgent", { name: `probe-teach-${Math.random().toString(36).slice(2, 8)}`, description: "", origin: "user", isKickstartRequested: false });

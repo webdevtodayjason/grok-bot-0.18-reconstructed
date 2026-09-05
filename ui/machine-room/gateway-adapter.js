@@ -2372,9 +2372,12 @@
           if (before?.state === "idle") {
             state.teaching = { active: false, workerId: null, startedAt: null };
             emit("teaching:finished", { workerId: id, saved: null });
+            // noteSent:false keeps the view from clearing the textarea. The cap saves and
+            // dispatches with nothing from the dialog in it, so the note in front of the operator
+            // was never sent anywhere and throwing it away here would be the second loss.
             return {
-              ok: true, saved: null, alreadyStopped: true, workerId: id,
-              message: "This box was no longer recording, so nothing here stopped it. The ten-minute cap ends a recording by saving it and starting the learning turn, so read the agent's transcript before recording again.",
+              ok: true, saved: null, alreadyStopped: true, workerId: id, noteSent: false,
+              message: "This box was no longer recording, so nothing here stopped it. The ten-minute cap ends a recording by saving it and starting the learning turn, and that save carries no note, so read the agent's transcript before recording again. The note typed here was not sent and is still in the field.",
             };
           }
           return call("stopTeachRecording", save && note ? { agentId: id, save, note } : { agentId: id, save })
