@@ -658,6 +658,51 @@
     }));
   }
 
+  // CONNECT-5: a shell tool is a CLI the agent runs from its own shell, with its credential in the
+  // environment. CodeRabbit ships no MCP server at all, so it can never be a connector card; the
+  // operator's cli-anything-tinyfish is the same shape. These cards sit in their own group under
+  // Connectors and reuse the connector credential card component, because the promise a credential
+  // card makes -- the host holds it, this page never did -- is the same one.
+  const SHELL_TOOL_TOOLS_NOTE = "A shell tool has no MCP tools to list: the agent runs its command itself. What it adds is the command on this card.";
+  async function shellToolPlugins() {
+    const catalog = await tryCall("listShellTools", {}).catch(() => null);
+    if (!Array.isArray(catalog) || catalog.length === 0) return [];
+    // The catalog answer already carries `stored` per tool; the field list is read too so a
+    // credential stored under a name the catalog no longer claims still appears somewhere.
+    const secrets = await tryCall("listShellSecretFields", {}).catch(() => null);
+    const stored = new Set(Array.isArray(secrets?.stored) ? secrets.stored.map(String) : []);
+    return catalog.map((tool) => {
+      const id = String(tool?.id ?? "");
+      const field = String(tool?.field ?? "");
+      const held = stored.has(field) || tool?.stored === true;
+      const skillUrl = typeof tool?.skillUrl === "string" && tool.skillUrl.length > 0 ? tool.skillUrl : null;
+      return {
+        id: `shell:${id}`, name: String(tool?.name ?? id), icon: (String(tool?.name ?? id)[0] ?? "?").toUpperCase(),
+        group: "Shell tools",
+        category: `shell CLI · ${held ? "key stored" : "no key yet"}`,
+        description: `A command-line tool the agent runs in the box. It reads ${field} from the shell environment; the host holds the value and hands it to the box.`,
+        status: held ? "connected" : "available",
+        account: null,
+        connectable: false,
+        connectNote: `${String(tool?.name ?? id)} is not connected, it is installed. Install it in the box below, then store ${field} in the credential card.`,
+        connectedNote: `The host holds ${field} and merges it into the environment of the box shell the agent runs commands in. This page never received it.`,
+        removable: false,
+        tools: [], toolsNote: SHELL_TOOL_TOOLS_NOTE, toolsReadOnlyNote: null,
+        secretFields: field ? [field] : [],
+        storedFields: held && field ? [field] : [],
+        secretHint: `${String(tool?.credentialNote ?? "")} The host stores it in its own 0600 store and merges it into the box shell's environment. It never enters connectors.json, chat, model context or this page's markup.`,
+        skills: [], skillsNote: null,
+        shellTool: {
+          id, field,
+          install: String(tool?.install ?? ""),
+          usage: String(tool?.usage ?? ""),
+          teachable: skillUrl != null,
+          skillUrl,
+        },
+      };
+    });
+  }
+
   // onError is the transcript's `failed` where there is a conversation to say it in. tryCall
   // already answers null for a host that has never heard of the command; anything it THROWS is a
   // host that has the command and refused, and swallowing that rendered a 500 as though the
@@ -665,17 +710,20 @@
   // else to draw -- but the reason is said out loud instead of disappearing.
   async function connectorPlugins(onError) {
     const config = await connectorConfig();
+    const shellTools = await shellToolPlugins().catch(() => []);
     let installed = null;
     try {
       installed = await tryCall("listInstalledMcpServers", {});
     } catch (error) {
       if (typeof onError === "function") onError(`The host could not list its connectors: ${error.message}`);
-      return connectorCards(config);
+      return [...await connectorCards(config), ...shellTools];
     }
     // A host that answers the command but reports nothing installed still has connectors.json,
     // so the Wave B card is the honest fallback rather than an empty Connectors group.
-    if (Array.isArray(installed) && installed.length > 0) return installedConnectorPlugins(installed, config);
-    return connectorCards(config);
+    const connectors = Array.isArray(installed) && installed.length > 0
+      ? await installedConnectorPlugins(installed, config)
+      : await connectorCards(config);
+    return [...connectors, ...shellTools];
   }
 
   async function connectorCards(config) {
@@ -1177,7 +1225,7 @@
     async function refreshConnectors() {
       const generation = ++connectorSettleGeneration;
       const connectors = await connectorPlugins(failed).catch(() => []);
-      state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("mcp:")), ...connectors];
+      state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("mcp:") && !String(p.id).startsWith("shell:")), ...connectors];
       const emitted = emit("plugin:state", {});
       // Deliberately not awaited: the write that asked for this refresh answers the operator now,
       // and the card catches up by itself while the box finishes the connect.
@@ -1199,7 +1247,7 @@
         seen = signature;
         const connectors = await connectorPlugins(null).catch(() => []);
         if (generation !== connectorSettleGeneration) return;
-        state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("mcp:")), ...connectors];
+        state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("mcp:") && !String(p.id).startsWith("shell:")), ...connectors];
         emit("plugin:state", {});
         if (!connectors.some(stillConnecting)) return;
       }
@@ -2275,6 +2323,88 @@
             failed(`Storing ${field} for ${server} failed: ${error.message}`);
             return { accepted: false, message: `${field} was not stored: ${error.message}` };
           });
+      },
+
+      // CONNECT-5: the shell-tool half of the same promise. setShellSecret stores the value in the
+      // host's 0600 store and pushes it into the box shell's environment; `applied` is the host
+      // saying whether the LIVE box took it, so this page never claims a running box has a key it
+      // has not been handed yet.
+      setShellSecret(id, field, value) {
+        return tryCall("setShellSecret", { field, value })
+          .then((answer) => {
+            if (answer === null) return { accepted: false, message: `This host has no setShellSecret command yet, so ${field} was not stored.` };
+            const stored = answer?.stored !== false;
+            void refreshConnectors();
+            return {
+              accepted: stored,
+              message: !stored ? `The host did not store ${field}.`
+                : answer?.applied === true
+                  ? `${field} stored by the host and pushed into the box shell — it never entered chat or model context`
+                  : `${field} stored by the host; the box was not reachable, so it lands on the box's next start`,
+            };
+          })
+          .catch((error) => {
+            failed(`Storing ${field} failed: ${error.message}`);
+            return { accepted: false, message: `${field} was not stored: ${error.message}` };
+          });
+      },
+      deleteShellSecret(field) {
+        return tryCall("deleteShellSecret", { field })
+          .then((answer) => {
+            if (answer === null) return { accepted: false, message: "This host has no deleteShellSecret command yet." };
+            void refreshConnectors();
+            return {
+              accepted: answer?.removed === true,
+              message: answer?.removed === true
+                ? `${field} removed from the host's store${answer?.applied === true ? " and cleared in the box shell" : ""}`
+                : `The host held no ${field} to remove`,
+            };
+          })
+          .catch((error) => ({ accepted: false, message: `${field} was not removed: ${error.message}` }));
+      },
+      // Whether the BOX has the variable, asked of the box's own shell. It answers set/unset and
+      // never the value; that is the whole contract of the probe.
+      probeShellSecret(field) {
+        return tryCall("probeShellSecret", { field })
+          .then((answer) => {
+            if (answer === null) return { accepted: false, message: "This host has no probeShellSecret command yet." };
+            const state = String(answer?.state ?? "unknown");
+            return {
+              accepted: state === "set",
+              message: state === "set" ? `The box shell has ${field} set.`
+                : state === "unset" ? `The box shell has no ${field}. Store it above, or restart the box if it was just stored.`
+                : `The box shell answered something this page does not recognise for ${field}.`,
+            };
+          })
+          .catch((error) => ({ accepted: false, message: `The box was not asked about ${field}: ${error.message}` }));
+      },
+      // The installer runs in the box as the user the host runs as, capped at five minutes, and
+      // answers with the tail of its own output. Nothing is retried and nothing is hidden: an
+      // install that failed says so with the box's own last lines.
+      installShellTool(id, agentId) {
+        return tryCall("installShellTool", { id, ...(agentId ? { agentId } : {}) })
+          .then((answer) => {
+            if (answer === null) return { accepted: false, message: "This host has no installShellTool command yet." };
+            void refreshConnectors();
+            return {
+              accepted: answer?.ok === true,
+              output: String(answer?.output ?? ""),
+              message: answer?.ok === true
+                ? `Installed in the box${answer?.taught === true ? ", and the skill was imported for this agent" : ""}.`
+                : answer?.timedOut === true
+                  ? "The installer was killed after five minutes."
+                  : `The installer exited ${answer?.exitCode ?? "with no code"}.`,
+            };
+          })
+          .catch((error) => ({ accepted: false, output: "", message: `The installer did not run: ${error.message}` }));
+      },
+      teachShellTool(id, agentId) {
+        return tryCall("teachShellTool", { id, agentId })
+          .then((answer) => {
+            if (answer === null) return { accepted: false, message: "This host has no teachShellTool command yet." };
+            return { accepted: true, message: `${answer?.name ?? id} skill imported as a workflow for this agent.` };
+          })
+          .catch((error) => ({ accepted: false, message: `The skill was not imported: ${error.message}` }));
       },
 
       // -- CP-11: the connectors editor. The relay owns connectors.json (GET/POST /connectors);

@@ -61,12 +61,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/**
+ * The whole store FILE, parsed, sections and all. `servers` below is this module's section;
+ * `shell` is shell-tools/shell-secrets.ts's. Both readers and both writers go through this pair so
+ * that writing one section cannot drop the other -- the old `writeStore` serialized `{ servers }`
+ * and would have silently deleted every shell credential on the next connector write.
+ */
+export function readSecretsDocument(rootDir: string): Record<string, unknown> {
+  try { return asRecord(JSON.parse(readFileSync(secretsPath(rootDir), "utf8"))) ?? {}; }
+  catch { return {}; }
+}
+
 /** The whole store. A missing or malformed file is "no secrets", never an error. */
 export function readConnectorEnvSecrets(rootDir: string): ConnectorEnvSecrets {
-  let parsed: unknown;
-  try { parsed = JSON.parse(readFileSync(secretsPath(rootDir), "utf8")); }
-  catch { return {}; }
-  const servers = asRecord(asRecord(parsed)?.servers);
+  const servers = asRecord(readSecretsDocument(rootDir).servers);
   if (servers == null) return {};
   const result: ConnectorEnvSecrets = {};
   for (const [server, fields] of Object.entries(servers)) {
@@ -132,11 +140,15 @@ export function assertConnectorCredentialField(rootDir: string, server: string, 
  * connector with no credentials. Temp file + rename + explicit chmod, the same shape
  * `SandConnectorSecretStore` already uses for the channel store.
  */
-function writeStore(rootDir: string, store: ConnectorEnvSecrets): void {
+export function writeSecretsDocument(rootDir: string, document: Record<string, unknown>): void {
   const path = secretsPath(rootDir), tempPath = `${path}.${process.pid}.tmp`;
-  writeFileSync(tempPath, `${JSON.stringify({ servers: store }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  writeFileSync(tempPath, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   renameSync(tempPath, path);
   try { chmodSync(path, 0o600); } catch { /* the rename already carried 0600 from the temp file */ }
+}
+
+function writeStore(rootDir: string, store: ConnectorEnvSecrets): void {
+  writeSecretsDocument(rootDir, { ...readSecretsDocument(rootDir), servers: store });
 }
 
 /** Stores one connector env value. Returns false when the field name is not an env name. */

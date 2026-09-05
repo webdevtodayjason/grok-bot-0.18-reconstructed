@@ -1,5 +1,7 @@
 import type { Context } from "../../../packages/context/core.js";
 import { boxApplyEnvironment, boxDescription, boxIsAvailable, boxIsPreparing, boxLoadMcpServers, boxMaxWindows, boxMcpResourceAccessor, boxTerminalsFolder } from "../../box/box-capabilities.js";
+import { getSandRootDir } from "../../host-paths.js";
+import { buildShellSecretEnvironmentUpdate } from "../shell-tools/shell-secrets.js";
 
 export class SandBoxCapabilityError extends Error {}
 export const RUN_STATE_PROBE_AGENT_ID = "";
@@ -13,7 +15,28 @@ export class HostBox {
   recordConnection(agentId: string, connection: BoxConnection): void { this.vncUrls.set(agentId, connection.vncUrl); this.connectionEpochs.set(agentId, (this.connectionEpochs.get(agentId) ?? 0) + 1); if (connection.imageUpdateAvailable !== undefined) this.imageUpdateAvailable = connection.imageUpdateAvailable; }
   recordImageUpdateAvailable(value: boolean | undefined): void { if (value === undefined || value === this.imageUpdateAvailable) return; this.imageUpdateAvailable = value; for (const agentId of this.lastReported.keys()) { const url = this.vncUrls.get(agentId), last = this.lastReported.get(agentId); if (url != null) this.notify(this.runningStatus(agentId, url)); else if (last != null) this.notify({ ...last, imageUpdateAvailable: value }); } }
   runningStatus(agentId: string, vncUrl: string): BoxStatus { const windows = this.buildWindows(agentId); return { agentId, state: "running", vncUrl, ...(windows === undefined ? {} : { windows }), ...(this.imageUpdateAvailable === undefined ? {} : { imageUpdateAvailable: this.imageUpdateAvailable }) }; }
-  async ensureReady(ctx: Context, agentId: string): Promise<BoxConnection> { const connection = await this.inner.ensureReady(ctx, agentId); this.recordConnection(agentId, connection); this.notify(this.runningStatus(agentId, connection.vncUrl)); return connection; }
+  async ensureReady(ctx: Context, agentId: string): Promise<BoxConnection> { const connection = await this.inner.ensureReady(ctx, agentId); await this.applyStoredShellSecrets(ctx); this.recordConnection(agentId, connection); this.notify(this.runningStatus(agentId, connection.vncUrl)); return connection; }
+  /**
+   * CONNECT-5. The shell credentials live in a 0600 file on the host; the box exec-daemon holds
+   * them only in memory, so a box that was recreated or restarted has lost them and the agent's
+   * next `cr review --api-key "$CODERABBIT_API_KEY"` would run with an empty key. Bring-up is the
+   * one moment every path goes through, so the store is re-pushed here rather than only when the
+   * operator stores a value. It is awaited -- the shell tool spawns after this returns -- and it
+   * never fails a bring-up: a box with no environment transport is a box without this feature,
+   * not a box that cannot start.
+   */
+  private shellSecretPushWarned = false;
+  private async applyStoredShellSecrets(ctx: Context): Promise<void> {
+    try {
+      const update = buildShellSecretEnvironmentUpdate(getSandRootDir());
+      if (Object.keys(update.env).length === 0) return;
+      await this.applyEnvironment(ctx, update);
+    } catch (error) {
+      if (this.shellSecretPushWarned) return;
+      this.shellSecretPushWarned = true;
+      console.warn(`[sand][shell-tools] stored shell credentials were not pushed to the box: ${error instanceof Error ? error.name : typeof error}`);
+    }
+  }
   async hibernate(): Promise<void> {} runState(ctx: Context, agentId: string): Promise<string> { return this.inner.runState(ctx, agentId); } describe(): unknown { return boxDescription(this.inner); } isAvailable(): Promise<boolean> { return boxIsAvailable(this.inner); } isPreparing(agentId: string): boolean { return boxIsPreparing(this.inner, agentId); } getTerminalsFolder(): string | undefined { return boxTerminalsFolder(this.inner); } listBoxes() { return this.inner.listBoxes(); } maxWindows(): number { return boxMaxWindows(this.inner); }
   async ensureWindow(ctx: Context, agentId: string, windowIndex: number, options?: unknown): Promise<{ windowIndex: number; vncUrl: string }> { if (this.inner.ensureWindow == null) throw new SandBoxCapabilityError("This box does not support multiple desktop windows."); if (!this.vncUrls.has(agentId)) await this.ensureReady(ctx, agentId); const window = await this.inner.ensureWindow(ctx, agentId, windowIndex, options); if (window.windowIndex === 0) this.vncUrls.set(agentId, window.vncUrl); else { const forks = this.forkVncUrls.get(agentId) ?? new Map<number, string>(); forks.set(window.windowIndex, window.vncUrl); this.forkVncUrls.set(agentId, forks); } this.notify(this.runningStatus(agentId, this.vncUrls.get(agentId) ?? window.vncUrl)); return window; }
   /** The persisted assignments only reach memory on the first bring-up; a sweep at start has to ask for them. */

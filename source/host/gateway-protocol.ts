@@ -135,7 +135,17 @@ export const SAND_GATEWAY_COMMANDS = {
   toggleMcpToolDisabled: (api: GatewayApi, body: string) => api.toggleMcpToolDisabled(parseCommandArgs(body)),
   listConnectorSecretFields: (api: GatewayApi, body: string) => api.listConnectorSecretFields(parseCommandArgs(body)),
   setConnectorSecret: (api: GatewayApi, body: string) => api.setConnectorSecret(parseCommandArgs(body)),
-  deleteConnectorSecret: (api: GatewayApi, body: string) => api.deleteConnectorSecret(parseCommandArgs(body))
+  deleteConnectorSecret: (api: GatewayApi, body: string) => api.deleteConnectorSecret(parseCommandArgs(body)),
+  // CONNECT-5. Shell tools: a CLI the agent runs from its own shell with a credential in the
+  // environment. CodeRabbit ships no MCP server at all, so none of the connector commands above
+  // can carry its key; these are the same shape one layer down.
+  listShellTools: (api: GatewayApi) => api.listShellTools(),
+  listShellSecretFields: (api: GatewayApi) => api.listShellSecretFields(),
+  setShellSecret: (api: GatewayApi, body: string) => api.setShellSecret(parseCommandArgs(body)),
+  deleteShellSecret: (api: GatewayApi, body: string) => api.deleteShellSecret(parseCommandArgs(body)),
+  probeShellSecret: (api: GatewayApi, body: string) => api.probeShellSecret(parseCommandArgs(body)),
+  installShellTool: (api: GatewayApi, body: string) => api.installShellTool(parseCommandArgs(body)),
+  teachShellTool: (api: GatewayApi, body: string) => api.teachShellTool(parseCommandArgs(body))
 };
 export const GATEWAY_PREPARE_UPGRADE_PATH = "/prepare-upgrade";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);

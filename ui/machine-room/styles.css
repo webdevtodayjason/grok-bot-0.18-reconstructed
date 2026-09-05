@@ -2470,6 +2470,28 @@ dialog[open] {
   font-size: 10px;
 }
 
+/* CONNECT-5: the shell tool card's install command and the tail of what it printed. Both wrap
+   rather than scroll sideways, because a command line and an installer's last lines are both
+   long and both meant to be read. */
+.shell-tool-command,
+.shell-tool-output {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(127, 227, 220, 0.18);
+  border-radius: 9px;
+  background: rgba(10, 16, 24, 0.45);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.shell-tool-output {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 .empty-state {
   display: grid;
   min-height: 180px;
