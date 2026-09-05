@@ -919,12 +919,14 @@ try {
       const missingCards = catalogPlugins.map((plugin) => String(plugin.id)).filter((id) => !cards.includes(id));
       check(missingCards.length === 0, `every plugin in the host's catalog has a card (${catalogPlugins.length})`, missingCards.length ? `missing ${missingCards.join(", ")}` : cards.join(", "));
       const chips = await page.$$eval("[data-marketplace-chips] [data-marketplace-category]", (els) => els.map((e) => e.dataset.marketplaceCategory));
-      const wantedChips = ["All", ...(catalog.categories ?? []).map(String)].filter((name, i, all) => all.indexOf(name) === i);
+      // categories is { plugins, bots } on this host; the Plugins tab's chips are the plugins half.
+      const catalogCategories = (Array.isArray(catalog.categories) ? catalog.categories : (catalog.categories?.plugins ?? [])).map(String);
+      const wantedChips = ["All", ...catalogCategories].filter((name, i, all) => all.indexOf(name) === i);
       const missingChips = wantedChips.filter((name) => !chips.includes(name));
       check(missingChips.length === 0, `the category chips are the catalog's own (${chips.length})`, missingChips.length ? `missing ${missingChips.join(", ")}` : chips.join(", "));
       // A chip filters to its own category and nothing else. Featured is skipped: it is a flag on
       // the row, not a category, and it is asserted by the card coverage above.
-      const pickCategory = (catalog.categories ?? []).map(String).find((name) => name !== "Featured" && catalogPlugins.some((plugin) => String(plugin.category) === name)) ?? null;
+      const pickCategory = catalogCategories.find((name) => name !== "Featured" && catalogPlugins.some((plugin) => String(plugin.category) === name)) ?? null;
       if (pickCategory) {
         await page.click(`[data-marketplace-category="${pickCategory}"]`); await page.waitForTimeout(600);
         const filtered = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));

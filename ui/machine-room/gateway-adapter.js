@@ -918,7 +918,10 @@
     marketplaceCatalogCache = {
       plugins: Array.isArray(answer.plugins) ? answer.plugins : [],
       bots: Array.isArray(answer.bots) ? answer.bots : [],
-      categories: Array.isArray(answer.categories) ? answer.categories.map(String) : [],
+      // The host serves categories as { plugins, bots } (source/shared/marketplace/catalog.ts), and
+      // this cache feeds the Plugins tab; a flat array is accepted too so an older host still
+      // draws chips instead of silently drawing none. marketplace-bots.js takes .bots the same way.
+      categories: (Array.isArray(answer.categories) ? answer.categories : (answer.categories?.plugins ?? [])).map(String),
     };
     return marketplaceCatalogCache;
   }
