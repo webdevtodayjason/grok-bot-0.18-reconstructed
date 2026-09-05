@@ -34,9 +34,10 @@ import {
   readLocalConnectorFile,
 } from "./local-connectors.js";
 import {
+  assertConnectorCredentialField,
   deleteConnectorEnvSecret,
   isConnectorEnvFieldName,
-  listConnectorEnvSecretFields,
+  listConnectorCredentialFields,
   readConnectorEnvSecrets,
   writeConnectorEnvSecret,
 } from "./connector-secrets.js";
@@ -207,24 +208,37 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
     },
     /** Does this name (or numeric id) belong to a local stdio connector on this box? */
     isLocalConnector: (server: unknown) => { try { resolveLocalConnector(server, "isLocalConnector", true); return true; } catch { return false; } },
+    /**
+     * CONNECT-4. The answer is the union of what is stored and what the entry in connectors.json
+     * leaves empty, because the card draws its "Enter securely" rows from exactly this list and
+     * the host is the authority on which env keys are credentials.
+     */
     listConnectorSecretFields: (server: unknown) => {
       const { name, id } = resolveLocalConnector(server, "listConnectorSecretFields");
-      return { server: name, serverId: id, fields: listConnectorEnvSecretFields(localConnectorRoot(), name) };
+      return { server: name, serverId: id, fields: listConnectorCredentialFields(localConnectorRoot(), name) };
     },
     setConnectorSecret: async (args: { server: unknown; field: unknown; value: unknown }) => {
       const { name, id } = resolveLocalConnector(args.server, "setConnectorSecret");
       if (!isConnectorEnvFieldName(args.field)) throw new Error("setConnectorSecret needs an environment variable name as `field` (process-control names such as PATH, NODE_OPTIONS and LD_* are refused)");
       if (typeof args.value !== "string" || args.value.length === 0) throw new Error("setConnectorSecret needs a non-empty `value`");
+      // CONNECT-4. A configuration key is not a credential. MCP_REMOTE_CONFIG_DIR -- a directory
+      // path the operator wrote into the entry themselves -- was offered as "Enter securely" and
+      // swallowed a pasted API key, leaving the connector with a config dir named after the key and
+      // no credential at all. Only a field the entry leaves EMPTY (or one already stored) is one.
+      assertConnectorCredentialField(localConnectorRoot(), name, args.field);
       if (!writeConnectorEnvSecret(localConnectorRoot(), name, args.field, args.value)) throw new Error("the connector secret store could not be written");
       const restarted = await restartLocalConnector(name);
-      return { server: name, serverId: id, field: args.field, stored: true, restarted, fields: listConnectorEnvSecretFields(localConnectorRoot(), name) };
+      return { server: name, serverId: id, field: args.field, stored: true, restarted, fields: listConnectorCredentialFields(localConnectorRoot(), name) };
     },
     deleteConnectorSecret: async (args: { server: unknown; field: unknown }) => {
       const { name, id } = resolveLocalConnector(args.server, "deleteConnectorSecret");
       if (!isConnectorEnvFieldName(args.field)) throw new Error("deleteConnectorSecret needs an environment variable name as `field`");
       const removed = deleteConnectorEnvSecret(localConnectorRoot(), name, args.field);
       const restarted = removed ? await restartLocalConnector(name) : false;
-      return { server: name, serverId: id, field: args.field, removed, restarted, fields: listConnectorEnvSecretFields(localConnectorRoot(), name) };
+      // Deleting is not gated by the rule: a stored field is a credential by definition, and a
+      // value stored before the rule landed must stay removable. The field list is the union, so a
+      // credential the entry still declares empty stays on the card with nothing stored behind it.
+      return { server: name, serverId: id, field: args.field, removed, restarted, fields: listConnectorCredentialFields(localConnectorRoot(), name) };
     },
     getPlugin: async (pluginId: string) => {
       let views = await readCatalog(), view = views.find((entry) => entry.id === pluginId);

@@ -162,3 +162,90 @@ test("CP-10: the ack beat says what actually happened to the value", () => {
   const channel = ack.buildSecretProvidedAck(request, { destination: "channel-credential" });
   assert.ok(!/restart/.test(channel));
 });
+
+// CONNECT-4. The card used to offer every env key of the entry as "Enter securely", so
+// MCP_REMOTE_CONFIG_DIR -- a directory path the operator wrote themselves -- came up as a
+// credential field and swallowed a pasted API key: the connector then started with a config dir
+// named after the key and no credential at all. The host is the authority on which env keys are
+// credentials, and the rule is the empty value.
+const connectorRoot = (servers) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "connector-credential-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, "connectors.json"), JSON.stringify({ mcpServers: servers }), "utf8");
+  return dir;
+};
+
+const TINYFISH_ENTRY = {
+  command: "npx",
+  args: ["-y", "mcp-remote", "https://agent.tinyfish.ai/mcp", "--transport", "http-only",
+    "--header", "Authorization:Bearer ${TINYFISH_API_KEY}"],
+  env: { TINYFISH_API_KEY: "", MCP_REMOTE_CONFIG_DIR: "/home/box/.mcp-auth" },
+};
+
+test("CONNECT-4: an empty env value is a credential field, a filled one is configuration", () => {
+  const dir = connectorRoot({ tinyfish: TINYFISH_ENTRY });
+  assert.deepEqual(secrets.listConnectorCredentialFields(dir, "tinyfish"), ["TINYFISH_API_KEY"]);
+  assert.doesNotThrow(() => secrets.assertConnectorCredentialField(dir, "tinyfish", "TINYFISH_API_KEY"));
+
+  assert.throws(
+    () => secrets.assertConnectorCredentialField(dir, "tinyfish", "MCP_REMOTE_CONFIG_DIR"),
+    (error) => {
+      // The message names the rule, because the person reading it wrote the entry and the fix is
+      // in that entry. It names no VALUE from connectors.json: the refusal is not a read primitive.
+      assert.match(error.message, /MCP_REMOTE_CONFIG_DIR/);
+      assert.match(error.message, /empty string/);
+      assert.match(error.message, /configuration, not a credential/);
+      assert.match(error.message, /TINYFISH_API_KEY/);
+      assert.ok(!error.message.includes("/home/box/.mcp-auth"));
+      return true;
+    },
+  );
+
+  // A process-control name is not rescued by an empty value: an entry could otherwise make the
+  // card offer a field writeConnectorEnvSecret refuses anyway.
+  const hostile = connectorRoot({ tinyfish: { ...TINYFISH_ENTRY, env: { PATH: "", LD_PRELOAD: "" } } });
+  assert.deepEqual(secrets.listConnectorCredentialFields(hostile, "tinyfish"), []);
+  assert.throws(() => secrets.assertConnectorCredentialField(hostile, "tinyfish", "PATH"), /not a credential/);
+});
+
+test("CONNECT-4: a stored field stays on the list after its entry is edited away", () => {
+  // Otherwise a credential stored before the entry changed becomes invisible on the card and
+  // undeletable through it, while the value stays in the store for the life of the box.
+  const dir = connectorRoot({ tinyfish: TINYFISH_ENTRY });
+  assert.equal(secrets.writeConnectorEnvSecret(dir, "tinyfish", "TINYFISH_API_KEY", "PROBE-SECRET-stored"), true);
+  writeFileSync(path.join(dir, "connectors.json"), JSON.stringify({ mcpServers: {} }), "utf8");
+  assert.deepEqual(secrets.listConnectorCredentialFields(dir, "tinyfish"), ["TINYFISH_API_KEY"]);
+
+  // And the union is a union: above, the stored field and the entry's empty key are the same name,
+  // so a second field proves both halves are read.
+  const both = connectorRoot({ tinyfish: TINYFISH_ENTRY });
+  assert.equal(secrets.writeConnectorEnvSecret(both, "tinyfish", "OLD_TOKEN", "PROBE-SECRET-old"), true);
+  assert.deepEqual(secrets.listConnectorCredentialFields(both, "tinyfish"), ["OLD_TOKEN", "TINYFISH_API_KEY"]);
+});
+
+test("CONNECT-4: the merge into the connector process env is unchanged", () => {
+  const dir = connectorRoot({ tinyfish: TINYFISH_ENTRY });
+  const spawnConfig = (rootDir) => {
+    const local = connectors.readLocalConnectorFile(rootDir);
+    return connectors.mergeLocalConnectors(null, local, {
+      ids: connectors.assignLocalConnectorIds(rootDir, Object.keys(local)),
+      secrets: secrets.readConnectorEnvSecrets(rootDir),
+    }).servers.find((server) => server.name === "tinyfish").config;
+  };
+
+  // With nothing stored the connector still starts, with the placeholder empty: that is what makes
+  // "no key yet" a connector that fails to authenticate rather than one that never launches.
+  const before = spawnConfig(dir);
+  assert.equal(before.env.TINYFISH_API_KEY, "");
+  assert.deepEqual(before.args, TINYFISH_ENTRY.args);
+
+  const probe = `PROBE-SECRET-${Math.random().toString(36).slice(2, 10)}`;
+  assert.equal(secrets.writeConnectorEnvSecret(dir, "tinyfish", "TINYFISH_API_KEY", probe), true);
+  const after = spawnConfig(dir);
+  assert.equal(after.env.TINYFISH_API_KEY, probe);
+  // Configuration is untouched by the rule -- it is still handed to the process, just never asked
+  // for as a credential -- and the header argument reaches the process unexpanded.
+  assert.equal(after.env.MCP_REMOTE_CONFIG_DIR, "/home/box/.mcp-auth");
+  assert.deepEqual(after.args, TINYFISH_ENTRY.args);
+  assert.ok(!readFileSync(path.join(dir, "connectors.json"), "utf8").includes(probe));
+});
