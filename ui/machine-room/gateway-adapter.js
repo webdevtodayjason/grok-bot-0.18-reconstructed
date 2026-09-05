@@ -808,7 +808,7 @@
         tools: [], toolsNote: SHELL_TOOL_TOOLS_NOTE, toolsReadOnlyNote: null,
         secretFields: field ? [field] : [],
         storedFields: held && field ? [field] : [],
-        secretHint: `${String(tool?.credentialNote ?? "")} The host stores it in its own 0600 store and merges it into the box shell's environment. It never enters connectors.json, chat, model context or this page's markup.`,
+        secretHint: `${String(tool?.credentialNote ?? "")} The host stores it in its own 0600 store and merges it into the box shell's environment. It never enters connectors.json, chat, model context or this page's markup. Removing it empties ${field} rather than removing it: the name stays in the running box shell with an empty value until the box restarts.`,
         skills: [], skillsNote: null,
         shellTool: {
           id, field,

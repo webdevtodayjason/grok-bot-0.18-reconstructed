@@ -314,6 +314,17 @@ runs are metered against the wallet.
   box's volumes, so the token store has to be pointed into `sand-data` or the connector silently
   goes back to waiting for authorization after the next redeploy.
 
+**The TinyFish CLI is a different thing, and it lives under Shell tools.** The connector above is
+an MCP server the host spawns; the CLI is a program the agent runs itself. Global capabilities →
+**Plugins, connectors & skills** → **Shell tools** → **TinyFish CLI** → **Install in the box** runs
+`pip install cli-anything-tinyfish` in the box as user `box`, capped at five minutes, and shows the
+tail of its output on the card. Then paste the same TinyFish key into that card's
+`TINYFISH_API_KEY` field — a key stored on the `tinyfish` connector card does not reach the CLI,
+because a connector's environment and the box shell's are two different environments — and press
+**Teach the active agent**, which imports the CLI's own published `SKILL.md` as a workflow for the
+agent on screen. Removing the stored key leaves the name in that shell with an empty value until
+the box restarts: the host can set a variable in the running shell, it cannot unset one.
+
 Full report: [docs/CONNECTORS-TINYFISH.md](CONNECTORS-TINYFISH.md), which also carries the OAuth
 recipe, the measured R750 install and what the probe left behind on the Mac's box (nothing).
 
@@ -337,7 +348,9 @@ in the box as user `box`, capped at five minutes, and shows the tail of its outp
 installer wants `curl` and `unzip` and defaults to `~/.local/bin`, and `CI=1` skips the post-install
 browser prompt. Then paste the Agentic key into that same card's `CODERABBIT_API_KEY` field: the
 host puts it in the `shell` section of the 0600 store and merges it into the environment of the box
-shell the agent runs commands in. Reviews then run as
+shell the agent runs commands in. Taking that key back out empties the variable rather than removing
+it — the name stays in the running box shell with an empty value until the box restarts, which the
+CLI treats the same as no key at all. Reviews then run as
 `cr review --agent --api-key "$CODERABBIT_API_KEY"` (add `--region eu` for EU accounts, which is
 only accepted alongside `--api-key`). The key is passed on every run rather than left with the CLI:
 box storage is ephemeral.
