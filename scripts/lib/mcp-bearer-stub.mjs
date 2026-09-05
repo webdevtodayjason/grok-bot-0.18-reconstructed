@@ -8,12 +8,18 @@
 // rather than a string inside the gate: the unit test's claims about the 401, the tool list and the
 // key never appearing in an answer are claims about the server the gate actually drives.
 //
-//   MCP_STUB_KEY=<key> node mcp-bearer-stub.mjs --port <port>
+//   MCP_STUB_KEY=<key> [MCP_STUB_HEADERS='{"X-Name":"value"}'] node mcp-bearer-stub.mjs --port <port>
 //
 // The key comes from the environment and never from an argument, because a command line is readable
 // by anyone who can run ps. It prints one line, "listening <port>", when it is up, and nothing else
 // ever -- no request log, no header dump. A stub that logged its inputs would be a stub that logs
 // the key it exists to protect.
+//
+// MCP_STUB_HEADERS is the same demand for headers that are NOT credentials. GitHub's preset carries
+// three of them (X-MCP-Toolsets, X-MCP-Tools, X-MCP-Readonly) and they are what decides which tools
+// the operator gets; a header the bridge dropped on the floor would leave the connector working and
+// the catalogue wrong, which no "it connected" ever catches. With them required here, a connector
+// that reaches `connected` has proved every one of them arrived with the value the preset set.
 import { createServer } from "node:http";
 
 const argOf = (name) => {
@@ -25,6 +31,18 @@ const PORT = Number(argOf("port") ?? 0);
 const KEY = process.env.MCP_STUB_KEY ?? "";
 if (KEY.length === 0) {
   process.stderr.write("MCP_STUB_KEY is required\n");
+  process.exit(2);
+}
+
+// Header name (lowercased, the shape node hands back) to the exact value the request must carry.
+// An empty or absent MCP_STUB_HEADERS demands nothing, which is the TinyFish and Linear shape.
+let REQUIRED_HEADERS = [];
+try {
+  const declared = JSON.parse(process.env.MCP_STUB_HEADERS ?? "{}");
+  if (declared == null || typeof declared !== "object" || Array.isArray(declared)) throw new Error("not an object");
+  REQUIRED_HEADERS = Object.entries(declared).map(([name, value]) => [name.toLowerCase(), String(value)]);
+} catch {
+  process.stderr.write("MCP_STUB_HEADERS must be a JSON object of header name to value\n");
   process.exit(2);
 }
 
@@ -96,6 +114,16 @@ const server = createServer((req, res) => {
     // WHICH secret is missing, and it has to stay tellable without becoming readable.
     return sendJson(res, 401,
       { jsonrpc: "2.0", id: null, error: { code: -32001, message: "unauthorized: this server needs an Authorization: Bearer header" } },
+      { "www-authenticate": 'Bearer realm="mcp-bearer-stub"' });
+  }
+  // Refused the same way as a missing bearer, and for the same reason: the connector must not reach
+  // `connected` on a request that lost one of them. The refusal names the header and never repeats
+  // what arrived -- the habit of not echoing an inbound header back is what keeps the bearer out of
+  // an answer, and it costs nothing to keep here too.
+  const wrongHeader = REQUIRED_HEADERS.find(([name, value]) => req.headers[name] !== value);
+  if (wrongHeader !== undefined) {
+    return sendJson(res, 401,
+      { jsonrpc: "2.0", id: null, error: { code: -32001, message: `unauthorized: this server needs the header ${wrongHeader[0]}` } },
       { "www-authenticate": 'Bearer realm="mcp-bearer-stub"' });
   }
   // No SSE stream to open and no session to end; the streamable HTTP client treats both as fine.

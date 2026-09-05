@@ -28,13 +28,25 @@
 //              stored, and storing it through setConnectorSecret is what makes it connect. Off by
 //              default because it runs a server inside the box: --tinyfish-key.
 //
+//   CONNECT-3/4, the other four services  the same two claims for the connectors the operator asked
+//              for next: GitHub and Linear are remote API-key connectors, so they run against the
+//              same in-box stub as (h) -- GitHub's with its three extra headers demanded back, so
+//              "it connected" is proof the preset's toolset filter reached the far end. Slack and
+//              Google are stdio packages, installed for real from npm, given invented tokens, and
+//              held to a terminal answer inside 90 s: an operator who pastes a dead token must get
+//              a NO, not a console that waits forever. Off by default, one flag each.
+//
 //   node scripts/verify-connector-plane.mjs            all of it
 //   node scripts/verify-connector-plane.mjs --no-restart   skip the docker restart in (a)
 //   node scripts/verify-connector-plane.mjs --no-model     skip the one model turn in (b)
 //   node scripts/verify-connector-plane.mjs --model-tool   add (f), the AddMcpServer turn
 //   node scripts/verify-connector-plane.mjs --stalled-server  add (g), the stalled connector
 //   node scripts/verify-connector-plane.mjs --tinyfish-key    add (h), the API-key connector
-//              (h) implies --no-restart and --no-model so the arm fits the 280 s gate budget
+//   node scripts/verify-connector-plane.mjs --github-key      add (i), GitHub's preset and headers
+//   node scripts/verify-connector-plane.mjs --linear-key      add (j), Linear's preset
+//   node scripts/verify-connector-plane.mjs --slack-stdio     add (k), Slack's package and token
+//   node scripts/verify-connector-plane.mjs --google-stdio    add (l), Google's package and tokens
+//              (h) through (l) imply --no-restart and --no-model so the arm fits the 280 s budget
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -49,13 +61,22 @@ const PROBE_FIELD = "PROBE_SECRET";
 const MODEL_TOOL = process.argv.includes("--model-tool");
 const STALLED_SERVER = process.argv.includes("--stalled-server");
 const TINYFISH_KEY = process.argv.includes("--tinyfish-key");
+const GITHUB_KEY = process.argv.includes("--github-key");
+const LINEAR_KEY = process.argv.includes("--linear-key");
+const SLACK_STDIO = process.argv.includes("--slack-stdio");
+const GOOGLE_STDIO = process.argv.includes("--google-stdio");
 // (h) spends a minute of its own on two deliberate 30 s windows, so on top of the docker restart
 // in (a) and the model turn in (b) it does not fit the 280 s these gates are run under. The
 // contract names the arm `--tinyfish-key` with no other flags, so the flag carries the two skips.
+// (i) through (l) are the same shape and cost the same or more, so they carry them too.
 const NO_RESTART = process.argv.includes("--no-restart");
 const NO_MODEL = process.argv.includes("--no-model");
-const SKIP_RESTART = NO_RESTART || TINYFISH_KEY;
-const SKIP_MODEL = NO_MODEL || TINYFISH_KEY;
+const CREDENTIAL_ARM = [
+  ["--tinyfish-key", TINYFISH_KEY], ["--github-key", GITHUB_KEY], ["--linear-key", LINEAR_KEY],
+  ["--slack-stdio", SLACK_STDIO], ["--google-stdio", GOOGLE_STDIO],
+].find(([, on]) => on)?.[0];
+const SKIP_RESTART = NO_RESTART || CREDENTIAL_ARM != null;
+const SKIP_MODEL = NO_MODEL || CREDENTIAL_ARM != null;
 const PROBE_PREFIX = "probe-u3";
 const TURN_TIMEOUT_MS = 300_000;
 // CONNECT-3. The preset the console's "TinyFish (API key)" button writes, name and all. The gate
@@ -184,18 +205,20 @@ const saveConnectorsThroughRelay = async (servers) => {
 // The stub server (scripts/lib/mcp-bearer-stub.mjs) runs INSIDE the box, because the connector that
 // has to reach it runs there too. The key travels in the environment, never in an argument: the
 // box's own ps would otherwise carry it, which is the failure this whole arm is about.
-const startStub = async (path, port, key) => {
+const startStub = async (path, port, key, headers = {}) => {
   await docker(["exec", BOX, "node", "-e",
     `require('fs').writeFileSync(${JSON.stringify(path)},${JSON.stringify(STUB_SOURCE)})`]);
-  await docker(["exec", "-d", "-e", `MCP_STUB_KEY=${key}`, BOX, "sh", "-c",
-    `node ${path} --port ${port} > ${path}.log 2>&1`]);
+  await docker(["exec", "-d", "-e", `MCP_STUB_KEY=${key}`, "-e", `MCP_STUB_HEADERS=${JSON.stringify(headers)}`,
+    BOX, "sh", "-c", `node ${path} --port ${port} > ${path}.log 2>&1`]);
 };
 // One request at the stub from inside the box, printed as "<status> <body>". Used to know the stub
 // is up before a connector is pointed at it, so a connector that never connects means the connector.
-const askStub = async (port, authorization) => {
-  const out = await docker(["exec", "-e", `STUB_AUTH=${authorization}`, BOX, "node", "-e",
+// The headers ride in the environment for the same reason the key does: `docker exec` arguments are
+// a command line, and one of these headers is the bearer.
+const askStub = async (port, headers) => {
+  const out = await docker(["exec", "-e", `STUB_HEADERS=${JSON.stringify(headers)}`, BOX, "node", "-e",
     `fetch("http://127.0.0.1:${port}/mcp",{method:"POST",headers:{"content-type":"application/json",accept:"application/json, text/event-stream",` +
-    `...(process.env.STUB_AUTH?{authorization:process.env.STUB_AUTH}:{})},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})})` +
+    `...JSON.parse(process.env.STUB_HEADERS||"{}")},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})})` +
     `.then((r)=>r.text().then((t)=>console.log(r.status+" "+t.replace(/\\s+/g," ").slice(0,300)))).catch((e)=>console.log("ERR "+e.message))`]);
   return out.trim();
 };
@@ -243,9 +266,401 @@ let stalledMarker = null;
 let tinyfishSnapshot = null;
 let tinyfishSecretSet = false;
 let stubPath = null;
+// (i) through (l) run one at a time and each unwinds itself, so the four share one set of undo
+// handles: the connectors.json bytes to put back, and the credentials still in the store.
+let armSnapshot = null;
+let armSecrets = [];
+
+// The four entries the operator asked for next, taken from the research reports (docs/connectors/
+// {github,linear,slack,google}.md §2) rather than invented here, and from the same reports' §4 for
+// the first call and what a refused credential says.
+//
+// GitHub and Linear are remote servers reached through `npx mcp-remote`, so their arms run against
+// the in-box stub instead of api.githubcopilot.com and mcp.linear.app: an arm that needed a real
+// PAT could not run at all, and one that ran against the real endpoint would be a gate on GitHub's
+// uptime. Three things differ from the operator's entry and nothing else does -- the URL is the
+// stub's, --allow-http is added because the stub is plain http on loopback, and MCP_REMOTE_CONFIG_DIR
+// points mcp-remote's own store at a per-run directory so a gate run leaves nothing in the box
+// user's home. That last one earns its place twice: it is a NON-EMPTY env value sitting beside the
+// empty one, so `listConnectorSecretFields` answering with only the credential is the CONNECT-4 rule
+// being enforced rather than a coincidence of there being one key.
+const REMOTE_ARMS = [
+  {
+    on: GITHUB_KEY, flag: "--github-key", letter: "(i)", service: "GitHub", server: "github",
+    field: "GITHUB_PERSONAL_ACCESS_TOKEN", keyPrefix: "gh-stub",
+    // docs/connectors/github.md §2. Repeated --header arguments, and NOT credentials: they are the
+    // toolset filter that decides the operator gets 23 read tools instead of the whole write
+    // catalogue. A bridge that dropped them would leave a working connector and a wrong catalogue,
+    // which no "it connected" catches -- so the stub demands them back.
+    headers: { "X-MCP-Toolsets": "repos,issues,pull_requests", "X-MCP-Tools": "get_me", "X-MCP-Readonly": "true" },
+  },
+  {
+    on: LINEAR_KEY, flag: "--linear-key", letter: "(j)", service: "Linear", server: "linear",
+    field: "LINEAR_API_KEY", keyPrefix: "ln-stub",
+    // docs/connectors/linear.md §2 carries the bearer and nothing else.
+    headers: {},
+  },
+];
+
+// Slack and Google are stdio packages, and these arms install the REAL pinned package from npm --
+// the box has outbound network, and a stub would prove nothing about whether `npx
+// slack-mcp-server@1.3.0` spawns and answers on this box at all. What cannot be real is the token,
+// so each field gets an invented value: the claim is then the one an operator needs, which is that
+// a credential the far end refuses ends in an answer rather than in a wait.
+const STDIO_ARMS = [
+  {
+    on: SLACK_STDIO, flag: "--slack-stdio", letter: "(k)", service: "Slack", server: "slack",
+    // docs/connectors/slack.md §2, unchanged.
+    entry: { command: "npx", args: ["-y", "slack-mcp-server@1.3.0", "--transport", "stdio"], env: { SLACK_MCP_XOXP_TOKEN: "" } },
+    warm: "slack-mcp-server@1.3.0",
+    // docs/connectors/slack.md §4 step 2: the first call, with its arguments.
+    smoke: { tool: "channels_list", args: { channel_types: "public_channel", limit: 5 } },
+    // docs/connectors/slack.md §4 step 4: what Slack says to a token it does not know.
+    refusal: /invalid_auth|not_authed|token_revoked|account_inactive|token_expired|missing_scope|unauthori[sz]|authentication|\b40[13]\b/i,
+    // An xoxp token Slack will not know, shaped like one so a client-side format check is not what
+    // refuses it. Invented here and thrown away at the end of the arm.
+    invent: () => `xoxp-0000000000-0000000000-0000000000-invented${Math.random().toString(36).slice(2, 12)}`,
+  },
+  {
+    on: GOOGLE_STDIO, flag: "--google-stdio", letter: "(l)", service: "Google", server: "google",
+    // docs/connectors/google.md §2, unchanged: three credential slots, not one.
+    entry: { command: "npx", args: ["-y", "google-workspace-mcp-server@1.4.3"], env: { GOOGLE_CLIENT_ID: "", GOOGLE_CLIENT_SECRET: "", GOOGLE_REFRESH_TOKEN: "" } },
+    warm: "google-workspace-mcp-server@1.4.3",
+    // docs/connectors/google.md §4 step 2: needs no message or document id.
+    smoke: { tool: "gmail_list_labels", args: {} },
+    // docs/connectors/google.md §4: an OAuth client or refresh token Google will not mint against.
+    refusal: /invalid_grant|invalid_client|unauthorized_client|invalid_credentials|unauthori[sz]|authentication|access token|refresh token|\b40[13]\b/i,
+    invent: (field) => `invented-${field.toLowerCase().replace(/_/g, "-")}-${Math.random().toString(36).slice(2, 12)}`,
+  },
+];
+
+// npx fetches a package the first time a connector spawns it. On a box with a cold npm cache that
+// download would be counted against the 90 s (k) and (l) give the connector to reach a terminal
+// state, turning a registry round trip into a verdict about the credential path. So the download is
+// kicked off detached at the start of the run and has the whole of (a) through (e) to finish; the
+// arm below then measures the connector. It leaves nothing but an npm cache entry.
+// `timeout` bounds it so a package whose --help starts a server instead of printing one cannot
+// leave a process behind; if this image has no timeout the whole line fails into /dev/null and the
+// arm simply runs with a cold cache.
+const warmNpx = (spec) => docker(["exec", "-d", BOX, "sh", "-c",
+  `timeout 120 npx -y ${spec} --help < /dev/null > /dev/null 2>&1`]);
+
+// The entry an operator's console writes for a remote API-key connector, with the three gate-only
+// differences described above. `${FIELD}` reaches connectors.json as those literal characters --
+// mcp-remote expands it from the environment the host merged the stored secret into, so anything
+// expanded here would be a credential written into a plaintext file.
+const remoteEntry = (arm, port, authDir) => ({
+  command: "npx",
+  args: [
+    "-y", "mcp-remote@0.8.3", `http://127.0.0.1:${port}/mcp`, "--transport", "http-only",
+    "--header", `Authorization:Bearer \${${arm.field}}`,
+    ...Object.entries(arm.headers).flatMap(([name, value]) => ["--header", `${name}:${value}`]),
+    "--allow-http",
+  ],
+  env: { [arm.field]: "", MCP_REMOTE_CONFIG_DIR: authDir },
+});
+
+// Nothing in this file may overwrite a credential the operator actually uses: setConnectorSecret
+// replaces a value in place, and no arm here could put a real one back.
+const refuseIfStored = async (server, fields) => {
+  const raw = await inBox(`cat ${SECRET_STORE} 2>/dev/null || echo '{}'`);
+  let stored = [];
+  try { stored = Object.keys(JSON.parse(raw)?.servers?.[server] ?? {}); } catch {}
+  const clash = fields.filter((field) => stored.includes(field));
+  if (clash.length > 0) {
+    fail(`this box already holds a stored ${clash.join(", ")} for "${server}"; this arm would overwrite a real credential, so it stops here`);
+  }
+};
+
+// A shell literal for a value this file invented, so a `grep -F` for it cannot be re-read by the
+// shell. The only place any of these values reaches a command line at all is here, in the search
+// that proves it is nowhere in the log.
+const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+
+// The host log is the surface an operator reads when a connector will not start, and the one place a
+// credential most easily lands: a spawn line that prints the merged environment, an error that
+// quotes the argv. Checked for every value the arm stored.
+const assertNoneInHostLog = async (values) => {
+  for (const [field, value] of Object.entries(values)) {
+    // `grep -c` prints 0 AND exits 1 on no match, so an `|| echo 0` fallback would double the line.
+    const hits = (await inBox(`grep -c -a -F -- ${shellQuote(value)} /tmp/sand-host.log 2>/dev/null | head -1`)).trim();
+    if (hits !== "" && hits !== "0") fail(`the host log contains the ${field} value ${hits} time(s)`);
+  }
+  ok(`the host log holds none of the ${Object.keys(values).length} stored value(s)`);
+};
+
+// Both files back byte for byte, not equivalently: these arms write through the console's own POST
+// /connectors, so the file they leave has to be the file they found, key order and trailing newline
+// included. `null` for the secret store is its own answer -- it does not exist until a first secret
+// is stored, and an arm that created it has not put the box back.
+const assertFilesRestored = async (connectorsBase64, secretsBase64) => {
+  if (await readConnectorsBase64() !== connectorsBase64) fail("connectors.json is not byte-identical to what this arm found");
+  const now = await readFileBase64(SECRET_STORE);
+  if (now !== secretsBase64) {
+    fail(`connector-env-secrets.json is not byte-identical to what this arm found (${secretsBase64 == null ? "it did not exist" : "it existed"} before, ${now == null ? "it does not exist" : "it exists"} now)`);
+  }
+  ok("connectors.json and connector-env-secrets.json are byte-identical to before the arm");
+};
+
+/**
+ * (i) and (j). A remote connector whose credential is an API key, for one service.
+ *
+ * The claims, in the order an operator meets them: the preset entry goes in through the console's
+ * own write path with the credential unexpanded; the empty env value is the ONE field the card
+ * offers; with nothing stored the connector does not connect and does not hold the connector list
+ * open; storing the key through setConnectorSecret is what makes it connect and list tools; and
+ * taking it all out again leaves connectors.json and the secret store exactly as they were.
+ */
+async function runRemoteKeyArm(arm) {
+  console.log(`\n${arm.letter} CONNECT-3/4 — ${arm.service}: the preset entry, its one credential field, and the key`);
+  const KEY = `${arm.keyPrefix}-${Math.random().toString(36).slice(2, 12).toUpperCase()}`;
+  const PORT = 39_000 + Math.floor(Math.random() * 2000);
+  console.log(`  invented key: ${KEY.length} characters (never printed), stub on 127.0.0.1:${PORT}`);
+
+  await refuseIfStored(arm.server, [arm.field]);
+  armSnapshot = await readConnectorsBase64();
+  const secretsSnapshot = await readFileBase64(SECRET_STORE);
+  const before = await readConnectorsJson();
+
+  stubPath = `/tmp/mcp-bearer-stub-${Math.random().toString(36).slice(2, 8)}.mjs`;
+  await startStub(stubPath, PORT, KEY, arm.headers);
+  const everything = { authorization: `Bearer ${KEY}`, ...arm.headers };
+  let unauthorised = "";
+  let authorised = "";
+  const stubDeadline = Date.now() + 30_000;
+  while (Date.now() < stubDeadline) {
+    unauthorised = await askStub(PORT, {});
+    authorised = await askStub(PORT, everything);
+    if (unauthorised.startsWith("401") && authorised.startsWith("200")) break;
+    await sleep(2000);
+  }
+  if (!unauthorised.startsWith("401")) fail(`the stub answered "${unauthorised.slice(0, 120)}" with no bearer, expected 401`);
+  if (!authorised.startsWith("200")) fail(`the stub answered "${authorised.slice(0, 120)}" with the bearer and headers, expected 200`);
+  if (!/search/.test(authorised) || !/fetch_content/.test(authorised)) fail("the stub's tool list names neither search nor fetch_content");
+  if (`${unauthorised}${authorised}`.includes(KEY)) fail("the stub echoed the key back in an answer");
+  ok("the stub refuses without the bearer (401) and lists search + fetch_content with it");
+
+  // The headers are only PROVED to arrive if their absence is refused. Without this the arm would
+  // pass just as happily against a bridge that dropped all three.
+  const headerNames = Object.keys(arm.headers);
+  if (headerNames.length > 0) {
+    const bearerOnly = await askStub(PORT, { authorization: `Bearer ${KEY}` });
+    if (!bearerOnly.startsWith("401")) {
+      fail(`the stub answered "${bearerOnly.slice(0, 120)}" to a request carrying the bearer but not ${headerNames.join(", ")}, expected 401: this arm proves those headers arrive only if their absence is refused`);
+    }
+    ok(`the stub also refuses the bearer alone, so reaching connected means ${headerNames.join(", ")} arrived with the preset's values`);
+  }
+
+  const entry = remoteEntry(arm, PORT, `${stubPath}.auth`);
+  const saved = await saveConnectorsThroughRelay({ ...before.mcpServers, [arm.server]: entry });
+  if (!Array.isArray(saved.saved) || !saved.saved.includes(arm.server)) {
+    fail(`POST /connectors did not report ${arm.server} saved: ${JSON.stringify(saved).slice(0, 200)}`);
+  }
+  await call("refreshMcp", {});
+  const written = (await readConnectorsJson()).mcpServers?.[arm.server];
+  if (JSON.stringify(written) !== JSON.stringify(entry)) {
+    fail(`connectors.json holds a different entry than the preset: ${JSON.stringify(written).slice(0, 200)}`);
+  }
+  ok(`the preset entry, stub URL and MCP_REMOTE_CONFIG_DIR aside, is in connectors.json through the console's POST /connectors, with \${${arm.field}} unexpanded`);
+
+  const fieldsBefore = await call("listConnectorSecretFields", { server: arm.server });
+  if (JSON.stringify(fieldsBefore.fields) !== JSON.stringify([arm.field])) {
+    fail(`listConnectorSecretFields answers [${(fieldsBefore.fields ?? []).join(", ")}] with nothing stored, expected exactly [${arm.field}]: an empty-valued env key is the credential field, and a non-empty one (MCP_REMOTE_CONFIG_DIR, a path) is configuration that must never be offered as one`);
+  }
+  ok(`listConnectorSecretFields answers exactly [${arm.field}], with MCP_REMOTE_CONFIG_DIR on the entry and not offered`);
+
+  // Thirty seconds of watching it NOT connect, reading the connector list the whole time: a
+  // connector waiting on a credential must not be something the console waits on.
+  let keyless = null;
+  let slowest = 0;
+  const keylessDeadline = Date.now() + 30_000;
+  while (Date.now() < keylessDeadline) {
+    const started = Date.now();
+    const installed = await call("listInstalledMcpServers");
+    slowest = Math.max(slowest, Date.now() - started);
+    keyless = installed.find((server) => server.serverIdentifier === arm.server) ?? keyless;
+    if (keyless?.status === "connected") fail(`${arm.server} reached connected with no key stored; the stub would have had to accept an empty bearer`);
+    await sleep(3000);
+  }
+  if (keyless == null) fail(`${arm.server} never appeared in listInstalledMcpServers`);
+  if (!["initializing", "error"].includes(String(keyless.status))) {
+    fail(`with no key stored ${arm.server} reports status=${keyless.status}, expected initializing or error`);
+  }
+  if (slowest > 5000) fail(`listInstalledMcpServers took ${slowest} ms while the keyless connector was mid-connect`);
+  ok(`with no key stored: status=${keyless.status}${keyless.statusDetail ? ` (${keyless.statusDetail})` : ""}, and the list never took longer than ${slowest} ms`);
+
+  armSecrets.push({ server: arm.server, field: arm.field });
+  const storedKey = await call("setConnectorSecret", { server: arm.server, field: arm.field, value: KEY });
+  if (storedKey?.stored !== true) fail("setConnectorSecret did not report the key stored");
+  if (JSON.stringify(storedKey).includes(KEY)) fail("setConnectorSecret echoed the key back");
+  ok(`setConnectorSecret stored=${storedKey.stored} restarted=${storedKey.restarted}`);
+
+  let connected = null;
+  const connectDeadline = Date.now() + 30_000;
+  while (Date.now() < connectDeadline) {
+    connected = (await call("listInstalledMcpServers")).find((server) => server.serverIdentifier === arm.server) ?? connected;
+    if (connected?.status === "connected") break;
+    await sleep(3000);
+  }
+  if (connected?.status !== "connected") {
+    // The keyless window above is also what warms npx, so mcp-remote is normally already downloaded
+    // by the time the key lands. A box that cannot reach the npm registry fails here rather than at
+    // the credential, and the detail is the only place that says which it was.
+    fail(`${arm.server} did not reach connected within 30 s of the key being stored: status=${connected?.status}${connected?.statusDetail ? ` (${connected.statusDetail})` : ""} — if the detail names npx or the registry, this box could not fetch mcp-remote@0.8.3 and the credential path is untested rather than broken`);
+  }
+  ok(`storing the key restarted the connector and it reached connected, id=${connected.id}`);
+
+  const listed = await waitForServerTools(String(connected.id), 60_000);
+  const toolNames = (Array.isArray(listed) ? listed : []).map((tool) => tool.name).sort();
+  if (JSON.stringify(toolNames) !== JSON.stringify(["fetch_content", "search"])) {
+    fail(`listMcpServerTools for ${arm.server} lists [${toolNames.join(", ")}], expected exactly the stub's fetch_content and search`);
+  }
+  ok(`listMcpServerTools lists exactly [${toolNames.join(", ")}]`);
+
+  const removedKey = await call("deleteConnectorSecret", { server: arm.server, field: arm.field });
+  if (removedKey?.removed !== true) fail("deleteConnectorSecret did not remove the key");
+  armSecrets = armSecrets.filter((held) => held.server !== arm.server || held.field !== arm.field);
+  const survivors = (await inBox(`grep -rl -- ${KEY} ${DATA} 2>/dev/null || true`)).trim();
+  if (survivors.length > 0) fail(`the key survives the delete in: ${survivors}`);
+  ok(`the key is gone from ${DATA}`);
+
+  await saveConnectorsThroughRelay(before.mcpServers ?? {});
+  await call("refreshMcp", {});
+  if ((await call("listInstalledMcpServers")).some((server) => server.serverIdentifier === arm.server)) {
+    fail(`${arm.server} survived its removal from connectors.json`);
+  }
+  await stopStub(stubPath);
+  stubPath = null;
+  ok("the entry is out of connectors.json and the stub is stopped");
+
+  await assertFilesRestored(armSnapshot, secretsSnapshot);
+  armSnapshot = null;
+}
+
+/**
+ * (k) and (l). A stdio connector whose credential the far end will refuse, for one service.
+ *
+ * The operator's failure this catches is not a wrong tool list, it is a console that never answers.
+ * A dead token has to end somewhere an operator can read: either the connector fails outright, or it
+ * connects and the first call comes back saying the credential was refused. What is not allowed is
+ * the third outcome -- a connector that stays "initializing" forever while the Plugins panel waits
+ * on it, which is exactly what the TinyFish OAuth bridge did.
+ */
+async function runStdioTokenArm(arm) {
+  console.log(`\n${arm.letter} CONNECT-3/4 — ${arm.service}: the pinned package, invented tokens, and a terminal answer`);
+  const fields = Object.keys(arm.entry.env);
+  const values = Object.fromEntries(fields.map((field) => [field, arm.invent(field)]));
+  console.log(`  ${fields.length} invented credential value(s) (never printed), package ${arm.warm}`);
+
+  await refuseIfStored(arm.server, fields);
+  armSnapshot = await readConnectorsBase64();
+  const secretsSnapshot = await readFileBase64(SECRET_STORE);
+  const before = await readConnectorsJson();
+
+  const saved = await saveConnectorsThroughRelay({ ...before.mcpServers, [arm.server]: arm.entry });
+  if (!Array.isArray(saved.saved) || !saved.saved.includes(arm.server)) {
+    fail(`POST /connectors did not report ${arm.server} saved: ${JSON.stringify(saved).slice(0, 200)}`);
+  }
+  // No refresh yet, on purpose. Both reads below answer from connectors.json on disk, and a refresh
+  // here would spawn the connector once with EMPTY credentials -- so a status this arm read
+  // afterwards could be a verdict on the empty value rather than on the invented one it stored.
+  const written = (await readConnectorsJson()).mcpServers?.[arm.server];
+  if (JSON.stringify(written) !== JSON.stringify(arm.entry)) {
+    fail(`connectors.json holds a different entry than the preset: ${JSON.stringify(written).slice(0, 200)}`);
+  }
+  ok(`the preset entry is in connectors.json unchanged, through the console's POST /connectors`);
+
+  const offered = await call("listConnectorSecretFields", { server: arm.server });
+  if (JSON.stringify(offered.fields) !== JSON.stringify([...fields].sort())) {
+    fail(`listConnectorSecretFields answers [${(offered.fields ?? []).join(", ")}], expected the entry's empty env values [${[...fields].sort().join(", ")}]`);
+  }
+  ok(`listConnectorSecretFields offers exactly the entry's ${fields.length} empty env value(s): [${offered.fields.join(", ")}]`);
+
+  for (const field of fields) {
+    armSecrets.push({ server: arm.server, field });
+    const stored = await call("setConnectorSecret", { server: arm.server, field, value: values[field] });
+    if (stored?.stored !== true) fail(`setConnectorSecret did not report ${field} stored`);
+    if (JSON.stringify(stored).includes(values[field])) fail(`setConnectorSecret echoed the ${field} value back`);
+  }
+  ok(`${fields.length} invented value(s) stored through setConnectorSecret`);
+
+  // The connector's FIRST spawn carries the invented tokens, so what the window below measures is
+  // this credential and nothing else.
+  await call("refreshMcp", {});
+
+  // Ninety seconds for a terminal answer, reading the connector list the whole time so a connector
+  // that is still starting cannot be something the console blocks on.
+  let row = null;
+  let slowest = 0;
+  let terminal = null;
+  const started = Date.now();
+  const deadline = started + 90_000;
+  while (Date.now() < deadline) {
+    const asked = Date.now();
+    const installed = await call("listInstalledMcpServers");
+    slowest = Math.max(slowest, Date.now() - asked);
+    row = installed.find((server) => server.serverIdentifier === arm.server) ?? row;
+    if (row?.status === "error" || row?.status === "connected") { terminal = row.status; break; }
+    await sleep(3000);
+  }
+  if (slowest > 5000) fail(`listInstalledMcpServers took ${slowest} ms while ${arm.server} was starting; the console boots on that list`);
+  if (row == null) fail(`${arm.server} never appeared in listInstalledMcpServers`);
+  if (terminal == null) {
+    fail(`${arm.server} was still status=${row.status}${row.statusDetail ? ` (${row.statusDetail})` : ""} after 90 s: it neither failed nor connected, which is the wait this arm exists to catch`);
+  }
+  const seconds = Math.round((Date.now() - started) / 1000);
+  ok(`${arm.server} reached a terminal status=${terminal} in ${seconds} s, and the list never took longer than ${slowest} ms`);
+
+  if (terminal === "error") {
+    // The honest outcome for a refused credential on a server that authenticates at startup.
+    ok(`the invented credential ends as an error an operator can read: ${String(row.statusDetail ?? "(no detail reported)").slice(0, 200)}`);
+  } else {
+    const listed = await waitForServerTools(String(row.id), 30_000);
+    if (!Array.isArray(listed) || listed.length === 0) {
+      fail(`${arm.server} reports connected but listed no tools, so there is no first call to make and nothing says the credential was refused`);
+    }
+    const routed = (await routedTools()).filter((tool) => tool.providerIdentifier === arm.server);
+    const chosen = routed.find((tool) => tool.toolName === arm.smoke.tool) ?? routed[0];
+    if (chosen == null) fail(`${arm.server} listed ${listed.length} tool(s) but none of them reached listRoutedMcpTools`);
+    const isSmoke = chosen.toolName === arm.smoke.tool;
+    const outcome = await callRaw("executeRoutedMcpTool", {
+      providerIdentifier: arm.server,
+      toolName: chosen.name,
+      name: chosen.toolName,
+      args: isSmoke ? arm.smoke.args : {},
+      toolCallId: `verify-connector-plane-${arm.server}-${Date.now()}`,
+    });
+    const answer = outcome.ok ? JSON.stringify(outcome.value) : outcome.message;
+    for (const [field, value] of Object.entries(values)) {
+      if (answer.includes(value)) fail(`the ${chosen.toolName} answer carried the ${field} value back`);
+    }
+    if (!arm.refusal.test(answer)) {
+      fail(`the first call to ${chosen.toolName} did not report an authentication failure: ${answer.replace(/\s+/g, " ").slice(0, 300)}`);
+    }
+    ok(`connected, and the first call (${chosen.toolName}${isSmoke ? "" : ", the first routed tool"}) reports an authentication failure: ${answer.replace(/\s+/g, " ").slice(0, 160)}`);
+  }
+
+  await assertNoneInHostLog(values);
+
+  for (const field of fields) {
+    const removed = await call("deleteConnectorSecret", { server: arm.server, field });
+    if (removed?.removed !== true) fail(`deleteConnectorSecret did not remove ${field}`);
+    armSecrets = armSecrets.filter((held) => held.server !== arm.server || held.field !== field);
+  }
+  await saveConnectorsThroughRelay(before.mcpServers ?? {});
+  await call("refreshMcp", {});
+  if ((await call("listInstalledMcpServers")).some((server) => server.serverIdentifier === arm.server)) {
+    fail(`${arm.server} survived its removal from connectors.json`);
+  }
+  ok(`the ${fields.length} credential(s) and the entry are out, and the connector is gone after a refresh`);
+
+  await assertFilesRestored(armSnapshot, secretsSnapshot);
+  armSnapshot = null;
+}
 
 try {
   console.log(`gateway ${GATEWAY}  box ${BOX}`);
+  for (const arm of STDIO_ARMS) if (arm.on) { await warmNpx(arm.warm); console.log(`  --  warming npx ${arm.warm} in the background for ${arm.letter}`); }
 
   // ---------------------------------------------------------------- (a) CP-07 stable numeric id
   console.log("\n(a) CP-07 — a stable numeric id for a local connector");
@@ -259,7 +674,7 @@ try {
   const SERVER_ID = String(localfiles.id);
   ok(`localfiles id=${SERVER_ID} transport=${localfiles.transport} status=${localfiles.status} tools=${localfiles.toolCount}`);
 
-  if (SKIP_RESTART) console.log(`  --  docker restart skipped (${NO_RESTART ? "--no-restart" : "--tinyfish-key"})`);
+  if (SKIP_RESTART) console.log(`  --  docker restart skipped (${NO_RESTART ? "--no-restart" : CREDENTIAL_ARM})`);
   else {
     await docker(["restart", BOX]);
     await sleep(10_000);
@@ -291,7 +706,7 @@ try {
   }
   ok(`${VICTIM} disabled and gone from listRoutedMcpTools`);
 
-  if (SKIP_MODEL) console.log(`  --  the GetMcpTools leg is skipped (${NO_MODEL ? "--no-model" : "--tinyfish-key"})`);
+  if (SKIP_MODEL) console.log(`  --  the GetMcpTools leg is skipped (${NO_MODEL ? "--no-model" : CREDENTIAL_ARM})`);
   else {
     const created = await call("createAgent", { name: `verify-cp-${Math.random().toString(36).slice(2, 8)}` });
     probeAgentId = created?.agent?.id ?? created?.id;
@@ -600,8 +1015,8 @@ try {
     let authorised = "";
     const stubDeadline = Date.now() + 30_000;
     while (Date.now() < stubDeadline) {
-      unauthorised = await askStub(PORT, "");
-      authorised = await askStub(PORT, `Bearer ${KEY}`);
+      unauthorised = await askStub(PORT, {});
+      authorised = await askStub(PORT, { authorization: `Bearer ${KEY}` });
       if (unauthorised.startsWith("401") && authorised.startsWith("200")) break;
       await sleep(2000);
     }
@@ -740,6 +1155,18 @@ try {
     ok("connectors.json and connector-env-secrets.json are byte-identical to before the arm");
   }
 
+  // ---------------------------- (i) (j) CONNECT-3/4 for GitHub and Linear, the other two API keys
+  for (const arm of REMOTE_ARMS) {
+    if (!arm.on) { console.log(`\n${arm.letter} CONNECT-3/4 — the ${arm.service} arm is skipped (pass ${arm.flag})`); continue; }
+    await runRemoteKeyArm(arm);
+  }
+
+  // ------------------------------- (k) (l) CONNECT-3/4 for Slack and Google, the stdio packages
+  for (const arm of STDIO_ARMS) {
+    if (!arm.on) { console.log(`\n${arm.letter} CONNECT-3/4 — the ${arm.service} arm is skipped (pass ${arm.flag})`); continue; }
+    await runStdioTokenArm(arm);
+  }
+
   console.log("\nPASS — connector plane");
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
@@ -755,6 +1182,21 @@ try {
   // (h) last would put the probe entry back after (c) had removed it. Deleting (h)'s key also has
   // to happen while its entry is still in connectors.json, because that file is what
   // deleteConnectorSecret resolves the connector through.
+  //
+  // (i) through (l) run after (h) and unwind before it, for the same two reasons: newest write
+  // undone first, and every credential deleted while the entry that names its connector is still on
+  // disk. A run that failed mid-arm gets here with a live invented value in the store and the
+  // entry still installed, which is exactly what these two blocks are for.
+  try {
+    for (const { server, field } of armSecrets) await callRaw("deleteConnectorSecret", { server, field });
+    armSecrets = [];
+  } catch (error) { console.error(`cleanup: connector credential — ${error.message}`); }
+  try {
+    if (armSnapshot != null && await readConnectorsBase64() !== armSnapshot) {
+      await restoreConnectorsBase64(armSnapshot);
+      await callRaw("refreshMcp", {});
+    }
+  } catch (error) { console.error(`cleanup: connector entry — ${error.message}`); }
   try {
     if (tinyfishSecretSet) await callRaw("deleteConnectorSecret", { server: TINYFISH_SERVER, field: TINYFISH_FIELD });
   } catch (error) { console.error(`cleanup: tinyfish key — ${error.message}`); }
