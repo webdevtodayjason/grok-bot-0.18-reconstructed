@@ -36,3 +36,6 @@ ui/auth.json
 
 # a build artifact once landed here from an undefined output path (GATE-3)
 undefined/
+
+# Orca/OMX worker hook state, created when a worker runs in this worktree
+.omx/
