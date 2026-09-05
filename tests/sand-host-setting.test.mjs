@@ -162,18 +162,21 @@ test("maintenance switches read the host settings file through envWithSandBoxSet
 });
 
 // TOOLS-15. The five host-machine tools swing on a live 30 s bridge-liveness fact, which no gate
-// can stage: on a box with the desktop app attached it is stuck at "connected". This switch pins
-// either world so both legs can be driven and measured. Unset has to fall through to the bridge,
-// and "0" has to mean withheld rather than unset, or the withhold is unverifiable again.
-test("the local-machine switch pins either world and otherwise asks the bridge", () => {
+// can stage: on a box with the desktop app attached it is stuck at "connected". This switch drives
+// the withheld leg so it can be measured. Unset has to fall through to the bridge, and "0" has to
+// mean withheld rather than unset, or the withhold is unverifiable again. TOOLS-18: "1" is an AND
+// over the bridge, not an answer of its own -- a pin cannot offer five tools nothing can carry.
+test("the local-machine switch withholds on demand and otherwise asks the bridge", () => {
   useRoot();
   write("sand-host-settings.json", { SAND_LOCAL_MACHINE: "0" });
   assert.equal(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), "0");
   assert.equal(mod.resolveLocalMachineOffered(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), () => true), false,
     "the pin withholds even while a computer is announced");
   write("sand-host-settings.json", { SAND_LOCAL_MACHINE: "1" });
-  assert.equal(mod.resolveLocalMachineOffered(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), () => false), true,
-    "the pin offers even while none is");
+  assert.equal(mod.resolveLocalMachineOffered(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), () => false), false,
+    "the pin is honoured only while a daemon answers");
+  assert.equal(mod.resolveLocalMachineOffered(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), () => true), true,
+    "and with one answering it offers the five");
   write("sand-host-settings.json", {});
   assert.equal(mod.readSandBoxSetting(mod.SAND_LOCAL_MACHINE_SETTING), undefined);
   assert.equal(mod.resolveLocalMachineOffered(undefined, () => true), true, "unset asks the bridge");

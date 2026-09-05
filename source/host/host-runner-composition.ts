@@ -2,10 +2,10 @@ import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getSandRootDir } from "./host-paths.js";
 import {
+  createTurnLocalMachineReader,
   isSandBoxSettingEnabled,
   isSandOverrideTruthy,
   readSandBoxSetting,
-  resolveLocalMachineOffered,
   SAND_LOCAL_MACHINE_SETTING,
   SAND_SHARED_ROOM_BOX_TOOLS_SETTING,
   SAND_TOOL_TRACE_SETTING,
@@ -1061,17 +1061,32 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
      * already normal here (an MCP server coming or going does the same thing). If the flapping
      * ever shows up as real cost, the fix is a grace window on the withhold direction only.
      *
-     * SAND_LOCAL_MACHINE pins either world on a running box, which is the only way to exercise the
-     * withheld leg on a machine whose daemon is attached (scripts/verify-toolset.mjs runs both).
+     * SAND_LOCAL_MACHINE pins the withheld world on a running box, which is the only way to
+     * exercise that leg on a machine whose daemon is attached (scripts/verify-toolset.mjs runs it).
+     *
+     * TOOLS-18. "Once per turn" used to be a claim, not a mechanism: the toolset builder and the
+     * prompt assembly each called this, and with a 30 s liveness window between them a lapsed
+     * heartbeat split the turn -- a prompt teaching five tools the wire had already withheld. The
+     * answer is now read once and held until the run shell emits the next "started" (see
+     * `noteRunLifecycle`), so every consumer in a turn gets the same value, and the next turn still
+     * re-reads: a computer that connects mid-conversation is offered on the turn after it connects.
      */
-    const localMachine = (): { readonly connected: boolean; readonly source: "bridge" | "setting" } => {
-      const override = readSandBoxSetting(SAND_LOCAL_MACHINE_SETTING);
-      return {
-        connected: resolveLocalMachineOffered(override, () => method(localExec, "hasLiveComputer")?.() ?? false),
-        source: override != null && override.length > 0 ? "setting" : "bridge",
-      };
-    };
+    const localMachineReader = createTurnLocalMachineReader({
+      readOverride: () => readSandBoxSetting(SAND_LOCAL_MACHINE_SETTING),
+      hasAnnouncedComputer: () => method(localExec, "hasLiveComputer")?.() ?? false,
+    });
+    const localMachine = () => localMachineReader.read();
     const localMachineConnected = (): boolean => localMachine().connected;
+    /**
+     * TOOLS-18. The turn boundary the held answer is dropped on. Both run paths (the runner's own
+     * and the production run shell's) emit "started" through the caller's hook, so wrapping it here
+     * is the one seam that sees every turn begin.
+     */
+    const noteRunLifecycle = (event: unknown): void => {
+      if (typeof event === "object" && event !== null
+        && (event as { readonly type?: unknown }).type === "started") localMachineReader.beginTurn();
+      hooks.onRunLifecycle?.(event);
+    };
     /**
      * TOOLS-17. Whether a shared-room member keeps the box tools beside SendMessage, asked in one
      * place because two callers used to ask it differently: the runner honoured the kill switch and
@@ -1763,7 +1778,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           method(extensions.api("session"), "startHandoff")?.(request)
       },
       transport: hooks.transport,
-      onRunLifecycle: hooks.onRunLifecycle,
+      onRunLifecycle: noteRunLifecycle,
       isSharedRoomTurn,
       isSharedRoomBoxToolsEnabled: sharedRoomBoxToolsEnabled,
       getAgentId: () => session.id,
@@ -2957,8 +2972,8 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         cloudAgentsDisabledByTeam: () => method(cloudAgents, "isDisabledByTeamAdmin")?.() ?? false,
         // CLOUD-1: offered only when the operator turns cloud agents on (SAND_CLOUD_AGENTS in the host settings file).
         cloudAgentsAvailable: () => isSandOverrideTruthy(readSandBoxSetting("SAND_CLOUD_AGENTS")),
-        // TOOLS-15: offered only while a computer is answering on the local-exec bridge, unless
-        // an operator has pinned the answer with SAND_LOCAL_MACHINE.
+        // TOOLS-15: offered only while a computer is answering on the local-exec bridge, and
+        // TOOLS-18: the same held answer the prompt assembly reads, so the two cannot disagree.
         localMachineConnected: () => localMachine().connected,
         localMachineSource: () => localMachine().source,
         spotlightEnabled: () => method(experiments, "isSpotlightEnabled")?.() ?? false,
@@ -3382,7 +3397,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         setActiveRunInterrupted: () => {},
         setAwaitingUserSelection: () => {},
         isAwaitingUserSelection: () => false,
-        emitRunLifecycle: event => hooks.onRunLifecycle?.(event),
+        emitRunLifecycle: event => noteRunLifecycle(event),
         emitUpdate: update => hooks.transport.onUpdate(update),
         ...(hooks.transport.lastReactionApplied === undefined
           ? {}

@@ -103,9 +103,11 @@ const writeTrace = (value) => writeSetting("SAND_TOOL_TRACE", value);
 // TOOLS-15. The pin. The five host-machine tools swing on whether a computer is answering on the
 // local-exec bridge, which is a 30 s liveness window fed by a daemon on the operator's own machine:
 // nothing this gate can stage, and on a box with the desktop app running it is stuck at "connected"
-// forever. So the host reads SAND_LOCAL_MACHINE first ("0" withholds, "1" offers, unset means ask
-// the bridge) and the chief run drives BOTH worlds -- the live one, then the other one pinned --
-// rather than asserting whichever one this box happens to be in.
+// forever. So the chief run drives the live world and then a pinned one, rather than asserting
+// whichever one this box happens to be in. TOOLS-18: the pin is an AND over the bridge ("0"
+// withholds, "1" is honoured only while a daemon answers, unset is the bridge alone), so the pinned
+// turn is always the withheld world -- and on a box with no daemon it also proves "1" cannot fake
+// a computer, which is what the old read-the-pin-first order let it do.
 const LOCAL_MACHINE = "SAND_LOCAL_MACHINE";
 // TOOLS-17. The same shape for the room: whether a member answering in a shared room keeps the box
 // tools beside SendMessage. It used to be read from the container environment, where nothing on a
@@ -363,11 +365,22 @@ try {
     // TOOLS-15, the second leg. The turn above ran in whichever world this box happens to be in,
     // and on a box with the desktop app attached that is always the connected one -- so on its own
     // it cannot tell the withhold working from a host that answers "connected" no matter what.
-    // This pins the OTHER world with SAND_LOCAL_MACHINE and drives a second turn, so both legs are
-    // measured on every run and a change gone inert fails here. The pin is put back in the finally.
+    // This pins the withheld world with SAND_LOCAL_MACHINE and drives a second turn, so a withhold
+    // gone inert fails here whatever the box is. The pin is put back in the finally.
+    //
+    // TOOLS-18 changed what the pin can do, and this leg with it. `SAND_LOCAL_MACHINE=1` used to be
+    // answered before the bridge was asked, so it pinned the CONNECTED world on a box with no
+    // daemon -- five tools that block until the response watchdog gives up, which is the failure
+    // TOOLS-15 exists to stop. The pin is now an AND over the bridge: it can only withhold. So the
+    // pinned turn drives the withheld world either way, and on a box with nothing on the bridge
+    // that same turn is the proof the pin can no longer conjure a computer. The connected leg is
+    // measured from the live turn above when a daemon is attached, and is honestly unmeasurable
+    // here when one is not: staging it needs a daemon on /local-exec/requests, not a setting.
     if (!wantSubagent) {
       const pin = connected ? "0" : "1";
-      console.log(`pinning ${LOCAL_MACHINE}=${pin}: driving the ${connected ? "withheld" : "connected"} world`);
+      console.log(connected
+        ? `pinning ${LOCAL_MACHINE}=0: driving the withheld world`
+        : `pinning ${LOCAL_MACHINE}=1 with no computer on the bridge: the pin must NOT offer the five`);
       pinnedLocalMachine = true;
       await writeSetting(LOCAL_MACHINE, pin);
       const second = await driveTurn(READY);
@@ -378,12 +391,16 @@ try {
       }
       console.log(`pinned: chief offered ${second.chief.count} tools; withheld: `
         + `${(second.chief.withheld ?? []).map((entry) => `${entry.tool} (${entry.reason})`).join(", ") || "(none)"}`);
-      assertLocalMachineTools(second.chief, !connected);
+      assertLocalMachineTools(second.chief, false);
       await assertWire(second.chief, second.from);
       const secondReport = await readPromptReport(agent.id);
       if (secondReport == null) fail("no assembled system prompt report was written for the pinned turn");
       console.log(`pinned assembled system prompt: ${secondReport.length} chars`);
-      assertLocalMachinePrompt(secondReport, !connected);
+      assertLocalMachinePrompt(secondReport, false);
+      if (!connected) {
+        console.log("  INFO  no daemon on this box's local-exec bridge, so the connected leg cannot be"
+          + " staged from here; what is measured instead is that the pin cannot fake one");
+      }
       await writeSetting(LOCAL_MACHINE, previousLocalMachine ?? null);
       pinnedLocalMachine = false;
     }
