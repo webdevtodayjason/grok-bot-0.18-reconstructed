@@ -18,10 +18,15 @@
 //   CONNECT-1  the model's AddMcpServer tool runs its body instead of dying in config parsing.
 //              Off by default because it spends a second model turn: --model-tool turns it on.
 //
+//   CONNECT-2  a connector that never connects does not hold listInstalledMcpServers open, and
+//              removing it takes effect on a refresh instead of needing a box restart. Off by
+//              default because it installs a deliberately broken connector: --stalled-server.
+//
 //   node scripts/verify-connector-plane.mjs            all of it
 //   node scripts/verify-connector-plane.mjs --no-restart   skip the docker restart in (a)
 //   node scripts/verify-connector-plane.mjs --no-model     skip the one model turn in (b)
 //   node scripts/verify-connector-plane.mjs --model-tool   add (f), the AddMcpServer turn
+//   node scripts/verify-connector-plane.mjs --stalled-server  add (g), the stalled connector
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -35,6 +40,7 @@ const PROBE_FIELD = "PROBE_SECRET";
 const SKIP_RESTART = process.argv.includes("--no-restart");
 const SKIP_MODEL = process.argv.includes("--no-model");
 const MODEL_TOOL = process.argv.includes("--model-tool");
+const STALLED_SERVER = process.argv.includes("--stalled-server");
 const PROBE_PREFIX = "probe-u3";
 const TURN_TIMEOUT_MS = 300_000;
 
@@ -168,6 +174,8 @@ let probeAgentId = null;
 let originalConnectors = null;
 let modelToolAgentId = null;
 let connectorsSnapshot = null;
+let stalledSnapshot = null;
+let stalledMarker = null;
 
 try {
   console.log(`gateway ${GATEWAY}  box ${BOX}`);
@@ -430,6 +438,62 @@ try {
     ok("connectors.json is byte-identical: the account tool did not touch the local connector plane");
   }
 
+  // ------------------------------------------ (g) CONNECT-2 a connector that cannot ever connect
+  // The TinyFish bridge sat waiting on an OAuth sign-in that never came, and every MCP list call
+  // waited out its sixty-second connection timeout behind it -- the console boots on those lists,
+  // so the page took over a minute to paint. Removing the entry did not clear it either; the host
+  // was still holding the loaded server, and only a box restart got rid of it. This arm installs
+  // that shape on purpose: a command that starts and then says nothing, which is what a connector
+  // waiting on a sign-in looks like from the box's side.
+  if (!STALLED_SERVER) console.log("\n(g) CONNECT-2 — the stalled-connector arm is skipped (pass --stalled-server)");
+  else {
+    console.log("\n(g) CONNECT-2 — a stalled connector is reported, not awaited");
+    stalledSnapshot = await readConnectorsBase64();
+    const beforeStalled = await readConnectorsJson();
+    stalledMarker = `stalled-${Math.random().toString(36).slice(2, 8)}`;
+    await writeConnectorsJson({
+      ...beforeStalled,
+      mcpServers: {
+        ...beforeStalled.mcpServers,
+        [stalledMarker]: { command: "sh", args: ["-c", `sleep 600 # ${stalledMarker}`] },
+      },
+    });
+    await call("refreshMcp", {});
+
+    let installed = [];
+    let row = null;
+    let elapsed = 0;
+    const appearBy = Date.now() + 60_000;
+    while (Date.now() < appearBy) {
+      const started = Date.now();
+      installed = await call("listInstalledMcpServers");
+      elapsed = Date.now() - started;
+      row = installed.find((server) => server.serverIdentifier === stalledMarker || server.name === stalledMarker);
+      if (row != null) break;
+      await sleep(3000);
+    }
+    if (row == null) fail(`${stalledMarker} never appeared in listInstalledMcpServers`);
+    if (elapsed > 5000) fail(`listInstalledMcpServers took ${elapsed} ms with a stalled connector installed`);
+    if (row.status === "connected") fail(`${stalledMarker} reports connected, so this arm proves nothing`);
+    ok(`listInstalledMcpServers answered in ${elapsed} ms; ${stalledMarker} status=${row.status}${row.statusDetail ? ` (${row.statusDetail})` : ""}`);
+    // The rest of the plane is still on the page while that one hangs: the list answers from the
+    // last known state rather than going silent because one server is mid-connect.
+    if (!installed.some((server) => server.serverIdentifier === "localfiles")) {
+      fail("the stalled connector took the other connectors off the list");
+    }
+    ok(`the other ${installed.length - 1} connector row(s) are still listed`);
+
+    await writeConnectorsJson(beforeStalled);
+    const refreshStarted = Date.now();
+    await call("refreshMcp", {});
+    const refreshElapsed = Date.now() - refreshStarted;
+    const afterStalled = await call("listInstalledMcpServers");
+    if (afterStalled.some((server) => server.serverIdentifier === stalledMarker || server.name === stalledMarker)) {
+      fail(`${stalledMarker} survived the refresh; it would take a box restart to clear it`);
+    }
+    ok(`${stalledMarker} is gone after refreshMcp (${refreshElapsed} ms), with no box restart`);
+  }
+
   console.log("\nPASS — connector plane");
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
@@ -461,4 +525,19 @@ try {
   try {
     if (modelToolAgentId != null) await call("deleteAgent", { id: modelToolAgentId });
   } catch (error) { console.error(`cleanup: AddMcpServer probe agent — ${error.message}`); }
+  try {
+    if (stalledSnapshot != null && await readConnectorsBase64() !== stalledSnapshot) {
+      await restoreConnectorsBase64(stalledSnapshot);
+      await callRaw("refreshMcp", {});
+    }
+  } catch (error) { console.error(`cleanup: stalled connector entry — ${error.message}`); }
+  try {
+    // The marker goes in through the environment so that pkill's own command line does not carry
+    // it: -f matches on the full command line, and a pattern that matches the killer is a way to
+    // lose the shell before it finishes.
+    if (stalledMarker != null) {
+      await docker(["exec", "-e", `STALLED_MARKER=${stalledMarker}`, BOX, "sh", "-c",
+        'pkill -f "$STALLED_MARKER" >/dev/null 2>&1; exit 0']);
+    }
+  } catch (error) { console.error(`cleanup: stalled connector process — ${error.message}`); }
 }

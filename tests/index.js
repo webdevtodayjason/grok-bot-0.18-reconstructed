@@ -9,6 +9,7 @@ import "./codex-direct-responses.test.mjs";
 import "./inference-extension-readiness.test.mjs";
 import "./inference-router-transcript.test.mjs";
 import "./mcp-add-server-config.test.mjs";
+import "./mcp-connecting-server-list.test.mjs";
 import "./openai-compatible-provider.test.mjs";
 import "./publication-bootstrap.test.mjs";
 import "./publication-packaging.test.mjs";
