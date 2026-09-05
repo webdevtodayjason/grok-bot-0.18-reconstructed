@@ -187,23 +187,64 @@ export const SAND_MAINTENANCE_SETTINGS = ["SAND_STALE_ROOT_GC", "SAND_RETIRE_LEG
  * CopyToBox, CopyFromBox) are offered. They all travel the local-exec bridge, so the honest answer
  * is the bridge's own: is a computer announced on it right now. This override exists because that
  * answer cannot be staged -- it is a live 30 s liveness window fed by a daemon the operator runs on
- * their own machine -- and a withhold nobody can force is a withhold nobody can verify. Written to
- * the host settings file it pins either world on a running box: "0" withholds the five whatever the
- * bridge says, "1" offers them whatever the bridge says. "1" with no daemon attached restores the
- * behaviour this change removed (each call blocks until the response watchdog gives up), so it is
- * for a gate pinning the connected leg, not for daily operation. Unset, which is the normal state,
- * means the bridge decides.
+ * their own machine -- and a withhold nobody can force is a withhold nobody can verify.
+ *
+ * TOOLS-18. The pin can only ever WITHHOLD. It used to be read first and answered on its own, so
+ * `SAND_LOCAL_MACHINE=1` offered the five whatever the bridge said -- including on a box with no
+ * daemon at all, which is exactly the world TOOLS-15 exists to stop: five tools that block until
+ * the response watchdog gives up, plus the prompt paragraphs teaching the model to reach for them.
+ * The bridge is now asked on every resolution and the pin is an AND over its answer: "0" withholds
+ * the five whatever the bridge says, "1" honours them only while a daemon is answering, and unset
+ * (the normal state) is the bridge alone. So the connected world cannot be pinned into existence on
+ * a box with nothing on the far end -- a gate that wants it has to attach a daemon.
  */
 export function resolveLocalMachineOffered(
   envOverride: string | undefined,
   hasAnnouncedComputer: () => boolean,
 ): boolean {
-  if (envOverride != null && envOverride.length > 0) return isSandOverrideTruthy(envOverride);
-  return hasAnnouncedComputer();
+  const announced = hasAnnouncedComputer();
+  if (envOverride != null && envOverride.length > 0) return announced && isSandOverrideTruthy(envOverride);
+  return announced;
 }
 
 /** The name an operator writes into sand-host-settings.json (or the container env). */
 export const SAND_LOCAL_MACHINE_SETTING = "SAND_LOCAL_MACHINE";
+
+/** Whether the five host-machine tools are offered this turn, and what decided it. */
+export interface LocalMachineAnswer {
+  readonly connected: boolean;
+  /** "setting" when a pin is in force (it is an AND over the bridge), "bridge" when it alone decides. */
+  readonly source: "bridge" | "setting";
+}
+
+/**
+ * TOOLS-18. One read per turn, shared. The toolset builder and the system-prompt assembly each
+ * asked the bridge for themselves, and the bridge's answer is a 30 s liveness window: a heartbeat
+ * that lapsed between the two reads sent a prompt teaching ExternalShell, ExternalRead and the
+ * CopyToBox/CopyFromBox pair on a wire that withheld all five (or the reverse -- five tools offered
+ * with no paragraph explaining the two machines). The answer is now computed once and held for the
+ * turn, so both halves of a turn describe the same world. `beginTurn` is called when the run shell
+ * emits "started", which is why a computer that connects mid-conversation is still picked up by the
+ * very next turn: the value is per turn, not per session.
+ */
+export function createTurnLocalMachineReader(deps: {
+  readonly readOverride: () => string | undefined;
+  readonly hasAnnouncedComputer: () => boolean;
+}): { readonly read: () => LocalMachineAnswer; readonly beginTurn: () => void } {
+  let held: LocalMachineAnswer | undefined;
+  return {
+    read: (): LocalMachineAnswer => {
+      if (held !== undefined) return held;
+      const override = deps.readOverride();
+      held = {
+        connected: resolveLocalMachineOffered(override, deps.hasAnnouncedComputer),
+        source: override != null && override.length > 0 ? "setting" : "bridge",
+      };
+      return held;
+    },
+    beginTurn: (): void => { held = undefined; },
+  };
+}
 
 /**
  * TOOLS-17. Whether a member answering in a shared room keeps the box tools alongside SendMessage.
