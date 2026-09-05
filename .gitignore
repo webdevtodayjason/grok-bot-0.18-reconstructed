@@ -33,3 +33,6 @@ node_modules/
 ui/endpoints.json
 ui/subscriptions.json
 ui/auth.json
+
+# a build artifact once landed here from an undefined output path (GATE-3)
+undefined/
