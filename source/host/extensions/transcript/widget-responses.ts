@@ -1,4 +1,4 @@
-import { errorLogTag } from "../../../shared/errors.js";
+import { errorLogTag, errorMessage } from "../../../shared/errors.js";
 import {
   getMainTranscriptEntries,
   getThreadTranscriptEntries,
@@ -378,6 +378,27 @@ export class WidgetResponses {
       return;
     const request = (entry.message as any).secretRequest;
     const routed = await this.routeSecret(session.id, request.target, trimmed);
+    if (routed != null && "refused" in routed) {
+      // CONNECT-4. The host refused the field, so NOTHING was stored anywhere. The operator hears
+      // the rule (the fix is in the connector entry, and the console's credential card is where the
+      // key belongs) and the agent hears that its request went unanswered, rather than an ack that
+      // says the value "was written straight to its destination".
+      this.tm.trayErrors.pushError({
+        agentId: session.id,
+        title: "The secret was not stored",
+        detail: routed.refused,
+      });
+      await this.tm.boxHandoff.resumeWithHiddenPrompt(
+        session.id,
+        [
+          `[The user securely provided the requested secret: "${request.label}", but the host REFUSED the field and discarded the value: nothing was stored. You never see the value and it is not in this conversation.]`,
+          `Reason: ${routed.refused}`,
+          "Do not ask for it again. Tell the user the field was refused and that a connector credential goes in that connector's card in the console's Plugins panel.",
+        ].join("\n"),
+        "Agent failed to resume after a refused secret",
+      );
+      return;
+    }
     if (routed == null) {
       this.tm.trayErrors.pushError({
         agentId: session.id,
@@ -405,13 +426,18 @@ export class WidgetResponses {
    * agent can read back. When the named platform is a local stdio connector instead of a chat
    * channel, the value now goes to the host-owned connector store and into that server's process
    * environment, and the server is restarted so it picks it up. Slack and GitHub keep the channel
-   * branch. Returns null when nothing accepted the value.
+   * branch. Returns null when nothing accepted the value, and `{ refused }` when the host rejected
+   * the field: a refusal is not a reason to write the value somewhere else.
    */
   async routeSecret(
     agentId: string,
     target: any,
     value: string,
-  ): Promise<{ destination: string; server?: string; restarted?: boolean } | null> {
+  ): Promise<
+    | { destination: string; server?: string; restarted?: boolean }
+    | { refused: string }
+    | null
+  > {
     if (target.kind !== "channel-credential") return null;
     const platform = typeof target.platform === "string" ? target.platform.trim() : "";
     // The connector route and the chat-channel route share ONE namespace -- `target.platform` --
@@ -424,7 +450,8 @@ export class WidgetResponses {
       // A throw here used to escape submitSecret entirely: the value reached NO store, the entry
       // was never marked provided, and the agent waited forever on the secret it had just asked
       // for. The field name comes from the model unvalidated, so "api-key" or a missing field is
-      // ordinary input, not an edge case. Fall through to the channel store instead.
+      // ordinary input, not an edge case. The refusal is reported to the caller instead -- see the
+      // catch below for why it is NOT answered by falling through to the channel store.
       let connector: { server: string; restarted?: boolean } | null = null;
       try {
         connector = await this.tm.connectorSecretSink?.({
@@ -433,9 +460,15 @@ export class WidgetResponses {
           value,
         }) ?? null;
       } catch (error) {
+        // CONNECT-4. Falling through to the channel store here was a leak: the sink only throws for
+        // a platform it has already identified as a local connector (sand-host returns null for
+        // anything else), so a throw is the host REFUSING the field -- and the fallback wrote the
+        // refused value into `connector-secrets/<agentId>/<platform>.json`, the per-agent store the
+        // agent can read back, which is the CP-10 bug this route exists to fix. Nothing is stored.
         console.log(
-          `[sand:transcript] connector secret sink failed (${errorLogTag(error)}); falling back to the channel store`,
+          `[sand:transcript] connector secret sink refused the value (${errorLogTag(error)}); nothing was stored`,
         );
+        return { refused: errorMessage(error) };
       }
       if (connector != null) {
         return {

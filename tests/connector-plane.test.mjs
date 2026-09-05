@@ -9,7 +9,7 @@
 // not move when a second connector appears, and a stored secret reaches the spawn spec's env
 // without ever being written into connectors.json.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -38,6 +38,8 @@ const bundle = async (entry, name) => {
 const connectors = await bundle("source/host/extensions/mcp/local-connectors.ts", "local-connectors.cjs");
 const secrets = await bundle("source/host/extensions/mcp/connector-secrets.ts", "connector-secrets.cjs");
 const ack = await bundle("source/host/runner/tools/sand-secret-request.ts", "sand-secret-request.cjs");
+const widgets = await bundle("source/host/extensions/transcript/widget-responses.ts", "widget-responses.cjs");
+const channelStore = await bundle("source/host/extensions/session/connector-secret-store.ts", "connector-secret-store.cjs");
 
 const writeConnectors = (servers) =>
   writeFileSync(path.join(root, "connectors.json"), JSON.stringify({ mcpServers: servers }), "utf8");
@@ -248,4 +250,41 @@ test("CONNECT-4: the merge into the connector process env is unchanged", () => {
   assert.equal(after.env.MCP_REMOTE_CONFIG_DIR, "/home/box/.mcp-auth");
   assert.deepEqual(after.args, TINYFISH_ENTRY.args);
   assert.ok(!readFileSync(path.join(dir, "connectors.json"), "utf8").includes(probe));
+});
+
+test("CONNECT-4: a refused field is not written to the per-agent channel store", async () => {
+  // The refusal has a consumer: the secure-input widget. Its catch used to log and fall through to
+  // `connector-secrets/<agentId>/<platform>.json` -- the per-agent store no MCP code reads and the
+  // agent CAN read back -- so tightening setConnectorSecret would have turned every refused field
+  // into a value sitting where the agent could cat it, with the operator told it worked.
+  const dir = connectorRoot({ tinyfish: TINYFISH_ENTRY });
+  const store = new channelStore.SandConnectorSecretStore(path.join(dir, "connector-secrets"));
+  const responses = new widgets.WidgetResponses({
+    // The real sink: local connector, then the host's own rule. Nothing about it is stubbed except
+    // the restart it would do on success.
+    connectorSecretSink: async ({ server, field, value }) => {
+      secrets.assertConnectorCredentialField(dir, server, field);
+      assert.equal(secrets.writeConnectorEnvSecret(dir, server, field, value), true);
+      return { server, serverId: "1000", field, stored: true, restarted: true };
+    },
+    sessionStore: {
+      storeConnectorCredential: (agentId, platform, field, value) =>
+        store.setSecret(agentId, platform, field, value),
+    },
+    channelConfigChanged: () => {},
+  });
+  const target = (field) => ({ kind: "channel-credential", platform: "tinyfish", field });
+  const probe = `PROBE-SECRET-${Math.random().toString(36).slice(2, 10)}`;
+
+  const refused = await responses.routeSecret("agent1", target("MCP_REMOTE_CONFIG_DIR"), probe);
+  assert.match(refused.refused, /configuration, not a credential/);
+  assert.equal(refused.destination, undefined);
+  assert.equal(existsSync(store.filePath("agent1", "tinyfish")), false);
+  assert.equal(existsSync(path.join(dir, secrets.CONNECTOR_ENV_SECRETS_FILENAME)), false);
+
+  // And the field the entry does declare still routes to the connector, untouched by the guard.
+  const accepted = await responses.routeSecret("agent1", target("TINYFISH_API_KEY"), probe);
+  assert.equal(accepted.server, "tinyfish");
+  assert.equal(accepted.restarted, true);
+  assert.equal(existsSync(store.filePath("agent1", "tinyfish")), false);
 });
