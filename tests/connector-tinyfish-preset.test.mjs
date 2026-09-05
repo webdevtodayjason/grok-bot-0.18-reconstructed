@@ -192,13 +192,48 @@ test("a field the host already holds is offered even when the entry gives that k
     {
       listInstalledMcpServers: [{ id: 1, name: "tinyfish", status: "connected", transport: "stdio", toolCount: 2 }],
       listMcpServerTools: [],
-      listConnectorSecretFields: { server: "tinyfish", serverId: 1, fields: ["TINYFISH_API_KEY"] },
+      listConnectorSecretFields: { server: "tinyfish", serverId: 1, fields: ["TINYFISH_API_KEY"], stored: ["TINYFISH_API_KEY"] },
     },
     { connectors: { mcpServers: { tinyfish: { command: "npx", args: TINYFISH_ARGS, env: { TINYFISH_API_KEY: "placeholder", MCP_REMOTE_CONFIG_DIR: "/home/box/sand-data/.mcp-auth" } } } } },
   );
   const [card] = await connectorPlugins();
   assert.deepEqual(card.secretFields, ["TINYFISH_API_KEY"]);
   assert.deepEqual(card.storedFields, ["TINYFISH_API_KEY"]);
+});
+
+// -- The flow this wave exists for, at the step the operator does it: the preset was added, the
+// entry declares TINYFISH_API_KEY empty, the store holds nothing. The host's `fields` names the
+// field (that is CONNECT-4's union), and reading THAT for "already held" captioned the input "The
+// host holds a value - type to replace it" on a card with no key in it. Only `stored` may say so.
+test("a declared but unstored credential is offered, not reported as already held", async () => {
+  const { connectorPlugins } = await loadAdapter(
+    {
+      listInstalledMcpServers: [{ id: 1, name: "tinyfish", status: "initializing", transport: "stdio", toolCount: 0 }],
+      listMcpServerTools: [],
+      listConnectorSecretFields: { server: "tinyfish", serverId: 1, fields: ["TINYFISH_API_KEY"], stored: [] },
+    },
+    { connectors: { mcpServers: { tinyfish: { command: "npx", args: TINYFISH_ARGS, env: { TINYFISH_API_KEY: "" } } } } },
+  );
+  const [card] = await connectorPlugins();
+  assert.deepEqual(card.secretFields, ["TINYFISH_API_KEY"]);
+  assert.deepEqual(card.storedFields, []);
+});
+
+// A host that predates the `stored` list says nothing about what it holds, and the card must not
+// invent it: "Enter securely" is the honest caption, and storing over a value that is there is
+// what the field does anyway.
+test("a host that answers no stored list leaves the card claiming nothing is held", async () => {
+  const { connectorPlugins } = await loadAdapter(
+    {
+      listInstalledMcpServers: [{ id: 1, name: "tinyfish", status: "connected", transport: "stdio", toolCount: 0 }],
+      listMcpServerTools: [],
+      listConnectorSecretFields: { server: "tinyfish", serverId: 1, fields: ["TINYFISH_API_KEY"] },
+    },
+    { connectors: { mcpServers: { tinyfish: { command: "npx", args: TINYFISH_ARGS, env: { TINYFISH_API_KEY: "" } } } } },
+  );
+  const [card] = await connectorPlugins();
+  assert.deepEqual(card.secretFields, ["TINYFISH_API_KEY"]);
+  assert.deepEqual(card.storedFields, []);
 });
 
 // -- app.js's half, asserted on the source: both are inside the delegated click and submit

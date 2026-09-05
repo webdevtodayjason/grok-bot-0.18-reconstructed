@@ -13,8 +13,9 @@
 //                                    (`id` is the minted numeric-string local id, CP-07)
 //   listMcpServerTools {serverId} -> [{ name, description, isDisabled, enabled }]
 //   toggleMcpToolDisabled {serverId, toolName, disabled} -> the same tool list, after
-//   listConnectorSecretFields {server} -> { server, serverId, fields } -- `fields` are the names
-//                                    the host ALREADY holds a value for, empty on a fresh connector
+//   listConnectorSecretFields {server} -> { server, serverId, fields, stored } -- `fields` are the
+//                                    credential fields (CONNECT-4: stored names plus the entry's
+//                                    empty-valued env keys), `stored` the names it HOLDS a value for
 //   setConnectorSecret {server, field, value} -> { server, serverId, field, stored, restarted, fields }
 // A host without them answers {"error":"unknown gateway method: <name>"}, which is the one string
 // that separates "not here yet" from "the host refused".
@@ -96,9 +97,9 @@ const SERVER_TOOLS = [
 const installedAnswers = (over = {}) => ({
   listInstalledMcpServers: INSTALLED,
   listMcpServerTools: SERVER_TOOLS,
-  // The live host answers { server, serverId, fields }: `fields` are the names it ALREADY holds
-  // a value for, which is empty on a connector nobody has filled in yet.
-  listConnectorSecretFields: { server: "localfiles", serverId: 1, fields: ["API_TOKEN"] },
+  // The live host answers { server, serverId, fields, stored }: `fields` are the credential
+  // fields, `stored` the ones it already holds a value for -- both empty on a fresh connector.
+  listConnectorSecretFields: { server: "localfiles", serverId: 1, fields: ["API_TOKEN"], stored: ["API_TOKEN"] },
   ...over,
 });
 

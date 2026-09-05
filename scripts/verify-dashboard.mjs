@@ -939,7 +939,10 @@ try {
       const held = await gw("listConnectorSecretFields", { server: "localfiles" }).catch(() => null);
       const formFields = await page.$$eval("[data-connector-secret-form] input[type=password]", (els) => els.map((e) => e.name));
       const expectedFields = [...new Set([...declared, ...(held?.fields ?? [])])];
-      check(expectedFields.length === 0 || formFields.sort().join(",") === expectedFields.sort().join(","),
+      // No short-circuit on an empty expected set: on a box whose localfiles entry declares no
+      // empty-valued env key, "the form offers nothing" IS the CONNECT-4 assertion, and letting
+      // it pass on length 0 is what made this line observe the negative case without checking it.
+      check(formFields.sort().join(",") === expectedFields.sort().join(","),
         `the key form names every environment value localfiles wants (${expectedFields.length})`, `form ${formFields.join(", ")} vs ${expectedFields.join(", ")}`);
       const envValues = await relay("/connectors").then((c) => Object.values(c?.mcpServers?.localfiles?.env ?? {})).catch(() => []);
       const formHtml = await page.evaluate(() => document.querySelector("[data-connector-secret-form]")?.outerHTML ?? "");

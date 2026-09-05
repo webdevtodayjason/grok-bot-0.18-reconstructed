@@ -38,6 +38,7 @@ import {
   deleteConnectorEnvSecret,
   isConnectorEnvFieldName,
   listConnectorCredentialFields,
+  listConnectorEnvSecretFields,
   readConnectorEnvSecrets,
   writeConnectorEnvSecret,
 } from "./connector-secrets.js";
@@ -209,13 +210,20 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
     /** Does this name (or numeric id) belong to a local stdio connector on this box? */
     isLocalConnector: (server: unknown) => { try { resolveLocalConnector(server, "isLocalConnector", true); return true; } catch { return false; } },
     /**
-     * CONNECT-4. The answer is the union of what is stored and what the entry in connectors.json
+     * CONNECT-4. `fields` is the union of what is stored and what the entry in connectors.json
      * leaves empty, because the card draws its "Enter securely" rows from exactly this list and
      * the host is the authority on which env keys are credentials.
+     *
+     * `stored` is the narrower answer to the other question the card asks: which of those names
+     * does the 0600 store actually HOLD a value for. They were one list before the union landed,
+     * and a card reading the union for both told the operator "the host holds a value" about a
+     * freshly declared, empty credential field -- on the very card the TinyFish preset exists to
+     * get a key into. Names only, from both: no value leaves this module.
      */
     listConnectorSecretFields: (server: unknown) => {
       const { name, id } = resolveLocalConnector(server, "listConnectorSecretFields");
-      return { server: name, serverId: id, fields: listConnectorCredentialFields(localConnectorRoot(), name) };
+      const root = localConnectorRoot();
+      return { server: name, serverId: id, fields: listConnectorCredentialFields(root, name), stored: listConnectorEnvSecretFields(root, name) };
     },
     setConnectorSecret: async (args: { server: unknown; field: unknown; value: unknown }) => {
       const { name, id } = resolveLocalConnector(args.server, "setConnectorSecret");
@@ -238,7 +246,10 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
       // Deleting is not gated by the rule: a stored field is a credential by definition, and a
       // value stored before the rule landed must stay removable. The field list is the union, so a
       // credential the entry still declares empty stays on the card with nothing stored behind it.
-      return { server: name, serverId: id, field: args.field, removed, restarted, fields: listConnectorCredentialFields(localConnectorRoot(), name) };
+      // `stored` beside `fields` here for the same reason as the list command: after a delete the
+      // field is still offered and nothing is held, and only the second list can say so. (The set
+      // answer carries no such list: its `stored` is the boolean that says the write landed.)
+      return { server: name, serverId: id, field: args.field, removed, restarted, fields: listConnectorCredentialFields(localConnectorRoot(), name), stored: listConnectorEnvSecretFields(localConnectorRoot(), name) };
     },
     getPlugin: async (pluginId: string) => {
       let views = await readCatalog(), view = views.find((entry) => entry.id === pluginId);

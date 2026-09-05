@@ -590,10 +590,19 @@
         tryCall("listConnectorSecretFields", { server: name }).catch(() => null),
       ]);
       const rows = Array.isArray(tools) ? tools : [];
-      // { server, serverId, fields } on this host; an array is accepted too, so a host that
-      // answers the bare list does not silently lose the form.
-      const storedFields = (Array.isArray(fields) ? fields : Array.isArray(fields?.fields) ? fields.fields : [])
-        .map((f) => String(f?.name ?? f)).filter(Boolean);
+      // { server, serverId, fields, stored } on this host; an array is accepted too, so a host
+      // that answers the bare list does not silently lose the form. The two lists answer two
+      // different questions and must not be read for each other: `fields` is the union of the
+      // stored names and the env keys the entry leaves EMPTY (CONNECT-4), while `stored` is the
+      // names the host's 0600 store actually holds a value for.
+      const fieldNames = (list) => (Array.isArray(list) ? list : []).map((f) => String(f?.name ?? f)).filter(Boolean);
+      const offeredFields = fieldNames(Array.isArray(fields) ? fields : fields?.fields);
+      // Only a name the host reports HOLDING may make the card say so. Read off `fields`, a
+      // freshly added tinyfish entry -- empty env value, empty store -- came up captioned "The
+      // host holds a value", on the very card the TinyFish preset exists to get a key into. A
+      // host that answers no `stored` list holds nothing this page can vouch for, so it says
+      // "Enter securely" rather than claiming a value nobody has seen.
+      const storedFields = fieldNames(fields?.stored);
       const spec = config?.mcpServers?.[name] ?? null;
       const status = server.status ?? "unknown";
       const transport = server.transport ?? (spec?.command ? "stdio" : "mcp");
@@ -632,16 +641,16 @@
         toolsNote: CONNECTOR_TOOLS_NOTE,
         toolsReadOnlyNote: numeric ? (canToggle ? null : CONNECTOR_TOOLS_NO_COMMAND) : CONNECTOR_TOOLS_READONLY,
         // CP-10 item 1: one masked input per environment value this connector wants. The host
-        // answers { server, serverId, fields } and its `fields` are the names it ALREADY holds a
-        // value for -- an empty list on a connector nobody has filled in yet -- so the form is
-        // drawn from the env names connectors.json declares WITH NO VALUE as well, or there would
-        // be no way to store the first one. Only keys are read from that file; values stay off it.
+        // answers { server, serverId, fields, stored } and its `fields` are the credential fields
+        // it will accept a value for -- so the form is drawn from the env names connectors.json
+        // declares WITH NO VALUE as well, for the moment before the host has answered at all.
+        // Only keys are read from that file; values stay off it.
         // CONNECT-4: only the EMPTY-valued env keys. MCP_REMOTE_CONFIG_DIR is a path, it was
         // offered here as somewhere to "Enter securely", and a pasted key went into it. The host
         // is the authority -- listConnectorSecretFields answers the same union of stored fields
         // and empty-valued env keys -- and this is that rule mirrored for the moment the card is
         // drawn before the host has answered.
-        secretFields: [...new Set([...credentialEnvNames(spec), ...storedFields])],
+        secretFields: [...new Set([...credentialEnvNames(spec), ...offeredFields])],
         storedFields,
         secretHint: `Stored by the host for ${name} in its own 0600 store and merged into the connector's environment when the box launches it. It never enters connectors.json, chat, model context or this page's markup.`,
         skills: [], skillsNote: null,
