@@ -1289,7 +1289,11 @@ try {
       fail(`connector-env-secrets.json is not byte-identical to what this arm found (${shellStoreSnapshot == null ? "it did not exist" : "it existed"} before, ${shellStoreNow == null ? "it does not exist" : "it exists"} now)`);
     }
     shellStoreSnapshotTaken = false;
-    ok("nothing is left behind: the value is gone and the store is the file this arm found");
+    // What this checked, and only that: no copy of the value under sand-data, and a byte-identical
+    // store. The delete pushed the field into the live exec daemon as the EMPTY STRING (the control
+    // plane can set, it cannot unset), so the name itself outlives this arm in the box shell's
+    // environment until the box restarts. That is a name with nothing in it, not a credential.
+    ok(`the value is gone from ${DATA} and the store is byte-identical to the file this arm found; ${SHELL_FIELD} stays in the box shell as an empty name until the box restarts`);
   }
 
   console.log("\nPASS — connector plane");
