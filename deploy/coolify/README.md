@@ -51,6 +51,18 @@ So, from the repo on the Mac:
 
     bash deploy/r750/sync.sh --no-install
 
+If the change touches this compose file (an env var, a mount, a label), Coolify has to be told,
+because it deploys the compose it stores, not the file in this repo. Push the file as base64 and
+then restart; the stored copy is Coolify's rewritten form, so compare env keys, not text:
+
+    B64=$(base64 < deploy/coolify/docker-compose.yml | tr -d '\n')
+    curl -X PATCH $COOLIFY_URL/api/v1/services/<uuid> -H "Authorization: Bearer $COOLIFY_API_KEY" \
+      -H 'content-type: application/json' -d "{\"docker_compose_raw\":\"$B64\"}"
+
+Measured 2026-09-05 09:19: this is how `SAND_DESKTOP_SUPERVISION_DISABLED` (BOX-4) reached the
+R750; the response echoes the uuid and the domains, and the next restart recreated both
+containers with the new env.
+
 That builds `host-main.cjs` and the exec daemon and copies them, `ui/` (server, auth, the Machine
 Room), `deploy/r750/{common,install,uninstall}.sh`, `init-box.sh` and `apply-start-window-fix.sh` to
 `/home/sem/titanbot`. `--no-install` matters: without it `sync.sh` ends by running `install.sh` and
