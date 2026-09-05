@@ -1,6 +1,8 @@
 import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { LOCAL_CONNECTORS_FILENAME, readLocalConnectorFile } from "./local-connectors.js";
+
 /**
  * CP-10. A credential for a local stdio connector used to land in
  * `connector-secrets/<agentId>/<platform>.json` -- the chat-channel store, which no MCP code reads
@@ -82,6 +84,43 @@ export function readConnectorEnvSecrets(rootDir: string): ConnectorEnvSecrets {
 /** Field NAMES only. Nothing in this module ever returns a stored value to a caller. */
 export function listConnectorEnvSecretFields(rootDir: string, server: string): string[] {
   return Object.keys(readConnectorEnvSecrets(rootDir)[server] ?? {}).sort();
+}
+
+/**
+ * CONNECT-4. Which env keys of a connector are CREDENTIALS, as opposed to configuration.
+ *
+ * The card used to offer every env key of the entry, so `MCP_REMOTE_CONFIG_DIR` -- a directory
+ * path the operator wrote themselves -- came up captioned "Enter securely", and a pasted API key
+ * went into it. The connector then started with a config dir named after the key and no credential
+ * at all, and the key sat in a field nothing reads.
+ *
+ * The rule, and the host is its authority: an env key the entry gives the EMPTY string is a
+ * credential -- the operator wrote the name and deliberately left the value out, which is exactly
+ * how a preset says "this one comes from the secret store". An env key with a non-empty value is
+ * configuration the operator already answered, and is never offered. Stored fields join the list
+ * unconditionally so a credential does not vanish from the card (or become undeletable) when the
+ * entry is edited or removed underneath it.
+ *
+ * `isConnectorEnvFieldName` still filters: a connectors.json that leaves `PATH` empty must not be
+ * able to make the card offer a field `writeConnectorEnvSecret` would refuse anyway.
+ */
+export function listConnectorCredentialFields(rootDir: string, server: string): string[] {
+  const stored = Object.keys(readConnectorEnvSecrets(rootDir)[server] ?? {});
+  const entryEnv = readLocalConnectorFile(rootDir)[server]?.env ?? {};
+  const empty = Object.entries(entryEnv).flatMap(([field, value]) =>
+    value === "" && isConnectorEnvFieldName(field) ? [field] : []);
+  return [...new Set([...stored, ...empty])].sort();
+}
+
+/**
+ * The refusal, message and all, lives beside the rule it enforces so the two cannot drift. It
+ * names the rule rather than saying "invalid field", because the operator reading it is the person
+ * who wrote the entry and the fix is in that entry: leave the value out.
+ */
+export function assertConnectorCredentialField(rootDir: string, server: string, field: string): void {
+  const offered = listConnectorCredentialFields(rootDir, server);
+  if (offered.includes(field)) return;
+  throw new Error(`setConnectorSecret refuses "${field}" on connector "${server}": a credential field is an env key whose value in ${LOCAL_CONNECTORS_FILENAME} is the empty string (or a field already stored for this connector); an env key with a non-empty value is configuration, not a credential. Credential fields here: ${offered.length === 0 ? "(none)" : offered.join(", ")}`);
 }
 
 /**

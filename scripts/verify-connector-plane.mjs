@@ -272,7 +272,10 @@ try {
   await writeConnectorsJson({
     mcpServers: {
       ...originalConnectors.mcpServers,
-      [PROBE_SERVER]: { command: "node", args: [PROBE_SCRIPT] },
+      // CONNECT-4. The empty value is how an entry declares a credential field: the host offers
+      // (and stores) only env keys the entry leaves empty, so a configuration key such as a
+      // directory path can no longer be captioned "Enter securely" and swallow a pasted key.
+      [PROBE_SERVER]: { command: "node", args: [PROBE_SCRIPT], env: { [PROBE_FIELD]: "" } },
     },
   });
   probeInstalled = true;

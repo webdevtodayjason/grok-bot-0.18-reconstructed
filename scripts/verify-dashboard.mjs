@@ -922,7 +922,12 @@ try {
       // restarts the connector, and localfiles is the box's one working MCP server that other
       // gates depend on; a probe value would go into its real environment. The submit is done
       // below, on the throwaway connector this gate adds and removes.
-      const declared = await relay("/connectors").then((c) => Object.keys(c?.mcpServers?.localfiles?.env ?? {})).catch(() => []);
+      // CONNECT-4: only the env keys the entry leaves EMPTY are credentials. A key with a value is
+      // configuration the operator already answered, and the card must not offer it -- that is how
+      // MCP_REMOTE_CONFIG_DIR, a directory path, came up captioned "Enter securely".
+      const declared = await relay("/connectors")
+        .then((c) => Object.entries(c?.mcpServers?.localfiles?.env ?? {}).flatMap(([name, value]) => value === "" ? [name] : []))
+        .catch(() => []);
       const held = await gw("listConnectorSecretFields", { server: "localfiles" }).catch(() => null);
       const formFields = await page.$$eval("[data-connector-secret-form] input[type=password]", (els) => els.map((e) => e.name));
       const expectedFields = [...new Set([...declared, ...(held?.fields ?? [])])];
@@ -999,7 +1004,12 @@ try {
         // the value would sit in it for the life of the box.
         const removed = await gw("deleteConnectorSecret", { server: PROBE_CONNECTOR, field: "PROBE_TOKEN" }).catch(() => null);
         const left = await gw("listConnectorSecretFields", { server: PROBE_CONNECTOR }).catch(() => null);
-        check(removed?.removed === true && (left?.fields ?? []).length === 0, "and the gate takes its throwaway value back out of the host's store", JSON.stringify(left ?? removed ?? null).slice(0, 120));
+        // CONNECT-4: the NAME stays on the list -- connectors.json still declares PROBE_TOKEN with
+        // an empty value, so the card must keep offering it. What has to be gone is the stored
+        // value, and a second delete reporting removed:false is what says the store holds none.
+        const again = await gw("deleteConnectorSecret", { server: PROBE_CONNECTOR, field: "PROBE_TOKEN" }).catch(() => null);
+        check(removed?.removed === true && again?.removed === false && (left?.fields ?? []).includes("PROBE_TOKEN"),
+          "and the gate takes its throwaway value back out of the host's store", JSON.stringify(left ?? removed ?? null).slice(0, 120));
         if (removed?.removed === true) probeSecretStored = false;
       }
       // And the removal, through the same editor.
