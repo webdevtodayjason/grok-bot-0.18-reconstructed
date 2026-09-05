@@ -1,4 +1,5 @@
 
+import { Value, type JsonValue } from "@bufbuild/protobuf";
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
 import { evidenceRegistry, readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
 import {
@@ -37,6 +38,24 @@ export interface HostGatewayDependencies {
   handleDesktopMcpAuthCompletion(completion: unknown): Promise<void>;
   forgetLocalToolPermission(agentId: string): void;
   readonly now?: () => number;
+}
+
+/**
+ * Tool arguments reach the routed path as plain JSON: the console posts them, and the model's
+ * own tool call is parsed out of a stream. The HTTP branch of the executor turns whatever it is
+ * handed back into JSON, but the box branch serializes it as a protobuf map<string, Value>, where
+ * a plain object is "google.protobuf.Value must have a value" and every stdio connector on the
+ * box is unreachable. Marshal once here, where the JSON enters the host, as the agent package
+ * already does when it builds an McpArgs for the same executor.
+ */
+function toValueArgs(args: unknown): Record<string, Value> {
+  if (args == null || typeof args !== "object") return {};
+  const values: Record<string, Value> = {};
+  for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+    if (value === undefined) continue;
+    values[key] = value instanceof Value ? value : Value.fromJson(value as JsonValue);
+  }
+  return values;
 }
 
 function isSandAgentPurpose(value: unknown): value is string {
@@ -159,7 +178,7 @@ export function createHostGatewayApi(
       name: args.toolName,
       toolName: args.name,
       providerIdentifier: args.providerIdentifier,
-      args: args.args,
+      args: toValueArgs(args.args),
       toolCallId: args.toolCallId,
     });
   };

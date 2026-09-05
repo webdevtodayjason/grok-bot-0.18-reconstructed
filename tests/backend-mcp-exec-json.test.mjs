@@ -71,3 +71,52 @@ test("routed MCP JSON arguments become a protobuf Struct before backend serializ
     await loaded.dispose();
   }
 });
+
+test("routed MCP tool arguments become protobuf Values before the box exec serializes them", async () => {
+  const loaded = await loadModule("source/host/host-gateway-api.ts");
+  try {
+    let received;
+    const mcp = {
+      mcp: {
+        createExecutor: () => ({
+          execute: async (_context, args) => {
+            received = args;
+            return { result: { case: "success", value: { content: [] } } };
+          },
+        }),
+      },
+    };
+    const api = loaded.module.createHostGatewayApi({
+      extensions: { api: () => mcp },
+      hostEvents: { emit: () => {} },
+      decorateForeverBoxStatus: status => status,
+      getHealth: () => ({ isBusy: false }),
+      kickstartIfPending: async () => false,
+      requestDiskSaverAudit: async () => false,
+      releaseAgentBox: async () => {},
+      handleDesktopMcpAuthCompletion: async () => {},
+      forgetLocalToolPermission: () => {},
+    });
+    await api.executeRoutedMcpTool({
+      providerIdentifier: "tinyfish",
+      name: "search",
+      toolName: "tinyfish-search",
+      args: { query: "echo-me", limit: 2, nested: { deep: [1, "two", null] } },
+      toolCallId: "call-1",
+    });
+    // The plain object this used to forward is what every box stdio connector died on: that
+    // branch serializes the arguments as map<string, google.protobuf.Value>, where a plain
+    // object is "google.protobuf.Value must have a value" and no tool call ever ran.
+    assert.deepEqual(Object.keys(received.args), ["query", "limit", "nested"]);
+    for (const value of Object.values(received.args)) assert.equal(typeof value.toBinary, "function");
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(received.args).map(([key, value]) => [key, value.toJson()])),
+      { query: "echo-me", limit: 2, nested: { deep: [1, "two", null] } },
+    );
+
+    await api.executeRoutedMcpTool({ providerIdentifier: "tinyfish", name: "search", toolName: "tinyfish-search", toolCallId: "call-2" });
+    assert.deepEqual(received.args, {});
+  } finally {
+    await loaded.dispose();
+  }
+});

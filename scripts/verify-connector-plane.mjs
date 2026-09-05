@@ -34,6 +34,7 @@
 //   node scripts/verify-connector-plane.mjs --model-tool   add (f), the AddMcpServer turn
 //   node scripts/verify-connector-plane.mjs --stalled-server  add (g), the stalled connector
 //   node scripts/verify-connector-plane.mjs --tinyfish-key    add (h), the API-key connector
+//              (h) implies --no-restart and --no-model so the arm fits the 280 s gate budget
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -45,11 +46,16 @@ const SECRET_STORE = `${DATA}/connector-env-secrets.json`;
 const PROBE_SERVER = "envprobe";
 const PROBE_SCRIPT = "/workspace/mcp-env-probe.mjs";
 const PROBE_FIELD = "PROBE_SECRET";
-const SKIP_RESTART = process.argv.includes("--no-restart");
-const SKIP_MODEL = process.argv.includes("--no-model");
 const MODEL_TOOL = process.argv.includes("--model-tool");
 const STALLED_SERVER = process.argv.includes("--stalled-server");
 const TINYFISH_KEY = process.argv.includes("--tinyfish-key");
+// (h) spends a minute of its own on two deliberate 30 s windows, so on top of the docker restart
+// in (a) and the model turn in (b) it does not fit the 280 s these gates are run under. The
+// contract names the arm `--tinyfish-key` with no other flags, so the flag carries the two skips.
+const NO_RESTART = process.argv.includes("--no-restart");
+const NO_MODEL = process.argv.includes("--no-model");
+const SKIP_RESTART = NO_RESTART || TINYFISH_KEY;
+const SKIP_MODEL = NO_MODEL || TINYFISH_KEY;
 const PROBE_PREFIX = "probe-u3";
 const TURN_TIMEOUT_MS = 300_000;
 // CONNECT-3. The preset the console's "TinyFish (API key)" button writes, name and all. The gate
@@ -253,7 +259,7 @@ try {
   const SERVER_ID = String(localfiles.id);
   ok(`localfiles id=${SERVER_ID} transport=${localfiles.transport} status=${localfiles.status} tools=${localfiles.toolCount}`);
 
-  if (SKIP_RESTART) console.log("  --  docker restart skipped (--no-restart)");
+  if (SKIP_RESTART) console.log(`  --  docker restart skipped (${NO_RESTART ? "--no-restart" : "--tinyfish-key"})`);
   else {
     await docker(["restart", BOX]);
     await sleep(10_000);
@@ -285,7 +291,7 @@ try {
   }
   ok(`${VICTIM} disabled and gone from listRoutedMcpTools`);
 
-  if (SKIP_MODEL) console.log("  --  the GetMcpTools leg is skipped (--no-model)");
+  if (SKIP_MODEL) console.log(`  --  the GetMcpTools leg is skipped (${NO_MODEL ? "--no-model" : "--tinyfish-key"})`);
   else {
     const created = await call("createAgent", { name: `verify-cp-${Math.random().toString(36).slice(2, 8)}` });
     probeAgentId = created?.agent?.id ?? created?.id;
@@ -631,7 +637,7 @@ try {
     if (JSON.stringify(written) !== JSON.stringify(entry)) {
       fail(`connectors.json holds a different entry than the preset: ${JSON.stringify(written).slice(0, 200)}`);
     }
-    ok(`the preset entry is in connectors.json through the console's POST /connectors, with \${${TINYFISH_FIELD}} unexpanded`);
+    ok(`the preset entry, stub URL and MCP_REMOTE_CONFIG_DIR aside, is in connectors.json through the console's POST /connectors, with \${${TINYFISH_FIELD}} unexpanded`);
 
     const fieldsBefore = await call("listConnectorSecretFields", { server: TINYFISH_SERVER });
     if (JSON.stringify(fieldsBefore.fields) !== JSON.stringify([TINYFISH_FIELD])) {
