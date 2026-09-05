@@ -36,6 +36,12 @@
 //              held to a terminal answer inside 90 s: an operator who pastes a dead token must get
 //              a NO, not a console that waits forever. Off by default, one flag each.
 //
+//   CONNECT-5  a shell tool's credential: CodeRabbit ships no MCP server at all, so its key
+//              belongs to a COMMAND the agent runs, not to a connector process. The store is the
+//              same 0600 file in its own section, and the destination is the environment of the
+//              box shell the agent's shell tool spawns. Off by default: --shell-secrets. It does
+//              NOT run either installer; the catalog is read, not executed.
+//
 //   node scripts/verify-connector-plane.mjs            all of it
 //   node scripts/verify-connector-plane.mjs --no-restart   skip the docker restart in (a)
 //   node scripts/verify-connector-plane.mjs --no-model     skip the one model turn in (b)
@@ -46,7 +52,8 @@
 //   node scripts/verify-connector-plane.mjs --linear-key      add (j), Linear's preset
 //   node scripts/verify-connector-plane.mjs --slack-stdio     add (k), Slack's package and token
 //   node scripts/verify-connector-plane.mjs --google-stdio    add (l), Google's package and tokens
-//              (h) through (l) imply --no-restart and --no-model so the arm fits the 280 s budget
+//   node scripts/verify-connector-plane.mjs --shell-secrets   add (m), the shell-tool credential
+//              (h) through (m) imply --no-restart and --no-model so each arm fits the 280 s budget
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -65,18 +72,23 @@ const GITHUB_KEY = process.argv.includes("--github-key");
 const LINEAR_KEY = process.argv.includes("--linear-key");
 const SLACK_STDIO = process.argv.includes("--slack-stdio");
 const GOOGLE_STDIO = process.argv.includes("--google-stdio");
+const SHELL_SECRETS = process.argv.includes("--shell-secrets");
 // (h) spends a minute of its own on two deliberate 30 s windows, so on top of the docker restart
 // in (a) and the model turn in (b) it does not fit the 280 s these gates are run under. The
 // contract names the arm `--tinyfish-key` with no other flags, so the flag carries the two skips.
-// (i) through (l) are the same shape and cost the same or more, so they carry them too.
+// (i) through (m) are the same shape and cost the same or more, so they carry them too.
 const NO_RESTART = process.argv.includes("--no-restart");
 const NO_MODEL = process.argv.includes("--no-model");
 const CREDENTIAL_ARM = [
   ["--tinyfish-key", TINYFISH_KEY], ["--github-key", GITHUB_KEY], ["--linear-key", LINEAR_KEY],
   ["--slack-stdio", SLACK_STDIO], ["--google-stdio", GOOGLE_STDIO],
+  ["--shell-secrets", SHELL_SECRETS],
 ].find(([, on]) => on)?.[0];
 const SKIP_RESTART = NO_RESTART || CREDENTIAL_ARM != null;
 const SKIP_MODEL = NO_MODEL || CREDENTIAL_ARM != null;
+// CONNECT-5. The one shell-tool field this arm touches. It refuses to run at all if the host
+// already holds a value under it: an operator's real CodeRabbit key is not this gate's to delete.
+const SHELL_FIELD = "CODERABBIT_API_KEY";
 const PROBE_PREFIX = "probe-u3";
 const TURN_TIMEOUT_MS = 300_000;
 // CONNECT-3. The preset the console's "TinyFish (API key)" button writes, name and all. The gate
@@ -155,6 +167,12 @@ const readConnectorsBase64 = async () => (await inBox(`base64 < ${CONNECTORS} | 
 // survive the round trip: the secret store does not exist until the first secret is stored.
 const readFileBase64 = async (path) =>
   (await inBox(`test -f ${path} && base64 < ${path} | tr -d '\\n' || true`)).trim() || null;
+// CONNECT-5: (i) puts the secret store back the way it found it, including "it did not exist".
+const restoreSecretStoreBase64 = async (encoded) => {
+  if (encoded == null) { await inBox(`rm -f ${SECRET_STORE}`); return; }
+  await docker(["exec", BOX, "node", "-e",
+    `require('fs').writeFileSync(${JSON.stringify(SECRET_STORE)},Buffer.from(${JSON.stringify(encoded)},'base64'),{mode:0o600})`]);
+};
 const restoreConnectorsBase64 = async (encoded) => {
   await docker(["exec", BOX, "node", "-e",
     `require('fs').writeFileSync(${JSON.stringify(CONNECTORS)},Buffer.from(${JSON.stringify(encoded)},'base64'),{mode:0o600})`]);
@@ -657,6 +675,9 @@ async function runStdioTokenArm(arm) {
   await assertFilesRestored(armSnapshot, secretsSnapshot);
   armSnapshot = null;
 }
+let shellSecretSet = false;
+let shellStoreSnapshot = null;
+let shellStoreSnapshotTaken = false;
 
 try {
   console.log(`gateway ${GATEWAY}  box ${BOX}`);
@@ -1167,6 +1188,94 @@ try {
     await runStdioTokenArm(arm);
   }
 
+  // ------------------------------------------- (m) CONNECT-5 a shell tool's credential
+  if (SHELL_SECRETS) {
+    console.log("\n(m) CONNECT-5 — a shell credential in the box shell's environment, and gone again");
+
+    // The catalog is READ, never executed. Running `curl | sh` or `pip install` from a gate would
+    // leave a tool on the box that the next run would find already there, and neither installer is
+    // what this arm is about.
+    const catalogue = await call("listShellTools");
+    if (!Array.isArray(catalogue) || catalogue.length !== 2) {
+      fail(`listShellTools returned ${Array.isArray(catalogue) ? catalogue.length : "a non-array"}, expected the two catalog entries`);
+    }
+    const coderabbit = catalogue.find((tool) => tool.id === "coderabbit");
+    const tinyfishCli = catalogue.find((tool) => tool.id === "tinyfish-cli");
+    if (coderabbit?.field !== SHELL_FIELD) fail(`the coderabbit entry's field is ${coderabbit?.field}, expected ${SHELL_FIELD}`);
+    if (!/cli\.coderabbit\.ai\/install\.sh/.test(String(coderabbit.install))) fail("the coderabbit entry does not install from cli.coderabbit.ai");
+    if (!/^cr review --agent --api-key/.test(String(coderabbit.usage))) fail(`the coderabbit usage line is "${coderabbit.usage}"`);
+    if (tinyfishCli?.field !== "TINYFISH_API_KEY") fail(`the tinyfish-cli entry's field is ${tinyfishCli?.field}`);
+    if (!/SKILL\.md$/.test(String(tinyfishCli.skillUrl ?? ""))) fail("the tinyfish-cli entry carries no SKILL.md to import");
+    ok(`the catalog names ${catalogue.map((tool) => `${tool.id} (${tool.field})`).join(", ")} — neither installer is run here`);
+
+    const held = await call("listShellSecretFields");
+    if ((held?.stored ?? []).includes(SHELL_FIELD)) {
+      fail(`the host already holds a ${SHELL_FIELD}; this arm will not overwrite an operator's key`);
+    }
+    if (!(held?.fields ?? []).includes(SHELL_FIELD)) fail(`listShellSecretFields does not offer ${SHELL_FIELD}`);
+    shellStoreSnapshot = await readFileBase64(SECRET_STORE);
+    shellStoreSnapshotTaken = true;
+
+    const beforeShell = await call("probeShellSecret", { field: SHELL_FIELD });
+    if (beforeShell?.state !== "unset") {
+      fail(`the box shell already reports ${SHELL_FIELD} ${beforeShell?.state}; the check would prove nothing`);
+    }
+    ok(`before anything is stored, the box's own shell reports ${SHELL_FIELD} unset`);
+
+    // Invented here and nowhere else: this is not, and must never be, a real CodeRabbit key.
+    const SHELL_KEY = `cr-verify-${Math.random().toString(36).slice(2, 12)}`;
+    console.log(`  probe value: ${SHELL_KEY.length} characters (never printed)`);
+    const storedShell = await call("setShellSecret", { field: SHELL_FIELD, value: SHELL_KEY });
+    shellSecretSet = true;
+    if (storedShell?.stored !== true) fail("setShellSecret did not report the value stored");
+    if (storedShell?.applied !== true) fail("setShellSecret stored the value but did not push it into the live box");
+    if (JSON.stringify(storedShell).includes(SHELL_KEY)) fail("setShellSecret echoed the value back");
+    ok(`setShellSecret stored=true applied=true fields=[${(storedShell.fields ?? []).join(", ")}]`);
+
+    // The claim, asked of the box's own shell: the exec-daemon that spawns every /bin/sh the
+    // agent's shell tool runs. The answer is set/unset and never the value.
+    const probedShell = await call("probeShellSecret", { field: SHELL_FIELD });
+    if (probedShell?.state !== "set") fail(`the box shell reports ${SHELL_FIELD} ${probedShell?.state} after it was stored`);
+    if (JSON.stringify(probedShell).includes(SHELL_KEY)) fail("probeShellSecret answered with the value");
+    ok(`the box shell reports ${SHELL_FIELD} set, and says nothing about its value`);
+
+    const shellControl = await callRaw("setShellSecret", { field: "NODE_OPTIONS", value: "cr-verify-control" });
+    if (shellControl.ok) fail("setShellSecret accepted NODE_OPTIONS as a field name");
+    ok("process-control env names are refused on this store too");
+
+    const shellHits = (await inBox(`grep -rl -- ${SHELL_KEY} ${DATA} 2>/dev/null || true`))
+      .split("\n").map((line) => line.trim()).filter(Boolean);
+    console.log(`  files under ${DATA} containing the value: ${shellHits.join(", ") || "(none)"}`);
+    if (shellHits.length !== 1 || !shellHits[0].endsWith("/connector-env-secrets.json")) {
+      fail(`the value is in ${shellHits.length} file(s); expected only connector-env-secrets.json`);
+    }
+    const shellMode = (await inBox(`stat -c %a ${shellHits[0]}`)).trim();
+    if (shellMode !== "600") fail(`the secret store is mode ${shellMode}, expected 600`);
+    const shellLogHit = (await inBox(`grep -c -- ${SHELL_KEY} /tmp/sand-host.log 2>/dev/null | head -1`)).trim();
+    if (shellLogHit !== "" && shellLogHit !== "0") fail(`the host log contains the value ${shellLogHit} time(s)`);
+    ok(`only ${shellHits[0]} holds it, mode ${shellMode}, and the host log does not`);
+
+    const removedShell = await call("deleteShellSecret", { field: SHELL_FIELD });
+    shellSecretSet = removedShell?.removed !== true;
+    if (removedShell?.removed !== true) fail("deleteShellSecret did not remove the field");
+    if ((removedShell?.stored ?? []).includes(SHELL_FIELD)) fail("the store still lists the field after the delete");
+    const afterShell = await call("probeShellSecret", { field: SHELL_FIELD });
+    if (afterShell?.state !== "unset") fail(`the box shell still reports ${SHELL_FIELD} ${afterShell?.state} after the delete`);
+    ok(`after the delete the box shell reports ${SHELL_FIELD} unset again`);
+
+    const shellSurvivors = (await inBox(`grep -rl -- ${SHELL_KEY} ${DATA} 2>/dev/null || true`)).trim();
+    if (shellSurvivors.length > 0) fail(`the value survives the delete in: ${shellSurvivors}`);
+    // Byte-identical, including "the store did not exist before this arm ran": a delete leaves an
+    // empty section behind, which is residue even though it holds nothing.
+    await restoreSecretStoreBase64(shellStoreSnapshot);
+    const shellStoreNow = await readFileBase64(SECRET_STORE);
+    if (shellStoreNow !== shellStoreSnapshot) {
+      fail(`connector-env-secrets.json is not byte-identical to what this arm found (${shellStoreSnapshot == null ? "it did not exist" : "it existed"} before, ${shellStoreNow == null ? "it does not exist" : "it exists"} now)`);
+    }
+    shellStoreSnapshotTaken = false;
+    ok("nothing is left behind: the value is gone and the store is the file this arm found");
+  }
+
   console.log("\nPASS — connector plane");
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
@@ -1182,8 +1291,16 @@ try {
   // (h) last would put the probe entry back after (c) had removed it. Deleting (h)'s key also has
   // to happen while its entry is still in connectors.json, because that file is what
   // deleteConnectorSecret resolves the connector through.
+  // CONNECT-5: (m) unwinds before (h) for the same reason (h) unwinds before (c) -- the later arm
+  // took the later snapshot, so the later arm's restore has to be overwritten by nobody.
+  try {
+    if (shellSecretSet) await callRaw("deleteShellSecret", { field: SHELL_FIELD });
+  } catch (error) { console.error(`cleanup: shell secret — ${error.message}`); }
+  try {
+    if (shellStoreSnapshotTaken) await restoreSecretStoreBase64(shellStoreSnapshot);
+  } catch (error) { console.error(`cleanup: secret store — ${error.message}`); }
   //
-  // (i) through (l) run after (h) and unwind before it, for the same two reasons: newest write
+  // (i) through (l) also run after (h) and unwind before it, for the same two reasons: newest write
   // undone first, and every credential deleted while the entry that names its connector is still on
   // disk. A run that failed mid-arm gets here with a live invented value in the store and the
   // entry still installed, which is exactly what these two blocks are for.

@@ -164,7 +164,12 @@ function thrown(id: number, error: unknown, errorCode = "BOX_EXEC_DAEMON_ERROR")
   });
 }
 
-class BoxExecRuntime {
+/**
+ * Exported for tests: `#environment` is the env every shell the agent runs is spawned with, and
+ * `applyEnvironment` is what the host's environment update lands in. A test that asserts a stored
+ * credential reaches a spawned shell has to drive the real pair, not a stand-in for them.
+ */
+export class BoxExecRuntime {
   readonly #environment: NodeJS.ProcessEnv;
   readonly #foreground = new Set<ChildProcessWithoutNullStreams>();
   readonly #background = new Map<number, BackgroundProcess>();

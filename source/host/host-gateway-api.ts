@@ -1,5 +1,27 @@
 
 import { Value, type JsonValue } from "@bufbuild/protobuf";
+import { createContext } from "../packages/context/core.js";
+import { shellExecutorResource } from "../packages/agent-exec/shell.js";
+import { buildHostShellArgs } from "./box/box-shell-command.js";
+import { getSandRootDir } from "./host-paths.js";
+import { isConnectorEnvFieldName } from "./extensions/mcp/connector-secrets.js";
+import {
+  SHELL_TOOLS,
+  SHELL_TOOL_FIELDS,
+  findShellTool,
+} from "./extensions/shell-tools/shell-tool-catalog.js";
+import {
+  buildShellSecretEnvironmentUpdate,
+  deleteShellEnvSecret,
+  listShellEnvSecretFields,
+  writeShellEnvSecret,
+} from "./extensions/shell-tools/shell-secrets.js";
+import {
+  fetchShellToolSkill,
+  readShellSecretProbe,
+  runShellToolInstall,
+  shellSecretProbeCommand,
+} from "./extensions/shell-tools/shell-tools-service.js";
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
 import { evidenceRegistry, readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
 import {
@@ -95,6 +117,43 @@ export function createHostGatewayApi(
   const sharing = deps.extensions.api("cross-user-sharing");
   const now = deps.now ?? Date.now;
   const createAgentMintsByNonce = new Map<string, Promise<any>>();
+
+  // CONNECT-5. The shell-tool plane. `getSandRootDir()` is the same root the connector store uses;
+  // the box is read lazily because the forever-box extension starts after this table is built.
+  const shellCtx = createContext().withName("shellTools");
+  const shellRoot = () => getSandRootDir();
+  const shellSecretsSnapshot = () => {
+    const stored = listShellEnvSecretFields(shellRoot());
+    return { fields: [...new Set([...SHELL_TOOL_FIELDS, ...stored])].sort(), stored };
+  };
+  /**
+   * The values only reach the agent's shell once they are in the box exec-daemon's environment --
+   * that daemon is what spawns `/bin/sh -lc` for the shell tool. A box that is not up yet is not a
+   * failure: HostBox.ensureReady re-pushes the store on the next bring-up, which is before any
+   * shell can run. The boolean says which of the two happened, so the console never claims the
+   * live box has a value it does not.
+   */
+  const pushShellSecretsToBox = async (clearing: readonly string[] = []): Promise<boolean> => {
+    try {
+      const box = deps.extensions.api("forever-box").box;
+      if (box == null || typeof box.applyEnvironment !== "function") return false;
+      await box.applyEnvironment(shellCtx, buildShellSecretEnvironmentUpdate(shellRoot(), clearing));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const requireShellField = (field: unknown, command: string): string => {
+    if (!isConnectorEnvFieldName(field)) {
+      throw new Error(`${command} needs an environment variable name as \`field\` (process-control names such as PATH, NODE_OPTIONS and LD_* are refused)`);
+    }
+    return field;
+  };
+  const requireShellTool = (id: unknown) => {
+    const entry = findShellTool(id);
+    if (entry == null) throw new Error(`no shell tool "${String(id)}"; this box knows ${SHELL_TOOLS.map((tool) => tool.id).join(", ")}`);
+    return entry;
+  };
 
   const markActive = (reason: "user_action" | "app_open") => {
     method(telemetry.analytics, "markActive")(reason);
@@ -787,6 +846,97 @@ export function createHostGatewayApi(
         server: args?.server ?? args?.serverId,
         field: args?.field
       }),
+
+    // ---------------------------------------------------------------- CONNECT-5, shell tools
+    // A shell tool is a CLI the agent runs itself, with its credential in the environment.
+    // CodeRabbit has no MCP server to hang a credential on (docs/connectors/coderabbit.md) and the
+    // operator's cli-anything-tinyfish is the same shape, so this is the connector credential card
+    // one layer down: same 0600 store file, same env-name guard, a different destination.
+    listShellTools: () => {
+      const stored = new Set(listShellEnvSecretFields(shellRoot()));
+      return SHELL_TOOLS.map((tool) => ({
+        id: tool.id,
+        name: tool.name,
+        field: tool.field,
+        install: tool.install,
+        usage: tool.usage,
+        credentialNote: tool.credentialNote,
+        ...(tool.skillUrl == null ? {} : { skillUrl: tool.skillUrl }),
+        stored: stored.has(tool.field)
+      }));
+    },
+    // Names only, from both lists, for the same reason listConnectorSecretFields answers two:
+    // `fields` is what a value may be stored under, `stored` is what the 0600 store holds.
+    listShellSecretFields: () => shellSecretsSnapshot(),
+    setShellSecret: async (args: any) => {
+      const field = requireShellField(args?.field, "setShellSecret");
+      if (typeof args?.value !== "string" || args.value.length === 0) {
+        throw new Error("setShellSecret needs a non-empty `value`");
+      }
+      if (!writeShellEnvSecret(shellRoot(), field, args.value)) {
+        throw new Error("the shell secret store could not be written");
+      }
+      // `stored` is the boolean that says the write landed, as it is on setConnectorSecret; the
+      // delete answer below is the one that carries the store's name list.
+      return { field, stored: true, applied: await pushShellSecretsToBox(), fields: shellSecretsSnapshot().fields };
+    },
+    deleteShellSecret: async (args: any) => {
+      const field = requireShellField(args?.field, "deleteShellSecret");
+      const removed = deleteShellEnvSecret(shellRoot(), field);
+      // The box control plane can set but not unset, so a delete pushes the empty string: the
+      // shell's own `${VAR:+...}` reads that as unset, and the next box restart drops it for real.
+      return { field, removed, applied: removed ? await pushShellSecretsToBox([field]) : false, ...shellSecretsSnapshot() };
+    },
+    /**
+     * Does the BOX have this credential? Asked of the box's own shell -- the exec-daemon that
+     * spawns every `/bin/sh -lc` the agent's shell tool runs -- so the answer is about the process
+     * that will actually run `cr`, not about the host's store. The command prints a marker; the
+     * value is never in the command, never in the output, and never in this answer.
+     */
+    probeShellSecret: async (args: any) => {
+      const field = requireShellField(args?.field, "probeShellSecret");
+      const box = deps.extensions.api("forever-box").box;
+      if (box == null || typeof box.mcpResourceAccessor !== "function") {
+        throw new Error("this box exposes no shell to probe");
+      }
+      const accessor = await box.mcpResourceAccessor(shellCtx);
+      const answer = await accessor.get(shellExecutorResource).execute(shellCtx, buildHostShellArgs({
+        command: shellSecretProbeCommand(field),
+        name: "sh",
+        workingDirectory: "/workspace",
+        toolCallId: "sand-shell-secret-probe"
+      }));
+      const result = answer.result;
+      if (result.case !== "success") throw new Error(`the box shell did not answer (${result.case})`);
+      return { field, state: readShellSecretProbe(result.value.stdout) };
+    },
+    installShellTool: async (args: any) => {
+      const entry = requireShellTool(args?.id);
+      const result = await runShellToolInstall(entry, { rootDir: shellRoot() });
+      // `agentId` is the contract's optional second half: install the tool AND teach the agent the
+      // tool's own published skill, so one click leaves an agent that can use what was installed.
+      // A skill that could not be fetched does not turn a successful install into a failed command
+      // -- the install happened, and `taught` is how the answer says the second half did not.
+      let taught = false;
+      if (result.ok && entry.skillUrl != null && typeof args?.agentId === "string" && args.agentId.length > 0) {
+        try {
+          await method(manager, "importAgentWorkflowMarkdown")(args.agentId, await fetchShellToolSkill(entry), entry.name);
+          taught = true;
+        } catch { taught = false; }
+      }
+      return { ...result, taught };
+    },
+    teachShellTool: async (args: any) => {
+      const entry = requireShellTool(args?.id);
+      if (typeof args?.agentId !== "string" || args.agentId.length === 0) {
+        throw new Error("teachShellTool needs an `agentId`; a skill is imported for one agent");
+      }
+      // The host fetches, not the console: raw.githubusercontent.com answers no browser
+      // cross-origin, and importAgentWorkflowText is the command that takes markdown.
+      const markdown = await fetchShellToolSkill(entry);
+      const workflows = await method(manager, "importAgentWorkflowMarkdown")(args.agentId, markdown, entry.name);
+      return { id: entry.id, agentId: args.agentId, name: entry.name, workflows };
+    },
     completeMcpOAuth: async (args: any) => {
       const stateId = typeof args?.stateId === "string" ? args.stateId : "";
       const code = typeof args?.code === "string" ? args.code : args?.authorizationCode;

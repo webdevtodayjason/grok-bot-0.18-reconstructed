@@ -585,3 +585,66 @@ test("the empty capabilities panel carries the connector editor and no longer de
   assert.match(branch, /\$\{connectorEditorMarkup\(\)\}/);
   assert.equal(/Connectors are added to connectors\.json on the box, not from this page/.test(branch), false);
 });
+
+// -- CONNECT-5: the shell tools group. A shell tool is a CLI the agent runs itself, with its
+// credential in the box shell's environment. CodeRabbit ships no MCP server at all, so it can
+// never be a connector card; the card has to exist beside them, in its own group, reusing the
+// credential component and nothing else.
+const SHELL_CATALOG = [
+  { id: "coderabbit", name: "CodeRabbit CLI", field: "CODERABBIT_API_KEY", install: "CI=1 curl -fsSL https://cli.coderabbit.ai/install.sh | sh", usage: 'cr review --agent --api-key "$CODERABBIT_API_KEY"', credentialNote: "An Agentic API key.", stored: false },
+  { id: "tinyfish-cli", name: "TinyFish CLI", field: "TINYFISH_API_KEY", install: "pip install cli-anything-tinyfish", usage: "Read from the environment.", credentialNote: "The same TinyFish API key.", skillUrl: "https://raw.githubusercontent.com/webdevtodayjason/cli-anything-tinyfish/main/cli_anything/tinyfish/skills/SKILL.md", stored: true },
+];
+
+test("the shell tools come back as their own group beside the connectors", async () => {
+  const { connectorPlugins, calls } = await loadAdapter(installedAnswers({
+    listShellTools: SHELL_CATALOG,
+    listShellSecretFields: { fields: ["CODERABBIT_API_KEY", "TINYFISH_API_KEY"], stored: ["TINYFISH_API_KEY"] },
+  }));
+  const cards = await connectorPlugins();
+  assert.deepEqual(cards.map((card) => card.id), ["mcp:localfiles", "shell:coderabbit", "shell:tinyfish-cli"]);
+
+  const [, coderabbit, tinyfish] = cards;
+  assert.equal(coderabbit.group, "Shell tools");
+  // Not connected, not installed: a shell tool with no key is a card waiting for one.
+  assert.equal(coderabbit.status, "available");
+  assert.deepEqual(coderabbit.secretFields, ["CODERABBIT_API_KEY"]);
+  assert.deepEqual(coderabbit.storedFields, []);
+  assert.equal(coderabbit.shellTool.install, "CI=1 curl -fsSL https://cli.coderabbit.ai/install.sh | sh");
+  assert.equal(coderabbit.shellTool.teachable, false);
+  // A shell tool has no MCP tools, and the card must say why rather than showing an empty list.
+  assert.deepEqual(coderabbit.tools, []);
+  assert.match(coderabbit.toolsNote, /runs its command itself/);
+  // A connector can be removed from connectors.json; a shell tool was never in it.
+  assert.equal(coderabbit.removable, false);
+
+  assert.equal(tinyfish.status, "connected");
+  assert.deepEqual(tinyfish.storedFields, ["TINYFISH_API_KEY"]);
+  assert.equal(tinyfish.shellTool.teachable, true);
+
+  // No value is ever asked for or echoed: the page reads names and the catalog, nothing else.
+  assert.deepEqual(calls.find((c) => c.method === "listShellTools").args, {});
+  assert.equal(JSON.stringify(cards).includes("cr-"), false);
+});
+
+test("a host without the shell tool commands simply has no shell tools group", async () => {
+  const { connectorPlugins } = await loadAdapter(installedAnswers({
+    listShellTools: UNKNOWN("listShellTools"),
+  }));
+  const cards = await connectorPlugins();
+  assert.deepEqual(cards.map((card) => card.id), ["mcp:localfiles"]);
+});
+
+test("the credential form sends a shell tool's value to setShellSecret, not setConnectorSecret", async () => {
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const start = source.indexOf('} else if (form.dataset.connectorSecretForm) {');
+  assert.notEqual(start, -1, "app.js no longer handles the connector key form");
+  const end = source.indexOf('} else if (form.hasAttribute("data-add-connector"))', start);
+  assert.notEqual(end, -1, "the key form handler no longer ends where this test expects");
+  const handler = source.slice(start, end);
+  // The two stores are not interchangeable: a key in the connector store never reaches the shell.
+  assert.match(handler, /adapter\.setShellSecret\(plugin\.shellTool\.id, field, value\)/);
+  assert.match(handler, /adapter\.setConnectorSecret\(plugin\.name, field, value\)/);
+  assert.match(source, /adapter\.installShellTool\(id, contextLead\(\)\?\.id\)/);
+  assert.match(source, /adapter\.teachShellTool\(id, lead\.id\)/);
+  assert.match(source, /const GROUPS = \["Providers", "Connectors", "Shell tools", "Listeners"\]/);
+});

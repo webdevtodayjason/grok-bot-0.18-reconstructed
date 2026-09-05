@@ -1126,6 +1126,23 @@
     const fields = plugin.secretFields.map((field) => `<div class="field"><label for="connector-secret-${escapeHtml(plugin.id)}-${escapeHtml(field)}">${escapeHtml(field)}</label><input id="connector-secret-${escapeHtml(plugin.id)}-${escapeHtml(field)}" name="${escapeHtml(field)}" type="password" autocomplete="off" placeholder="${stored.has(field) ? "The host holds a value — type to replace it" : "Enter securely"}" />${hints[field] ? `<span class="field-hint" data-credential-hint="${escapeHtml(field)}">${escapeHtml(hints[field])}</span>` : ""}</div>`).join("");
     return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Credentials for ${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.secretHint || "The host stores these and hands them to the connector process.")}</small></div></div><form data-connector-secret-form="${escapeHtml(plugin.id)}">${fields}<div class="form-actions"><button class="primary-button" type="submit">Store on the host</button></div><span class="field-hint">Leave a field blank to leave what the host already holds for it untouched. Nothing you type here is written into this page.</span></form></div>`;
   }
+  // CONNECT-5: a shell tool card. Install runs the catalog's command in the box and prints the
+  // tail of its own output here; the usage line is what the agent is meant to type once the
+  // credential card above has a value. The teach button is drawn only where the tool publishes a
+  // skill, and only for the agent on screen -- a workflow is imported for one agent.
+  function shellToolMarkup(plugin, lead) {
+    const tool = plugin.shellTool;
+    const id = escapeHtml(tool.id);
+    const teach = tool.teachable && typeof adapter.teachShellTool === "function"
+      ? (lead
+        ? `<div class="setting-row"><div><strong>Teach ${escapeHtml(lead.name)} to use it</strong><small>Imports ${escapeHtml(plugin.name)}'s own published SKILL.md as a workflow for this agent. The host fetches it; this page never sees the URL's answer.</small></div><button class="ghost-button" type="button" data-teach-shell-tool="${id}">Teach the active agent</button></div>`
+        : `<div class="setting-row"><div><strong>Teach an agent to use it</strong><small>A workflow is imported for one agent. Open an agent's conversation first, then come back.</small></div><span class="status-pill">no agent on screen</span></div>`)
+      : "";
+    const probe = typeof adapter.probeShellSecret === "function"
+      ? `<div class="setting-row"><div><strong>Does the box have ${escapeHtml(tool.field)}?</strong><small>Asks the box's own shell — the one the agent runs commands in — and reports set or unset. It never prints the value.</small></div><button class="ghost-button" type="button" data-probe-shell-secret="${escapeHtml(tool.field)}">Ask the box</button></div>`
+      : "";
+    return `<section><div class="plugin-section-title"><span>Install in the box</span><span>as the host's own user</span></div><div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>${escapeHtml(plugin.name)}</strong><small>Runs in the box, capped at five minutes. The last lines of its output come back here.</small></div></div><pre class="shell-tool-command">${escapeHtml(tool.install)}</pre><div class="form-actions"><button class="primary-button" type="button" data-install-shell-tool="${id}">Install in the box</button></div><pre class="shell-tool-output" data-shell-tool-output="${id}" hidden></pre></div>${tool.usage ? `<div class="demo-note"><strong>Once it is installed</strong><br />${escapeHtml(tool.usage)}</div>` : ""}${probe}${teach}</section>`;
+  }
   const connectorRemoveRow = (plugin) => (plugin.group === "Connectors" && plugin.removable && typeof adapter.removeConnector === "function"
     ? `<div class="setting-row"><div><strong>Remove this connector</strong><small>Drops ${escapeHtml(plugin.name)} from connectors.json on the box and asks the host to re-read the file.</small></div><button class="ghost-button" type="button" data-remove-connector="${escapeHtml(plugin.name)}">Remove</button></div>`
     : "");
@@ -1151,7 +1168,11 @@
     // listener it is already bound to would be a guess wearing a control.
     const canConnectListener = plugin.group === "Listeners" && typeof adapter.connectListener === "function" && Array.isArray(lead?.channels);
     const listenerChannel = canConnectListener ? lead.channels.find((c) => c.platform === plugin.id) : undefined;
-    const connectorSecrets = Array.isArray(plugin.secretFields) && plugin.secretFields.length && typeof adapter.setConnectorSecret === "function"
+    // CONNECT-5: the same credential card, whichever store is behind it. A shell tool's value goes
+    // to setShellSecret (the box shell's environment); a connector's to setConnectorSecret (the
+    // connector process's). The component is one because the promise it makes is one.
+    const secretWriter = plugin.shellTool ? adapter.setShellSecret : adapter.setConnectorSecret;
+    const connectorSecrets = Array.isArray(plugin.secretFields) && plugin.secretFields.length && typeof secretWriter === "function"
       ? connectorSecretMarkup(plugin) : "";
     if (canConnectListener && listenerChannel?.connected !== true) account = listenerConnectMarkup(plugin, lead);
     else if (canConnectListener && listenerChannel?.connected === true) account = listenerConnectedMarkup(plugin, lead);
@@ -1182,7 +1203,7 @@
     const skillsSection = plugin.skills.length
       ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${plugin.skills.map((skill) => `<span class="tag">✦ ${escapeHtml(skill)}</span>`).join("")}</div></section>`
       : plugin.skillsNote ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="empty-state">${escapeHtml(plugin.skillsNote)}</div></section>` : "";
-    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${connectorSecrets}${providerSwitch}${channelRow}${connectorRemoveRow(plugin)}</section><section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
+    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${connectorSecrets}${providerSwitch}${channelRow}${connectorRemoveRow(plugin)}</section>${plugin.shellTool ? shellToolMarkup(plugin, lead) : ""}<section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
   }
 
   // The relay holds the endpoint catalogue and probes each one; the box holds which is in use.
@@ -1441,13 +1462,14 @@
     const navButton = (plugin) => `<button class="plugin-nav-button${plugin.id === selected.id ? " is-active" : ""}" type="button" data-plugin-id="${escapeHtml(plugin.id)}"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><span><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.category)}</small></span><span class="status-dot ${plugin.status === "connected" ? "success" : plugin.status === "installed" ? "attention" : ""}"></span></button>`;
     // Providers (subscriptions and endpoints a user connects) lead; the box's own MCP connectors
     // follow; the chat listeners the host reports come last. Anything without a group is a
-    // connector, which is what the demo fixtures are.
-    const GROUPS = ["Providers", "Connectors", "Listeners"];
+    // connector, which is what the demo fixtures are. CONNECT-5: shell tools sit under the
+    // connectors they are not -- a CLI the agent runs itself, with a key in its environment.
+    const GROUPS = ["Providers", "Connectors", "Shell tools", "Listeners"];
     const nav = GROUPS.map((group) => {
       const members = state.plugins.filter((plugin) => (plugin.group ?? "Connectors") === group);
       return members.length ? `<div class="plugin-group-title">${group}</div>${members.map(navButton).join("")}` : "";
     }).join("");
-    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Listeners are chat platforms the host binds to.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>${connectorEditorMarkup()}`);
+    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Shell tools are command-line programs the agent runs itself, with a key in the box shell's environment. Listeners are chat platforms the host binds to.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>${connectorEditorMarkup()}`);
   }
 
   // CP-11: adding a connector used to mean an operator editing connectors.json inside the
@@ -2170,6 +2192,41 @@
       Promise.resolve(adapter.removeConnector(name))
         .then((result) => { renderPluginsPanel(); showToast(result?.message ?? `${name} removed`); })
         .catch((error) => { target.disabled = false; showToast(`${name} was not removed: ${error.message}`); });
+    } else if (target.dataset.installShellTool) {
+      // CONNECT-5. The output pane is written from the host's answer, not from a guess about it:
+      // an installer that failed shows the box's own last lines here rather than a red toast.
+      const id = target.dataset.installShellTool;
+      const output = elements.panelContent.querySelector(`[data-shell-tool-output="${id}"]`);
+      target.disabled = true;
+      const label = target.textContent;
+      target.textContent = "Installing…";
+      if (output) { output.hidden = false; output.textContent = "Running in the box. This can take a few minutes."; }
+      Promise.resolve(adapter.installShellTool(id, contextLead()?.id))
+        .then((result) => {
+          if (output) { output.hidden = false; output.textContent = result?.output || result?.message || "The host returned no output."; }
+          showToast(result?.message ?? `${id} install finished`);
+        })
+        .catch((error) => {
+          if (output) { output.hidden = false; output.textContent = error.message; }
+          showToast(`${id} was not installed: ${error.message}`);
+        })
+        .finally(() => { target.disabled = false; target.textContent = label; });
+    } else if (target.dataset.teachShellTool) {
+      const id = target.dataset.teachShellTool;
+      const lead = contextLead();
+      if (!lead) { showToast("Open an agent's conversation first: a skill is imported for one agent."); return; }
+      target.disabled = true;
+      Promise.resolve(adapter.teachShellTool(id, lead.id))
+        .then((result) => showToast(result?.message ?? `${id} skill imported for ${lead.name}`))
+        .catch((error) => showToast(`The skill was not imported: ${error.message}`))
+        .finally(() => { target.disabled = false; });
+    } else if (target.dataset.probeShellSecret) {
+      const field = target.dataset.probeShellSecret;
+      target.disabled = true;
+      Promise.resolve(adapter.probeShellSecret(field))
+        .then((result) => showToast(result?.message ?? `The box was asked about ${field}`))
+        .catch((error) => showToast(`The box was not asked about ${field}: ${error.message}`))
+        .finally(() => { target.disabled = false; });
     } else if (target.dataset.disconnectPlugin) {
       const pluginId = target.dataset.disconnectPlugin;
       target.disabled = true;
@@ -2468,7 +2525,12 @@
       if (!entries.length) { showToast("Nothing to store — every field was blank"); return; }
       const submit = form.querySelector("button[type=submit]");
       if (submit) submit.disabled = true;
-      Promise.all(entries.map((entry) => Promise.resolve(adapter.setConnectorSecret(plugin.name, entry.field, entry.value))))
+      // CONNECT-5: a shell tool's credential goes to the shell store, a connector's to the
+      // connector store. Same form, same clearing, two destinations.
+      const store = plugin.shellTool && typeof adapter.setShellSecret === "function"
+        ? (field, value) => adapter.setShellSecret(plugin.shellTool.id, field, value)
+        : (field, value) => adapter.setConnectorSecret(plugin.name, field, value);
+      Promise.all(entries.map((entry) => Promise.resolve(store(entry.field, entry.value))))
         .then((results) => {
           if (submit) submit.disabled = false;
           const bad = results.find((r) => r && r.accepted === false);
