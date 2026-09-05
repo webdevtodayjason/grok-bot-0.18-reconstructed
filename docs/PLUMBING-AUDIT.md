@@ -1679,6 +1679,7 @@ wave's output; `npm test` still green; zero UI/feature diffs outside `docs/`.
   Every gate that mints a probe deletes it and reports any agent that appeared during its run.
 
 
+- The box supervisor's receipts: `/tmp/sand-supervisor.log` (its own starts, "desktop: restarted" and "crash-looping" lines), `/tmp/sand-box-telemetry.log` (`supervisor_restart` events with the wrapper's cause, `status_stale` means the 180 s heartbeat kill), `/tmp/sand-host-profiles/*.cpuprofile` (written by the host's pressure profiler before each kill; summarize by self time, the host was idle in every one). The desktop registry is `/tmp/sand-desktop/<group>/<component>.json` plus a pid file; it survives `docker restart`. The switch that turns the respawn engine off is `SAND_DESKTOP_SUPERVISION_DISABLED=1` in the box env (BOX-4), and the start line `[sand-supervisor] started (... desktop supervision off)` is the proof it took.
 - Worktree `/Users/sem/orca/workspaces/grok-bot-0.18-reconstructed/gb`, branch `webdevtodayjason/gb`.
 - Session memories: `~/.claude-titanium/projects/-Users-sem-orca-grok-bot-0-18-reconstructed/memory/`
   (index `MEMORY.md`; the tool-schema, wedged-agent, box-operating-facts and

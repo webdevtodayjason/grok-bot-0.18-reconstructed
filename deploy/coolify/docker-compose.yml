@@ -82,6 +82,11 @@ services:
       com.titanbot.role: box
     environment:
       SAND_SUPERVISOR_ENABLED: "1"
+      # BOX-4: the box supervisor also "supervises" desktop seats from a registry in /tmp. After any
+      # restart it finds every registered pid dead, respawns all of them while the host rebuilds the
+      # same seats through start-window, and the duplicates crash-loop until its heartbeat stalls and
+      # its wrapper kills its whole process group, host included. The host owns seats; this stays off.
+      SAND_DESKTOP_SUPERVISION_DISABLED: "1"
       SAND_BOX_AUTO_UPDATE: "0"
       SAND_USE_EXISTING_BOX_EXEC_DAEMON: "1"
       SAND_TREE_SITTER_NODE_DEPS: /home/box/deps

@@ -133,7 +133,7 @@ docker run --detach --name "$BOX" \
   --network "$NET" \
   --restart unless-stopped \
   --label com.titanbot.role=box \
-  --env SAND_SUPERVISOR_ENABLED=1 \
+  --env SAND_SUPERVISOR_ENABLED=1 --env SAND_DESKTOP_SUPERVISION_DISABLED=1 \
   --env SAND_BOX_AUTO_UPDATE=0 \
   --env SAND_USE_EXISTING_BOX_EXEC_DAEMON=1 \
   --env SAND_TREE_SITTER_NODE_DEPS=/home/box/deps \
