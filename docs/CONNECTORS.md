@@ -31,7 +31,16 @@ say the host holds a value from the second list. That same 0600 file carries a s
 on, whose values are merged into the environment of the box shell the agent runs commands in rather
 than into any connector process, and those tools sit under **Shell tools** in the same panel.
 
-The operator's route is Global capabilities → **Plugins, connectors & skills** → **Add or remove a
+**Where this is in the UI now.** The panel is the **Marketplace** (it was called Global
+capabilities), and its Plugins tab is the catalog these six services are in: one card each, an
+**Add** button that writes the entry below, and a plugin page carrying the credential card and the
+connector's status. [MARKETPLACE.md](MARKETPLACE.md) is that surface end to end — what the two tabs
+are, what Add and Import do, where the providers went, the catalog schema, and how to add a plugin
+or a bot. This file stays the per-service walk-through: what to mint, with which permissions, and
+what bites. The connector editor described below is still there, behind the Marketplace's **Custom
+MCP server** card.
+
+The operator's route is Marketplace → **Plugins** → **Custom MCP server** → **Add or remove a
 connector**. The preset row at the top of that card is a row of buttons, one per service; clicking
 one **fills the four fields and writes nothing**. Pressing **Add connector** writes
 `connectors.json` through the relay and calls `refreshMcp`, so the host relaunches its stdio servers

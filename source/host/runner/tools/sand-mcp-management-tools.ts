@@ -35,6 +35,8 @@ export interface McpPluginSummary {
   readonly displayName: string;
   readonly description: string;
   readonly category: string;
+  /** MARKET-1: "connector" (an entry in connectors.json) or "shell-tool" (a CLI in the box). */
+  readonly kind?: string;
   readonly isInstalled: boolean;
   readonly installMode?: string;
   readonly connectorCount: number;
@@ -47,6 +49,10 @@ export interface McpPluginDetail extends McpPluginSummary {
     readonly label: string;
     readonly isRequired: boolean;
     readonly isSecret: boolean;
+    /** One line: what the value is and where it is minted. Never a value. */
+    readonly hint?: string;
+    /** Whether the HOST already holds a value for this field. Never the value itself. */
+    readonly isStored?: boolean;
   }[];
   readonly servers: readonly McpInstalledServer[];
 }
@@ -61,7 +67,15 @@ export type McpAuthenticationResult =
 export interface McpManagementDependencies {
   listPlugins(): Promise<readonly McpPluginSummary[]>;
   getPlugin(pluginId: string): Promise<McpPluginDetail | null>;
-  install(args: { readonly id: string; readonly values?: Readonly<Record<string, string>> }): Promise<void>;
+  /**
+   * MARKET-1: answers what the install did. A connector entry is written and the fields the
+   * operator must fill come back; a shell tool or the connector-editor card comes back `refused`
+   * with the reason, because neither is installed by writing connectors.json.
+   */
+  install(args: { readonly id: string; readonly values?: Readonly<Record<string, string>> }): Promise<{
+    readonly installed?: boolean;
+    readonly refused?: string;
+  } | void>;
   add(args: { readonly name: string; readonly configJson: string }): Promise<readonly McpInstalledServer[]>;
   listInstalled(): Promise<readonly McpInstalledServer[]>;
   removeServer(serverId: string): Promise<{
@@ -94,7 +108,7 @@ export const getPluginParameters = z.object({
 export const installPluginParameters = z.object({
   plugin_id: z.string().trim().min(1).describe("The stable plugin id from SearchPlugins."),
   values: z.record(z.string(), z.string()).optional().describe(
-    `Optional setup values keyed by the plugin's field key from GetPlugin (e.g. { "CONTEXT7_API_KEY": "..." }). Provide every required field. Ask the user for any secret you don't already have.`,
+    "Ignored on this box, and deliberately: a credential typed here would land in the transcript. The user stores every key themselves on the plugin's page in the Marketplace, so leave this out and tell them which field to fill.",
   ),
 });
 export const addMcpServerParameters = z.object({
@@ -197,6 +211,9 @@ function describePluginInstallState(plugin: McpPluginSummary): string {
 function describePluginIncludes(plugin: McpPluginSummary): string {
   const parts: string[] = [];
   if (plugin.connectorCount > 0) parts.push(`${plugin.connectorCount} connector${plugin.connectorCount === 1 ? "" : "s"}`);
+  // MARKET-1: a shell tool adds a command-line program to the box rather than an MCP server, so
+  // "no primitives" would be a plain untruth about CodeRabbit and the TinyFish CLI.
+  if (plugin.kind === "shell-tool") parts.push("1 shell tool");
   if (plugin.skills.length > 0) parts.push(`${plugin.skills.length} skill${plugin.skills.length === 1 ? "" : "s"}`);
   return parts.length > 0 ? parts.join(", ") : "no primitives";
 }
@@ -226,9 +243,17 @@ export function describePluginDetail(detail: McpPluginDetail): string {
     )].join("\n"));
   }
   if (detail.fields.length > 0) {
-    sections.push(["Setup fields (pass in InstallPlugin values):", ...detail.fields.map((field) => {
-      const flags = [field.isRequired ? "required" : "optional", ...(field.isSecret ? ["secret \u2014 ask the user, never guess"] : [])];
-      return `  - ${field.key} (${field.label}; ${flags.join(", ")})`;
+    // MARKET-1. These are credential fields the OPERATOR fills on the plugin's page in the
+    // Marketplace: a key typed into a conversation is in the transcript, the model's context and
+    // whatever window that was compacted into, so the model never sets one. `stored` is the only
+    // thing said about a value, and it is a boolean.
+    sections.push(["Credential fields (the user fills these on the plugin's page; you cannot set a key):", ...detail.fields.map((field) => {
+      const flags = [
+        field.isRequired ? "required" : "optional",
+        field.isStored === true ? "the host already holds a value" : "not stored yet",
+      ];
+      const hint = field.hint == null || field.hint.length === 0 ? "" : ` ${truncateOneLine(field.hint, 300)}`;
+      return `  - ${field.key} (${flags.join(", ")})${hint}`;
     })].join("\n"));
   }
   if (detail.servers.length > 0) sections.push(["Its installed MCP server(s) — statuses live in GetMcpServerStatus:", ...detail.servers.map(describeInstalled)].join("\n"));
@@ -312,35 +337,41 @@ export function createMcpManagementTools(
 
   const tools = [
     defineCommunicateTool(management, {
-      id: "SEARCH_PLUGINS", name: "SearchPlugins", description: "Search the plugins the user could install (or already has): marketplace plugins bundling connectors and skills. Say what you're looking for in natural language and results come back ranked by relevance, each with its STABLE plugin id, install state, and what it includes. Use this to discover a capability (Linear, Notion, writing Word documents, …) or to check whether a plugin is installed. Inspect one result with GetPlugin; connector runtime statuses (connected/needsAuth) live in GetMcpServerStatus. This is read-only and never needs the user's permission.", parameters: searchPluginsParameters,
+      id: "SEARCH_PLUGINS", name: "SearchPlugins", description: "Search the Marketplace — the plugins this box can install, and the ones it already has. A plugin is either a connector (an MCP server the box runs) or a shell tool (a CLI the box installs). Say what you're looking for in natural language; results come back ranked, each with its STABLE plugin id, its install state and what it includes. Use this to discover a capability (GitHub, Slack, Linear, web search, code review, …) or to check whether something is installed. Inspect one result with GetPlugin; connector runtime statuses (connected/needsAuth) live in GetMcpServerStatus. This is read-only and never needs the user's permission.", parameters: searchPluginsParameters,
       execute: async (_ctx, args: z.infer<typeof searchPluginsParameters>, deps) => {
         const query = (args.query ?? "").trim();
         const plugins = rankPluginsLexically(await deps.listPlugins(), query);
-        if (plugins.length === 0) return query.length > 0 ? `No plugins match "${query}".` : "The plugin catalog is empty or unavailable right now.";
+        if (plugins.length === 0) return query.length > 0 ? `No plugins in the Marketplace match "${query}".` : "The Marketplace catalog is empty.";
         return [`${plugins.length} plugin(s)${query.length > 0 ? ` matching "${query}" (best first)` : " available"}:`, ...plugins.map(describePluginSummary)].join("\n");
       },
     }),
     defineCommunicateTool(management, {
-      id: "GET_PLUGIN", name: "GetPlugin", description: "Full detail for one plugin by its STABLE plugin id (from SearchPlugins): what it includes (connectors, skills), its install state, any setup fields InstallPlugin needs (with required/secret flags), and the installed MCP servers backing it. Read this before installing a plugin with setup fields, and before uninstalling (to know the full scope you must disclose). Read-only.", parameters: getPluginParameters,
+      id: "GET_PLUGIN", name: "GetPlugin", description: "Full detail for one Marketplace plugin by its STABLE plugin id (from SearchPlugins): what it includes, its install state, its credential fields with a line each on where the value is minted and whether the host already holds it, and the MCP server backing it. Read this before installing and before uninstalling (to know the full scope you must disclose). You cannot set a credential — the user fills these on the plugin's page in the Marketplace. Read-only.", parameters: getPluginParameters,
       execute: async (_ctx, args: z.infer<typeof getPluginParameters>, deps) => {
         const detail = await deps.getPlugin(args.plugin_id);
         return detail == null ? `No plugin with id "${args.plugin_id}".` : describePluginDetail(detail);
       },
     }),
     defineCommunicateTool(management, {
-      id: "INSTALL_PLUGIN", name: "InstallPlugin", description: "Install a plugin by its STABLE plugin id (from SearchPlugins) into the user's Cursor account. Only call this after the user has agreed — confirm with a question widget first, since installing changes the user's configuration. Idempotent: re-installing an installed plugin is safe. Pass any setup values GetPlugin lists (ask the user for secrets like API keys — never guess). If an installed connector needs authentication, its connect card is shown to the user automatically — finish unrelated work, then end your turn; you're resumed when they authorize. New tools and skills become available on your next message.", parameters: installPluginParameters,
+      id: "INSTALL_PLUGIN", name: "InstallPlugin", description: "Install a Marketplace plugin by its STABLE plugin id (from SearchPlugins) onto this box: it writes the connector's entry and reloads the MCP servers. Only call this after the user has agreed — confirm with a question widget first, since installing changes their configuration. Idempotent: re-installing an installed plugin is safe. You CANNOT set a credential — a key typed into a conversation ends up in the transcript, so the answer names the fields the user has to fill on the plugin's page in the Marketplace, and you tell them to go there. A shell tool is not installed from here; its install command runs in the box from that same page. New tools become available to you on your next message.", parameters: installPluginParameters,
       execute: guardMutation(async (_ctx, args: z.infer<typeof installPluginParameters>, deps) => {
         const before = await deps.getPlugin(args.plugin_id);
         if (before == null) return `No plugin with id "${args.plugin_id}".`;
-        await deps.install({ id: args.plugin_id, ...(args.values == null ? {} : { values: args.values }) });
+        const outcome = await deps.install({ id: args.plugin_id, ...(args.values == null ? {} : { values: args.values }) });
+        const refused = outcome == null ? undefined : outcome.refused;
+        if (refused != null) return [refused, describePluginDetail(before)].join("\n");
         const after = await deps.getPlugin(args.plugin_id);
         if (after == null || !after.isInstalled) return `The install request for "${before.displayName}" completed, but the plugin does not read as installed yet.`;
         const note = emitNeedsAuthCards(before.servers, after.servers);
-        return [`Installed ${after.displayName} (plugin ${after.pluginId}).`, ...(note == null ? [] : [note]), describePluginDetail(after)].join("\n");
+        const unfilled = after.fields.filter((field) => field.isStored !== true).map((field) => field.key);
+        const ask = unfilled.length === 0
+          ? []
+          : [`It cannot connect until the user stores ${unfilled.join(", ")} on its page in the Marketplace (Marketplace → Plugins → ${after.displayName} → Accounts). Tell them that in plain text; do not ask them for the value here.`];
+        return [`Installed ${after.displayName} (plugin ${after.pluginId}).`, ...(note == null ? [] : [note]), ...ask, describePluginDetail(after)].join("\n");
       }),
     }),
     defineCommunicateTool(management, {
-      id: "ADD_MCP_SERVER", name: "AddMcpServer", description: "Add a remote MCP server that isn't in the catalog to the user's Cursor account — use this when the user gives you a link for a server that SearchPlugins doesn't know. Only call this after the user agrees to add it — confirm with a question widget first, since it changes the user's account configuration and the server can reach external services on their behalf. Provide the remote server's `url` (with `headers` for any auth token). Grok Bot only supports remote http/sse MCP servers (executed on the backend); local/stdio servers are not supported. Ask the user for the exact endpoint and any secrets rather than guessing; if you only have a link, open it first (WebFetch) to find the connection details. Newly added tools become available to you on your next message.", parameters: addMcpServerParameters,
+      id: "ADD_MCP_SERVER", name: "AddMcpServer", description: "Add a remote MCP server the Marketplace doesn't carry — use this when the user gives you a link for a server SearchPlugins doesn't know. Only call this after the user agrees to add it — confirm with a question widget first, since it changes the user's account configuration and the server can reach external services on their behalf. Provide the remote server's `url` (with `headers` for any auth token). Grok Bot only supports remote http/sse MCP servers (executed on the backend); local/stdio servers are not supported. Ask the user for the exact endpoint and any secrets rather than guessing; if you only have a link, open it first (WebFetch) to find the connection details. Newly added tools become available to you on your next message.", parameters: addMcpServerParameters,
       describeActivity: (args: z.infer<typeof addMcpServerParameters>) => ({ detail: args.name }),
       execute: guardMutation(async (_ctx, args: z.infer<typeof addMcpServerParameters>, deps) => {
         const error = validateRemoteMcpUrl(args.url);
@@ -367,7 +398,7 @@ export function createMcpManagementTools(
       }),
     }),
     defineCommunicateTool(management, {
-      id: "UNINSTALL_PLUGIN", name: "UninstallPlugin", description: "Uninstall a plugin by its STABLE plugin id (from SearchPlugins). This is destructive and removes the WHOLE PLUGIN — its install record and EVERY connector and skill it added — so confirm with the user via a question widget first, and your confirmation must disclose that full scope (list what goes). Plugins required by the user's team cannot be uninstalled." + (multiAccount ? " This removes each of its servers with ALL of their accounts; to remove just one account from a server, use RemoveMcpAccount instead." : ""), parameters: getPluginParameters,
+      id: "UNINSTALL_PLUGIN", name: "UninstallPlugin", description: "Uninstall a Marketplace plugin by its STABLE plugin id (from SearchPlugins): it removes the connector's entry and reloads the MCP servers, so every tool that plugin provided goes away. Destructive — confirm with the user via a question widget first, and your confirmation must disclose that full scope (list what goes). Any credential the user stored for it is deliberately LEFT in place, so re-adding the plugin does not need a fresh key; tell them that, and that clearing it is a separate action on the plugin's page." + (multiAccount ? " This removes each of its servers with ALL of their accounts; to remove just one account from a server, use RemoveMcpAccount instead." : ""), parameters: getPluginParameters,
       execute: guardMutation(async (_ctx, args: z.infer<typeof getPluginParameters>, deps) => {
         const detail = await deps.getPlugin(args.plugin_id);
         if (detail == null) return `No plugin with id "${args.plugin_id}".`;
