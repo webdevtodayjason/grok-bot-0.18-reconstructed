@@ -292,10 +292,7 @@ export class SandMcpManager {
   }
   async addServer(request: any) {
     const name = this.validateInstallableName(request.name),
-      config = parseServerConfig(
-        request.configJson,
-        this.options.parseServerConfig,
-      );
+      config = parseServerConfig(request.configJson);
     await this.addServersToAccount({ [name]: config });
     return this.reloadServers();
   }

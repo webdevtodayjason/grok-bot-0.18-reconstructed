@@ -341,6 +341,7 @@ export function createMcpManagementTools(
     }),
     defineCommunicateTool(management, {
       id: "ADD_MCP_SERVER", name: "AddMcpServer", description: "Add a remote MCP server that isn't in the catalog to the user's Cursor account — use this when the user gives you a link for a server that SearchPlugins doesn't know. Only call this after the user agrees to add it — confirm with a question widget first, since it changes the user's account configuration and the server can reach external services on their behalf. Provide the remote server's `url` (with `headers` for any auth token). Grok Bot only supports remote http/sse MCP servers (executed on the backend); local/stdio servers are not supported. Ask the user for the exact endpoint and any secrets rather than guessing; if you only have a link, open it first (WebFetch) to find the connection details. Newly added tools become available to you on your next message.", parameters: addMcpServerParameters,
+      describeActivity: (args: z.infer<typeof addMcpServerParameters>) => ({ detail: args.name }),
       execute: guardMutation(async (_ctx, args: z.infer<typeof addMcpServerParameters>, deps) => {
         const error = validateRemoteMcpUrl(args.url);
         if (error != null) return error;

@@ -15,9 +15,13 @@
 // Integration check, not a unit test: needs the box up. Only step (b)'s GetMcpTools leg spends a
 // model turn; everything else drives the gateway directly.
 //
+//   CONNECT-1  the model's AddMcpServer tool runs its body instead of dying in config parsing.
+//              Off by default because it spends a second model turn: --model-tool turns it on.
+//
 //   node scripts/verify-connector-plane.mjs            all of it
 //   node scripts/verify-connector-plane.mjs --no-restart   skip the docker restart in (a)
 //   node scripts/verify-connector-plane.mjs --no-model     skip the one model turn in (b)
+//   node scripts/verify-connector-plane.mjs --model-tool   add (f), the AddMcpServer turn
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -30,6 +34,8 @@ const PROBE_SCRIPT = "/workspace/mcp-env-probe.mjs";
 const PROBE_FIELD = "PROBE_SECRET";
 const SKIP_RESTART = process.argv.includes("--no-restart");
 const SKIP_MODEL = process.argv.includes("--no-model");
+const MODEL_TOOL = process.argv.includes("--model-tool");
+const PROBE_PREFIX = "probe-u3";
 const TURN_TIMEOUT_MS = 300_000;
 
 class VerificationFailed extends Error {}
@@ -95,6 +101,37 @@ else if(m.id!==undefined)send({jsonrpc:"2.0",id:m.id,result:{}});}});
 `;
 
 const readConnectorsJson = async () => JSON.parse(await inBox(`cat ${CONNECTORS}`));
+// Byte-exact, because (f) promises to put the file back exactly as it found it and a JSON
+// round-trip is not that: it loses key order, trailing newline and indentation.
+const readConnectorsBase64 = async () => (await inBox(`base64 < ${CONNECTORS} | tr -d '\\n'`)).trim();
+const restoreConnectorsBase64 = async (encoded) => {
+  await docker(["exec", BOX, "node", "-e",
+    `require('fs').writeFileSync(${JSON.stringify(CONNECTORS)},Buffer.from(${JSON.stringify(encoded)},'base64'),{mode:0o600})`]);
+};
+// The action ledger is the only surface that carries a tool's NAME next to its result: the
+// conversation outline keeps the completed row, and a completed row has lost which tool it was.
+const auditRecords = async (agentId) => {
+  const raw = await inBox(`cat ${DATA}/agents/${agentId}/audit.jsonl 2>/dev/null || true`);
+  return raw.split("\n").flatMap((line) => { try { return line.trim() ? [JSON.parse(line)] : []; } catch { return []; } });
+};
+const toolResults = async (agentId, toolName) =>
+  (await auditRecords(agentId)).filter((record) => record.type === "tool_result" && record.tool === toolName);
+
+// A turn is over when the agent has been seen running and has stopped. Waiting only for "not
+// running" would return the instant the prompt is posted, before the run has even started.
+const runTurn = async (agentId, prompt, timeoutMs) => {
+  await call("sendPrompt", { agentId, prompt });
+  const deadline = Date.now() + timeoutMs;
+  let seenRunning = false;
+  const startBy = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    await sleep(5000);
+    const running = (await call("listAgents")).find((agent) => agent.id === agentId)?.isRunning === true;
+    if (running) { seenRunning = true; continue; }
+    if (seenRunning || Date.now() > startBy) return true;
+  }
+  return false;
+};
 const writeConnectorsJson = async (value) => {
   await docker(["exec", BOX, "node", "-e",
     `require('fs').writeFileSync(${JSON.stringify(CONNECTORS)},${JSON.stringify(JSON.stringify(value, null, 2))},{mode:0o600})`]);
@@ -129,6 +166,8 @@ let probeSecretSet = false;
 let probeInstalled = false;
 let probeAgentId = null;
 let originalConnectors = null;
+let modelToolAgentId = null;
+let connectorsSnapshot = null;
 
 try {
   console.log(`gateway ${GATEWAY}  box ${BOX}`);
@@ -328,6 +367,69 @@ try {
   if (!/agent id/i.test(refused.message)) fail(`disconnectChannel failed for the wrong reason: ${refused.message}`);
   ok(`refused: ${refused.message.split("->").at(-1).trim()}`);
 
+  // ------------------------------------------- (f) CONNECT-1 the AddMcpServer tool runs its body
+  // AddMcpServer used to die on "parse7 is not a function": the manager asked its caller for a
+  // config validator and no caller ever supplied one, so the tool never reached the account at
+  // all. The tool takes a REMOTE url and nothing else -- stdio connectors are the operator's
+  // connectors.json, not this tool -- so the probe is a remote endpoint and the claim is that the
+  // tool executes its own body and gets as far as the account write.
+  if (!MODEL_TOOL) console.log("\n(f) CONNECT-1 — the AddMcpServer turn is skipped (pass --model-tool)");
+  else {
+    console.log("\n(f) CONNECT-1 — the model's AddMcpServer tool runs its body");
+    connectorsSnapshot = await readConnectorsBase64();
+    const probeName = `${PROBE_PREFIX}-${Math.random().toString(36).slice(2, 8)}`;
+    const created = await call("createAgent", { name: `verify-cp-connect-${probeName}` });
+    modelToolAgentId = created?.agent?.id ?? created?.id;
+    if (modelToolAgentId == null) fail("createAgent returned no agent id for the AddMcpServer probe");
+
+    // Two attempts, the tool named outright both times. A model that still will not call it is a
+    // real result about the model, and this gate exists to prove the tool, so it fails.
+    const prompts = [
+      `Call the AddMcpServer tool exactly once with name "${probeName}" and url "https://mcp.deepwiki.com/mcp". I have already agreed to this; do not ask me to confirm. When the tool returns, reply with its exact output text and nothing else.`,
+      `You did not call it. Call the tool named AddMcpServer now — that exact tool — with name "${probeName}" and url "https://mcp.deepwiki.com/mcp". Do not ask any question first. Then reply with the tool's exact output text.`,
+    ];
+    let results = [];
+    for (const prompt of prompts) {
+      if (!await runTurn(modelToolAgentId, prompt, TURN_TIMEOUT_MS)) fail("the AddMcpServer probe turn never settled");
+      results = await toolResults(modelToolAgentId, "AddMcpServer");
+      if (results.length > 0) break;
+      console.log("  --  no AddMcpServer call in that attempt; asking once more");
+    }
+    if (results.length === 0) fail("the model would not call AddMcpServer in two attempts, so the tool is unproven");
+    const head = String(results.at(-1).head ?? "");
+    console.log(`  AddMcpServer returned: ${head.replace(/\s+/g, " ").slice(0, 240)}`);
+    if (/is not a function|TypeError/.test(head)) fail(`AddMcpServer died before its body ran: ${head.slice(0, 200)}`);
+    ok("AddMcpServer ran and returned something that is not a TypeError");
+
+    if (new RegExp(`Added "${probeName}"`).test(head)) {
+      const installed = (await call("listInstalledMcpServers")).find((server) =>
+        server.serverIdentifier === probeName || server.name === probeName);
+      if (installed == null) fail(`AddMcpServer reported success but ${probeName} is not in listInstalledMcpServers`);
+      ok(`listInstalledMcpServers shows ${probeName} id=${installed.id}`);
+      const added = await waitForServerTools(String(installed.id), 120_000);
+      if (!Array.isArray(added) || added.length === 0) fail(`listMcpServerTools lists no tools for ${probeName}`);
+      ok(`listMcpServerTools lists ${added.length} tool(s) for ${probeName}`);
+      if (!await runTurn(modelToolAgentId,
+        `Call the UninstallMcpServer tool once for server_id "${installed.id}". I have already agreed; do not ask me to confirm.`,
+        TURN_TIMEOUT_MS)) fail("the UninstallMcpServer turn never settled");
+      const removals = await toolResults(modelToolAgentId, "UninstallMcpServer");
+      if (removals.length === 0) fail("the model would not call UninstallMcpServer, so the probe server is still installed");
+      if ((await call("listInstalledMcpServers")).some((server) => server.serverIdentifier === probeName || server.name === probeName)) {
+        fail(`${probeName} survived UninstallMcpServer`);
+      }
+      ok(`${probeName} is gone from listInstalledMcpServers`);
+    } else if (/inference credential|signed-in Cursor account|Managing MCP servers requires/.test(head)) {
+      // The write lands on the Cursor account, not on this machine. On a box with no account the
+      // tool can only get this far, and getting this far IS the thing CONNECT-1 broke.
+      ok("AddMcpServer reached the account write and stopped there: this box has no signed-in account");
+    } else {
+      fail(`AddMcpServer failed for an unrecognised reason: ${head.slice(0, 300)}`);
+    }
+
+    if (await readConnectorsBase64() !== connectorsSnapshot) fail("the AddMcpServer turn changed connectors.json");
+    ok("connectors.json is byte-identical: the account tool did not touch the local connector plane");
+  }
+
   console.log("\nPASS — connector plane");
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
@@ -350,4 +452,13 @@ try {
   try {
     if (probeAgentId != null) await call("deleteAgent", { id: probeAgentId });
   } catch (error) { console.error(`cleanup: probe agent — ${error.message}`); }
+  try {
+    if (connectorsSnapshot != null && await readConnectorsBase64() !== connectorsSnapshot) {
+      await restoreConnectorsBase64(connectorsSnapshot);
+      await callRaw("refreshMcp", {});
+    }
+  } catch (error) { console.error(`cleanup: connectors.json snapshot — ${error.message}`); }
+  try {
+    if (modelToolAgentId != null) await call("deleteAgent", { id: modelToolAgentId });
+  } catch (error) { console.error(`cleanup: AddMcpServer probe agent — ${error.message}`); }
 }
