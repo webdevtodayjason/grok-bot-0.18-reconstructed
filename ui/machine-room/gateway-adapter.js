@@ -363,7 +363,10 @@
         statusText: agent.awaitingUserResponse ? "Waiting on you" : "The last turn failed",
       };
     }
-    return { status: "ready", statusText: agent.description || "Ready for the next task" };
+    // The description is what the agent is for; it lives on the profile and the details panel. As
+    // the idle status line it ran the whole persona across the sidebar card, the header and the
+    // status pill (MR-28), so the status line says the state and nothing else.
+    return { status: "ready", statusText: "Ready for the next task" };
   }
 
   // The automation record carries triggerDescription, schedule, isEnabled, lastRunAt and a runs[]
@@ -1158,10 +1161,24 @@
       await reloadRosterInner();
       if (rosterSig() !== before) rosterChanged = true;
     }
+    // An agent the list did not hold a moment ago (one the operator or another agent minted, on
+    // any surface) or one that is gone. The per-field update below only touches records it already
+    // has, so membership used to reach the count and never the sidebar until a browser reload.
+    // hydrate rebuilds the roster the way first load and duplicateAgent do, keeping the active
+    // and open contexts, so the stream event that announced the agent is what draws its card.
+    const membershipMoved = (agents) => {
+      // An empty answer is what a host gives while its roster is still loading; it is not a
+      // roster with nobody on it, and blanking the sidebar on it would be worse than a stale card.
+      if (agents.length === 0) return false;
+      const seen = new Set(agents.map((a) => a.id));
+      const held = [...state.workers, ...state.rooms].map((x) => x.id);
+      return held.length !== seen.size || held.some((id) => !seen.has(id));
+    };
     async function reloadRosterInner() {
       const [agents, count] = await Promise.all([call("listAgents").catch(() => null), call("countAgents").catch(() => null)]);
       if (Number.isFinite(Number(count)) && count !== null) state.agentCount = Number(count);
       if (!agents) return;
+      if (membershipMoved(agents)) { state = await hydrate(state); rosterChanged = true; return; }
       for (const a of agents) {
         const target = (a.isGroup ? state.rooms : state.workers).find((x) => x.id === a.id);
         if (!target) continue;

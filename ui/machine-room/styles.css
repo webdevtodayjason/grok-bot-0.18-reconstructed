@@ -366,6 +366,7 @@ select:focus-visible {
 }
 
 .worker-card {
+  overflow: hidden;
   position: relative;
   display: grid;
   grid-template-columns: 45px minmax(0, 1fr) 22px;
@@ -452,11 +453,42 @@ select:focus-visible {
 }
 
 .worker-status {
+  /* A span cannot clip; the line ran past the card's edge until it was a block (MR-28). */
+  display: block;
   overflow: hidden;
   color: var(--text-secondary);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The conversation header's second line: status, never a persona, and never wider than the head. */
+#room-subtitle {
+  display: block;
+  max-width: min(60vw, 720px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* MR-29: every agent gets its own ring colour from its id (the same accent rooms already carry),
+   and the avatar breathes while the agent is alive, faster while it is working. Motion is off for
+   anyone who asked the OS for less of it. */
+.worker-avatar,
+.context-profile-avatar,
+.participant-avatar {
+  border: 2px solid var(--accent, rgba(255, 255, 255, 0.46));
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #8b69ea) 55%, transparent);
+  animation: avatar-breathe 4.2s ease-in-out infinite;
+}
+.worker-card[data-status="working"] .worker-avatar { animation-duration: 1.4s; }
+.worker-card[data-status="attention"] .worker-avatar { animation: none; border-color: var(--warning, #e7a23c); }
+@keyframes avatar-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #8b69ea) 55%, transparent); transform: scale(1); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent, #8b69ea) 0%, transparent); transform: scale(1.04); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .worker-avatar, .context-profile-avatar, .participant-avatar { animation: none; }
 }
 
 .status-dot {
@@ -1540,6 +1572,12 @@ dialog[open] {
   justify-content: space-between;
   gap: 14px;
 }
+/* MR-30: the label column keeps its width when the control beside it is an input and a button;
+   it used to collapse to one word per line. The control clips before the label does. */
+.setting-row > div:first-child { flex: 1 1 0; min-width: 200px; }
+.setting-row > .field { flex: 0 1 380px; max-width: 60%; min-width: 0; }
+.setting-row > .field input, .setting-row > .field textarea { width: 100%; min-width: 0; }
+.status-pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .panel-card-icon,
 .plugin-icon {

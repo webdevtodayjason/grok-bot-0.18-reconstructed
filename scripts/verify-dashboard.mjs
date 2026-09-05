@@ -546,6 +546,41 @@ try {
 
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     check(await page.evaluate(() => window.__machineRoomLive === true), "the page is on the live gateway, not the demo adapter", await page.evaluate(() => window.__machineRoomError ?? ""));
+
+    // -- MR-28/29/30 and the real-time roster. An agent minted on any surface after the page loaded
+    // (Titan minted "Scribe" from a turn) has to reach the sidebar from the host's own event stream,
+    // not from a browser reload; its long description stays out of the status line, the header and
+    // the pill; and nothing in the sidebar runs past its card.
+    {
+      const LONG = "Online course note-taker and study-material builder. Captures and organizes notes from the user's online courses while access is still active, preserving structure: modules, lessons, key concepts, definitions, formulas, and examples. Then turns the material into study aids.";
+      const liveName = `Roster probe ${Date.now()}`;
+      const made = await gw("createAgent", { name: liveName, description: LONG }).catch(() => null);
+      const liveId = made?.agent?.id ?? made?.id ?? null;
+      check(liveId != null, "an agent can be minted after the page loaded (the Scribe case)");
+      if (liveId != null) {
+        try {
+          const card = await until(() => page.evaluate((id) => {
+            const el = document.querySelector(`.worker-card[data-context-id="${id}"]`);
+            if (!el) return null;
+            const status = el.querySelector(".worker-status");
+            return { status: status?.textContent?.trim() ?? "", overflow: status ? status.scrollWidth > status.clientWidth + 1 : null, cardOverflow: el.scrollWidth > el.clientWidth + 1 };
+          }, liveId), 20_000, 500);
+          check(card != null, "the minted agent reaches the sidebar with no reload (stream, then heartbeat)", card == null ? "no card within 20s" : "card drawn");
+          if (card != null) {
+            check(card.status === "Ready for the next task", "its status line says its state, not its description", JSON.stringify(card.status.slice(0, 60)));
+            check(card.overflow === false && card.cardOverflow === false, "and nothing on the card runs past its edge", JSON.stringify(card));
+          }
+          const header = await page.evaluate(() => { const el = document.getElementById("room-subtitle"); return el ? { text: el.textContent.trim(), overflow: el.scrollWidth > el.clientWidth + 1 } : null; });
+          check(header != null && header.overflow === false, "the conversation header's second line fits its box", JSON.stringify(header));
+          const rings = await page.evaluate(() => Array.from(document.querySelectorAll(".worker-card")).map((el) => ({ accent: getComputedStyle(el).getPropertyValue("--accent").trim(), border: getComputedStyle(el.querySelector(".worker-avatar")).borderTopColor, animation: getComputedStyle(el.querySelector(".worker-avatar")).animationName })));
+          check(rings.length > 0 && rings.every((r) => r.accent && r.animation && r.animation !== "none"), "every avatar carries its agent's accent and breathes", JSON.stringify(rings.slice(0, 3)));
+        } finally {
+          await gw("deleteAgents", { ids: [liveId] }).catch((e) => console.log(`  INFO  roster probe NOT deleted: ${e.message}`));
+        }
+        const gone = await until(() => page.evaluate((id) => document.querySelector(`.worker-card[data-context-id="${id}"]`) == null ? true : null, liveId), 20_000, 500);
+        check(gone === true, "and a deleted agent leaves the sidebar with no reload", gone === true ? "card gone" : "card still drawn after 20s");
+      }
+    }
     // GW-14: the gate is consulted once, at boot, before anything below clears the call log.
     const consultedSearch = callsTo("isGlobalSearchEnabled") >= 1;
     const searchEnabled = await gw("isGlobalSearchEnabled").catch(() => null);
