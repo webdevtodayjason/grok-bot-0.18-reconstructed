@@ -26,7 +26,10 @@ anything — that rule exists because the TinyFish OAuth entry declared a direct
 offered it, and a pasted API key went into it (CONNECT-4). The host is the authority on that
 distinction: `listConnectorSecretFields` answers `fields` (the union of what is stored and what the
 entry leaves empty) and `stored` (the names the 0600 store actually holds), and the card may only
-say the host holds a value from the second list.
+say the host holds a value from the second list. That same 0600 file carries a second top-level
+`shell` section for command-line tools that have no `connectors.json` entry to hang an empty env key
+on, whose values are merged into the environment of the box shell the agent runs commands in rather
+than into any connector process, and those tools sit under **Shell tools** in the same panel.
 
 The operator's route is Global capabilities → **Plugins, connectors & skills** → **Add or remove a
 connector**. The preset row at the top of that card is a row of buttons, one per service; clicking
@@ -55,7 +58,7 @@ takes it out of the store and the field stays on the card as an empty one to fil
 
 ## GitHub
 
-**Preset.** Click the GitHub preset. It fills:
+**Preset.** Click **GitHub (PAT, read-only)**. It fills:
 
 | field | filled with |
 | --- | --- |
@@ -106,7 +109,7 @@ Full report: [docs/connectors/github.md](connectors/github.md).
 
 ## Slack
 
-**Preset.** Click the Slack preset. It fills:
+**Preset.** Click **Slack (user token)**. It fills:
 
 | field | filled with |
 | --- | --- |
@@ -154,7 +157,7 @@ Full report: [docs/connectors/slack.md](connectors/slack.md).
 
 ## Linear
 
-**Preset.** Click the Linear preset. It fills:
+**Preset.** Click **Linear (API key)**. It fills:
 
 | field | filled with |
 | --- | --- |
@@ -203,7 +206,7 @@ Full report: [docs/connectors/linear.md](connectors/linear.md).
 
 ## Google Workspace
 
-**Preset.** Click the Google Workspace preset. It fills:
+**Preset.** Click **Google Workspace (OAuth refresh token)**. It fills:
 
 | field | filled with |
 | --- | --- |
@@ -318,21 +321,26 @@ recipe, the measured R750 install and what the probe left behind on the Mac's bo
 
 **No preset, and no entry in `connectors.json`.** CodeRabbit ships no MCP server — it is an MCP
 *client*, consuming other people's servers during a PR review — so there is nothing for the host to
-spawn and nothing will ever appear in `tools/list`. The integration is the official CLI, run as a
-shell tool with a secret, which is the CONNECT-10 shape in `docs/GAP-ANALYSIS.md` (the same shape as
-CONNECT-5 for the TinyFish CLI): an install, a credential card, and the agent's shell inheriting the
-key. Every unofficial CodeRabbit MCP package on npm was rejected in the report as unofficial,
-inactive, archived, or a security holding stub.
+spawn and nothing will ever appear in `tools/list`. The integration is the official CLI, installed
+and keyed from the console's **Shell tools** group — the same shape as the TinyFish CLI: an install,
+a credential card, and the agent's shell inheriting the key. Every unofficial CodeRabbit MCP package
+on npm was rejected in the report as unofficial, inactive, archived, or a security holding stub.
 
-Install it headless on the box — it needs `curl` and `unzip`, and defaults to `~/.local/bin`:
+**Install it from the console.** Global capabilities → **Plugins, connectors & skills** → **Shell
+tools** → **CodeRabbit CLI** → **Install in the box**. That button runs
 
 ```bash
 CI=1 curl -fsSL https://cli.coderabbit.ai/install.sh | sh
 ```
 
-`CI=1` skips the post-install browser prompt. Reviews then run as
+in the box as user `box`, capped at five minutes, and shows the tail of its output on the card; the
+installer wants `curl` and `unzip` and defaults to `~/.local/bin`, and `CI=1` skips the post-install
+browser prompt. Then paste the Agentic key into that same card's `CODERABBIT_API_KEY` field: the
+host puts it in the `shell` section of the 0600 store and merges it into the environment of the box
+shell the agent runs commands in. Reviews then run as
 `cr review --agent --api-key "$CODERABBIT_API_KEY"` (add `--region eu` for EU accounts, which is
-only accepted alongside `--api-key`). Pass the key on every run: box storage is ephemeral.
+only accepted alongside `--api-key`). The key is passed on every run rather than left with the CLI:
+box storage is ephemeral.
 
 **The credential.** An **Agentic API key** — CodeRabbit's docs show the prefix as `cr-…` — created
 at <https://app.coderabbit.ai/settings/api-keys> (EU:
