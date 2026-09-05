@@ -19,10 +19,7 @@ import {
   createMcpToolsDiscovery,
   SandMcpExecutor,
 } from "../../../shared/node/mcp/tools-discovery.js";
-import {
-  isEffectivePluginInstalled,
-  uninstallClearedInstallRecord,
-} from "../../../shared/mcp.js";
+import { isEffectivePluginInstalled } from "../../../shared/mcp.js";
 import type { CapableBox } from "../../box/box-capabilities.js";
 import { createSandMcpStateExecutor } from "../../ports/mcp-state-executor.js";
 import { createBoxSandMcpExec } from "./box-mcp-exec.js";
@@ -33,6 +30,12 @@ import {
   mergeLocalConnectors,
   readLocalConnectorFile,
 } from "./local-connectors.js";
+import {
+  getMarketplacePluginDetail,
+  installMarketplacePlugin,
+  listMarketplacePluginSummaries,
+  uninstallMarketplacePlugin,
+} from "./marketplace-plugins.js";
 import {
   assertConnectorCredentialField,
   deleteConnectorEnvSecret,
@@ -131,18 +134,15 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
     ...(deps.onConnectorAuth === undefined ? {} : { onConnectorAuth: deps.onConnectorAuth }),
   });
   manager.setBoxRuntime(discovery);
-  const token = deps.getAccessToken ?? (async () => null);
   if (deps.onServerAuthenticated != null) manager.setAuthCompletionObserver(deps.onServerAuthenticated);
-  const readEffective = async (): Promise<EffectivePlugin[] | null> => { try { return await manager.listEffectivePlugins(); } catch (error) { log(`effective-plugins read degraded to attributed rows: ${error instanceof Error ? error.message : String(error)}`); return null; } };
   const mutate = async <T>(fn: () => Promise<T>): Promise<T> => { const result = await fn(); deps.onServersMutated?.(); return result; };
-  // CP-05. `getCatalog` rethrows when the Cursor marketplace read fails, and on this box it always
-  // fails: there is no usable Cursor account. That threw straight out of SearchPlugins at the
-  // model. A catalog nobody can reach is an empty catalog with a logged reason, not an exception.
-  const readCatalog = async (options?: { forceRefresh?: boolean }): Promise<CatalogPlugin[]> => {
-    try { return await manager.getCatalog(token, options); }
-    catch (error) { log(`plugin catalog unavailable on this box: ${error instanceof Error ? error.message : String(error)}`); return []; }
-  };
+  // CP-05 wrapped `getCatalog` because it rethrows when the Cursor marketplace read fails, and on
+  // this box it always fails: there is no usable Cursor account, so SearchPlugins could only ever
+  // say "the plugin catalog is empty or unavailable right now". MARKET-1 removes the read instead
+  // of softening it -- the plugin surface is the local Marketplace catalog (marketplace-plugins.ts,
+  // source/shared/marketplace/catalog.ts), which is on the box and cannot be unreachable.
   const localConnectorRoot = () => getSandRootDir();
+  const marketplaceReader = { rootDir: localConnectorRoot };
   /**
    * Accepts either the human connector name or the numeric id CP-07 mints for it. `caller` names
    * the command in the error, because three commands share this and being told to fix the
@@ -191,7 +191,10 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
   };
   const management = {
     listInstalled: async () => toInstalledServers(await manager.listServers()),
-    listPlugins: async () => { const [views, state, effective] = await Promise.all([readCatalog(), manager.listServers(), readEffective()]); return views.map((view) => toPluginSummary(view, effective, state.servers)); },
+    // MARKET-1. The plugin surface is the local Marketplace catalog, not Cursor's marketplace:
+    // `readCatalog` still exists for the Cursor-attributed servers below, but nothing the agent
+    // searches, installs or uninstalls goes through it any more. See marketplace-plugins.ts.
+    listPlugins: async () => listMarketplacePluginSummaries(marketplaceReader),
     listServerTools: async (serverId: string) => (await manager.listServerTools(serverId)).map((tool) => ({ ...tool, enabled: tool.isDisabled !== true })),
     /**
      * CP-08. The shared method is a pure toggle; the gateway command carries a desired state, so
@@ -251,24 +254,32 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
       // answer carries no such list: its `stored` is the boolean that says the write landed.)
       return { server: name, serverId: id, field: args.field, removed, restarted, fields: listConnectorCredentialFields(localConnectorRoot(), name), stored: listConnectorEnvSecretFields(localConnectorRoot(), name) };
     },
-    getPlugin: async (pluginId: string) => {
-      let views = await readCatalog(), view = views.find((entry) => entry.id === pluginId);
-      if (view == null) { views = await readCatalog({ forceRefresh: true }); view = views.find((entry) => entry.id === pluginId); }
-      if (view == null) return null;
-      const [state, effective] = await Promise.all([manager.listServers(), readEffective()]);
-      return { ...toPluginSummary(view, effective, state.servers), fields: toCatalogFields(view.fields), servers: state.servers.filter((server) => server.pluginId === view.id).map(toInstalledServer) };
-    },
+    getPlugin: async (pluginId: string) =>
+      getMarketplacePluginDetail(marketplaceReader, pluginId, toInstalledServers(await manager.listServers())),
+    /**
+     * Removing the entry from connectors.json is the whole uninstall; the reload is what stops the
+     * process. The 0600 secret store is left alone deliberately -- clearing a credential is its own
+     * console action (`deleteConnectorSecret`), so an uninstall never silently destroys a key the
+     * operator would have to mint again.
+     */
     uninstallPlugin: async (pluginId: string) => {
-      let urls: string[] = []; try { urls = (await readCatalog()).find((view) => view.id === pluginId)?.skills?.flatMap((skill) => skill.sourceUrl == null ? [] : [skill.sourceUrl]) ?? []; } catch {}
-      const result = await mutate(() => manager.uninstallPlugin(pluginId));
-      if (uninstallClearedInstallRecord(result)) { try { deps.pluginSkills?.removeLiveReferences?.(urls); } catch {} syncPluginSkillsInBackground(deps.pluginSkills, "uninstall"); }
-      return { removed: result.removed, ...(result.reason == null ? {} : { reason: result.reason }) };
+      const outcome = uninstallMarketplacePlugin(marketplaceReader, pluginId);
+      if (outcome == null) return { removed: false, reason: `no marketplace plugin "${pluginId}"` };
+      if (outcome.removed) await mutate(() => manager.reloadServers());
+      return { removed: outcome.removed, ...(outcome.reason == null ? {} : { reason: outcome.reason }), storedFields: outcome.storedFields };
     },
     setInstructions: async (args: { serverId: string; instructions: string }) => toInstalledServers(await mutate(() => manager.setServerCustomInstructions(args))),
+    /**
+     * `values` is accepted and ignored on purpose: a credential typed into a conversation is in the
+     * transcript, the model's context and whatever window that was compacted into, so the model
+     * cannot set a key here. The answer names the fields the operator has to fill on the plugin
+     * page instead.
+     */
     install: async (args: { id: string; values?: Record<string, string> }) => {
-      const servers = toInstalledServers(await mutate(() => manager.installEntry({ entryId: args.id, ...(args.values == null ? {} : { values: args.values }) }, token)));
-      try { const urls = (await readCatalog()).find((view) => view.id === args.id)?.skills?.flatMap((skill) => skill.sourceUrl == null ? [] : [skill.sourceUrl]) ?? []; deps.pluginSkills?.removeLiveReferences?.(urls); } catch {}
-      syncPluginSkillsInBackground(deps.pluginSkills, "install"); return servers;
+      const outcome = installMarketplacePlugin(marketplaceReader, args.id);
+      if (outcome == null) throw new Error(`no marketplace plugin "${args.id}"`);
+      if (outcome.installed && outcome.refused == null) await mutate(() => manager.reloadServers());
+      return outcome;
     },
     add: async (args: { name: string; configJson: string }) => toInstalledServers(await mutate(() => manager.addServer(args))),
     removeServer: async (serverId: string) => { const result = await mutate(() => manager.removeServer(serverId)); return { removed: result.removed, ...(result.reason == null ? {} : { reason: result.reason }), servers: toInstalledServers(result.state) }; },

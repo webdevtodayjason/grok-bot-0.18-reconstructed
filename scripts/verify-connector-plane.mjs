@@ -53,7 +53,16 @@
 //   node scripts/verify-connector-plane.mjs --slack-stdio     add (k), Slack's package and token
 //   node scripts/verify-connector-plane.mjs --google-stdio    add (l), Google's package and tokens
 //   node scripts/verify-connector-plane.mjs --shell-secrets   add (m), the shell-tool credential
-//              (h) through (m) imply --no-restart and --no-model so each arm fits the 280 s budget
+//   node scripts/verify-connector-plane.mjs --plugin-tools    add (n), the agent's plugin tools
+//              (h) through (n) imply --no-restart and --no-model so each arm fits its budget
+//
+//   PLUGINTOOLS-1  the agent's four plugin tools against the Marketplace catalog. SearchPlugins,
+//              GetPlugin, InstallPlugin and UninstallPlugin used to resolve against Cursor's
+//              marketplace, which on this box always answered nothing. This arm asks a probe agent
+//              to drive all four in one turn -- that is the only door InstallPlugin has -- and
+//              holds the box's connectors.json to what actually happened: the entry appears, then
+//              it is gone and the file is byte-identical to what the arm found. Off by default:
+//              --plugin-tools. It runs one model turn and needs ~450 s.
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -73,6 +82,7 @@ const LINEAR_KEY = process.argv.includes("--linear-key");
 const SLACK_STDIO = process.argv.includes("--slack-stdio");
 const GOOGLE_STDIO = process.argv.includes("--google-stdio");
 const SHELL_SECRETS = process.argv.includes("--shell-secrets");
+const PLUGIN_TOOLS = process.argv.includes("--plugin-tools");
 // (h) spends a minute of its own on two deliberate 30 s windows, so on top of the docker restart
 // in (a) and the model turn in (b) it does not fit the 280 s these gates are run under. The
 // contract names the arm `--tinyfish-key` with no other flags, so the flag carries the two skips.
@@ -83,6 +93,8 @@ const CREDENTIAL_ARM = [
   ["--tinyfish-key", TINYFISH_KEY], ["--github-key", GITHUB_KEY], ["--linear-key", LINEAR_KEY],
   ["--slack-stdio", SLACK_STDIO], ["--google-stdio", GOOGLE_STDIO],
   ["--shell-secrets", SHELL_SECRETS],
+  // (n) runs a model turn of its own, so it skips (b)'s for exactly the same budget reason.
+  ["--plugin-tools", PLUGIN_TOOLS],
 ].find(([, on]) => on)?.[0];
 const SKIP_RESTART = NO_RESTART || CREDENTIAL_ARM != null;
 const SKIP_MODEL = NO_MODEL || CREDENTIAL_ARM != null;
@@ -694,6 +706,26 @@ async function runStdioTokenArm(arm) {
 let shellSecretSet = false;
 let shellStoreSnapshot = null;
 let shellStoreSnapshotTaken = false;
+// PLUGINTOOLS-1 (n). Its own snapshot and its own probe agent, unwound before every earlier arm's
+// for the same reason (m) is: the newest write is the one that has to be undone first.
+let pluginToolsSnapshot = null;
+let pluginToolsAgentId = null;
+
+// The finally block below is the whole cleanup, and a killed process never reaches it: these arms
+// run under `timeout`, which sends SIGTERM. Re-raising after the handler runs keeps the exit status
+// honest -- a gate killed by its own budget still reports as killed, it just leaves nothing behind.
+const restoreOnSignal = async (signal) => {
+  try {
+    if (pluginToolsSnapshot != null && await readConnectorsBase64() !== pluginToolsSnapshot) {
+      await restoreConnectorsBase64(pluginToolsSnapshot);
+      await callRaw("refreshMcp", {});
+    }
+    if (pluginToolsAgentId != null) await callRaw("deleteAgent", { id: pluginToolsAgentId });
+  } catch (error) { console.error(`cleanup on ${signal}: ${error.message}`); }
+  process.exit(signal === "SIGINT" ? 130 : 143);
+};
+process.once("SIGTERM", () => { void restoreOnSignal("SIGTERM"); });
+process.once("SIGINT", () => { void restoreOnSignal("SIGINT"); });
 
 try {
   console.log(`gateway ${GATEWAY}  box ${BOX}`);
@@ -1296,6 +1328,129 @@ try {
     ok(`the value is gone from ${DATA} and the store is byte-identical to the file this arm found; ${SHELL_FIELD} stays in the box shell as an empty name until the box restarts`);
   }
 
+  // ---------------------------------- (n) PLUGINTOOLS-1 the agent's four tools on the catalog
+  if (PLUGIN_TOOLS) {
+    console.log("\n(n) PLUGINTOOLS-1 — SearchPlugins, GetPlugin, InstallPlugin and UninstallPlugin on the Marketplace catalog");
+
+    // The catalog through the gateway first, because it is what the console reads and what the
+    // four tools resolve against. A read, so it can never leave anything behind.
+    const marketplace = await call("listMarketplace");
+    const plugins = marketplace?.plugins ?? [];
+    const bots = marketplace?.bots ?? [];
+    if (!Array.isArray(plugins) || plugins.length === 0) fail("listMarketplace returned no plugins");
+    if (!Array.isArray(bots) || bots.length === 0) fail("listMarketplace returned no bots");
+    if (!Array.isArray(marketplace?.categories?.plugins) || !Array.isArray(marketplace?.categories?.bots)) {
+      fail("listMarketplace returned no category lists");
+    }
+    ok(`listMarketplace: ${plugins.length} plugin(s), ${bots.length} bot(s), ${marketplace.categories.plugins.length}/${marketplace.categories.bots.length} categories`);
+
+    const item = await call("getMarketplaceItem", { kind: "plugin", id: TINYFISH_SERVER });
+    if (item?.id !== TINYFISH_SERVER) fail(`getMarketplaceItem answered ${JSON.stringify(item?.id)}`);
+    if (item?.install?.env?.[TINYFISH_FIELD] !== "") {
+      fail(`the ${TINYFISH_SERVER} entry does not leave ${TINYFISH_FIELD} empty, so the host would not read it as a credential`);
+    }
+    for (const [name, entry] of Object.entries(item.install.env)) {
+      if (entry !== "") fail(`the ${TINYFISH_SERVER} entry gives env ${name} a value; a catalog carries no values`);
+    }
+    ok(`getMarketplaceItem: ${item.name} (${item.kind}) declares ${TINYFISH_FIELD} empty and carries no value`);
+
+    const badKind = await callRaw("getMarketplaceItem", { kind: "provider", id: "anything" });
+    if (badKind.ok) fail("getMarketplaceItem accepted a kind that is not plugin or bot");
+    ok("getMarketplaceItem refuses a kind it does not serve");
+
+    // The plugin the model will install: the first connector in the catalog this box does NOT
+    // already have. Installing over a connector the operator configured would be this gate
+    // editing their box, and "byte-identical after" would then be a claim about the wrong file.
+    pluginToolsSnapshot = await readConnectorsBase64();
+    const installedNames = new Set(Object.keys((await readConnectorsJson()).mcpServers ?? {}));
+    const target = plugins.find((plugin) =>
+      plugin.kind === "connector" && plugin.install != null && plugin.connectorName != null
+      && !installedNames.has(plugin.connectorName));
+    if (target == null) fail("every connector in the catalog is already installed on this box; the install leg would prove nothing");
+    ok(`the install leg will use ${target.id} (connector "${target.connectorName}"), which this box does not have`);
+
+    const created = await call("createAgent", { name: `verify-plugins-${Math.random().toString(36).slice(2, 8)}` });
+    pluginToolsAgentId = created?.agent?.id ?? created?.id;
+    if (pluginToolsAgentId == null) fail("createAgent returned no agent id");
+
+    // Two turns rather than one: the install has to be checked against the box BEFORE the
+    // uninstall, or an install that no-opped and an uninstall that no-opped would leave the file
+    // byte-identical and prove nothing. The yes is given in the prompt because these tools ask for
+    // a confirmation widget before a mutation, and a widget would end the turn with nothing done.
+    const PLUGIN_TURN_MS = 170_000;
+    const NO_ASK = "This is a supervised verification run and I have already agreed to everything below, so do NOT send a question widget and do NOT ask me anything.";
+    if (!await runTurn(pluginToolsAgentId, [
+      NO_ASK,
+      "In this one turn, in this order:",
+      `1. Call SearchPlugins with the query "${target.name}".`,
+      `2. Call GetPlugin with the plugin id "${target.id}".`,
+      `3. Call InstallPlugin with the plugin id "${target.id}". Do not pass any values.`,
+      "Then reply with one short line naming the credential field GetPlugin listed. Call no other tool.",
+    ].join("\n"), PLUGIN_TURN_MS)) fail("the probe agent's install turn did not settle inside its budget");
+
+    // The action ledger is the only surface carrying a tool's NAME beside its answer, so it is what
+    // says which tool actually ran and what each one said.
+    const answers = {};
+    const readAnswers = async (names) => {
+      for (const name of names) {
+        const results = await toolResults(pluginToolsAgentId, name);
+        if (results.length === 0) fail(`the probe agent never called ${name}`);
+        answers[name] = String(results.at(-1).head ?? "");
+        console.log(`  ${name}: ${answers[name].replace(/\s+/g, " ").slice(0, 220)}`);
+      }
+    };
+    await readAnswers(["SearchPlugins", "GetPlugin", "InstallPlugin"]);
+    if (!new RegExp(`\\b${target.id}\\b`).test(answers.SearchPlugins)) {
+      fail(`SearchPlugins did not list ${target.id}; the catalog did not reach the model`);
+    }
+    if (/empty or unavailable/.test(answers.SearchPlugins)) fail("SearchPlugins still reports an unreachable catalog");
+    ok(`SearchPlugins lists the catalog and names ${target.id}`);
+
+    const field = Object.keys(target.credentialHints ?? {})[0];
+    if (field != null && !new RegExp(`\\b${field}\\b`).test(answers.GetPlugin)) {
+      fail(`GetPlugin did not name ${target.id}'s credential field ${field}`);
+    }
+    ok(`GetPlugin returns ${target.id}${field == null ? "" : ` with its field ${field}`}`);
+
+    // What the install actually did to the box, not what the model said about it. The entry has
+    // to have BEEN there: an install and an uninstall that both no-opped would leave the file
+    // byte-identical too, and would prove nothing at all.
+    if (!/Installed /.test(answers.InstallPlugin)) fail(`InstallPlugin did not report an install: ${answers.InstallPlugin.slice(0, 300)}`);
+    if (field != null && !new RegExp(`\\b${field}\\b`).test(answers.InstallPlugin)) {
+      fail(`InstallPlugin did not name the field the operator must fill (${field})`);
+    }
+    const writtenEntry = (await readConnectorsJson()).mcpServers?.[target.connectorName];
+    if (writtenEntry == null) fail(`InstallPlugin reported success but ${target.connectorName} is not in connectors.json`);
+    if (JSON.stringify(writtenEntry) !== JSON.stringify(target.install)) {
+      fail(`the entry written for ${target.connectorName} is not the catalog's entry`);
+    }
+    for (const [name, value] of Object.entries(writtenEntry.env ?? {})) {
+      if (value !== "") fail(`the written entry gives env ${name} a value; every credential must land empty`);
+    }
+    ok(`InstallPlugin wrote the catalog's entry for ${target.connectorName} with its credential field${field == null ? "" : ` ${field}`} empty`);
+
+    if (!await runTurn(pluginToolsAgentId,
+      `${NO_ASK}\nCall UninstallPlugin once with the plugin id "${target.id}", then reply with its exact output text. Call no other tool.`,
+      PLUGIN_TURN_MS)) fail("the probe agent's uninstall turn did not settle inside its budget");
+    await readAnswers(["UninstallPlugin"]);
+    if (!/Uninstalled /.test(answers.UninstallPlugin)) fail(`UninstallPlugin did not report a removal: ${answers.UninstallPlugin.slice(0, 300)}`);
+    if (Object.hasOwn((await readConnectorsJson()).mcpServers ?? {}, target.connectorName)) {
+      fail(`${target.connectorName} is still in connectors.json after UninstallPlugin`);
+    }
+    const afterPluginTools = await readConnectorsBase64();
+    if (afterPluginTools !== pluginToolsSnapshot) {
+      await restoreConnectorsBase64(pluginToolsSnapshot);
+      await callRaw("refreshMcp", {});
+      fail("connectors.json is not byte-identical to what this arm found; it has been put back");
+    }
+    pluginToolsSnapshot = null;
+    ok(`UninstallPlugin removed ${target.connectorName} and connectors.json is byte-identical to before the arm`);
+
+    await call("deleteAgent", { id: pluginToolsAgentId });
+    pluginToolsAgentId = null;
+    ok("the probe agent is deleted");
+  }
+
   console.log("\nPASS — connector plane");
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
@@ -1313,6 +1468,16 @@ try {
   // deleteConnectorSecret resolves the connector through.
   // CONNECT-5: (m) unwinds before (h) for the same reason (h) unwinds before (c) -- the later arm
   // took the later snapshot, so the later arm's restore has to be overwritten by nobody.
+  // PLUGINTOOLS-1: (n) is the newest arm and took the newest snapshot, so it unwinds before (m).
+  try {
+    if (pluginToolsSnapshot != null && await readConnectorsBase64() !== pluginToolsSnapshot) {
+      await restoreConnectorsBase64(pluginToolsSnapshot);
+      await callRaw("refreshMcp", {});
+    }
+  } catch (error) { console.error(`cleanup: plugin-tools connector entry — ${error.message}`); }
+  try {
+    if (pluginToolsAgentId != null) await callRaw("deleteAgent", { id: pluginToolsAgentId });
+  } catch (error) { console.error(`cleanup: plugin-tools probe agent — ${error.message}`); }
   try {
     if (shellSecretSet) await callRaw("deleteShellSecret", { field: SHELL_FIELD });
   } catch (error) { console.error(`cleanup: shell secret — ${error.message}`); }

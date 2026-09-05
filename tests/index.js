@@ -56,3 +56,4 @@ import "./self-talk-cap.test.mjs";
 import "./send-cap-per-turn.test.mjs";
 import "./tinyfish-key-stub.test.mjs";
 import "./shell-tools.test.mjs";
+import "./marketplace-catalog.test.mjs";

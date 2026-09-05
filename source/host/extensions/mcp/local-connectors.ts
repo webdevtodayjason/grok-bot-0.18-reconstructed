@@ -91,6 +91,62 @@ function parseServer(value: unknown): LocalServerConfig | null {
   };
 }
 
+/**
+ * The raw `mcpServers` map, unparsed and unfiltered -- what a WRITE has to start from.
+ *
+ * `readLocalConnectorFile` below normalises: it drops a disabled entry and rebuilds every config
+ * from the fields it knows. Writing that back would silently delete a disabled connector and any
+ * field a future MCP client adds, so an edit reads here instead and touches exactly one key.
+ */
+function readLocalConnectorDocument(rootDir: string): Record<string, unknown> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(join(rootDir, LOCAL_CONNECTORS_FILENAME), "utf8")); }
+  catch { return {}; }
+  return record(record(parsed)?.mcpServers) ?? {};
+}
+
+/**
+ * Writes the map back in the SAME bytes the relay's `POST /connectors` produces --
+ * `JSON.stringify({ mcpServers }, null, 2)` at 0600 -- because both doors edit one file and the
+ * connector gate asserts the file is byte-identical after an install is undone. A different
+ * indent, a trailing newline or a second top-level key here would make an undo look like an edit.
+ */
+function writeLocalConnectorDocument(rootDir: string, mcpServers: Record<string, unknown>): void {
+  writeFileSync(
+    join(rootDir, LOCAL_CONNECTORS_FILENAME),
+    JSON.stringify({ mcpServers }, null, 2),
+    { encoding: "utf8", mode: 0o600 },
+  );
+}
+
+/**
+ * Adds (or replaces) one connector entry. This is the host-side twin of the console's
+ * `POST /connectors`: same file, same bytes, same 0600. The caller reloads the servers afterwards
+ * -- writing the file is not what starts the process.
+ */
+export function writeLocalConnectorEntry(
+  rootDir: string,
+  name: string,
+  entry: { command: string; args?: readonly string[]; env?: Readonly<Record<string, string>> },
+): void {
+  const servers = readLocalConnectorDocument(rootDir);
+  servers[name] = {
+    command: entry.command,
+    ...(entry.args === undefined ? {} : { args: [...entry.args] }),
+    ...(entry.env === undefined ? {} : { env: { ...entry.env } }),
+  };
+  writeLocalConnectorDocument(rootDir, servers);
+}
+
+/** Removes one connector entry. Answers whether it was there; the secret store is untouched. */
+export function removeLocalConnectorEntry(rootDir: string, name: string): boolean {
+  const servers = readLocalConnectorDocument(rootDir);
+  if (!Object.hasOwn(servers, name)) return false;
+  delete servers[name];
+  writeLocalConnectorDocument(rootDir, servers);
+  return true;
+}
+
 /** Reads the operator's local connector file. A missing or malformed file yields no servers. */
 export function readLocalConnectorFile(rootDir: string): Record<string, LocalServerConfig> {
   let raw: string;

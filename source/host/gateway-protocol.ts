@@ -139,6 +139,11 @@ export const SAND_GATEWAY_COMMANDS = {
   // CONNECT-5. Shell tools: a CLI the agent runs from its own shell with a credential in the
   // environment. CodeRabbit ships no MCP server at all, so none of the connector commands above
   // can carry its key; these are the same shape one layer down.
+  // MARKET-1. The Marketplace catalog, bundled into the host and served from here. The console
+  // reads it ONLY through these two, never as a static JSON, so the panel and the agent's
+  // SearchPlugins cannot be looking at two different catalogs.
+  listMarketplace: (api: GatewayApi) => api.listMarketplace(),
+  getMarketplaceItem: (api: GatewayApi, body: string) => api.getMarketplaceItem(parseCommandArgs(body)),
   listShellTools: (api: GatewayApi) => api.listShellTools(),
   listShellSecretFields: (api: GatewayApi) => api.listShellSecretFields(),
   setShellSecret: (api: GatewayApi, body: string) => api.setShellSecret(parseCommandArgs(body)),

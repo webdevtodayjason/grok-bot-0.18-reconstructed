@@ -6,6 +6,11 @@ import { buildHostShellArgs } from "./box/box-shell-command.js";
 import { getSandRootDir } from "./host-paths.js";
 import { isConnectorEnvFieldName } from "./extensions/mcp/connector-secrets.js";
 import {
+  MARKETPLACE_CATALOG,
+  findMarketplaceBot,
+  findMarketplacePlugin,
+} from "../shared/marketplace/catalog.js";
+import {
   SHELL_TOOLS,
   SHELL_TOOL_FIELDS,
   findShellTool,
@@ -846,6 +851,28 @@ export function createHostGatewayApi(
         server: args?.server ?? args?.serverId,
         field: args?.field
       }),
+
+    // ------------------------------------------------------------------ MARKET-1, the catalog
+    // The Marketplace catalog is bundled into this host, so these two are pure reads with no box,
+    // no network and no account behind them: the console draws its Plugins and Bots tabs from
+    // exactly the data the agent's SearchPlugins resolves against. Nothing here is per-install
+    // state -- "installed", "needs auth" and "ready" come from the connector commands above.
+    listMarketplace: () => MARKETPLACE_CATALOG,
+    getMarketplaceItem: (args: any) => {
+      const kind = typeof args?.kind === "string" ? args.kind : "";
+      const id = args?.id;
+      if (kind === "plugin") {
+        const plugin = findMarketplacePlugin(id);
+        if (plugin == null) throw new Error(`no marketplace plugin "${String(id)}"`);
+        return plugin;
+      }
+      if (kind === "bot") {
+        const bot = findMarketplaceBot(id);
+        if (bot == null) throw new Error(`no marketplace bot "${String(id)}"`);
+        return bot;
+      }
+      throw new TypeError(`getMarketplaceItem needs kind "plugin" or "bot", not "${kind}"`);
+    },
 
     // ---------------------------------------------------------------- CONNECT-5, shell tools
     // A shell tool is a CLI the agent runs itself, with its credential in the environment.
