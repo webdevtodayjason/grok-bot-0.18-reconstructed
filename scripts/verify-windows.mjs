@@ -46,7 +46,8 @@ try {
   const a = await mint("gone"); made.push(a.id);
   const aStatus = await call("ensureForeverBox", { id: a.id });
   const aIndex = Object.entries((await seats()).assigned).find(([id]) => id === a.id)?.[1];
-  check(Number.isInteger(aIndex) && aIndex >= 3, "the first probe got a fork window", `index ${aIndex}, state ${aStatus?.state}`);
+// Fork windows start at 2 (SAND_BOX_FIRST_FORK_WINDOW_INDEX); the gate once demanded 3 because Chief happened to hold :2.
+  check(Number.isInteger(aIndex) && aIndex >= 2, "the first probe got a fork window", `index ${aIndex}, state ${aStatus?.state}`);
   await call("deleteAgents", { ids: [a.id] }); made.pop();
   await sleep(3000);
   const afterDelete = await seats();
@@ -60,7 +61,7 @@ try {
   const b = await mint("fresh"); made.push(b.id);
   const bStatus = await call("ensureForeverBox", { id: b.id });
   const bIndex = (await seats()).assigned[b.id];
-  check(Number.isInteger(bIndex) && bIndex >= 3 && bStatus?.state === "running", "a fresh agent gets a window right after the deleted one's polls", `index ${bIndex}, state ${bStatus?.state}`);
+  check(Number.isInteger(bIndex) && bIndex >= 2 && bStatus?.state === "running", "a fresh agent gets a window right after the deleted one's polls", `index ${bIndex}, state ${bStatus?.state}`);
   // 3. a seat the host did not issue is adopted: forge a foreign token on b's live display, then ask for it again
   const forged = await sh(`printf 'not-the-hosts-token' > /tmp/sand-window-tokens.d/${bIndex} && cat /tmp/sand-window-tokens.d/${bIndex}`);
   check(forged.out === "not-the-hosts-token", "a foreign token was planted on the live seat", `index ${bIndex}`);
