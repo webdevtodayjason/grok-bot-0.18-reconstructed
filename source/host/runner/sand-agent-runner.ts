@@ -142,6 +142,9 @@ export type RunnerUpdate =
     readonly timestampMs: number;
   }
   | { readonly type: "turn-ended"; readonly usage?: unknown }
+  // A line the host itself puts in the transcript: not the agent speaking, and not an error
+  // either. The self-talk cap is the first thing to use it.
+  | { readonly type: "notice"; readonly text: string; readonly timestampMs: number; readonly reason?: string }
   | { readonly type: "react-to-message"; readonly messageAddress: string; readonly emoji: string }
   | { readonly type: "request-id"; readonly requestId: string }
   | { readonly type: "retrying" };

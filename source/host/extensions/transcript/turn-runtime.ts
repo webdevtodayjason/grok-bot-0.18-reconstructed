@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isMessageAddress } from "../../../shared/message-reference.js";
 import { sandDualSurfaceToolTelemetry } from "../../../shared/agents/agent-tool-names.js";
 import { SAND_REACTION_AGENT } from "../../../shared/transcript.js";
@@ -353,6 +354,13 @@ export class TurnRuntime {
   readonly lastDeliveryToolTick = new Map<string, number>();
   /** Consecutive work-owed turns per session; survives the turn, unlike the counts. */
   readonly workRedriveStreaks = new Map<string, number>();
+  /**
+   * Conversations whose last turn was ended by the self-talk cap. The work redrive exists to
+   * push an agent that only talked into doing something, but an agent the cap just stopped has
+   * already proved it will keep talking: redriving it buys another cap's worth of paid model
+   * calls and nothing else.
+   */
+  readonly selfTalkCapped = new Set<string>();
 
   constructor(readonly tm: TranscriptManagerLike) {}
 
@@ -650,6 +658,7 @@ export class TurnRuntime {
           this.lastDeliveryToolTick,
           this.activeRequestPrompts,
           this.activeRequestSources,
+          this.selfTalkCapped,
         ])
           map.delete(session.id);
         this.tm.runLifecycle.lastRequestIdBySession.delete(session.id);
@@ -745,7 +754,11 @@ export class TurnRuntime {
       deliveryToolCalls: this.deliveryToolCallCounts.get(session.id) ?? 0,
     });
     const streak = this.workRedriveStreaks.get(session.id) ?? 0;
-    if (!workOwed) this.workRedriveStreaks.delete(session.id);
+    if (this.selfTalkCapped.has(session.id)) {
+      this.workRedriveStreaks.delete(session.id);
+      setTurnTraceAttributes(turnTrace, { "sand.work_redrive_paused": true, "sand.work_redrive_pause_reason": "self_talk_cap" });
+    }
+    else if (!workOwed) this.workRedriveStreaks.delete(session.id);
     else if (streak >= MAX_WORK_REDRIVES)
       // Stop rather than spin: an agent that has answered this many turns
       // running without touching a tool will not start because we asked again.
@@ -981,6 +994,27 @@ export class TurnRuntime {
           void this.tm.roster.emitAgentUpdate(runSession.id);
         }
         return sendId;
+      }
+      // A line the host puts in the transcript in its own voice. It is not the agent speaking, so
+      // it never touches the ack obligation or the delivery bookkeeping: it only has to be seen.
+      case "notice": {
+        const text = String(update.text ?? "").trim();
+        if (text.length === 0) return undefined;
+        if (update.reason === "self-talk-cap" && runSession != null) this.selfTalkCapped.add(runSession.id);
+        const entry: TranscriptEntry = {
+          kind: "notice",
+          id: `notice-${randomUUID()}`,
+          text,
+          timestampMs: typeof update.timestampMs === "number" ? update.timestampMs : Date.now(),
+        };
+        if (isForActiveAgent || runSession == null) {
+          this.tm.appendEntry(entry);
+        } else {
+          runSession.db.appendTranscriptEntry(entry);
+          this.tm.sessionStore.markSessionActivity(runSession);
+        }
+        if (runSession != null) void this.tm.roster.emitAgentUpdate(runSession.id);
+        return entry.id;
       }
       case "auto-review-status":
         this.settleNestedStatus(

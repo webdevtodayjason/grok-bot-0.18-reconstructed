@@ -45,3 +45,4 @@ import "./relay-login-guards.test.mjs";
 import "./auto-review-enforcement.test.mjs";
 import "./relay-trusted-proxies.test.mjs";
 import "./local-machine-prompt.test.mjs";
+import "./self-talk-cap.test.mjs";

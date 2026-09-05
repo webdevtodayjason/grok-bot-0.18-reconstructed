@@ -514,6 +514,40 @@ async function isSendMessageDeliveryOwed(
   return false;
 }
 
+/**
+ * What one model step called and what came back, which is all the self-talk cap needs to tell a
+ * loop from work. The counter itself is supplied by the caller, so this loop never has to know
+ * which tool is the agent's voice or where the cap is configured.
+ */
+function describeStepForSelfTalkCap(messages: readonly CoreMessageLike[]): {
+  readonly toolNames: readonly string[];
+  readonly resultTexts: readonly string[];
+} {
+  const toolNames: string[] = [];
+  const resultTexts: string[] = [];
+  for (const message of messages) {
+    const content = message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const rawPart of content) {
+      const part = rawPart as AssistantContentPart | undefined;
+      if (part == null) continue;
+      if (message.role === "assistant" && part.type === "tool-call" && typeof part.toolName === "string") {
+        toolNames.push(part.toolName);
+      }
+      if (message.role === "tool" && part.type === "tool-result") {
+        const rendered = typeof part.text === "string" ? part.text : safeStableString(part.result);
+        resultTexts.push(rendered);
+      }
+    }
+  }
+  return { toolNames, resultTexts };
+}
+
+function safeStableString(value: unknown): string {
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value) ?? ""; } catch { return ""; }
+}
+
 function trailingToolBatchHasFailure(messages: readonly CoreMessageLike[]): boolean {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -867,6 +901,17 @@ interface UserMessageActionHandlerConfigLike {
     readonly sandSendMessageDeliveryOwed?: boolean | undefined;
     readonly promptContextUsageTree?: boolean | undefined;
     readonly protectLoopSkillDescription?: boolean | undefined;
+  } | undefined;
+  /**
+   * The host's cap on an agent that only talks to itself. It is handed in already built so the
+   * loop stays free of host settings and host tool names: the loop reports each step, the cap
+   * decides, and a verdict of ended stops the turn before another model call goes out.
+   */
+  readonly sandSelfTalkCap?: {
+    noteStep(step: {
+      readonly toolNames: readonly string[];
+      readonly resultTexts: readonly string[];
+    }): { readonly ended: boolean; readonly steps: number; readonly cap: number };
   } | undefined;
   readonly automationInstructions?: unknown;
   readonly reminders?: Parameters<typeof applyRemindersToToolResults>[1];
@@ -2621,6 +2666,10 @@ export class AbstractUserMessageActionHandler {
             previousQueuedMessageSource,
             emptyResponseRetryTurnBudget,
           );
+          // Reported before anything else this step can change: the cap counts model steps, and
+          // the queued-message and reminder machinery below must not be able to hide a loop.
+          const selfTalkVerdict = this.config.sandSelfTalkCap?.noteStep(describeStepForSelfTalkCap(responseMessages));
+          const selfTalkCapReached = selfTalkVerdict?.ended === true;
           const toolCallsInStep = responseMessages.filter(message => message.role === "tool").length;
           totalToolCallsInTurn += toolCallsInStep;
           const assistantMessagesInStep = countAssistantMessages(responseMessages);
@@ -2699,7 +2748,7 @@ export class AbstractUserMessageActionHandler {
           }
           turn = updatedTurn;
           currentMcpTools = updatedMcpTools;
-          const hasEnded = (!hasToolCall && !hasQueuedMessages) || isLastIteration;
+          const hasEnded = (!hasToolCall && !hasQueuedMessages) || isLastIteration || selfTalkCapReached;
           if (!hasToolCall && !hasQueuedMessages && conflictBarrierInjectionsRemaining > 0 && !isLastIteration && this.config.featureFlags?.enableAgentStoreConflictNotices === true && await this.maybeInjectPreFinalConflictBarrier(ctx, rootPromptExecutor, stateHandler.getPrivacyMode())) {
             conflictBarrierInjectionsRemaining -= 1;
             this.responseComparisonCandidate = undefined;
@@ -2849,6 +2898,15 @@ export class AbstractUserMessageActionHandler {
             }
           }
           if (!hasToolCall && !hasQueuedMessages) break;
+          // The agent has been messaging and doing nothing else for the whole streak. Stop here
+          // rather than at the step ceiling: every further iteration is another paid model call
+          // that cannot produce anything the last one did not.
+          if (selfTalkCapReached) {
+            logger.info(ctx, "Ending turn on the self-talk cap", { steps: selfTalkVerdict?.steps, cap: selfTalkVerdict?.cap });
+            this.responseComparisonCandidate = undefined;
+            await this.cancelPendingAgentResponseComparison();
+            break;
+          }
           if (!this.config.doNotFailOnMaxSteps && isLastIteration) throw new Error("Reached maximum number of steps before turn ended (possible looping?)");
         } finally {
           agentStepCount.increment(ctx, 1, {});

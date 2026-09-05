@@ -10,6 +10,12 @@ import {
   SAND_SHARED_ROOM_BOX_TOOLS_SETTING,
   SAND_TOOL_TRACE_SETTING,
 } from "./sand-box-setting.js";
+import {
+  createSelfTalkCap,
+  resolveSelfTalkCap,
+  SAND_SELF_TALK_CAP_SETTING,
+  SELF_TALK_CAP_NOTICE,
+} from "./runner/self-talk-cap.js";
 import { evidenceRegistry } from "./extensions/evidence/evidence-registry.js";
 import { createSandExecutorSubagentConfig } from "./sand-multitask.js";
 import { SubagentType, SubagentTypeCustom } from "../packages/proto/generated/agent/v1/subagents_pb.js";
@@ -3285,6 +3291,17 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               modelId: staticModelId,
               agentTokenLimit: 200_000,
               conversationId: shellConversationId,
+              // Built per run, so the streak is per turn and the cap is re-read every step: an
+              // operator can raise it, or set it to 0, on a box that is already looping.
+              selfTalkCap: createSelfTalkCap({
+                readCap: () => resolveSelfTalkCap(readSandBoxSetting(SAND_SELF_TALK_CAP_SETTING)),
+                onCapReached: verdict => {
+                  console.warn(`[sand][turn] self-talk cap reached for ${shellConversationId}: ${verdict.steps} consecutive SendMessage-only steps (cap ${verdict.cap}, ${SAND_SELF_TALK_CAP_SETTING}); ending the turn`);
+                  // The reason is what stops the work redrive from immediately buying another
+                  // cap's worth of the same loop.
+                  emitUpdate({ type: "notice", text: SELF_TALK_CAP_NOTICE, timestampMs: Date.now(), reason: "self-talk-cap" });
+                },
+              }),
               isBoxScopedSubagent: isBoxScopedSubagentKind(shellSubagentKind),
               isSubagentRunner: shellSubagentKind !== undefined,
               isSharedRoomRunner: isSharedRoomTurn,

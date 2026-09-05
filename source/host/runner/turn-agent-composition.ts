@@ -138,6 +138,7 @@ import type {
   SandAutoReviewMode,
 } from "./sand-auto-review.js";
 import type { SmartModeClassifierConversationMessage } from "../../packages/proto/generated/agent/v1/smart_mode_classifier_exec_pb.js";
+import type { SelfTalkCap } from "./self-talk-cap.js";
 
 export const SAND_AGENT_MAX_STEPS = 5_000;
 
@@ -203,6 +204,8 @@ export interface TurnAgentStaticConfigInputs {
     props: TurnToolsetBuildProps,
   ) => ReturnType<typeof buildTurnTools>;
   readonly selfSummaryConfig?: unknown;
+  /** The per-run self-talk cap; absent means this run is uncapped (subagents built without one). */
+  readonly selfTalkCap?: SelfTalkCap;
   readonly attachedMediaUrlProvider?: unknown;
   readonly messageHistoryModifier?: (...args: readonly unknown[]) => unknown;
   readonly profilePromptSnapshot?: unknown;
@@ -250,6 +253,9 @@ export function createSandAgentStaticConfig(
     ...(input.selfSummaryConfig === undefined
       ? {}
       : { selfSummaryConfig: input.selfSummaryConfig }),
+    ...(input.selfTalkCap === undefined
+      ? {}
+      : { sandSelfTalkCap: input.selfTalkCap }),
     featureFlags: {
       enableWatchVideoInIdeSubagent: true,
       sandSendMessageDeliveryOwed: input.sandSendMessageDeliveryOwed,
