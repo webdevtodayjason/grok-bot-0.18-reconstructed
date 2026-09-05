@@ -225,6 +225,8 @@ adversarially tests the markdown renderer. Browser harness (Playwright) lives in
 session scratchpad `browsercheck/` — **scratchpad dies with the session**; the durable
 technique is §4.
 
+**2026-09-05, afternoon (measured on the Mac box, bundle 117b6235; the R750 receives it with the next ship).** CONNECT-3/4: TinyFish by API key with no bridge (mcp-remote with the key as a Bearer header from the secret store; the credential card offers only empty-valued env keys; the editor's Arguments field is quote-aware; a preset owning its name replaces an entry). Connectors wave: five primary-source reports by Orca workers (Codex, Grok) in docs/connectors/, a preset catalog (GitHub, Slack, Linear, Google Workspace, TinyFish), per-service gate arms, docs/CONNECTORS.md, and shell tools with their own secret store (CodeRabbit CLI, TinyFish CLI). CONNECT-12: the routed tools cache kept a starting server's empty answer for a day; fixed with a 5 s TTL for provisional answers. Process findings, each filed: two integrators on one box void each other (GATE-2, scripts/on-box.sh); a timeout kill skips a gate's cleanup (GATE-4); the model leg after the gate's own restart fails about half the time (GATE-5); a removed connector's secrets cannot be deleted (CONNECT-11); a message to a workflow subagent resumes a duplicate of it (memory). Gate tallies on the fixed bundle, first runs: --linear-key x2, --google-stdio x2, --tinyfish-key, --slack-stdio, --github-key, --shell-secrets, verify-toolset --connector, gateway-reads 11, windows 15 all green; the plain arm green on its third run.
+
 ## 4. Verification doctrine (earned, not theoretical)
 
 1. No claim without `file:line` or a captured artifact. "It seems" is not a finding.
