@@ -25,6 +25,10 @@ import {
 import { toJsonArgs } from "./mcp-validation.js";
 
 export const MCP_TOOLS_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
+// CONNECT-12: a box answer taken while a server was still starting is not a settled answer. It
+// used to be cached for the full day, so a connector added a moment ago listed no tools to the
+// agents until the next reload. Such an answer lives only this long, and the next list asks again.
+export const MCP_TOOLS_UNSETTLED_TTL_MS = 5_000;
 export const TOOLS_DISCOVERY_DEADLINE_MS = 120_000;
 
 export interface McpDiscoveryResultFactory extends McpResultFactory {
@@ -37,11 +41,11 @@ type ToolServer = {
   tools: Tool[];
   toolCount?: number;
 };
-type CacheResolution = { tools: Tool[]; resolvedKey: string };
+type CacheResolution = { tools: Tool[]; resolvedKey: string; unsettled?: boolean };
 type CacheEntry = {
   requestedKey: string;
   promise: Promise<CacheResolution>;
-  fulfilled?: { tools: Tool[]; resolvedKey: string; atMs: number };
+  fulfilled?: { tools: Tool[]; resolvedKey: string; atMs: number; unsettled?: boolean };
   staleTools?: Tool[];
 };
 
@@ -69,6 +73,7 @@ export function createMcpToolsDiscovery(
     resultFactory?: McpDiscoveryResultFactory;
     onConnectorAuth?(event: Record<string, unknown>): void;
     onDiscoveryFailed?(event: Record<string, unknown>): void;
+    unsettledTtlMs?: number;
   } = {},
 ) {
   let boxMcpExecSlot = deps.boxMcpExec;
@@ -78,6 +83,9 @@ export function createMcpToolsDiscovery(
   let toolsCacheEntry: CacheEntry | null = null;
   let toolsCacheEpoch = 0;
   let toolsColdWarmScheduled = false;
+  const unsettledTtlMs = deps.unsettledTtlMs ?? MCP_TOOLS_UNSETTLED_TTL_MS;
+  const ttlOf = (fulfilled: { unsettled?: boolean }): number =>
+    fulfilled.unsettled === true ? unsettledTtlMs : MCP_TOOLS_CACHE_TTL_MS;
   const firstCallReported = new Map<string, { ok: boolean; failed: boolean }>();
   const resultFactory = deps.resultFactory ?? generatedMcpResultFactory;
   const discoveryDeadline =
@@ -190,7 +198,7 @@ export function createMcpToolsDiscovery(
     if (entry.fulfilled === undefined) return entry.requestedKey === key;
     return (
       entry.fulfilled.resolvedKey === key &&
-      Date.now() - entry.fulfilled.atMs < MCP_TOOLS_CACHE_TTL_MS
+      Date.now() - entry.fulfilled.atMs < ttlOf(entry.fulfilled)
     );
   }
 
@@ -223,21 +231,35 @@ export function createMcpToolsDiscovery(
     return servers.flatMap((server: ToolServer) => server.tools);
   }
 
-  async function discoverBoxTools(stdioServerNames: string[]): Promise<Tool[]> {
+  async function discoverBoxTools(
+    stdioServerNames: string[],
+  ): Promise<{ tools: Tool[]; unsettled: boolean }> {
     const boxMcpExec = boxMcpExecSlot;
-    if (boxMcpExec == null) return [];
+    if (boxMcpExec == null) return { tools: [], unsettled: false };
     if (stdioServerNames.length === 0) {
       try {
         await ensureBoxServersPushed();
       } catch (error) {
         reportMcpHostEdgeFailure("box-config-reconcile", error);
       }
-      return [];
+      return { tools: [], unsettled: false };
     }
     await ensureBoxServersPushed();
-    return (await boxMcpExec.listTools(stdioServerNames)).flatMap(
-      (server: ToolServer) => server.tools,
-    );
+    const servers: Array<ToolServer & { status?: string }> =
+      await boxMcpExec.listTools(stdioServerNames);
+    // A server the box has not answered for yet, or one it reports as still loading with nothing to
+    // show, makes this answer provisional: cache it briefly, not for the day.
+    const answered = new Set(servers.map((server) => server.serverIdentifier));
+    const unsettled =
+      stdioServerNames.some((name) => !answered.has(name)) ||
+      servers.some(
+        (server) =>
+          server.tools.length === 0 &&
+          typeof server.status === "string" &&
+          server.status !== "connected" &&
+          server.status !== "error",
+      );
+    return { tools: servers.flatMap((server) => server.tools), unsettled };
   }
 
   async function fetchToolsViaBackend(): Promise<CacheResolution> {
@@ -259,7 +281,11 @@ export function createMcpToolsDiscovery(
       reportMcpHostEdgeFailure("box-list-tools", boxResult.reason);
       return { tools: httpResult.value, resolvedKey };
     }
-    return { tools: [...httpResult.value, ...boxResult.value], resolvedKey };
+    return {
+      tools: [...httpResult.value, ...boxResult.value.tools],
+      resolvedKey,
+      unsettled: boxResult.value.unsettled,
+    };
   }
 
   function getToolsViaBackend(): Promise<CacheResolution> {
@@ -281,9 +307,14 @@ export function createMcpToolsDiscovery(
     };
     toolsCacheEntry = entry;
     void entry.promise.then(
-      ({ tools, resolvedKey }) => {
+      ({ tools, resolvedKey, unsettled }) => {
         if (toolsCacheEntry === entry)
-          entry.fulfilled = { tools, resolvedKey, atMs: Date.now() };
+          entry.fulfilled = {
+            tools,
+            resolvedKey,
+            atMs: Date.now(),
+            ...(unsettled === true ? { unsettled: true } : {}),
+          };
       },
       (error) => {
         if (toolsCacheEntry === entry) {
@@ -326,7 +357,7 @@ export function createMcpToolsDiscovery(
     if (entry?.fulfilled !== undefined && serverNames !== undefined) {
       const key = toolServerSetKey(serverNames);
       if (entry.fulfilled.resolvedKey === key) {
-        if (Date.now() - entry.fulfilled.atMs >= MCP_TOOLS_CACHE_TTL_MS)
+        if (Date.now() - entry.fulfilled.atMs >= ttlOf(entry.fulfilled))
           startToolsResolution(key, true);
         return entry.fulfilled.tools;
       }
