@@ -15,7 +15,10 @@
 // header's countAgents, inline attachments through readAttachmentImage and readAttachmentText
 // (GW-09), and the Cmd-K palette on isGlobalSearchEnabled / searchAgents (GW-14). Two model
 // turns on a probe agent it creates and deletes: the unread/acceptance prompt (which now carries
-// the two attachments) and the skill run.
+// the two attachments) and the skill run. CONNECT-3 added one bounded check to the connectors
+// editor: the TinyFish (API key) preset fills the fixed entry and writes nothing on the click --
+// the round trip runs against a stub server in scripts/verify-connector-plane.mjs --tinyfish-key,
+// never against agent.tinyfish.ai from a shared box.
 // --teach: the Learn flow is honest and stoppable (the operator's report: "there's no way to stop
 //   it, so I feel like that section is also stubbed"). On a probe with its own display: the modal
 //   opens only on a recording the host confirmed and its timer moves, every control in its footer
@@ -209,6 +212,11 @@ const noDemoStrings = async (where) => {
 const startCatalog = await relay("/endpoints").catch(() => null);
 const previousRow = startCatalog?.endpoints?.find((e) => e.baseUrl === startCatalog?.live?.baseUrl && e.model === startCatalog?.live?.model) ?? null;
 let probeAgentId = null;
+// CONNECT-3: what the TinyFish preset must put in the editor's argument field, character for
+// character. The bearer header is a single argument that holds a space, so the field carries it
+// quoted; ${TINYFISH_API_KEY} is literal here and in connectors.json -- mcp-remote expands it from
+// the environment the host merges the stored key into, so no key is ever in this string.
+const TINYFISH_ARGS_TEXT = '-y mcp-remote https://agent.tinyfish.ai/mcp --transport http-only --header "Authorization:Bearer ${TINYFISH_API_KEY}"';
 // CP-11: set while the gate's own connector is in connectors.json, so the finally block can take
 // it back out if an assertion threw between the write and the removal.
 let probeConnectorAdded = false;
@@ -951,6 +959,31 @@ try {
       // disclosure already open would close it and then fail to fill an invisible field.
       await page.evaluate(() => document.querySelector("[data-connector-editor]")?.setAttribute("open", "open"));
       await page.waitForTimeout(400);
+      // -- CONNECT-3: the TinyFish preset. One click has to fill the fixed entry, and NOTHING is
+      // saved here: this gate must not put a connector pointing at agent.tinyfish.ai on a shared
+      // box. The round trip belongs to scripts/verify-connector-plane.mjs --tinyfish-key, which
+      // runs the same entry against a stub MCP server inside the box.
+      const presetButton = await page.$('[data-connector-preset="tinyfish"]');
+      check(presetButton != null, "the connector editor offers the TinyFish (API key) preset");
+      if (presetButton) {
+        const presetLabel = (await page.evaluate(() => document.querySelector('[data-connector-preset="tinyfish"]')?.textContent ?? "")).trim();
+        check(presetLabel === "TinyFish (API key)", "and the button is named for the recipe it fills", presetLabel);
+        await presetButton.click(); await page.waitForTimeout(400);
+        const filled = await page.evaluate(() => ({
+          name: document.querySelector("#connector-name")?.value ?? "",
+          command: document.querySelector("#connector-command")?.value ?? "",
+          args: document.querySelector("#connector-args")?.value ?? "",
+          env: document.querySelector("#connector-env")?.value ?? "",
+        }));
+        check(filled.name === "tinyfish" && filled.command === "npx", "clicking it fills the connector's name and command", `${filled.name} · ${filled.command}`);
+        // The bearer header is one argument with a space in it, so the field has to carry it
+        // quoted; an unquoted one would arrive as two arguments and the header would be lost.
+        check(filled.args === TINYFISH_ARGS_TEXT, "and the mcp-remote arguments, with the bearer header quoted whole", filled.args);
+        check(filled.env === "TINYFISH_API_KEY", "and names TINYFISH_API_KEY as the only environment value it wants", filled.env);
+        const afterPreset = await relay("/connectors").catch(() => null);
+        check(JSON.stringify(afterPreset?.mcpServers ?? null) === JSON.stringify(before?.mcpServers ?? null),
+          "and writes nothing to connectors.json until the form is submitted", Object.keys(afterPreset?.mcpServers ?? {}).join(", "));
+      }
       await page.fill("#connector-name", PROBE_CONNECTOR);
       await page.fill("#connector-command", "node");
       await page.fill("#connector-args", `/workspace/${PROBE_MCP_FILE}`);

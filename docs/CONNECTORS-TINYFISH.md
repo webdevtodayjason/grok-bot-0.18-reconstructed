@@ -4,9 +4,11 @@ TinyFish is the paid web-automation service: ranked search, page fetch, and a br
 clicks through a real site. An agent in the box reaches it as MCP tools, the same way it reaches
 the filesystem connector, once TinyFish is a connector on this box.
 
-Everything below was measured on 2026-09-04 against the box on this Mac and against TinyFish's own
-endpoints. The headline is a correction: **the TinyFish MCP endpoint does not accept an API key.**
-It wants an OAuth bearer. Everything else follows from that.
+There are two ways to make it one, and the key is now the first of them. The operator pastes an API
+key into the connector's credential card and the box does the rest; the OAuth route, which is what
+this document used to lead with, is kept below as the alternative. Everything measured is dated and
+says which machine it was measured on; everything that is a contract the code implements rather
+than an observation is labelled as such.
 
 ## What the connector plane can and cannot do here
 
@@ -20,76 +22,142 @@ This build runs connectors as **local stdio servers only**. `connectors.json` un
     }
 
 There is no entry shape for a remote HTTP MCP server, so anything remote has to be bridged by a
-local process. `mcp-remote` is that process, and it runs in the box: node v20.19.2, measured.
+local process. `mcp-remote` is that process, and it runs in the box: node v20.19.2, measured on
+this Mac's box 2026-09-04.
 
 Secrets do not go in that file. `setConnectorSecret {server, field, value}` puts them in
 `/home/box/sand-data/connector-env-secrets.json` (0600), and the host hands them to the connector
-process as environment variables when it spawns it. Measured, with an invented key: after storing
-it, `grep -rl` across the whole of `/home/box/sand-data` found the value in
+process as environment variables when it spawns it. Measured on this Mac's box, with an invented
+key: after storing it, `grep -rl` across the whole of `/home/box/sand-data` found the value in
 `connector-env-secrets.json` and nowhere else. Not in `connectors.json`, not in a per-agent tree,
 not in a log.
 
-## The measurement: X-API-Key is refused
+## The measurement: X-API-Key is refused, the bearer is the one it takes
 
 TinyFish's REST endpoints take `X-API-Key` (`api.search.tinyfish.ai`, `api.fetch.tinyfish.ai`,
-`agent.tinyfish.ai/v1/automation/run-sse`). Its **MCP** endpoint does not. From inside the box,
-with an invented 43-character key:
+`agent.tinyfish.ai/v1/automation/run-sse`). Its **MCP** endpoint does not. From inside the box on
+2026-09-04, with an invented 43-character key:
 
     POST https://agent.tinyfish.ai/mcp   -H "X-API-Key: <invented>"
     401 {"jsonrpc":"2.0","error":{"code":-31001,
          "message":"Unauthorized: Valid OAuth Bearer token required"},"id":1}
 
-The same call with `Authorization: Bearer <invented>` gets the same 401. A call with no credential
-at all answers:
+An invented key gets the same 401 as `Authorization: Bearer`, which is what an invented key should
+get. What the header name has to be is not a guess: TinyFish's own CLI documents it. `npm
+@tiny-fish/cli`, the "Connect Grok" section, connects a client to the same endpoint by passing the
+account's API key as `Authorization: Bearer <key>`. So the credential this endpoint understands is
+the API key, carried in the bearer header — not in `X-API-Key`, which is the REST-side name and the
+one that was tried first here.
+
+A call with no credential at all answers:
 
     www-authenticate: Bearer resource_metadata="https://agent.tinyfish.ai/.well-known/oauth-protected-resource/mcp"
 
-and that document names the authorization server:
+and that document names the authorization server (`https://clerk.tinyfish.ai`), which is what the
+alternative recipe at the bottom of this page uses.
 
-    {"resource":"https://agent.tinyfish.ai/mcp",
-     "authorization_servers":["https://clerk.tinyfish.ai"], ...}
+**Not measured here, and deliberately:** nobody in this repository has driven the bearer path
+against `agent.tinyfish.ai` with a real key. Tests and gates use an invented key against a stub MCP
+server started inside the box, so no real credential is ever read, logged, or committed. What the
+gate proves is the mechanism end to end — the entry, the header, the secret store, the restart, the
+tool list, a tool call. What TinyFish's docs supply is the header name.
 
-`https://clerk.tinyfish.ai/.well-known/oauth-authorization-server` then says what is possible:
+## The entry
 
-    grant_types_supported:            ["authorization_code","refresh_token"]
-    registration_endpoint:            https://clerk.tinyfish.ai/oauth/register
-    token_endpoint_auth_methods:      ["client_secret_basic","none","client_secret_post"]
+    "tinyfish": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://agent.tinyfish.ai/mcp",
+               "--transport", "http-only",
+               "--header", "Authorization:Bearer ${TINYFISH_API_KEY}"],
+      "env": { "TINYFISH_API_KEY": "" }
+    }
 
-Two consequences worth reading twice. Dynamic registration is open and public clients are
-accepted, so `mcp-remote` can register itself with no client id to obtain. And there is **no**
-`device_authorization_endpoint`, so `mcp-remote --device-code` is not available: the only way to
-get a token is a browser hitting a loopback redirect.
+Every part of that is load-bearing:
 
-## What the bridge does with a key, end to end
+- `mcp-remote` passes a custom header with `--header "Name: value"` and **expands `${VAR}` in the
+  value from its own environment** (its README). So the literal text `${TINYFISH_API_KEY}` is what
+  goes into `connectors.json`, unexpanded. The key itself never enters that file: the host merges
+  the stored secret into the connector process's environment when it launches it, and `mcp-remote`
+  expands the placeholder at start.
+- **No space after the colon.** That is the form `mcp-remote`'s README asks for from clients that
+  mangle spaces inside an argument; it trims the value itself.
+- `"TINYFISH_API_KEY": ""` — the empty value is not decoration either. An env key whose value in
+  the entry is the empty string is a **credential field**: the card offers it as "Enter securely",
+  `setConnectorSecret` stores it, `listConnectorSecretFields` reports it. An env key that carries a
+  value is **configuration** and is never offered as somewhere to paste a key. That rule exists
+  because the OAuth entry below declares `MCP_REMOTE_CONFIG_DIR`, which is a path, the card offered
+  it, and a pasted key went into it.
+- One TinyFish per box. Filling the preset over an entry already called `tinyfish` — the OAuth one
+  — replaces it whole, `MCP_REMOTE_CONFIG_DIR` included.
 
-The connector was added on this Mac's box with an invented key, exactly as the recipe below
-describes, and then removed. The host's own report of that server:
+## Operator: paste the key
 
-    status:      error
-    toolCount:   0
-    statusDetail: MCP server connection timed out after 60000ms: tinyfish; stderr:
-      Using transport strategy: http-only
-      Using custom headers: X-API-Key
-      Discovering OAuth server configuration...
-      Discovered authorization server: [REDACTED]
-      Connecting to remote server: https://agent.tinyfish.ai/mcp
-      Please authorize this client by visiting:
-        https://clerk.tinyfish.ai/oauth/authorize?response_type=code&client_id=...
-        &redirect_uri=http%3A%2F%2Flocalhost%3A41257%2Foauth%2Fcallback&scope=openid+profile+email+offline_access
-      Browser opened automatically.
-      Authentication required. Waiting for authorization...
+Global capabilities → *Plugins, connectors & skills* → **Add or remove a connector**.
 
-`listMcpServerTools` for it returned `[]`.
+1. Click **TinyFish (API key)**. It fills the four fields with the entry above and writes nothing:
 
-That failure is the proof the bridge works: it sent the `X-API-Key` header, reached
-`agent.tinyfish.ai`, was refused, discovered the authorization server from the refusal, registered
-itself, and sat waiting for a human to approve it. Nothing in that chain is broken except the
-assumption that a key is a credential this endpoint understands.
+   | field | filled with |
+   | --- | --- |
+   | Name | `tinyfish` |
+   | Command | `npx` |
+   | Arguments | `-y mcp-remote https://agent.tinyfish.ai/mcp --transport http-only --header "Authorization:Bearer ${TINYFISH_API_KEY}"` |
+   | Environment variable names | `TINYFISH_API_KEY` |
 
-## Recipe A: OAuth once, at the box's own desktop
+   The header is quoted because it is one argument that holds a space. The argument field groups on
+   quotes; unquoted, it splits on whitespace, and the header would arrive as two arguments and be
+   lost.
 
-The box has a browser and a screen, and `mcp-remote` binds its callback on the box's own loopback.
-So the authorization can be completed without any of it leaving the container.
+2. Press **Add connector**. That writes `connectors.json` on the box through the relay and calls
+   `refreshMcp`, so the host relaunches its stdio servers without a container restart. If a
+   `tinyfish` entry was already there, this replaces it.
+
+3. The connector's card appears with the box still starting it. **Credentials for tinyfish** offers
+   one masked input, `TINYFISH_API_KEY`, and no other — `MCP_REMOTE_CONFIG_DIR` is not a credential
+   and is not offered. Paste the key and press **Store on the host**. That calls
+   `setConnectorSecret`, which writes the 0600 store and never the config file, and restarts the
+   connector.
+
+4. The card polls until the box reports the server connected and its tools are listed. Until the
+   key is stored the connector cannot authenticate, so it sits at initializing or error — the card
+   says so and nothing blocks on it.
+
+Removing it: **Remove this connector** on the card, or the row in the editor. That drops it from
+`connectors.json` and re-reads the file. The stored secret is separate: `deleteConnectorSecret`
+takes it out of the store, and the field stays on the card as an empty one to fill again.
+
+The gate for this path is `scripts/verify-connector-plane.mjs --tinyfish-key`, which runs the same
+entry against a stub MCP server inside the box with an invented key, and
+`scripts/verify-dashboard.mjs`, which checks in a real browser that the preset button fills exactly
+the entry above and saves nothing on the click.
+
+## Agent: AddMcpServer
+
+An agent adds the same entry itself with **AddMcpServer** — same name, same command, same
+arguments, same environment variable name — after confirming with the user, the way
+`source/host/extensions/managed-setup/seed-skills/add-connector/SKILL.md` describes for a server
+the catalog does not know.
+
+What the agent cannot do is set the key. `setConnectorSecret` is a console command, not an agent
+tool, and that is deliberate: a key typed into a conversation is in the transcript, the model's
+context and the window it was compacted into. So the split is:
+
+- the agent installs the connector,
+- the operator pastes the key on the connector's card in the console,
+- a tool call made before the key is stored answers with an error that names that card, rather than
+  a bare transport failure the agent cannot act on.
+
+That last line is the contract the agent-side piece of CONNECT-3 implements; it is the behaviour to
+check when reading this, not an observation. Note also what `AddMcpServer` accepts today in
+`source/host/runner/tools/sand-mcp-management-tools.ts`: `name`, `url`, `headers` — the local
+command form the skill describes needs the `command`/`args`/`env` arguments that piece adds.
+
+## Alternative: OAuth once, at the box's own desktop
+
+This is the route that was measured working end to end first, and it is still the one to use if the
+account should authorize a client rather than hand out a key.
+
+The box has a browser and a screen, and `mcp-remote` binds its callback on the box's own loopback,
+so the authorization can be completed without any of it leaving the container.
 
 Connector entry:
 
@@ -101,14 +169,16 @@ Connector entry:
 
 `MCP_REMOTE_CONFIG_DIR` is not decoration. `mcp-remote` stores its tokens in `~/.mcp-auth` by
 default, and `/home/box` is **not** one of the box's four volumes: `/workspace`,
-`/home/box/sand-data`, `/var/lib/sand-box-store` and `/home/box/chrome-profile` are. A token in
-the default location survives a restart and dies at the next recreate, which a redeploy does, and
-the connector would silently go back to waiting for authorization. Putting the store inside
-`sand-data` puts it in a volume.
+`/home/box/sand-data`, `/var/lib/sand-box-store` and `/home/box/chrome-profile` are. A token in the
+default location survives a restart and dies at the next recreate, which a redeploy does, and the
+connector would silently go back to waiting for authorization. Putting the store inside `sand-data`
+puts it in a volume. It is also configuration, not a credential: it carries a value, so the card
+does not offer it as a place to paste anything.
 
 Then, once:
 
-1. Add the connector (Machine Room steps below). Its card goes to `error` after sixty seconds.
+1. Add the connector with the editor (name `tinyfish`, command `npx`, the arguments above,
+   environment variable name `MCP_REMOTE_CONFIG_DIR`). Its card goes to `error` after sixty seconds.
 2. Read the authorize URL out of the server's `statusDetail` on that card.
 3. Open the box's desktop from the console and paste that URL into the box's Chrome. The redirect
    goes to `http://localhost:<port>/oauth/callback`, which is the box's own loopback, so it has to
@@ -116,83 +186,40 @@ Then, once:
 4. Approve. The tokens land in `/home/box/sand-data/.mcp-auth` and the connector reconnects.
 
 The refresh token is what makes this a one-time step. It is also the thing to remember when
-rotating access: revoking that client at Clerk is what removes the box's access, not deleting a
-key.
+rotating access: revoking that client at Clerk is what removes the box's access, not deleting a key.
+
+`clerk.tinyfish.ai`'s `.well-known/oauth-authorization-server` says what is possible here:
+`grant_types_supported` is `["authorization_code","refresh_token"]`, `registration_endpoint` is
+open and public clients are accepted (so `mcp-remote` can register itself with no client id to
+obtain), and there is **no** `device_authorization_endpoint` — so `mcp-remote --device-code` is not
+available and a browser hitting a loopback redirect is the only way to a token.
 
 **Before doing step 3, know whose browser that is.** The box's Chrome is a long-lived signed-in
-profile in the `titanbot-box-chrome` volume, and it is already signed in to TinyFish: the probe
-that measured all of this let `mcp-remote` open its authorize URL, and the box's browser landed on
-`accounts.tinyfish.ai` with the page title "My account", not on a sign-in form. The session is in
-that profile, and `/home/box/sand-data/chrome-cookie-seed.json` carries the Clerk cookies for it.
+profile, and on this Mac's box it is already signed in to TinyFish: the probe that measured all of
+this let `mcp-remote` open its authorize URL, and the box's browser landed on `accounts.tinyfish.ai`
+with the page title "My account", not on a sign-in form. That was fine while the console lived on
+the tailnet. It is a different fact once the console is public with a password as the only lock:
+anyone through that password reaches the desktop surface, and the desktop surface is a browser
+signed in wherever that profile is signed in. It is not a reason to skip this recipe, and it is a
+reason to decide deliberately what that profile stays signed in to. Approving one more OAuth client
+in it adds a refresh token to the same pile.
 
-That was fine while the console lived on the tailnet. It is a different fact once the console is
-public with a password as the only lock: anyone through that password reaches the desktop surface,
-and the desktop surface is a browser signed in as Jason wherever that profile is signed in. It is
-not a reason to skip Recipe A, and it is a reason to decide deliberately what that profile stays
-signed in to. Approving one more OAuth client in it adds a refresh token to the same pile.
+### Measured install on the R750, 2026-09-05 11:45 CDT
 
-## Recipe B: the key, against the REST APIs
+This recipe worked end to end once the sign-in was approved in that box's own Chrome: the bridge
+(`npx -y mcp-remote https://agent.tinyfish.ai/mcp 41257 --transport http-only` with
+`MCP_REMOTE_CONFIG_DIR=/home/box/sand-data/.mcp-auth`) wrote `mcp-remote-v1/<id>_tokens.json`, the
+entry went into `connectors.json` as user box (0600), `refreshMcp` was called, and ten seconds later
+`listInstalledMcpServers` said connected and `listMcpServerTools` (by `serverId`, not by name)
+listed 19 tools. Two things the recipe did not say: the token directory was root-owned from the
+manual bridge and needed `chown -R box:box` before the connector, which runs as box, could read it;
+and a Coolify restart kills the manual bridge, so the sign-in has to be re-armed after every ship
+until the tokens exist. The tokens live on the data volume and survive restarts.
 
-If the point is the API key rather than the MCP endpoint, the bridge has to speak to the REST
-endpoints, which do take `X-API-Key`. That means a small stdio MCP server that exposes
-`search`, `fetch_content` and `run_web_automation` as tools and forwards them to
-`api.search.tinyfish.ai`, `api.fetch.tinyfish.ai` and `agent.tinyfish.ai/v1/automation/run-sse`.
+## Which tools an agent then sees
 
-**This repo does not have one.** Writing it is maybe eighty lines against the shapes in
-`docs.tinyfish.ai/{search-api,fetch-api,agent-api}`, and it is not written today, so this is a
-plan and not a measurement. What it buys is the whole point of the key form: no browser step, no
-refresh token, a credential that rotates by typing a new one. Its connector entry would be the
-shape the rest of this document describes:
-
-    "tinyfish": {
-      "command": "node",
-      "args": ["/workspace/tinyfish-mcp/main.mjs"],
-      "env": { }
-    }
-
-with `TINYFISH_API_KEY` declared as an environment variable NAME and its value stored through the
-key form.
-
-For completeness, the `mcp-remote` form of a key header, which is what to use for any remote MCP
-server that really does take one:
-
-    "args": ["-y", "mcp-remote", "https://example/mcp", "--header", "X-API-Key:${TINYFISH_API_KEY}"]
-
-`mcp-remote` expands `${NAME}` from its own environment, so the value still comes from the secret
-store rather than from `connectors.json`. Write it with **no space** after the colon. That is the
-form `mcp-remote`'s own README recommends for clients that mangle spaces inside arguments, and it
-is required here for a second reason: the Machine Room's argument field splits on whitespace
-(`app.js`, `args: String(...).trim().split(/\s+/)`), so `X-API-Key: ${...}` would arrive as two
-arguments and the header would be lost.
-
-## The Machine Room steps
-
-**Add the connector.** Global capabilities -> *Plugins, connectors & skills* -> **Add or remove a
-connector**:
-
-| field | value |
-| --- | --- |
-| Name | `tinyfish` |
-| Command | `npx` |
-| Arguments | `-y mcp-remote https://agent.tinyfish.ai/mcp --transport http-only` |
-| Environment variable names | `MCP_REMOTE_CONFIG_DIR` for recipe A, `TINYFISH_API_KEY` for recipe B |
-
-Saving writes `connectors.json` on the box through the relay and calls `refreshMcp`, so the host
-relaunches its stdio servers without a container restart. Only NAMES go in that last field; the
-form says so, and it is the whole point of the split.
-
-**Store the key.** On the connector's own card, *Credentials for tinyfish* -> one masked input per
-name the host reported -> **Store on the host**. That calls `setConnectorSecret`, which writes the
-0600 store and never the config file. A blank field leaves whatever the host already holds.
-
-**Remove it.** *Remove this connector* on the card, or the row in the editor. That drops it from
-`connectors.json` and re-reads the file. The stored secret is separate: `deleteConnectorSecret`
-takes it out of the store.
-
-## Which tools an agent would then see
-
-Not measured, because nothing here authenticated. What TinyFish's MCP server exposes to a signed-in
-client today, from this repository's own connection to it:
+Measured on the R750 install above: 19 tools. From this repository's own connection to the same
+service:
 
     search                     fetch_content              run_web_automation
     run_web_automation_async   get_run                    list_runs
@@ -204,16 +231,11 @@ client today, from this repository's own connection to it:
 Search and fetch are free per TinyFish's documentation; agent and browser runs are metered against
 the wallet, which is why `get_wallet` and the usage tools are on that list at all.
 
-## What this left behind on the box
+## What the 2026-09-04 probe left behind on this Mac's box
 
 Nothing. `connectors.json` was read first and restored byte for byte afterwards: sha256
 `04f0f8b93419bee5eb4ed5b7c654ad5288c7ef80f565e3f740c0095c44f1f4d5`, 245 bytes, mode 600, identical
 before and after. `connector-env-secrets.json` is back to `{"servers":{}}` at 20 bytes. The box's
-connector roster reads `localfiles:connected:14`, which is what it read before any of this. The
-box was not restarted.
-
-## Measured install on the R750, 2026-09-05 11:45 CDT
-
-Recipe A worked end to end once the sign-in was approved in Titan's own Chrome: the bridge (`npx -y mcp-remote https://agent.tinyfish.ai/mcp 41257 --transport http-only` with `MCP_REMOTE_CONFIG_DIR=/home/box/sand-data/.mcp-auth`) wrote `mcp-remote-v1/<id>_tokens.json`, the Recipe A entry went into `connectors.json` as user box (0600), `refreshMcp` was called, and ten seconds later `listInstalledMcpServers` said connected and `listMcpServerTools` (by `serverId`, not by name) listed 19 tools. Two things the recipe did not say: the token directory was root-owned from the manual bridge and needed `chown -R box:box` before the connector, which runs as box, could read it; and a Coolify restart kills the manual bridge, so the sign-in has to be re-armed after every ship until the tokens exist. The tokens live on the data volume and survive restarts.
-
-Recipe B (the REST bridge with the API key as a connector secret) is what the operator prefers over OAuth and is still not written; filed as CONNECT-3.
+connector roster reads `localfiles:connected:14`, which is what it read before any of this. The box
+was not restarted. `scripts/verify-connector-plane.mjs --tinyfish-key` holds itself to the same
+standard: both files byte-identical before and after, on failure as well as success.

@@ -495,6 +495,59 @@
   const CONNECTOR_CONFIG_NOTE = "Configured on the box in connectors.json. The box runs the process and the host discovers its tools; this page holds no credential in that file and does not show the ones it may carry.";
   const connectorConfig = () => relayFetch("/connectors").then((r) => r.json()).catch(() => null);
 
+  // CONNECT-4's rule in one place: an env key whose value in the entry is the EMPTY string is a
+  // credential the host is waiting for; one that carries a value is configuration and is never
+  // offered as a place to paste a key. Read from the entry only -- the values themselves never
+  // leave this function, and connectors.json is the 0600 plaintext file.
+  const credentialEnvNames = (spec) => Object.entries(spec?.env ?? {})
+    .filter(([, value]) => value === "")
+    .map(([name]) => name);
+
+  // CONNECT-3: the one connector entry an operator should not have to type out. TinyFish's MCP
+  // endpoint refuses X-API-Key and takes the key as an Authorization bearer (TinyFish's own CLI
+  // docs, npm @tiny-fish/cli, "Connect Grok"); mcp-remote is the local stdio bridge that carries
+  // that header, and it expands ${NAME} inside a --header value from its OWN environment at
+  // start. So the literal text ${TINYFISH_API_KEY} is what lands in connectors.json and the key
+  // itself stays in the host's secret store. No space after the colon: that is the form
+  // mcp-remote's README asks for from clients that mangle spaces inside an argument, and it trims
+  // the value itself.
+  const CONNECTOR_PRESETS = [{
+    id: "tinyfish",
+    label: "TinyFish (API key)",
+    name: "tinyfish",
+    entry: {
+      command: "npx",
+      args: ["-y", "mcp-remote", "https://agent.tinyfish.ai/mcp", "--transport", "http-only", "--header", "Authorization:Bearer ${TINYFISH_API_KEY}"],
+      env: { TINYFISH_API_KEY: "" },
+    },
+    // A box wants one TinyFish, so filling this over an entry already called tinyfish -- the OAuth
+    // recipe in docs/CONNECTORS-TINYFISH.md -- replaces it instead of being refused as a duplicate.
+    replaces: true,
+    note: "The key goes in the credential card on the tinyfish card once this is added, never in this form: connectors.json is plaintext on the box.",
+  }];
+
+  // A header argument carries a space ("Authorization:Bearer ${TINYFISH_API_KEY}") and the
+  // editor's argument field is one line of text that used to be split on whitespace alone -- so
+  // that entry could not be expressed in this console at all: the header arrived as two arguments
+  // and was lost. Quotes group; everything outside them splits exactly as it did before.
+  function splitConnectorArgs(text) {
+    const out = [];
+    let current = "", quote = null, started = false;
+    for (const ch of String(text ?? "")) {
+      if (quote !== null) { if (ch === quote) quote = null; else current += ch; continue; }
+      if (ch === '"' || ch === "'") { quote = ch; started = true; continue; }
+      if (/\s/.test(ch)) { if (started) out.push(current); current = ""; started = false; continue; }
+      current += ch; started = true;
+    }
+    if (started) out.push(current);
+    return out;
+  }
+  // The inverse, for filling that field from a preset: only an argument that would be split needs
+  // quoting, so everything that could be typed before still reads exactly as it did.
+  const joinConnectorArgs = (args) => args
+    .map((a) => (!/\s/.test(a) ? a : a.includes('"') ? `'${a}'` : `"${a}"`))
+    .join(" ");
+
   // ui/server.mjs readConnectors answers { mcpServers: {} } for BOTH an empty file and a box it
   // could not `docker exec cat` into (the catch on a null read), so an empty map is ambiguous --
   // and a write derived from it during a box restart replaces every connector on the box with the
@@ -581,9 +634,14 @@
         // CP-10 item 1: one masked input per environment value this connector wants. The host
         // answers { server, serverId, fields } and its `fields` are the names it ALREADY holds a
         // value for -- an empty list on a connector nobody has filled in yet -- so the form is
-        // drawn from the env NAMES connectors.json declares as well, or there would be no way to
-        // store the first one. Only the keys are read from that file; its values stay off this page.
-        secretFields: [...new Set([...Object.keys(spec?.env ?? {}), ...storedFields])],
+        // drawn from the env names connectors.json declares WITH NO VALUE as well, or there would
+        // be no way to store the first one. Only keys are read from that file; values stay off it.
+        // CONNECT-4: only the EMPTY-valued env keys. MCP_REMOTE_CONFIG_DIR is a path, it was
+        // offered here as somewhere to "Enter securely", and a pasted key went into it. The host
+        // is the authority -- listConnectorSecretFields answers the same union of stored fields
+        // and empty-valued env keys -- and this is that rule mirrored for the moment the card is
+        // drawn before the host has answered.
+        secretFields: [...new Set([...credentialEnvNames(spec), ...storedFields])],
         storedFields,
         secretHint: `Stored by the host for ${name} in its own 0600 store and merged into the connector's environment when the box launches it. It never enters connectors.json, chat, model context or this page's markup.`,
         skills: [], skillsNote: null,
@@ -2214,6 +2272,21 @@
       // the host re-reads it on refreshMcp, so an added connector appears on its card without an
       // operator running docker exec. Env VALUES are deliberately absent from this write: the
       // form collects names only, and setConnectorSecret above carries the values.
+      //
+      // CONNECT-3: the preset buttons that editor draws, as data. A click fills the form, the
+      // operator reads what it filled in, and nothing is written until Add connector is pressed.
+      connectorPresets() {
+        return CONNECTOR_PRESETS.map((preset) => ({
+          id: preset.id, label: preset.label, name: preset.name,
+          command: preset.entry.command,
+          args: [...preset.entry.args],
+          argsText: joinConnectorArgs(preset.entry.args),
+          envNames: Object.keys(preset.entry.env),
+          replaces: preset.replaces === true,
+          note: preset.note,
+        }));
+      },
+      splitConnectorArgs,
       listConnectors() {
         return connectorConfig().then((c) => Object.entries(c?.mcpServers ?? {}).map(([name, spec]) => ({
           name, command: spec?.command ?? null, argCount: Array.isArray(spec?.args) ? spec.args.length : 0,
@@ -2231,12 +2304,16 @@
         const held = await readableConnectorServers();
         if (held == null) return { accepted: false, message: CONNECTORS_UNREADABLE };
         const servers = { ...held };
-        if (servers[name]) return { accepted: false, message: `${name} is already configured on the box.` };
+        // A duplicate name is still refused for anything typed by hand. `replace` is set only by a
+        // preset that owns its name (the TinyFish one), where refusing would leave the OAuth entry
+        // in place with no way to swap recipes from this page.
+        const replacing = servers[name] != null;
+        if (replacing && spec?.replace !== true) return { accepted: false, message: `${name} is already configured on the box.` };
         // Names with no values: the file records which env the process wants, and the host's own
         // store is where the value goes. Writing a value here would put it in a 0600 JSON file
         // this page can read back, which is exactly what setConnectorSecret exists to avoid.
         servers[name] = { command, args, env: Object.fromEntries(envNames.map((n) => [n, ""])) };
-        return this.writeConnectors(servers, `${name} added`);
+        return this.writeConnectors(servers, `${name} ${replacing ? "replaced" : "added"}`);
       },
       async removeConnector(name) {
         const held = await readableConnectorServers();

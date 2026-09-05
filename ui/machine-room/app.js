@@ -1458,7 +1458,14 @@
     const rows = configured.length
       ? configured.map((p) => `<div class="setting-row"><div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.category)}</small></div><button class="ghost-button" type="button" data-remove-connector="${escapeHtml(p.name)}">Remove</button></div>`).join("")
       : `<div class="empty-state">No stdio connector is configured on this box yet.</div>`;
-    return `<details class="panel-card" data-connector-editor><summary>Add or remove a connector</summary><p class="field-hint">Writes connectors.json on the box and calls refreshMcp, so the host relaunches its stdio servers without a container restart. Give the environment variable NAMES the process needs; their values go in the key form on the connector's card, where the host stores them instead of this file.</p><form data-add-connector><div class="field"><label for="connector-name">Name</label><input id="connector-name" name="name" required placeholder="e.g. localfiles" /></div><div class="field"><label for="connector-command">Command</label><input id="connector-command" name="command" required placeholder="e.g. npx" /></div><div class="field"><label for="connector-args">Arguments</label><input id="connector-args" name="args" placeholder="space separated, e.g. -y @modelcontextprotocol/server-filesystem /workspace" /></div><div class="field"><label for="connector-env">Environment variable names</label><input id="connector-env" name="envNames" placeholder="comma separated, names only" /></div><div class="form-actions"><button class="primary-button" type="submit">Add connector</button></div></form><div class="plugin-list">${rows}</div></details>`;
+    // CONNECT-3: a preset is a button that FILLS this form, not one that installs anything. The
+    // operator sees the entry before it is written, and the credential still goes through the key
+    // form on the connector's own card afterwards.
+    const presets = typeof adapter.connectorPresets === "function" ? adapter.connectorPresets() : [];
+    const presetRow = presets.length
+      ? `<div class="form-actions" data-connector-presets>${presets.map((p) => `<button class="ghost-button" type="button" data-connector-preset="${escapeHtml(p.id)}">${escapeHtml(p.label)}</button>`).join("")}</div><span class="field-hint">A preset fills the fields below with that service's connector entry, so it can be read before it is written. Nothing is written until Add connector, and a credential is a separate step on the connector's own card.</span>`
+      : "";
+    return `<details class="panel-card" data-connector-editor><summary>Add or remove a connector</summary><p class="field-hint">Writes connectors.json on the box and calls refreshMcp, so the host relaunches its stdio servers without a container restart. Give the environment variable NAMES the process needs; their values go in the key form on the connector's card, where the host stores them instead of this file.</p>${presetRow}<form data-add-connector><div class="field"><label for="connector-name">Name</label><input id="connector-name" name="name" required placeholder="e.g. localfiles" /></div><div class="field"><label for="connector-command">Command</label><input id="connector-command" name="command" required placeholder="e.g. npx" /></div><div class="field"><label for="connector-args">Arguments</label><input id="connector-args" name="args" placeholder="space separated; quote one that holds a space, e.g. --header &quot;Name:Value&quot;" /></div><div class="field"><label for="connector-env">Environment variable names</label><input id="connector-env" name="envNames" placeholder="comma separated, names only" /></div><div class="form-actions"><button class="primary-button" type="submit">Add connector</button></div></form><div class="plugin-list">${rows}</div></details>`;
   }
 
   function agentProfilePanel(worker) {
@@ -2127,6 +2134,21 @@
           if (result && typeof result === "object" && result.message) showToast(result.message);
         })
         .catch((error) => { renderPluginsPanel(); showToast(`That tool was not changed: ${error.message}`); });
+    } else if (target.dataset.connectorPreset) {
+      // CONNECT-3: fill only. The write is the operator pressing Add connector on what they can
+      // see in the fields, and the key is a separate step on the connector's own card afterwards.
+      const preset = (typeof adapter.connectorPresets === "function" ? adapter.connectorPresets() : [])
+        .find((p) => p.id === target.dataset.connectorPreset) ?? null;
+      const form = document.querySelector("[data-add-connector]");
+      if (!preset || !form) { showToast("That preset is no longer on this page; nothing was filled in."); return; }
+      form.querySelector('[name="name"]').value = preset.name;
+      form.querySelector('[name="command"]').value = preset.command;
+      form.querySelector('[name="args"]').value = preset.argsText;
+      form.querySelector('[name="envNames"]').value = preset.envNames.join(", ");
+      // Carried on the form rather than in a variable so that editing the name away from the
+      // preset's own takes the replacement with it: only a save of THIS name may overwrite.
+      if (preset.replaces) form.dataset.presetName = preset.name; else delete form.dataset.presetName;
+      showToast(`${preset.label} filled in — nothing is written until Add connector. ${preset.note ?? ""}`.trim());
     } else if (target.dataset.removeConnector) {
       const name = target.dataset.removeConnector;
       target.disabled = true;
@@ -2442,16 +2464,23 @@
       const data = new FormData(form);
       const submit = form.querySelector("button[type=submit]");
       if (submit) submit.disabled = true;
+      // Quotes group, so an argument that holds a space -- a --header value, which is how a remote
+      // MCP server takes a key -- survives this field. The adapter owns the rule; a factory that
+      // does not have it falls back to the whitespace split this form always did.
+      const argsText = String(data.get("args") ?? "");
       const spec = {
         name: String(data.get("name") ?? "").trim(),
         command: String(data.get("command") ?? "").trim(),
-        args: String(data.get("args") ?? "").trim().split(/\s+/).filter(Boolean),
+        args: typeof adapter.splitConnectorArgs === "function" ? adapter.splitConnectorArgs(argsText) : argsText.trim().split(/\s+/).filter(Boolean),
         envNames: String(data.get("envNames") ?? "").split(",").map((n) => n.trim()).filter(Boolean),
       };
+      // Only a preset that owns its name may overwrite an entry already using it, and only while
+      // the name in the field is still that one.
+      if (form.dataset.presetName && form.dataset.presetName === spec.name) spec.replace = true;
       Promise.resolve(adapter.addConnector(spec))
         .then((result) => {
           if (submit) submit.disabled = false;
-          if (result?.accepted) form.reset();
+          if (result?.accepted) { form.reset(); delete form.dataset.presetName; }
           renderPluginsPanel();
           showToast(result?.message ?? `${spec.name} written to connectors.json`);
         })
