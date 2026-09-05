@@ -1,5 +1,11 @@
 # TinyFish as a connector
 
+**The index for every connector on this box is [docs/CONNECTORS.md](CONNECTORS.md)** — GitHub,
+Slack, Linear, Google Workspace, TinyFish and CodeRabbit, one operator walk-through each, and the
+"How it works" head that explains the entry, the credential card and the secret store once for all
+of them. This page is TinyFish's own report in full: the measurements, the OAuth alternative, and
+what the probe left behind.
+
 TinyFish is the paid web-automation service: ranked search, page fetch, and a browser agent that
 clicks through a real site. An agent in the box reaches it as MCP tools, the same way it reaches
 the filesystem connector, once TinyFish is a connector on this box.

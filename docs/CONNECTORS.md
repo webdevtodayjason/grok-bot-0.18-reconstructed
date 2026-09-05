@@ -1,0 +1,369 @@
+# Connectors: the operator index
+
+Six services, in the order the operator asked for them: GitHub and Slack first, then Linear,
+CodeRabbit and Google, with TinyFish already landed in the middle as the reference. Each section
+below is the whole walk-through for one service — which preset fills the form, which credential to
+mint and with what permissions, the first tool call and the answer that means it worked, and the
+two or three things that bite. Every fact here comes from that service's report in
+`docs/connectors/` (TinyFish's is `docs/CONNECTORS-TINYFISH.md`); the reports carry the sources,
+the version pins and the reasoning, and nothing is claimed here that is not in one of them.
+
+## How it works
+
+A connector is one entry in `/home/box/sand-data/connectors.json`, and that file is the whole
+configuration surface: a name, a `command`, its `args`, and an `env` map. The box runs the process
+as user `box` and the host discovers its tools. This build runs local stdio servers only, so a
+service whose MCP endpoint is remote is bridged by a local `mcp-remote` process carrying the token
+in an `Authorization` header; `mcp-remote` expands `${NAME}` inside a `--header` value from its own
+environment, so the literal `${...}` text is what lands in the file and the key does not.
+
+**No credential ever goes in that file.** An env key whose value in the entry is the **empty
+string** is a credential field: the connector's card draws one masked "Enter securely" input per
+such key, `setConnectorSecret` writes the value into `/home/box/sand-data/connector-env-secrets.json`
+(0600, host-owned), and the host merges it into the connector process's environment when it spawns
+it. An env key that carries a value is configuration and is never offered as a place to paste
+anything — that rule exists because the TinyFish OAuth entry declared a directory path, the card
+offered it, and a pasted API key went into it (CONNECT-4). The host is the authority on that
+distinction: `listConnectorSecretFields` answers `fields` (the union of what is stored and what the
+entry leaves empty) and `stored` (the names the 0600 store actually holds), and the card may only
+say the host holds a value from the second list.
+
+The operator's route is Global capabilities → **Plugins, connectors & skills** → **Add or remove a
+connector**. The preset row at the top of that card is a row of buttons, one per service; clicking
+one **fills the four fields and writes nothing**. Pressing **Add connector** writes
+`connectors.json` through the relay and calls `refreshMcp`, so the host relaunches its stdio servers
+with no container restart. The connector's card then appears with its **Credentials for
+&lt;name&gt;** form; paste the key, press **Store on the host**, and the card polls until the box
+reports the server connected and lists its tools. Until the key is stored the connector cannot
+authenticate, so it sits at initializing or error and says so. The tables below give exactly what
+each preset fills, so the form can be read before it is written — and typed by hand if a preset is
+missing.
+
+An agent can install the same entry itself with **AddMcpServer** after confirming with the user,
+the way `source/host/extensions/managed-setup/seed-skills/add-connector/SKILL.md` describes for a
+server the catalog does not know. What an agent **cannot** do is set the key: `setConnectorSecret`
+is a console command and not an agent tool, deliberately, because a key typed into a conversation
+is in the transcript, the model's context and whatever window that was compacted into. So the split
+is always the same — the agent installs the connector, the operator pastes the key on the card, and
+a tool call made before the key is stored answers with an error naming that card rather than a bare
+transport failure. (Note what `AddMcpServer` accepts on this bundle: `name`, `url`, `headers`. The
+local `command`/`args`/`env` form the skill describes is the piece CONNECT-3 adds.)
+
+Removing a connector: **Remove this connector** on its card, or its row in the editor, drops it from
+`connectors.json` and re-reads the file. The stored secret is separate — `deleteConnectorSecret`
+takes it out of the store and the field stays on the card as an empty one to fill again.
+
+## GitHub
+
+**Preset.** Click the GitHub preset. It fills:
+
+| field | filled with |
+| --- | --- |
+| Name | `github` |
+| Command | `npx` |
+| Arguments | `-y mcp-remote@0.8.3 https://api.githubcopilot.com/mcp/ --transport http-only --header "Authorization:Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}" --header X-MCP-Toolsets:repos,issues,pull_requests --header X-MCP-Tools:get_me --header X-MCP-Readonly:true` |
+| Environment variable names | `GITHUB_PERSONAL_ACCESS_TOKEN` |
+
+This is GitHub's own hosted server at `api.githubcopilot.com/mcp/`, bridged into stdio. The three
+`X-MCP-*` headers are what make it read-only: toolsets `repos,issues,pull_requests`, plus `get_me`
+by name, with `X-MCP-Readonly:true` filtering every write tool. The header argument is quoted
+because it holds a space; unquoted, the argument field splits on whitespace and the header is lost.
+
+**The credential.** A GitHub **fine-grained personal access token**, created at
+<https://github.com/settings/personal-access-tokens/new> (Settings → Developer settings → Personal
+access tokens → Fine-grained tokens). Set an expiry there — fine-grained tokens carry one — pick a
+single resource owner, and select only the repositories this box should reach. Organization
+approval may be required, and a token still pending approval reads public resources only. For a
+read-only check, a valid fine-grained PAT with **no permissions at all** is enough: that covers
+`get_me` and public repository reads. For the intended private-repository workflow, grant
+**Contents: read**, **Issues: read**, **Pull requests: read**, plus the **Metadata: read** GitHub
+includes automatically. These are permissions, not classic scope strings. Add extras only when a
+tool needs them: PR `get_status` also wants **Commit statuses: read**, and organization issue-type
+listing wants **Issue Types: read**. Revoke by deleting the token on the same settings page, then
+remove or replace the value on the connector's credential card and let it restart.
+
+**First call.** `get_me` with `{}`. A good answer is a user object carrying the expected account
+login, its numeric id and the profile URL — that proves the token is accepted, not that any
+repository is reachable. Follow with `get_file_contents`
+`{"owner":"github","repo":"github-mcp-server","path":"README.md"}` for the public path, then the
+same call against one of the selected private repositories, because a public read alone does not
+prove the private grant.
+
+**What bites.**
+
+- **A listed tool is not an authorized one.** Fine-grained PATs do not support classic-scope
+  detection, so the headers decide which tools the server offers while the token's permissions
+  independently decide which API calls succeed. Expect tools that list and then fail.
+- **A 404 can be a permission error.** A valid token without access to a resource answers 403
+  (`Resource not accessible by personal access token`) or a privacy-preserving 404; check
+  repository selection, expiry, organization approval and SSO before concluding the thing is gone.
+- **Rate limits are shared and search is tighter.** PAT REST requests share the 5,000/hour user
+  limit, search endpoints are lower, secondary limits apply, and one tool call can make several API
+  requests. Also: the remote server does not host GitHub Enterprise Server; GHES needs the local
+  binary.
+
+Full report: [docs/connectors/github.md](connectors/github.md).
+
+## Slack
+
+**Preset.** Click the Slack preset. It fills:
+
+| field | filled with |
+| --- | --- |
+| Name | `slack` |
+| Command | `npx` |
+| Arguments | `-y slack-mcp-server@1.3.0 --transport stdio` |
+| Environment variable names | `SLACK_MCP_XOXP_TOKEN` |
+
+This one runs entirely in the box — `korotovsky/slack-mcp-server`, a maintained stdio server that
+takes a pasteable token. `--transport stdio` is required. Posting stays off: the write tools are
+not registered at all until their own configuration env is set.
+
+**The credential.** A Slack **user OAuth token** (`xoxp-`), which acts as the installing user.
+Create the app at <https://api.slack.com/apps> → Create New App → From scratch, then **OAuth &
+Permissions → User Token Scopes**, then **Install to Workspace**, and copy the **User OAuth Token**.
+The minimum that passes the smoke test is `channels:read`. The working read-and-search set adds
+`channels:history`, `groups:read`, `groups:history`, `im:read`, `im:history`, `mpim:read`,
+`mpim:history`, `users:read` and `search:read`; `usergroups:read` covers the usergroup tools. If you
+later want the agent to post, that is `chat:write` **and** `SLACK_MCP_ADD_MESSAGE_TOOL=true` — the
+second is configuration, not a credential, so it carries a value in the entry and the card will not
+offer it. Revoke by revoking or reinstalling under the app's OAuth & Permissions, by uninstalling
+the app from the workspace, or with `auth.revoke`; then clear or replace the console credential and
+let the connector restart.
+
+**First call.** `channels_list` with `{"channel_types":"public_channel","limit":5}`. A good answer
+is a CSV directory of channels with id, name, topic or purpose and member count. If you took the
+`xoxp` route, `conversations_search_messages` against a known public-channel keyword is the second
+call worth making: it is what proves `search:read`. A dead token shows up as Slack's `invalid_auth`
+(or `not_authed`, `token_revoked`, `account_inactive`, `token_expired`) inside the tool error; a
+missing scope is `missing_scope`.
+
+**What bites.**
+
+- **The listener is not this connector.** The host's Slack listener binds inbound events to an
+  agent; this entry is outbound MCP tools in the box. Connecting Slack in the console does not start
+  this server. One Slack app can serve both planes, but the token gets pasted twice — the listener
+  through Connect, the connector through its credential card.
+- **A bot token costs you search.** `SLACK_MCP_XOXB_TOKEN` works, but `conversations_search_messages`
+  is unavailable on `xoxb`, `search:read` becomes `search:read.public`, and the bot must be invited
+  to every channel it should read.
+- **The cache is load-bearing.** Without the users and channels cache (`~/.cache/slack-mcp-server/`
+  on Linux), `#name` and `@handle` lookups and `channels_list` degrade.
+
+Full report: [docs/connectors/slack.md](connectors/slack.md).
+
+## Linear
+
+**Preset.** Click the Linear preset. It fills:
+
+| field | filled with |
+| --- | --- |
+| Name | `linear` |
+| Command | `npx` |
+| Arguments | `-y mcp-remote@0.8.3 https://mcp.linear.app/mcp --transport http-only --header "Authorization:Bearer ${LINEAR_API_KEY}"` |
+| Environment variable names | `LINEAR_API_KEY` |
+
+Linear's own hosted server, bridged. Linear documents that the endpoint accepts an API key in
+`Authorization: Bearer` instead of the interactive OAuth flow, which is what makes this a paste
+rather than a browser session in the box. If write tools must never even appear, point the same
+entry at `https://mcp.linear.app/mcp/readonly` instead.
+
+**The credential.** A Linear **personal API key**, created at
+<https://linear.app/settings/account/security> (Settings → Account → Security & Access → Personal
+API keys → New API key). Copy it on creation; Linear will not show it again. Each key carries
+permissions — Read, Write, Admin, Create issues, Create comments — plus an optional team
+restriction, and can never exceed the creating user's own workspace access. For the read-only
+configuration grant **Read** and nothing else; Linear's own MCP FAQ recommends exactly that for a
+read-only integration. For a working agent that files things, add **Write**, or the narrower
+**Create issues** / **Create comments** if that is all it should do. Do not grant **Admin** unless
+you need the webhook and admin surfaces. Revoke from the same Security & Access page, or from
+workspace Settings → Administration → API where an admin can revoke workspace keys; then remove or
+replace the console credential and let the connector restart. (Workspace admins can also disable
+member-created keys entirely, which is worth checking before blaming the entry.)
+
+**First call.** `list_teams` with `{}`. A good answer is the workspace's teams with at least id and
+name — that proves the Bearer key is accepted and the user can see teams. Then `list_issues` with
+`{"assignee":"me"}` for the caller's assigned issues; an empty list can be a genuinely empty inbox,
+so do not read it as a failure. A bad key reads as HTTP 401 or an authentication error; a Read-only
+key calling a write tool is a permission failure, which is a different thing.
+
+**What bites.**
+
+- **Two auth conventions, one key.** MCP wants `Authorization: Bearer <key>`. Direct Linear GraphQL
+  calls use `Authorization: <key>` with no `Bearer`. Do not mix them.
+- **Drop the header and you get a browser.** Omitting the `--header` argument falls through to
+  `mcp-remote`'s OAuth flow, which wants a browser in the box and stores its tokens under
+  `~/.mcp-auth`. That is the disfavored path here. `/sse` is deprecated; do not point new entries
+  at it.
+- **The rate limit is per user, not per key.** 2,500 requests/hour and 3,000,000 complexity
+  points/hour for API keys, shared across every key that user holds; over-limit answers arrive as
+  GraphQL `errors.extensions.code = RATELIMITED` on HTTP 400.
+
+Full report: [docs/connectors/linear.md](connectors/linear.md).
+
+## Google Workspace
+
+**Preset.** Click the Google Workspace preset. It fills:
+
+| field | filled with |
+| --- | --- |
+| Name | `google` |
+| Command | `npx` |
+| Arguments | `-y google-workspace-mcp-server@1.4.3` |
+| Environment variable names | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
+
+Three empty env values means **three credential cards** on the connector, and the process cannot
+authenticate until all three are stored. Google's own 2026 remote MCP was not chosen: it is two
+product endpoints, it accepts only a roughly one-hour OAuth access token as a Bearer, and there is
+no durable token to paste. This npm server takes a refresh token and mints access tokens itself, so
+spawning needs no browser.
+
+**The credential.** There is no long-lived Gmail or Docs PAT, so the one-time browser work happens
+against Google's OAuth Playground rather than a loopback port inside the container.
+
+1. Create a Google Cloud project and enable the **Gmail API**, **Google Docs API** and **Google
+   Drive API** (the Docs tools address Drive file ids).
+2. Configure the OAuth consent screen: **Internal** for a Workspace domain, which needs no test-user
+   list; **External** for consumer Gmail, adding the operator as a test user until the app is
+   verified.
+3. Create an OAuth **Web application** client with `https://developers.google.com/oauthplayground`
+   as an authorized redirect URI, and copy the client id and secret.
+4. In the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground/): gear → **Use your
+   own OAuth credentials** → paste the id and secret → select the scopes → **Authorize APIs** →
+   sign in → **Exchange authorization code for tokens** → copy the **Refresh Token**, not the
+   access token.
+
+For reading only, that is `https://www.googleapis.com/auth/gmail.readonly` plus
+`https://www.googleapis.com/auth/drive.readonly` (official Docs MCP also lists
+`documents.readonly`). For the working configuration — read mail, read and write Docs — add
+`https://www.googleapis.com/auth/gmail.compose` if you want `gmail_create_draft`,
+`https://www.googleapis.com/auth/documents` for Docs read and write, and
+`https://www.googleapis.com/auth/drive.file`; grant the broad
+`https://www.googleapis.com/auth/drive` only if you will actually use this server's Drive tools.
+Note that `gmail.readonly` is a **restricted** scope: an External or production app needs Google's
+restricted-scope verification, an Internal Workspace app does not. Revoke by removing the app under
+<https://myaccount.google.com/permissions> or POSTing the token to Google's revoke endpoint, and
+delete or rotate the OAuth client under Credentials; then replace or clear the three console
+credentials and let the connector restart.
+
+**First call.** `gmail_list_labels` with `{}` — it needs no message or document id. A good answer is
+a list of label objects with `id` and `name`, including system labels such as `INBOX` and `UNREAD`.
+Then `gmail_list_messages` with something like `{"q":"is:unread","maxResults":5}` and
+`gmail_get_message` on one of the returned ids; for the Docs half, `docs_create_document` followed
+by `docs_get_document` on that id should come back with the title and body.
+
+**What bites.**
+
+- **A revoked refresh token does not look revoked.** It surfaces as a `401` / `invalid_grant` /
+  "Access token expired" until you mint a new one in the Playground. A missing scope or a disabled
+  API is `403` instead.
+- **Mail and documents are untrusted input.** Google documents prompt injection as a risk for its
+  own Workspace MCP servers; treat anything the agent reads out of this connector the same way.
+- **More tools than scopes.** The same process also registers Sheets, Drive and Calendar tools, and
+  Google's official Workspace MCP is still Developer Preview. Grant only the scopes you mean to
+  use — a registered tool with no scope behind it just fails at call time.
+
+Full report: [docs/connectors/google.md](connectors/google.md).
+
+## TinyFish
+
+**Preset.** Click **TinyFish (API key)** — the reference preset this whole mechanism was built
+around. It fills:
+
+| field | filled with |
+| --- | --- |
+| Name | `tinyfish` |
+| Command | `npx` |
+| Arguments | `-y mcp-remote https://agent.tinyfish.ai/mcp --transport http-only --header "Authorization:Bearer ${TINYFISH_API_KEY}"` |
+| Environment variable names | `TINYFISH_API_KEY` |
+
+A box wants one TinyFish, so this preset replaces an entry already named `tinyfish` — including the
+older OAuth one — rather than being refused as a duplicate.
+
+**The credential.** The account's TinyFish API key, pasted into the single `TINYFISH_API_KEY` card.
+It goes in the **`Authorization: Bearer`** header, not `X-API-Key`: measured from inside the box on
+2026-09-04 with an invented key, the MCP endpoint answers
+`401 Unauthorized: Valid OAuth Bearer token required` to `X-API-Key`, and the bearer form is what
+TinyFish's own CLI documentation uses for the same endpoint. `X-API-Key` remains correct for
+TinyFish's REST endpoints, which is why it was tried first. To rotate, store a new value on the
+card; to remove access, take the value out with the card's delete and rotate the key at TinyFish —
+the field stays on the card as an empty one to fill again.
+
+**First call.** The card polls by itself: a good answer is it leaving initializing and listing the
+server's tools. Nineteen were listed on the R750 install, and from this repository's own connection
+to the same service the names are `search`, `fetch_content`, `run_web_automation`,
+`run_web_automation_async`, `get_run`, `list_runs`, `cancel_run`, `guide_next_step`,
+`create_browser_session`, `list_browser_sessions`, `close_browser_session`, `batch_status`,
+`batch_cancel`, `get_wallet`, `get_search_usage` and `list_fetch_usage`. Make the first call
+`search` or `fetch_content`: those are free per TinyFish's documentation, while agent and browser
+runs are metered against the wallet.
+
+**What bites.**
+
+- **The header form is exact.** No space after the colon — that is the form `mcp-remote`'s README
+  asks for from clients that mangle spaces inside an argument, and it trims the value itself. And
+  the whole header must stay one quoted argument in the console's argument field, or it arrives as
+  two arguments and is lost.
+- **The OAuth alternative signs the box's own Chrome in.** The other recipe completes authorization
+  in the box's browser, which is a long-lived signed-in profile reachable by anyone who gets through
+  the console's password. Revoking that path means revoking the client at Clerk, not deleting a key.
+- **`~/.mcp-auth` does not survive a recreate.** On the OAuth path, `/home/box` is not one of the
+  box's volumes, so the token store has to be pointed into `sand-data` or the connector silently
+  goes back to waiting for authorization after the next redeploy.
+
+Full report: [docs/CONNECTORS-TINYFISH.md](CONNECTORS-TINYFISH.md), which also carries the OAuth
+recipe, the measured R750 install and what the probe left behind on the Mac's box (nothing).
+
+## CodeRabbit
+
+**No preset, and no entry in `connectors.json`.** CodeRabbit ships no MCP server — it is an MCP
+*client*, consuming other people's servers during a PR review — so there is nothing for the host to
+spawn and nothing will ever appear in `tools/list`. The integration is the official CLI, run as a
+shell tool with a secret, which is the CONNECT-10 shape in `docs/GAP-ANALYSIS.md` (the same shape as
+CONNECT-5 for the TinyFish CLI): an install, a credential card, and the agent's shell inheriting the
+key. Every unofficial CodeRabbit MCP package on npm was rejected in the report as unofficial,
+inactive, archived, or a security holding stub.
+
+Install it headless on the box — it needs `curl` and `unzip`, and defaults to `~/.local/bin`:
+
+```bash
+CI=1 curl -fsSL https://cli.coderabbit.ai/install.sh | sh
+```
+
+`CI=1` skips the post-install browser prompt. Reviews then run as
+`cr review --agent --api-key "$CODERABBIT_API_KEY"` (add `--region eu` for EU accounts, which is
+only accepted alongside `--api-key`). Pass the key on every run: box storage is ephemeral.
+
+**The credential.** An **Agentic API key** — CodeRabbit's docs show the prefix as `cr-…` — created
+at <https://app.coderabbit.ai/settings/api-keys> (EU:
+<https://app.eu.coderabbit.ai/settings/api-keys>) for the organization that should bill CLI reviews.
+It requires an assigned seat. There are no OAuth scope strings to choose: the key is org-bound, and
+the CLI rejects the other key types outright with a message that user API keys are not supported.
+The browser alternative, `cr auth login`, wants a GUI and is the wrong shape here. Revoke by
+deleting the key on the same page — CodeRabbit's audit log records `api_key_delete` — and run
+`cr auth logout` if a session was ever stored locally. Do not paste a GitHub PAT here; that belongs
+to the unofficial package the report rejected.
+
+**First call.** `coderabbit --version` first: expect 0.7.6 or newer, and `--agent` needs at least
+0.4.0. Then `cr auth status --agent`, whose good answer is structured JSON naming an authenticated
+session and its region, followed by `cr doctor`, which exits 1 if any of runtime, local storage,
+auth, git repo, backend HTTPS or WebSocket fails. The real one is `cr review --agent --api-key …`
+from an initialized git worktree with a small tracked diff: a good answer is NDJSON on stdout, one
+object per line, with `type` values `review_context`, `status`, `heartbeat`, `finding` and
+`complete`; a `finding` carries `severity`, `fileName` and either `codegenInstructions` or
+`comment`. An empty scope answers `complete` with `status: "review_skipped"`, `findings: 0` and
+`"No changes detected"` — that is a pass, not a failure.
+
+**What bites.**
+
+- **`cr doctor` can pass while a review fails.** Auth failures after the network path is good come
+  back as HTTP 401 or 403; a key of the wrong type comes back as "user API keys not supported".
+- **It needs git, and WebSockets.** Run inside a git worktree, and add `--include-untracked` for
+  untracked files. Every hosted review opens **WSS** to `ide.coderabbit.ai` (or the EU host); a
+  proxy that blocks WebSocket upgrades fails the review with a `1006`.
+- **Reviews are slow and rationed.** Three to twelve CLI reviews per developer per rolling hour
+  depending on plan, 150 or 300 files per review, and 7 to 30+ minutes each. In `--agent` mode the
+  CLI never auto-confirms paid overage: it returns `action_required` with
+  `status: "awaiting_confirmation"` and waits for `--use-credits`.
+
+Full report: [docs/connectors/coderabbit.md](connectors/coderabbit.md).
