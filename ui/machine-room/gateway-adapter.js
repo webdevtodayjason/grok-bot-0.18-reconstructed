@@ -370,6 +370,12 @@
   // array that is NEWEST FIRST. Reading runs[length - 1] reports the oldest run as the latest, and
   // the status vocabulary is "ok", not the demo's "passed".
   const RUN_OK = new Set(["ok", "success", "completed", "passed"]);
+  // The host's word for a run that failed is "error" (automation.ts: AutomationRunStatus is
+  // "running" | "ok" | "error"); the card's word is "failed". Nothing mapped between them, so a
+  // failed run fell through to the card's "outcome not reported" line -- and since a background
+  // failure deliberately raises no tray error (automation-runtime.ts runLocalScheduledAutomation),
+  // that line was the whole of what the console said about a scheduled run that failed.
+  const RUN_FAILED = new Set(["error", "failed", "failure"]);
 
   function lastRunOf(automation) {
     const runs = Array.isArray(automation.runs) ? automation.runs : [];
@@ -380,11 +386,16 @@
     return {
       // Report the host's own word when it is not one we recognise, rather than mapping an unknown
       // outcome onto "passed" and telling the operator a run succeeded.
-      status: RUN_OK.has(newest.status) ? "passed" : (newest.status ?? "unknown"),
+      status: RUN_OK.has(newest.status) ? "passed"
+        : RUN_FAILED.has(newest.status) ? "failed"
+        : (newest.status ?? "unknown"),
       // A real measured duration: the host stamps both ends of the run.
       duration: Number.isFinite(ms) && ms >= 0 ? `${(ms / 1000).toFixed(1)}s` : "",
       at: newest.finishedAt ?? newest.startedAt ?? null,
       trigger: newest.trigger ?? null,
+      // finishRunDefinition stores the failure reason on the run row. It is the only place the
+      // operator can read why a scheduled run failed, so it comes up with the status.
+      detail: typeof newest.detail === "string" && newest.detail.trim() ? newest.detail.trim() : null,
     };
   }
 

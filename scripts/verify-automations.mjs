@@ -13,6 +13,10 @@
 //   3. A fire whose definition could not be read dropped out of runAgentAutomationNow in silence
 //      while the tick logged "fired". The entry point reports what it did and the tick logs that.
 //
+// And one more after that (AUTOMATION-3): a scheduled run that FAILS raises no tray error by
+// design, so the run record is the whole report -- the last check here reads a failed scheduled run
+// back off the gateway and insists it still says error, schedule, and why.
+//
 // Two model turns, one per slot, on a probe agent this script creates and deletes. Needs
 // SAND_TOOL_TRACE for the [sand][automation-wake] line, and puts it back as it found it.
 //
@@ -102,8 +106,33 @@ const wakeLinesSince = async (from) => {
 };
 
 const AUTOMATION_ID_HINT = "verify-automations-probe";
-const runsOf = async (agentId, automationId) =>
-  ((await call("getAgentAutomations", { id: agentId })).find((entry) => entry.id === automationId)?.runs ?? []);
+const recordOf = async (agentId, automationId) =>
+  (await call("getAgentAutomations", { id: agentId })).find((entry) => entry.id === automationId);
+const runsOf = async (agentId, automationId) => (await recordOf(agentId, automationId))?.runs ?? [];
+
+// AUTOMATION-3. A scheduled run that fails raises no tray error, on purpose: the run record is the
+// report. So the failure has to survive to a reader, and the only way to check that from out here
+// is to put a failed run in the history the way the host does and read it back through the gateway.
+//
+// A model turn cannot be made to fail from outside the box, so the OUTCOME is the one staged thing:
+// the run being marked is the one this box fired on its own slot, and the row is rewritten into the
+// shape automation-store.ts finishRunWith writes on a throw (finishedAt, status "error", detail).
+// What is under test is the read -- that a failed scheduled run is still a failed scheduled run,
+// with its reason, when the console asks the host for the routine fresh.
+const stageRunFailure = async (agentId, automationId, runUuid, detail) => {
+  const configPath = (await recordOf(agentId, automationId))?.filePath;
+  if (typeof configPath !== "string" || !configPath.includes("/"))
+    fail(`the host returned no filePath for the routine, so its run history cannot be located: ${JSON.stringify(configPath)}`);
+  const runsPath = `${configPath.slice(0, configPath.lastIndexOf("/"))}/runs.json`;
+  await docker(["exec", BOX, "node", "-e",
+    `const fs=require('fs');const p=${JSON.stringify(runsPath)};`
+    + `const runs=JSON.parse(fs.readFileSync(p,'utf8'));`
+    + `const run=runs.find((r)=>r.id===${JSON.stringify(runUuid)});`
+    + `if(run==null)throw new Error('no run '+${JSON.stringify(runUuid)}+' in '+p);`
+    + `run.finishedAt=run.finishedAt==null?Date.now():run.finishedAt;`
+    + `run.status='error';run.detail=${JSON.stringify(detail)};`
+    + `fs.writeFileSync(p,JSON.stringify(runs,null,2)+'\\n');`]);
+};
 const waitForRun = async (agentId, automationId, runUuid, label) => {
   const deadline = Date.now() + SLOT_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -188,6 +217,21 @@ try {
   if (strays.length > 0) fail(`${strays.length} run(s) not derived from either slot: ${strays.map((entry) => `${entry.id}(${entry.trigger})`).join(", ")}`);
   if (all.some((entry) => entry.trigger !== "schedule")) fail(`a run is filed under a trigger other than schedule: ${all.map((entry) => entry.trigger).join(", ")}`);
   pass(`two slots, two runs, no duplicate for either and nothing else in the history (${elapsed()})`);
+
+  // AUTOMATION-3. Pause first so no further slot is served and the history stops moving under the
+  // stage; then mark the first slot's run failed the way the host does, and ask the host for the
+  // routine again. A fresh read is what the console does, and until this change what came back was
+  // read as "outcome not reported", in the same green as a run that went fine.
+  await call("setAgentAutomationEnabled", { id: probeId, automationId, isEnabled: false });
+  const FAILURE_DETAIL = "verify-automations staged failure: the run's command exited non-zero";
+  await stageRunFailure(probeId, automationId, uuidOne, FAILURE_DETAIL);
+  const failedRun = (await runsOf(probeId, automationId)).find((entry) => entry.id === uuidOne);
+  if (failedRun == null) fail(`the failed run ${uuidOne} is not in the history a fresh read returns`);
+  if (failedRun.status !== "error") fail(`a fresh read reports the failed run as "${failedRun.status}", not "error": the failure a scheduled run leaves behind is not readable, and nothing else reports it`);
+  if (failedRun.trigger !== "schedule") fail(`the failed run comes back filed as "${failedRun.trigger}", so the console cannot say it was a run nobody pressed`);
+  if (failedRun.detail !== FAILURE_DETAIL) fail(`the reason did not survive the read: ${JSON.stringify(failedRun.detail)}`);
+  if (!(Number(failedRun.finishedAt) >= Number(failedRun.startedAt))) fail(`the failed run has no usable finish stamp: startedAt ${failedRun.startedAt}, finishedAt ${failedRun.finishedAt}`);
+  pass(`a scheduled run that failed reads back as one -- status error, filed as a schedule, with the reason on the row (${elapsed()})`);
 } catch (error) {
   failed = error;
 } finally {
@@ -199,4 +243,4 @@ if (failed != null) {
   console.error(`FAIL - ${failed instanceof VerificationFailed ? failed.message : failed.stack ?? failed}`);
   process.exit(1);
 }
-console.log(`OK - the box runs its own schedule, files it as one, and says so to the agent (${elapsed()})`);
+console.log(`OK - the box runs its own schedule, files it as one, says so to the agent, and a scheduled run that failed can be read back as failed (${elapsed()})`);
