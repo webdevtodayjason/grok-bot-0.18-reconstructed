@@ -23,6 +23,13 @@ import { SandMcpListingSummaries } from "./mcp-listing-summaries.js";
 import { validateMcpServerId } from "./mcp-server-id.js";
 import { parseServerConfig, validateServerName } from "./mcp-validation.js";
 import { reportMcpHostEdgeFailure } from "./mcp-diagnostics.js";
+// CONNECT-2. How long a list call will wait for the box's answer about its stdio servers before
+// it answers from the last known state instead. A connector stuck on its sign-in used to hold the
+// list open for the box's whole connection timeout, and the console boots on this list.
+const BOX_SERVER_LIST_BUDGET_MS = 500;
+// What a server nobody has heard back from yet looks like: connecting, no tools, not an error.
+// statusFromBoxListStatus turns "loading" into the "initializing" the console already draws.
+const BOX_SERVER_CONNECTING: any = { status: "loading", toolCount: 0, tools: [] };
 const EMPTY_SETTINGS: any = {
   scopeToAccount() {},
   migrateMcpCustomInstructionToServerId() {},
@@ -50,6 +57,11 @@ export class SandMcpManager {
   private lastState: any = null;
   private lastBackendTools: any[] = [];
   private lastScope: string | undefined;
+  private readonly lastBoxServers = new Map<string, any>();
+  private boxServersRead: Promise<void> | null = null;
+  private boxServersUnreachable = false;
+  private boxReadGeneration = 0;
+  private readonly boxListBudgetMs: number;
   private readonly authWatches: SandMcpAuthWatchLifecycle;
   private readonly summaries: SandMcpListingSummaries;
   private readonly instructions: SandMcpInstructionsAndToggles;
@@ -62,6 +74,8 @@ export class SandMcpManager {
     this.accountWriter = options.accountMcpWriter;
     this.effectivePluginsProvider = options.effectivePluginsProvider;
     this.accountServersProvider = options.accountServersProvider;
+    this.boxListBudgetMs =
+      options.boxListBudgetMs ?? BOX_SERVER_LIST_BUDGET_MS;
     this.accountDisplayConfigProvider =
       options.accountServersProvider == null
         ? options.accountDisplayConfigProvider
@@ -251,17 +265,22 @@ export class SandMcpManager {
       );
     });
     let unavailable = false;
-    if (this.boxRuntime?.isBoxExecWired())
-      try {
-        for (const server of await this.boxRuntime.listBoxServers(
-          stdio.map((item: any) => item.serverIdentifier),
-        ))
-          boxByName.set(server.serverIdentifier, server);
-        unavailable = stdio.length > 0 && boxByName.size === 0;
-      } catch (error) {
-        reportMcpHostEdgeFailure("box-settings-list", error);
-        unavailable = true;
+    if (this.boxRuntime?.isBoxExecWired()) {
+      const identifiers = stdio.map((item: any) => item.serverIdentifier);
+      await this.readBoxServersWithinBudget(identifiers);
+      for (const identifier of identifiers) {
+        const known = this.lastBoxServers.get(identifier);
+        if (known != null) boxByName.set(identifier, known);
+        else if (!this.boxServersUnreachable)
+          boxByName.set(identifier, BOX_SERVER_CONNECTING);
       }
+      // A server that is no longer configured stops being remembered here, so a removal is gone
+      // from the next list instead of surviving until the box is restarted.
+      for (const identifier of [...this.lastBoxServers.keys()])
+        if (!identifiers.includes(identifier))
+          this.lastBoxServers.delete(identifier);
+      unavailable = this.boxServersUnreachable;
+    }
     const servers: any[] = [];
     for (const server of visible) {
       if (server.disabledByTeamAdminPolicy)
@@ -285,6 +304,57 @@ export class SandMcpManager {
         );
     }
     return (this.lastState = { servers });
+  }
+  /**
+   * CONNECT-2. The box read runs in the background and a list call waits for it only until the
+   * budget runs out; a server that is still connecting is REPORTED as connecting, never awaited.
+   * Once every requested server has a known state the wait is skipped entirely, so the steady
+   * state costs nothing and one connector stuck on its sign-in cannot hold the console's boot.
+   */
+  private async readBoxServersWithinBudget(
+    identifiers: string[],
+  ): Promise<void> {
+    const read = this.startBoxServersRead(identifiers);
+    if (
+      this.boxListBudgetMs <= 0 ||
+      identifiers.every((identifier) => this.lastBoxServers.has(identifier))
+    )
+      return;
+    let timer: any;
+    await Promise.race([
+      read,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.boxListBudgetMs);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+  private startBoxServersRead(identifiers: string[]): Promise<void> {
+    if (this.boxServersRead != null) return this.boxServersRead;
+    const generation = this.boxReadGeneration;
+    // kickOnly asks the box for the state it already has and starts the ones it does not, rather
+    // than sitting on a connect. A reload bumps the generation, and a read from before it is
+    // abandoned: its answer describes servers this manager no longer has.
+    const read = (async () => {
+      try {
+        const servers = await this.boxRuntime.listBoxServers(identifiers, {
+          kickOnly: true,
+        });
+        if (generation !== this.boxReadGeneration) return;
+        for (const server of servers)
+          this.lastBoxServers.set(server.serverIdentifier, server);
+        this.boxServersUnreachable =
+          identifiers.length > 0 && servers.length === 0;
+      } catch (error) {
+        reportMcpHostEdgeFailure("box-settings-list", error);
+        if (generation === this.boxReadGeneration)
+          this.boxServersUnreachable = true;
+      } finally {
+        if (generation === this.boxReadGeneration) this.boxServersRead = null;
+      }
+    })();
+    this.boxServersRead = read;
+    return read;
   }
   async listConnectedBackendTools() {
     await this.listServers();
@@ -552,6 +622,11 @@ export class SandMcpManager {
   async reload(): Promise<void> {
     this.generation += 1;
     this.accountPromise = undefined;
+    // Let go of the connect that is still in flight: whatever it eventually says is about the
+    // configuration this reload just replaced, and the next list starts its own read.
+    this.boxReadGeneration += 1;
+    this.boxServersRead = null;
+    this.boxServersUnreachable = false;
     this.definitionSource.clearCache();
     this.boxRuntime?.invalidateToolsCache();
     this.boxRuntime?.resetPushState();
