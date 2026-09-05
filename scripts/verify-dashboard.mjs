@@ -212,11 +212,6 @@ const noDemoStrings = async (where) => {
 const startCatalog = await relay("/endpoints").catch(() => null);
 const previousRow = startCatalog?.endpoints?.find((e) => e.baseUrl === startCatalog?.live?.baseUrl && e.model === startCatalog?.live?.model) ?? null;
 let probeAgentId = null;
-// CONNECT-3: what the TinyFish preset must put in the editor's argument field, character for
-// character. The bearer header is a single argument that holds a space, so the field carries it
-// quoted; ${TINYFISH_API_KEY} is literal here and in connectors.json -- mcp-remote expands it from
-// the environment the host merges the stored key into, so no key is ever in this string.
-const TINYFISH_ARGS_TEXT = '-y mcp-remote https://agent.tinyfish.ai/mcp --transport http-only --header "Authorization:Bearer ${TINYFISH_API_KEY}"';
 // CP-11: set while the gate's own connector is in connectors.json, so the finally block can take
 // it back out if an assertion threw between the write and the removal.
 let probeConnectorAdded = false;
@@ -962,31 +957,55 @@ try {
       // disclosure already open would close it and then fail to fill an invisible field.
       await page.evaluate(() => document.querySelector("[data-connector-editor]")?.setAttribute("open", "open"));
       await page.waitForTimeout(400);
-      // -- CONNECT-3: the TinyFish preset. One click has to fill the fixed entry, and NOTHING is
-      // saved here: this gate must not put a connector pointing at agent.tinyfish.ai on a shared
+      // -- CONNECT-3, then the connectors wave: the preset catalog. One click per preset has to
+      // fill that entry exactly, and NOTHING is saved here: this gate must not put a connector
+      // pointing at agent.tinyfish.ai, api.githubcopilot.com, Slack, Linear or Google on a shared
       // box. The round trip belongs to scripts/verify-connector-plane.mjs --tinyfish-key, which
-      // runs the same entry against a stub MCP server inside the box.
-      const presetButton = await page.$('[data-connector-preset="tinyfish"]');
-      check(presetButton != null, "the connector editor offers the TinyFish (API key) preset");
-      if (presetButton) {
-        const presetLabel = (await page.evaluate(() => document.querySelector('[data-connector-preset="tinyfish"]')?.textContent ?? "")).trim();
-        check(presetLabel === "TinyFish (API key)", "and the button is named for the recipe it fills", presetLabel);
-        await presetButton.click(); await page.waitForTimeout(400);
+      // runs the same shape against a stub MCP server inside the box.
+      //
+      // The expectations come from the console's own catalog (window.__connectorPresets) rather
+      // than from constants restated here, because the entries themselves are fixed elsewhere:
+      // tests/connector-preset-catalog.test.mjs holds each one against the JSON in its report
+      // under docs/connectors/. What this gate proves is the half no unit test can — that a real
+      // browser click puts that entry, character for character, into the four fields.
+      const catalog = await page.evaluate(() => (window.__connectorPresets ?? []).map((p) => ({
+        id: p.id, label: p.label, name: p.name, command: p.entry.command, argsText: p.argsText,
+        envNames: Object.keys(p.entry.env),
+        // CONNECT-4's rule: an env key the entry leaves EMPTY is a credential, and a credential is
+        // what has to arrive with a hint saying where it comes from.
+        credentials: Object.entries(p.entry.env).flatMap(([name, value]) => (value === "" ? [name] : [])),
+        hints: p.hints ?? {},
+      })));
+      check(catalog.length >= 5, `the connector editor carries a preset catalog (${catalog.length})`, catalog.map((p) => p.id).join(", "));
+      for (const preset of catalog) {
+        const button = await page.$(`[data-connector-preset="${preset.id}"]`);
+        check(button != null, `the connector editor offers the ${preset.label} preset`);
+        if (!button) continue;
+        const label = (await page.evaluate((id) => document.querySelector(`[data-connector-preset="${id}"]`)?.textContent ?? "", preset.id)).trim();
+        check(label === preset.label, `and the ${preset.id} button is named for the recipe it fills`, label);
+        await button.click(); await page.waitForTimeout(300);
         const filled = await page.evaluate(() => ({
           name: document.querySelector("#connector-name")?.value ?? "",
           command: document.querySelector("#connector-command")?.value ?? "",
           args: document.querySelector("#connector-args")?.value ?? "",
           env: document.querySelector("#connector-env")?.value ?? "",
+          hints: document.querySelector("[data-connector-preset-hints]")?.textContent ?? "",
         }));
-        check(filled.name === "tinyfish" && filled.command === "npx", "clicking it fills the connector's name and command", `${filled.name} · ${filled.command}`);
-        // The bearer header is one argument with a space in it, so the field has to carry it
-        // quoted; an unquoted one would arrive as two arguments and the header would be lost.
-        check(filled.args === TINYFISH_ARGS_TEXT, "and the mcp-remote arguments, with the bearer header quoted whole", filled.args);
-        check(filled.env === "TINYFISH_API_KEY", "and names TINYFISH_API_KEY as the only environment value it wants", filled.env);
-        const afterPreset = await relay("/connectors").catch(() => null);
-        check(JSON.stringify(afterPreset?.mcpServers ?? null) === JSON.stringify(before?.mcpServers ?? null),
-          "and writes nothing to connectors.json until the form is submitted", Object.keys(afterPreset?.mcpServers ?? {}).join(", "));
+        check(filled.name === preset.name && filled.command === preset.command,
+          `clicking it fills ${preset.id}'s name and command`, `${filled.name} · ${filled.command}`);
+        // A bearer header is one argument with a space in it, so the field has to carry it quoted;
+        // an unquoted one would arrive as two arguments and the header would be lost.
+        check(filled.args === preset.argsText, `and ${preset.id}'s arguments, with any header quoted whole`, filled.args);
+        check(filled.env === preset.envNames.join(", "), `and names the environment values ${preset.id} wants`, filled.env);
+        // Named, and said out loud: a field with no line telling the operator what it is and where
+        // it is made sends them to the service's docs to find out, which is the whole gap here.
+        const unexplained = preset.credentials.filter((name) => !preset.hints[name] || !filled.hints.includes(preset.hints[name]));
+        check(unexplained.length === 0,
+          `and says what each credential ${preset.id} wants is and where it comes from (${preset.credentials.length})`, unexplained.join(", "));
       }
+      const afterPreset = await relay("/connectors").catch(() => null);
+      check(JSON.stringify(afterPreset?.mcpServers ?? null) === JSON.stringify(before?.mcpServers ?? null),
+        "and every one of those clicks wrote nothing to connectors.json", Object.keys(afterPreset?.mcpServers ?? {}).join(", "));
       await page.fill("#connector-name", PROBE_CONNECTOR);
       await page.fill("#connector-command", "node");
       await page.fill("#connector-args", `/workspace/${PROBE_MCP_FILE}`);

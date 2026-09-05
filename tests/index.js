@@ -37,6 +37,7 @@ import "./machine-room-identity.test.mjs";
 import "./connector-plane.test.mjs";
 import "./machine-room-connectors.test.mjs";
 import "./connector-tinyfish-preset.test.mjs";
+import "./connector-preset-catalog.test.mjs";
 import "./managed-seed-skills.test.mjs";
 import "./workflow-injected-body.test.mjs";
 import "./workflow-frontmatter.test.mjs";
