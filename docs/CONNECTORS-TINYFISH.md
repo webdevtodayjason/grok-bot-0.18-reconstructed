@@ -98,7 +98,8 @@ Every part of that is load-bearing:
 
 ## Operator: paste the key
 
-Global capabilities → *Plugins, connectors & skills* → **Add or remove a connector**.
+**Marketplace** → *Plugins* → **Add** on the TinyFish card, or the **Add or remove a connector**
+editor at the bottom of the same tab.
 
 1. Click **TinyFish (API key)**. It fills the four fields with the entry above and writes nothing:
 

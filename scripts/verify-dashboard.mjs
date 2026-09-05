@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // verify-dashboard.mjs -- the dashboard gate (docs/DASHBOARD-CONTRACT.md), in a real browser.
 // Headless Chrome through playwright-core from GROK_BOT_PLAYWRIGHT_DIR (never a repo dependency).
-// Default: the Machine Room's modals tell the truth -- Providers lead the Plugins page, the box's
-// own connectors carry their real tools, a provider card that cannot be adopted offers no button,
+// Default: the Machine Room's modals tell the truth -- the Marketplace opens on its Plugins tab
+// with the host's own catalog and no provider anywhere in it (MARKET-1: providers and chat
+// listeners are Settings sections now), Add and Uninstall on a catalog card write and unwrite
+// connectors.json byte for byte, the box's own connectors carry their real tools, a provider card
+// that cannot be adopted offers no button,
 // an evidence pill opens its receipts, unread clears when a conversation is read, the Agent
 // details rows carry text, and no surface still claims to be a demo. Wave C1 added: the composer
 // reports the host's acceptance ledger for a send made through it (GW-03), the transcript is read
@@ -165,6 +168,17 @@ const apiCalls = []; page.on("request", (r) => { const m = /\/api\/([A-Za-z]+)/.
 const callsTo = (method) => apiCalls.filter((m) => m === method).length;
 const userTextOf = (e) => (typeof e?.content === "string" ? e.content : Array.isArray(e?.content) ? e.content.map((c) => c?.text ?? "").join("") : "");
 const clickText = async (text) => { const loc = page.getByText(text, { exact: false }).first(); const box = await loc.boundingBox(); if (!box) throw new Error(`not visible: ${text}`); await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2); await page.waitForTimeout(1200); };
+// MARKET-1: the Global capabilities panel is the Marketplace now, and the provider and chat
+// listener cards moved out of it into Settings. Two openers, so every check below says which
+// surface it means rather than clicking a word that appears on both.
+const openMarketplace = async () => {
+  await page.keyboard.press("Escape"); await page.waitForTimeout(300);
+  await page.click('[data-capability="marketplace"]'); await page.waitForTimeout(1400);
+};
+const openSettingsPanel = async () => {
+  await page.keyboard.press("Escape"); await page.waitForTimeout(300);
+  await page.click("#settings-button"); await page.waitForTimeout(1400);
+};
 // A nav click by id, not by text: the sidebar scrolls, and a click at a stale coordinate lands on
 // the dialog backdrop, which closes the panel instead of selecting the card. Retried once through
 // a reopened panel. A run in this wave hit a 30s
@@ -182,13 +196,12 @@ const pluginNavState = (id) => page.evaluate((sel) => {
   }
   return { found: true, w: Math.round(rect.width), h: Math.round(rect.height), hidden, dialogOpen: document.getElementById("panel-dialog")?.open ?? null };
 }, id);
-const pickPlugin = async (id) => {
+const pickPlugin = async (id, reopen = openMarketplace) => {
   try {
     await page.click(`[data-plugin-id="${id}"]`, { timeout: 12_000 });
   } catch (error) {
     console.log(`  INFO  ${id} not clickable on the first try: ${JSON.stringify(await pluginNavState(id))}`);
-    await page.keyboard.press("Escape"); await page.waitForTimeout(600);
-    await clickText("Plugins");
+    await reopen();
     await page.click(`[data-plugin-id="${id}"]`, { timeout: 12_000 });
   }
   await page.waitForTimeout(1200);
@@ -215,6 +228,9 @@ let probeAgentId = null;
 // CP-11: set while the gate's own connector is in connectors.json, so the finally block can take
 // it back out if an assertion threw between the write and the removal.
 let probeConnectorAdded = false;
+// MARKET-1: set while the catalog's tinyfish entry the Add check wrote is still in connectors.json,
+// so the finally block takes it back out if an assertion threw between the Add and the Uninstall.
+let tinyfishAdded = false;
 // Set once the key form has stored a throwaway value for that connector, so the finally block can
 // take it back out of the host's connector-secret store.
 let probeSecretStored = false;
@@ -242,7 +258,7 @@ try {
     for (const route of ["**/api/**", "**/connectors", "**/subscriptions", "**/endpoints", "**/model", "**/events"]) await page.route(route, (r) => r.abort());
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(3500);
     check(await page.evaluate(() => window.__machineRoomLive === false), "the page falls back to the offline demo adapter when the gateway is unreachable");
-    await clickText("Plugins");
+    await openMarketplace();
     const ids = await page.$$eval("[data-plugin-id]", (els) => els.map((e) => e.dataset.pluginId));
     let hint = "";
     for (const id of ids) {
@@ -265,8 +281,10 @@ try {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     const { storedSecrets } = await import(path.join(repoRoot, "ui", "subscriptions.mjs"));
     const secrets = await storedSecrets();
-    await clickText("Plugins");
-    for (const id of ["sub:zai", "sub:codex", "mcp:localfiles"]) await pickPlugin(id).catch(() => {});
+    await openSettingsPanel();
+    for (const id of ["sub:zai", "sub:codex"]) await pickPlugin(id, openSettingsPanel).catch(() => {});
+    await openMarketplace();
+    await pickPlugin("mcp:localfiles").catch(() => {});
     const dom = await page.evaluate(() => document.documentElement.outerHTML + " " + Array.from(document.querySelectorAll("input")).map((i) => i.value).join(" "));
     check(!secrets.some((s) => dom.includes(s)), `no adopted secret in the dashboard DOM (${secrets.length} held)`);
     // The connector card is built from connectors.json, which ui/server.mjs itself calls a 0600
@@ -862,15 +880,62 @@ try {
     }
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);
 
-    // -- The Plugins page: Providers, then the box's own connectors, then listeners.
-    await clickText("Plugins");
-    const titles = await page.$$eval(".plugin-group-title", (els) => els.map((e) => e.textContent.trim()));
-    check(titles[0] === "Providers", "Providers section leads the Plugins page", `groups: ${titles.join(", ")}`);
-    const order = await page.$$eval(".plugin-sidebar > *", (els) => els.map((e) => e.classList.contains("plugin-group-title") ? `#${e.textContent.trim()}` : e.textContent.trim().slice(0, 18)));
-    check(order.indexOf("#Providers") < order.indexOf("#Connectors") || order.indexOf("#Connectors") < 0, "providers listed before connectors");
+    // -- MARKET-1: the Marketplace. Two pill tabs, the host's own catalog on the Plugins tab, and
+    // no provider anywhere inside it: providers and chat listeners moved to Settings this wave,
+    // which is the whole point of it ("I really don't want providers in this marketplace area").
+    await openMarketplace();
+    const tabs = await page.$$eval("[data-marketplace-tabs] .roster-tab", (els) => els.map((e) => `${e.textContent.trim()}${e.classList.contains("is-active") ? "*" : ""}`));
+    check(tabs.join(",") === "Plugins*,Bots", "the Marketplace opens on the Plugins tab, beside a Bots tab", tabs.join(", ") || "no tabs");
+    // The catalog is read from the host, not restated here: source/shared/marketplace/catalog.ts is
+    // where it is fixed, and the whole contract is that the console and the agents' plugin tools
+    // resolve against the same rows. A host without the command yet gets an INFO line, because the
+    // derivations behind this page are pinned in tests/machine-room-marketplace.test.mjs.
+    const catalog = await gw("listMarketplace", {}).catch(() => null);
+    const catalogPlugins = Array.isArray(catalog?.plugins) ? catalog.plugins : [];
+    if (catalogPlugins.length === 0) {
+      console.log("  INFO  listMarketplace answers no plugins on this host yet — the catalog cards, chips and search are covered by tests/machine-room-marketplace.test.mjs until it lands");
+      const note = await page.evaluate(() => document.querySelector("[data-marketplace-note]")?.textContent ?? "");
+      check(/no marketplace catalog|no gateway behind it/.test(note), "and the tab says the host serves none instead of drawing an empty catalog", note.slice(0, 120));
+    } else {
+      const cards = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
+      const missingCards = catalogPlugins.map((plugin) => String(plugin.id)).filter((id) => !cards.includes(id));
+      check(missingCards.length === 0, `every plugin in the host's catalog has a card (${catalogPlugins.length})`, missingCards.length ? `missing ${missingCards.join(", ")}` : cards.join(", "));
+      const chips = await page.$$eval("[data-marketplace-chips] [data-marketplace-category]", (els) => els.map((e) => e.dataset.marketplaceCategory));
+      const wantedChips = ["All", ...(catalog.categories ?? []).map(String)].filter((name, i, all) => all.indexOf(name) === i);
+      const missingChips = wantedChips.filter((name) => !chips.includes(name));
+      check(missingChips.length === 0, `the category chips are the catalog's own (${chips.length})`, missingChips.length ? `missing ${missingChips.join(", ")}` : chips.join(", "));
+      // A chip filters to its own category and nothing else. Featured is skipped: it is a flag on
+      // the row, not a category, and it is asserted by the card coverage above.
+      const pickCategory = (catalog.categories ?? []).map(String).find((name) => name !== "Featured" && catalogPlugins.some((plugin) => String(plugin.category) === name)) ?? null;
+      if (pickCategory) {
+        await page.click(`[data-marketplace-category="${pickCategory}"]`); await page.waitForTimeout(600);
+        const filtered = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
+        const expected = catalogPlugins.filter((plugin) => String(plugin.category) === pickCategory).map((plugin) => String(plugin.id));
+        check(filtered.slice().sort().join(",") === expected.slice().sort().join(","), `the ${pickCategory} chip shows that category and nothing else`, `${filtered.join(", ")} vs ${expected.join(", ")}`);
+        await page.click(`[data-marketplace-category="All"]`); await page.waitForTimeout(600);
+      }
+      // Search is the same rule the catalog's own SearchPlugins tool applies -- name, tagline,
+      // category -- because there is one catalog and it has to give one answer.
+      const probe = String(catalogPlugins[0].name).slice(0, 4);
+      await page.fill("#marketplace-search", probe); await page.waitForTimeout(700);
+      const found = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
+      const wanted = catalogPlugins
+        .filter((plugin) => [plugin.name, plugin.tagline, plugin.category].some((field) => String(field ?? "").toLowerCase().includes(probe.toLowerCase())))
+        .map((plugin) => String(plugin.id));
+      check(found.slice().sort().join(",") === wanted.slice().sort().join(","), `searching "${probe}" narrows the catalog to what matches`, `${found.join(", ")} vs ${wanted.join(", ")}`);
+      await page.fill("#marketplace-search", ""); await page.waitForTimeout(700);
+      // The Bots tab is the other half of this wave. What this gate owns is the contract between
+      // them: the tab exists and hands that half a container to draw into.
+      await page.click('[data-marketplace-tab="bots"]'); await page.waitForTimeout(900);
+      check((await page.$$("#marketplace-bots")).length === 1, "the Bots tab renders the container the bot templates are drawn into");
+      await page.click('[data-marketplace-tab="plugins"]'); await page.waitForTimeout(900);
+    }
+    const inMarket = await page.$$eval("[data-marketplace] [data-plugin-id]", (els) => els.map((e) => e.dataset.pluginId));
+    check(!inMarket.some((id) => id.startsWith("sub:")), "no provider card appears in the Marketplace", inMarket.join(", ") || "nothing installed on this box");
+    check(inMarket.every((id) => id.startsWith("mcp:") || id.startsWith("shell:")), "and every card in it is a connector or a shell tool", inMarket.join(", "));
+    check((await page.$$("[data-marketplace] [data-channel-state]")).length === 0, "and no chat listener either");
 
-    // -- MR-02: the Connectors group carries the box's real server and its real tools.
-    check(titles.includes("Connectors"), "a Connectors group is present", `groups: ${titles.join(", ")}`);
+    // -- MR-02: the box's real server, its real tools and its real status, on its plugin page.
     await pickPlugin("mcp:localfiles");
     // Against the host's own number, never a literal: connectors.json launches this server with
     // `npx -y @modelcontextprotocol/server-filesystem`, unpinned, so the upstream release that
@@ -886,7 +951,10 @@ try {
     const connectorSpec = await relay("/connectors").then((c) => c?.mcpServers?.localfiles ?? null).catch(() => null);
     // Scoped to the card's own hero copy: a server's tool descriptions are the server's words and
     // may legitimately name a path, but the card's description is ours and is built from the spec.
-    const connectorBlurb = await page.evaluate(() => document.querySelector(".plugin-detail .plugin-hero-copy p")?.textContent ?? "");
+    // The hero carries the CATALOG's description for a plugin the catalog knows; the card's own
+    // line -- the one built from connectors.json, and the one that must never echo argv -- is the
+    // server row in the Connectors box.
+    const connectorBlurb = await page.evaluate(() => document.querySelector("[data-connector-status] small")?.textContent ?? "");
     const argLeaks = [...(connectorSpec?.args ?? []), ...Object.values(connectorSpec?.env ?? {})].filter((v) => String(v).length > 2 && connectorBlurb.includes(String(v)));
     check(argLeaks.length === 0, "the connector card names the executable without echoing its argv or env", `blurb: ${connectorBlurb.slice(0, 110)}`);
     check(/argument\(s\), configured in connectors\.json/.test(connectorBlurb), "and says where the rest of the launch spec lives", connectorBlurb.slice(0, 110));
@@ -912,7 +980,7 @@ try {
       const server = (Array.isArray(installed) ? installed : []).find((row) => row?.name === "localfiles") ?? null;
       check(server != null && server.id != null, "the host installs localfiles with an id of its own", `id ${server?.id}`);
       await pickPlugin("mcp:localfiles");
-      const idBlurb = await page.evaluate(() => document.querySelector(".plugin-detail .plugin-hero-copy p")?.textContent ?? "");
+      const idBlurb = await page.evaluate(() => document.querySelector("[data-connector-status] small")?.textContent ?? "");
       check(server != null && idBlurb.includes(`host id ${server.id}`), "the localfiles card shows the host's numeric server id", idBlurb.slice(0, 120));
       const hostTools = server ? await gw("listMcpServerTools", { serverId: server.id }).catch(() => null) : null;
       const switches = await page.$$eval(".plugin-detail .tool-row [data-toggle-tool]", (els) => els.map((e) => e.dataset.toggleTool));
@@ -960,8 +1028,12 @@ try {
     // -- CP-11: the connectors editor. The relay's /connectors route and refreshMcp both answer
     // today, so this runs on every host. A stdio server the box can actually launch: node with a
     // one-file MCP server written into /workspace, the same shape connectors.json already holds.
+    // Back to the list first: the editor is on the Plugins tab's list view, and the connector
+    // checks above left that connector's own plugin page open in front of it.
+    await page.click("[data-marketplace-back]").catch(() => {});
+    await page.waitForTimeout(800);
     const editor = await page.$("[data-connector-editor]");
-    if (!editor) check(false, "the Plugins page offers a connectors editor");
+    if (!editor) check(false, "the Plugins tab offers a connectors editor");
     else {
       const before = await relay("/connectors").catch(() => null);
       const wrote = await box(`cat > /workspace/${PROBE_MCP_FILE} <<'PROBEEOF'\n${PROBE_MCP_SOURCE}\nPROBEEOF`);
@@ -1043,7 +1115,7 @@ try {
       // Reopened after the wait so the panel is drawn from the state the host reports NOW: the
       // render right after the POST ran before the box had finished launching the process.
       await page.keyboard.press("Escape"); await page.waitForTimeout(500);
-      await clickText("Plugins"); await page.waitForTimeout(1500);
+      await openMarketplace(); await page.waitForTimeout(1500);
       await pickPlugin(`mcp:${PROBE_CONNECTOR}`).catch(() => {});
       const probeName = await page.evaluate(() => document.querySelector(".plugin-detail h3")?.textContent ?? "");
       const probeCard = await page.evaluate(() => document.querySelector(".plugin-detail .plugin-hero-copy p")?.textContent ?? "");
@@ -1080,7 +1152,10 @@ try {
           "and the gate takes its throwaway value back out of the host's store", JSON.stringify(left ?? removed ?? null).slice(0, 120));
         if (removed?.removed === true) probeSecretStored = false;
       }
-      // And the removal, through the same editor.
+      // And the removal, through the same editor -- which is on the list view, not on the plugin
+      // page the checks above opened.
+      await page.click("[data-marketplace-back]").catch(() => {});
+      await page.waitForTimeout(800);
       await page.evaluate(() => document.querySelector("[data-connector-editor]")?.setAttribute("open", "open"));
       await page.click(`[data-connector-editor] [data-remove-connector="${PROBE_CONNECTOR}"]`).catch(async () => {
         await page.click(`.plugin-detail [data-remove-connector="${PROBE_CONNECTOR}"]`);
@@ -1091,11 +1166,71 @@ try {
       if (afterRemove?.mcpServers?.[PROBE_CONNECTOR] == null) probeConnectorAdded = false;
     }
 
+    // -- MARKET-1: Add and Uninstall, on the one catalog row this gate may safely write. The
+    // entry is the preset's, with the env name and NO value, so nothing authenticates and nothing
+    // of the operator's is touched; connectors.json is compared byte for byte before and after.
+    // Skipped rather than forced if the box already has that entry: replacing an operator's
+    // tinyfish and then deleting it would leave the box worse than the gate found it.
+    const addRow = catalogPlugins.find((plugin) => String(plugin.id) === "tinyfish") ?? null;
+    const filesBefore = await relay("/connectors").catch(() => null);
+    if (!addRow) {
+      console.log("  INFO  this host's catalog has no tinyfish row, so the Add/Uninstall round trip is not exercised");
+    } else if (filesBefore?.mcpServers?.tinyfish != null) {
+      console.log("  INFO  this box already has a tinyfish connector; Add would replace an operator's entry, so the round trip is not exercised");
+      await openMarketplace();
+      const added = await page.evaluate(() => document.querySelector('[data-marketplace-added="tinyfish"]')?.textContent?.trim() ?? "");
+      check(/Added/.test(added), "and the catalog card for it says Added rather than offering Add again", added);
+    } else {
+      const bytesBefore = JSON.stringify(filesBefore?.mcpServers ?? null);
+      await openMarketplace();
+      await page.click('[data-marketplace-add="tinyfish"]', { timeout: 12_000 });
+      tinyfishAdded = true;
+      await page.waitForTimeout(8000);
+      const written = await relay("/connectors").catch(() => null);
+      const spec = written?.mcpServers?.tinyfish ?? null;
+      check(spec?.command === String(addRow.install?.command ?? ""), "Add on the TinyFish card writes the catalog's own entry into connectors.json", JSON.stringify(spec ?? null).slice(0, 140));
+      check(spec != null && Object.values(spec.env ?? {}).every((v) => v === ""), "with the environment value named and nothing written into that 0600 file", JSON.stringify(spec?.env ?? null));
+      check(Object.keys(filesBefore?.mcpServers ?? {}).every((name) => written?.mcpServers?.[name]), "and the connectors already on the box survived the write");
+      // ...and lands on that plugin's page, which is where the credential goes.
+      const opened = await until(() => page.evaluate(() => document.querySelector("[data-marketplace-account]")?.dataset.marketplaceAccount ?? null), 20_000, 1000);
+      check(opened === "tinyfish", "and opens the TinyFish plugin page", `account row for ${opened}`);
+      const accountRow = await page.evaluate(() => document.querySelector("[data-marketplace-account]")?.textContent?.replace(/\s+/g, " ").trim() ?? "");
+      check(/Needs auth/.test(accountRow), "whose Accounts row says Needs auth", accountRow.slice(0, 140));
+      check((await page.$$("[data-connector-secret-form] input[type=password]")).length > 0, "and offers the credential card to answer it with");
+      // Uninstall. Nothing was stored for it, so the clear offer is not drawn and the entry alone
+      // comes out; the file has to come back byte-identical to the one the gate found.
+      await page.click('[data-marketplace-uninstall="tinyfish"]', { timeout: 12_000 });
+      await page.waitForTimeout(500);
+      const armedLabel = await page.evaluate(() => document.querySelector('[data-marketplace-uninstall="tinyfish"]')?.textContent?.trim() ?? "");
+      check(/Click again/.test(armedLabel), "Uninstall arms on the first click instead of removing", armedLabel);
+      const stillThere = await relay("/connectors").catch(() => null);
+      check(stillThere?.mcpServers?.tinyfish != null, "and the entry is untouched after that click");
+      await page.click('[data-marketplace-uninstall="tinyfish"]', { timeout: 12_000 });
+      await page.waitForTimeout(7000);
+      const after = await relay("/connectors").catch(() => null);
+      check(after?.mcpServers?.tinyfish == null, "the second click takes it back out of connectors.json", Object.keys(after?.mcpServers ?? {}).join(", "));
+      check(JSON.stringify(after?.mcpServers ?? null) === bytesBefore, "and connectors.json is byte-identical to before the Add", `${bytesBefore.length} vs ${JSON.stringify(after?.mcpServers ?? null).length} chars`);
+      if (after?.mcpServers?.tinyfish == null) tinyfishAdded = false;
+    }
+
+    // -- PROVIDERS-1: the providers and the chat listeners the Marketplace no longer carries are
+    // sections in Settings, built from the same cards. Everything below this line used to run on
+    // the Plugins page; only the panel it is read from changed.
+    await openSettingsPanel();
+    const settingsHeadings = await page.$$eval(".settings-list h3", (els) => els.map((e) => e.textContent.trim()));
+    check(settingsHeadings.indexOf("Providers") === settingsHeadings.indexOf("Inference") + 1 && settingsHeadings.includes("Inference"),
+      "Settings carries a Providers section directly under Inference", settingsHeadings.join(" | "));
+    check(settingsHeadings.includes("Chat listeners"), "and the chat listeners are a Settings section too", settingsHeadings.join(" | "));
+    const relaySubs = await relay("/subscriptions").then((r) => (Array.isArray(r) ? r : r?.subscriptions ?? [])).catch(() => []);
+    const providerIds = await page.$$eval('[data-plugin-group="Providers"] [data-plugin-id]', (els) => els.map((e) => e.dataset.pluginId));
+    check(relaySubs.length > 0 && providerIds.length === relaySubs.length && providerIds.every((id) => id.startsWith("sub:")),
+      `and the Providers section lists every subscription the relay reports (${relaySubs.length})`, providerIds.join(", "));
+
     // -- GW-08 item 2: a listener card shows getAgentChannels for the agent on screen.
     const onScreen = await page.evaluate(() => document.getElementById("room-title")?.textContent ?? "");
     const onScreenId = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.name === onScreen)?.id ?? null;
     const channels = onScreenId ? await gw("getAgentChannels", { id: onScreenId }).catch(() => null) : null;
-    await pickPlugin("slack");
+    await pickPlugin("slack", openSettingsPanel);
     const channelRow = await page.evaluate(() => document.querySelector("[data-channel-state='slack']")?.textContent?.replace(/\s+/g, " ") ?? "");
     const slackConnected = (channels?.connections ?? []).some((c) => c.platform === "slack");
     check(channelRow.includes(onScreen) && new RegExp(slackConnected ? "connected" : "not connected").test(channelRow) && (slackConnected || !/: connected/.test(channelRow)), "the Slack listener card shows this agent's channel state from getAgentChannels", `${onScreen} → ${channelRow.slice(0, 110)}`);
@@ -1115,7 +1250,7 @@ try {
     }
 
     // -- MR-04: a provider whose route this host cannot adopt offers no Connect button.
-    await pickPlugin("sub:claude");
+    await pickPlugin("sub:claude", openSettingsPanel);
     const connectButtons = await page.$$("[data-install-plugin]");
     const connectNote = await page.evaluate(() => document.querySelector(".plugin-detail .secure-card-header small")?.textContent?.trim() ?? "");
     check(connectButtons.length === 0, "a non-adoptable provider card shows no Connect button", `${connectButtons.length} button(s)`);
@@ -1126,7 +1261,7 @@ try {
     // unrelated Cursor URL -- so a button here would open a tab and toast a success that is false.
     const minimax = await relay("/subscriptions").then((r) => (Array.isArray(r) ? r : r?.subscriptions ?? []).find((s) => s.id === "minimax")).catch(() => null);
     if (minimax && minimax.usable !== true && minimax.adopted !== true) {
-      await pickPlugin("sub:minimax");
+      await pickPlugin("sub:minimax", openSettingsPanel);
       const mmButtons = await page.$$("[data-install-plugin]");
       const mmNote = await page.evaluate(() => document.querySelector(".plugin-detail .secure-card-header small")?.textContent?.trim() ?? "");
       check(mmButtons.length === 0, "a CLI-login provider with no login on this Mac shows no Connect button", `${mmButtons.length} button(s)`);
@@ -1135,13 +1270,13 @@ try {
       check(true, "MiniMax is adoptable on this Mac, so the un-adoptable endpoint card is not exercised", `usable ${minimax?.usable}, adopted ${minimax?.adopted}`);
     }
     // -- MR-03: the key form on a card that is definitely NOT adopted, so the hint really renders.
-    await pickPlugin("sub:gemini-key");
+    await pickPlugin("sub:gemini-key", openSettingsPanel);
     const keyHint = await page.evaluate(() => document.querySelector(".plugin-detail .field-hint")?.textContent?.trim() ?? "");
     check(/0600 store/.test(keyHint) && !/discard/i.test(keyHint), "the key form says where the value goes, not that it is discarded", keyHint.slice(0, 120));
-    await noDemoStrings("plugins page");
+    await noDemoStrings("providers in Settings");
 
     // -- The Providers switch still moves the box (docs/DASHBOARD-CONTRACT.md).
-    await pickPlugin("sub:zai");
+    await pickPlugin("sub:zai", openSettingsPanel);
     const hasKeyField = (await page.$$("input[type=password]")).length > 0;
     const hasSwitch = (await page.$$("[data-use-endpoint]")).length > 0;
     const isLive = (await page.$$eval(".provider-switch .status-pill", (els) => els.map((e) => e.textContent.trim()))).includes("answering now");
@@ -1644,6 +1779,22 @@ try {
       const put = await writeConnectors(servers);
       await fetch(`${GATEWAY}/api/refreshMcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => null);
       console.log(`  INFO  probe connector ${put?.ok ? "swept from" : "NOT removed from"} connectors.json`);
+    }
+  }
+  // MARKET-1: the catalog entry the Add check wrote, if the Uninstall never ran. Same rule as the
+  // probe connector above -- an empty or unreadable connectors.json is a failed read on this box,
+  // never an empty file, so nothing is written and the row is left for the next run to sweep.
+  if (tinyfishAdded) {
+    const held = await relay("/connectors").catch(() => null);
+    const map = held?.mcpServers;
+    if (map == null || typeof map !== "object" || Array.isArray(map) || Object.keys(map).length === 0) {
+      console.log("  INFO  connectors.json came back empty or unreadable; the gate's tinyfish row was NOT swept and nothing was written to the file");
+    } else {
+      const servers = { ...map };
+      delete servers.tinyfish;
+      const put = await fetch(`${GATEWAY}/connectors`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mcpServers: servers }) }).catch(() => null);
+      await fetch(`${GATEWAY}/api/refreshMcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => null);
+      console.log(`  INFO  the gate's tinyfish row ${put?.ok ? "swept from" : "NOT removed from"} connectors.json`);
     }
   }
   for (const dir of teachDirsMade) await box(`rm -rf ${dir}`).then(() => console.log(`  INFO  teach session ${dir} swept`)).catch(() => {});

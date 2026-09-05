@@ -1147,57 +1147,73 @@
     ? `<div class="setting-row"><div><strong>Remove this connector</strong><small>Drops ${escapeHtml(plugin.name)} from connectors.json on the box and asks the host to re-read the file.</small></div><button class="ghost-button" type="button" data-remove-connector="${escapeHtml(plugin.name)}">Remove</button></div>`
     : "");
 
-  function pluginDetailMarkup(plugin) {
-    if (!plugin) return `<div class="empty-state">Choose a plugin to inspect its tools and account.</div>`;
-    // A tool row carries a switch only where the write exists. Where it does not, the row says
-    // what the host holds and the section says why it cannot be changed from here.
+  // MARKET-1: the three boxes a plugin card is made of, pulled out of pluginDetailMarkup so the
+  // Marketplace's plugin page draws exactly the ones the Settings provider and listener sections
+  // do. Nothing here changed in the move; only the call sites multiplied.
+  //
+  // A tool row carries a switch only where the write exists. Where it does not, the row says
+  // what the host holds and the section says why it cannot be changed from here.
+  function pluginToolsMarkup(plugin) {
     const toolRow = (tool) => `<div class="tool-row"><div><strong>${escapeHtml(tool.name)}</strong><small>${escapeHtml(tool.description)}</small></div>${tool.togglable === false
       ? `<span class="status-pill${tool.enabled ? " success" : ""}">${tool.enabled ? "enabled" : "disabled"}</span>`
       : `<button class="switch" type="button" data-toggle-tool="${escapeHtml(tool.id)}" aria-label="Toggle ${escapeHtml(tool.name)}" aria-pressed="${tool.enabled}"></button>`}</div>`;
-    const tools = plugin.tools.length
+    return plugin.tools.length
       ? plugin.tools.map(toolRow).join("") + (plugin.toolsReadOnlyNote ? `<span class="field-hint">${escapeHtml(plugin.toolsReadOnlyNote)}</span>` : "")
       : `<div class="empty-state">${escapeHtml(plugin.toolsNote || "No tools are reported for this plugin.")}</div>`;
-    let account;
+  }
+  // Only once getAgentChannels has actually been read for the agent on screen: until then this
+  // page does not know whether that agent holds a token, and drawing a Connect form on a listener
+  // it is already bound to would be a guess wearing a control.
+  const listenerChannelOf = (plugin, lead) => (plugin.group === "Listeners" && typeof adapter.connectListener === "function" && Array.isArray(lead?.channels)
+    ? { canConnect: true, channel: lead.channels.find((c) => c.platform === plugin.id) }
+    : { canConnect: false, channel: undefined });
+  // CONNECT-5: the same credential card, whichever store is behind it. A shell tool's value goes
+  // to setShellSecret (the box shell's environment); a connector's to setConnectorSecret (the
+  // connector process's). The component is one because the promise it makes is one.
+  function pluginSecretsMarkup(plugin) {
+    const secretWriter = plugin.shellTool ? adapter.setShellSecret : adapter.setConnectorSecret;
+    return Array.isArray(plugin.secretFields) && plugin.secretFields.length && typeof secretWriter === "function"
+      ? connectorSecretMarkup(plugin) : "";
+  }
+  function pluginAccountMarkup(plugin, lead) {
     // CP-04: a listener binds per agent with a token the host takes (connectChannel). The local
     // form is the route that works on this box; the Cursor-hosted flow stays as a labelled
     // secondary, because getListenerConnectUrl answers with cursor.com's page for an account this
     // box does not have and clicking it can only end in a dead tab.
-    const lead = contextLead();
-    // Only once getAgentChannels has actually been read for the agent on screen: until then this
-    // page does not know whether that agent holds a token, and drawing a Connect form on a
-    // listener it is already bound to would be a guess wearing a control.
-    const canConnectListener = plugin.group === "Listeners" && typeof adapter.connectListener === "function" && Array.isArray(lead?.channels);
-    const listenerChannel = canConnectListener ? lead.channels.find((c) => c.platform === plugin.id) : undefined;
-    // CONNECT-5: the same credential card, whichever store is behind it. A shell tool's value goes
-    // to setShellSecret (the box shell's environment); a connector's to setConnectorSecret (the
-    // connector process's). The component is one because the promise it makes is one.
-    const secretWriter = plugin.shellTool ? adapter.setShellSecret : adapter.setConnectorSecret;
-    const connectorSecrets = Array.isArray(plugin.secretFields) && plugin.secretFields.length && typeof secretWriter === "function"
-      ? connectorSecretMarkup(plugin) : "";
-    if (canConnectListener && listenerChannel?.connected !== true) account = listenerConnectMarkup(plugin, lead);
-    else if (canConnectListener && listenerChannel?.connected === true) account = listenerConnectedMarkup(plugin, lead);
+    const { canConnect, channel } = listenerChannelOf(plugin, lead);
+    if (canConnect && channel?.connected !== true) return listenerConnectMarkup(plugin, lead);
+    if (canConnect && channel?.connected === true) return listenerConnectedMarkup(plugin, lead);
     // A card the host cannot connect gets no button. Clicking it ran getListenerConnectUrl with a
     // subscription id, which always errors -- behind a success toast fired before the answer came.
-    else if (plugin.status === "available" && plugin.connectable === false) account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Not connectable from here</strong><small>${escapeHtml(plugin.connectNote || `This host has no connect flow for ${plugin.name}.`)}</small></div></div></div>`;
-    else if (plugin.status === "available") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>Opens ${escapeHtml(plugin.name)}'s own authorisation page. The credential is exchanged there and stored by the host — it never passes through this page.</small></div></div><div class="form-actions"><button class="primary-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Connect ${escapeHtml(plugin.name)}</button></div></div>`;
-    else if (plugin.status === "pending") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Awaiting authorisation</strong><small>Finish approving ${escapeHtml(plugin.name)} in the tab that opened, then reopen this panel.</small></div></div></div>`;
-    else if (plugin.status === "installed") account = `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Secure value required</strong><small>Scoped to ${escapeHtml(plugin.name)} · ${escapeHtml(plugin.secretField)}. It never enters chat or model context.</small></div></div><form data-secret-form="${escapeHtml(plugin.id)}"><div class="field"><label for="secret-${escapeHtml(plugin.id)}">${escapeHtml(plugin.secretField)}</label><input id="secret-${escapeHtml(plugin.id)}" name="secret" type="password" autocomplete="off" required placeholder="Enter securely" /><span class="field-hint">${escapeHtml(plugin.secretHint || demoSecretNote)}</span></div><div class="form-actions"><button class="primary-button" type="submit">Connect account</button></div></form></div>`;
-    else account = `<div class="demo-note"><strong>${escapeHtml(plugin.account || (plugin.group === "Providers" ? "Adopted on this Mac" : "Connected"))}</strong><br />${escapeHtml(plugin.connectedNote || "The host holds this connection. Contexts receive its capabilities, never the credential.")}</div>`;
+    if (plugin.status === "available" && plugin.connectable === false) return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Not connectable from here</strong><small>${escapeHtml(plugin.connectNote || `This host has no connect flow for ${plugin.name}.`)}</small></div></div></div>`;
+    if (plugin.status === "available") return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>Opens ${escapeHtml(plugin.name)}'s own authorisation page. The credential is exchanged there and stored by the host — it never passes through this page.</small></div></div><div class="form-actions"><button class="primary-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Connect ${escapeHtml(plugin.name)}</button></div></div>`;
+    if (plugin.status === "pending") return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Awaiting authorisation</strong><small>Finish approving ${escapeHtml(plugin.name)} in the tab that opened, then reopen this panel.</small></div></div></div>`;
+    if (plugin.status === "installed") return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Secure value required</strong><small>Scoped to ${escapeHtml(plugin.name)} · ${escapeHtml(plugin.secretField)}. It never enters chat or model context.</small></div></div><form data-secret-form="${escapeHtml(plugin.id)}"><div class="field"><label for="secret-${escapeHtml(plugin.id)}">${escapeHtml(plugin.secretField)}</label><input id="secret-${escapeHtml(plugin.id)}" name="secret" type="password" autocomplete="off" required placeholder="Enter securely" /><span class="field-hint">${escapeHtml(plugin.secretHint || demoSecretNote)}</span></div><div class="form-actions"><button class="primary-button" type="submit">Connect account</button></div></form></div>`;
+    return `<div class="demo-note"><strong>${escapeHtml(plugin.account || (plugin.group === "Providers" ? "Adopted on this Mac" : "Connected"))}</strong><br />${escapeHtml(plugin.connectedNote || "The host holds this connection. Contexts receive its capabilities, never the credential.")}</div>`;
+  }
+  // GW-08: a listener is bound per agent. The card is global; this row is getAgentChannels for
+  // the agent on screen -- whether it holds a token for this platform -- and says which agent.
+  function pluginChannelRowMarkup(plugin, lead) {
+    if (plugin.group !== "Listeners") return "";
+    const { channel } = listenerChannelOf(plugin, lead);
+    const line = !lead ? "No agent on screen to read a channel for."
+      : lead.channels == null ? `Not read yet for ${lead.name} — the host answers getAgentChannels on the next refresh.`
+      : !channel ? `${lead.name}: the host lists no ${plugin.name} channel manifest for this agent.`
+      : channel.connected ? `${lead.name}: connected${channel.detail ? ` · ${channel.detail}` : ""}.`
+      : `${lead.name}: not connected — this agent holds no ${plugin.name} token.`;
+    return `<div class="setting-row" data-channel-state="${escapeHtml(plugin.id)}"><div><strong>For ${escapeHtml(lead ? lead.name : "this agent")}</strong><small>${escapeHtml(line)}</small></div><span class="status-pill${channel?.connected ? " success" : ""}">${channel ? (channel.connected ? "connected" : "not connected") : "unknown"}</span></div>`;
+  }
+
+  function pluginDetailMarkup(plugin) {
+    if (!plugin) return `<div class="empty-state">Choose a plugin to inspect its tools and account.</div>`;
+    const tools = pluginToolsMarkup(plugin);
+    const lead = contextLead();
+    const account = pluginAccountMarkup(plugin, lead);
+    const connectorSecrets = pluginSecretsMarkup(plugin);
+    const channelRow = pluginChannelRowMarkup(plugin, lead);
     const providerSwitch = plugin.endpointId
       ? `<div class="provider-switch">${plugin.live ? `<span class="status-pill success">answering now</span>` : plugin.status === "connected" ? `<button class="primary-button" type="button" data-use-endpoint="${escapeHtml(plugin.endpointId)}">Use this endpoint</button>` : ""}</div>`
       : "";
-    // GW-08: a listener is bound per agent. The card is global; this row is getAgentChannels for
-    // the agent on screen -- whether it holds a token for this platform -- and says which agent.
-    let channelRow = "";
-    if (plugin.group === "Listeners") {
-      const channel = listenerChannel;
-      const line = !lead ? "No agent on screen to read a channel for."
-        : lead.channels == null ? `Not read yet for ${lead.name} — the host answers getAgentChannels on the next refresh.`
-        : !channel ? `${lead.name}: the host lists no ${plugin.name} channel manifest for this agent.`
-        : channel.connected ? `${lead.name}: connected${channel.detail ? ` · ${channel.detail}` : ""}.`
-        : `${lead.name}: not connected — this agent holds no ${plugin.name} token.`;
-      channelRow = `<div class="setting-row" data-channel-state="${escapeHtml(plugin.id)}"><div><strong>For ${escapeHtml(lead ? lead.name : "this agent")}</strong><small>${escapeHtml(line)}</small></div><span class="status-pill${channel?.connected ? " success" : ""}">${channel ? (channel.connected ? "connected" : "not connected") : "unknown"}</span></div>`;
-    }
     // The Skills section was a heading over an empty div on every card the gateway builds: no
     // plugin here ships skills. It renders only where there are some, or where there is a reason.
     const skillsSection = plugin.skills.length
@@ -1445,32 +1461,291 @@
       : `<div class="empty-state">Nothing unread. This is the host's own unread count — there is no separate notification feed on this gateway.</div>`;
   }
 
-  function renderPluginsPanel() {
-    const selected = state.plugins.find((plugin) => plugin.id === selectedPluginId) || state.plugins[0];
-    // This host reports its connectors through getListenerIntegrations, and a box with none
-    // returns an empty list. Reaching for plugins[0] threw and left the panel blank with no
-    // explanation -- an empty capability set is a normal state, not an error.
-    if (!selected) {
-      // CP-11: the editor belongs here most of all. This branch used to say connectors could only
-      // be added by editing connectors.json on the box -- which the editor made untrue -- and then
-      // offered no way to add the first one.
-      openPanel("Global capabilities", "Plugins, connectors & skills",
-        `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Listeners are chat platforms the host binds to.</p><span class="status-pill">none installed</span></div><div class="empty-state">This box has no providers, connectors or listeners yet. Add the first stdio connector with the editor below; a provider appears here once its CLI holds a login on this Mac or it takes a pasted key.</div>${connectorEditorMarkup()}`);
+  // ===== Marketplace ==================================================================
+  // MARKET-1. The Global capabilities panel became the Marketplace: two pill tabs, Plugins and
+  // Bots. Plugins is the catalog the host serves (listMarketplace) drawn against the connector and
+  // shell-tool cards this page already builds; Bots is rendered by the bots half of this wave
+  // through window.__marketplaceBots. Providers and chat listeners LEFT this panel for Settings --
+  // a provider is where the box answers from and a listener is what it listens to; neither is a
+  // thing you install, and offering them in a marketplace was the confusion this wave removes.
+  //
+  // Every write here is a path that already existed: Add is addConnector (or installShellTool),
+  // Uninstall is removeConnector, a credential is the same credential card, a tool switch is the
+  // same toggleMcpToolDisabled. The catalog only says WHICH entry, never how it is written.
+  const MARKETPLACE_ALL = "All";
+  let marketplaceTab = "plugins";
+  let marketplaceQuery = "";
+  let marketplaceCategory = MARKETPLACE_ALL;
+  let marketplaceCatalog = null;
+  let marketplaceInstalls = [];
+  let marketplaceNote = null;
+  let marketplacePluginId = null;
+  let marketplaceArmedUninstall = null;
+
+  // Which surface the plugin cards are drawn on right now, so a control on a card re-renders the
+  // panel it lives in: the Marketplace for a connector or a shell tool, Settings for a provider
+  // or a chat listener. Before this, every one of them called renderPluginsPanel and a click on a
+  // provider card in Settings would have thrown the operator into the Marketplace.
+  let openPluginSurface = "marketplace";
+
+  // The cards this panel owns. Providers and Listeners are in Settings and must not appear here.
+  const marketplaceCards = () => state.plugins.filter((plugin) => {
+    const group = plugin.group ?? "Connectors";
+    return group === "Connectors" || group === "Shell tools";
+  });
+  const marketplaceItems = () => (marketplaceCatalog?.plugins ?? []);
+  const marketplaceItemById = (id) => marketplaceItems().find((item) => String(item.id) === String(id)) ?? null;
+  const marketplaceInstallById = (id) => marketplaceInstalls.find((row) => String(row.id) === String(id)) ?? null;
+
+  function renderMarketplacePanel() {
+    openPluginSurface = "marketplace";
+    openPanel("Marketplace", "Plugins & bots", marketplaceMarkup());
+    mountMarketplaceBots();
+    refreshMarketplace();
+  }
+
+  // The catalog is read once through the gateway and cached by the adapter; the install states are
+  // re-derived every time, because a connector added a second ago is still connecting.
+  function refreshMarketplace(live) {
+    if (typeof adapter.listMarketplace !== "function" || typeof adapter.installedPlugins !== "function") {
+      marketplaceNote = "This view has no gateway behind it, so there is no catalog to read.";
+      if (elements.panelDialog.open && openPluginSurface === "marketplace") paintMarketplaceBody();
       return;
     }
-    selectedPluginId = selected.id;
-    const navButton = (plugin) => `<button class="plugin-nav-button${plugin.id === selected.id ? " is-active" : ""}" type="button" data-plugin-id="${escapeHtml(plugin.id)}"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><span><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.category)}</small></span><span class="status-dot ${plugin.status === "connected" ? "success" : plugin.status === "installed" ? "attention" : ""}"></span></button>`;
-    // Providers (subscriptions and endpoints a user connects) lead; the box's own MCP connectors
-    // follow; the chat listeners the host reports come last. Anything without a group is a
-    // connector, which is what the demo fixtures are. CONNECT-5: shell tools sit under the
-    // connectors they are not -- a CLI the agent runs itself, with a key in its environment.
-    const GROUPS = ["Providers", "Connectors", "Shell tools", "Listeners"];
-    const nav = GROUPS.map((group) => {
-      const members = state.plugins.filter((plugin) => (plugin.group ?? "Connectors") === group);
-      return members.length ? `<div class="plugin-group-title">${group}</div>${members.map(navButton).join("")}` : "";
-    }).join("");
-    openPanel("Global capabilities", "Plugins, connectors & skills", `<div class="panel-intro"><p>Providers are the endpoints this box can answer through. Connectors are MCP servers the box runs; their tools are listed as the host discovers them. Shell tools are command-line programs the agent runs itself, with a key in the box shell's environment. Listeners are chat platforms the host binds to.</p><span class="status-pill success">global</span></div><div class="plugin-browser"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div>${connectorEditorMarkup()}`);
+    Promise.all([adapter.listMarketplace(), adapter.installedPlugins()])
+      .then(([catalog, installs]) => {
+        marketplaceCatalog = catalog;
+        marketplaceInstalls = Array.isArray(installs) ? installs : [];
+        marketplaceNote = catalog ? null : "This host serves no marketplace catalog yet — listMarketplace is not one of its commands.";
+      })
+      .catch((error) => { marketplaceNote = `The marketplace catalog could not be read: ${error.message}`; })
+      .then(() => {
+        if (!elements.panelDialog.open || openPluginSurface !== "marketplace") return;
+        if (live === true) paintMarketplaceLive(); else paintMarketplaceBody();
+      });
   }
+
+  // The operator asked for this one, so it redraws everything.
+  function paintMarketplaceBody() {
+    const body = elements.panelContent.querySelector("[data-marketplace-body]");
+    if (!body) return;
+    body.innerHTML = marketplaceBodyMarkup();
+    mountMarketplaceBots();
+  }
+
+  // The box moved under the panel, and nobody asked. A repaint here must never take a half-typed
+  // value with it -- a credential being entered, the connector editor's fields, an armed Uninstall
+  // -- so it redraws only the two parts that hold no input, and stands down entirely otherwise.
+  function paintMarketplaceLive() {
+    const body = elements.panelContent.querySelector("[data-marketplace-body]");
+    if (!body || marketplaceArmedUninstall) return;
+    if (body.contains(document.activeElement)) return;
+    if (body.querySelector("[data-connector-editor][open]")) return;
+    const typed = [...body.querySelectorAll("input[type=password], input[type=text], input:not([type]), textarea")];
+    if (typed.some((field) => field.value !== "")) return;
+    const strip = body.querySelector("[data-marketplace-installed]");
+    const sections = body.querySelector("[data-marketplace-sections]");
+    if (strip) strip.outerHTML = marketplaceInstalledStripMarkup();
+    if (sections) sections.innerHTML = marketplaceSectionsMarkup();
+    if (!strip && !sections) { body.innerHTML = marketplaceBodyMarkup(); mountMarketplaceBots(); }
+  }
+
+  function marketplaceMarkup() {
+    const tab = (id, label) => `<button class="roster-tab${marketplaceTab === id ? " is-active" : ""}" type="button" data-marketplace-tab="${id}">${label}</button>`;
+    return `<div id="marketplace-panel" data-marketplace><div class="panel-intro"><p>Plugins are the connectors and shell tools this box can run; Bots are agent templates you import. The catalog is served by the host, so an agent's own plugin tools and this page read the same rows. Providers and chat listeners are not installed from here — they are in Settings.</p><span class="status-pill success">global</span></div><div class="roster-tabs" data-marketplace-tabs>${tab("plugins", "Plugins")}${tab("bots", "Bots")}</div><div data-marketplace-body>${marketplaceBodyMarkup()}</div></div>`;
+  }
+
+  function marketplaceBodyMarkup() {
+    // The Bots tab body belongs to the bots half of this wave. The container and the hook name are
+    // the contract between the two; until that half is on the page, the placeholder says so.
+    if (marketplaceTab === "bots") return `<div id="marketplace-bots" data-marketplace-bots><div class="empty-state">The Bots tab is drawn by the bot templates half of this wave. It is not on this build.</div></div>`;
+    if (marketplacePluginId) return marketplacePluginPageMarkup();
+    return marketplaceListMarkup();
+  }
+
+  function mountMarketplaceBots() {
+    if (marketplaceTab !== "bots") return;
+    const container = elements.panelContent.querySelector("#marketplace-bots");
+    if (!container) return;
+    if (typeof window.__marketplaceBots?.render === "function") window.__marketplaceBots.render(container);
+  }
+
+  // -- The Plugins tab, list view: an installed strip, a search field, category chips, and one
+  // section per category with a card each.
+  function marketplaceInstalledStripMarkup() {
+    const cards = marketplaceCards();
+    const connected = cards.filter((card) => card.status === "connected").length;
+    const icons = cards
+      .map((card) => `<button class="plugin-icon" type="button" data-plugin-id="${escapeHtml(card.id)}" title="${escapeHtml(card.name)}" aria-label="${escapeHtml(card.name)}">${escapeHtml(card.icon)}</button>`)
+      .join("");
+    return `<div class="marketplace-installed" data-marketplace-installed><span><strong>${cards.length} installed</strong> · ${connected} connected</span><div class="marketplace-installed-icons">${icons || `<small>Nothing is installed on this box yet.</small>`}</div></div>`;
+  }
+
+  function marketplaceCategories() {
+    const items = marketplaceItems();
+    if (!items.length) return [MARKETPLACE_ALL];
+    const declared = (marketplaceCatalog?.categories ?? []).map(String);
+    const used = [...new Set(items.map((item) => String(item.category ?? "")).filter(Boolean))];
+    const featured = items.some((item) => item.featured === true) ? ["Featured"] : [];
+    const ordered = declared.length ? declared : [...featured, ...used];
+    return [
+      MARKETPLACE_ALL,
+      ...ordered.filter((name) => (name === "Featured" ? featured.length > 0 : used.includes(name))),
+      ...used.filter((name) => !ordered.includes(name)),
+    ];
+  }
+
+  // The catalog's tile colour, and only a colour. It lands inside a style attribute, so anything
+  // that is not a plain CSS colour token is dropped rather than painted; the catalog is repo data,
+  // and this keeps it that way rather than trusting it to stay that way.
+  const marketplaceColor = (value) => {
+    const text = String(value ?? "").trim();
+    return /^#[0-9a-f]{3,8}$/i.test(text) || /^rgba?\([\d.,\s%]+\)$/i.test(text) || /^[a-z]+$/i.test(text)
+      ? text : "rgba(255, 255, 255, 0.08)";
+  };
+
+  // The same filter the catalog's own SearchPlugins tool applies: name, tagline, category.
+  function marketplaceMatches(item) {
+    const q = marketplaceQuery.trim().toLowerCase();
+    if (!q) return true;
+    return [item.name, item.tagline, item.category].some((field) => String(field ?? "").toLowerCase().includes(q));
+  }
+
+  function marketplaceCardMarkup(item) {
+    const install = marketplaceInstallById(item.id);
+    const color = marketplaceColor(item?.icon?.color);
+    const letter = String(item?.icon?.letter ?? String(item?.name ?? "?").slice(0, 1)).toUpperCase();
+    const action = install?.installed === true
+      ? `<span class="status-pill success" data-marketplace-added="${escapeHtml(item.id)}">✓ Added</span>`
+      : `<button class="primary-button" type="button" data-marketplace-add="${escapeHtml(item.id)}">Add</button>`;
+    return `<div class="plugin-card marketplace-card" data-marketplace-card="${escapeHtml(item.id)}"><button class="marketplace-card-open" type="button" data-marketplace-plugin="${escapeHtml(item.id)}"><span class="plugin-icon" style="background:${escapeHtml(color)}">${escapeHtml(letter)}</span><span class="marketplace-card-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.tagline ?? "")}</small></span></button>${action}</div>`;
+  }
+
+  function marketplaceSectionsMarkup() {
+    const items = marketplaceItems().filter(marketplaceMatches);
+    if (!items.length) {
+      return marketplaceItems().length
+        ? `<div class="empty-state">No plugin in this catalog matches “${escapeHtml(marketplaceQuery)}”.</div>`
+        : `<div class="empty-state">There is no catalog to draw. The installed strip above is what this box is actually running.</div>`;
+    }
+    const sections = marketplaceCategories()
+      .filter((category) => category !== MARKETPLACE_ALL)
+      .filter((category) => marketplaceCategory === MARKETPLACE_ALL || category === marketplaceCategory)
+      .map((category) => {
+        const members = category === "Featured"
+          ? items.filter((item) => item.featured === true)
+          : items.filter((item) => String(item.category ?? "") === category);
+        if (!members.length) return "";
+        return `<div class="plugin-group-title">${escapeHtml(category)}</div><div class="marketplace-grid">${members.map(marketplaceCardMarkup).join("")}</div>`;
+      })
+      .join("");
+    return sections || `<div class="empty-state">Nothing in that category matches.</div>`;
+  }
+
+  function marketplaceListMarkup() {
+    const chips = marketplaceCategories()
+      .map((category) => `<button class="tag${marketplaceCategory === category ? " is-active" : ""}" type="button" data-marketplace-category="${escapeHtml(category)}">${escapeHtml(category)}</button>`)
+      .join("");
+    const note = marketplaceNote ? `<div class="empty-state" data-marketplace-note>${escapeHtml(marketplaceNote)}</div>` : "";
+    return `${marketplaceInstalledStripMarkup()}<div class="field marketplace-search"><label class="sr-only" for="marketplace-search">Search plugins</label><input class="search-input" id="marketplace-search" data-marketplace-search type="search" placeholder="Search plugins" value="${escapeHtml(marketplaceQuery)}" /></div><div class="palette-chips marketplace-chips" data-marketplace-chips>${chips}</div>${note}<div class="marketplace-sections" data-marketplace-sections>${marketplaceSectionsMarkup()}</div>${connectorEditorMarkup()}`;
+  }
+
+  // -- The plugin page. Opened from a card, or from the installed strip for a connector nobody put
+  // in the catalog (a custom MCP server, or the throwaway one a gate adds), which gets a page
+  // drawn from its own card alone.
+  function marketplacePluginPageMarkup() {
+    const key = String(marketplacePluginId);
+    const item = marketplaceItemById(key);
+    const install = marketplaceInstallById(key);
+    const cardId = install?.cardId ?? (key.includes(":") ? key : `mcp:${key}`);
+    const card = state.plugins.find((plugin) => plugin.id === cardId) ?? null;
+    // The tool switches on this page are handled by id through selectedPluginId, and this page can
+    // be reached from a catalog card as well as from the installed strip. Pinning it here means it
+    // is the card on screen whichever way the operator arrived.
+    if (card) selectedPluginId = card.id;
+    const back = `<div class="form-actions"><button class="ghost-button" type="button" data-marketplace-back>← All plugins</button></div>`;
+    if (!item && !card) return `${back}<div class="empty-state">That plugin is not in this host's catalog and nothing on this box matches it.</div>`;
+    const lead = contextLead();
+    const name = String(item?.name ?? card?.name ?? key);
+    const letter = String(item?.icon?.letter ?? card?.icon ?? name.slice(0, 1)).toUpperCase();
+    const color = item?.icon?.color ? `style="background:${escapeHtml(marketplaceColor(item.icon.color))}"` : "";
+    const description = String(item?.description ?? card?.description ?? "");
+    // A catalog row carries the contract's three states. A card with no catalog row keeps the
+    // status pill it has always had rather than being forced into a vocabulary it never used.
+    const label = install ? install.label : pluginStatusLabel(card?.status ?? "available");
+    const ready = install ? install.ready === true : card?.status === "connected";
+    const source = item?.source?.url
+      ? `<a class="ghost-button" href="${escapeHtml(String(item.source.url))}" target="_blank" rel="noreferrer noopener" data-marketplace-source>View source ↗</a>`
+      : "";
+    return `${back}<section class="plugin-detail"><div class="plugin-hero"><span class="plugin-icon" ${color}>${escapeHtml(letter)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(name)}</h3><p>${escapeHtml(description)}</p></div><span class="status-pill${ready ? " success" : ""}">${escapeHtml(label)}</span></div><div class="form-actions marketplace-actions">${source}${marketplaceInstallControlMarkup(item, install, card)}</div><div class="plugin-sections">${marketplaceAccountsSectionMarkup(item, install, card, lead)}${card?.shellTool ? shellToolMarkup(card, lead) : ""}${marketplaceConnectorsSectionMarkup(item, card)}</div></section>`;
+  }
+
+  // Add, or Uninstall with the offer to clear what the host stores for it. The clear has to happen
+  // BEFORE the entry leaves connectors.json: deleteConnectorSecret resolves the server through
+  // that file, so once the row is gone the host cannot reach its own store for it.
+  function marketplaceInstallControlMarkup(item, install, card) {
+    const stored = (install?.storedCredentials ?? card?.storedFields ?? []).length;
+    const installed = install?.installed === true || (install == null && card?.removable === true);
+    if (!installed) return item ? `<button class="primary-button" type="button" data-marketplace-add="${escapeHtml(item.id)}">Add</button>` : "";
+    // A shell tool has no inverse here: installShellTool runs an installer in the box and the host
+    // has no command that removes it. Offering an Uninstall would call removeConnector with a name
+    // connectors.json has never held, which answers "not in connectors.json" and does nothing.
+    if (install?.kind === "shell-tool" || card?.shellTool != null) return "";
+    const name = install?.connectorName || card?.name || "";
+    if (!name || typeof adapter.removeConnector !== "function") return "";
+    const armed = marketplaceArmedUninstall === name;
+    const clear = stored > 0
+      ? `<label class="tag"><input type="checkbox" data-marketplace-clear-secrets checked /> Also clear the ${stored} value${stored === 1 ? "" : "s"} the host stores for it</label>`
+      : "";
+    return `${clear}<button class="danger-button" type="button" data-marketplace-uninstall="${escapeHtml(name)}">${armed ? "Click again to remove" : "Uninstall"}</button>`;
+  }
+
+  function marketplaceAccountsSectionMarkup(item, install, card, lead) {
+    const label = install ? install.label : pluginStatusLabel(card?.status ?? "available");
+    const ready = install ? install.ready === true : card?.status === "connected";
+    const line = install?.installed === false
+      ? "Add it and its credential fields appear here; the host stores the values, never this page."
+      : install?.needsAuth
+        ? `The host holds no value for ${install.missingCredentials.join(", ")}. Enter it below and the host stores it.`
+        : "The host holds this account's credentials in its own 0600 store and hands them to the process it launches.";
+    const account = `<div class="setting-row" data-marketplace-account="${escapeHtml(String(item?.id ?? card?.id ?? ""))}"><div><strong>default</strong><small>${escapeHtml(line)}</small></div><span class="status-pill${ready ? " success" : ""}">${escapeHtml(label)}</span></div>`;
+    // Not installed: the catalog's own one-line hints are all there is to show, and they are what
+    // an operator needs before they go and make the credential.
+    const hints = install?.installed === false && item?.credentialHints
+      ? Object.entries(item.credentialHints).map(([field, hint]) => `<div class="setting-row"><div><strong>${escapeHtml(field)}</strong><small data-credential-hint="${escapeHtml(field)}">${escapeHtml(String(hint))}</small></div></div>`).join("")
+      : "";
+    const body = card ? `${pluginAccountMarkup(card, lead)}${pluginSecretsMarkup(card)}` : "";
+    return `<section data-marketplace-accounts><div class="plugin-section-title"><span>Accounts</span><span>1 account</span></div>${account}${hints}${body}</section>`;
+  }
+
+  function marketplaceConnectorsSectionMarkup(item, card) {
+    const shellTool = item?.kind === "shell-tool" || card?.shellTool != null;
+    const count = `<span>${!shellTool && card?.tools?.length ? `${card.tools.filter((tool) => tool.enabled).length}/${card.tools.length} enabled` : !shellTool && card ? "1 connector" : "0 connectors"}</span>`;
+    if (!card || shellTool) {
+      return `<section data-marketplace-connectors><div class="plugin-section-title"><span>Connectors</span>${count}</div><div class="empty-state">${escapeHtml(shellTool ? "A shell tool is not an MCP server: the agent runs its command itself, so there is no connector here. Its command and its key are above." : "Not on this box yet. Add it and the host launches its server, discovers its tools, and lists them here.")}</div></section>`;
+    }
+    const status = String(card.boxStatus ?? card.status ?? "unknown");
+    const server = `<div class="setting-row" data-connector-status="${escapeHtml(card.name)}"><div><strong>${escapeHtml(card.name)}</strong><small>${escapeHtml(card.description)}</small></div><span class="status-pill${card.status === "connected" ? " success" : ""}">${escapeHtml(status)}</span></div>`;
+    return `<section data-marketplace-connectors><div class="plugin-section-title"><span>Connectors</span>${count}</div>${server}<div class="plugin-list">${pluginToolsMarkup(card)}</div></section>`;
+  }
+
+  // Typing filters the sections in place: repainting the whole body would take the focus and the
+  // caret out of the field on every keystroke.
+  function handleMarketplaceInput(event) {
+    const field = event.target.closest?.("[data-marketplace-search]");
+    if (!field) return;
+    marketplaceQuery = field.value;
+    const sections = elements.panelContent.querySelector("[data-marketplace-sections]");
+    if (sections) sections.innerHTML = marketplaceSectionsMarkup();
+  }
+
+  // The Marketplace, or Settings, or neither: a card control re-renders the panel it is drawn in.
+  function renderPluginsPanel() {
+    if (openPluginSurface === "settings") { openSettingsPanel(); return; }
+    renderMarketplacePanel();
+  }
+
+  // ===== end Marketplace ==============================================================
 
   // CP-11: adding a connector used to mean an operator editing connectors.json inside the
   // container by hand. The relay owns that file (GET/POST /connectors) and the host re-reads it
@@ -1594,6 +1869,23 @@
     return `<div class="panel-intro"><p>This is a real group-chat roster. Only these workers receive a turn or appear with sender labels in <strong>${escapeHtml(room.name)}</strong>.</p><span class="status-pill success">${room.memberIds.length} members</span></div><div class="member-manager-list">${rows}</div>`;
   }
 
+  // PROVIDERS-1: providers and chat listeners left the Marketplace for Settings. A provider is
+  // where this box answers from; a listener is what it listens to. Neither is something you
+  // install, and neither belongs in a catalog of things you do. The CARDS are unchanged -- the
+  // same nav buttons and the same pluginDetailMarkup the Plugins page drew -- so nothing about
+  // their behaviour moved with them, only the panel they are in.
+  const pluginNavButton = (plugin, activeId) => `<button class="plugin-nav-button${plugin.id === activeId ? " is-active" : ""}" type="button" data-plugin-id="${escapeHtml(plugin.id)}"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><span><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.category)}</small></span><span class="status-dot ${plugin.status === "connected" ? "success" : plugin.status === "installed" ? "attention" : ""}"></span></button>`;
+
+  function pluginGroupSection(group, title, blurb, empty) {
+    const members = state.plugins.filter((plugin) => (plugin.group ?? "Connectors") === group);
+    const head = `<h3>${escapeHtml(title)}</h3><p>${escapeHtml(blurb)}</p>`;
+    if (!members.length) return `<section class="settings-section" data-plugin-group="${escapeHtml(group)}">${head}<div class="empty-state">${escapeHtml(empty)}</div></section>`;
+    // Only a selection inside THIS group counts: picking a listener must not empty the provider
+    // detail beside it, so each section falls back to its own first card.
+    const selected = members.find((plugin) => plugin.id === selectedPluginId) ?? members[0];
+    return `<section class="settings-section" data-plugin-group="${escapeHtml(group)}">${head}<div class="plugin-browser"><aside class="plugin-sidebar">${members.map((plugin) => pluginNavButton(plugin, selected.id)).join("")}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div></section>`;
+  }
+
   function settingsPanel() {
     // Per-agent routing does not exist on this host: updateAgent takes only name, description and
     // title, and the model is resolved globally from box-secrets.json on every request. A picker
@@ -1607,7 +1899,14 @@
     const updates = typeof adapter.getHostStatus === "function"
       ? `<section class="settings-section" data-updates-panel><h3>Updates</h3><p>The host bundle this box runs, as getHostStatus reports it. The host itself is not updated from this page: updateHostNow would fetch a bundle from S3 over the locally patched one this box runs, so that command is left unwired here on purpose.</p><div class="setting-row"><div><strong>Host version</strong><small data-host-version>Reading from the host…</small></div><span class="status-pill" data-host-update>…</span></div>${boxAgent ? `<div class="setting-row"><div><strong>Update ${escapeHtml(boxAgent.name)}'s computer</strong><small>Moves the box to a fresh instance and keeps files and logins. Two clicks.</small></div><button class="ghost-button" type="button" data-update-box="${escapeHtml(boxAgent.id)}"${typeof adapter.updateBox === "function" ? "" : " disabled"}>Update</button></div><div class="setting-row"><div><strong>Reset ${escapeHtml(boxAgent.name)}'s computer</strong><small>Restores the box from its last snapshot. Recent unsynced work can be lost — prefer Update. Two clicks.</small></div><button class="danger-button" type="button" data-reset-box="${escapeHtml(boxAgent.id)}"${typeof adapter.resetBox === "function" ? "" : " disabled"}>Reset</button></div>` : ""}</section>`
       : "";
-    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section><section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${updates}</div>`;
+    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Providers", "Providers", "Every endpoint this box could answer through, as the relay reports them. Adopting one stores its credential in the relay's 0600 store on this Mac; switching one is the endpoint row above.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${updates}</div>`;
+  }
+
+  function openSettingsPanel() {
+    openPluginSurface = "settings";
+    openPanel("Global router & policy", "Operator settings", settingsPanel());
+    fillEndpoints();
+    fillHostStatus();
   }
 
   // The Updates rows fill from getHostStatus after the panel opens, like the endpoint rows do.
@@ -2142,7 +2441,72 @@
     }
     if (target.dataset.pluginId) {
       selectedPluginId = target.dataset.pluginId;
+      // MARKET-1: in the Marketplace a card id opens that plugin's page -- including one no
+      // catalog row claims, which is how a custom MCP server is reachable at all.
+      if (openPluginSurface === "marketplace") { marketplacePluginId = target.dataset.pluginId; marketplaceArmedUninstall = null; }
       renderPluginsPanel();
+    } else if (target.dataset.marketplaceTab) {
+      marketplaceTab = target.dataset.marketplaceTab;
+      marketplacePluginId = null;
+      renderMarketplacePanel();
+    } else if (target.dataset.marketplaceCategory) {
+      marketplaceCategory = target.dataset.marketplaceCategory;
+      paintMarketplaceBody();
+    } else if (target.dataset.marketplacePlugin) {
+      marketplacePluginId = target.dataset.marketplacePlugin;
+      marketplaceArmedUninstall = null;
+      paintMarketplaceBody();
+    } else if (target.hasAttribute("data-marketplace-back")) {
+      marketplacePluginId = null;
+      marketplaceArmedUninstall = null;
+      paintMarketplaceBody();
+    } else if (target.dataset.marketplaceAdd) {
+      // Add writes the catalog's entry through addConnector -- the same POST /connectors plus
+      // refreshMcp the connector editor makes -- and then opens the plugin page, where the
+      // credential card is. A catalog row with no command of its own ("Custom MCP server") is the
+      // catalog's door to that editor: there is nothing to write until an operator types one in.
+      const item = marketplaceItemById(target.dataset.marketplaceAdd);
+      if (!item) { showToast("That plugin is no longer in this host's catalog."); return; }
+      if (typeof item.install !== "object" || item.install === null || !item.install.command) {
+        marketplacePluginId = null;
+        paintMarketplaceBody();
+        const editor = elements.panelContent.querySelector("[data-connector-editor]");
+        if (editor) { editor.setAttribute("open", "open"); editor.scrollIntoView({ block: "center" }); }
+        showToast("Fill in the connector editor below — nothing is written until Add connector.");
+        return;
+      }
+      target.disabled = true;
+      Promise.resolve(adapter.addMarketplacePlugin(item, contextLead()?.id))
+        .then((result) => {
+          showToast(result?.message ?? `${item.name} added`);
+          if (result?.accepted !== false) { marketplacePluginId = item.id; marketplaceArmedUninstall = null; }
+          refreshMarketplace();
+        })
+        .catch((error) => { target.disabled = false; showToast(`${item.name} was not added: ${error.message}`); });
+    } else if (target.dataset.marketplaceUninstall) {
+      const name = target.dataset.marketplaceUninstall;
+      // Armed on the label, not on a repaint: redrawing the page here would put the "also clear"
+      // box back to its default under the hand of an operator who had just changed it.
+      if (marketplaceArmedUninstall !== name) { marketplaceArmedUninstall = name; target.textContent = "Click again to remove"; return; }
+      // The stored values go first: deleteConnectorSecret resolves the server through
+      // connectors.json, so once the entry is gone the host cannot reach its own store for it and
+      // the value would sit there for the life of the box.
+      const clear = elements.panelContent.querySelector("[data-marketplace-clear-secrets]");
+      const install = marketplaceInstallById(marketplacePluginId);
+      const held = install?.storedCredentials ?? [];
+      target.disabled = true;
+      const cleared = clear?.checked && held.length && typeof adapter.deleteConnectorSecret === "function"
+        ? Promise.all(held.map((field) => adapter.deleteConnectorSecret(name, field)))
+        : Promise.resolve([]);
+      cleared
+        .then(() => adapter.removeConnector(name))
+        .then((result) => {
+          marketplaceArmedUninstall = null;
+          marketplacePluginId = null;
+          showToast(result?.message ?? `${name} removed`);
+          refreshMarketplace();
+        })
+        .catch((error) => { target.disabled = false; showToast(`${name} was not removed: ${error.message}`); });
     } else if (target.dataset.installPlugin) {
       selectedPluginId = target.dataset.installPlugin;
       // The toast used to fire before the host had answered, on a call that for some cards always
@@ -2672,6 +3036,9 @@
     }
     renderAll(event.type === "worker:status" || event.type.startsWith("plugin:") || event.type.startsWith("settings:"));
     refreshOpenSkillsPanel();
+    // MARKET-1: the install states are derived from the connector cards, so a connector the host
+    // has finished launching moves "Connecting" to "Ready" without the operator reopening the panel.
+    if (event.type.startsWith("plugin:") && elements.panelDialog.open && openPluginSurface === "marketplace") refreshMarketplace(true);
     if (event.type === "desktop:pause") renderDesktop();
     // Not renderDesktop: that remounts the VNC frame. Only the hand-back control follows state.
     else if (elements.desktopDialog.open) renderHandBack();
@@ -2829,7 +3196,7 @@
     else if (capability === "browser") openDesktop("browser");
     else if (capability === "routines") renderRoutinesPanel();
     else if (capability === "skills") renderSkillsPanel();
-    else if (capability === "plugins") renderPluginsPanel();
+    else if (capability === "marketplace") { marketplacePluginId = null; renderMarketplacePanel(); }
     else if (capability === "add") openPanel("Global creation", "Add to the Machine Room", addPanel());
   }));
 
@@ -2838,6 +3205,7 @@
   document.querySelectorAll("[data-desktop-app]").forEach((button) => button.addEventListener("click", () => renderDesktop(button.dataset.desktopApp)));
   elements.panelContent.addEventListener("click", handlePanelClick);
   elements.panelContent.addEventListener("input", handleTriggerInput);
+  elements.panelContent.addEventListener("input", handleMarketplaceInput);
   elements.panelContent.addEventListener("change", handleTriggerInput);
   // GW-01: the avatar control. A PNG file, base64, to setAgentAvatarBytes; the adapter reads
   // the new version back and the panel's own image follows it.
@@ -2867,7 +3235,7 @@
   });
   elements.panelContent.addEventListener("submit", handlePanelSubmit);
 
-  const openSettings = () => { openPanel("Global router & policy", "Operator settings", settingsPanel()); fillEndpoints(); fillHostStatus(); };
+  const openSettings = openSettingsPanel;
   document.getElementById("settings-button").addEventListener("click", openSettings);
   document.getElementById("shelf-settings").addEventListener("click", openSettings);
   document.getElementById("people-button").addEventListener("click", () => {

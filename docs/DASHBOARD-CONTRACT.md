@@ -38,9 +38,14 @@ DISPOSITION LOG as the last action before done — done is not claimable without
 
 ## As built
 
-- Plugins page: a `Providers` group leads, `Connectors` follow (`renderPluginsPanel`); provider
+- Marketplace: two pill tabs, Plugins and Bots, opening on Plugins (`renderMarketplacePanel`).
+  The Plugins tab is the host's catalog (`listMarketplace`) with an installed strip, a search
+  field, category chips and a card per plugin; a card opens that plugin's page with its Accounts
+  and Connectors boxes. Providers and chat listeners are NOT in it — they are Settings sections
+  (`pluginGroupSection`, Providers directly under Inference), drawn from the same cards. Provider
   cards get a "Use this endpoint" button when adopted and an "answering now" pill when live
-  (`pluginDetailMarkup`, `handlePanelClick` → `adapter.setModel`, box-wide).
+  (`pluginDetailMarkup`, `handlePanelClick` → `adapter.setModel`, box-wide). See
+  [docs/MARKETPLACE.md](MARKETPLACE.md).
 - System rows that carry an exchange are clickable (`data-exchange`); the transcript click handler
   opens `openExchangeViewer`, which renders the exchange in the panel dialog with a view-only footer.
 - Adapter: provider plugins carry `group`, `endpointId`, `live`; blurbs carry `exchange`, `self`,

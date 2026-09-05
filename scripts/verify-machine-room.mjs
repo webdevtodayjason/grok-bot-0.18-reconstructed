@@ -141,7 +141,7 @@ if (want("--assert-no-silent-mocks")) {
 
   // Every panel, not just whichever happened to be open. A mock hiding one click deep is still a
   // mock the operator will read as fact.
-  for (const capability of ["files", "browser", "routines", "plugins", "add"]) {
+  for (const capability of ["files", "browser", "routines", "marketplace", "add"]) {
     await page.click(`[data-capability="${capability}"]`).catch(() => {});
     await page.waitForTimeout(1600);
     const text = await page.evaluate(() =>

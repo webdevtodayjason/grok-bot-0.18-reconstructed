@@ -576,14 +576,17 @@ test("the key form says so when its card is gone, instead of throwing past its o
   assert.ok(guard < clear, "the guard has to run before the inputs are cleared, or the typed value is lost");
 });
 
-// -- CP-11 in the state where it matters most: a box with nothing configured at all.
-test("the empty capabilities panel carries the connector editor and no longer denies it exists", async () => {
+// -- CP-11 in the state where it matters most: a box with nothing configured at all. MARKET-1
+// moved the panel this lives in -- the Plugins tab of the Marketplace -- but not the rule: the
+// editor is on the list view unconditionally, so the first connector can be added from a box that
+// has none, and no branch tells the operator connectors can only be added by hand on the box.
+test("the Marketplace's Plugins list carries the connector editor and no longer denies it exists", async () => {
   const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
-  const start = source.indexOf("  function renderPluginsPanel() {");
-  assert.notEqual(start, -1);
-  const branch = source.slice(start, source.indexOf("    selectedPluginId = selected.id;", start));
-  assert.match(branch, /\$\{connectorEditorMarkup\(\)\}/);
-  assert.equal(/Connectors are added to connectors\.json on the box, not from this page/.test(branch), false);
+  const start = source.indexOf("  function marketplaceListMarkup() {");
+  assert.notEqual(start, -1, "app.js no longer draws the Plugins list");
+  const body = source.slice(start, source.indexOf("\n  }", start));
+  assert.match(body, /\$\{connectorEditorMarkup\(\)\}/);
+  assert.equal(/Connectors are added to connectors\.json on the box, not from this page/.test(source), false);
 });
 
 // -- CONNECT-5: the shell tools group. A shell tool is a CLI the agent runs itself, with its
@@ -646,5 +649,9 @@ test("the credential form sends a shell tool's value to setShellSecret, not setC
   assert.match(handler, /adapter\.setConnectorSecret\(plugin\.name, field, value\)/);
   assert.match(source, /adapter\.installShellTool\(id, contextLead\(\)\?\.id\)/);
   assert.match(source, /adapter\.teachShellTool\(id, lead\.id\)/);
-  assert.match(source, /const GROUPS = \["Providers", "Connectors", "Shell tools", "Listeners"\]/);
+  // MARKET-1: the one grouped nav became two surfaces. The Marketplace draws connectors and shell
+  // tools; providers and chat listeners are sections in Settings, built from the same cards.
+  assert.match(source, /group === "Connectors" \|\| group === "Shell tools"/);
+  assert.match(source, /pluginGroupSection\("Providers", "Providers"/);
+  assert.match(source, /pluginGroupSection\("Listeners", "Chat listeners"/);
 });

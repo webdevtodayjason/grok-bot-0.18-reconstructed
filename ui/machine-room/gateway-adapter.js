@@ -812,6 +812,12 @@
         skills: [], skillsNote: null,
         shellTool: {
           id, field,
+          // MARKET-1: whether the CLI itself is in the box. listShellTools does not answer that
+          // today -- the host reports the catalog and whether it HOLDS the key -- so a host that
+          // grows an `installed` flag is believed, and until then the stored key is the only
+          // durable per-tool state there is to read. A tool with no key stored has not been set
+          // up, which is what the marketplace's "Added" is claiming when it says so.
+          installed: typeof tool?.installed === "boolean" ? tool.installed : held,
           install: String(tool?.install ?? ""),
           usage: String(tool?.usage ?? ""),
           teachable: skillUrl != null,
@@ -894,6 +900,72 @@
         toolsNote: CONNECTOR_TOOLS_NOTE,
         toolsReadOnlyNote: CONNECTOR_TOOLS_READONLY,
         skills: [], skillsNote: null,
+      };
+    });
+  }
+
+  // ------------------------------------------------------------------ MARKET-1: the marketplace
+  // One catalog, in the repo at source/shared/marketplace/catalog.ts, bundled into the host and
+  // served by two gateway commands. The console reads it ONLY through the gateway, never from a
+  // static JSON beside this file, so the agents' own plugin tools and this page see the same rows.
+  // A host that has not landed the commands answers "unknown gateway method", tryCall turns that
+  // into null, and the panel says the catalog is not on this host rather than drawing an empty one.
+  let marketplaceCatalogCache = null;
+  async function marketplaceCatalog(force) {
+    if (marketplaceCatalogCache && force !== true) return marketplaceCatalogCache;
+    const answer = await tryCall("listMarketplace", {});
+    if (answer == null) return null;
+    marketplaceCatalogCache = {
+      plugins: Array.isArray(answer.plugins) ? answer.plugins : [],
+      bots: Array.isArray(answer.bots) ? answer.bots : [],
+      categories: Array.isArray(answer.categories) ? answer.categories.map(String) : [],
+    };
+    return marketplaceCatalogCache;
+  }
+
+  // Which card on this page a catalog plugin is: a connector is its entry's name in
+  // connectors.json (the catalog's own id, unless it carries a connectorName of its own), a shell
+  // tool is the shell-tool id its `install` names.
+  const marketplaceConnectorName = (item) => String(item?.connectorName ?? item?.id ?? "");
+  const marketplaceShellToolId = (item) => String(typeof item?.install === "string" ? item.install : item?.shellToolId ?? item?.id ?? "");
+  const marketplaceCardId = (item) => (item?.kind === "shell-tool"
+    ? `shell:${marketplaceShellToolId(item)}`
+    : `mcp:${marketplaceConnectorName(item)}`);
+
+  // The contract's three states, derived from the cards this adapter already builds -- never from
+  // a second read of the box:
+  //   INSTALLED  the connector's name is in connectors.json (`removable` is this adapter's own
+  //              word for exactly that), or the shell tool is installed in the box.
+  //   NEEDS AUTH installed, and a credential field the entry declares has no stored value. The
+  //              card carries both lists already: `secretFields` is what may hold a value and
+  //              `storedFields` is what the host's 0600 store actually holds one for.
+  //   READY      installed, nothing left to authenticate, and the box reports it connected.
+  // Anything installed that is neither is CONNECTING: the box has the entry and has not finished
+  // launching it, which is a real state and must not be painted as ready.
+  function marketplaceInstallState(items, cards) {
+    const byId = new Map((Array.isArray(cards) ? cards : []).map((card) => [card.id, card]));
+    return (Array.isArray(items) ? items : []).map((item) => {
+      const kind = item?.kind === "shell-tool" ? "shell-tool" : "connector";
+      const cardId = marketplaceCardId(item);
+      const card = byId.get(cardId) ?? null;
+      const installed = card != null && (kind === "shell-tool"
+        ? card.shellTool?.installed === true
+        : card.removable === true);
+      const stored = new Set(Array.isArray(card?.storedFields) ? card.storedFields.map(String) : []);
+      const missing = (Array.isArray(card?.secretFields) ? card.secretFields.map(String) : []).filter((field) => !stored.has(field));
+      const needsAuth = installed && missing.length > 0;
+      const ready = installed && !needsAuth && (card?.boxStatus === "connected" || card?.status === "connected");
+      return {
+        id: String(item?.id ?? ""),
+        name: String(item?.name ?? item?.id ?? ""),
+        kind,
+        connectorName: kind === "connector" ? marketplaceConnectorName(item) : "",
+        shellToolId: kind === "shell-tool" ? marketplaceShellToolId(item) : "",
+        cardId,
+        installed, needsAuth, ready,
+        missingCredentials: missing,
+        storedCredentials: [...stored],
+        label: !installed ? "Not installed" : needsAuth ? "Needs auth" : ready ? "Ready" : "Connecting",
       };
     });
   }
@@ -2523,6 +2595,50 @@
             return { accepted: true, message: `${answer?.name ?? id} skill imported as a workflow for this agent.` };
           })
           .catch((error) => ({ accepted: false, message: `The skill was not imported: ${error.message}` }));
+      },
+
+      // -- MARKET-1: the marketplace. Two reads and one derivation; every WRITE goes through the
+      // connector paths that were already here, so Add and Uninstall are the same round trip the
+      // connector editor makes and nothing new can write connectors.json.
+      listMarketplace(force) { return marketplaceCatalog(force === true); },
+      getMarketplaceItem(kind, id) { return tryCall("getMarketplaceItem", { kind, id }); },
+      // The install state of every catalog plugin against the connector and shell-tool cards this
+      // adapter already holds. `cards` is an argument so a test can hand it a built list; the page
+      // passes nothing and gets the live ones.
+      installedPlugins(cards) {
+        return marketplaceCatalog().then((catalog) => marketplaceInstallState(
+          catalog?.plugins ?? [],
+          Array.isArray(cards) ? cards : state.plugins,
+        ));
+      },
+      // Add. A connector is written with the catalog's own entry -- the same {command,args,env}
+      // object the presets already carry -- and env NAMES only: connectors.json is plaintext on
+      // the box, so the values go through the credential card on the plugin page afterwards. A
+      // shell tool is installed in the box by the host's own installer.
+      addMarketplacePlugin(item, agentId) {
+        if (item?.kind === "shell-tool") return this.installShellTool(marketplaceShellToolId(item), agentId);
+        const entry = item?.install ?? {};
+        if (typeof entry.command !== "string" || entry.command.length === 0) {
+          return Promise.resolve({ accepted: false, message: "This catalog entry has no connector command; add it with the connector editor." });
+        }
+        return this.addConnector({
+          name: marketplaceConnectorName(item),
+          command: entry.command,
+          args: Array.isArray(entry.args) ? entry.args : [],
+          envNames: Object.keys(entry.env ?? {}),
+          replace: item?.replaces === true,
+        });
+      },
+      // Uninstall. The entry comes out of connectors.json through the same write Remove already
+      // made; the stored credentials are a separate offer, and they have to be cleared BEFORE the
+      // entry goes -- deleteConnectorSecret resolves the server through connectors.json, so once
+      // the row is gone the host cannot reach its own store for it.
+      deleteConnectorSecret(server, field) {
+        return tryCall("deleteConnectorSecret", { server, field })
+          .then((answer) => (answer === null
+            ? { accepted: false, message: `This host has no deleteConnectorSecret command yet, so ${field} is still in its store.` }
+            : { accepted: answer?.removed === true, message: answer?.removed === true ? `${field} cleared from the host's store.` : `The host held no value for ${field}.` }))
+          .catch((error) => ({ accepted: false, message: `${field} was not cleared: ${error.message}` }));
       },
 
       // -- CP-11: the connectors editor. The relay owns connectors.json (GET/POST /connectors);
