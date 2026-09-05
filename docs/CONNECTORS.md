@@ -37,11 +37,12 @@ capabilities), and its Plugins tab is the catalog these six services are in: one
 connector's status. [MARKETPLACE.md](MARKETPLACE.md) is that surface end to end — what the two tabs
 are, what Add and Import do, where the providers went, the catalog schema, and how to add a plugin
 or a bot. This file stays the per-service walk-through: what to mint, with which permissions, and
-what bites. The connector editor described below is still there, behind the Marketplace's **Custom
-MCP server** card.
+what bites.
 
-The operator's route is Marketplace → **Plugins** → **Custom MCP server** → **Add or remove a
-connector**. The preset row at the top of that card is a row of buttons, one per service; clicking
+The operator's route is **Marketplace** → **Plugins** → **Add** on the service's card, which writes
+that entry and opens its plugin page. Anything with no card goes through the connector editor, which
+is the **Custom MCP server** card and the **Add or remove a connector** box at the bottom of the same
+Plugins list. The preset row at the top of that card is a row of buttons, one per service; clicking
 one **fills the four fields and writes nothing**. Pressing **Add connector** writes
 `connectors.json` through the relay and calls `refreshMcp`, so the host relaunches its stdio servers
 with no container restart. The connector's card then appears with its **Credentials for
@@ -324,8 +325,8 @@ runs are metered against the wallet.
   goes back to waiting for authorization after the next redeploy.
 
 **The TinyFish CLI is a different thing, and it lives under Shell tools.** The connector above is
-an MCP server the host spawns; the CLI is a program the agent runs itself. Global capabilities →
-**Plugins, connectors & skills** → **Shell tools** → **TinyFish CLI** → **Install in the box** runs
+an MCP server the host spawns; the CLI is a program the agent runs itself. **Marketplace** →
+**Plugins** → **TinyFish CLI** → **Install in the box** runs
 `pip install cli-anything-tinyfish` in the box as user `box`, capped at five minutes, and shows the
 tail of its output on the card. Then paste the same TinyFish key into that card's
 `TINYFISH_API_KEY` field — a key stored on the `tinyfish` connector card does not reach the CLI,
@@ -346,8 +347,8 @@ and keyed from the console's **Shell tools** group — the same shape as the Tin
 a credential card, and the agent's shell inheriting the key. Every unofficial CodeRabbit MCP package
 on npm was rejected in the report as unofficial, inactive, archived, or a security holding stub.
 
-**Install it from the console.** Global capabilities → **Plugins, connectors & skills** → **Shell
-tools** → **CodeRabbit CLI** → **Install in the box**. That button runs
+**Install it from the console.** **Marketplace** → **Plugins** → **CodeRabbit CLI** → **Install in
+the box**. That button runs
 
 ```bash
 CI=1 curl -fsSL https://cli.coderabbit.ai/install.sh | sh

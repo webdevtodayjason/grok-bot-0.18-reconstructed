@@ -1,164 +1,184 @@
 # The Marketplace
 
-One button, two tabs. **Plugins** are the things this box can install — a connector (an MCP server
-the box runs) or a shell tool (a CLI the box installs). **Bots** are agent templates: a persona,
-its skills, and the plugins it needs. The button and the panel used to be called *Global
-capabilities*, and providers and chat listeners used to live inside it; they do not any more —
-see [Where the providers went](#where-the-providers-went).
+The console's **Marketplace** button opens one dialog with two pill tabs, **Plugins** and **Bots**.
+It replaces the old *Global capabilities* panel, which mixed four unlike things in one list:
+connectors you install, shell tools you install, chat listeners you bind, and providers you answer
+through. The last two are not things anybody installs, so this wave moved them out — the operator's
+own words were *"I really don't want providers in this marketplace area. Providers should be moved
+and should only be under the settings."*
 
-The catalog is one file in the repo, `source/shared/marketplace/catalog.ts`, bundled into the host.
-The console never reads a static JSON: it asks the gateway. That is the whole point — the operator's
-Marketplace panel and the agent's `SearchPlugins` resolve against the same data, so a plugin the
-agent offers to install is one the operator can see, and neither list can drift from the other.
+The panel opens on **Plugins**.
 
-Two gateway commands serve it:
+## One catalog, served by the host
 
-| command | argument | answer |
+Both tabs are drawn from a single catalog that lives in the repo at
+`source/shared/marketplace/catalog.ts` and is bundled into the host. The console reads it through
+two gateway commands and never from a static JSON of its own:
+
+| Command | Arguments | Answers |
 | --- | --- | --- |
-| `listMarketplace` | `{}` | `{ plugins, bots, categories }` — the whole catalog |
-| `getMarketplaceItem` | `{ kind: "plugin" \| "bot", id }` | that one item |
+| `listMarketplace` | `{}` | `{ plugins, bots, categories }` |
+| `getMarketplaceItem` | `{ kind, id }` | the one item |
 
-Both are pure reads out of the bundle: no box, no network, no account. Per-install state is *not*
-in them — "installed", "Needs auth" and "Ready" come from the connector commands
-(`listInstalledMcpServers`, `listConnectorSecretFields`), which is what keeps the catalog a catalog.
+That single source is the point. The agents' own plugin tools — `SearchPlugins`, `GetPlugin`,
+`InstallPlugin`, `UninstallPlugin` — resolve against the same catalog, so what a model can find and
+what an operator can see are the same list. A host that has not landed the commands answers
+`unknown gateway method`, and the tab says the host serves no catalog rather than drawing an empty
+one.
 
-## Plugins: what Add does
+## The Plugins tab
 
-A plugin is installed when its connector name is in `/home/box/sand-data/connectors.json`. **Add**
-writes that entry through the same door the connector editor uses (the console's `POST /connectors`,
-or the host's own writer for an agent's `InstallPlugin`) and then calls `refreshMcp`, so the host
-relaunches its stdio servers with no container restart. Then it opens the plugin page.
+A **plugin** is one thing the box can run for an agent: an MCP **connector** the host spawns, or a
+**shell tool** the agent runs from its own shell. The tab has, top to bottom:
 
-The plugin page has the two boxes the connector plane already had:
+- an **installed strip** — how many are installed, how many the box reports connected, and one icon
+  per installed card. An icon opens that plugin's page, including one no catalog row claims (a
+  custom MCP server, or a connector added by hand);
+- a **search field** — it filters on name, tagline and category, the same rule `SearchPlugins`
+  applies;
+- **category chips** — `All` plus the catalog's own categories;
+- **sections**, one per category, each a grid of cards: icon tile, name, one line, and either an
+  **Add** button or a **✓ Added** pill;
+- the **Add or remove a connector** editor, unchanged, at the bottom. The catalog's *Custom MCP
+  server* card opens it rather than writing anything.
 
-- **Accounts** — one credential card per credential field. A credential field is an env key whose
-  value in the entry is the **empty string**; that rule is the host's (CONNECT-4), and it is why no
-  catalog entry may carry a non-empty env value. Until a value is stored the row reads **Needs
-  auth**; once the connector reports connected it reads **Ready**.
-- **Connectors** — the server, its status and its tool count, with the per-tool enable toggles.
+### Add
 
-**Uninstall** removes the entry and reloads. It deliberately leaves the stored credential alone, so
-re-adding the plugin does not need a fresh key; clearing it is a separate action
-(`deleteConnectorSecret`), which the page offers.
+**Add** writes the catalog entry through exactly the path the connector editor already used:
+`POST /connectors` on the relay, then `refreshMcp`, so the host relaunches its stdio servers with
+no container restart. The entry written is the catalog's own `{command, args, env}` object with the
+environment **names** and no values — `connectors.json` is plaintext on the box, and a credential
+never goes in it. Add then opens the plugin's page, which is where the credential does go.
 
-The whole credential story is unchanged and is written up in [CONNECTORS.md](CONNECTORS.md): no key
-ever goes in `connectors.json`, values live in the 0600 store, and **the agent cannot set one** — a
-key typed into a conversation is in the transcript, the model's context and whatever window that was
-compacted into. `InstallPlugin` therefore answers with the *names* of the fields the operator has to
-fill and where to fill them.
+For a shell tool, Add is `installShellTool`: the host runs the catalog's install command inside the
+box as user `box`, capped at five minutes, and the tail of its output comes back on the card.
 
-Two plugins are not connectors:
+### The plugin page
 
-- **Shell tools** (CodeRabbit CLI, TinyFish CLI) install by running a command inside the box
-  (`installShellTool`) and take their key from the shell section of the same 0600 store.
-  `InstallPlugin` refuses them with that explanation rather than writing `connectors.json`. This box
-  keeps no install record for a shell tool, so the closest true signal for "installed" — the one the
-  Shell tools panel already shows — is whether the host holds its key.
-- **Custom MCP server** has no entry at all: it opens the connector editor, where a name, a command,
-  its arguments and the environment variable *names* are typed by hand.
+- the icon, the name, and the state pill;
+- **View source ↗**, a link to the service's own documentation, and **Uninstall**;
+- the description;
+- an **Accounts** box: a `default` row carrying the state, and the credential card that already
+  existed — one masked field per credential the entry declares, stored by the host with
+  `setConnectorSecret` (or `setShellSecret` for a shell tool) into its own 0600 store, never into
+  `connectors.json` and never into this page's markup;
+- a **Connectors** box: the server, the box's own word for its status, its tool count, and every
+  tool it discovered with its enable switch.
 
-## Bots: what Import does
+### The three states
 
-A bot is a template, not a running thing. **Import Bot** does three steps:
+Derived in `ui/machine-room/gateway-adapter.js` (`installedPlugins`) from the connector and
+shell-tool cards the console already builds — never from a second read of the box:
 
-1. `createAgent` with the bot's name and its `instructions` as the agent's persona.
-2. `importAgentWorkflowText` once per skill, so each `SKILL.md` in the template lands as one of the
-   agent's workflows.
-3. The bot page then shows the imported agent and the plugins the template names, with **Add**
-   beside any that are not installed.
+| State | What it means |
+| --- | --- |
+| **Not installed** | the connector's name is not in `connectors.json` (or the shell tool is not installed). A host running a server by that name is not enough: an account server has no entry, and "Added" would offer an Uninstall that removes nothing. |
+| **Needs auth** | installed, and a credential field the entry declares has no value in the host's store. `listConnectorSecretFields` answers `fields` and `stored` separately, and only the second may make a card claim the host holds a value. |
+| **Connecting** | installed and authenticated, and the box has not finished launching it. |
+| **Ready** | installed, nothing left to authenticate, and the box reports it connected. |
 
-Importing the same bot twice makes a second agent with `" copy"` appended, the way `duplicateAgent`
-does — a template is meant to be taken more than once.
+### Uninstall
 
-Note for whoever wires the import: the host's `createAgent` takes `name`, `description`, `title`,
-`avatarShape` and `avatarColor`, and `description` is the free-text field the agent's persona
-actually runs from (that is the field MR-28 is about). There is no separate persona field to put
-`instructions` in.
+**Uninstall** takes two clicks. Where the host stores credentials for that connector, the first
+click's row offers to clear them as well — and they are cleared **first**, because
+`deleteConnectorSecret` resolves the server through `connectors.json`: once the entry is gone the
+host cannot reach its own store for it, and the value would sit there for the life of the box. Then
+the entry comes out through the same `removeConnector` write the editor's Remove row makes.
+
+## The Bots tab
+
+A **bot** is an agent template: a persona, the skills it can run, and the plugins it needs. The tab
+lists them as cards under the same category chips, and a bot's page has its description and three
+sections — **Instructions** (the persona the agent runs with), **Skills** (each playbook's name and
+description) and **Integrations** (the plugins it needs, with an Add button for the missing ones).
+
+**Import Bot** creates a real agent: `createAgent` with the template's name, its description, and
+its instructions as the agent's persona, then `importAgentWorkflowText` once per skill. Importing
+the same bot twice makes a second agent with `" copy"` appended, the same way Duplicate does. The
+bot's page then shows the imported agent and which of its integrations are still missing.
 
 ## Where the providers went
 
-Providers and chat listeners are not in the Marketplace. Nothing about how they behave changed, only
-where they live:
+**Settings** (the ⚙ button). Providers are a **Providers** section directly under **Inference** —
+the same provider cards, with the same key form, the same "Use this endpoint" button and the same
+"answering now" pill. Nothing about their behaviour changed; only the panel they live in.
 
-- **Providers** render in **Settings → Inference** as a *Providers* section, using the same provider
-  cards.
-- **Chat listeners** render in **Settings** as *Chat listeners*.
+Chat listeners moved with them, as a **Chat listeners** section in the same panel. A listener binds
+to one agent — the agent whose conversation is on screen — which is why it belongs beside the
+box's own settings rather than in a catalog of things to install.
 
-The operator's reason, in his words: *"I really don't want providers in this marketplace area.
-Providers should be moved and should only be under the settings."* A marketplace is a place to add a
-capability; a provider is how the box thinks, and it belongs beside the rest of the box's settings.
+## Adding to the catalog
 
-## The catalog schema
+Edit `source/shared/marketplace/catalog.ts` and rebuild the host. Nothing in the console needs to
+change: it draws whatever the two commands answer.
 
 ### A plugin
 
 ```ts
 {
-  id, name,
-  tagline,            // one line; the card's subtitle, and part of what search matches
-  description,        // the paragraph on the plugin page
-  category,           // one of categories.plugins
-  featured,           // drives the Featured section, independent of category
-  icon: { letter, color },          // no external images, ever
-  source: { label, url },           // "View Source ↗" on the plugin page
-  kind: "connector" | "shell-tool",
-  install,            // a connector: the exact {command,args,env} entry. a shell tool: its id.
-  connectorName,      // the name the entry takes in connectors.json (connectors only)
-  credentialHints: { ENV_KEY: "one line: what the value is, where it is minted, the least it needs" },
+  id: "linear",                       // the connector's name in connectors.json
+  name: "Linear",
+  tagline: "Issues, projects and cycles.",   // one line, on the card
+  description: "…",                          // the plugin page's paragraph
+  category: "Project management",            // one of `categories`
+  featured: false,
+  icon: { letter: "L", color: "#5e6ad2" },   // no external images
+  source: { label: "linear.app", url: "https://linear.app/docs/mcp" },
+  kind: "connector",                          // or "shell-tool"
+  install: LINEAR_PRESET_ENTRY,               // the preset's own {command,args,env} object
+  credentialHints: { LINEAR_API_KEY: "A Linear personal API key…" },
 }
 ```
 
-Categories: Featured, Development, Communication, Project management, Documents & Files, Web &
-Search, Code review, Shell tools.
+Two rules that are not style:
+
+- **`install` reuses the preset entry object; it does not restate it.** The entries are fixed
+  against the primary-source reports in `docs/connectors/`, and
+  `tests/connector-preset-catalog.test.mjs` fails if a report and an entry drift apart. A second
+  copy in this file would be a second thing to keep true.
+- **`credentialHints` is one line per credential field**: what the value is, where it is created,
+  and the least it needs to work. It is what the plugin page shows an operator who reaches it
+  without the credential in hand.
+
+For a `shell-tool`, `install` is the shell-tool id from
+`source/host/extensions/shell-tools/shell-tool-catalog.ts`.
+
+The categories are `Featured`, `Development`, `Communication`, `Project management`,
+`Documents & Files`, `Web & Search`, `Code review` and `Shell tools`. `Featured` is the `featured`
+flag rather than a category anything is filed under.
 
 ### A bot
 
 ```ts
 {
-  id, name,
-  creator,            // "Titanbot team"
-  category,           // one of categories.bots
-  featured,
-  tile: { color, shape },
-  description,        // one line, shown on the card and the bot page
-  instructions,       // the persona the imported agent runs with
-  skills: [{ name, description, body }],   // body is a whole SKILL.md, front matter included
-  integrations: [pluginId, ...],
+  id: "research-desk",
+  name: "Research desk",
+  creator: "Titanbot team",
+  category: "From Titanbot team",
+  featured: true,
+  tile: { color: "#31b6b8", shape: "circle" },
+  description: "…",
+  instructions: "…",                    // the persona the imported agent runs with
+  skills: [{ name: "Daily scan", description: "…", body: "…SKILL.md text…" }],
+  integrations: ["tinyfish"],           // plugin ids
 }
 ```
 
-Categories: Featured, From Titanbot team, Engineering, Operations, Sales, Personal.
+Seed only what the box can actually run today. A template whose integration has no plugin behind it
+imports an agent that cannot do the job it is named for.
 
-## Adding a plugin
+## Where the code is
 
-1. If it is a connector, research it first and land the report under `docs/connectors/<service>.md`
-   with its entry in section 2. `tests/connector-preset-catalog.test.mjs` holds the console's preset
-   row against that section, and `tests/marketplace-catalog.test.mjs` holds this catalog against the
-   preset row — so an entry exists in three places and none of the three can be edited alone.
-2. Add the object to `MARKETPLACE_PLUGINS`. Every credential env value is the **empty string** and
-   every credential field has a one-line hint; the test fails otherwise, and so it should — a
-   non-empty env value in the catalog would be a secret in git.
-3. Add the connector's preset to `CONNECTOR_PRESETS` in `ui/machine-room/gateway-adapter.js` with
-   the identical entry, so the connector editor offers it too.
-4. `npm test`. The catalog validator checks the category, the hints and the shape; a separate case
-   scans every string in the catalog for anything key-shaped.
+| Piece | File |
+| --- | --- |
+| The catalog | `source/shared/marketplace/catalog.ts` |
+| The two gateway commands | `source/host/gateway-protocol.ts`, `source/host/host-gateway-api.ts` |
+| The agents' plugin tools | `source/shared/node/mcp/mcp-catalog-flow.ts`, `mcp-service.ts` |
+| The panel, tabs, cards and plugin page | `ui/machine-room/app.js` (the `Marketplace` block) |
+| The catalog reads and the install-state derivation | `ui/machine-room/gateway-adapter.js` |
+| Providers and listeners in Settings | `ui/machine-room/app.js` (`pluginGroupSection`) |
+| The gate | `scripts/verify-dashboard.mjs`, `scripts/verify-connector-plane.mjs --plugin-tools` |
+| The derivations, against a stub gateway | `tests/machine-room-marketplace.test.mjs` |
 
-## Adding a bot
-
-1. Add the object to `MARKETPLACE_BOTS`. Its `integrations` must be plugin ids that exist, and every
-   skill body must be a real `SKILL.md` whose front-matter `name` matches the skill's `name` — both
-   are asserted.
-2. Keep the persona to what the box can actually do today. A template whose integrations are not in
-   the catalog is a promise the Import button cannot keep.
-
-## Gates
-
-- `scripts/verify-dashboard.mjs` — the Marketplace opens on Plugins with the catalog's cards, the
-  category chips and a working search; no provider appears in it and the Providers section is in
-  Settings; **Add** on *TinyFish (API key)* writes the entry and opens a plugin page whose Accounts
-  row says Needs auth; **Uninstall** removes it and `connectors.json` is byte-identical to before;
-  the Bots tab lists the six templates; **Import** on *Research desk* creates an agent whose
-  description matches and whose skills list the template's skill names.
-- `scripts/verify-connector-plane.mjs --plugin-tools` — `SearchPlugins` lists the catalog,
-  `GetPlugin` returns TinyFish with its field, `InstallPlugin` writes the entry, `UninstallPlugin`
-  removes it, byte-identical after.
+The mechanism underneath — what a connector entry is, what makes an env key a credential field, and
+where the values are stored — is [docs/CONNECTORS.md](CONNECTORS.md).

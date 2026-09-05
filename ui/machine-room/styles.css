@@ -3039,3 +3039,25 @@ dialog[open] {
 [data-connector-editor] .plugin-list {
   margin-top: 12px;
 }
+
+/* Marketplace (MARKET-1). The panel reuses the console's own components -- .roster-tab for the
+   two pill tabs, .tag for the category chips, .plugin-card for a catalog card, .plugin-detail and
+   its hero/sections for the plugin page -- so only the layout of the new arrangements is here. */
+[data-marketplace] .roster-tabs { margin: 0 0 14px; gap: 18px; }
+.marketplace-installed { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--glass-edge-soft); border-radius: var(--radius-lg); background: rgba(255, 255, 255, 0.03); font-size: 12px; color: var(--text-secondary); }
+.marketplace-installed-icons { display: flex; gap: 6px; flex-wrap: wrap; }
+.marketplace-installed-icons .plugin-icon { border: 0; cursor: pointer; }
+.marketplace-search { margin: 12px 0 10px; }
+.marketplace-chips { flex-wrap: wrap; margin-bottom: 14px; }
+.marketplace-chips .tag { border: 1px solid var(--glass-edge-soft); background: transparent; cursor: pointer; }
+.marketplace-chips .tag.is-active { border-color: var(--teal-300); color: var(--text-primary); }
+.marketplace-sections { display: grid; gap: 6px; }
+.marketplace-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); margin-bottom: 10px; }
+.marketplace-card { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+.marketplace-card-open { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.marketplace-card-copy { display: grid; min-width: 0; }
+.marketplace-card-copy strong { font-size: 13px; }
+.marketplace-card-copy small { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.marketplace-actions { flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.marketplace-actions .tag { display: inline-flex; align-items: center; gap: 6px; }
+.marketplace-card .plugin-icon, [data-marketplace-body] .plugin-hero .plugin-icon { color: var(--text-primary); font-weight: 600; }
