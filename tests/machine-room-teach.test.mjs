@@ -421,6 +421,39 @@ test("teach: the note's hint says where the note actually goes", async () => {
     "the hint is only true while the note is an argument of the stop");
 });
 
+test("teach: the dialog says the ten-minute cap saves without the note, and the page keeps the note it never sent", async () => {
+  // TEACH-4. The cap is the host's own timer: it calls the same stop the Finish button calls, with
+  // nothing from this dialog to hand it, so a recording left to run out is saved and its learning
+  // turn dispatched with the note still in the textarea. The hint promised the note always reached
+  // that turn, which was true only of the button.
+  const html = await readFile(path.join(repoRoot, "ui/machine-room/index.html"), "utf8");
+  const start = html.indexOf('id="teach-dialog"');
+  const dialog = html.slice(start, html.indexOf("</dialog>", start)).replace(/<!--[\s\S]*?-->/g, "");
+  assert.match(dialog, /ten-minute cap[^<]*without this note/i);
+  // The toast the page shows when its poller discovers the cap fired says the same thing at the
+  // one moment the operator can act on it.
+  const app = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const pollAt = app.indexOf("function pollTeachHost(");
+  assert.match(app.slice(pollAt, app.indexOf("\n  }", pollAt)), /without the note typed here/);
+
+  // And the note itself survives. Finish on a recording the cap already ended sends no stop, so
+  // nothing carried the note anywhere; the view clears the field only on noteSent !== false, and
+  // this branch used to answer with no noteSent at all, which cleared it.
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    startTeachRecording: { state: "recording", agentId: "w1", startedAtMs: Date.now(), maxDurationMs: 600_000 },
+    getTeachRecordingStatus: { state: "idle", maxDurationMs: 600_000 },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.startTeaching("w1");
+  const result = await adapter.finishTeaching(true, "filter to unassigned tickets");
+  assert.equal(result.alreadyStopped, true);
+  assert.equal(result.noteSent, false, "the note was never sent, so the field must not be cleared");
+  assert.match(result.message, /carries no note/);
+  assert.equal(only(calls, "stopTeachRecording").length, 0);
+  adapter.destroy();
+});
+
 test("teach: the refusal and the progress line are drawn beside the button that was clicked", async () => {
   const html = await readFile(path.join(repoRoot, "ui/machine-room/index.html"), "utf8");
   const start = html.indexOf('class="desktop-header-actions"');
