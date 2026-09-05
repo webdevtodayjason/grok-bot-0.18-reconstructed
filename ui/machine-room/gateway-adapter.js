@@ -511,6 +511,15 @@
   // itself stays in the host's secret store. No space after the colon: that is the form
   // mcp-remote's README asks for from clients that mangle spaces inside an argument, and it trims
   // the value itself.
+  //
+  // The connectors wave turned that one recipe into a catalog. Every `entry` below after TinyFish
+  // is the JSON from section 2 of that service's primary-source report in docs/connectors/,
+  // character for character; tests/connector-preset-catalog.test.mjs parses those reports and
+  // fails if a report and this list drift apart, so neither can be edited alone. `hints` is one
+  // line per credential field, taken from the report's Credentials section: what the value is,
+  // where it is created, and the least it needs to work. CodeRabbit has a report and no entry
+  // here on purpose -- it ships a CLI, not an MCP server, so there is nothing to spawn.
+  const PRESET_CREDENTIAL_NOTE = "The credential goes in the key form on this connector's own card once it is added, never in this form: connectors.json is plaintext on the box.";
   const CONNECTOR_PRESETS = [{
     id: "tinyfish",
     label: "TinyFish (API key)",
@@ -520,11 +529,107 @@
       args: ["-y", "mcp-remote", "https://agent.tinyfish.ai/mcp", "--transport", "http-only", "--header", "Authorization:Bearer ${TINYFISH_API_KEY}"],
       env: { TINYFISH_API_KEY: "" },
     },
+    hints: {
+      TINYFISH_API_KEY: "Your TinyFish account's API key, carried to https://agent.tinyfish.ai/mcp as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. The key is account-wide; it carries no separate scopes.",
+    },
     // A box wants one TinyFish, so filling this over an entry already called tinyfish -- the OAuth
     // recipe in docs/CONNECTORS-TINYFISH.md -- replaces it instead of being refused as a duplicate.
     replaces: true,
     note: "The key goes in the credential card on the tinyfish card once this is added, never in this form: connectors.json is plaintext on the box.",
+  }, {
+    id: "github",
+    label: "GitHub (PAT, read-only)",
+    name: "github",
+    // docs/connectors/github.md §2. The toolset and read-only headers are part of the entry: they
+    // are what keeps this connector to repository, issue and PR reads plus the identity tool.
+    entry: {
+      command: "npx",
+      args: [
+        "-y",
+        "mcp-remote@0.8.3",
+        "https://api.githubcopilot.com/mcp/",
+        "--transport",
+        "http-only",
+        "--header",
+        "Authorization:Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
+        "--header",
+        "X-MCP-Toolsets:repos,issues,pull_requests",
+        "--header",
+        "X-MCP-Tools:get_me",
+        "--header",
+        "X-MCP-Readonly:true",
+      ],
+      env: { GITHUB_PERSONAL_ACCESS_TOKEN: "" },
+    },
+    hints: {
+      GITHUB_PERSONAL_ACCESS_TOKEN: "A GitHub fine-grained personal access token. Create one under Settings → Developer settings → Personal access tokens → Fine-grained tokens (github.com/settings/personal-access-tokens/new); the least this entry needs is Contents: read, Issues: read and Pull requests: read, plus the Metadata: read it includes automatically.",
+    },
+    note: PRESET_CREDENTIAL_NOTE,
+  }, {
+    id: "slack",
+    label: "Slack (user token)",
+    name: "slack",
+    // docs/connectors/slack.md §2. A local stdio server rather than a bridge, and posting stays
+    // off: that is the server's own default, not a header this entry sets.
+    entry: {
+      command: "npx",
+      args: ["-y", "slack-mcp-server@1.3.0", "--transport", "stdio"],
+      env: { SLACK_MCP_XOXP_TOKEN: "" },
+    },
+    hints: {
+      SLACK_MCP_XOXP_TOKEN: "A Slack user OAuth token (xoxp-), acting as the installing user. Create the app at api.slack.com/apps, add User Token Scopes, Install to Workspace and copy the User OAuth Token; channels:read alone lists public channels, and reading plus search also wants channels:history, groups:read, groups:history, im:read, im:history, mpim:read, mpim:history, users:read and search:read.",
+    },
+    note: PRESET_CREDENTIAL_NOTE,
+  }, {
+    id: "linear",
+    label: "Linear (API key)",
+    name: "linear",
+    // docs/connectors/linear.md §2. Same bridge and same bearer as GitHub, against Linear's
+    // Streamable HTTP endpoint; without the header mcp-remote falls through to a browser OAuth
+    // flow, which this box cannot finish.
+    entry: {
+      command: "npx",
+      args: [
+        "-y",
+        "mcp-remote@0.8.3",
+        "https://mcp.linear.app/mcp",
+        "--transport",
+        "http-only",
+        "--header",
+        "Authorization:Bearer ${LINEAR_API_KEY}",
+      ],
+      env: { LINEAR_API_KEY: "" },
+    },
+    hints: {
+      LINEAR_API_KEY: "A Linear personal API key. Create one under Settings → Account → Security & Access → Personal API keys (linear.app/settings/account/security) and copy it once; Read is the only permission the read tools need, and Linear's own MCP FAQ recommends a Read-only key.",
+    },
+    note: PRESET_CREDENTIAL_NOTE,
+  }, {
+    id: "google",
+    label: "Google Workspace (OAuth refresh token)",
+    name: "google",
+    // docs/connectors/google.md §2. Three credential fields, not one: the server mints access
+    // tokens at runtime from the client pair plus the refresh token, so consent is done once in
+    // Google's OAuth Playground and nothing here needs a browser afterwards.
+    entry: {
+      command: "npx",
+      args: ["-y", "google-workspace-mcp-server@1.4.3"],
+      env: { GOOGLE_CLIENT_ID: "", GOOGLE_CLIENT_SECRET: "", GOOGLE_REFRESH_TOKEN: "" },
+    },
+    hints: {
+      GOOGLE_CLIENT_ID: "The client ID of an OAuth Web application client. Create it in Google Cloud under APIs & Services → Credentials with https://developers.google.com/oauthplayground as an authorized redirect URI, on a project with the Gmail, Google Docs and Google Drive APIs enabled.",
+      GOOGLE_CLIENT_SECRET: "The secret shown beside that same OAuth client under APIs & Services → Credentials. It is half of the client pair, not a scope of its own, and it is what the Playground is given to mint the refresh token.",
+      GOOGLE_REFRESH_TOKEN: "The refresh token from the OAuth 2.0 Playground exchange (gear → Use your own OAuth credentials → Authorize APIs → Exchange authorization code for tokens), not the access token; authorize gmail.readonly for Gmail reads, gmail.compose for drafts, documents for Docs read and write, and drive.file plus drive.readonly for the Docs file IDs.",
+    },
+    note: PRESET_CREDENTIAL_NOTE,
   }];
+
+  // One line per credential field, keyed by env name, so a card drawn from connectors.json can say
+  // what the field is without knowing which preset put it there. Env names are unique across the
+  // catalog; a connector added by hand under a different name still gets the hint for the value it
+  // declares, which is the point -- the hint is about the credential, not about the entry.
+  const CREDENTIAL_HINTS = Object.fromEntries(CONNECTOR_PRESETS.flatMap((p) => Object.entries(p.hints ?? {})));
+  const credentialHintsFor = (fields) => Object.fromEntries(fields.flatMap((f) => (CREDENTIAL_HINTS[f] ? [[f, CREDENTIAL_HINTS[f]]] : [])));
 
   // A header argument carries a space ("Authorization:Bearer ${TINYFISH_API_KEY}") and the
   // editor's argument field is one line of text that used to be split on whitespace alone -- so
@@ -547,6 +652,13 @@
   const joinConnectorArgs = (args) => args
     .map((a) => (!/\s/.test(a) ? a : a.includes('"') ? `'${a}'` : `"${a}"`))
     .join(" ");
+
+  // The catalog as data, on the page. scripts/verify-dashboard.mjs reads it in a real browser and
+  // clicks its way through it, and tests/connector-preset-catalog.test.mjs reads the same array
+  // through the stub window it loads this file with -- so neither has to restate an entry that
+  // docs/connectors/ already fixes. argsText is here rather than derived twice: it is the exact
+  // text the editor's one-line argument field carries for that entry.
+  global.__connectorPresets = CONNECTOR_PRESETS.map((preset) => ({ ...preset, argsText: joinConnectorArgs(preset.entry.args) }));
 
   // ui/server.mjs readConnectors answers { mcpServers: {} } for BOTH an empty file and a box it
   // could not `docker exec cat` into (the catch on a null read), so an empty map is ambiguous --
@@ -612,6 +724,7 @@
       const command = spec?.command ? String(spec.command) : null;
       const argCount = Array.isArray(spec?.args) ? spec.args.length : 0;
       const toolCount = Number.isFinite(Number(server.toolCount)) ? Number(server.toolCount) : rows.length;
+      const secretFields = [...new Set([...credentialEnvNames(spec), ...offeredFields])];
       return {
         id: `mcp:${name}`, name, icon: (name[0] ?? "?").toUpperCase(),
         group: "Connectors", serverId,
@@ -650,8 +763,13 @@
         // is the authority -- listConnectorSecretFields answers the same union of stored fields
         // and empty-valued env keys -- and this is that rule mirrored for the moment the card is
         // drawn before the host has answered.
-        secretFields: [...new Set([...credentialEnvNames(spec), ...offeredFields])],
+        secretFields,
         storedFields,
+        // What each of those fields IS, one line, from the same catalog the editor's presets come
+        // from. An operator who reaches this card without the credential in hand needs to be told
+        // where it is made and what it must be allowed to do, and this is the only place on the
+        // page that knows -- the host answers names, not what they mean.
+        secretHints: credentialHintsFor(secretFields),
         secretHint: `Stored by the host for ${name} in its own 0600 store and merged into the connector's environment when the box launches it. It never enters connectors.json, chat, model context or this page's markup.`,
         skills: [], skillsNote: null,
       };
@@ -2291,6 +2409,9 @@
           args: [...preset.entry.args],
           argsText: joinConnectorArgs(preset.entry.args),
           envNames: Object.keys(preset.entry.env),
+          // One line per credential field, so the editor can say what each value is and where it
+          // comes from before the operator has anything to paste.
+          hints: { ...(preset.hints ?? {}) },
           replaces: preset.replaces === true,
           note: preset.note,
         }));

@@ -1919,6 +1919,14 @@ dialog[open] {
   margin-top: 15px;
 }
 
+/* The connector presets are a catalog rather than the single TinyFish button they started as, so
+   this row wraps instead of running off the side of the panel, and it reads left to right like
+   the list it is rather than hanging off the right edge. */
+[data-connector-presets] {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
 .inline-form {
   display: grid;
   grid-template-columns: 1fr 1fr auto;

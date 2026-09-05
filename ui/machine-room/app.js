@@ -1120,7 +1120,10 @@
   // CP-10 item 1: one masked input per field the host names for this connector.
   function connectorSecretMarkup(plugin) {
     const stored = new Set(plugin.storedFields ?? []);
-    const fields = plugin.secretFields.map((field) => `<div class="field"><label for="connector-secret-${escapeHtml(plugin.id)}-${escapeHtml(field)}">${escapeHtml(field)}</label><input id="connector-secret-${escapeHtml(plugin.id)}-${escapeHtml(field)}" name="${escapeHtml(field)}" type="password" autocomplete="off" placeholder="${stored.has(field) ? "The host holds a value — type to replace it" : "Enter securely"}" /></div>`).join("");
+    // The connector catalog carries one line per credential field -- what the value is, where it
+    // is created, the least it needs -- and a field with no hint behind it simply gets none.
+    const hints = plugin.secretHints ?? {};
+    const fields = plugin.secretFields.map((field) => `<div class="field"><label for="connector-secret-${escapeHtml(plugin.id)}-${escapeHtml(field)}">${escapeHtml(field)}</label><input id="connector-secret-${escapeHtml(plugin.id)}-${escapeHtml(field)}" name="${escapeHtml(field)}" type="password" autocomplete="off" placeholder="${stored.has(field) ? "The host holds a value — type to replace it" : "Enter securely"}" />${hints[field] ? `<span class="field-hint" data-credential-hint="${escapeHtml(field)}">${escapeHtml(hints[field])}</span>` : ""}</div>`).join("");
     return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Credentials for ${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.secretHint || "The host stores these and hands them to the connector process.")}</small></div></div><form data-connector-secret-form="${escapeHtml(plugin.id)}">${fields}<div class="form-actions"><button class="primary-button" type="submit">Store on the host</button></div><span class="field-hint">Leave a field blank to leave what the host already holds for it untouched. Nothing you type here is written into this page.</span></form></div>`;
   }
   const connectorRemoveRow = (plugin) => (plugin.group === "Connectors" && plugin.removable && typeof adapter.removeConnector === "function"
@@ -1465,7 +1468,12 @@
     const presetRow = presets.length
       ? `<div class="form-actions" data-connector-presets>${presets.map((p) => `<button class="ghost-button" type="button" data-connector-preset="${escapeHtml(p.id)}">${escapeHtml(p.label)}</button>`).join("")}</div><span class="field-hint">A preset fills the fields below with that service's connector entry, so it can be read before it is written. Nothing is written until Add connector, and a credential is a separate step on the connector's own card.</span>`
       : "";
-    return `<details class="panel-card" data-connector-editor><summary>Add or remove a connector</summary><p class="field-hint">Writes connectors.json on the box and calls refreshMcp, so the host relaunches its stdio servers without a container restart. Give the environment variable NAMES the process needs; their values go in the key form on the connector's card, where the host stores them instead of this file.</p>${presetRow}<form data-add-connector><div class="field"><label for="connector-name">Name</label><input id="connector-name" name="name" required placeholder="e.g. localfiles" /></div><div class="field"><label for="connector-command">Command</label><input id="connector-command" name="command" required placeholder="e.g. npx" /></div><div class="field"><label for="connector-args">Arguments</label><input id="connector-args" name="args" placeholder="space separated; quote one that holds a space, e.g. --header &quot;Name:Value&quot;" /></div><div class="field"><label for="connector-env">Environment variable names</label><input id="connector-env" name="envNames" placeholder="comma separated, names only" /></div><div class="form-actions"><button class="primary-button" type="submit">Add connector</button></div></form><div class="plugin-list">${rows}</div></details>`;
+    // Filled by the preset click below with one line per credential the filled entry will want:
+    // what it is, where it is created, the least it needs. An operator reading the form before
+    // pressing Add connector can see what they have to go and get, rather than finding out at the
+    // key form on the card afterwards.
+    const presetHints = presets.length ? `<div class="plugin-list" data-connector-preset-hints></div>` : "";
+    return `<details class="panel-card" data-connector-editor><summary>Add or remove a connector</summary><p class="field-hint">Writes connectors.json on the box and calls refreshMcp, so the host relaunches its stdio servers without a container restart. Give the environment variable NAMES the process needs; their values go in the key form on the connector's card, where the host stores them instead of this file.</p>${presetRow}${presetHints}<form data-add-connector><div class="field"><label for="connector-name">Name</label><input id="connector-name" name="name" required placeholder="e.g. localfiles" /></div><div class="field"><label for="connector-command">Command</label><input id="connector-command" name="command" required placeholder="e.g. npx" /></div><div class="field"><label for="connector-args">Arguments</label><input id="connector-args" name="args" placeholder="space separated; quote one that holds a space, e.g. --header &quot;Name:Value&quot;" /></div><div class="field"><label for="connector-env">Environment variable names</label><input id="connector-env" name="envNames" placeholder="comma separated, names only" /></div><div class="form-actions"><button class="primary-button" type="submit">Add connector</button></div></form><div class="plugin-list">${rows}</div></details>`;
   }
 
   function agentProfilePanel(worker) {
@@ -2145,6 +2153,13 @@
       form.querySelector('[name="command"]').value = preset.command;
       form.querySelector('[name="args"]').value = preset.argsText;
       form.querySelector('[name="envNames"]').value = preset.envNames.join(", ");
+      // What each of those environment values is, before there is a card to paste it into.
+      const hintBox = document.querySelector("[data-connector-preset-hints]");
+      if (hintBox) hintBox.innerHTML = preset.envNames
+        .map((name) => (preset.hints?.[name]
+          ? `<div class="setting-row"><div><strong>${escapeHtml(name)}</strong><small data-credential-hint="${escapeHtml(name)}">${escapeHtml(preset.hints[name])}</small></div></div>`
+          : ""))
+        .join("");
       // Carried on the form rather than in a variable so that editing the name away from the
       // preset's own takes the replacement with it: only a save of THIS name may overwrite.
       if (preset.replaces) form.dataset.presetName = preset.name; else delete form.dataset.presetName;
