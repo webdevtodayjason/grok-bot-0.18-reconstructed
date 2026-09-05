@@ -211,3 +211,9 @@ Nothing. `connectors.json` was read first and restored byte for byte afterwards:
 before and after. `connector-env-secrets.json` is back to `{"servers":{}}` at 20 bytes. The box's
 connector roster reads `localfiles:connected:14`, which is what it read before any of this. The
 box was not restarted.
+
+## Measured install on the R750, 2026-09-05 11:45 CDT
+
+Recipe A worked end to end once the sign-in was approved in Titan's own Chrome: the bridge (`npx -y mcp-remote https://agent.tinyfish.ai/mcp 41257 --transport http-only` with `MCP_REMOTE_CONFIG_DIR=/home/box/sand-data/.mcp-auth`) wrote `mcp-remote-v1/<id>_tokens.json`, the Recipe A entry went into `connectors.json` as user box (0600), `refreshMcp` was called, and ten seconds later `listInstalledMcpServers` said connected and `listMcpServerTools` (by `serverId`, not by name) listed 19 tools. Two things the recipe did not say: the token directory was root-owned from the manual bridge and needed `chown -R box:box` before the connector, which runs as box, could read it; and a Coolify restart kills the manual bridge, so the sign-in has to be re-armed after every ship until the tokens exist. The tokens live on the data volume and survive restarts.
+
+Recipe B (the REST bridge with the API key as a connector secret) is what the operator prefers over OAuth and is still not written; filed as CONNECT-3.
