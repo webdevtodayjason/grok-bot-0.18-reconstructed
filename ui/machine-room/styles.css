@@ -1581,6 +1581,12 @@ dialog[open] {
   background: rgba(49, 182, 184, 0.1);
 }
 
+.status-pill.attention {
+  border-color: rgba(231, 162, 60, 0.3);
+  color: var(--amber-500);
+  background: rgba(231, 162, 60, 0.1);
+}
+
 .routine-list,
 .plugin-list,
 .settings-list,
@@ -1608,6 +1614,17 @@ dialog[open] {
   color: #a6e9b9;
   font-family: var(--font-mono);
   font-size: 10px;
+}
+
+/* A failed run in the success green read as a run that went fine. */
+.run-result.failed {
+  color: var(--amber-500);
+}
+
+.run-detail {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }
 
 .plugin-browser {

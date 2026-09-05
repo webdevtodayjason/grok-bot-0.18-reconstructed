@@ -16,6 +16,7 @@ import "./reconstructed-updater-guard.test.mjs";
 import "./research-archives.test.mjs";
 import "./router-settings.test.mjs";
 import "./ui-routine-triggers.test.mjs";
+import "./routine-run-failure.test.mjs";
 import "./machine-room-decisions.test.mjs";
 import "./machine-room-trigger-availability.test.mjs";
 import "./openai-compatible-images.test.mjs";
