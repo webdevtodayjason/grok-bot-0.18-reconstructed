@@ -109,6 +109,20 @@ test("AUTOMATION-3: the routine card shows the failed scheduled run, out of the 
   assert.equal(/Last run outcome not reported/.test(card), false, "the failure is not reported as an outcome nobody reported");
 });
 
+// Pausing a routine is what an operator does the moment it starts failing, so this is the common
+// pair, not a corner. The pill's class already put paused first; its text did not, and a disabled
+// routine read on its card as a live one that keeps failing, with the word "paused" nowhere on it.
+test("AUTOMATION-3: a paused routine whose last run failed still says it is paused", async () => {
+  const { routinesOf } = await loadRoutineShaping();
+  const [routine] = routinesOf([{ ...automation([failedScheduleRun]), isEnabled: false }], { kind: "worker", id: "w1" });
+  assert.equal(routine.status, "paused", "a disabled routine is a paused one");
+  const card = await renderCard(routine);
+  assert.match(card, /class="status-pill ">paused</, "the pill says what the routine is, not what its last run did");
+  assert.match(card, /class="run-result failed"/, "and the failure is still on the card, on the run line");
+  assert.match(card, /class="run-detail">Lost the connection repeatedly/, "with the reason the host stored");
+  assert.equal(/Last run outcome not reported/.test(card), false);
+});
+
 test("AUTOMATION-3: a routine whose last run succeeded is unchanged", async () => {
   const { routinesOf } = await loadRoutineShaping();
   const [routine] = routinesOf([automation([{ ...failedScheduleRun, status: "ok", detail: undefined }])], { kind: "worker", id: "w1" });

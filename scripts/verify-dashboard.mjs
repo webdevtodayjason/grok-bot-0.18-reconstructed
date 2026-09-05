@@ -90,6 +90,10 @@ const run = (args) => new Promise((resolve) => execFile("node", args, { maxBuffe
 // executable where the host will launch it from. Nothing else in this gate reaches past the relay.
 const BOX = process.env.GROK_BOT_BOX_CONTAINER ?? "grok-bot-local-vm";
 const box = (command) => new Promise((resolve) => execFile("docker", ["exec", BOX, "sh", "-lc", command], { maxBuffer: 8 << 20 }, (error, out, err) => resolve({ code: error?.code ?? 0, out: String(out) + String(err) })));
+// The same reach, but a program rather than a command line: the AUTOMATION-3 check has to write a
+// routine's run history in the shape the host writes it, and a JS source with quotes of its own
+// cannot be handed to `sh -lc` without an escaping story.
+const boxNode = (source) => new Promise((resolve) => execFile("docker", ["exec", BOX, "node", "-e", source], { maxBuffer: 8 << 20 }, (error, out, err) => resolve({ code: error?.code ?? 0, out: String(out) + String(err) })));
 // The host settings file the teach gate flips, written the way the host wrote it (0600, flat
 // string map). Same shape scripts/verify-teach.mjs uses, so the two gates cannot drift apart.
 const SAND_SETTINGS = "/home/box/sand-data/sand-host-settings.json";
@@ -1257,8 +1261,8 @@ try {
     // It builds exactly two event sources (createBackendRelaySources: Slack and GitHub), hands the
     // trigger hub those two and nothing else, and both are polled out of Cursor's backend relay,
     // which needs a login this box does not have. A routine saved on one took the form, showed the
-    // word "trigger" where its countdown goes, and never fired. Nothing here saves a routine or
-    // touches an existing one: the panel is opened, read, and closed.
+    // word "trigger" where its countdown goes, and never fired. The read-only checks come first;
+    // the AUTOMATION-3 check below is the only one that writes, and it removes what it planted.
     await page.click("#schedule-button"); await page.waitForTimeout(1500);
     const routinesTitle = await page.evaluate(() => document.getElementById("room-title")?.textContent ?? "");
     const routinesFor = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.name === routinesTitle)?.id ?? null;
@@ -1283,6 +1287,67 @@ try {
       `${kindOptions.length} kind(s), ${connectedListeners.size} connected listener(s), wrong: ${JSON.stringify(misoffered)}`);
     check(kindOptions.filter((o) => o.disabled).every((o) => /no listener on this box/.test(o.label)),
       "and a kind that cannot be chosen says so in its own label", JSON.stringify(kindOptions.filter((o) => o.disabled).map((o) => o.label)));
+
+    // -- AUTOMATION-3: a scheduled run that fails raises no tray error, on purpose (automation-
+    // runtime.ts runLocalScheduledAutomation reports a background failure through the run record
+    // rather than an alert about a run the operator did not start). So this card is the ONLY place
+    // the failure can be seen, and it was not on it: the host's word is "error", the card's is
+    // "failed", and the unmapped status fell through to "Last run outcome not reported" in the same
+    // green as a healthy run. Plant a routine here, write the failure onto its history the way
+    // finishRunWith writes one on a throw, and read the card the console draws from it. The
+    // schedule is January 1st so nothing fires while the gate is holding the routine.
+    if (routinesFor != null) {
+      const FAILED_NAME = "Gate probe failed schedule";
+      const FAILED_DETAIL = "verify-dashboard staged failure: the run's command exited non-zero";
+      let plantedId = null;
+      try {
+        const made = await gw("createAgentAutomation", { id: routinesFor, spec: { name: FAILED_NAME, prompt: "Planted by the dashboard gate; never fires.", isEnabled: true, trigger: { type: "cron", schedule: "0 4 1 1 *" } } }).catch((e) => ({ error: e.message }));
+        const planted = (Array.isArray(made) ? made : [made]).find((entry) => entry?.name === FAILED_NAME) ?? null;
+        plantedId = planted?.id ?? null;
+        const configPath = plantedId == null ? null : ((await gw("getAgentAutomations", { id: routinesFor }).catch(() => [])) ?? []).find((r) => r.id === plantedId)?.filePath ?? null;
+        check(typeof configPath === "string" && configPath.includes("/"), "a routine can be planted on this agent and the host says where its history lives", plantedId == null ? JSON.stringify(made).slice(0, 160) : String(configPath));
+        if (typeof configPath === "string" && configPath.includes("/")) {
+          const now = Date.now();
+          const staged = [{ id: "gate-staged-failure", trigger: "schedule", startedAt: now - 4100, finishedAt: now, status: "error", detail: FAILED_DETAIL }];
+          const runsPath = `${configPath.slice(0, configPath.lastIndexOf("/"))}/runs.json`;
+          const wrote = await boxNode(`require("fs").writeFileSync(${JSON.stringify(runsPath)}, ${JSON.stringify(JSON.stringify(staged, null, 2) + "\n")})`);
+          const readBack = await until(async () => {
+            const row = ((await gw("getAgentAutomations", { id: routinesFor }).catch(() => [])) ?? []).find((r) => r.id === plantedId);
+            return (row?.runs ?? []).find((entry) => entry.status === "error") ?? null;
+          }, 10_000, 1000);
+          check(wrote.code === 0 && readBack != null, "and a failed scheduled run staged on that history reads back through the gateway", `exit ${wrote.code}${wrote.out ? ` ${wrote.out.trim().slice(0, 120)}` : ""}; ${readBack == null ? "no error run came back" : `${readBack.status}/${readBack.trigger}`}`);
+          // The panel does not repaint on the adapter's own heartbeat, so each attempt closes it and
+          // opens it again: the reopen is what re-reads the roster record the heartbeat refreshed.
+          const shown = await until(async () => {
+            await page.keyboard.press("Escape").catch(() => {});
+            await page.waitForTimeout(300);
+            await page.click("#schedule-button", { timeout: 5000 }).catch(() => {});
+            await page.waitForTimeout(900);
+            return page.evaluate((name) => {
+              const card = Array.from(document.querySelectorAll(".routine-card")).find((el) => el.querySelector("h3")?.textContent?.trim() === name);
+              if (card == null) return null;
+              const pill = card.querySelector(".status-pill");
+              return {
+                pill: pill?.textContent?.trim() ?? "",
+                pillClass: pill?.className ?? "",
+                failedLine: card.querySelector(".run-result.failed")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+                text: card.textContent.replace(/\s+/g, " ").trim(),
+              };
+            }, FAILED_NAME);
+          }, 40_000, 1000);
+          check(shown != null, "the planted routine reaches the routines panel", shown == null ? "no card with that name after 40s" : "card found");
+          if (shown != null) {
+            check(/Last run failed/.test(shown.failedLine), "the card says the last run failed, out of the success green", shown.failedLine.slice(0, 160) || shown.text.slice(0, 160));
+            check(/on its schedule/.test(shown.failedLine), "and names the trigger, so a run nobody pressed can be told from a test run", shown.failedLine.slice(0, 160));
+            check(shown.failedLine.includes(FAILED_DETAIL), "and carries the reason the host stored on the run, because nowhere else reports it", shown.failedLine.slice(0, 200));
+            check(/attention/.test(shown.pillClass) && /last run failed/.test(shown.pill), "the pill stops claiming the routine is fine", `class "${shown.pillClass}", text "${shown.pill}"`);
+            check(!/Last run outcome not reported/.test(shown.text), "and the failure is not reported as an outcome nobody reported");
+          }
+        }
+      } finally {
+        if (plantedId != null) await gw("deleteAgentAutomation", { id: routinesFor, automationId: plantedId }).catch((e) => console.log(`  INFO  planted routine NOT deleted: ${e.message}`));
+      }
+    }
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);
 
     // -- The exchange viewer (docs/DASHBOARD-CONTRACT.md) still opens view-only.
