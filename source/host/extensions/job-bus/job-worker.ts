@@ -28,6 +28,16 @@ import {
 /** How often the loop looks at the transcript for a reply. Section 5.4 fixes this at five seconds. */
 export const JOB_POLL_INTERVAL_MS = 5_000;
 
+/**
+ * Section 10.9. How long a job waits for its worker agent to appear before it stops on
+ * `needs_human {no_worker}`. The roster comes from `listAgentsSync`, which serves a cache, and
+ * needs_human is never retried -- so a host that was still materialising its agents turned a
+ * transient miss into a permanent one that a person had to clear by hand. The waits are bounded and
+ * small: two retries, then the honest answer. The whole budget fits inside the box gate's 30 s wait
+ * for that same needs_human.
+ */
+export const NO_WORKER_RETRY_MS: readonly number[] = [5_000, 10_000];
+
 // ---- the result-block schema (section 10.4) ----------------------------------------------------
 
 export const RESULT_SUMMARY_MAX = 200;
@@ -88,6 +98,15 @@ export interface JobWorkerDeps {
   /** The connector ids currently attached to an agent's own conversation. */
   readonly listAgentConnectors: (agentId: string) => readonly string[];
   readonly disconnectAgentConnector: (agentId: string, connectorId: string) => unknown;
+  /**
+   * Section 10.9. A clone inherits the template agent's automation configs (agent-clone.ts copies
+   * `automations/<id>/automation.json`), so without these two the per-job clone would keep running
+   * the template's scheduled work -- outside the job, and after the job. Both are optional so a
+   * host that cannot list automations still runs the bus; a host that CAN and fails to clear them
+   * stops the job instead, the same way an unstrippable connector does.
+   */
+  readonly listAgentAutomations?: (agentId: string) => Promise<readonly string[]> | readonly string[];
+  readonly deleteAgentAutomation?: (agentId: string, automationId: string) => Promise<unknown> | unknown;
   /** Layer 2 of the attestation: GitHub, asked from this host with the box's own credential. */
   readonly github: () => GitHubClient;
   /**
@@ -155,6 +174,33 @@ export function buildChapterPrompt(job: JobRecord): string {
 
 export function buildCancelPrompt(job: JobRecord): string {
   return `Titan Job Bus job ${job.id} was cancelled. Stop work on it now. Do not commit and do not push.`;
+}
+
+/**
+ * Section 10.2's connector list as the HOST resolves it, lifted out of the gateway wiring so the
+ * production adapter is a thing a test can hold.
+ *
+ * `listAgentChannels` answers only the connections whose credential the connector-secret store still
+ * has, and a clone's secrets are not copied with it -- so through that method alone a clone always
+ * reads as having no connectors, the strip loop never ran in production, and its fail-closed branch
+ * was unreachable. Isolation held by accident. This reads the clone's own channel directory as well,
+ * so a connection the clone inherited is SEEN and stripped whether or not a credential came with it.
+ */
+export function agentConnectorIds(sessionStore: unknown, agentId: string): readonly string[] {
+  const store = sessionStore as {
+    listAgentChannels?: (id: string) => readonly { platform?: unknown }[];
+    openChannelStore?: (id: string) => { listPlatforms?: () => readonly string[] } | null;
+  } | null;
+  const found = new Set<string>();
+  for (const connection of store?.listAgentChannels?.(agentId) ?? []) {
+    const platform = String(connection?.platform ?? "");
+    if (platform.length > 0) found.add(platform);
+  }
+  for (const platform of store?.openChannelStore?.(agentId)?.listPlatforms?.() ?? []) {
+    const name = String(platform ?? "");
+    if (name.length > 0) found.add(name);
+  }
+  return [...found];
 }
 
 /** The per-job clone's name (section 10.2), so the roster says which job an agent is running. */
@@ -466,6 +512,13 @@ export function createJobWorker(deps: JobWorkerDeps) {
   let running = false;
   let stopped = false;
   let loop: Promise<void> | null = null;
+  // One pass at a time. `jobBusCreate` fires an unawaited tick so a new job starts moving without
+  // waiting a poll interval, and the loop is ticking on its own clock: without this the two passes
+  // read the same `queued` job and dispatched it twice, each writing its own nonce and its own
+  // clone. Section 10.9.
+  let ticking = false;
+  /** Per job, how many times its worker agent was missing and when it is worth looking again. */
+  const noWorkerSince = new Map<string, { tries: number; nextAtMs: number }>();
 
   /**
    * Section 10.2. The mapping holds an agent id, or a name that resolves to exactly one non-group,
@@ -529,9 +582,23 @@ export function createJobWorker(deps: JobWorkerDeps) {
   async function dispatchChapter(job: JobRecord): Promise<void> {
     const agent = resolveWorkerAgent(job);
     if (agent == null) {
+      // A roster that has not caught up yet is not the same thing as a worker that is not there.
+      const waited = noWorkerSince.get(job.id) ?? { tries: 0, nextAtMs: 0 };
+      if (waited.tries < NO_WORKER_RETRY_MS.length) {
+        const nowMs = deps.now();
+        if (waited.nextAtMs === 0 || nowMs >= waited.nextAtMs) {
+          noWorkerSince.set(job.id, {
+            tries: waited.tries + 1,
+            nextAtMs: nowMs + (NO_WORKER_RETRY_MS[waited.tries] ?? 0),
+          });
+        }
+        return; // still queued; the next tick looks again
+      }
+      noWorkerSince.delete(job.id);
       await needsHuman(job, null, "no_worker", `no agent named ${workerNameFor(job)} is on this box`);
       return;
     }
+    noWorkerSince.delete(job.id);
     // Mid-turn is not a failure: the job stays queued and the next tick tries again.
     if (agent.isRunning === true) return;
     const nonce = `${deps.now().toString(36)}-${job.id.slice(-6)}`;
@@ -557,14 +624,18 @@ export function createJobWorker(deps: JobWorkerDeps) {
     try { await deps.renameAgent?.(cloneId, cloneAgentName(agent.name, job.id)); }
     catch { /* the clone's name is how the roster reads, not how the job runs */ }
 
-    // Fail closed: a clone that still carries a connector the operator did not allow is a worker
-    // with more reach than the bus promised, so the job stops and says so rather than running.
-    if (!stripConnectors(cloneId)) {
+    // Fail closed: a clone that still carries a connector the operator did not allow, or an
+    // automation it inherited from the template, is a worker with more reach than the bus promised,
+    // so the job stops and says so rather than running.
+    const isolated = stripConnectors(cloneId)
+      ? (await clearAutomations(cloneId) ? null : "automations")
+      : "connectors";
+    if (isolated != null) {
       await disposeClone(worker);
       // The clone is gone, so the record must not point at it: the row says which agent it was
       // cloned from and why the job stopped, and there is no orphan id for the console to open.
       await store.setWorker(job.id, { ...worker, agentId: "" });
-      await needsHuman(started.job, null, "other", "cannot isolate the worker's connectors");
+      await needsHuman(started.job, null, "other", `cannot isolate the worker's ${isolated}`);
       return;
     }
     const baseline = readSendMessages(await deps.readEntries(cloneId)).length;
@@ -576,6 +647,24 @@ export function createJobWorker(deps: JobWorkerDeps) {
       // sit running for two hours waiting for a reply nobody was asked for.
       await store.transition(job.id, "failed", { note: "could not send the prompt", error: "could not send the prompt" });
       await disposeClone(dispatched);
+    }
+  }
+
+  /**
+   * Section 10.9. The clone inherits the template's automations, so it could fire the template's
+   * scheduled work in the middle of a job and go on firing it after the job ended. True when the
+   * clone holds none once this has run, or when this host cannot list them at all -- an older host
+   * is not a reason to refuse every job, and it is named in the contract's residuals.
+   */
+  async function clearAutomations(agentId: string): Promise<boolean> {
+    if (deps.listAgentAutomations == null || deps.deleteAgentAutomation == null) return true;
+    try {
+      for (const automationId of await deps.listAgentAutomations(agentId)) {
+        await deps.deleteAgentAutomation(agentId, automationId);
+      }
+      return (await deps.listAgentAutomations(agentId)).length === 0;
+    } catch {
+      return false;
     }
   }
 
@@ -681,6 +770,15 @@ export function createJobWorker(deps: JobWorkerDeps) {
       return;
     }
     const entries = await deps.readEntries(worker.agentId);
+    // Section 10.4's empty-transcript check, on the read that decides. It used to run only inside
+    // `attest`, which is reached only once a result block has already been found -- so a clone whose
+    // transcript read back empty was polled until the run timeout instead of failing now. The clone
+    // was sent a prompt, so an empty read is a transcript this host cannot read, not a quiet worker.
+    // A restart pass is left alone: it fails the job below in section 10.3's own words.
+    if (entries.length === 0 && options.onRestart !== true) {
+      await failJob(job, "transcript unreadable", "the worker's transcript read back empty");
+      return;
+    }
     const replies = readSendMessages(entries).slice(worker.baseline);
     for (const reply of replies) {
       const block = parseJobBlock(reply.text);
@@ -735,9 +833,19 @@ export function createJobWorker(deps: JobWorkerDeps) {
 
   /** One pass of the loop: move running jobs on, expire what ran out, then start what the queue allows. */
   async function tick(): Promise<void> {
-    if (!deps.readSettings().enabled) return;
+    if (ticking) return;
+    ticking = true;
+    try { await pass(); }
+    finally { ticking = false; }
+  }
+
+  async function pass(): Promise<void> {
+    // Turning the bus off must not strand the jobs that were already running: they still owe an
+    // answer, a timeout and a deleted clone. So a pass always finishes what is in flight, and it is
+    // only DISPATCH that the switch stops. Section 10.9.
     for (const job of [...await store.running()]) await advance(job);
     await expire();
+    if (!deps.readSettings().enabled) return;
     const busyAgents = new Set(
       (await store.running()).flatMap((job) => (job.worker == null ? [] : [job.worker.sourceAgentId])),
     );

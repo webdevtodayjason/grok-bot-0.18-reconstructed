@@ -90,6 +90,11 @@
   // generating a bearer IS turning it on -- nobody pastes a token at a bus they want shut. A host
   // too old to carry jobBusSetSettings leaves the answer alone rather than failing a token write
   // that did land.
+  //
+  // §10.9: this is no longer the only place it happens. The relay arms the bus on the same two
+  // routes and on its own start when TITAN_JOB_TOKEN is in the environment, because arming that
+  // lived only here meant the env deploy path in §8 armed nothing at all. Doing it twice is one
+  // idempotent write.
   async function armJobBusOnToken(answer) {
     if (answer?.accepted === true) {
       try { await tryCall("jobBusSetSettings", { enabled: true }); } catch { /* the token still landed */ }

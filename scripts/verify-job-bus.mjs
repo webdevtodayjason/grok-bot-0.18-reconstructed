@@ -310,16 +310,27 @@ try {
 
   step("what the job bearer does NOT open (§10.8)");
   // A key that opened the console would make every other rule on this page decorative.
+  // 404 is NOT accepted here. All four of these routes exist on the relay (server.mjs answers
+  // /api/*, /, /vnc/<n>/ and /box/surface), so a 404 does not mean "refused", it means the route
+  // moved -- and a leg that reads a moved route as a pass would keep saying the bearer is contained
+  // long after it stopped being asked. A refusal is 401, 403, or a redirect to the login.
   for (const route of ["/api/listAgents", "/", "/vnc/1/", "/box/surface"]) {
     const answer = await offBus(route);
-    const refused = answer.status === 401 || answer.status === 403 || answer.status === 404
+    const refused = answer.status === 401 || answer.status === 403
       || (answer.status >= 300 && answer.status < 400 && /\/login/.test(answer.location));
-    check(refused, `the job bearer is refused on ${route}`, `HTTP ${answer.status}${answer.location ? ` -> ${answer.location}` : ""}`);
+    check(refused, `the job bearer is refused on ${route}`,
+      answer.status === 404
+        ? `HTTP 404: this route is not where the gate thinks it is, so this leg proved nothing`
+        : `HTTP ${answer.status}${answer.location ? ` -> ${answer.location}` : ""}`);
   }
 
   step("the settings this run borrows (§10.7)");
   settingsBefore = await gw("jobBusGetSettings").catch(() => undefined);
   check(settingsBefore != null, "the host answers jobBusGetSettings", JSON.stringify(settingsBefore ?? null));
+  // 10.9: the read carries `integrity` beside the settings, and the write refuses a key it does not
+  // own -- so what goes back at the end is the settings without it.
+  if (settingsBefore != null) delete settingsBefore.integrity;
+  check(settingsBefore?.integrity === undefined, "and it is written back without the read-only integrity block");
   // Off first, because "off until the operator turns it on" is the one default that decides
   // whether shipping this code opens a door by itself.
   await gw("jobBusSetSettings", { enabled: false });
@@ -421,7 +432,10 @@ try {
   const chapterId = chapter.body?.id;
   let blocked = null;
   if (chapterId) {
-    for (let i = 0; i < 30; i += 1) {
+    // 10.9 gives a missing worker two bounded retries (5 s then 10 s) before it becomes needs_human,
+    // because a roster that has not caught up is not a worker that is not there. That budget, plus
+    // the five-second tick it lands on, fits inside this wait.
+    for (let i = 0; i < 45; i += 1) {
       blocked = await v1(`/jobs/${chapterId}`);
       if (blocked.body?.status !== "queued") break;
       await sleep(1000);
@@ -527,9 +541,10 @@ try {
   check(parsed.every((row) => row?.policy_version === "v1"), "and the policy version the contract fixes");
 
   // The chain: each row's `prev` is the sha256 of the bytes of the row before it, "" for the very
-  // first row in the file. The contract does not say whether those bytes include the newline that
-  // separates the rows, so both readings are tried and the one that verifies is named. Either way
-  // a row that was rewritten after the fact breaks it, which is what the chain is for.
+  // first row in the file. ONE convention, the store's own (`auditRowBytes` = the line without its
+  // newline, job-store.ts). Accepting either reading is how a gate stops being a check: two hashing
+  // conventions means a file the host could never have written still passes, so the wrong-newline
+  // reading is only computed to say which mistake was made.
   const chainHolds = (withNewline) => {
     for (let i = 0; i < after.length; i += 1) {
       let row;
@@ -541,8 +556,10 @@ try {
   };
   const bare = after.length > 0 && chainHolds(false);
   const newline = after.length > 0 && chainHolds(true);
-  check(bare || newline, `the audit chain verifies over all ${after.length} row(s)`,
-    bare ? "hashing each row's bytes" : newline ? "hashing each row's bytes with its newline" : "a prev does not match the row before it");
+  check(bare, `the audit chain verifies over all ${after.length} row(s)`,
+    bare ? "hashing each row's bytes, which is the store's convention"
+      : newline ? "the rows chain over their bytes WITH the newline, which is not what the store writes"
+        : "a prev does not match the row before it");
 } catch (error) {
   check(false, "the gate ran to the end", String(error?.message ?? error));
 } finally {

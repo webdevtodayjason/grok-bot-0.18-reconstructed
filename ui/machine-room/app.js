@@ -2115,6 +2115,7 @@
     timeoutMin: 120,
     queueTimeoutMin: 60,
     maxOpen: 20,
+    allowUnattested: false,
   };
   // The full id is on the row's title; the table shows enough of it to match a CoS log line.
   const shortJobId = (id) => (String(id).length > 15 ? `${String(id).slice(0, 15)}…` : String(id));
@@ -2170,6 +2171,7 @@
     if (typeof adapter.getJobBusStatus !== "function") return "";
     return `<section class="settings-section" data-job-bus><h3>Job bus</h3><p>An allowlisted job API for the Chief of Staff. It publishes no shell, no browser and no desktop: a caller posts a job of an allowed type and reads back a result the host checked against the receipts of the tools its worker actually ran, and against GitHub itself. The contract is docs/JOB-BUS.md.</p>`
       + `<div class="setting-row"><div><strong>Enabled</strong><small data-job-bus-enabled-note>Reading from the host…</small></div><button class="switch" type="button" data-job-bus-enabled aria-pressed="false"></button></div>`
+      + `<div class="setting-row"><div><strong>Store integrity</strong><small data-job-bus-integrity>Reading from the host…</small></div></div>`
       + `<div class="setting-row"><div><strong>Token</strong><small data-job-bus-state>Reading from the relay…</small></div><span class="status-pill" data-job-bus-pill>…</span></div>`
       + `<div class="setting-row"><div><strong>Base URL</strong><small data-job-bus-base>…</small></div></div>`
       + `<div class="setting-row"><div><strong>Set the bearer</strong><small>Generate one here, or paste the value you set on the deployment. It is compared in constant time and never written to a log, an audit row or a job body. Generating or setting one also turns the bus on.</small></div><div class="field"><input id="job-bus-token" type="password" autocomplete="off" placeholder="At least 32 characters" data-job-bus-input /></div></div>`
@@ -2179,6 +2181,7 @@
       + `<div class="job-bus-block"><strong>Workers</strong><small class="field-hint">Which agent runs each job type. The bus never sends the prompt into that agent's own conversation: it clones the agent per job, strips every connector but the ones below, and deletes the clone when the job ends. A type pointing at no agent on this box stops its jobs on needs_human rather than running them somewhere else.</small><div data-job-bus-workers></div><div class="form-actions"><button class="ghost-button" type="button" data-job-bus-worker-add>Add a type</button></div></div>`
       + `<div class="job-bus-block"><strong>Repositories</strong><small class="field-hint">The only repositories a job may name. A payload pointing anywhere else is refused with 400 before any worker sees it.</small><div data-job-bus-repos></div><div class="form-actions"><button class="ghost-button" type="button" data-job-bus-repo-add>Add a repository</button></div></div>`
       + `<div class="job-bus-block"><strong>Connectors the clone keeps</strong><small class="field-hint">Everything else is stripped from the per-job clone before the prompt is sent. If they cannot be stripped the job stops on needs_human rather than running with them.</small><div data-job-bus-connectors></div><div class="form-actions"><button class="ghost-button" type="button" data-job-bus-connector-add>Add a connector</button></div></div>`
+      + `<div class="setting-row"><div><strong>Unattested jobs</strong><small data-job-bus-allow-unattested-note>Off. A job body asking for <code>require_attestation:false</code> is refused with 400 “attestation is required”, so nothing reaches done on the model's word alone.</small></div><button class="switch" type="button" data-job-bus-allow-unattested aria-pressed="false"></button></div>`
       + `<div class="job-bus-block"><strong>Limits</strong><small class="field-hint">Minutes for the two timeouts, a count for the open jobs. Queued past the first, a job fails as queued too long; running past the second it fails as timed out; a create beyond the third answers 429 queue full.</small><div class="job-bus-limits"><label>Queue timeout (min)<input type="number" min="1" step="1" data-job-bus-queue-timeout /></label><label>Run timeout (min)<input type="number" min="1" step="1" data-job-bus-timeout /></label><label>Max open jobs<input type="number" min="1" step="1" data-job-bus-max-open /></label></div></div>`
       + `<div class="form-actions"><button class="primary-button" type="button" data-job-bus-settings-save>Save job bus settings</button></div>`
       + `<div class="job-bus-block"><strong>Jobs</strong><div class="job-bus-table-wrap"><table class="job-bus-table"><thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Worker</th><th>Created</th><th>Result</th></tr></thead><tbody data-job-bus-rows><tr><td colspan="6">Reading from the host…</td></tr></tbody></table></div></div>`
@@ -2223,6 +2226,36 @@
 
   // Only the switch and its line, so arming the bus does not throw away an edit somebody is part
   // way through in the lists below it.
+  // §10.9. The one switch a job body must never be able to flip for itself, so it is drawn beside
+  // the arm switch and saved with the rest of the card rather than on the click.
+  function fillJobBusUnattested(root, settings) {
+    const note = root.querySelector("[data-job-bus-allow-unattested-note]");
+    const toggle = root.querySelector("[data-job-bus-allow-unattested]");
+    if (!note || !toggle) return;
+    const on = settings?.allowUnattested === true;
+    toggle.setAttribute("aria-pressed", String(on));
+    toggle.disabled = settings == null;
+    note.innerHTML = on
+      ? `On. A job may send <code>policy.require_attestation:false</code>, and one that does is marked done without either attestation layer. Leave this off unless you are debugging a worker.`
+      : `Off. A job body asking for <code>require_attestation:false</code> is refused with 400 “attestation is required”, so nothing reaches done on the model's word alone.`;
+  }
+
+  // §10.9. Whether the host trusted jobs.json, its audit chain and settings.json when it started.
+  // A quarantined file is why every create is answering 503 with a bearer that is perfectly good,
+  // so it is said here rather than left for whoever reads the audit log.
+  function fillJobBusIntegrity(root, settings) {
+    const line = root.querySelector("[data-job-bus-integrity]");
+    if (!line) return;
+    const integrity = settings?.integrity;
+    if (integrity == null) {
+      line.textContent = "This host does not report it. A bundle older than §10.9 does not quarantine its own files.";
+      return;
+    }
+    line.textContent = integrity.ok === true
+      ? "The host verified its own job store at start: jobs.json, the audit chain and settings.json."
+      : `A file did not verify at start and was moved aside, so the bus stays off until you look: ${integrity.detail || "see the audit log"}.`;
+  }
+
   function fillJobBusEnabled(root, settings) {
     const note = root.querySelector("[data-job-bus-enabled-note]");
     const toggle = root.querySelector("[data-job-bus-enabled]");
@@ -2245,6 +2278,8 @@
     if (typeof adapter.getJobBusSettings !== "function") { fillJobBusEnabled(root, null); return; }
     Promise.resolve(adapter.getJobBusSettings()).then((answer) => {
       fillJobBusEnabled(root, answer);
+      fillJobBusUnattested(root, answer);
+      fillJobBusIntegrity(root, answer);
       // null is a host older than §10.7. The editors below are left empty rather than filled with
       // the defaults, because a filled form is a claim about what the box holds.
       if (answer == null) return;
@@ -2290,6 +2325,7 @@
       workers,
       repos: list("repo"),
       allowedConnectors: list("connector"),
+      allowUnattested: root.querySelector("[data-job-bus-allow-unattested]")?.getAttribute("aria-pressed") === "true",
       queueTimeoutMin: number("[data-job-bus-queue-timeout]", JOB_BUS_DEFAULTS.queueTimeoutMin),
       timeoutMin: number("[data-job-bus-timeout]", JOB_BUS_DEFAULTS.timeoutMin),
       maxOpen: number("[data-job-bus-max-open]", JOB_BUS_DEFAULTS.maxOpen),
@@ -3326,6 +3362,13 @@
           // Only the switch, so a toggle does not wipe an edit in the lists under it.
           Promise.resolve(adapter.getJobBusSettings()).then((settings) => fillJobBusEnabled(root, settings)).catch(() => {});
         });
+    } else if (target.hasAttribute("data-job-bus-allow-unattested")) {
+      // Not written on the click: this one goes with Save, so an accidental tap on a phone does not
+      // silently take the checking off a bus that is already running work.
+      const root = elements.panelContent.querySelector("[data-job-bus]");
+      const on = target.getAttribute("aria-pressed") !== "true";
+      target.setAttribute("aria-pressed", String(on));
+      fillJobBusUnattested(root, { allowUnattested: on });
     } else if (target.hasAttribute("data-job-bus-worker-add")) {
       const rows = elements.panelContent.querySelector("[data-job-bus-workers]");
       rows.insertAdjacentHTML("beforeend", jobBusWorkerRow("", ""));

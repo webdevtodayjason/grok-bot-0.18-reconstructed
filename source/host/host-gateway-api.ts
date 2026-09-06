@@ -40,7 +40,7 @@ import {
 } from "./extensions/job-bus/job-store.js";
 import { createJobSettingsStore } from "./extensions/job-bus/job-settings.js";
 import { createGitHubClient } from "./extensions/job-bus/github-client.js";
-import { createJobWorker } from "./extensions/job-bus/job-worker.js";
+import { agentConnectorIds, createJobWorker } from "./extensions/job-bus/job-worker.js";
 import {
   parseCoordinatorAgentThreadRequest,
   parseCoordinatorTranscriptWindowRequest,
@@ -153,6 +153,14 @@ export function createHostGatewayApi(
       void jobStore.appendExternalAudit({ event: "settings_diverged", fields, ok: false })
         .catch(() => undefined);
     },
+    // Section 10.9: a settings.json that is there but cannot be believed is moved aside at start and
+    // the host runs on the defaults, which is the bus OFF. The row says so in the same hash chain.
+    onQuarantine: (quarantine) => {
+      void jobStore.appendExternalAudit({
+        event: "store_quarantined", client: quarantine.movedTo, ok: false,
+        fields: [quarantine.detail],
+      }).catch(() => undefined);
+    },
   });
   const jobStore = createJobStore({
     rootDir: getSandRootDir(),
@@ -198,14 +206,25 @@ export function createHostGatewayApi(
       });
     },
     deleteAgent: (agentId) => removeAgentCompletely(agentId),
-    // A per-agent connector is a channel connection with a stored credential; stripping one is the
-    // same disconnect the console's own Channels card does.
-    listAgentConnectors: (agentId) =>
-      ((manager as any).sessionStore?.listAgentChannels?.(agentId) ?? [])
-        .map((connection: any) => String(connection?.platform ?? ""))
-        .filter((platform: string) => platform.length > 0),
+    // A per-agent connector is a channel connection; stripping one is the same disconnect the
+    // console's own Channels card does. `agentConnectorIds` reads the clone's channel directory as
+    // well as the credentialed list, because a clone carries no connector SECRETS -- so listing
+    // through `listAgentChannels` alone would have reported "no connectors" for every clone and the
+    // strip would never have run in production. Section 10.9. A clone today carries no channel
+    // directory either, so this is usually still an empty list -- what changes is that the check
+    // now looks at what the clone HAS rather than at what it has a credential for, so a clone that
+    // ever does inherit one is stripped and the fail-closed branch is reachable.
+    listAgentConnectors: (agentId) => agentConnectorIds((manager as any).sessionStore, agentId),
     disconnectAgentConnector: (agentId, connectorId) =>
       (manager as any).sessionStore?.disconnectChannel?.(agentId, connectorId),
+    // Section 10.9: the clone inherits the template's automation configs, so they go before the
+    // prompt does. Same failure mode as a connector that will not strip: the job stops.
+    listAgentAutomations: async (agentId) =>
+      ((await method(manager, "getAgentAutomations")(agentId)) ?? [])
+        .map((automation: any) => String(automation?.id ?? ""))
+        .filter((id: string) => id.length > 0),
+    deleteAgentAutomation: (agentId, automationId) =>
+      method(manager, "deleteAgentAutomation")(agentId, automationId),
     // Section 10.4: the box's own GitHub credential, read host-side, never handed to the worker.
     github: () => createGitHubClient({ token: readShellEnvSecrets(getSandRootDir()).GITHUB_TOKEN ?? null }),
     markUnread: (agentId) => { method(manager, "setAgentUnread")(agentId, true, now()); },
@@ -220,7 +239,26 @@ export function createHostGatewayApi(
     },
   });
   jobWorker.start();
-  const requireJobBusEnabled = (): void => {
+  /**
+   * Section 10.9. Two ways the bus is off: the operator has not turned it on, and the host did not
+   * trust a file it read at start. The second answers with the same 503 -- the caller's next move is
+   * the same either way -- and names what was quarantined so the console and the audit agree.
+   */
+  const jobBusIntegrity = async (): Promise<{ ok: boolean; detail: string; quarantined: readonly unknown[] }> => {
+    const store = await jobStore.integrity();
+    const settings = jobSettings.quarantined();
+    const quarantined = [...store.quarantined, ...(settings == null ? [] : [settings])];
+    return {
+      ok: quarantined.length === 0,
+      detail: quarantined.map((entry: any) => String(entry?.detail ?? "")).filter((line: string) => line.length > 0).join("; "),
+      quarantined,
+    };
+  };
+  const requireJobBusEnabled = async (): Promise<void> => {
+    const integrity = await jobBusIntegrity();
+    if (!integrity.ok) {
+      throw new GatewayCommandError(503, { error: "job bus is disabled", detail: integrity.detail });
+    }
     if (!jobSettings.read().enabled) {
       throw new GatewayCommandError(503, { error: "job bus is disabled" });
     }
@@ -996,19 +1034,23 @@ export function createHostGatewayApi(
           return [type, typeof agent?.name === "string" && agent.name.length > 0 ? agent.name : worker];
         }),
       );
+      const integrity = await jobBusIntegrity();
       return {
         ok: true,
         queue_depth: await jobStore.queueDepth(),
         version: JOB_BUS_API_VERSION,
         host_version: hostPackageVersion(),
         workers,
+        // Additive to section 10.6's shape: CoS learns from health, not from a refused create, that
+        // this box quarantined a file and is therefore answering 503 to everything.
+        integrity: { ok: integrity.ok, detail: integrity.detail },
       };
     },
     // `created` says 201 or 200 to the relay; the job itself is the body either way. Every field is
     // forwarded verbatim, unknown ones included, because section 10.1's refusal of an unknown field
     // is the store's to make: dropping it here would answer 201 to a body the bus never read.
     jobBusCreate: async (args: any) => {
-      requireJobBusEnabled();
+      await requireJobBusEnabled();
       const created = await jobStore.create({ ...(args ?? {}) });
       // A new job should not wait up to a poll interval to start moving.
       if (created.created) void jobWorker.tick().catch(() => {});
@@ -1064,7 +1106,9 @@ export function createHostGatewayApi(
     },
     // Section 10.7. The bus reads its own settings file, not sand-host-settings.json, and the file
     // is re-read on every use so an edit lands without a restart.
-    jobBusGetSettings: async () => jobSettings.read(),
+    // The card draws the settings and, beside them, whether the host trusted the files it read.
+    // `jobBusSetSettings` refuses unknown keys, so this extra field is read-only by construction.
+    jobBusGetSettings: async () => ({ ...jobSettings.read(), integrity: await jobBusIntegrity() }),
     jobBusSetSettings: async (args: any) => await jobSettings.write(args ?? {}),
 
     // ---------------------------------------------------------------- CONNECT-5, shell tools

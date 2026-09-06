@@ -561,6 +561,27 @@ async function handleJobBus(req, res, url) {
     JSON.stringify({ id, type, status, created_at }));
 }
 
+// ---- arming the bus ---------------------------------------------------------------------------
+// docs/JOB-BUS.md 10.7 says the bus is off until the operator turns it on, and that setting a
+// bearer IS turning it on. That was implemented only in the browser -- the console's own token
+// buttons -- so the env-var deploy path in section 8 armed nothing: an operator who set
+// TITAN_JOB_TOKEN on Coolify and never opened Settings got `503 job bus is disabled` on every
+// create, with a token that worked. So the relay does it too, from both ends: once at start when
+// the token comes from the environment, and on the console routes that write one.
+//
+// It is one jobBusSetSettings {enabled:true} call and it is logged, because "the deploy turned the
+// bus on" is exactly the kind of thing an operator must be able to read back out of a container
+// log. It runs on every relay start with the env token set, which is the honest reading of that
+// variable: the deployment says the bus is on. An operator who wants it off clears the variable.
+async function armJobBus(why) {
+  const answer = await jobBusCall("jobBusSetSettings", { enabled: true }).catch((error) => ({
+    status: 0, text: String(error?.message ?? error), type: "",
+  }));
+  if (answer.status === 200) console.log(`bus  armed the job bus (${why})`);
+  else console.log(`bus  could not arm the job bus (${why}): HTTP ${answer.status} ${answer.text.slice(0, 200)}`);
+  return answer.status === 200;
+}
+
 // ---- the job bus token, from the console --------------------------------------------------
 // Written where resolveJobToken reads it, at 0600, because it is a bearer for the whole bus.
 // Returns null on success and the reason on failure, because the two ways this fails -- no
@@ -609,6 +630,9 @@ async function handleJobBusConsole(req, res, url) {
     const token = newJobToken();
     const failed = await writeJobToken(token);
     if (failed != null) return fail(res, 503, failed);
+    // Nobody generates a bearer for a bus they want shut. The browser asks for this as well; doing
+    // it here means the bus is armed even when the console is not the caller.
+    await armJobBus("a token was generated in the console");
     // Once. It is not readable back through any route on this server.
     return sendJson(200, { token, ...state() });
   }
@@ -629,6 +653,7 @@ async function handleJobBusConsole(req, res, url) {
     if (typeof token !== "string" || token.trim().length < 32) return fail(res, 400, "the token must be at least 32 characters");
     const failed = await writeJobToken(token.trim());
     if (failed != null) return fail(res, 503, failed);
+    await armJobBus("a token was set in the console");
     return sendJson(200, state());
   }
   return fail(res, 404, `not found: ${url.pathname}`);
@@ -1146,6 +1171,12 @@ if (AUTH == null && !isLoopbackHost(BIND)) {
   process.exit(1);
 }
 await resolveBoxContainer();
+// The env deploy path (docs/JOB-BUS.md 8): TITAN_JOB_TOKEN set on the deployment means the bus is
+// meant to be answering, so the relay arms it on its own start. Not awaited into the listen: a
+// gateway that is not up yet must not stop the console from coming up, and the call logs either way.
+if (String(process.env.TITAN_JOB_TOKEN ?? "").trim().length > 0) {
+  void armJobBus("TITAN_JOB_TOKEN is set in the environment");
+}
 server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${GATEWAY}${TOKEN.length > 0 ? " (bearer)" : " (no auth)"}`);

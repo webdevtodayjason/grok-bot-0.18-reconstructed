@@ -64,6 +64,10 @@
         timeoutMin: 120,
         queueTimeoutMin: 60,
         maxOpen: 20,
+        // 10.9: the operator switch behind policy.require_attestation, and what the host says about
+        // the files it read at start. Both are drawn by the card, so the offline gate sees them.
+        allowUnattested: false,
+        integrity: { ok: true, detail: "", quarantined: [] },
       },
       jobs: [
         {

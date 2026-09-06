@@ -37,6 +37,8 @@ const {
   checkClaims,
   cloneAgentName,
   createJobWorker,
+  NO_WORKER_RETRY_MS,
+  agentConnectorIds,
   parseJobBlock,
   receiptKind,
   stripControlCharacters,
@@ -91,6 +93,9 @@ async function withWorker(run, overrides = {}) {
     deleted: [],
     renames: [],
     connectors: { a1: ["github", "slack"] },
+    // agent-clone.ts copies `automations/<id>/automation.json` into the clone, so a per-job clone
+    // really does start with the template's scheduled work attached. Section 10.9.
+    automations: { a1: ["auto-daily-digest"] },
     // A disconnect that works. A test that wants the fail-closed path replaces this with a no-op.
     disconnect: (agentId, connectorId) => {
       world.connectors[agentId] = (world.connectors[agentId] ?? []).filter((entry) => entry !== connectorId);
@@ -159,6 +164,7 @@ async function withWorker(run, overrides = {}) {
       world.clones.push({ id, sourceAgentId });
       world.agents = [...world.agents, { id, name: "Scribe copy", isGroup: false, isRunning: false }];
       world.connectors[id] = [...(world.connectors[sourceAgentId] ?? [])];
+      world.automations[id] = [...(world.automations[sourceAgentId] ?? [])];
       return id;
     },
     renameAgent: (agentId, name) => { world.renames.push({ agentId, name }); },
@@ -168,6 +174,10 @@ async function withWorker(run, overrides = {}) {
     },
     listAgentConnectors: (agentId) => world.connectors[agentId] ?? [],
     disconnectAgentConnector: (agentId, connectorId) => world.disconnect(agentId, connectorId),
+    listAgentAutomations: (agentId) => world.automations[agentId] ?? [],
+    deleteAgentAutomation: (agentId, automationId) => {
+      world.automations[agentId] = (world.automations[agentId] ?? []).filter((entry) => entry !== automationId);
+    },
     github: () => fakeGitHub,
     markUnread: (agentId) => world.unread.push(agentId),
     raiseNeedsYou: (agentId, reason) => world.needsYou.push({ agentId, reason }),
@@ -182,6 +192,17 @@ async function queueChapter(store, key = "c05-ch2", extra = {}) {
     type: "nextgen.chapter", idempotency_key: key, payload: chapterPayload, submitter: "cos", ...extra,
   });
   return job;
+}
+
+/**
+ * Section 10.9: a missing worker agent is retried twice before it becomes needs_human, so a
+ * transient roster does not strand a job on a person. This spends that whole budget.
+ */
+async function spendNoWorkerBudget(worker, world) {
+  for (let attempt = 0; attempt < NO_WORKER_RETRY_MS.length + 1; attempt += 1) {
+    await worker.tick();
+    world.clock += 60_000;
+  }
 }
 
 /** Dispatch a chapter job and hand back the job and the clone it landed on. */
@@ -322,7 +343,11 @@ test("a chapter job runs in a per-job clone, named for the job, stripped to the 
     assert.equal(world.prompts[0].prompt, buildChapterPrompt(running));
     assert.deepEqual(world.renames, [{ agentId: "clone1", name: cloneAgentName("Scribe", job.id) }]);
     assert.match(cloneAgentName("Scribe", job.id), /^Scribe · job .{6}$/);
-    // github is allowlisted, slack is not.
+    // github is allowlisted, slack is not. This half runs against a fake whose clone INHERITS the
+    // template's connectors, which is the pessimistic case rather than the production one: a real
+    // clone carries no connector secrets, so what the host lists for it is the subject of its own
+    // test above ("the connector list the host hands the bus ..."). Both are needed -- this one
+    // proves the strip and the allowlist, that one proves the adapter is looking at the right thing.
     assert.deepEqual(world.connectors.clone1, ["github"]);
     assert.deepEqual(world.connectors.a1, ["github", "slack"]);
   });
@@ -379,7 +404,7 @@ test("a worker name that resolves to nothing, or to two agents, answers needs_hu
   await withWorker(async ({ store, worker, world }) => {
     world.settings = { ...world.settings, workers: { "nextgen.chapter": "Nobody" } };
     const job = await queueChapter(store);
-    await worker.tick();
+    await spendNoWorkerBudget(worker, world);
     const blocked = await store.get(job.id);
     assert.equal(blocked.status, "needs_human");
     assert.equal(blocked.needs_human.reason, "no_worker");
@@ -388,14 +413,14 @@ test("a worker name that resolves to nothing, or to two agents, answers needs_hu
   await withWorker(async ({ store, worker, world }) => {
     world.agents = [{ id: "a1", name: "Scribe" }, { id: "a2", name: "Scribe" }];
     const job = await queueChapter(store);
-    await worker.tick();
+    await spendNoWorkerBudget(worker, world);
     assert.equal((await store.get(job.id)).needs_human.reason, "no_worker");
   });
   // A group with the right name is not a worker either.
   await withWorker(async ({ store, worker, world }) => {
     world.agents = [{ id: "g1", name: "Scribe", isGroup: true }];
     const job = await queueChapter(store);
-    await worker.tick();
+    await spendNoWorkerBudget(worker, world);
     assert.equal((await store.get(job.id)).needs_human.reason, "no_worker");
   });
 });
@@ -731,6 +756,9 @@ test("an HTTP failure is a verification claim, never a silent pass", async () =>
 
 test("require_attestation false lets an unsupported claim through, still recorded", async () => {
   await withWorker(async ({ store, worker, world }) => {
+    // Section 10.9: the escape hatch is the operator's now, so the box has to have opened it before
+    // a body may ask for it at all.
+    world.settings = { ...world.settings, allowUnattested: true };
     const { job } = await dispatched(store, worker, world, "k1", { policy: { require_attestation: false } });
     world.github.commits = new Set();
     world.entries = [sendMessage(goodResult(), { verdict: "unsupported", attemptId: "attempt-1", missing: [] })];
@@ -782,6 +810,9 @@ test("a job past timeoutMin with no reply fails as timed out", async () => {
   await withWorker(async ({ store, worker, world }) => {
     world.settings = { ...world.settings, timeoutMin: 10 };
     const { job } = await dispatched(store, worker, world);
+    // A clone that was sent a prompt has a transcript; what it does not have is a reply. An EMPTY
+    // read is a different fault and section 10.4 fails it at once (below).
+    world.entries = [sendMessage("still working on it")];
     assert.equal((await store.get(job.id)).status, "running");
     // Nine minutes on: still running, the reply may yet arrive.
     world.clock += 9 * 60_000;
@@ -1011,4 +1042,138 @@ test.after(async () => {
   await workerModule.dispose();
   await settingsModule.dispose();
   await githubModule.dispose();
+});
+
+// ---- section 10.9 --------------------------------------------------------------------------
+
+test("the connector list the host hands the bus sees a connection the clone's credential did not follow", () => {
+  // The production adapter used to be `listAgentChannels().map(platform)`, and that method answers
+  // only connections whose credential the connector-secret store still has. A clone's secrets are
+  // not copied with it, so through that method every clone reads as having no connectors at all:
+  // the strip loop never ran in production and its fail-closed branch was unreachable. Isolation
+  // held by accident. The adapter now reads the clone's own channel directory as well.
+  const sessionStore = {
+    listAgentChannels: (id) => (id === "a1" ? [{ platform: "github" }] : []),
+    openChannelStore: (id) => ({ listPlatforms: () => (id === "clone1" ? ["slack", "github"] : ["github"]) }),
+  };
+  assert.deepEqual(sessionStore.listAgentChannels("clone1"), [], "the credentialed list is empty for a clone");
+  assert.deepEqual([...agentConnectorIds(sessionStore, "clone1")].sort(), ["github", "slack"]);
+  // A host too old to expose the channel directory still answers what it can, and a missing store
+  // is an empty list rather than a throw -- which the worker would have read as "cannot isolate".
+  assert.deepEqual([...agentConnectorIds({ listAgentChannels: () => [{ platform: "github" }] }, "a1")], ["github"]);
+  assert.deepEqual([...agentConnectorIds(null, "a1")], []);
+});
+
+test("the per-job clone loses the automations it inherited from the template", async () => {
+  await withWorker(async ({ store, worker, world }) => {
+    const { job } = await dispatched(store, worker, world);
+    assert.equal((await store.get(job.id)).status, "running");
+    // The template keeps its own; the clone runs the job and nothing else.
+    assert.deepEqual(world.automations.a1, ["auto-daily-digest"]);
+    assert.deepEqual(world.automations.clone1, []);
+  });
+});
+
+test("a clone whose automations will not clear stops the job instead of running it", async () => {
+  await withWorker(async ({ store, worker, world }) => {
+    const job = await queueChapter(store);
+    await worker.tick();
+    const blocked = await store.get(job.id);
+    assert.equal(blocked.status, "needs_human");
+    assert.deepEqual(blocked.needs_human, {
+      reason: "other", detail: "cannot isolate the worker's automations",
+    });
+    // The clone is gone and the record does not point at it.
+    assert.deepEqual(world.deleted, ["clone1"]);
+    assert.equal(blocked.worker.agentId, "");
+    assert.equal(blocked.worker.sourceAgentId, "a1");
+    assert.deepEqual(world.prompts, []);
+  }, { deleteAgentAutomation: () => {} });
+});
+
+test("a second tick while one is still running is dropped, not run over the same jobs", async () => {
+  // jobBusCreate fires an unawaited tick so a new job starts moving at once, and the loop is
+  // ticking on its own five-second clock. Without a guard both passes read the same job: the
+  // second either dispatched it again or raced the first one's transition into a 409.
+  let world;
+  let hold = null;
+  await withWorker(async ({ store, worker, world: w }) => {
+    world = w;
+    const { job } = await dispatched(store, worker, world);
+    world.entries = [sendMessage(goodResult(), { verdict: "evidenced", attemptId: "attempt-1", missing: [] })];
+    world.attestations = receiptedHeads();
+    let release;
+    hold = new Promise((resolve) => { release = resolve; });
+    const first = worker.tick();
+    const second = worker.tick();
+    release();
+    hold = null;
+    await assert.doesNotReject(Promise.all([first, second]));
+    const done = await store.get(job.id);
+    assert.equal(done.status, "done");
+    // One clone, deleted once. Two passes over the same running job would have attested twice.
+    assert.deepEqual(world.clones.map((clone) => clone.id), ["clone1"]);
+    assert.deepEqual(world.deleted, ["clone1"]);
+  }, {
+    readEntries: async () => {
+      if (hold != null) await hold;
+      return world.entries;
+    },
+  });
+});
+
+test("turning the bus off stops dispatch and still finishes what was already running", async () => {
+  await withWorker(async ({ store, worker, world }) => {
+    const { job } = await dispatched(store, worker, world);
+    // The operator flips the switch mid-job. The running job still owes an answer and a deleted
+    // clone; only new work stops.
+    world.settings = { ...world.settings, enabled: false };
+    world.entries = [sendMessage(goodResult(), { verdict: "evidenced", attemptId: "attempt-1", missing: [] })];
+    world.attestations = receiptedHeads();
+    await worker.tick();
+    const done = await store.get(job.id);
+    assert.equal(done.status, "done");
+    assert.deepEqual(world.deleted, ["clone1"]);
+
+    const waiting = await queueChapter(store, "c05-ch3");
+    await worker.tick();
+    assert.equal((await store.get(waiting.id)).status, "queued", "nothing new is dispatched while the bus is off");
+    assert.deepEqual(world.clones.map((clone) => clone.id), ["clone1"]);
+  });
+});
+
+test("a running job whose transcript reads back empty fails now, not at the run timeout", async () => {
+  await withWorker(async ({ store, worker, world }) => {
+    world.settings = { ...world.settings, timeoutMin: 120 };
+    const { job } = await dispatched(store, worker, world);
+    // Section 10.4's empty-transcript check used to run only after a result block had been found,
+    // so this state polled quietly for two hours.
+    world.entries = [];
+    await worker.tick();
+    const failed = await store.get(job.id);
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.error, "transcript unreadable");
+    assert.deepEqual(world.deleted, ["clone1"]);
+  });
+});
+
+test("a roster that has not caught up yet is retried before the job stops on a person", async () => {
+  await withWorker(async ({ store, worker, world }) => {
+    // listAgentsSync serves a cache, and needs_human is never retried: a host still materialising
+    // its agents turned a transient miss into a permanent one somebody had to clear by hand.
+    world.agents = [];
+    const job = await queueChapter(store);
+    await worker.tick();
+    assert.equal((await store.get(job.id)).status, "queued");
+    world.clock += NO_WORKER_RETRY_MS[0] + 1_000;
+    await worker.tick();
+    assert.equal((await store.get(job.id)).status, "queued");
+    // The roster catches up inside the budget.
+    world.agents = [{ id: "a1", name: "Scribe", isGroup: false, isRunning: false }];
+    world.clock += NO_WORKER_RETRY_MS[1] + 1_000;
+    await worker.tick();
+    const running = await store.get(job.id);
+    assert.equal(running.status, "running");
+    assert.equal(running.worker.sourceAgentId, "a1");
+  });
 });

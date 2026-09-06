@@ -13,10 +13,18 @@
 // there on. And the idempotency keys of pruned jobs survive the cap in `retired`, so a replay after
 // 500 terminal jobs still answers the same id instead of minting a second job for the same work.
 //
+// Section 10.9 adds the integrity half. Both files sit on the volume the worker's own shell can
+// write, so the host holds the authoritative job state in MEMORY for its lifetime and treats
+// jobs.json as its own cache: it is read back exactly once, at start, and only after it verifies.
+// A jobs.json that fails, or an audit chain that does not verify, is moved aside as
+// `jobs.json.quarantined-<timestamp>` and the bus stays off. What that does NOT close is a shell
+// editing the files between reloads -- the host and the worker share the box's user -- and that
+// residual is written down in the contract rather than dressed up as a defence.
+//
 // Everything a caller can get wrong answers with a GatewayCommandError carrying the HTTP status the
 // contract names, so the relay passes 400/404/409/413/429/503 through unchanged.
 import { createHash, randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -132,7 +140,7 @@ export interface JobAuditRow {
   readonly seq: number;
   readonly prev: string;
   readonly at: string;
-  readonly event: JobStatus | "auth_locked" | "settings_diverged";
+  readonly event: JobStatus | "auth_locked" | "settings_diverged" | "store_quarantined" | "store_unwritable";
   readonly jobId: string;
   readonly type: JobType | "";
   readonly submitter: string;
@@ -216,9 +224,13 @@ export function findPayloadSecret(value: unknown, path = "payload"): string | nu
 // can carry a quote, a space, a newline or a `..`.
 
 export const COURSE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,80}$/;
-export const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-export const BRANCH_PATTERN = /^[A-Za-z0-9._/-]{1,100}$/;
-export const RULES_REF_PATTERN = /^[A-Za-z0-9._/-]{1,120}$/;
+// Section 10.9: no field that reaches a command line may begin with `-`. The prompt hands `repo`,
+// `branch` and `rules_ref` to git and to `wc -c`, and an argument starting with a dash is read as an
+// option flag by every one of those, whatever quoting is around it. So the first character is a
+// letter, a digit or a `.` in all three, and the dash is legal only after it.
+export const REPO_PATTERN = /^[A-Za-z0-9_.][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*$/;
+export const BRANCH_PATTERN = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,99}$/;
+export const RULES_REF_PATTERN = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,119}$/;
 export const CHAPTER_MIN = 1;
 export const CHAPTER_MAX = 200;
 
@@ -257,14 +269,14 @@ export function validateJobPayload(type: JobType, raw: unknown, repos: readonly 
   }
   const repo = payload.repo;
   if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) {
-    return { ok: false, detail: "repo must be owner/name" };
+    return { ok: false, detail: "repo must be owner/name, neither part starting with -" };
   }
   if (!repos.includes(repo)) {
     return { ok: false, detail: `repo ${repo} is not in the allowlist` };
   }
   const branch = payload.branch;
   if (typeof branch !== "string" || !BRANCH_PATTERN.test(branch) || branch.includes("..")) {
-    return { ok: false, detail: "branch must match ^[A-Za-z0-9._/-]{1,100}$ and contain no .." };
+    return { ok: false, detail: "branch must match ^[A-Za-z0-9._][A-Za-z0-9._/-]{0,99}$ and contain no .." };
   }
   const rulesRef = payload.rules_ref === undefined ? DEFAULT_RULES_REF : payload.rules_ref;
   if (
@@ -273,19 +285,32 @@ export function validateJobPayload(type: JobType, raw: unknown, repos: readonly 
     || rulesRef.includes("..")
     || rulesRef.startsWith("/")
   ) {
-    return { ok: false, detail: "rules_ref must match ^[A-Za-z0-9._/-]{1,120}$, contain no .. and not start with /" };
+    return { ok: false, detail: "rules_ref must match ^[A-Za-z0-9._][A-Za-z0-9._/-]{0,119}$, contain no .. and not start with /" };
   }
   return { ok: true, payload: { course_slug: courseSlug, chapter, repo, branch, rules_ref: rulesRef } };
 }
 
-/** Policy is booleans and nothing else; an unknown key is a refusal, not a stored surprise. */
-export function validateJobPolicy(raw: unknown): { readonly ok: true; readonly policy: Record<string, boolean> } | { readonly ok: false; readonly detail: string } {
+/**
+ * Policy is booleans and nothing else; an unknown key is a refusal, not a stored surprise.
+ *
+ * Section 10.9: `require_attestation:false` is the one flag that turns off both attestation layers,
+ * and it used to be the bearer holder's to set. It is now the operator's: unless `allowUnattested`
+ * is true in the bus's settings file, a body that carries it is refused, and the answer says so in
+ * its own words rather than as another "unknown field".
+ */
+export function validateJobPolicy(
+  raw: unknown,
+  options: { readonly allowUnattested?: boolean } = {},
+): { readonly ok: true; readonly policy: Record<string, boolean> } | { readonly ok: false; readonly detail: string; readonly attestationRequired?: true } {
   const policy: Record<string, boolean> = { no_final_assessment: true, no_placeholder: true, require_attestation: true };
   if (raw === undefined || raw === null) return { ok: true, policy };
   if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, detail: "policy must be an object" };
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!(POLICY_KEYS as readonly string[]).includes(key)) return { ok: false, detail: `unknown field policy.${key}` };
     if (typeof value !== "boolean") return { ok: false, detail: `policy.${key} must be a boolean` };
+    if (key === "require_attestation" && value === false && options.allowUnattested !== true) {
+      return { ok: false, detail: "attestation is required", attestationRequired: true };
+    }
     policy[key] = value;
   }
   return { ok: true, policy };
@@ -328,7 +353,15 @@ export interface JobStoreDeps {
   readonly emit?: (event: { readonly type: "job-bus"; readonly jobId: string; readonly status: JobStatus }) => void;
 }
 
-interface RetiredKey { readonly id: string; readonly status: JobStatus }
+interface RetiredKey { readonly id: string; readonly status: JobStatus; readonly created_at?: string }
+
+/** What a quarantined file left behind: enough for the console card to say what happened. */
+export interface JobStoreQuarantine {
+  readonly file: string;
+  readonly movedTo: string;
+  readonly at: string;
+  readonly detail: string;
+}
 
 export function createJobStore(deps: JobStoreDeps) {
   const now = deps.now ?? Date.now;
@@ -344,6 +377,12 @@ export function createJobStore(deps: JobStoreDeps) {
   let auditSeq = 0;
   let auditPrev = "";
   let auditLoaded = false;
+  // The byte length audit.jsonl had after this host's last append. The chain proves that no row was
+  // edited or removed, but it is self-referential: a whole file rewritten consistently still
+  // verifies. This does not, because it is held in the host's memory and never on the volume the
+  // worker can write. Section 10.9.
+  let auditBytes = 0;
+  const quarantines: JobStoreQuarantine[] = [];
   // One write at a time. Two atomic writes racing would each rename a whole-file snapshot over the
   // other, so the loser's transition would vanish even though its audit row had landed.
   let writeTail: Promise<void> = Promise.resolve();
@@ -360,18 +399,82 @@ export function createJobStore(deps: JobStoreDeps) {
       && typeof record.status === "string";
   }
 
+  /**
+   * Section 10.9. jobs.json and audit.jsonl live on the box data volume, which is the filesystem the
+   * worker agent's own shell runs on, so the host does not simply believe what it reads there. It
+   * holds the authoritative job state in MEMORY for its lifetime and treats jobs.json as its own
+   * cache; this is the one moment that cache is read back, and it is checked before it is believed.
+   *
+   * A jobs.json that is not a list of job records, or that carries a record whose payload no longer
+   * hashes to its own `payload_sha256`, or an audit.jsonl whose chain does not verify, is moved
+   * aside as `jobs.json.quarantined-<timestamp>`; the host starts with no jobs, writes a
+   * `store_quarantined` audit row, and the bus stays DISABLED until an operator has looked.
+   *
+   * The residual is stated rather than papered over: the host and the worker share the box's user,
+   * so a shell in the box can still edit both files BETWEEN reloads. This closes "the host believed
+   * a file it never checked", not "the file cannot be touched".
+   */
+  async function quarantineFile(file: string, detail: string): Promise<JobStoreQuarantine> {
+    const at = stamp();
+    const movedTo = `${file}.quarantined-${at.replace(/[:.]/g, "-")}`;
+    try { await rename(file, movedTo); }
+    catch { /* a file that will not move is still not believed: nothing below reads it again */ }
+    const record: JobStoreQuarantine = { file, movedTo, at, detail };
+    quarantines.push(record);
+    return record;
+  }
+
+  /** What a stored record has to still be. `payload_sha256` is the part a rewrite cannot fake. */
+  function recordSetFault(rows: readonly unknown[]): string | null {
+    for (const row of rows) {
+      if (!isJobRecord(row)) return "jobs.json carries a row that is not a job record";
+      const job = row as JobRecord;
+      if (typeof job.payload_sha256 !== "string") return `job ${job.id} carries no payload hash`;
+      // health.ping's payload is `{}` and hashes like any other, so every record is checkable.
+      if (job.payload_sha256 !== sha256(JSON.stringify(job.payload ?? {}))) {
+        return `job ${job.id} does not match its payload hash`;
+      }
+    }
+    return null;
+  }
+
   async function ensureLoaded(): Promise<void> {
     if (loaded) return;
-    try {
-      const parsed: unknown = JSON.parse(await readFile(jobsPath, "utf8"));
-      const rows = Array.isArray(parsed) ? parsed : (parsed as { jobs?: unknown } | null)?.jobs;
-      jobs = Array.isArray(rows) ? rows.filter(isJobRecord) : [];
-      const stored = (parsed as { retired?: unknown } | null)?.retired;
-      retired = typeof stored === "object" && stored != null && !Array.isArray(stored)
-        ? stored as Record<string, RetiredKey>
-        : {};
-    } catch { jobs = []; retired = {}; } // a missing or half-written file means "no jobs"
     loaded = true;
+    let raw: string;
+    try { raw = await readFile(jobsPath, "utf8"); }
+    catch { jobs = []; retired = {}; return; } // absent is a first start, not a tamper
+    let fault: string | null = null;
+    let rows: unknown[] = [];
+    let stored: unknown;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      const listed = Array.isArray(parsed) ? parsed : (parsed as { jobs?: unknown } | null)?.jobs;
+      if (!Array.isArray(listed)) fault = "jobs.json is not a list of jobs";
+      else rows = listed;
+      stored = (parsed as { retired?: unknown } | null)?.retired;
+    } catch { fault = "jobs.json is not JSON"; }
+    fault ??= recordSetFault(rows);
+    if (fault == null) {
+      const chain = await verifyAuditFile();
+      if (!chain.ok) fault = `the audit chain breaks at row ${chain.brokenAt ?? 0}`;
+    }
+    if (fault != null) {
+      const record = await quarantineFile(jobsPath, fault);
+      jobs = [];
+      retired = {};
+      await appendAudit({
+        at: record.at, event: "store_quarantined", jobId: "", type: "", submitter: "",
+        submitter_id: "", client: "", idempotency_key: "", payload_sha256: "",
+        policy_version: JOB_AUDIT_POLICY_VERSION, worker: null,
+        unsupported_claims: [`store:${fault}`], ok: false, eventId: randomHex(8),
+      }).catch(() => undefined);
+      return;
+    }
+    jobs = rows as JobRecord[];
+    retired = typeof stored === "object" && stored != null && !Array.isArray(stored)
+      ? stored as Record<string, RetiredKey>
+      : {};
   }
 
   /** The chain head, read off the file once: the host restarts, the chain does not begin again. */
@@ -379,12 +482,58 @@ export function createJobStore(deps: JobStoreDeps) {
     if (auditLoaded) return;
     auditLoaded = true;
     try {
-      const lines = (await readFile(auditPath, "utf8")).split("\n").filter((line) => line.trim().length > 0);
+      const text = await readFile(auditPath, "utf8");
+      auditBytes = Buffer.byteLength(text, "utf8");
+      const lines = text.split("\n").filter((line) => line.trim().length > 0);
       const last = lines.at(-1);
       if (last == null) return;
       auditSeq = lines.length;
       auditPrev = sha256(last);
-    } catch { auditSeq = 0; auditPrev = ""; }
+    } catch { auditSeq = 0; auditPrev = ""; auditBytes = 0; }
+  }
+
+  /** The whole file, chained. The load check and the gate's `verifyAudit` both read it this way. */
+  async function verifyAuditFile(): Promise<{ ok: boolean; brokenAt: number | null; rows: number }> {
+    let lines: string[] = [];
+    try { lines = (await readFile(auditPath, "utf8")).split("\n").filter((line) => line.trim().length > 0); }
+    catch { lines = []; }
+    return { ...verifyJobAuditChain(lines), rows: lines.length };
+  }
+
+  /**
+   * Section 10.9's other half of the chain. `prev` proves no row was edited or deleted, but a file
+   * rewritten whole -- rows and hashes together -- verifies perfectly, and that is exactly what a
+   * shell in the box can do. So before extending the chain the host checks that the file is still
+   * the one it has been extending: the byte length it left behind. A file that grew or shrank under
+   * us is moved aside and a fresh chain begins with a `store_quarantined` row, so the break is IN
+   * the log rather than only in the memory of a host that has since restarted.
+   */
+  async function ensureAuditIntact(): Promise<void> {
+    await ensureAuditLoaded();
+    if (auditSeq === 0) return;
+    let size = -1;
+    try { size = (await stat(auditPath)).size; } catch { size = -1; }
+    if (size === auditBytes) return;
+    const record = await quarantineFile(auditPath, `audit.jsonl changed under the host (${auditBytes} -> ${size} bytes)`);
+    auditSeq = 0;
+    auditPrev = "";
+    auditBytes = 0;
+    await writeChained({
+      at: record.at, event: "store_quarantined", jobId: "", type: "", submitter: "", submitter_id: "",
+      client: "", idempotency_key: "", payload_sha256: "", policy_version: JOB_AUDIT_POLICY_VERSION,
+      worker: null, unsupported_claims: [`store:${record.detail}`], ok: false, eventId: randomHex(8),
+    });
+  }
+
+  /** One row onto the end of the chain. Callers hold the tail, so this never runs twice at once. */
+  async function writeChained(row: Omit<JobAuditRow, "seq" | "prev">): Promise<void> {
+    const chained: JobAuditRow = { seq: auditSeq + 1, prev: auditPrev, ...row };
+    const line = auditRowBytes(chained);
+    await mkdir(directory, { recursive: true });
+    await appendFile(auditPath, `${line}\n`, { mode: 0o600 });
+    auditSeq = chained.seq;
+    auditPrev = sha256(line);
+    auditBytes += Buffer.byteLength(`${line}\n`, "utf8");
   }
 
   /**
@@ -398,38 +547,59 @@ export function createJobStore(deps: JobStoreDeps) {
     if (terminal.length <= TERMINAL_JOB_CAP) return jobs;
     const keep = new Set(terminal.slice(terminal.length - TERMINAL_JOB_CAP).map((job) => job.id));
     const dropped = terminal.filter((job) => !keep.has(job.id));
-    for (const job of dropped) retired[`${job.type} ${job.idempotency_key}`] = { id: job.id, status: job.status };
+    for (const job of dropped) retired[`${job.type} ${job.idempotency_key}`] = { id: job.id, status: job.status, created_at: job.created_at };
     const keys = Object.keys(retired);
     for (const key of keys.slice(0, Math.max(0, keys.length - RETIRED_KEY_CAP))) delete retired[key];
     return jobs.filter((job) => !TERMINAL_JOB_STATUSES.includes(job.status) || keep.has(job.id));
   }
 
+  /**
+   * Writes the cache. The error is NOT swallowed any more: a caller that believes it persisted a
+   * dispatch when it did not is how a queued job gets dispatched twice, so the failure travels up
+   * and the transition that asked for it fails. The tail itself is kept resolved either way, so one
+   * unwritable moment does not wedge every later write behind a rejected promise.
+   */
   async function save(): Promise<void> {
     jobs = capped();
     const snapshot = JSON.stringify({ jobs, retired }, null, 2);
-    writeTail = writeTail
-      .then(async () => {
-        await mkdir(directory, { recursive: true });
-        await writeFileAtomic(jobsPath, snapshot, { mode: 0o600 });
-      })
-      .catch(() => {});
-    await writeTail;
+    const write = writeTail.then(async () => {
+      await mkdir(directory, { recursive: true });
+      await writeFileAtomic(jobsPath, snapshot, { mode: 0o600 });
+    });
+    writeTail = write.catch(() => {});
+    await write;
   }
 
   /** Appends one chained row. Serialised, because `prev` is read and written in the same step. */
   async function appendAudit(row: Omit<JobAuditRow, "seq" | "prev">): Promise<void> {
-    auditTail = auditTail
-      .then(async () => {
-        await ensureAuditLoaded();
-        const chained: JobAuditRow = { seq: auditSeq + 1, prev: auditPrev, ...row };
-        const line = auditRowBytes(chained);
-        await mkdir(directory, { recursive: true });
-        await appendFile(auditPath, `${line}\n`, { mode: 0o600 });
-        auditSeq = chained.seq;
-        auditPrev = sha256(line);
-      })
-      .catch(() => {});
-    await auditTail;
+    const append = auditTail.then(async () => {
+      await ensureAuditIntact();
+      await writeChained(row);
+    });
+    auditTail = append.catch(() => {});
+    await append;
+  }
+
+  /**
+   * The cache write, with the failure recorded rather than swallowed. The in-memory state is the
+   * authoritative one and has already moved, so this does not roll anything back; it writes a
+   * `store_unwritable` row -- the receipt that the file on the volume is now behind what the host
+   * holds -- and hands the caller a 503 so a create is answered honestly instead of as a 201 for a
+   * job the box could not write down.
+   */
+  async function saveOrRecord(job: JobRecord | null, what: string): Promise<void> {
+    try { await save(); }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await appendAudit({
+        at: stamp(), event: "store_unwritable", jobId: job?.id ?? "", type: job?.type ?? "",
+        submitter: job?.submitter ?? "", submitter_id: job?.submitter_id ?? "", client: job?.client ?? "",
+        idempotency_key: job?.idempotency_key ?? "", payload_sha256: job?.payload_sha256 ?? "",
+        policy_version: JOB_AUDIT_POLICY_VERSION, worker: job?.worker?.agentName ?? null,
+        unsupported_claims: [`store:${what}`], ok: false, eventId: randomHex(8),
+      }).catch(() => undefined);
+      throw new GatewayCommandError(503, { error: "the job store could not be written", detail });
+    }
   }
 
   function requireJob(id: string): JobRecord {
@@ -476,7 +646,7 @@ export function createJobStore(deps: JobStoreDeps) {
       ok: next !== "failed",
       eventId,
     });
-    await save();
+    await saveOrRecord(job, `${job.id} could not be written as ${next}`);
     deps.emit?.({ type: "job-bus", jobId: job.id, status: next });
     return { job, eventId };
   }
@@ -560,8 +730,14 @@ export function createJobStore(deps: JobStoreDeps) {
       }
       const checked = validateJobPayload(jobType, request.payload, settings.repos);
       if (!checked.ok) throw new GatewayCommandError(400, { error: "invalid payload", detail: checked.detail });
-      const policy = validateJobPolicy(request.policy);
-      if (!policy.ok) throw new GatewayCommandError(400, { error: "invalid payload", detail: policy.detail });
+      const policy = validateJobPolicy(request.policy, { allowUnattested: settings.allowUnattested });
+      if (!policy.ok) {
+        // Its own error, not "invalid payload": the body was well formed and the box said no.
+        if (policy.attestationRequired === true) {
+          throw new GatewayCommandError(400, { error: "attestation is required" });
+        }
+        throw new GatewayCommandError(400, { error: "invalid payload", detail: policy.detail });
+      }
 
       const existing = jobs.find((job) => job.type === jobType && job.idempotency_key === idempotencyKey);
       if (existing != null) return { job: existing, created: false };
@@ -575,7 +751,11 @@ export function createJobStore(deps: JobStoreDeps) {
           job: {
             id: pruned.id, type: jobType, status: pruned.status, idempotency_key: idempotencyKey,
             payload: {}, policy: policy.policy, callback_url: null, submitter: "", submitter_id: "",
-            client: "", payload_sha256: "", created_at: "", updated_at: "", started_at: null,
+            // `created_at` rides with the retired key rather than being blanked: the create answer
+            // carries four fields and this is one of them, so a replay that answered "" told CoS the
+            // job it already had was made at no time at all. A key retired before this field existed
+            // still answers "", which is the one honest gap.
+            client: "", payload_sha256: "", created_at: pruned.created_at ?? "", updated_at: "", started_at: null,
             finished_at: null, worker: null, events: [], result: null, error: null, needs_human: null,
           },
         };
@@ -618,7 +798,7 @@ export function createJobStore(deps: JobStoreDeps) {
         payload_sha256: job.payload_sha256, policy_version: JOB_AUDIT_POLICY_VERSION, worker: null,
         ok: true, eventId,
       });
-      await save();
+      await saveOrRecord(job, `${job.id} could not be written as queued`);
       deps.emit?.({ type: "job-bus", jobId: job.id, status: "queued" });
       return { job, created: true };
     },
@@ -635,7 +815,7 @@ export function createJobStore(deps: JobStoreDeps) {
       const job = requireJob(id);
       job.worker = worker;
       job.updated_at = stamp();
-      await save();
+      await saveOrRecord(job, `${job.id} could not be written with its clone`);
       return job;
     },
 
@@ -650,16 +830,19 @@ export function createJobStore(deps: JobStoreDeps) {
      * exists to answer.
      */
     async appendExternalAudit(row: {
-      readonly event: "auth_locked" | "settings_diverged";
+      readonly event: "auth_locked" | "settings_diverged" | "store_quarantined";
       readonly client?: unknown;
       readonly ok?: unknown;
-      /** For `settings_diverged`: which guarded fields the settings file disagreed with. */
+      /**
+       * For `settings_diverged`: which guarded fields the settings file disagreed with. For
+       * `store_quarantined` written from outside this store (the settings file): why it was moved.
+       */
       readonly fields?: readonly string[];
     }): Promise<{ readonly eventId: string }> {
       const eventId = randomHex(8);
       await appendAudit({
         at: stamp(),
-        event: row.event === "settings_diverged" ? "settings_diverged" : "auth_locked",
+        event: row.event,
         jobId: "", type: "", submitter: "", submitter_id: "",
         client: typeof row.client === "string" ? row.client : "",
         idempotency_key: "", payload_sha256: "", policy_version: JOB_AUDIT_POLICY_VERSION,
@@ -674,14 +857,34 @@ export function createJobStore(deps: JobStoreDeps) {
 
     /** Reads the whole audit file back and checks the chain. The box gate calls this after its run. */
     async verifyAudit(): Promise<{ readonly ok: boolean; readonly brokenAt: number | null; readonly rows: number }> {
-      let lines: string[] = [];
-      try { lines = (await readFile(auditPath, "utf8")).split("\n").filter((line) => line.trim().length > 0); }
-      catch { lines = []; }
-      return { ...verifyJobAuditChain(lines), rows: lines.length };
+      return await verifyAuditFile();
+    },
+
+    /**
+     * Section 10.9. Whether this host trusted what it read at start. `ok:false` means a file was
+     * moved aside, and the bus stays off until an operator has looked: the console card says so, and
+     * `jobBusCreate` answers 503 rather than accepting work into a store that was tampered with.
+     */
+    async integrity(): Promise<{ readonly ok: boolean; readonly quarantined: readonly JobStoreQuarantine[]; readonly detail: string }> {
+      await ensureLoaded();
+      return {
+        ok: quarantines.length === 0,
+        quarantined: [...quarantines],
+        detail: quarantines.map((entry) => entry.detail).join("; "),
+      };
     },
 
     /** Test seam: forget the in-memory copy so the next call re-reads jobs.json from disk. */
-    reset(): void { jobs = []; retired = {}; loaded = false; auditLoaded = false; auditSeq = 0; auditPrev = ""; },
+    reset(): void {
+      jobs = [];
+      retired = {};
+      loaded = false;
+      auditLoaded = false;
+      auditSeq = 0;
+      auditPrev = "";
+      auditBytes = 0;
+      quarantines.length = 0;
+    },
   };
 }
 

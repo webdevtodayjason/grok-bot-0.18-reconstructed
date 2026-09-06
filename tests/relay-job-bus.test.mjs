@@ -13,9 +13,12 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { copyFileSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { build } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const GATEWAY_TOKEN = "g".repeat(64);
@@ -34,9 +37,12 @@ function fakeGateway() {
       const command = req.url.replace("/api/", "");
       let args; try { args = JSON.parse(raw || "{}"); } catch { args = null; }
       seen.push({ command, args, authorization: req.headers.authorization ?? null });
-      const answer = reply(command, args) ?? { status: 200, body: {} };
-      res.writeHead(answer.status, { "content-type": "application/json" });
-      res.end(JSON.stringify(answer.body));
+      // Awaited, because one test puts the REAL job store behind this and answers a promise.
+      void Promise.resolve(reply(command, args)).then((answered) => {
+        const answer = answered ?? { status: 200, body: {} };
+        res.writeHead(answer.status, { "content-type": "application/json" });
+        res.end(JSON.stringify(answer.body));
+      });
     });
   });
   return {
@@ -93,6 +99,12 @@ async function startRelay({ env = {}, withPassword = true } = {}) {
       setTimeout(() => resolve(false), 15_000).unref();
     });
     if (listening) {
+      // docs/JOB-BUS.md 10.9: with TITAN_JOB_TOKEN in the environment the relay arms the bus on its
+      // own start, so that call is already on the fake gateway before any test has sent a request.
+      // It is asserted on its own below; here it is waited for and cleared, so every other test
+      // still reads `seen` as "what my request caused".
+      if (String(env.TITAN_JOB_TOKEN ?? "").length > 0) await armed(gateway);
+      gateway.seen.length = 0;
       return {
         base: `http://127.0.0.1:${port}`, gateway, profile,
         tokenFile: path.join(profile, "job-bus.json"),
@@ -103,6 +115,17 @@ async function startRelay({ env = {}, withPassword = true } = {}) {
   }
   gateway.stop();
   throw new Error("the relay copy would not start on any of five ports");
+}
+
+// The startup arm, waited for rather than slept on. Returns the call, or null if it never came.
+async function armed(gateway, timeoutMs = 5_000) {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    const call = gateway.seen.find((entry) => entry.command === "jobBusSetSettings");
+    if (call != null) return call;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return null;
 }
 
 const bearer = (token) => ({ authorization: `Bearer ${token}` });
@@ -497,4 +520,130 @@ test("with TITAN_JOB_TOKEN in the environment the console refuses to write a fil
     assert.equal((await json("/job-bus/token/generate", { method: "POST" })).status, 409);
     assert.throws(() => statSync(relay.tokenFile), "no file may be written when the env wins");
   } finally { relay.stop(); }
+});
+
+// ---- section 10.9 --------------------------------------------------------------------------
+
+test("with TITAN_JOB_TOKEN in the environment the relay arms the bus on its own start", async () => {
+  // The env deploy path in section 8: an operator sets the variable on the deployment and never
+  // opens the console. Arming lived only in the browser, so that operator got 503 "job bus is
+  // disabled" on every create with a token that was perfectly good.
+  const gateway = fakeGateway();
+  const gatewayUrl = await gateway.start();
+  const dir = relayCopy();
+  const profile = mkdtempSync(path.join(tmpdir(), "job-bus-arm-"));
+  const { newAuthRecord, writeAuthFile } = await import("../ui/auth.mjs");
+  writeAuthFile(path.join(dir, "auth.json"), newAuthRecord(PASSWORD));
+  const port = 35000 + Math.floor(Math.random() * 8000);
+  const child = spawn(process.execPath, [path.join(dir, "server.mjs")], {
+    env: {
+      ...process.env, SAND_UI_PORT: String(port), SAND_UI_BIND_HOST: "127.0.0.1",
+      SAND_UI_TRUSTED_PROXIES: "", SAND_HOST_GATEWAY_TOKEN: GATEWAY_TOKEN,
+      SAND_HOST_GATEWAY_URL: gatewayUrl, SAND_PROFILE_DIRS: profile, TITAN_JOB_TOKEN: JOB_TOKEN,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let out = "";
+  child.stdout.on("data", (chunk) => { out += chunk; });
+  try {
+    const call = await armed(gateway, 15_000);
+    assert.ok(call, `the relay never armed the bus. stdout: ${out}`);
+    assert.equal(call.command, "jobBusSetSettings");
+    assert.deepEqual(call.args, { enabled: true });
+    // With the gateway's own bearer, not the job token: this is a console-plane command.
+    assert.equal(call.authorization, `Bearer ${GATEWAY_TOKEN}`);
+    // And it says so where an operator reads it back: the container log.
+    for (let i = 0; i < 100 && !out.includes("bus  armed"); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.match(out, /bus {2}armed the job bus \(TITAN_JOB_TOKEN is set in the environment\)/);
+  } finally { child.kill("SIGKILL"); gateway.stop(); }
+});
+
+test("the console's token routes arm the bus at the relay, not only in the browser", async () => {
+  // The console asks for this too, from the page. Doing it here as well means a bus that follows a
+  // token however the token was set: curl against the console route arms it the same as a click.
+  const relay = await startRelay();
+  try {
+    const cookie = await signIn(relay);
+    relay.gateway.answerWith(() => ({ status: 200, body: { enabled: true } }));
+    const generated = await fetch(`${relay.base}/job-bus/token/generate`, {
+      method: "POST", headers: { cookie },
+    });
+    assert.equal(generated.status, 200);
+    const armCalls = relay.gateway.seen.filter((entry) => entry.command === "jobBusSetSettings");
+    assert.equal(armCalls.length, 1);
+    assert.deepEqual(armCalls[0].args, { enabled: true });
+
+    relay.gateway.seen.length = 0;
+    const set = await fetch(`${relay.base}/job-bus/token`, {
+      method: "POST", headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ token: "z".repeat(48) }),
+    });
+    assert.equal(set.status, 200);
+    assert.deepEqual(relay.gateway.seen.map((entry) => entry.command), ["jobBusSetSettings"]);
+
+    // Clearing the token does NOT disarm: that is the switch on the card, and a cleared token
+    // already refuses every /v1 call on its own.
+    relay.gateway.seen.length = 0;
+    await fetch(`${relay.base}/job-bus/token/clear`, { method: "POST", headers: { cookie } });
+    assert.deepEqual(relay.gateway.seen, []);
+  } finally { relay.stop(); }
+});
+
+test("an unknown field posted over HTTP is refused by the real store, not only by a fake gateway", async () => {
+  // The store test proves the store refuses it and the relay test proves the relay forwards it.
+  // Neither proved the two together, which is the only thing a caller can see -- so this one puts
+  // the REAL store behind the fake gateway's jobBusCreate and posts a body over /v1.
+  const temporary = await mkdtemp(path.join(tmpdir(), "relay-job-bus-store-"));
+  const outfile = path.join(temporary, "store.mjs");
+  await build({
+    entryPoints: [path.join(repoRoot, "source/host/extensions/job-bus/job-store.ts")],
+    outfile, bundle: true, format: "esm", platform: "node", target: "node22",
+  });
+  const { createJobStore } = await import(`${pathToFileURL(outfile).href}?${Date.now()}`);
+  const store = createJobStore({
+    rootDir: temporary,
+    readSettings: () => ({
+      enabled: true, workers: {}, repos: ["webdevtodayjason/nextgen-training"],
+      allowedConnectors: ["github"], timeoutMin: 120, queueTimeoutMin: 60, maxOpen: 20,
+      allowUnattested: false,
+    }),
+  });
+  const relay = await startRelay({ env: { TITAN_JOB_TOKEN: JOB_TOKEN } });
+  try {
+    // The fake gateway stops faking the one command under test.
+    relay.gateway.answerWith((command, args) => {
+      if (command !== "jobBusCreate") return { status: 200, body: {} };
+      return store.create(args).then(
+        (created) => ({ status: 200, body: created }),
+        (error) => ({ status: error.status ?? 500, body: error.body ?? { error: String(error?.message ?? error) } }),
+      );
+    });
+    const refused = await postJob(relay, {
+      type: "health.ping", idempotency_key: "k1", payload: {}, priority: 9,
+    });
+    assert.equal(refused.status, 400);
+    assert.deepEqual(await refused.json(), { error: "invalid payload", detail: "unknown field priority" });
+
+    // Section 10.9's operator switch, over the same wire: the bearer cannot turn attestation off.
+    const unattested = await postJob(relay, {
+      type: "nextgen.chapter", idempotency_key: "k2",
+      payload: { course_slug: "c05", chapter: 2, repo: "webdevtodayjason/nextgen-training", branch: "main" },
+      policy: { require_attestation: false },
+    });
+    assert.equal(unattested.status, 400);
+    assert.deepEqual(await unattested.json(), { error: "attestation is required" });
+
+    // And a good body still lands: 201 with the four fields, from the real store's own record.
+    const created = await postJob(relay, { type: "health.ping", idempotency_key: "k3", payload: {} });
+    assert.equal(created.status, 201);
+    const body = await created.json();
+    assert.deepEqual(Object.keys(body).sort(), ["created_at", "id", "status", "type"]);
+    assert.equal(body.status, "queued");
+    assert.match(body.created_at, /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    relay.stop();
+    await rm(temporary, { recursive: true, force: true });
+  }
 });

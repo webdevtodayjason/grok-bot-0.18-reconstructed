@@ -8,7 +8,12 @@
 // The file is re-read on every use. That is deliberate: an operator who edits it by hand on the box
 // (or a second process that writes it) must not have to restart the host, and every read here is a
 // few hundred bytes off the data volume.
-import { readFileSync } from "node:fs";
+//
+// `jobBusSetSettings` takes seven keys plus `allowUnattested` (section 10.9). That last one is the
+// only switch that lets a job body say "do not check my work": with it false -- the default -- a
+// create carrying `policy.require_attestation:false` is refused 400 "attestation is required", so
+// the escape hatch is an operator's to open on the box and not a bearer holder's to claim in a body.
+import { readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "../../../shared/node/atomic-write.js";
@@ -26,6 +31,13 @@ export interface JobBusSettings {
   readonly timeoutMin: number;
   readonly queueTimeoutMin: number;
   readonly maxOpen: number;
+  /**
+   * Section 10.9. `policy.require_attestation:false` is the one flag in a job body that turns the
+   * whole two-layer check off, and until this key existed any holder of the bearer could set it.
+   * It is now an OPERATOR decision that lives on the box: with this false -- the default -- a create
+   * carrying `require_attestation:false` is refused with `400 {"error":"attestation is required"}`.
+   */
+  readonly allowUnattested: boolean;
 }
 
 /** The bootstrap defaults. `enabled` is off until the operator turns the bus on in the console. */
@@ -37,10 +49,12 @@ export const DEFAULT_JOB_BUS_SETTINGS: JobBusSettings = Object.freeze({
   timeoutMin: 120,
   queueTimeoutMin: 60,
   maxOpen: 20,
+  allowUnattested: false,
 });
 
 const SETTING_KEYS = [
   "enabled", "workers", "repos", "allowedConnectors", "timeoutMin", "queueTimeoutMin", "maxOpen",
+  "allowUnattested",
 ] as const;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -82,11 +96,22 @@ export function normalizeJobBusSettings(raw: unknown): JobBusSettings {
     timeoutMin: readCount(record.timeoutMin, DEFAULT_JOB_BUS_SETTINGS.timeoutMin),
     queueTimeoutMin: readCount(record.queueTimeoutMin, DEFAULT_JOB_BUS_SETTINGS.queueTimeoutMin),
     maxOpen: readCount(record.maxOpen, DEFAULT_JOB_BUS_SETTINGS.maxOpen),
+    allowUnattested: record.allowUnattested === true,
   };
 }
 
 /** The fields that widen what the bus may do, so a file that widens them is not believed. */
-export const GUARDED_JOB_SETTING_KEYS = ["enabled", "workers", "repos", "allowedConnectors"] as const;
+export const GUARDED_JOB_SETTING_KEYS = [
+  "enabled", "workers", "repos", "allowedConnectors", "allowUnattested",
+] as const;
+
+/** What a quarantined settings file left behind, for the console card and the audit row. */
+export interface JobSettingsQuarantine {
+  readonly file: string;
+  readonly movedTo: string;
+  readonly at: string;
+  readonly detail: string;
+}
 
 export interface JobSettingsStoreOptions {
   /**
@@ -95,15 +120,52 @@ export interface JobSettingsStoreOptions {
    * audit row every five seconds would bury the one that matters.
    */
   readonly onDivergence?: (fields: readonly string[]) => void;
+  /** Called once, at host start, when settings.json was there but could not be believed. */
+  readonly onQuarantine?: (quarantine: JobSettingsQuarantine) => void;
+  readonly now?: () => number;
 }
 
 export function createJobSettingsStore(rootDir: string, options: JobSettingsStoreOptions = {}) {
   const settingsPath = join(rootDir, JOB_BUS_DIRNAME, JOB_SETTINGS_FILENAME);
+  const now = options.now ?? Date.now;
 
   function readFile(): JobBusSettings {
     try { return normalizeJobBusSettings(JSON.parse(readFileSync(settingsPath, "utf8"))); }
     catch { return DEFAULT_JOB_BUS_SETTINGS; }
   }
+
+  /**
+   * Section 10.9, the reload half. This file sits on the box data volume, which the worker's own
+   * shell can write, so at host start it is checked before it is believed: a file that is there but
+   * is not JSON, or is JSON that is not an object, is moved aside as
+   * `settings.json.quarantined-<timestamp>` and the host runs on the defaults -- which is the bus
+   * DISABLED. A file that is simply absent is the ordinary first start and quarantines nothing.
+   *
+   * The residual is written down in docs/JOB-BUS.md 10.9 rather than papered over: the host and the
+   * worker share the box's user, so a shell in the box can still edit this file BETWEEN reloads.
+   * What this closes is the case where the host believes a file it never checked.
+   */
+  function loadOrQuarantine(): JobBusSettings {
+    let raw: string;
+    try { raw = readFileSync(settingsPath, "utf8"); }
+    catch { return DEFAULT_JOB_BUS_SETTINGS; } // absent is a first start, not a tamper
+    let detail = "";
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed === "object" && parsed != null && !Array.isArray(parsed)) {
+        return normalizeJobBusSettings(parsed);
+      }
+      detail = "settings.json is not a JSON object";
+    } catch { detail = "settings.json is not JSON"; }
+    const at = new Date(now()).toISOString();
+    const movedTo = `${settingsPath}.quarantined-${at.replace(/[:.]/g, "-")}`;
+    try { renameSync(settingsPath, movedTo); }
+    catch { /* a file that will not move is still not believed; the defaults still win */ }
+    quarantine = { file: settingsPath, movedTo, at, detail };
+    return DEFAULT_JOB_BUS_SETTINGS;
+  }
+
+  let quarantine: JobSettingsQuarantine | null = null;
 
   /**
    * The host's own copy of the guarded fields, taken at start and moved only by `write` -- which is
@@ -116,8 +178,9 @@ export function createJobSettingsStore(rootDir: string, options: JobSettingsStor
    * The file still decides everything else on every read, as section 10.7 says; these four it can
    * only NARROW. A widening is dropped and reported.
    */
-  let trusted = readFile();
+  let trusted = loadOrQuarantine();
   let reported = "";
+  if (quarantine != null) options.onQuarantine?.(quarantine);
 
   /** Both directions of the guard: what the file may still do, and what it may not. */
   function guard(fromFile: JobBusSettings): JobBusSettings {
@@ -125,6 +188,10 @@ export function createJobSettingsStore(rootDir: string, options: JobSettingsStor
     // Off wins. The file can stop a running bus; it cannot start a stopped one.
     const enabled = fromFile.enabled && trusted.enabled;
     if (fromFile.enabled && !trusted.enabled) diverged.push("enabled");
+    // Same shape, and for the same reason: a file that turns attestation optional is the file
+    // asking to be believed about work nobody checked.
+    const allowUnattested = fromFile.allowUnattested && trusted.allowUnattested;
+    if (fromFile.allowUnattested && !trusted.allowUnattested) diverged.push("allowUnattested");
     // A repository or a connector the host never held is not in the list, however it got there.
     const repos = fromFile.repos.filter((repo) => trusted.repos.includes(repo));
     if (repos.length !== fromFile.repos.length) diverged.push("repos");
@@ -146,6 +213,7 @@ export function createJobSettingsStore(rootDir: string, options: JobSettingsStor
     return {
       ...fromFile,
       enabled,
+      allowUnattested,
       repos,
       allowedConnectors,
       workers: workersDiffer ? trusted.workers : fromFile.workers,
@@ -170,8 +238,10 @@ export function createJobSettingsStore(rootDir: string, options: JobSettingsStor
         throw new GatewayCommandError(400, { error: "invalid settings", detail: `unknown field ${key}` });
       }
     }
-    if (patch.enabled !== undefined && typeof patch.enabled !== "boolean") {
-      throw new GatewayCommandError(400, { error: "invalid settings", detail: "enabled must be a boolean" });
+    for (const key of ["enabled", "allowUnattested"] as const) {
+      if (patch[key] !== undefined && typeof patch[key] !== "boolean") {
+        throw new GatewayCommandError(400, { error: "invalid settings", detail: `${key} must be a boolean` });
+      }
     }
     for (const key of ["timeoutMin", "queueTimeoutMin", "maxOpen"] as const) {
       const value = patch[key];
@@ -190,6 +260,7 @@ export function createJobSettingsStore(rootDir: string, options: JobSettingsStor
       timeoutMin: readCount(patch.timeoutMin, current.timeoutMin),
       queueTimeoutMin: readCount(patch.queueTimeoutMin, current.queueTimeoutMin),
       maxOpen: readCount(patch.maxOpen, current.maxOpen),
+      allowUnattested: patch.allowUnattested === undefined ? current.allowUnattested : patch.allowUnattested === true,
     };
     await writeFileAtomic(settingsPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
     // The command is the only sanctioned writer, so this is the only place the host's copy moves.
@@ -198,7 +269,7 @@ export function createJobSettingsStore(rootDir: string, options: JobSettingsStor
     return next;
   }
 
-  return { settingsPath, read, write };
+  return { settingsPath, read, write, quarantined: (): JobSettingsQuarantine | null => quarantine };
 }
 
 export type JobSettingsStore = ReturnType<typeof createJobSettingsStore>;

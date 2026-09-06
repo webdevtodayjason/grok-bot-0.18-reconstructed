@@ -235,7 +235,8 @@ status, worker, created, one-line result or needs-human detail) fed by `jobBusLi
 > the worker is chosen by agent rather than by the name `Scribe` alone (§10.2). The current steps are
 > in `docs/OPERATOR-RUNBOOK.md` and `deploy/coolify/README.md`.
 
-1. Set `TITAN_JOB_TOKEN` on the `titanbot` Coolify resource **or** generate one in Settings → Job bus.
+1. Set `TITAN_JOB_TOKEN` on the `titanbot` Coolify resource **or** generate one in Settings → Job bus. Either one arms the bus
+   (§10.9): the relay sends `jobBusSetSettings {enabled:true}` on its own start when the variable is set, and on the console's token routes.
 2. Make sure an agent named **Scribe** exists (or set `SAND_JOB_BUS_WORKERS`), and that the box has a GitHub
    credential (Settings → Connectors → GitHub; the `gh` shell tool) so the worker can push.
 3. Smoke from the CoS box:
@@ -354,13 +355,50 @@ sha256 of the presented token) on create. A bearer lockout on the relay (10.6) w
 
 ### 10.7 Settings, and the bus is off until the operator turns it on
 Job-bus settings live in `<sand-data>/job-bus/settings.json`, read and written by two commands, `jobBusGetSettings` →
-`{enabled, workers, repos, allowedConnectors, timeoutMin, queueTimeoutMin, maxOpen}` and `jobBusSetSettings(partial)`; the console uses these,
-not `getHostSettings`/`setHostSettings`, and the host re-reads the file on each use. `enabled` defaults to **off**: `jobBusCreate` answers
-`503 {"error":"job bus is disabled"}` until the operator turns it on in Settings → Job bus (generating or setting a token turns it on).
+`{enabled, workers, repos, allowedConnectors, timeoutMin, queueTimeoutMin, maxOpen, allowUnattested}` and `jobBusSetSettings(partial)`; the
+console uses these, not `getHostSettings`/`setHostSettings`, and the host re-reads the file on each use. `jobBusGetSettings` also answers a
+read-only `integrity` block (§10.9); `jobBusSetSettings` refuses it like any other unknown key, so a read-modify-write drops it first.
+`enabled` defaults to **off**: `jobBusCreate` answers `503 {"error":"job bus is disabled"}` until the operator turns it on in
+Settings → Job bus. Generating or setting a token turns it on, and so does starting the relay with `TITAN_JOB_TOKEN` set (§10.9).
 The `SAND_JOB_BUS_*` names in §4 are retired.
 
 ### 10.8 Gates, amended
 `verify-job-bus.mjs` also checks: 401 (not 503) when unconfigured; a job bearer on `/api/listAgents`, `/`, `/vnc/1/` and `/box/surface` is
-refused; a repo outside the allowlist → 400; unknown fields → 400; a 41-char sha in a fake result is never accepted (unit); the audit chain
-verifies; `maxOpen` → 429; the per-job clone appears during a dispatched job and is gone after it ends. `verify-deploy.mjs` keeps the port
-binding assertions when run on the server and states that it does not assert them when handed only a URL.
+refused — **401, 403 or a redirect to the login only; a 404 is a moved route, not a refusal, and fails the leg**; a repo outside the allowlist
+→ 400; unknown fields → 400; a 41-char sha in a fake result is never accepted (unit); the audit chain verifies **over the store's own hashing
+convention** (`JSON.stringify(row)` without the newline — one convention, never "either one"); `maxOpen` → 429; the per-job clone appears
+during a dispatched job and is gone after it ends. `verify-deploy.mjs` keeps the port binding assertions when run on the server and states that
+it does not assert them when handed only a URL.
+
+### 10.9 Deviations and residuals
+What this bus does that §§1–9 do not say, and what it still does not close. Written down because a residual nobody wrote down is a residual
+nobody remembers.
+
+- **The settings guard.** `GUARDED_JOB_SETTING_KEYS` = `enabled`, `workers`, `repos`, `allowedConnectors`, `allowUnattested`. The host holds
+  its own copy of these, taken at start and moved only by `jobBusSetSettings`; the file may narrow them and never widen them, and a widening
+  writes one `{event:"settings_diverged"}` audit row naming the fields (once per change of the set, not once per read).
+- **`maxOpen` is left hot.** It is re-read from the file on every create like the two clocks, so a file that raises it raises it. It bounds
+  this box's own queue, not what the bus may reach, which is why it is not guarded — a shell that can edit it can already spend the box.
+- **`allowUnattested`** (default `false`). `policy.require_attestation:false` turns both attestation layers off, so it is the operator's switch
+  and not the bearer holder's: with it false a create carrying that flag answers `400 {"error":"attestation is required"}`. It is documented on
+  the `jobBusSetSettings` command and drawn on the console card beside the arm switch.
+- **The quarantine.** The host keeps the authoritative job state in MEMORY for its lifetime and treats `jobs.json` and `settings.json` as its
+  own cache. On reload (host start) a `jobs.json` whose record set fails verification (not a job record, or a payload that no longer hashes to
+  its `payload_sha256`) or whose `audit.jsonl` chain does not verify is moved aside as `jobs.json.quarantined-<timestamp>`, the bus starts
+  disabled, and one `{event:"store_quarantined"}` row goes into the chain; `settings.json` is treated the same way and falls back to the
+  defaults, which is the bus off. An `audit.jsonl` whose byte length is not the one this host left behind is quarantined mid-run for the same
+  reason: the chain alone cannot see a file rewritten whole. A failed cache write is a failed transition plus a `{event:"store_unwritable"}`
+  row, never a silent success. The console card says which file, and `jobBusCreate` answers 503 until an operator has looked.
+- **The arming paths.** The bus is armed by three: the console's token buttons (browser), the relay's own `/job-bus/token` and
+  `/job-bus/token/generate` routes, and the relay's start when `TITAN_JOB_TOKEN` is set in the environment. That last one is the §8 deploy path
+  and it re-arms on every relay restart, which is the honest reading of the variable: the deployment says the bus is on. An operator who wants
+  it off clears the variable, or turns the switch off after the restart. Each arm is one `jobBusSetSettings {enabled:true}` and is logged.
+- **The shared-user residual.** The host and the worker agent's shell run as the same user in the box, so a shell in the box can still edit
+  `jobs.json`, `settings.json` and `audit.jsonl` BETWEEN reloads. Nothing here signs those files. What the quarantine closes is "the host
+  believed a file it never checked" and "a rewritten log looked untouched to the host that wrote it"; it does not make the volume read-only,
+  and the only real fix is a store the worker's user cannot write at all.
+- **The box-wide `GITHUB_TOKEN`.** Layer 2 asks GitHub with the box's own credential, which is the exec-daemon's environment and is therefore
+  reachable by any shell in the box, for any repository. `foreignRepoClaims` makes a job that used it elsewhere unattestable, but it cannot stop
+  the spending. Scoping a credential per job needs a GitHub App this tree does not have.
+- **The static bearer.** `/v1` is one long-lived token for every caller, compared in constant time and rotated by hand. There is no per-caller
+  identity beyond `submitter_id` (8 hex of its sha256) and no expiry, so a leaked token is a rotation, not a revocation.

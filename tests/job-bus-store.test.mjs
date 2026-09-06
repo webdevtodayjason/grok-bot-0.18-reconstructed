@@ -4,7 +4,7 @@
 // status machine, the chained append-only audit, `maxOpen`, and the 500-terminal-job cap.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -39,6 +39,10 @@ const { DEFAULT_JOB_BUS_SETTINGS, createJobSettingsStore } = settingsModule.modu
 
 const REPO = "webdevtodayjason/nextgen-training";
 const REPOS = [REPO];
+const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
+// Section 10.9: the store verifies the record set it reads back, so a hand-seeded jobs.json has to
+// carry the payload hash a real record carries. health.ping's payload is `{}`.
+const EMPTY_PAYLOAD_SHA = sha256(JSON.stringify({}));
 
 async function withStore(run, options = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-root-"));
@@ -134,11 +138,22 @@ test("every payload field is checked against its pattern, and rules_ref defaults
   assert.equal(bad({ course_slug: "-nope" }).ok, false);
   assert.equal(bad({ course_slug: "Course05" }).ok, false);
   assert.equal(bad({ course_slug: "a".repeat(82) }).ok, false);
-  assert.equal(bad({ repo: "nextgen" }).detail, "repo must be owner/name");
+  assert.equal(bad({ repo: "nextgen" }).detail, "repo must be owner/name, neither part starting with -");
   assert.equal(bad({ branch: "main; rm -rf /" }).ok, false);
   assert.equal(bad({ branch: "../main" }).ok, false);
   assert.equal(bad({ rules_ref: "../../etc/passwd" }).ok, false);
   assert.equal(bad({ rules_ref: "/etc/passwd" }).ok, false);
+  // Section 10.9. `branch`, `rules_ref` and both halves of `repo` reach a command line in the
+  // prompt's step 1 and step 4, and an argument that starts with a dash is an OPTION to git, to gh
+  // and to `wc`: `--upload-pack=...`, `--output=...`. The patterns admit no quote, space or
+  // newline, so the dash was the one character left that changed what a command does.
+  assert.equal(bad({ branch: "--upload-pack=touch /tmp/pwned" }).ok, false);
+  assert.equal(bad({ branch: "-main" }).ok, false);
+  assert.equal(bad({ rules_ref: "-rf" }).ok, false);
+  assert.equal(bad({ repo: "-x/nextgen-training" }).ok, false);
+  assert.equal(bad({ repo: "webdevtodayjason/-evil" }).ok, false);
+  // A dash anywhere but the front is ordinary, and the allowlisted repo has one.
+  assert.equal(validateJobPayload("nextgen.chapter", { ...chapterPayload, branch: "feature/a-b" }, REPOS).ok, true);
   const good = validateJobPayload("nextgen.chapter", chapterPayload, REPOS);
   assert.equal(good.ok, true);
   assert.equal(good.payload.rules_ref, "EXTERNAL-BOT-HANDOFF.md");
@@ -157,6 +172,9 @@ test("a repo outside the allowlist is refused even when it is well formed", asyn
   });
 });
 
+// What this proves is the STORE's refusal, over the gateway args object. The other half -- that a
+// body posted to /v1 arrives at the store with its unknown field still on it -- is HTTP, and it is
+// proved as HTTP in tests/relay-job-bus.test.mjs against this same store rather than a fake.
 test("an unknown field in the body, the payload or the policy is a 400 that names it", async () => {
   await withStore(async ({ store }) => {
     const refuses = async (request, detail) => {
@@ -205,16 +223,45 @@ test("a body over 8 KB is refused at the gateway", async () => {
   });
 });
 
-test("policy defaults to the three the contract prints, and an explicit false is kept", async () => {
+test("policy defaults to the three the contract prints", async () => {
   assert.deepEqual(validateJobPolicy(undefined).policy, { no_final_assessment: true, no_placeholder: true, require_attestation: true });
   await withStore(async ({ store }) => {
     const plain = await store.create({ type: "nextgen.chapter", idempotency_key: "k1", payload: chapterPayload });
     assert.deepEqual(plain.job.policy, { no_final_assessment: true, no_placeholder: true, require_attestation: true });
+  });
+});
+
+// Section 10.9. `require_attestation:false` turns off both attestation layers, and it used to be
+// the bearer holder's to set: anyone who could post a job could have the bus mark it done on the
+// model's unchecked word. It is now the operator's, and it lives in the settings file.
+test("require_attestation:false is refused unless the operator allowed it on the box", async () => {
+  assert.equal(validateJobPolicy({ require_attestation: false }).ok, false);
+  assert.equal(validateJobPolicy({ require_attestation: false }).detail, "attestation is required");
+  assert.equal(validateJobPolicy({ require_attestation: false }, { allowUnattested: true }).ok, true);
+  await withStore(async ({ store }) => {
+    await assert.rejects(
+      store.create({
+        type: "nextgen.chapter", idempotency_key: "k1", payload: chapterPayload,
+        policy: { require_attestation: false },
+      }),
+      (error) => error.status === 400 && error.body.error === "attestation is required",
+    );
+    // The other two policy flags are still the submitter's to set: they narrow the work, they do
+    // not turn the checking off.
+    const narrowed = await store.create({
+      type: "nextgen.chapter", idempotency_key: "k2", payload: chapterPayload,
+      policy: { no_final_assessment: false },
+    });
+    assert.equal(narrowed.job.policy.no_final_assessment, false);
+    assert.equal(narrowed.job.policy.require_attestation, true);
+  });
+  await withStore(async ({ store }) => {
     const relaxed = await store.create({
-      type: "nextgen.chapter", idempotency_key: "k2", payload: chapterPayload, policy: { require_attestation: false },
+      type: "nextgen.chapter", idempotency_key: "k1", payload: chapterPayload,
+      policy: { require_attestation: false },
     });
     assert.equal(relaxed.job.policy.require_attestation, false);
-  });
+  }, { settings: { allowUnattested: true } });
 });
 
 // ---- section 10.3 -------------------------------------------------------------------------------
@@ -371,7 +418,7 @@ test("jobs.json keeps the newest 500 terminal jobs and never drops a live one", 
       seeded.push({
         id: `job_terminal_${index}`, type: "health.ping", status: "done", idempotency_key: `t${index}`,
         payload: {}, policy: {}, callback_url: null, submitter: "cos", submitter_id: "", client: "",
-        payload_sha256: "", created_at: "2026-09-05T00:00:00.000Z", updated_at: "2026-09-05T00:00:00.000Z",
+        payload_sha256: EMPTY_PAYLOAD_SHA, created_at: "2026-09-05T00:00:00.000Z", updated_at: "2026-09-05T00:00:00.000Z",
         started_at: null, finished_at: null, worker: null, events: [], result: null, error: null, needs_human: null,
       });
     }
@@ -449,10 +496,13 @@ test("the bus is off until the operator turns it on, and the file is re-read eve
       (error) => error.status === 400 && error.body.detail === "unknown field nope",
     );
     await assert.rejects(settings.write({ enabled: "yes" }), (error) => error.status === 400);
+    await assert.rejects(settings.write({ allowUnattested: "yes" }), (error) => error.status === 400);
     await assert.rejects(settings.write({ maxOpen: 0 }), (error) => error.status === 400);
-    // A file that is not JSON at all is the defaults, never a thrown command.
+    // A file that is not JSON at all is the defaults, never a thrown command. On a running host
+    // that means the bus goes off, because `enabled` can only be narrowed by the file.
     await writeFile(path.join(root, "job-bus", "settings.json"), "{ not json");
-    assert.deepEqual(settings.read(), DEFAULT_JOB_BUS_SETTINGS);
+    assert.equal(settings.read().enabled, false);
+    assert.equal(settings.read().maxOpen, DEFAULT_JOB_BUS_SETTINGS.maxOpen);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -512,3 +562,202 @@ test("the settings file can narrow what the bus may do, and can never widen it",
 });
 
 test.after(async () => { await storeModule.dispose(); await settingsModule.dispose(); });
+
+// ---- section 10.9: the files are a cache, and the host checks them --------------------------
+
+/** A jobs.json with one believable record in it, written by hand the way a restart would read. */
+function seededJob(patch = {}) {
+  return {
+    id: "job_seeded", type: "health.ping", status: "done", idempotency_key: "seed",
+    payload: {}, policy: {}, callback_url: null, submitter: "cos", submitter_id: "", client: "",
+    payload_sha256: EMPTY_PAYLOAD_SHA, created_at: "2026-09-05T00:00:00.000Z",
+    updated_at: "2026-09-05T00:00:00.000Z", started_at: null, finished_at: null, worker: null,
+    events: [], result: null, error: null, needs_human: null, ...patch,
+  };
+}
+
+async function withSeededRoot(run) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-quarantine-"));
+  const directory = path.join(root, "job-bus");
+  await mkdir(directory, { recursive: true });
+  try { await run({ root, directory }); }
+  finally { await rm(root, { recursive: true, force: true }); }
+}
+
+const openStore = (root) => createJobStore({
+  rootDir: root,
+  readSettings: () => ({ ...DEFAULT_JOB_BUS_SETTINGS, enabled: true, maxOpen: 100 }),
+});
+
+test("a jobs.json whose record set does not verify is quarantined and the bus starts disabled", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    // The payload was edited on the volume; its hash was not, and cannot be without the host.
+    const tampered = seededJob({ payload: { course_slug: "somebody-elses-course" } });
+    await writeFile(path.join(directory, "jobs.json"), JSON.stringify({ jobs: [tampered] }));
+    const store = openStore(root);
+    const integrity = await store.integrity();
+    assert.equal(integrity.ok, false);
+    assert.match(integrity.detail, /payload hash/);
+    assert.equal((await store.snapshot()).length, 0, "a quarantined store starts empty");
+    const moved = (await readdir(directory)).filter((name) => name.startsWith("jobs.json.quarantined-"));
+    assert.equal(moved.length, 1, `jobs.json was moved aside: ${moved.join(", ")}`);
+    assert.equal((await readdir(directory)).includes("jobs.json"), false);
+    // The event is in the same hash chain as everything else the bus did.
+    const rows = (await readFile(path.join(directory, "audit.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(rows.at(-1).event, "store_quarantined");
+    assert.equal(rows.at(-1).ok, false);
+    assert.equal(verifyJobAuditChain(rows.map((row) => JSON.stringify(row))).ok, true);
+  });
+});
+
+test("a jobs.json that is not JSON at all is quarantined the same way; an absent one is not", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    await writeFile(path.join(directory, "jobs.json"), "not json, not even close");
+    const store = openStore(root);
+    assert.equal((await store.integrity()).ok, false);
+    assert.equal((await readdir(directory)).some((name) => name.startsWith("jobs.json.quarantined-")), true);
+  });
+  // A box that has never run a job has no jobs.json, and that is a first start, not a tamper.
+  await withSeededRoot(async ({ root, directory }) => {
+    const store = openStore(root);
+    assert.equal((await store.integrity()).ok, true);
+    assert.equal((await readdir(directory)).some((name) => name.startsWith("jobs.json.quarantined-")), false);
+  });
+});
+
+test("a broken audit chain quarantines the job store too, because the receipt is what jobs.json is checked against", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    await writeFile(path.join(directory, "jobs.json"), JSON.stringify({ jobs: [seededJob()] }));
+    // Two rows whose `prev` does not chain: the second was edited after it was written.
+    const row = (seq, prev, eventId) => JSON.stringify({
+      seq, prev, at: "2026-09-05T00:00:00.000Z", event: "queued", jobId: "job_seeded", type: "health.ping",
+      submitter: "cos", submitter_id: "", client: "", idempotency_key: "seed", payload_sha256: EMPTY_PAYLOAD_SHA,
+      policy_version: "v1", worker: null, ok: true, eventId,
+    });
+    await writeFile(path.join(directory, "audit.jsonl"), `${row(1, "", "aa")}\n${row(2, "0".repeat(64), "bb")}\n`);
+    const store = openStore(root);
+    const integrity = await store.integrity();
+    assert.equal(integrity.ok, false);
+    assert.match(integrity.detail, /audit chain breaks at row 2/);
+    assert.equal((await store.snapshot()).length, 0);
+  });
+});
+
+test("audit.jsonl rewritten under the host is caught by the length the host remembers", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    const store = openStore(root);
+    const first = await store.create({ type: "health.ping", idempotency_key: "k1", payload: {} });
+    const before = (await readFile(path.join(directory, "audit.jsonl"), "utf8")).trim().split("\n");
+    assert.equal(before.length, 1);
+    // A whole-file rewrite: consistent rows, consistent hashes. The chain alone verifies it, which
+    // is exactly the hole -- the log lives on the volume the worker's own shell can write.
+    const forged = JSON.stringify({
+      ...JSON.parse(before[0]), jobId: "job_somebody_elses", idempotency_key: "not-what-happened",
+    });
+    await writeFile(path.join(directory, "audit.jsonl"), `${forged}\n`);
+    assert.equal(verifyJobAuditChain([forged]).ok, true, "the forged file passes the chain check");
+    // The host has been extending this file and knows what it left behind.
+    await store.transition(first.job.id, "cancelled");
+    const rows = (await readFile(path.join(directory, "audit.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(rows[0].event, "store_quarantined", "the fresh chain opens with the break");
+    assert.match(String(rows[0].unsupported_claims?.[0] ?? ""), /audit\.jsonl changed under the host/);
+    assert.equal((await readdir(directory)).some((name) => name.startsWith("audit.jsonl.quarantined-")), true);
+  });
+});
+
+test("a store that cannot be written fails the transition and says so in the audit", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    const store = openStore(root);
+    const created = await store.create({ type: "health.ping", idempotency_key: "k1", payload: {} });
+    // jobs.json is replaced by a directory, so every later write of it throws. A swallowed error
+    // here is how a queued job gets dispatched twice: the host believes a dispatch it never wrote.
+    await rm(path.join(directory, "jobs.json"));
+    await mkdir(path.join(directory, "jobs.json"));
+    await assert.rejects(
+      store.transition(created.job.id, "running"),
+      (error) => error.status === 503 && error.body.error === "the job store could not be written",
+    );
+    const rows = (await readFile(path.join(directory, "audit.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(rows.at(-1).event, "store_unwritable");
+    assert.equal(rows.at(-1).jobId, created.job.id);
+    assert.equal(verifyJobAuditChain(rows.map((row) => JSON.stringify(row))).ok, true);
+  });
+});
+
+test("a replay of a pruned key answers with the created_at the job really had", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-retired-"));
+  try {
+    const seeded = [];
+    for (let index = 0; index < TERMINAL_JOB_CAP + 1; index += 1) {
+      seeded.push(seededJob({
+        id: `job_terminal_${index}`, idempotency_key: `t${index}`,
+        created_at: `2026-09-05T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      }));
+    }
+    await mkdir(path.join(root, "job-bus"), { recursive: true });
+    await writeFile(path.join(root, "job-bus", "jobs.json"), JSON.stringify({ jobs: seeded }));
+    const store = openStore(root);
+    await store.create({ type: "health.ping", idempotency_key: "fresh", payload: {} });
+    const replay = await store.create({ type: "health.ping", idempotency_key: "t0", payload: {} });
+    assert.equal(replay.created, false);
+    assert.equal(replay.job.id, "job_terminal_0");
+    // The create answer is four fields and this is one of them: "" told CoS the job it already had
+    // was made at no time at all.
+    assert.equal(replay.job.created_at, "2026-09-05T00:00:00.000Z");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("settings.json is quarantined at start when it is there and cannot be believed", async () => {
+  // Section 10.9's other half. The file sits on the volume the worker's own shell can write, so the
+  // host checks it before it believes it -- and a file that is unreadable at START is not the same
+  // as one that is absent, which is an ordinary first boot.
+  const root = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-settings-quarantine-"));
+  try {
+    const directory = path.join(root, "job-bus");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "settings.json"), "{ enabled: true, but not JSON");
+    const seen = [];
+    const settings = createJobSettingsStore(root, { onQuarantine: (record) => seen.push(record) });
+    assert.equal(seen.length, 1);
+    assert.equal(settings.quarantined()?.movedTo, seen[0].movedTo);
+    assert.match(seen[0].detail, /not JSON/);
+    // The defaults, which means the bus is OFF.
+    assert.equal(settings.read().enabled, false);
+    assert.equal(settings.read().allowUnattested, false);
+    const moved = (await readdir(directory)).filter((name) => name.startsWith("settings.json.quarantined-"));
+    assert.equal(moved.length, 1, `settings.json was moved aside: ${moved.join(", ")}`);
+    assert.equal((await readdir(directory)).includes("settings.json"), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+
+  // An absent file quarantines nothing and reports nothing.
+  const fresh = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-settings-fresh-"));
+  try {
+    const seen = [];
+    const settings = createJobSettingsStore(fresh, { onQuarantine: (record) => seen.push(record) });
+    assert.deepEqual(seen, []);
+    assert.equal(settings.quarantined(), null);
+    assert.deepEqual(settings.read(), DEFAULT_JOB_BUS_SETTINGS);
+  } finally { await rm(fresh, { recursive: true, force: true }); }
+});
+
+test("allowUnattested is guarded like enabled: the file may turn it off, never on", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-unattested-"));
+  const diverged = [];
+  try {
+    const settings = createJobSettingsStore(root, { onDivergence: (fields) => diverged.push(fields) });
+    await settings.write({ enabled: true, allowUnattested: false });
+    const file = path.join(root, "job-bus", "settings.json");
+    // A shell in the box turning the attestation off would be the whole point of turning it off.
+    await writeFile(file, JSON.stringify({ ...settings.read(), allowUnattested: true }));
+    assert.equal(settings.read().allowUnattested, false);
+    assert.deepEqual(diverged.at(-1), ["allowUnattested"]);
+    // The operator's own command moves it, and then the file agrees with the host.
+    await settings.write({ allowUnattested: true });
+    assert.equal(settings.read().allowUnattested, true);
+    // And the file can still narrow it back off without a divergence row.
+    const rows = diverged.length;
+    await writeFile(file, JSON.stringify({ ...settings.read(), allowUnattested: false }));
+    assert.equal(settings.read().allowUnattested, false);
+    assert.equal(diverged.length, rows);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
