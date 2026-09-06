@@ -73,6 +73,12 @@ export interface ProductionBoxProviderOptions<
    * accessor instead of attempting /usr/local/bin/start-window.
    */
   readonly sharedDesktop?: boolean;
+  /**
+   * ENV-1. The environment a newly started per-window exec daemon has to be given before the
+   * window is handed back -- the stored shell credentials, read at that moment. Supplied by the
+   * forever-box extension, which is the layer that can see the sand data root.
+   */
+  readonly storedEnvironment?: () => BoxEnvironmentUpdate | undefined;
 }
 
 export type ProductionBoxInner = HostBoxInner & {
@@ -165,6 +171,7 @@ export function createProductionBoxInner<
     ...(options.authToken === undefined ? {} : { authToken: options.authToken }),
     telemetry: options.telemetry,
     protectedBoxPaths: options.protectedBoxPaths,
+    ...(options.storedEnvironment === undefined ? {} : { storedEnvironment: options.storedEnvironment }),
     operations: {
       async ping(ctx, endpoint): Promise<PingResult> {
         const result = await pingBoxTransportClassified(

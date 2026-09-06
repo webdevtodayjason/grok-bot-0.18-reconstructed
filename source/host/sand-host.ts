@@ -592,12 +592,14 @@ export class SandHost {
         if (!isShellEnvSecretField(args.field)) return null;
         const rootDir = getSandRootDir();
         if (!writeShellEnvSecret(rootDir, args.field, args.value)) return null;
-        const applied = await pushShellEnvSecretsToBox(
+        const push = await pushShellEnvSecretsToBox(
           rootDir,
           extensions.api("forever-box").box,
           SHELL_SECRET_CONTEXT
         );
-        return { field: args.field, stored: true, applied };
+        // ENV-1: `applied` is every exec daemon on the box, the per-window ones included, because
+        // the agent that raised the card may be the one running its shells through a window.
+        return { field: args.field, stored: true, applied: push.applied, pendingWindows: [...push.pendingWindows] };
       }
     );
     void optionalMethod(

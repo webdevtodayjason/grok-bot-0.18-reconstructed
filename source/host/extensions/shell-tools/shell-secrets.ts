@@ -115,24 +115,45 @@ export function buildShellSecretEnvironmentUpdate(
 }
 
 /**
+ * ENV-1. What a push reached. `applied` is EVERY exec daemon on the box taking the update -- the
+ * primary one and the per-window one behind each open desktop -- and `pendingWindows` names the
+ * windows that did not, because an agent with its own window runs every shell through that
+ * window's daemon and a push the primary took is no claim about that shell.
+ */
+export interface ShellSecretPushResult { readonly applied: boolean; readonly pendingWindows: readonly string[] }
+
+/**
+ * A box whose transport answers nothing has one endpoint and took the update: that is the shape
+ * every environment transport had before the fan-out, and a push that did not throw was applied.
+ */
+export function readShellSecretPushResult(value: unknown): ShellSecretPushResult {
+  if (typeof value === "object" && value !== null) {
+    const applied = Reflect.get(value, "applied"), pending = Reflect.get(value, "pendingWindows");
+    if (typeof applied === "boolean") {
+      return { applied, pendingWindows: Array.isArray(pending) ? pending.filter((entry): entry is string => typeof entry === "string") : [] };
+    }
+  }
+  return { applied: true, pendingWindows: [] };
+}
+
+/**
  * The push half, shared by every writer: the gateway's setShellSecret/deleteShellSecret and the
  * secret-request route that answers an agent's inline card. One function because "stored" and
  * "the live box has it" are two different claims, and both callers have to report the second one
  * honestly. A box that is not up yet is not a failure -- HostBox.ensureReady re-pushes the store
- * on the next bring-up, which is before any shell can run -- so this answers false rather than
- * throwing, and the caller says "stored, not yet applied".
+ * on the next bring-up, which is before any shell can run -- so this answers applied:false rather
+ * than throwing, and the caller says "stored, not yet applied".
  */
 export async function pushShellEnvSecretsToBox(
   rootDir: string,
   box: { applyEnvironment?: (ctx: unknown, update: ShellSecretEnvironmentUpdate) => Promise<unknown> } | null | undefined,
   ctx: unknown,
   clearing: readonly string[] = [],
-): Promise<boolean> {
+): Promise<ShellSecretPushResult> {
   try {
-    if (box == null || typeof box.applyEnvironment !== "function") return false;
-    await box.applyEnvironment(ctx, buildShellSecretEnvironmentUpdate(rootDir, clearing));
-    return true;
+    if (box == null || typeof box.applyEnvironment !== "function") return { applied: false, pendingWindows: [] };
+    return readShellSecretPushResult(await box.applyEnvironment(ctx, buildShellSecretEnvironmentUpdate(rootDir, clearing)));
   } catch {
-    return false;
+    return { applied: false, pendingWindows: [] };
   }
 }

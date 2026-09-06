@@ -977,6 +977,14 @@ const server = createServer(async (req, res) => {
           if (typeof config.command !== "string" || config.command.length === 0) {
             return fail(res, 400, `${name}: stdio connectors need a "command"`);
           }
+          // SECRET-2. "shell" is the reserved destination a secret card names to mean the agent's
+          // own box shell, so routeSecret returns on it before any connector is consulted: a
+          // connector under that name could never be given a key from a card. Refused here rather
+          // than written and silently bypassed. A POST that simply omits it still passes, so an
+          // entry already in the file can always be removed.
+          if (name.trim().toLowerCase() === "shell") {
+            return fail(res, 400, `${name}: "shell" is reserved for the agent's own box shell environment, so a connector cannot use it. Rename it (for example shell-mcp) and save again.`);
+          }
         }
         await writeConnectors({ mcpServers: servers });
         return sendJson({ saved: Object.keys(servers), restartRequired: true });

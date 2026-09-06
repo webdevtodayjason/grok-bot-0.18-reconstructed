@@ -26,6 +26,8 @@ import { getSandRootDir } from "../../host-paths.js";
 import {
   assignLocalConnectorIds,
   LOCAL_CONNECTORS_FILENAME,
+  listRefusedLocalConnectors,
+  localConnectorIdForName,
   mergeLocalConnectors,
   readLocalConnectorFile,
 } from "./local-connectors.js";
@@ -181,7 +183,17 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
     } catch (error) { log(`connector restart failed for ${name}: ${error instanceof Error ? error.name : typeof error}`); return false; }
   };
   const management = {
-    listInstalled: async () => toInstalledServers(await manager.listServers()),
+    // SECRET-2: a connectors.json entry this host refuses to run appears here with the reason,
+    // rather than vanishing from the listing and leaving the operator to guess why their connector
+    // never turned up. It carries no tools and can never connect: refused is its whole story.
+    listInstalled: async () => [
+      ...toInstalledServers(await manager.listServers()),
+      ...listRefusedLocalConnectors(localConnectorRoot()).map(({ name, reason }) => ({
+        id: String(localConnectorIdForName(name)), name, serverIdentifier: name, accountKey: null,
+        isTeamServer: false, status: "refused", statusDetail: reason, transport: "stdio",
+        toolCount: 0, customInstructions: null,
+      })),
+    ],
     // MARKET-1. The plugin surface is the local Marketplace catalog, not Cursor's marketplace:
     // `readCatalog` still exists for the Cursor-attributed servers below, but nothing the agent
     // searches, installs or uninstalls goes through it any more. See marketplace-plugins.ts.

@@ -42,6 +42,14 @@
 //              box shell the agent's shell tool spawns. Off by default: --shell-secrets. It does
 //              NOT run either installer; the catalog is read, not executed.
 //
+//   ENV-1 / GATE-11  BOTH shells, in (m) and (m2). The box runs one exec daemon per open desktop
+//              window, each with its own environment, and an agent that has a window runs every
+//              command through its own. Every probe this gate made went through the PRIMARY
+//              daemon, so it stayed green while "Chief of staff" on display :4 read 0 characters
+//              from a variable setShellSecret had just reported applied. Both legs now open a
+//              probe agent with a window of its own and probe it with `agentId`, and (m2) also
+//              holds the submitted value out of the host log.
+//
 // SECRET-1 gives this gate GATE-8's three exit codes, for GATE-8's reason: (m2) asks a MODEL to
 // raise the inline credential card, and a model that does not raise it in time is neither a pass
 // nor a failure. Left out of the status, exit 0 would mean two different things.
@@ -788,6 +796,11 @@ async function runStdioTokenArm(arm) {
 let shellSecretSet = false;
 let shellStoreSnapshot = null;
 let shellStoreSnapshotTaken = false;
+// GATE-11: (m)'s second shell. An agent with its own desktop window runs every command through
+// that window's exec daemon, which holds its own environment, so a probe that only ever asked the
+// primary daemon proved a shell no agent with a window uses. This agent has one; deleting it
+// releases the window, which is why it carries its own unwind.
+let shellWindowAgentId = null;
 // SECRET-1: the inline-card leg's own unwind. It runs after (m)'s store restore and takes its own
 // snapshot, so it carries its own three.
 let inlineSecretSet = false;
@@ -1379,6 +1392,25 @@ try {
     }
     ok(`before anything is stored, the box's own shell reports ${SHELL_FIELD} unset`);
 
+    // GATE-11. The primary daemon is not the shell an agent with a desktop window runs. This probe
+    // agent is given one the way the console gives every agent one -- ensureForeverBox, which is
+    // what verify-windows drives -- and every claim below is then made about BOTH shells.
+    const windowAgent = await call("createAgent", { name: `verify-window-${Math.random().toString(36).slice(2, 8)}`, description: "", origin: "user", isKickstartRequested: false });
+    shellWindowAgentId = windowAgent?.agent?.id ?? windowAgent?.id;
+    if (shellWindowAgentId == null) fail("createAgent returned no agent id for the windowed-shell leg");
+    const windowStatus = await call("ensureForeverBox", { id: shellWindowAgentId });
+    const beforeWindow = await call("probeShellSecret", { field: SHELL_FIELD, agentId: shellWindowAgentId });
+    if (beforeWindow?.shell !== `agent:${shellWindowAgentId}`) {
+      fail(`probeShellSecret with an agentId answered about ${JSON.stringify(beforeWindow?.shell)}, not that agent's own shell`);
+    }
+    if (!(Number(beforeWindow?.windowIndex) >= 2)) {
+      fail(`the probe agent holds window ${JSON.stringify(beforeWindow?.windowIndex)}, so it shares the primary shell and this leg would prove nothing`);
+    }
+    if (beforeWindow?.state !== "unset") {
+      fail(`the windowed agent's own shell already reports ${SHELL_FIELD} ${beforeWindow?.state}`);
+    }
+    ok(`a probe agent holds display :${beforeWindow.windowIndex} of its own, and ITS shell reports ${SHELL_FIELD} unset too (box ${windowStatus?.state})`);
+
     // Invented here and nowhere else: this is not, and must never be, a real CodeRabbit key.
     const SHELL_KEY = `cr-verify-${Math.random().toString(36).slice(2, 12)}`;
     console.log(`  probe value: ${SHELL_KEY.length} characters (never printed)`);
@@ -1394,7 +1426,18 @@ try {
     const probedShell = await call("probeShellSecret", { field: SHELL_FIELD });
     if (probedShell?.state !== "set") fail(`the box shell reports ${SHELL_FIELD} ${probedShell?.state} after it was stored`);
     if (JSON.stringify(probedShell).includes(SHELL_KEY)) fail("probeShellSecret answered with the value");
+    if (probedShell?.shell !== "primary") fail(`probeShellSecret without an agentId answered about ${JSON.stringify(probedShell?.shell)}`);
     ok(`the box shell reports ${SHELL_FIELD} set, and says nothing about its value`);
+
+    // ENV-1, the claim the old gate never made: the shell the AGENT runs has it too. Before the
+    // fan-out this probe answered "unset" while the one above answered "set", which is exactly
+    // what "Chief of staff" measured with `printenv VERIFY_ENV_3 | wc -c` on display :4.
+    const probedWindow = await call("probeShellSecret", { field: SHELL_FIELD, agentId: shellWindowAgentId });
+    if (probedWindow?.state !== "set") {
+      fail(`the windowed agent's own shell (display :${probedWindow?.windowIndex}) reports ${SHELL_FIELD} ${probedWindow?.state} after it was stored`);
+    }
+    if (JSON.stringify(probedWindow).includes(SHELL_KEY)) fail("the windowed probe answered with the value");
+    ok(`and the agent's OWN shell on display :${probedWindow.windowIndex} reports ${SHELL_FIELD} set as well`);
 
     const shellControl = await callRaw("setShellSecret", { field: "NODE_OPTIONS", value: "cr-verify-control" });
     if (shellControl.ok) fail("setShellSecret accepted NODE_OPTIONS as a field name");
@@ -1418,7 +1461,9 @@ try {
     if ((removedShell?.stored ?? []).includes(SHELL_FIELD)) fail("the store still lists the field after the delete");
     const afterShell = await call("probeShellSecret", { field: SHELL_FIELD });
     if (afterShell?.state !== "unset") fail(`the box shell still reports ${SHELL_FIELD} ${afterShell?.state} after the delete`);
-    ok(`after the delete the box shell reports ${SHELL_FIELD} unset again`);
+    const afterWindow = await call("probeShellSecret", { field: SHELL_FIELD, agentId: shellWindowAgentId });
+    if (afterWindow?.state !== "unset") fail(`the windowed agent's shell still reports ${SHELL_FIELD} ${afterWindow?.state} after the delete`);
+    ok(`after the delete both shells -- the primary and display :${afterWindow.windowIndex} -- report ${SHELL_FIELD} unset again`);
 
     const shellSurvivors = (await inBox(`grep -rl -- ${SHELL_KEY} ${DATA} 2>/dev/null || true`)).trim();
     if (shellSurvivors.length > 0) fail(`the value survives the delete in: ${shellSurvivors}`);
@@ -1435,6 +1480,12 @@ try {
     // plane can set, it cannot unset), so the name itself outlives this arm in the box shell's
     // environment until the box restarts. That is a name with nothing in it, not a credential.
     ok(`the value is gone from ${DATA} and the store is byte-identical to the file this arm found; ${SHELL_FIELD} stays in the box shell as an empty name until the box restarts`);
+
+    // The window is released by deleting the agent that holds it, which is the only door the
+    // console has; verify-windows asserts the same teardown, and it runs after this gate.
+    await call("deleteAgents", { ids: [shellWindowAgentId] });
+    shellWindowAgentId = null;
+    ok("the windowed probe agent is deleted, so its display goes back to the pool");
 
     // ------------------------------------------------ SECRET-1: the same store, asked for INLINE
     //
@@ -1465,6 +1516,19 @@ try {
     const inlineCreated = await call("createAgent", { name: `verify-secret-${Math.random().toString(36).slice(2, 8)}` });
     inlineAgentId = inlineCreated?.agent?.id ?? inlineCreated?.id;
     if (inlineAgentId == null) fail("createAgent returned no agent id for the inline-card leg");
+
+    // GATE-11: the agent that raises the card gets a desktop window of its own, so the shell this
+    // leg then asks is the one that agent's own commands run in -- not the primary daemon, which
+    // is the shell no windowed agent ever touches.
+    await call("ensureForeverBox", { id: inlineAgentId });
+    const inlineWindowBefore = await call("probeShellSecret", { field: INLINE_FIELD, agentId: inlineAgentId });
+    if (!(Number(inlineWindowBefore?.windowIndex) >= 2)) {
+      fail(`the inline probe agent holds window ${JSON.stringify(inlineWindowBefore?.windowIndex)}, so its shell is the primary one and this leg would prove nothing`);
+    }
+    if (inlineWindowBefore?.state !== "unset") {
+      fail(`the inline agent's own shell already reports ${INLINE_FIELD} ${inlineWindowBefore?.state}`);
+    }
+    ok(`the inline probe agent holds display :${inlineWindowBefore.windowIndex}, and ITS shell reports ${INLINE_FIELD} unset`);
 
     await call("sendPrompt", {
       agentId: inlineAgentId,
@@ -1534,13 +1598,21 @@ try {
         fail(`the box shell reports ${INLINE_FIELD} ${inlineProbed?.state} after the card was answered`);
       }
       if (JSON.stringify(inlineProbed).includes(INLINE_VALUE)) fail("probeShellSecret answered with the value");
+      // The shell the asking agent actually runs in. This is the leg the fan-out exists for: the
+      // agent asked for a variable its own commands would read, and this is the only probe that
+      // says whether they can.
+      const inlineWindowProbed = await call("probeShellSecret", { field: INLINE_FIELD, agentId: inlineAgentId });
+      if (inlineWindowProbed?.state !== "set") {
+        fail(`the asking agent's own shell (display :${inlineWindowProbed?.windowIndex}) reports ${INLINE_FIELD} ${inlineWindowProbed?.state} after the card was answered`);
+      }
+      if (JSON.stringify(inlineWindowProbed).includes(INLINE_VALUE)) fail("the windowed probe answered with the value");
       const storedDigest = (await docker(["exec", BOX, "node", "-e",
         `const v=(JSON.parse(require('fs').readFileSync(${JSON.stringify(SECRET_STORE)},'utf8')).shell||{})[${JSON.stringify(INLINE_FIELD)}];process.stdout.write(v==null?'absent':require('crypto').createHash('sha256').update(v).digest('hex'))`,
       ])).trim();
       if (storedDigest !== inlineDigest) {
         fail(`the store holds ${storedDigest === "absent" ? "nothing" : "a different value"} under ${INLINE_FIELD}: sha256 ${storedDigest.slice(0, 16)}… against the submitted ${inlineDigest.slice(0, 16)}…`);
       }
-      ok(`the box shell reports ${INLINE_FIELD} set and the store's sha256 matches the value submitted through the card (${inlineDigest.slice(0, 16)}…)`);
+      ok(`both shells -- the primary and the asking agent's display :${inlineWindowProbed.windowIndex} -- report ${INLINE_FIELD} set, and the store's sha256 matches the value submitted through the card (${inlineDigest.slice(0, 16)}…)`);
 
       // The ack the model was resumed with has to name the variable. It is a hidden prompt, so the
       // transcript is not where it shows; what this can check is that the value is in no entry.
@@ -1548,7 +1620,13 @@ try {
       if (JSON.stringify(finalTranscript).includes(INLINE_VALUE)) {
         fail("the submitted value is somewhere in the agent's transcript");
       }
-      ok("and the value is in no transcript entry of the agent that asked for it");
+      // The check (m) makes of the operator door and this leg did not: a value that reached the
+      // host log is a value in a file the agent can read and an operator can page through. The
+      // route runs through three modules that log (the sink, routeSecret, the box push), so it is
+      // asked of the log itself rather than reasoned about.
+      const inlineLogHit = (await inBox(`grep -c -- ${INLINE_VALUE} /tmp/sand-host.log 2>/dev/null | head -1`)).trim();
+      if (inlineLogHit !== "" && inlineLogHit !== "0") fail(`the host log contains the submitted value ${inlineLogHit} time(s)`);
+      ok("and the value is in no transcript entry of the agent that asked for it, and in no line of the host log");
 
       const inlineRemoved = await call("deleteShellSecret", { field: INLINE_FIELD });
       inlineSecretSet = inlineRemoved?.removed !== true;
@@ -1891,6 +1969,11 @@ try {
   try {
     if (shellSecretSet) await callRaw("deleteShellSecret", { field: SHELL_FIELD });
   } catch (error) { console.error(`cleanup: shell secret — ${error.message}`); }
+  // GATE-11: the windowed probe agent holds a display until it is deleted, so a run that died
+  // mid-leg must not leave one up. verify-windows fails on exactly that.
+  try {
+    if (shellWindowAgentId != null) await callRaw("deleteAgents", { ids: [shellWindowAgentId] });
+  } catch (error) { console.error(`cleanup: windowed probe agent: ${error.message}`); }
   try {
     if (shellStoreSnapshotTaken) await restoreSecretStoreBase64(shellStoreSnapshot);
   } catch (error) { console.error(`cleanup: secret store — ${error.message}`); }

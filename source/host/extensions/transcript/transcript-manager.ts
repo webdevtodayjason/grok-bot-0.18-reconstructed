@@ -181,7 +181,7 @@ export class TranscriptManager {
   // AGENT'S OWN box shell environment, which is what the reserved connector name "shell" means.
   // `applied` is the live box taking the update, which is a different claim from `stored`.
   shellSecretSink:
-    | ((args: { field: string; value: string }) => Promise<{ field: string; stored: boolean; applied: boolean } | null>)
+    | ((args: { field: string; value: string }) => Promise<{ field: string; stored: boolean; applied: boolean; pendingWindows?: readonly string[] } | null>)
     | undefined;
   automationConfigChanged: (() => unknown) | undefined;
   shouldEmitAutomations = () => true;

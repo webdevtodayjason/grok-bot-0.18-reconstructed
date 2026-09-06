@@ -118,10 +118,23 @@ is stored anywhere and the agent is told the request went unanswered. The rule l
 `source/host/extensions/shell-tools/shell-secret-field.ts` and is the same one the console's
 `setShellSecret` enforces.
 
-The gate is `scripts/verify-connector-plane.mjs --shell-secrets`, leg (m2): a probe agent is asked
-to raise the card, the value is submitted through `submitSecret` the way the console does, and the
-box's own shell is then asked whether it has the variable, with the store's sha256 compared against
-what was submitted, so the leg proves the same value arrived without printing it.
+**The box has more than one shell, and the value goes to all of them.** An agent with its own
+desktop window runs every command through that window's exec daemon, and each daemon holds its own
+environment: a push that only reached the box's primary daemon left the agent's `printenv` reading
+nothing while the console reported the key applied (ENV-1). So `setShellSecret`, `deleteShellSecret`
+and the card's own route push the update to the primary daemon **and to every open window**, and
+answer `applied: true` only when all of them took it; a window that did not is named in
+`pendingWindows`, and the ack the model reads says so rather than promising a shell that has
+nothing. A window opened later is given the stored credentials before it is handed back, so a
+desktop started after a key was stored never runs a command without it.
+
+The gate is `scripts/verify-connector-plane.mjs --shell-secrets`, legs (m) and (m2): a probe agent
+is asked to raise the card, the value is submitted through `submitSecret` the way the console does,
+and **both** shells are then asked whether they have the variable -- the primary daemon, and the
+asking agent's own window through `probeShellSecret {field, agentId}`, which answers with the
+`shell` and `windowIndex` it asked. The store's sha256 is compared against what was submitted, so
+the legs prove the same value arrived without printing it, and the value is held out of the host
+log as well as out of the transcript.
 
 ## GitHub
 

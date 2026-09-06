@@ -110,6 +110,46 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-06 (ENV-1: the shell an agent actually runs in).** `setShellSecret` answered
+  `{stored: true, applied: true}`, `probeShellSecret` agreed, and "Chief of staff" -- which has its
+  own desktop window on display :4 -- ran `printenv VERIFY_ENV_3 | wc -c` through its shell tool and
+  got `0`. The box does not have one shell. `loopback-sand-box.ts` `ensureWindow` starts a per-window
+  exec daemon behind the 1339 router and keeps its endpoint in `windowConnections`; the window router
+  sends every command from an agent with a window to that daemon; and `box-exec-daemon/server.ts`
+  gives each daemon its own `#environment`. `applyEnvironment` pushed to `primaryEndpoint()` alone,
+  so the credential reached the one shell no windowed agent uses -- and `probeShellSecret`, along
+  with both legs of the gate, asked that same shell, which is why nothing was ever red.
+
+  The push now fans out: the primary daemon and every live window endpoint, each pinged first, with
+  a window that will not take the update NAMED in the answer rather than swallowed
+  (`{applied, pendingWindows}` all the way out through `pushShellEnvSecretsToBox`, `setShellSecret`,
+  `deleteShellSecret`, the inline card's sink and the ack the model reads). A window that starts
+  later is given the current stored environment before it is handed back, so a desktop opened after
+  a key was stored never runs a command without it. `probeShellSecret` takes an optional `agentId`
+  and then asks THAT agent's shell (`HostBox.agentShellAccessor`, which is the window accessor the
+  shared desktop hands out), and answers with `shell` and `windowIndex` so a green probe can never
+  be mistaken for a claim about a different shell. GATE-11: `verify-connector-plane --shell-secrets`
+  legs (m) and (m2) now prove both shells against a probe agent with a window of its own, and (m2)
+  also holds the submitted value out of `/tmp/sand-host.log`.
+
+  SECRET-2, the same honesty rule twice more: `routeSecret`'s shell branch answered `null` when the
+  sink was missing or did not store, which left the asking agent unresumed forever -- it now answers
+  `{refused}`, which is the beat that resumes it; and a local stdio connector literally named
+  `shell` (any case) is refused at both install doors (the relay's `POST /connectors` and the
+  console's editor, plus `writeLocalConnectorEntry` on the host), never run, and reported in
+  `listInstalledMcpServers` as `status: refused` with the reason, because a connector under that
+  name could never be given a credential from a card -- `routeSecret` returns on the reserved name
+  before the connector branch.
+
+  Measured on the Mac box, bundle `86cce95a` built, deployed and in-box identical: 683 unit tests
+  green (`tests/env-fanout.test.mjs`, 9 cases, new), both typechecks clean,
+  `verify-connector-plane --shell-secrets` green on the FIRST run with the new legs
+  (`env-connector-plane.log`: display :2 held by the probe agent, `CODERABBIT_API_KEY` unset -> set
+  -> unset in BOTH shells, `VERIFY_INLINE_TOKEN` the same through the model-raised card with store
+  sha256 `329a982adea6e933...`), `verify-windows` 14/14 (`env-windows.log`, nothing left on the box),
+  `verify-gateway-reads` OK (`env-gateway-reads.log`), `verify-dashboard --offline` 50/50
+  (`env-dashboard.log`). Roster 4 before and 4 after; the secret store byte-identical.
+
 - **2026-09-05 night (job bus §10: the console, the gates and the docs).** The console half of the
   hardening pass. Settings → Job bus now reads and writes `jobBusGetSettings` / `jobBusSetSettings`,
   the bus's own settings file, instead of `getHostSettings` and the retired `SAND_JOB_BUS_*` names:

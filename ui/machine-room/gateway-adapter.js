@@ -2750,6 +2750,13 @@
         const command = String(spec?.command ?? "").trim();
         if (!name) return { accepted: false, message: "A connector needs a name." };
         if (!command) return { accepted: false, message: "A stdio connector needs a command; the relay rejects one without it." };
+        // SECRET-2: the reserved destination name. A secret card whose connector is "shell" means
+        // the agent's own box shell environment, so a connector called that could never be handed
+        // a credential. The host and the relay refuse it too; saying so here is what makes the
+        // refusal readable instead of a 400.
+        if (name.toLowerCase() === "shell") {
+          return { accepted: false, message: '"shell" is reserved for the agent\'s own box shell environment, so a connector cannot use that name. Rename it (for example shell-mcp) and add it again.' };
+        }
         const args = Array.isArray(spec?.args) ? spec.args.map((a) => String(a)) : [];
         const envNames = (Array.isArray(spec?.envNames) ? spec.envNames : []).map((n) => String(n).trim()).filter(Boolean);
         // Never a map derived from a read that may have failed: this POST REPLACES the file.

@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AccountMcpServer } from "../../../shared/node/cursor-backend/account-mcp.js";
+import { isShellSecretConnector, SHELL_SECRET_CONNECTOR } from "../shell-tools/shell-secret-field.js";
 
 /**
  * Connectors reached this host exactly one way: the Cursor account's server list, fetched by
@@ -120,6 +121,31 @@ function writeLocalConnectorDocument(rootDir: string, mcpServers: Record<string,
 }
 
 /**
+ * SECRET-2. `shell` is not a connector name on this box: it is the reserved destination a
+ * secret-request card names to mean "the agent's own box shell environment", and `routeSecret`
+ * returns on it before the connector branch is ever reached. A local stdio connector under that
+ * name could therefore never be given a credential from a card, and the operator would be left
+ * with a connector whose key form silently writes somewhere else. So the name is refused at the
+ * door -- both doors -- rather than accepted and quietly bypassed. Case-insensitive, because
+ * that is how the route matches it.
+ */
+export function localConnectorNameRefusal(name: string): string | null {
+  return isShellSecretConnector(name)
+    ? `"${name}" is reserved: a secret card's connector "${SHELL_SECRET_CONNECTOR}" means the agent's own box shell environment, so a connector under that name could never be given a credential. Rename it (for example "${name.trim().toLowerCase()}-mcp") and add it again.`
+    : null;
+}
+
+/** The names in connectors.json this host refuses to run, with the reason each one is refused. */
+export function listRefusedLocalConnectors(rootDir: string): Array<{ name: string; reason: string }> {
+  const refused: Array<{ name: string; reason: string }> = [];
+  for (const name of Object.keys(readLocalConnectorDocument(rootDir))) {
+    const reason = localConnectorNameRefusal(name);
+    if (reason != null) refused.push({ name, reason });
+  }
+  return refused;
+}
+
+/**
  * Adds (or replaces) one connector entry. This is the host-side twin of the console's
  * `POST /connectors`: same file, same bytes, same 0600. The caller reloads the servers afterwards
  * -- writing the file is not what starts the process.
@@ -129,6 +155,8 @@ export function writeLocalConnectorEntry(
   name: string,
   entry: { command: string; args?: readonly string[]; env?: Readonly<Record<string, string>> },
 ): void {
+  const refusal = localConnectorNameRefusal(name);
+  if (refusal != null) throw new Error(refusal);
   const servers = readLocalConnectorDocument(rootDir);
   servers[name] = {
     command: entry.command,
@@ -169,6 +197,9 @@ export function readLocalConnectorFile(rootDir: string): Record<string, LocalSer
   if (servers == null) return {};
   const result: Record<string, LocalServerConfig> = {};
   for (const [name, value] of Object.entries(servers)) {
+    // SECRET-2: a reserved name never runs, however it got into the file. It is not dropped
+    // silently -- `listRefusedLocalConnectors` is what the installed listing reports it from.
+    if (localConnectorNameRefusal(name) != null) continue;
     const config = parseServer(value);
     if (config != null && config.disabled !== true) result[name] = config;
   }

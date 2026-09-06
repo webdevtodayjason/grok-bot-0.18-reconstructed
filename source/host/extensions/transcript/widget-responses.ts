@@ -443,7 +443,7 @@ export class WidgetResponses {
     target: any,
     value: string,
   ): Promise<
-    | { destination: string; server?: string; restarted?: boolean; shellField?: string; applied?: boolean }
+    | { destination: string; server?: string; restarted?: boolean; shellField?: string; applied?: boolean; pendingWindows?: readonly string[] }
     | { refused: string }
     | null
   > {
@@ -461,19 +461,30 @@ export class WidgetResponses {
       // answers one -- nothing is stored anywhere, and the agent is told the request went
       // unanswered rather than handed an ack that says the value reached its destination.
       if (!isShellEnvSecretField(field)) return { refused: shellEnvSecretFieldRefusal(field) };
-      if (this.tm.shellSecretSink == null) return null;
+      // SECRET-2. A null here reached submitSecret's "Could not store the secret" tray error and
+      // stopped: the agent was never resumed, so it sat waiting forever on a card it had already
+      // been answered. Every way this route can fail now answers `{refused}`, which submitSecret
+      // resumes the agent with. A host without the sink is a host that cannot honour the card,
+      // and saying so is the only honest beat.
+      if (this.tm.shellSecretSink == null) {
+        return { refused: "this host has no route from a secret card to the agent's shell environment, so nothing was stored. Ask the user to store the value from the console's Shell tools card instead." };
+      }
       let applied = false;
+      let pendingWindows: readonly string[] = [];
       try {
         const stored = await this.tm.shellSecretSink({ field, value });
-        if (stored == null || stored.stored !== true) return null;
+        if (stored == null || stored.stored !== true) {
+          return { refused: `the shell secret store did not take $${field}, so nothing was stored. Ask the user to store the value from the console's Shell tools card instead.` };
+        }
         applied = stored.applied === true;
+        pendingWindows = stored.pendingWindows ?? [];
       } catch (error) {
         console.log(
           `[sand:transcript] shell secret sink refused the value (${errorLogTag(error)}); nothing was stored`,
         );
         return { refused: errorMessage(error) };
       }
-      return { destination: `your shell's environment as $${field}`, shellField: field, applied };
+      return { destination: `your shell's environment as $${field}`, shellField: field, applied, pendingWindows };
     }
     // The connector route and the chat-channel route share ONE namespace -- `target.platform` --
     // and the collision is not hypothetical: the worked example in local-connectors.ts is a local

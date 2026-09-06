@@ -19,6 +19,7 @@ import {
   deleteShellEnvSecret,
   listShellEnvSecretFields,
   pushShellEnvSecretsToBox,
+  type ShellSecretPushResult,
   readShellEnvSecrets,
   writeShellEnvSecret,
 } from "./extensions/shell-tools/shell-secrets.js";
@@ -284,16 +285,24 @@ export function createHostGatewayApi(
    * The values only reach the agent's shell once they are in the box exec-daemon's environment --
    * that daemon is what spawns `/bin/sh -lc` for the shell tool. A box that is not up yet is not a
    * failure: HostBox.ensureReady re-pushes the store on the next bring-up, which is before any
-   * shell can run. The boolean says which of the two happened, so the console never claims the
+   * shell can run. The answer says which of the two happened, so the console never claims the
    * live box has a value it does not.
+   *
+   * ENV-1: the box has more than one such daemon. An agent with its own desktop window runs every
+   * shell through THAT window's daemon, which holds its own environment, so `applied` is true only
+   * when the primary and every open window took the update, and `pendingWindows` names the ones
+   * that did not.
    */
-  const pushShellSecretsToBox = async (clearing: readonly string[] = []): Promise<boolean> => {
+  const pushShellSecretsToBox = async (clearing: readonly string[] = []): Promise<ShellSecretPushResult> => {
     try {
       return await pushShellEnvSecretsToBox(shellRoot(), deps.extensions.api("forever-box").box, shellCtx, clearing);
     } catch {
-      return false;
+      return { applied: false, pendingWindows: [] };
     }
   };
+  /** The pendingWindows half of the answer, omitted when every endpoint took the update. */
+  const shellPushAnswer = (result: ShellSecretPushResult) =>
+    ({ applied: result.applied, ...(result.pendingWindows.length === 0 ? {} : { pendingWindows: [...result.pendingWindows] }) });
   /**
    * SECRET-1. The WRITE rule, shared with the secret-request card's "shell" route so an agent
    * asking for a variable inline and an operator typing one in the console are held to one rule.
@@ -1162,14 +1171,14 @@ export function createHostGatewayApi(
       }
       // `stored` is the boolean that says the write landed, as it is on setConnectorSecret; the
       // delete answer below is the one that carries the store's name list.
-      return { field, stored: true, applied: await pushShellSecretsToBox(), fields: shellSecretsSnapshot().fields };
+      return { field, stored: true, ...shellPushAnswer(await pushShellSecretsToBox()), fields: shellSecretsSnapshot().fields };
     },
     deleteShellSecret: async (args: any) => {
       const field = requireStoredShellField(args?.field, "deleteShellSecret");
       const removed = deleteShellEnvSecret(shellRoot(), field);
       // The box control plane can set but not unset, so a delete pushes the empty string: the
       // shell's own `${VAR:+...}` reads that as unset, and the next box restart drops it for real.
-      return { field, removed, applied: removed ? await pushShellSecretsToBox([field]) : false, ...shellSecretsSnapshot() };
+      return { field, removed, ...(removed ? shellPushAnswer(await pushShellSecretsToBox([field])) : { applied: false }), ...shellSecretsSnapshot() };
     },
     /**
      * Does the BOX have this credential? Asked of the box's own shell -- the exec-daemon that
@@ -1180,10 +1189,18 @@ export function createHostGatewayApi(
     probeShellSecret: async (args: any) => {
       const field = requireStoredShellField(args?.field, "probeShellSecret");
       const box = deps.extensions.api("forever-box").box;
-      if (box == null || typeof box.mcpResourceAccessor !== "function") {
+      // GATE-11. Without `agentId` this asks the PRIMARY exec daemon, which is the shell an agent
+      // with no window of its own runs. An agent that HAS a window runs every command through that
+      // window's daemon instead, and that daemon holds its own environment -- so a probe that only
+      // ever asked the primary proved the wrong shell, which is exactly how "Chief of staff" read
+      // 0 characters from a variable this command reported set.
+      const agentId = typeof args?.agentId === "string" && args.agentId.length > 0 ? args.agentId : null;
+      if (box == null || typeof box[agentId == null ? "mcpResourceAccessor" : "agentShellAccessor"] !== "function") {
         throw new Error("this box exposes no shell to probe");
       }
-      const accessor = await box.mcpResourceAccessor(shellCtx);
+      const accessor = agentId == null
+        ? await box.mcpResourceAccessor(shellCtx)
+        : await box.agentShellAccessor(shellCtx, agentId);
       const answer = await accessor.get(shellExecutorResource).execute(shellCtx, buildHostShellArgs({
         command: shellSecretProbeCommand(field),
         name: "sh",
@@ -1192,7 +1209,10 @@ export function createHostGatewayApi(
       }));
       const result = answer.result;
       if (result.case !== "success") throw new Error(`the box shell did not answer (${result.case})`);
-      return { field, state: readShellSecretProbe(result.value.stdout) };
+      // `shell` names WHICH shell answered, so a green probe can never be mistaken for a claim
+      // about a different one.
+      const windowIndex = agentId == null ? undefined : deps.extensions.api("forever-box").box?.getAgentWindowIndex?.(agentId);
+      return { field, state: readShellSecretProbe(result.value.stdout), shell: agentId == null ? "primary" : `agent:${agentId}`, ...(windowIndex == null ? {} : { windowIndex }) };
     },
     installShellTool: async (args: any) => {
       const entry = requireShellTool(args?.id);

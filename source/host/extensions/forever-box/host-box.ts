@@ -7,7 +7,7 @@ export class SandBoxCapabilityError extends Error {}
 export const RUN_STATE_PROBE_AGENT_ID = "";
 export interface BoxStatus { agentId: string; state: string; vncUrl: string | null; windows?: Array<{ windowIndex: number; vncUrl: string }>; imageUpdateAvailable?: boolean; pull?: { percent: number } }
 export interface BoxConnection { vncUrl: string; imageUpdateAvailable?: boolean; remoteAccessor?: unknown }
-export interface HostBoxInner { ensureReady(ctx: Context, agentId: string): Promise<BoxConnection>; runState(ctx: Context, agentId: string): Promise<string>; listBoxes(): Promise<Array<{ agentId: string; running?: boolean }>>; uploadFile(ctx: Context, agentId: string, path: string, data: Uint8Array): Promise<void>; downloadFile(ctx: Context, agentId: string, path: string): Promise<Uint8Array>; ensureWindow?(ctx: Context, agentId: string, windowIndex: number, options?: unknown): Promise<{ windowIndex: number; vncUrl: string }>; releaseWindow?(ctx: Context, agentId: string): Promise<void>; recreateInBox?(ctx: Context, options: { preserveData: boolean; force?: boolean }): Promise<{ started: boolean; reason?: string }>; getAgentWindowIndex?(agentId: string): number | undefined; ensureAssignmentsLoaded?(ctx: Context): Promise<void>; sweepUnassignedWindows?(ctx: Context): Promise<number[]>; maxWindows?(): number; getTerminalsFolder?(): string | undefined; isAvailable?(): boolean | Promise<boolean>; isPreparing?(agentId: string): boolean; describe?(): unknown; applyEnvironment?(ctx: Context, update: unknown): Promise<void>; loadMcpServers?(ctx: Context, configJson: string): Promise<unknown>; mcpResourceAccessor?(ctx: Context): Promise<unknown> }
+export interface HostBoxInner { ensureReady(ctx: Context, agentId: string): Promise<BoxConnection>; runState(ctx: Context, agentId: string): Promise<string>; listBoxes(): Promise<Array<{ agentId: string; running?: boolean }>>; uploadFile(ctx: Context, agentId: string, path: string, data: Uint8Array): Promise<void>; downloadFile(ctx: Context, agentId: string, path: string): Promise<Uint8Array>; ensureWindow?(ctx: Context, agentId: string, windowIndex: number, options?: unknown): Promise<{ windowIndex: number; vncUrl: string }>; releaseWindow?(ctx: Context, agentId: string): Promise<void>; recreateInBox?(ctx: Context, options: { preserveData: boolean; force?: boolean }): Promise<{ started: boolean; reason?: string }>; getAgentWindowIndex?(agentId: string): number | undefined; ensureAssignmentsLoaded?(ctx: Context): Promise<void>; sweepUnassignedWindows?(ctx: Context): Promise<number[]>; maxWindows?(): number; getTerminalsFolder?(): string | undefined; isAvailable?(): boolean | Promise<boolean>; isPreparing?(agentId: string): boolean; describe?(): unknown; applyEnvironment?(ctx: Context, update: unknown): Promise<unknown>; loadMcpServers?(ctx: Context, configJson: string): Promise<unknown>; mcpResourceAccessor?(ctx: Context): Promise<unknown> }
 export class HostBox {
   readonly vncUrls = new Map<string, string>(); readonly forkVncUrls = new Map<string, Map<number, string>>(); private readonly listeners = new Set<(status: BoxStatus) => void>(); private readonly lastReported = new Map<string, BoxStatus>(); private readonly connectionEpochs = new Map<string, number>(); private imageUpdateAvailable: boolean | undefined; constructor(readonly inner: HostBoxInner) {}
   subscribe(listener: (status: BoxStatus) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -30,12 +30,28 @@ export class HostBox {
     try {
       const update = buildShellSecretEnvironmentUpdate(getSandRootDir());
       if (Object.keys(update.env).length === 0) return;
-      await this.applyEnvironment(ctx, update);
+      // ENV-1: the push now fans out to every open desktop window as well as the primary daemon,
+      // and a window that would not take it is named rather than counted as applied.
+      const result = await this.applyEnvironment(ctx, update);
+      const pending = result != null && typeof result === "object" ? Reflect.get(result, "pendingWindows") : undefined;
+      if (Array.isArray(pending) && pending.length > 0) console.warn(`[sand][shell-tools] stored shell credentials did not reach ${pending.join(", ")}`);
     } catch (error) {
       if (this.shellSecretPushWarned) return;
       this.shellSecretPushWarned = true;
       console.warn(`[sand][shell-tools] stored shell credentials were not pushed to the box: ${error instanceof Error ? error.name : typeof error}`);
     }
+  }
+  /**
+   * ENV-1/GATE-11. The shell THIS agent runs its commands in. On the shared desktop an agent with
+   * its own window gets that window's exec daemon back from `ensureReady` (shared-desktop-sand-box
+   * hands out `window.computerUse` for a fork seat and the primary accessor otherwise), and that
+   * daemon holds its own environment. Every shell-secret probe used to go through the primary
+   * endpoint, which is why the gate stayed green while the agent's own shell had nothing.
+   */
+  async agentShellAccessor(ctx: Context, agentId: string): Promise<unknown> {
+    const connection = await this.ensureReady(ctx, agentId);
+    if (connection.remoteAccessor == null) throw new SandBoxCapabilityError("This box hands out no shell for an agent.");
+    return connection.remoteAccessor;
   }
   async hibernate(): Promise<void> {} runState(ctx: Context, agentId: string): Promise<string> { return this.inner.runState(ctx, agentId); } describe(): unknown { return boxDescription(this.inner); } isAvailable(): Promise<boolean> { return boxIsAvailable(this.inner); } isPreparing(agentId: string): boolean { return boxIsPreparing(this.inner, agentId); } getTerminalsFolder(): string | undefined { return boxTerminalsFolder(this.inner); } listBoxes() { return this.inner.listBoxes(); } maxWindows(): number { return boxMaxWindows(this.inner); }
   async ensureWindow(ctx: Context, agentId: string, windowIndex: number, options?: unknown): Promise<{ windowIndex: number; vncUrl: string }> { if (this.inner.ensureWindow == null) throw new SandBoxCapabilityError("This box does not support multiple desktop windows."); if (!this.vncUrls.has(agentId)) await this.ensureReady(ctx, agentId); const window = await this.inner.ensureWindow(ctx, agentId, windowIndex, options); if (window.windowIndex === 0) this.vncUrls.set(agentId, window.vncUrl); else { const forks = this.forkVncUrls.get(agentId) ?? new Map<number, string>(); forks.set(window.windowIndex, window.vncUrl); this.forkVncUrls.set(agentId, forks); } this.notify(this.runningStatus(agentId, this.vncUrls.get(agentId) ?? window.vncUrl)); return window; }
@@ -44,7 +60,7 @@ export class HostBox {
   sweepUnassignedWindows(ctx: Context): Promise<number[]> { return (this.inner as { sweepUnassignedWindows?(ctx: Context): Promise<number[]> }).sweepUnassignedWindows?.(ctx) ?? Promise.resolve([]); }
   listAssignedAgentIds(): string[] { const inner = this.inner as { listAssignedAgentIds?(): string[] }; return typeof inner.listAssignedAgentIds === "function" ? inner.listAssignedAgentIds() : []; }
   async releaseWindow(ctx: Context, agentId: string): Promise<void> { const epoch = this.connectionEpochs.get(agentId) ?? 0; try { await this.inner.releaseWindow?.(ctx, agentId); } catch (error) { console.warn(`[sand][window] release for ${agentId} failed: ${error instanceof Error ? error.message : String(error)}`); } if ((this.connectionEpochs.get(agentId) ?? 0) !== epoch) return; this.vncUrls.delete(agentId); this.forkVncUrls.delete(agentId); this.connectionEpochs.delete(agentId); this.notify({ agentId, state: "absent", vncUrl: null }); this.lastReported.delete(agentId); }
-  async applyEnvironment(ctx: Context, update: unknown): Promise<void> { await boxApplyEnvironment(this.inner, ctx, update); }
+  async applyEnvironment(ctx: Context, update: unknown): Promise<unknown> { return await boxApplyEnvironment(this.inner, ctx, update); }
   async loadMcpServers(ctx: Context, configJson: string): Promise<unknown> { return await boxLoadMcpServers(this.inner, ctx, configJson); }
   async mcpResourceAccessor(ctx: Context): Promise<unknown> { return await boxMcpResourceAccessor(this.inner, ctx); }
   uploadFile(ctx: Context, agentId: string, path: string, data: Uint8Array): Promise<void> { return this.inner.uploadFile(ctx, agentId, path, data); } downloadFile(ctx: Context, agentId: string, path: string): Promise<Uint8Array> { return this.inner.downloadFile(ctx, agentId, path); }
