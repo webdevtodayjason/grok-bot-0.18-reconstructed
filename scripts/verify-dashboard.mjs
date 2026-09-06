@@ -955,7 +955,15 @@ try {
         const reached = neighbour == null ? null : await until(async () => ((await rowsFor(neighbour.id)).some((w) => w.id === ownedRow.id) ? true : null), 12_000, 800);
         check(reached === true, "Make global puts the skill in every agent's library", neighbour ? `read back through ${neighbour.name}` : "no second agent");
       }
-      await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+      // Escape does not cancel this dialog once the Make global click above has re-rendered the
+      // card out from under the focused button: focus leaves #panel-dialog and the key goes
+      // nowhere. The panel then holds its backdrop over #room-menu, so the click below spent 30s
+      // timing out and everything after it -- the whole agent-details run, QOL-LOGOS, the panels
+      // sweep and the desktop-clipboard block at the end of this file -- never executed. Close it
+      // the way an operator does, through the dialog's own ×, and prove it shut before walking on.
+      await page.click("#panel-dialog [data-close-dialog]");
+      const skillsPanelClosed = await until(() => page.evaluate(() => (document.getElementById("panel-dialog")?.open ? null : true)), 5_000, 200);
+      check(skillsPanelClosed === true, "the Skills panel closes on its own × button, leaving the room menu underneath it clickable");
     }
 
     // -- MR-01, MR-05, MR-08, GW-06: the room ••• menu opens the live agent surface.

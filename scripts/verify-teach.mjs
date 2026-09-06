@@ -37,10 +37,16 @@ const SESSIONS = "/workspace/teach-sessions";
 const QUEUES = `${SESSIONS}/queues`;
 const KEEP_SETTING = process.argv.includes("--keep-setting");
 // Budgeted against the 300s warden ceiling, worst case, including the cleanup in the finally:
-// window 45 + expansion 45 + claim 120 + idle wait 25 leaves room for the two real turns. The
-// prompt wait shares its 45 with the expansion wait: both are waiting on the same dispatch, so
-// whichever runs first is the one that spends the time.
+// window 45 + expansion 45 + claim 120 + skill 60 (+60 if the write has to be asked for) + idle
+// wait 25 leaves room for the two real turns. The prompt wait shares its 45 with the expansion
+// wait: both are waiting on the same dispatch, so whichever runs first is the one that spends the
+// time.
 const CLAIM_TIMEOUT_MS = 120_000;
+// Step (f), the skill the turn writes. Measured runs reach the claim at ~73s and finish at ~103s,
+// so 60s of waiting and, when the turn has not got to step 5 of the recipe yet, 60s more after it
+// is asked outright keeps a real run near 220s.
+const SKILL_TIMEOUT_MS = 60_000;
+const SKILL_NUDGE_TIMEOUT_MS = 60_000;
 const EXPANSION_TIMEOUT_MS = 45_000;
 const WINDOW_TIMEOUT_MS = 45_000;
 const PROBE_IDLE_TIMEOUT_MS = 25_000;
@@ -154,16 +160,16 @@ const previousTrace = await readSetting("SAND_TOOL_TRACE");
 let probe = null;
 let failure = null;
 const createdDirs = [];
-// The workflow library on this box is GLOBAL (workflow-store.ts GlobalWorkflowLibrary; per-agent
-// state is only the enablement), so every skill the learning turn writes is visible to every
-// production agent and outlives the probe that produced it. Measured: one save-path run left
-// three "Flag unassigned tickets" workflows behind that had to be deleted by hand. Snapshot the
-// library before the turn and take out whatever the run added.
+// A skill the learning turn writes is the probe's OWN (agent-state.ts stamps ownerAgentId on the
+// create), so deleting the probe releases it. A global one -- anything this run adds without an
+// owner -- outlives the probe and is every production agent's problem. Measured, before ownership
+// existed: one save-path run left three "Flag unassigned tickets" workflows behind that had to be
+// deleted by hand. Snapshot the library before the turn and take out whatever the run added.
 let libraryBefore = null;
-const libraryIds = async (agentId) =>
+const libraryRows = async (agentId) =>
   ((await call("getAgentWorkflows", { id: agentId }).catch(() => [])) ?? [])
-    .filter((workflow) => workflow.source !== "automation")
-    .map((workflow) => workflow.id);
+    .filter((workflow) => workflow.source !== "automation");
+const libraryIds = async (agentId) => (await libraryRows(agentId)).map((workflow) => workflow.id);
 try {
   // (a) What the host reported about this gate when it started.
   const gateLine = (await sh("grep -F '[sand][gates]' /tmp/sand-host.log | tail -1")).trim();
@@ -367,7 +373,50 @@ try {
   if (claimed.length === 0) fail(`the agent never claimed the queue file within ${CLAIM_TIMEOUT_MS / 1000}s; the loop does not close`);
   pass(`the agent claimed the recording: ${claimed.join(", ")}`);
 
-  console.log(`SUMMARY: teach recording works with SAND_TEACH=1 and no Cursor login. Refused when off, recorded, discarded clean, saved with a signed queue entry, dispatched one learning turn carrying the operator's note, the whole recipe and scope ${scope.slice(0, 12)}, and the agent claimed the work (${elapsed()}).`);
+  // (f) Whose the learned skill is. This is the one path in the product that stamps ownership: the
+  // recipe's step 5 writes the skill with update_state, and that writer puts the agent's own id on
+  // the create (extensions/memory/agent-state.ts writeWorkflow). The dashboard gate can only drive
+  // createAgentWorkflow, which the console deliberately keeps global, so without this leg "the
+  // Teach plane produces skills the agent owns" is measured nowhere on a box. Both halves are read
+  // back: the owner on the probe's own row, and the absence of the row from a SECOND agent's
+  // library, because "offered to nobody else" is what ownership buys and only another agent's list
+  // can show it.
+  const otherAgentId = ((await call("listAgents").catch(() => [])) ?? [])
+    .find((agent) => agent.id !== probe.id && agent.isGroup !== true)?.id ?? null;
+  const waitForSkill = async (ms) => {
+    const by = Date.now() + ms;
+    for (;;) {
+      const found = (await libraryRows(probe.id)).find((workflow) => !libraryBefore.includes(workflow.id)) ?? null;
+      if (found != null) return found;
+      if (Date.now() > by) return null;
+      await sleep(5000);
+    }
+  };
+  let learned = await waitForSkill(SKILL_TIMEOUT_MS);
+  // The turn reaches step 5 minutes after the claim on this box -- frames, then the browser
+  // cross-check, then the write -- and this gate has a warden ceiling to fit. When it has not got
+  // there yet, ask for the write outright: it is the same tool call the recipe makes, from the
+  // same agent, so what comes back says the same thing about ownership. The log line below says
+  // which of the two routes produced the skill.
+  const askedFor = learned == null;
+  if (askedFor) {
+    console.log(`the learning turn had written no skill after ${SKILL_TIMEOUT_MS / 1000}s (${elapsed()}); asking for the write`);
+    await call("sendPrompt", { agentId: probe.id, prompt: 'Save what you have learned so far as a skill now, with update_state (target "workflow", action "write"). Keep the body short. Do not wait for the rest of your analysis.' });
+    learned = await waitForSkill(SKILL_NUDGE_TIMEOUT_MS);
+  }
+  if (learned == null) {
+    fail(`the agent wrote no skill within ${(SKILL_TIMEOUT_MS + SKILL_NUDGE_TIMEOUT_MS) / 1000}s, asked outright or not; nothing here measures who a skill written through update_state belongs to`);
+  }
+  if (learned.ownerAgentId !== probe.id) {
+    fail(`the skill "${learned.name}" (${learned.id}) came back owned by ${JSON.stringify(learned.ownerAgentId)}, not by the agent that wrote it (${probe.id}); update_state is not stamping ownership`);
+  }
+  if (otherAgentId == null) fail("this box has no second agent to read the library through; 'offered to nobody else' cannot be measured");
+  if ((await libraryRows(otherAgentId)).some((workflow) => workflow.id === learned.id)) {
+    fail(`the skill "${learned.name}" (${learned.id}) is offered to agent ${otherAgentId} as well; an owned skill reaches its owner only`);
+  }
+  pass(`the skill the ${askedFor ? "agent wrote when asked" : "learning turn wrote"} is its own: "${learned.name}" (${learned.id}) owned by ${learned.ownerAgentId}, and agent ${otherAgentId} is not offered it`);
+
+  console.log(`SUMMARY: teach recording works with SAND_TEACH=1 and no Cursor login. Refused when off, recorded, discarded clean, saved with a signed queue entry, dispatched one learning turn carrying the operator's note, the whole recipe and scope ${scope.slice(0, 12)}, the agent claimed the work, and the skill it wrote with update_state belongs to it alone (${elapsed()}).`);
 } catch (error) {
   failure = error;
   console.log(`FAIL - ${error.message}`);
@@ -385,10 +434,12 @@ try {
     for (const dir of createdDirs) await sh(`rm -rf ${dir}`).catch(() => {});
     await call("deleteAgents", { ids: [probe.id] }).catch(() => call("deleteAgent", { id: probe.id }).catch(() => {}));
     await sh(`rm -f /home/box/sand-data/sand-system-prompt-${probe.id}.json`).catch(() => {});
-    // The library is read and written through an agent id but the rows are shared, so the sweep
-    // works through a surviving agent. Twice, a few seconds apart: the learning turn can write one
-    // last workflow while the delete above is landing, and a skill left in the shared library is a
-    // production agent's problem, not this gate's.
+    // The library is read and written through an agent id but the global rows are shared, so the
+    // sweep works through a surviving agent. It is the global rows it is after: the probe's own
+    // skills went with the delete above (releaseOwnedWorkflows), and a survivor is not offered
+    // them anyway. Twice, a few seconds apart: the learning turn can write one last workflow while
+    // the delete above is landing, and a skill left in the shared library is a production agent's
+    // problem, not this gate's.
     const survivor = (await call("listAgents").catch(() => [])).find((agent) => agent.id !== probe.id)?.id ?? null;
     if (libraryBefore != null && survivor != null) {
       for (let pass = 0; pass < 2; pass += 1) {
