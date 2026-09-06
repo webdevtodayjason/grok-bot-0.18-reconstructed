@@ -121,17 +121,20 @@ test("a routine the host reports as running is running", () => {
   assert.equal(paused.status, "paused");
 });
 
-test("an evidence verdict becomes a pill that carries its attempt id", () => {
+test("an evidence verdict rides on the reply it judged, never as a line of its own", () => {
   const stamped = (verdict, extra = {}) => ({
     kind: "send-message", id: `e-${verdict}`, timestampMs: 1,
     message: { type: "text", content: `a reply judged ${verdict}` },
     evidence: { attemptId: `att-${verdict}`, verdict, receipts: 1, attestations: ["x"], missing: [], ...extra },
   });
   const rows = messagesOf([stamped("evidenced"), stamped("unsupported", { missing: ["/workspace/report.md"] }), stamped("conversational")], "Atera", null);
-  const pills = rows.filter((r) => r.type === "system" && r.text.startsWith("Evidence:"));
-  // "conversational" makes no checkable claim, so it gets no pill; the other two do.
-  assert.equal(pills.length, 2);
-  assert.deepEqual(pills.map((p) => p.evidence.attemptId), ["att-evidenced", "att-unsupported"]);
-  assert.match(pills[0].text, /1 receipt behind this reply/);
-  assert.match(pills[1].text, /report\.md/);
+  // EVID-UX-1: the adapter used to synthesize an "Evidence: <verdict> · <why>" system message
+  // under each judged reply, and an operator read that as an error on a reply that had in fact
+  // been delivered. The stamp stays on the reply; the view draws it as a chip in the same row.
+  assert.equal(rows.filter((r) => r.type === "system").length, 0);
+  assert.deepEqual(rows.map((r) => r.evidence?.verdict), ["evidenced", "unsupported", "conversational"]);
+  assert.deepEqual(rows.map((r) => r.evidence?.attemptId), ["att-evidenced", "att-unsupported", "att-conversational"]);
+  // The missing token stays in the stamp, for the Claim provenance panel, and is never text on a row.
+  assert.deepEqual(rows[1].evidence.missing, ["/workspace/report.md"]);
+  assert.ok(!rows.some((r) => r.text.includes("/workspace/report.md")));
 });

@@ -108,6 +108,8 @@ message they need to see next to its verdict.
 - Machine Room: the adapter renders one `system` pill after an `unverified` or `unsupported`
   message, for example `Evidence: unsupported · grokbot-verify-x1ipm3y.txt is in no tool result
   this attempt`. `app.js` and the stylesheets stay untouched, per the handoff rule.
+  (Superseded 2026-09-05: the pill is a chip in the reply's row and `app.js` and `styles.css` do
+  carry it. See "Presentation" in section 10 for why and for the copy.)
 - Gate: `verify-work-report --require-evidence` passes a round only when the delivered message's
   verdict is `evidenced` and the sentinel appears in an attestation head from this attempt. The
   sentinel stops being the proof; the receipt is.
@@ -290,4 +292,23 @@ point. All acceptance gates share the one box and must run sequentially.
   not quoting). Rule name unchanged..
 - **Gateway.** `getAgentEvidence {id, attemptId?}` is implemented in `host-gateway-api.ts` directly
   over the session store and the ledger file; no manager registry entry.
+- **Presentation (EVID-UX-1, 2026-09-05).** The verdict is a chip inside the reply's own row, not a
+  system line under it. It shipped as a synthesized `system` message reading
+  `Evidence: unsupported · https://captions.vimeo.com/captions/NNN.vtt?expires=…&sig=… in no tool
+  result this attempt`, dotted-underlined and centred; Jason read it as an error on a reply that had
+  in fact been delivered. Label, never suppress, was never meant to look like a failure. What the
+  operator sees now, per verdict, with no jargon and no token in the chip itself:
+
+  | Verdict | Chip | Tone |
+  |---|---|---|
+  | `evidenced` | `✓ Backed by 7 tool results` | quiet, teal outline |
+  | `unsupported` | `Names 1 thing no tool returned` | the console's attention amber, never the error red |
+  | `unverified` | `Nothing ran to check this` | neutral |
+  | `undecidable` | `Output was cut short, could not check` | neutral |
+  | `conversational` | no chip | -- |
+
+  Every chip carries the same hover sentence saying what the check is ("Titanbot compares the names,
+  paths and links in a reply with what its tools returned in the same turn"), and clicking one opens
+  the same Claim provenance panel as before, whose missing list is now headed "Named in the reply,
+  found in no tool result". The missing token is disclosed there, never printed under the reply.
 - **Budget.** Sixteen files against the twelve the draft estimated; reported in §6m of the audit.

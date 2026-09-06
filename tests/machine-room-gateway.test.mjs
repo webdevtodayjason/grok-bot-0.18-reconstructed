@@ -185,7 +185,11 @@ test("GW-03: refresh reads a bounded tail and scrolling back pages older entries
   assert.deepEqual(only(calls, "getAgentTranscript"), []);
   assert.deepEqual(only(calls, "getAgentTranscriptTail")[0].args, { id: "w1", limit: 150 });
   assert.deepEqual(w.messages.filter((m) => m.type !== "system").map((m) => m.text), ["five", "six"]);
-  assert.ok(w.messages.some((m) => m.type === "system" && /^Evidence: evidenced/.test(m.text)), "an evidence pill is built on a tail-loaded entry");
+  // The verdict rides on the reply itself and the view draws it as a chip inside that reply's row.
+  // It is deliberately not a system line any more: the synthesized "Evidence: <verdict> · <why>"
+  // row read as an error under a reply that had been delivered (EVID-UX-1).
+  assert.equal(w.messages.find((m) => m.text === "six")?.evidence?.verdict, "evidenced", "the tail-loaded reply keeps its stamp");
+  assert.ok(!w.messages.some((m) => m.type === "system" && /^Evidence:/.test(m.text)), "and no system line is synthesized beside it");
   assert.equal(w.hasOlder, true);
 
   const first = await adapter.loadOlderMessages({ kind: "worker", id: "w1" });

@@ -6,7 +6,7 @@
 // listeners are Settings sections now), Add and Uninstall on a catalog card write and unwrite
 // connectors.json byte for byte, the box's own connectors carry their real tools, a provider card
 // that cannot be adopted offers no button,
-// an evidence pill opens its receipts, unread clears when a conversation is read, the Agent
+// an evidence chip opens its receipts, unread clears when a conversation is read, the Agent
 // details rows carry text, and no surface still claims to be a demo. Wave C1 added: the composer
 // reports the host's acceptance ledger for a send made through it (GW-03), the transcript is read
 // as a tail and paged backwards through getAgentTranscriptPage (GW-03), a Skills panel imports,
@@ -295,6 +295,31 @@ try {
     await page.click("#room-menu").catch(() => {}); await page.waitForTimeout(1200);
     check((await page.$$("[data-save-role]")).length === 0, "no Role Save button on an adapter with no setRole");
     check((await page.$$("[data-clear-memories]")).length === 0, "no Forget-all button on an adapter with no clearMemories");
+
+    // -- EVID-UX-1: the claim-provenance verdict reads as a note on the reply, not as an error.
+    // The offline conversation carries both tones (one evidenced reply, one unsupported), so this
+    // measures the presentation with no gateway and no model turn.
+    await page.keyboard.press("Escape"); await page.waitForTimeout(600);
+    const chipState = await page.evaluate(() => {
+      const chips = [...document.querySelectorAll(".evidence-chip")];
+      return {
+        verdicts: chips.map((chip) => chip.dataset.verdict ?? ""),
+        unsupported: chips.filter((chip) => chip.dataset.verdict === "unsupported").map((chip) => chip.textContent.trim()),
+        // A chip wider than its own box means the sentence spilled past the message column.
+        overflowing: chips.filter((chip) => chip.scrollWidth > chip.clientWidth).map((chip) => chip.textContent.trim()),
+        outsideRow: chips.filter((chip) => Math.round(chip.getBoundingClientRect().right) > Math.round(chip.closest(".message-row").getBoundingClientRect().right) + 1).length,
+        inOwnRow: chips.every((chip) => chip.closest(".message-row") && !chip.closest(".message-row").classList.contains("is-system")),
+        titled: chips.every((chip) => /compares the names, paths and links/.test(chip.getAttribute("title") ?? "")),
+        opens: chips.every((chip) => chip.tagName === "BUTTON"),
+        systemLines: [...document.querySelectorAll(".message-row")].map((row) => row.textContent.trim()).filter((text) => text.startsWith("Evidence:")),
+      };
+    });
+    check(chipState.verdicts.includes("evidenced") && chipState.verdicts.includes("unsupported"), "the verdict is a chip in the reply's own row, in both of its tones", chipState.verdicts.join(", ") || "no chip on screen");
+    check(chipState.inOwnRow && chipState.opens, "every chip sits in a reply row and is a button that opens Claim provenance");
+    check(chipState.titled, "and each one says on hover what the check compares");
+    check(chipState.systemLines.length === 0, "no message on the page is a synthesized \"Evidence:\" system line", chipState.systemLines.slice(0, 2).join(" | "));
+    check(chipState.unsupported.length > 0 && chipState.unsupported.every((text) => !/http/i.test(text)), "an unsupported chip names no URL: the missing token stays in the disclosure", chipState.unsupported.join(" | "));
+    check(chipState.overflowing.length === 0 && chipState.outsideRow === 0, "and no chip overflows itself or bleeds past its message row", chipState.overflowing.slice(0, 2).join(" | ") || `${chipState.verdicts.length} chip(s) inside their rows`);
   } else if (LEAKS) {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     const { storedSecrets } = await import(path.join(repoRoot, "ui", "subscriptions.mjs"));
@@ -315,15 +340,15 @@ try {
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);
     await clickText("Atera Triage").catch(() => {});
     for (let i = 0; i < 400; i += 1) await page.mouse.wheel(0, 2000); await page.waitForTimeout(600);
-    const pill = (await page.$$(".message-row.is-evidence")).at(-1) ?? null;
-    if (pill) {
-      await pill.scrollIntoViewIfNeeded(); await pill.click(); await page.waitForTimeout(2500);
+    const chip = (await page.$$(".evidence-chip")).at(-1) ?? null;
+    if (chip) {
+      await chip.scrollIntoViewIfNeeded(); await chip.click(); await page.waitForTimeout(2500);
       const panel = await page.evaluate(() => document.getElementById("panel-dialog")?.textContent ?? "");
       check(!secrets.some((s) => panel.includes(s)), "no adopted secret in the evidence disclosure");
       const heads = await page.$$eval("[data-head-slot]", (els) => els.map((e) => e.textContent.trim()));
       check(heads.length === 0 || heads.every((h) => /not on this page until you ask/.test(h)), "attested tool output stays out of the DOM until asked for", `${heads.length} slot(s)`);
     } else {
-      check(true, "no evidence pill on Atera to open in the leak pass");
+      check(true, "no evidence chip on Atera to open in the leak pass");
     }
     // GW-09: attachment previews and avatar images are two more surfaces that paint host bytes.
     await page.keyboard.press("Escape"); await page.waitForTimeout(400);
@@ -1700,12 +1725,12 @@ try {
     // Wait for the transcript to be on screen, with a cap, then assert what it says.
     await until(async () => ((await page.$$(".message-row")).length > 0 ? true : null), 30_000, 1000);
     // -- GW-03(b): the conversation is a tail window. Nothing on this page asks for the whole
-    // transcript, the outline's tool rows and the evidence pills still weave into the tail, and
+    // transcript, the outline's tool rows still weave into the tail, the evidence chips ride on
     // the row above it pages older entries in through getAgentTranscriptPage.
     check(callsTo("getAgentTranscript") === 0 && callsTo("getAgentTranscriptTail") > 0, "selecting an agent reads getAgentTranscriptTail, never getAgentTranscript", `${callsTo("getAgentTranscriptTail")} tail, ${callsTo("getAgentTranscript")} whole`);
     const toolRowsInTail = await page.$$eval(".message-row.is-system", (els) => els.filter((e) => /^(Shell|Read|Computer|Task|Update)\b/.test(e.textContent.trim())).length);
     check(toolRowsInTail > 0, "outline tool rows are woven into the tail-loaded transcript", `${toolRowsInTail} row(s)`);
-    check((await page.$$(".message-row.is-evidence")).length > 0, "evidence pills render on tail-loaded entries");
+    check((await page.$$(".evidence-chip")).length > 0, "evidence chips render on tail-loaded entries");
     const rowsBefore = (await page.$$(".message-row")).length;
     const olderButton = await page.$("[data-load-older]");
     check(olderButton != null, "a long conversation offers to show earlier messages", `${rowsBefore} rows on screen`);
@@ -1800,7 +1825,7 @@ try {
       check(railRows.length === 1 && /Nothing running|no tool call for this turn/.test(railRows[0]),
         "and the rail says so instead of inventing a step", railRows.join(" | ").slice(0, 120));
     }
-    // Back to the agent the rest of this section reads (the evidence pills below are Atera's).
+    // Back to the agent the rest of this section reads (the evidence chips below are Atera's).
     if (railOnScreenId && (await page.evaluate(() => document.querySelector(".worker-card.is-active")?.dataset.contextId ?? null)) !== railOnScreenId) {
       const backName = await page.evaluate((id) => document.querySelector(`.worker-card[data-context-id="${id}"] .worker-name`)?.textContent?.trim() ?? "", railOnScreenId);
       check(await openRoom(railOnScreenId, backName), "the gate is back on the agent it walked away from", backName);
@@ -1872,7 +1897,7 @@ try {
           else check(true, `button re-enable skipped — the revived turn did not finish inside the ${Math.round(TURN_TIMEOUT_MS / 1000)}s budget, so handBackForeverBox has not answered yet`);
         }
         // The checks below this block read Atera's conversation. Put the page back where it was,
-        // or they measure the probe and report Atera's evidence pills as missing.
+        // or they measure the probe and report Atera's evidence chips as missing.
         if (roomWas && roomWas !== probeAgentId) {
           const backName = await page.evaluate((id) => document.querySelector(`.worker-card[data-context-id="${id}"] .worker-name`)?.textContent?.trim() ?? "", roomWas);
           check(await openRoom(roomWas, backName), "the gate is back on the agent the hand-back probe walked away from", backName);
@@ -1883,13 +1908,15 @@ try {
     await noDemoStrings("files view");
     await page.keyboard.press("Escape"); await page.waitForTimeout(800);
 
-    // -- GW-13: an evidence pill opens the receipts behind the verdict.
+    // -- GW-13: an evidence chip opens the receipts behind the verdict.
     for (let i = 0; i < 400; i += 1) await page.mouse.wheel(0, 2000); await page.waitForTimeout(600);
-    const pills = await page.$$(".message-row.is-evidence");
-    check(pills.length > 0, "evidence pills render on Atera's stamped replies", `${pills.length} pill(s)`);
-    if (pills.length > 0) {
-      const evidenced = await page.evaluateHandle(() => Array.from(document.querySelectorAll(".message-row.is-evidence")).find((el) => /evidenced/.test(el.textContent)) ?? null);
-      const target = evidenced.asElement() ?? pills.at(-1);
+    const chips = await page.$$(".evidence-chip");
+    check(chips.length > 0, "evidence chips render on Atera's stamped replies", `${chips.length} chip(s)`);
+    if (chips.length > 0) {
+      // The verdict word is on the chip's data-verdict, not in its sentence: the copy says what
+      // the reader gets out of it, not which of five internal words the host picked.
+      const evidenced = await page.evaluateHandle(() => document.querySelector('.evidence-chip[data-verdict="evidenced"]') ?? null);
+      const target = evidenced.asElement() ?? chips.at(-1);
       await target.scrollIntoViewIfNeeded();
       await target.click(); await page.waitForTimeout(1200);
       // The disclosure opens empty and fills from getEvidence. Until that answers, its body reads
@@ -1902,7 +1929,7 @@ try {
         const seen = await readReceipts();
         return seen && !/Reading the receipts from the host/.test(seen) ? seen : null;
       }, 30_000, 1000) ?? await readReceipts();
-      check(/receipt/.test(text) && /attestation/.test(text), "the pill opens a disclosure with the receipt and attestation counts", text.slice(0, 130));
+      check(/receipt/.test(text) && /attestation/.test(text), "the chip opens a disclosure with the receipt and attestation counts", text.slice(0, 130));
       check(/tool · \S/.test(text), "the disclosure names at least one tool", (/tool · [^ ]+/.exec(text) ?? ["none"])[0]);
       // An attested head is the raw tool result the host keeps out of model context. It is not in
       // the DOM until one attestation is asked for, and the reveal is per-attestation.
@@ -2129,16 +2156,16 @@ try {
     // openDesktop("files"), so the box measured is that dialog's own file view.
     await sweepPanel("Files", () => page.click('[data-capability="files"]', { timeout: 8000 }), "#desktop-dialog .files-view");
     await sweepPanel("Settings", () => page.click("#settings-button", { timeout: 8000 }));
-    // Claim provenance opens from an evidence pill in the transcript and fills from getEvidence,
+    // Claim provenance opens from an evidence chip in the transcript and fills from getEvidence,
     // so it is measured only once the receipts are in it -- an empty body has nothing to bleed.
     await sweepPanel("Claim provenance", async () => {
       for (let i = 0; i < 400; i += 1) await page.mouse.wheel(0, 2000);
       await page.waitForTimeout(600);
-      const sweepPills = await page.$$(".message-row.is-evidence");
-      if (sweepPills.length === 0) throw new Error("no evidence pill in the transcript to open");
-      const pill = sweepPills.at(-1);
-      await pill.scrollIntoViewIfNeeded();
-      await pill.click();
+      const sweepChips = await page.$$(".evidence-chip");
+      if (sweepChips.length === 0) throw new Error("no evidence chip in the transcript to open");
+      const chip = sweepChips.at(-1);
+      await chip.scrollIntoViewIfNeeded();
+      await chip.click();
       const filled = await until(async () => {
         const body = await page.evaluate(() => document.querySelector("[data-evidence-body]")?.textContent ?? "");
         return body && !/Reading the receipts from the host/.test(body) ? body : null;
