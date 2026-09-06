@@ -3061,3 +3061,11 @@ dialog[open] {
 .marketplace-actions { flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .marketplace-actions .tag { display: inline-flex; align-items: center; gap: 6px; }
 .marketplace-card .plugin-icon, [data-marketplace-body] .plugin-hero .plugin-icon { color: var(--text-primary); font-weight: 600; }
+
+/* -- Agent-owned skills beside global ones (qol/skills). Two headings inside the Skills panel's
+   existing .routine-list, and one chip on each card saying whose the skill is. Everything else is
+   the panel's own furniture: .plugin-section-title for the heading, .tag for the chip. */
+.routine-list .skills-section-title { margin: 14px 0 8px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); }
+.routine-list .skills-section-title:first-child { margin-top: 0; }
+.skill-scope-tag { border: 1px solid var(--glass-edge-soft); }
+.skill-scope-tag.owned { border-color: var(--teal-300); color: var(--text-primary); }

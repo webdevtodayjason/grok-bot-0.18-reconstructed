@@ -4,12 +4,13 @@ import { isSandSubagentId } from "../../../shared/agents/subagents.js";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { errorLogTag } from "../../../shared/errors.js";
 import { getSandProfilePath, readSandProfileFile, writeSandProfileFile, type SandAgentProfile } from "../../agents/agent-profile.js";
 import { getSandSettingsPath, writeSandSettingsFile } from "../../agents/settings-file.js";
 import { AUTOMATION_UI_LIMIT } from "../../automations/automation.js";
 import { getSandAgentsRootDir } from "../../storage/agent-paths.js";
+import { GlobalWorkflowLibrary, getGlobalWorkflowsDir } from "../../workflows/workflow-library.js";
 import { seedActivityFromMtime } from "./session-projection.js";
 import { deleteSandAgentDbWriteGeneration, getSandAgentDbWriteGeneration } from "../../storage/store-db.js";
 import { limitSurfacedWorkflows, type WorkflowSpec } from "../../../shared/workflow-model.js";
@@ -114,7 +115,14 @@ export class SandAgentSessionStore {
   async mintAgent(mint: (agentId: string) => Promise<OpenAgentSession>): Promise<OpenAgentSession> { if (this.materialization?.mintAgent != null) return this.materialization.mintAgent(mint); let id = randomUUID(); while (this.agentDirExists(id)) id = randomUUID(); return mint(id); }
   async createFallbackSession(open: (agentId: string) => Promise<OpenAgentSession>): Promise<OpenAgentSession> { if (this.materialization?.createFallbackSession != null) return this.materialization.createFallbackSession(open); const [agentId] = await this.listAgentIds(); if (agentId == null) throw new Error("No fallback session is available"); return open(agentId); }
   async openSession(agentId: string): Promise<OpenAgentSession> { if (this.materialization?.openSession != null) return this.materialization.openSession(agentId); if (!this.agentExists(agentId)) throw new Error(`Agent missing: ${agentId}`); const dbPath = getAgentDbPath(this.rootDir, agentId); return { id: agentId, dbPath, db: new SandAgentDb(dbPath), agentStore: { dispose: async () => {} } }; }
-  async deleteSession(agentId: string): Promise<void> { const dbPath = getAgentDbPath(this.rootDir, agentId); markAgentDeleted(this.rootDir, agentId); this.extrasCache.delete(agentId); deleteSandAgentDbWriteGeneration(dbPath); await rm(this.getAgentDir(agentId), { recursive: true, force: true }); publishTranscriptMutation({ kind: "agent-removed", agentId }); this.options.onAgentRemoved?.(agentId); }
+  /**
+   * A deleted agent takes its OWN skills with it. Those were offered to nobody else, so a folder
+   * left in the shared library after the owner is gone is invisible on every surface and still
+   * counts against the library's cap. Global skills the agent created are untouched: they belong
+   * to the box, not to it. Best effort -- a library that cannot be read must not block a delete.
+   */
+  releaseOwnedWorkflows(agentId: string): string[] { try { return new GlobalWorkflowLibrary(getGlobalWorkflowsDir(dirname(this.rootDir))).releaseOwnedBy(agentId); } catch { return []; } }
+  async deleteSession(agentId: string): Promise<void> { const dbPath = getAgentDbPath(this.rootDir, agentId); markAgentDeleted(this.rootDir, agentId); this.extrasCache.delete(agentId); deleteSandAgentDbWriteGeneration(dbPath); this.releaseOwnedWorkflows(agentId); await rm(this.getAgentDir(agentId), { recursive: true, force: true }); publishTranscriptMutation({ kind: "agent-removed", agentId }); this.options.onAgentRemoved?.(agentId); }
 
   activeAgentPointerPath(): string { return join(this.rootDir, ACTIVE_AGENT_FILENAME); }
   readActiveAgentId(): string | null { try { const parsed = JSON.parse(readFileSync(this.activeAgentPointerPath(), "utf8")) as { activeAgentId?: unknown }; const id = parsed.activeAgentId; return typeof id === "string" && id.length > 0 ? id : null; } catch { return null; } }
@@ -226,6 +234,9 @@ export class SandAgentSessionStore {
   createAgentWorkflow(agentId: string, spec: WorkflowSpec) { const store = this.workflowStoreFor(agentId); store.create(spec); return limitSurfacedWorkflows(store.listAll()); }
   updateAgentWorkflow(agentId: string, workflowId: string, spec: WorkflowSpec) { const store = this.workflowStoreFor(agentId); store.update(workflowId, spec); return limitSurfacedWorkflows(store.listAll()); }
   async setAgentWorkflowEnabled(agentId: string, workflowId: string, enabled: boolean) { const store = this.workflowStoreFor(agentId); store.setEnabledForAgent(workflowId, enabled); return limitSurfacedWorkflows(store.listAll()); }
+  // "Make global" (ownerAgentId null) and its inverse. The store refuses a skill this agent is
+  // not offered, so the operator can only hand over what the panel in front of them can see.
+  async setAgentWorkflowOwner(agentId: string, workflowId: string, ownerAgentId: string | null) { const store = this.workflowStoreFor(agentId); store.setOwner(workflowId, ownerAgentId); return limitSurfacedWorkflows(store.listAll()); }
   removeAgentWorkflow(agentId: string, workflowId: string) { const store = this.workflowStoreFor(agentId); store.remove(workflowId); return limitSurfacedWorkflows(store.listAll()); }
   async importAgentWorkflowMarkdown(agentId: string, markdown: string, fallbackName?: string) { const store = this.workflowStoreFor(agentId), imported = store.importMarkdown(markdown, fallbackName); return { workflows: limitSurfacedWorkflows(store.listAll()), result: imported == null ? { imported: [], skipped: [{ source: "pasted skill", reason: "empty or invalid" }] } : { imported: [imported], skipped: [] } }; }
   async importAgentWorkflowSource(agentId: string, source: string, fallbackName?: string) { const store = this.workflowStoreFor(agentId), imported = store.importLiveSource(source, fallbackName); return { workflows: limitSurfacedWorkflows(store.listAll()), result: imported == null ? { imported: [], skipped: [{ source, reason: "could not link" }] } : { imported: [imported], skipped: [] } }; }

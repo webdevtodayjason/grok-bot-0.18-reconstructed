@@ -537,7 +537,7 @@ try {
       // wait for the open panel to pick it up on its own. No model turn is spent to prove it.
       libraryBefore = await libraryIds(probeAgentId).catch(() => null);
       await page.click('[data-capability="skills"]'); await page.waitForTimeout(2500);
-      check(await page.evaluate(() => /skill library/i.test(document.getElementById("panel-content")?.innerText ?? "")), "the Skills panel opens for the probe");
+      check(await page.evaluate(() => document.getElementById("panel-eyebrow")?.textContent === "Agent skills"), "the Skills panel opens for the probe");
       const learnedName = `Gate learned skill ${Date.now()}`;
       await gw("createAgentWorkflow", { id: probeAgentId, spec: { name: learnedName, description: "written the way a learning turn writes one", body: "Do the demonstrated task.", trigger: null } }).catch((e) => check(false, "a workflow could be written to the host", e.message));
       const listed = await until(() => page.evaluate((name) => (document.getElementById("panel-content")?.innerText.includes(name) ? true : null), learnedName), 22_000, 1000);
@@ -736,10 +736,10 @@ try {
       if (!(await page.evaluate(() => document.getElementById("room-title")?.textContent)).startsWith("Unread probe")) await clickText(probeName);
       await page.click("[data-capability='skills']"); await page.waitForTimeout(1500);
       check((await page.evaluate(() => document.getElementById("panel-eyebrow")?.textContent)) === "Agent skills", "the Skills capability opens the agent's Skills panel");
-      // The library is global (see libraryIds above); the panel must say so, since Delete on it
-      // removes the skill for every agent on the box.
+      // A skill is either this agent's own or the box's, and the panel has to say which is which:
+      // Delete and Make global on a global one reach every agent, on an owned one only its owner.
       const intro = await page.evaluate(() => document.querySelector("#panel-content .panel-intro p")?.textContent ?? "");
-      check(/shared skill library/.test(intro) && /every agent/.test(intro), "the Skills panel says the library is the box's shared one, not this agent's", intro.slice(0, 90));
+      check(/its own/.test(intro) && /global/i.test(intro) && /every agent/.test(intro), "the Skills panel says which skills are this agent's own and which are the box's", intro.slice(0, 120));
       await page.evaluate(() => document.querySelectorAll("#panel-content details").forEach((d) => { d.open = true; }));
       await page.fill("#skill-markdown", "---\nname: Gate probe skill\ndescription: verify-dashboard probe\n---\nReply with the single word: done.");
       await page.click("[data-import-skill-text] button[type=submit]");
@@ -799,6 +799,58 @@ try {
       const portedRows = ((await gw("getAgentWorkflows", { id: probeAgentId }).catch(() => [])) ?? []).filter((w) => w.source !== "automation");
       const portedOnPanel = await page.$$eval("[data-skill-id]", (els) => els.map((e) => e.dataset.skillId));
       check(portToast != null && portedRows.length >= countBefore && portedRows.every((w) => portedOnPanel.includes(w.id)), "Port reports the host's own answer and every skill it linked is listed", `${portToast?.slice(0, 80)} · ${portedRows.length} on host, ${portedOnPanel.length} on panel`);
+      await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+    }
+
+    // -- Agent-owned skills beside global ones (qol/skills). Every skill used to be in one library
+    // that every agent got, so a skill an agent wrote for itself during a turn was silently
+    // everybody's and no surface could say whose it was. A skill now carries ownerAgentId: null is
+    // global (what every skill was), an agent id is that agent's own and is offered to nobody else.
+    // Two skills are written through the gateway -- one owned, one global -- and read back through
+    // getAgentWorkflows for BOTH agents, because "not offered to the other one" is the whole claim
+    // and only a second agent's list can prove it. Then the panel, which has to draw the split and
+    // name the owner, and the operator's one-way "Make global". No model turn is spent.
+    // The library sweep at the end of this gate removes both: they are on the probe's own list.
+    if (probeAgentId) {
+      const neighbour = (((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.id !== probeAgentId && !a.isGroup) ?? null);
+      const stamp = Date.now();
+      const ownedName = `Gate owned skill ${stamp}`, globalName = `Gate global skill ${stamp}`;
+      await gw("createAgentWorkflow", { id: probeAgentId, spec: { name: ownedName, description: "owned by the probe agent", body: "Reply with the single word: owned.", trigger: null, ownerAgentId: probeAgentId } }).catch((e) => check(false, "an owned skill could be written to the host", e.message));
+      await gw("createAgentWorkflow", { id: probeAgentId, spec: { name: globalName, description: "in the box's library", body: "Reply with the single word: global.", trigger: null } }).catch((e) => check(false, "a global skill could be written to the host", e.message));
+      const rowsFor = async (id) => ((await gw("getAgentWorkflows", { id }).catch(() => [])) ?? []);
+      const mine = await rowsFor(probeAgentId);
+      const ownedRow = mine.find((w) => w.name === ownedName) ?? null;
+      const globalRow = mine.find((w) => w.name === globalName) ?? null;
+      check(ownedRow?.ownerAgentId === probeAgentId, "a skill written for one agent records that agent as its owner", ownedRow ? String(ownedRow.ownerAgentId) : "not on the host");
+      check(globalRow != null && globalRow.ownerAgentId == null, "and one written with no owner is global, the way every skill used to be", globalRow ? String(globalRow.ownerAgentId) : "not on the host");
+      check(ownedRow != null && ownedRow.isEnabledForAgent !== false, "an owned skill is on for its owner from the moment it is saved");
+      if (neighbour == null) check(false, "the box has a second agent to read the library through");
+      else {
+        const theirs = await rowsFor(neighbour.id);
+        check(ownedRow != null && !theirs.some((w) => w.id === ownedRow.id), "another agent is not offered the owned skill", `${neighbour.name} sees ${theirs.length} skill(s)`);
+        check(globalRow != null && theirs.some((w) => w.id === globalRow.id), "and is offered the global one");
+      }
+      await page.click("[data-capability='skills']");
+      // The panel paints from the cached list first and repaints on its own read, so wait for the
+      // card rather than for a clock.
+      const painted = ownedRow == null ? null : await until(() => page.$(`[data-skill-id="${ownedRow.id}"]`), 15_000, 700);
+      check(painted != null, "the Skills panel lists the owned skill for its owner");
+      const sections = await page.$$eval(".skills-section-title", (els) => els.map((e) => e.textContent.trim()));
+      check(sections.includes("This agent's skills") && sections.includes("Global skills"), "the Skills panel draws this agent's skills and the global ones as two sections", sections.join(" | "));
+      if (ownedRow && globalRow) {
+        const tagOf = (id) => page.evaluate((skillId) => document.querySelector(`[data-skill-id="${skillId}"] .skill-scope-tag`)?.textContent ?? "", id);
+        const ownedTag = await tagOf(ownedRow.id), globalTag = await tagOf(globalRow.id);
+        check(/^owned by \S/.test(ownedTag), "an owned card names its owner", ownedTag);
+        check(/global/i.test(globalTag), "and a global card says it is every agent's", globalTag);
+        // Make global: one click, read back through the OTHER agent's list, because the point of
+        // the control is that the skill reaches agents whose panel is not on screen.
+        const promote = `[data-skill-id="${ownedRow.id}"] [data-make-skill-global]`;
+        check((await page.$(promote)) != null, "an owned skill offers Make global");
+        check((await page.$(`[data-skill-id="${globalRow.id}"] [data-make-skill-global]`)) == null, "and a global one does not, since there is nothing to hand over");
+        await page.click(promote);
+        const reached = neighbour == null ? null : await until(async () => ((await rowsFor(neighbour.id)).some((w) => w.id === ownedRow.id) ? true : null), 12_000, 800);
+        check(reached === true, "Make global puts the skill in every agent's library", neighbour ? `read back through ${neighbour.name}` : "no second agent");
+      }
       await page.keyboard.press("Escape"); await page.waitForTimeout(500);
     }
 

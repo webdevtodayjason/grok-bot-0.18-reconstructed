@@ -66,6 +66,7 @@ export const SAND_GATEWAY_COMMANDS = {
   createAgentWorkflow: (api: GatewayApi, body: string) => api.createAgentWorkflow(parseCommandArgs(body)),
   updateAgentWorkflow: (api: GatewayApi, body: string) => api.updateAgentWorkflow(parseCommandArgs(body)),
   setAgentWorkflowEnabled: (api: GatewayApi, body: string) => api.setAgentWorkflowEnabled(parseCommandArgs(body)),
+  setAgentWorkflowOwner: (api: GatewayApi, body: string) => api.setAgentWorkflowOwner(parseCommandArgs(body)),
   deleteAgentWorkflow: (api: GatewayApi, body: string) => api.deleteAgentWorkflow(parseCommandArgs(body)),
   runAgentWorkflowNow: (api: GatewayApi, body: string) => api.runAgentWorkflowNow(parseCommandArgs(body)),
   importAgentWorkflowText: (api: GatewayApi, body: string) => api.importAgentWorkflowText(parseCommandArgs(body)),

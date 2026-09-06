@@ -1030,6 +1030,11 @@
       id: w.id, name: w.name ?? w.id, description: w.description ?? "", body: w.body ?? "",
       enabled: w.isEnabledForAgent !== false,
       source: w.source ?? "workflow", sourceRef: w.sourceRef ?? null,
+      // Ownership (shared/workflow-model.ts): null is a global skill, in every agent's library
+      // the way every skill used to be; an agent id is a skill that agent wrote for itself and
+      // that the host offers to nobody else. The host has already filtered the list, so an id
+      // here is always the agent whose panel asked.
+      ownerAgentId: typeof w.ownerAgentId === "string" && w.ownerAgentId ? w.ownerAgentId : null,
       // A skill imported with trigger frontmatter is also scheduled; the host fires it by agent
       // id through the automation runtime, which is the path runAgentWorkflowNow takes for it.
       scheduled: w.trigger != null, schedule: w.trigger?.schedule ?? null,
@@ -1779,6 +1784,20 @@
             const saved = skills.find((s) => s.id === workflowId);
             if (!saved) throw new Error("the host answered but that skill is gone");
             if (saved.body !== body || saved.name !== wanted.slice(0, 80)) throw new Error("the host answered and kept the old skill");
+            emit("settings:skills", { agentId });
+            return saved;
+          });
+      },
+      // setAgentWorkflowOwner { id, workflowId, ownerAgentId }: null hands an owned skill to the
+      // box. Read back through getAgentWorkflows like every other write, because the host answers
+      // 200 to a change its store then declines (another agent's skill is refused outright).
+      makeSkillGlobal(agentId, workflowId) {
+        return call("setAgentWorkflowOwner", { id: agentId, workflowId, ownerAgentId: null })
+          .then(() => this.getSkills(agentId))
+          .then((skills) => {
+            const saved = skills.find((s) => s.id === workflowId);
+            if (!saved) throw new Error("the host answered but that skill is gone");
+            if (saved.ownerAgentId != null) throw new Error("the host answered and kept the skill owned");
             emit("settings:skills", { agentId });
             return saved;
           });

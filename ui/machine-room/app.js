@@ -1011,9 +1011,32 @@
   // What the open Skills panel is currently showing, so a refresh that changed nothing does not
   // rebuild the markup under the operator's hands.
   let paintedSkillsSig = "";
-  const skillsSig = (worker) => (worker?.skills ?? []).map((skill) => `${skill.id}:${skill.enabled ? 1 : 0}:${skill.name}`).join("|");
+  const skillsSig = (worker) => (worker?.skills ?? []).map((skill) => `${skill.id}:${skill.enabled ? 1 : 0}:${skill.ownerAgentId ?? ""}:${skill.name}`).join("|");
 
-  function skillCardMarkup(skill) {
+  // -- Agent-owned skills (qol/skills). ownerAgentId is off the host's own workflow record
+  // (shared/workflow-model.ts): null means the skill is global -- in every agent's library, the way
+  // every skill used to be -- and an id means one agent wrote it for itself. The host offers an
+  // owned skill to nobody but its owner, so an id read here is always the agent on screen; it is
+  // still resolved through the roster rather than assumed, because a card that names the wrong
+  // owner is exactly the confusion this section exists to end.
+  function skillOwnerName(skill, worker) {
+    if (skill.ownerAgentId == null) return null;
+    if (skill.ownerAgentId === worker?.id) return worker.name;
+    const known = [...state.workers, ...state.rooms].find((agent) => agent?.id === skill.ownerAgentId);
+    return known?.name ?? skill.ownerAgentId;
+  }
+  function skillOwnerTag(skill, worker) {
+    if (skill.source === "managed" || skill.source === "plugin") return "";
+    const owner = skillOwnerName(skill, worker);
+    return owner == null
+      ? '<span class="tag skill-scope-tag">global · every agent</span>'
+      : `<span class="tag skill-scope-tag owned">owned by ${escapeHtml(owner)}</span>`;
+  }
+  function skillSection(title, emptyNote, cards) {
+    return `<div class="plugin-section-title skills-section-title"><span>${escapeHtml(title)}</span></div>${cards || `<div class="empty-state"><div><p>${escapeHtml(emptyNote)}</p></div></div>`}`;
+  }
+
+  function skillCardMarkup(skill, worker) {
     const canToggle = typeof adapter.setSkillEnabled === "function";
     const canRun = typeof adapter.runSkill === "function";
     // The host's store refuses to edit or remove a managed or plugin skill (WorkflowStore.remove
@@ -1027,12 +1050,16 @@
     const controls = [
       canRun ? `<button class="primary-button" type="button" data-run-skill="${escapeHtml(skill.id)}" ${skill.enabled ? "" : "disabled"}>Run now</button>` : "",
       canEdit ? `<button class="ghost-button" type="button" data-edit-skill="${escapeHtml(skill.id)}">Edit</button>` : "",
-      canDelete ? `<button class="ghost-button" type="button" data-delete-skill="${escapeHtml(skill.id)}" title="Removes this skill from the box's shared library, for every agent">Delete</button>` : "",
+      canDelete ? `<button class="ghost-button" type="button" data-delete-skill="${escapeHtml(skill.id)}" title="${skill.ownerAgentId == null ? "Removes this skill from the box's shared library, for every agent" : "Removes this agent's own skill; no other agent has it"}">Delete</button>` : "",
+      // Only an owned skill can be handed to the box, and only where the adapter implements it.
+      skill.ownerAgentId != null && typeof adapter.makeSkillGlobal === "function"
+        ? `<button class="ghost-button" type="button" data-make-skill-global="${escapeHtml(skill.id)}" title="Puts this skill in the box's shared library, for every agent. It cannot be given back to one agent from here.">Make global</button>`
+        : "",
     ].join("");
     const toggle = canToggle
       ? `<button class="switch" type="button" data-toggle-skill="${escapeHtml(skill.id)}" aria-label="Enable ${escapeHtml(skill.name)} for this agent" aria-pressed="${skill.enabled}"></button>`
       : `<span class="status-pill${skill.enabled ? " success" : ""}">${skill.enabled ? "enabled" : "disabled"}</span>`;
-    return `<article class="routine-card skill-card" data-skill-id="${escapeHtml(skill.id)}" data-skill-name="${escapeHtml(skill.name)}"><div><div class="routine-header"><h3>${escapeHtml(skill.name)}</h3>${toggle}</div><p>${escapeHtml(skill.description || "No description on the host.")}</p><pre class="skill-body">${escapeHtml(skill.body)}</pre><div class="routine-meta"><span class="tag">${escapeHtml(origin)}</span>${schedule}${skill.helperScripts.length ? `<span class="tag">${skill.helperScripts.length} helper file(s)</span>` : ""}</div>${lastRun}</div><div style="display:grid;gap:6px;align-content:start">${controls}</div></article>`;
+    return `<article class="routine-card skill-card" data-skill-id="${escapeHtml(skill.id)}" data-skill-name="${escapeHtml(skill.name)}"><div><div class="routine-header"><h3>${escapeHtml(skill.name)}</h3>${toggle}</div><p>${escapeHtml(skill.description || "No description on the host.")}</p><pre class="skill-body">${escapeHtml(skill.body)}</pre><div class="routine-meta"><span class="tag">${escapeHtml(origin)}</span>${skillOwnerTag(skill, worker)}${schedule}${skill.helperScripts.length ? `<span class="tag">${skill.helperScripts.length} helper file(s)</span>` : ""}</div>${lastRun}</div><div style="display:grid;gap:6px;align-content:start">${controls}</div></article>`;
   }
 
   function skillsPanel(worker) {
@@ -1041,8 +1068,14 @@
     const canCreate = typeof adapter.createSkill === "function";
     const canImportText = typeof adapter.importSkillText === "function";
     const canImportUrl = typeof adapter.importSkillUrl === "function";
-    const cards = skills.length ? skills.map(skillCardMarkup).join("")
-      : `<div class="empty-state"><div><strong>No skills in the box's library</strong><p>A skill is a named recipe an agent can be asked to run by name. The library is shared by every agent on the box; routines created on the Routines panel are scheduled skills and stay there.</p></div></div>`;
+    // Two sections, because a skill is either this agent's own or the box's. The host has already
+    // filtered the list -- another agent's owned skills are not in it at all -- so the split here is
+    // over what came back, never a guess about what exists.
+    const ownedCards = skills.filter((skill) => skill.ownerAgentId != null).map((skill) => skillCardMarkup(skill, worker)).join("");
+    const globalCards = skills.filter((skill) => skill.ownerAgentId == null).map((skill) => skillCardMarkup(skill, worker)).join("");
+    const cards = skills.length
+      ? `${skillSection("This agent's skills", `${worker.name} has not written a skill of its own yet. One it saves during a turn, or learns from a demonstration, lands here and no other agent is offered it.`, ownedCards)}${skillSection("Global skills", "No global skills on this box yet.", globalCards)}`
+      : `<div class="empty-state"><div><strong>No skills in this agent's library</strong><p>A skill is a named recipe an agent can be asked to run by name. Global skills are shared by every agent on the box; a skill an agent writes for itself belongs to it alone. Routines created on the Routines panel are scheduled skills and stay there.</p></div></div>`;
     const form = canCreate || editing
       ? `<details class="routine-create"${editing ? " open" : ""}><summary class="secondary-button">${editing ? `Editing ${escapeHtml(editing.name)}` : "＋ New skill"}</summary><form ${editing ? `data-skill-form="${escapeHtml(editing.id)}"` : "data-skill-form=\"\""}><div class="field"><label for="skill-name">Name</label><input id="skill-name" name="name" required placeholder="e.g. Weekly ticket digest" value="${escapeHtml(editing ? editing.name : "")}" /></div><div class="field"><label for="skill-description">When to use it</label><input id="skill-description" name="description" placeholder="One line the agent reads to decide" value="${escapeHtml(editing ? editing.description : "")}" /></div><div class="field"><label for="skill-body">Instructions</label><textarea id="skill-body" name="body" rows="5" required placeholder="The recipe, written as you would to a person">${escapeHtml(editing ? editing.body : "")}</textarea></div><div class="form-actions">${editing ? `<button class="ghost-button" type="button" data-cancel-skill-edit>Cancel</button>` : ""}<button class="primary-button" type="submit">${editing ? "Save changes" : "Create skill"}</button></div></form></details>`
       : "";
@@ -1050,7 +1083,7 @@
     const importers = canImportText || canImportUrl || canPort
       ? `<details class="routine-create"><summary class="secondary-button">⇩ Import a skill</summary>${canImportText ? `<form data-import-skill-text><div class="field"><label for="skill-markdown">Paste skill markdown</label><textarea id="skill-markdown" name="markdown" rows="5" required placeholder="---&#10;name: My skill&#10;description: when to use it&#10;---&#10;The recipe…"></textarea><span class="field-hint">Frontmatter name and description are read if present; a trigger.schedule in it makes the skill scheduled as well.</span></div><div class="form-actions"><button class="primary-button" type="submit">Import markdown</button></div></form>` : ""}${canImportUrl ? `<form data-import-skill-url><div class="field"><label for="skill-url">Or a URL</label><input id="skill-url" name="url" type="url" required placeholder="https://…/SKILL.md" /><span class="field-hint">Stored as a live reference: the agent reads the URL when it runs the skill, so it follows the source as it changes.</span></div><div class="form-actions"><button class="primary-button" type="submit">Import from URL</button></div></form>` : ""}${canPort ? `<div class="setting-row"><div><strong>Port the host's local skill files</strong><small>The host scans its own working directory and home for CLAUDE.md, AGENTS.md and .cursor/rules and links each as a live reference. It reports what it found; nothing is invented here.</small></div><button class="ghost-button" type="button" data-port-local-skills>Port</button></div>` : ""}</details>`
       : "";
-    return `<div class="panel-intro"><p>The box's <strong>shared skill library</strong>: the how, read by an agent when it is asked by name or when a scheduled one fires. A skill created or imported here is in the library for every agent on the box, enabled by default; the switch is <strong>${escapeHtml(worker.name)}</strong>'s own per-agent enable. Delete removes a skill for every agent.</p>${form}${importers}</div><div class="routine-list" data-skill-list>${cards}</div>`;
+    return `<div class="panel-intro"><p><strong>Skills</strong> are the how, read by an agent when it is asked by name or when a scheduled one fires. A skill <strong>${escapeHtml(worker.name)}</strong> writes for itself is <strong>its own</strong> — nobody else is offered it, and it is on for ${escapeHtml(worker.name)} from the moment it is saved. A skill created or imported <em>here</em> is <strong>global</strong>: in the library for every agent on the box. “Make global” hands an owned skill to the box and cannot be undone from this panel; the switch is ${escapeHtml(worker.name)}'s own per-agent enable; Delete removes a global skill for every agent.</p>${form}${importers}</div><div class="routine-list" data-skill-list>${cards}</div>`;
   }
 
   function renderSkillsPanel() {
@@ -2700,6 +2733,14 @@
             : "The host found no local skill file to port");
         })
         .catch((error) => { target.disabled = false; showToast(`Could not port local skills: ${error.message}`); });
+    } else if (target.dataset.makeSkillGlobal) {
+      // One way only: the host can put an owned skill in the shared library, and this panel offers
+      // no control to take it back, so the button says so before it is pressed.
+      const worker = contextRecord();
+      target.disabled = true;
+      adapter.makeSkillGlobal(worker.id, target.dataset.makeSkillGlobal)
+        .then((skill) => { renderSkillsPanel(); showToast(`${skill.name} is global — every agent on the box has it now`); })
+        .catch((error) => { target.disabled = false; showToast(`Could not make that skill global: ${error.message}`); });
     } else if (target.dataset.editSkill) {
       editingSkillId = target.dataset.editSkill;
       renderSkillsPanel();
@@ -2718,7 +2759,11 @@
           armedDeleteSkillId = null;
           target.textContent = "Delete";
         }, 4000);
-        showToast("Click again to delete this skill for every agent on the box. The host keeps no copy.");
+        // An owned skill is nobody else's, so the arming line has to say which delete this is.
+        const armed = (contextRecord()?.skills ?? []).find((skill) => skill.id === workflowId) ?? null;
+        showToast(armed?.ownerAgentId != null
+          ? "Click again to delete this agent's own skill. No other agent has it; the host keeps no copy."
+          : "Click again to delete this skill for every agent on the box. The host keeps no copy.");
         return;
       }
       armedDeleteSkillId = null;
