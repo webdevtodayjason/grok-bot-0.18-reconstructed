@@ -8,15 +8,6 @@ two or three things that bite. Every fact here comes from that service's report 
 `docs/connectors/` (TinyFish's is `docs/CONNECTORS-TINYFISH.md`); the reports carry the sources,
 the version pins and the reasoning, and nothing is claimed here that is not in one of them.
 
-**Where these are installed from: [docs/MARKETPLACE.md](MARKETPLACE.md).** The panel that holds
-them is the Marketplace — a Plugins tab whose cards install these same entries with one Add, and a
-Bots tab of agent templates that name them as integrations. That file is the surface: the two tabs,
-what Add and Import do, where providers and listeners went (Settings), the catalog schema, and how
-to add a plugin or a bot. This file stays what it is: the credential walk-through per service.
-Route names below are the pre-Marketplace ones — **Global capabilities → Plugins, connectors &
-skills** is the panel now called **Marketplace**, its **Add or remove a connector** editor is what
-the *Custom MCP server* card opens, and its **Shell tools** group is the Shell tools category.
-
 ## How it works
 
 A connector is one entry in `/home/box/sand-data/connectors.json`, and that file is the whole

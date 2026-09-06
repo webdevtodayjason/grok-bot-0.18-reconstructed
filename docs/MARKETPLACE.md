@@ -6,12 +6,14 @@ from. It is the companion to [docs/CONNECTORS.md](CONNECTORS.md): that file is t
 walk-through (which credential to mint, with what permissions, and the first call that proves it),
 this one is the surface those services are installed from.
 
-**Status: written to the marketplace contract, and nothing here is measured.** The mechanism
-underneath it — a connector entry in `connectors.json`, an empty env value as a credential field, the
-host's 0600 secret store, `refreshMcp` — is landed, and `docs/CONNECTORS.md` is where it is described
-from measurement. The Marketplace surface on top of it is the wave this document was written for:
-every "the panel does X" sentence below is the contract that wave builds to, not a reading off a
-running box. The gates in §7 are what turn these into measured claims.
+**Status: the wave landed and both gate arms have run on the box.** The mechanism underneath it —
+a connector entry in `connectors.json`, an empty env value as a credential field, the host's 0600
+secret store, `refreshMcp` — was already measured, and `docs/CONNECTORS.md` is where it is described
+from. On top of it, `verify-connector-plane.mjs --plugin-tools` passed whole (27 checks, 0 failures)
+and the dashboard gate's marketplace arc passed except for two things: the imported-bot card and a
+group of provider-card rows. Both are marked **Known red** at the sentence that claims them (§2, §4
+step 4), both have a fix in the tree that landed after that run, and neither fix has been re-gated.
+§7 carries the numbers.
 
 ## 1. The two tabs
 
@@ -43,7 +45,15 @@ subscription adopted on this Mac, or an endpoint holding a pasted key. It was ne
 in that panel because the panel was a flat list of everything global. It now renders in **Settings**
 under **Inference**, as a **Providers** section, using the same provider cards, with the same
 "answering now" pill and the same **Use this endpoint** button. Nothing about how a provider is
-adopted, keyed, switched or reported changes — only where the section is drawn.
+adopted, keyed, switched or reported was meant to change — only where the section is drawn.
+
+**Known red at the §7 run.** The move did change what a provider card shows. Settings drew two open
+detail panes at once — Providers and Chat listeners each fell back to their own first card — so the
+Slack listener's Connect form, its masked token input and its Cursor-route button sat on the page
+beside every provider card. Three provider-card checks failed on it (`market-dashboard-rerun.log`
+lines 153, 154 and 156), and the key-form row at line 161 failed for the same reason. Commit
+`2e3a1e9` draws the detail only in the section that holds the selection, so one detail pane, one
+install button and one password input are on the page again. That fix has not been re-gated.
 
 **Chat listeners moved to Settings too**, as a **Chat listeners** section. A listener binds a chat
 platform to *one agent* with a token the host takes (`connectChannel`), which is a per-agent setting
@@ -76,13 +86,20 @@ inference key is a bug — file it.
    tools themselves with their enable toggles. When the box reports the server connected, the
    Accounts row reads **Ready**.
 
-**The three states, and where each one comes from.**
+**The four states, and where each one comes from.** These are the four labels the card can carry,
+in the order the console decides them (`ui/machine-room/gateway-adapter.js`, the label ladder).
 
 | State | What it means | Read from |
 | --- | --- | --- |
-| not installed | the plugin's connector name is not in `connectors.json` (for a shell-tool plugin: `command -v <binary>` in the box finds no such program — see below) | the connectors file / the box's own shell |
+| Not installed | the plugin's connector name is not in `connectors.json` (for a shell-tool plugin: `command -v <binary>` in the box finds no such program — see below) | the connectors file / the box's own shell |
 | Needs auth | installed, and at least one credential field has no stored value | `listConnectorSecretFields`: the field is in `fields` and not in `stored` |
 | Ready | installed, keyed, and the connector reports connected | the host's own connector status |
+| Connecting | installed, with nothing left to key, and the connector is not reporting connected yet | the same connector status, before it says connected |
+
+**Connecting is the state an Add lands in**, and it is not a transient the operator can ignore: the
+plugin page opens on the click rather than after the host's MCP connect returns, which can take the
+best part of a minute for a server that cannot authenticate yet. A card that sits at Connecting is
+telling you the entry is written and the box has not got a tool list back.
 
 **Two kinds of plugin behave slightly differently.**
 
@@ -135,7 +152,11 @@ expects. Importing one mints a new agent on this box.
    body, so the imported agent's Skills list carries the template's skill names.
 4. **The bot page then shows the imported agent**, and its Integrations list with an **Add** button
    beside each plugin this box does not have — that Add is the same Add as §3, credential card and
-   all. Importing a bot never installs a plugin or takes a key by itself.
+   all. Importing a bot never installs a plugin or takes a key by itself. **Known red at the §7
+   run:** the imported card was not on screen when the import returned, because the paint waited on
+   `adapter.refresh()` and `refreshInstalled()` behind it — `market-dashboard-rerun.log` line 145,
+   "no imported card on screen". Commit `0499430` paints on the import result, ahead of those two
+   round trips. That fix has not been re-gated.
 5. **Importing the same bot twice** makes a second agent named `<name> copy`, the same way
    duplicating an agent does (`cloneAgentDisplayName`, `source/host/agents/agent-clone.ts`). It is
    not an error and it does not overwrite the first one.
@@ -148,14 +169,15 @@ remembers that you imported it.
 One file, in the repo, bundled into the host:
 
 ```
-source/shared/marketplace/catalog.ts   →   export const plugins, bots, categories
+source/shared/marketplace/catalog.ts   →   export const MARKETPLACE_PLUGINS, MARKETPLACE_BOTS,
+                                                        MARKETPLACE_CATALOG
 ```
 
 It is served by two gateway commands:
 
 | Command | Arguments | Answers |
 | --- | --- | --- |
-| `listMarketplace` | `{}` | `{ plugins, bots, categories }` |
+| `listMarketplace` | `{}` | `{ plugins, bots, categories: { plugins, bots } }` — `categories` is an object of two lists, one per tab, **not** a flat array; a reader that calls `categories.map` gets nothing |
 | `getMarketplaceItem` | `{ kind, id }` | that one item |
 
 **The console reads the catalog only through the gateway** — never a static JSON beside the page.
@@ -190,10 +212,17 @@ and a rebuild, not a file dropped on the box.
   description: "TinyFish's hosted MCP endpoint, bridged into the box over stdio. …",
   category: "Web & Search",
   featured: true,
-  icon: { letter: "T", color: "#2f6f4f" },
-  source: { label: "agent.tinyfish.ai", url: "https://agent.tinyfish.ai" },
+  icon: { letter: "T", color: "#0f766e" },
+  source: { label: "agent.tinyfish.ai/mcp", url: "https://agent.tinyfish.ai/mcp" },
   kind: "connector",
-  install: TINYFISH_CONNECTOR_ENTRY,   // the {command,args,env} object — not a second copy of it
+  connectorName: "tinyfish",
+  install: {                            // the entry, written out here; see the note below on why
+    command: "npx",
+    args: ["-y", "mcp-remote", "https://agent.tinyfish.ai/mcp",
+           "--transport", "http-only",
+           "--header", "Authorization:Bearer ${TINYFISH_API_KEY}"],
+    env: { TINYFISH_API_KEY: "" },      // empty value = credential field, never a key
+  },
   credentialHints: { TINYFISH_API_KEY: "Your TinyFish account's API key, carried as an Authorization bearer …" },
 }
 ```
@@ -231,7 +260,7 @@ review, Shell tools.
 | `description` | the paragraph on the bot page |
 | `instructions` | the persona the imported agent runs with (§4 step 2) |
 | `skills` | `[{ name, description, body }]`, `body` being a `SKILL.md` text |
-| `integrations` | plugin ids — every one must exist in `plugins[]` |
+| `integrations` | plugin ids — every one must exist in `MARKETPLACE_PLUGINS` |
 
 ```ts
 {
@@ -265,13 +294,17 @@ Featured because `featured` is true, and under From Titanbot team because `creat
    service's report under `docs/connectors/` (what the credential is, where it is minted, the least
    permission that works, the first call and the answer that means it worked, and what bites), and
    land the `{command,args,env}` entry so the entry and the report cannot drift.
-2. Add the object to `plugins[]` in `source/shared/marketplace/catalog.ts`. `category` must be one of
+2. Add the object to the `PLUGINS` array in `source/shared/marketplace/catalog.ts` (the private const
+   the file exports as `MARKETPLACE_PLUGINS`). `category` must be one of
    the declared categories. `icon` is a letter and a colour — do not reach for a logo URL, the cards
    are deliberately image-free. Write one `credentialHints` line per env key the entry leaves empty:
    what the value is, where it is created, what it needs. **Never a key, a token or an example
    secret** — a catalog is source, it is in git, and it ships inside the bundle.
 3. Add the service's section to `docs/CONNECTORS.md` so the operator has a walk-through, and point
-   `source.url` at something a person can actually read.
+   `source.url` at something a person can actually read. **The shipped catalog already owes one:**
+   Filesystem (`localfiles`) is a card whose Add works and which has no section in
+   `docs/CONNECTORS.md` and no report in `docs/connectors/`. It takes no credential, which is how it
+   slipped through; it is still the one entry this step is owed.
 4. Rebuild the host and run the gates in §7. The catalog is bundled, so an entry that is not in a
    deployed bundle does not exist on the box.
 
@@ -298,11 +331,21 @@ box, through `bash scripts/on-box.sh`.
   byte-identical to before; the Bots tab lists the six templates; **Import** on *Research desk*
   creates an agent whose description matches and whose skills list the template's skill names, and
   the gate deletes it again.
-- **`scripts/verify-connector-plane.mjs --plugin-tools`** — `SearchPlugins` lists the catalog,
-  `GetPlugin` returns TinyFish with its credential field, `InstallPlugin` writes the entry,
-  `UninstallPlugin` removes it, byte-identical after.
+- **`scripts/verify-connector-plane.mjs --plugin-tools`** — `listMarketplace` and
+  `getMarketplaceItem` answer the catalog (TinyFish, with `TINYFISH_API_KEY` declared and empty),
+  then a probe agent turn drives the four tools against a connector plugin this box does not already
+  have: `SearchPlugins` lists the catalog and names it, `GetPlugin` returns it with its credential
+  field, `InstallPlugin` writes the entry, `UninstallPlugin` removes it, byte-identical after.
 
-Until those have run on the box, this document is the contract and not a measurement.
+**What the arms actually measured.** `verify-connector-plane.mjs --plugin-tools` passed whole: 27
+checks, 0 failures, the four tools driven through a probe agent turn (the install leg ran against
+GitHub, the first catalog connector the box did not already hold). `verify-dashboard.mjs` ran the
+whole console; its marketplace arc came back green — the Plugins tab, the chips and search, Add and
+Uninstall with `connectors.json` byte-identical after, no provider card in the Marketplace, the
+Providers and Chat listeners sections in Settings, the six bot templates, and Import Bot creating an
+agent with the template's description and skills — **except** for the two rows marked Known red
+above: the imported-bot card (§4 step 4) and the provider-card group (§2). `2e3a1e9` and `0499430`
+fix those two and landed after that run, so re-run this gate before calling them green.
 
 ## 8. The agent's own path: SearchPlugins → GetPlugin → InstallPlugin
 
@@ -310,8 +353,11 @@ The agent has had four plugin tools all along — `SearchPlugins`, `GetPlugin`, 
 `UninstallPlugin` — and they resolved against **Cursor's** marketplace, which this box has no account
 for. `source/host/extensions/mcp/mcp-service.ts` says it plainly: there is no usable Cursor account,
 and the call threw straight out of `SearchPlugins`. So the catalog was always empty and the tools
-were dead ends. They now resolve against the local catalog
-(`source/shared/node/mcp/mcp-catalog-flow.ts`, `mcp-service.ts`), and the wording in
+were dead ends. They now resolve against the local catalog:
+`source/host/extensions/mcp/marketplace-plugins.ts` is the module that answers all four, wired in
+from `mcp-service.ts`. (`source/shared/node/mcp/mcp-catalog-flow.ts` is untouched Cursor plumbing,
+still imported by `source/shared/node/mcp/mcp-manager.ts`; it is not where these tools are served
+from.) The wording in
 `source/host/runner/system-prompt.ts` and in the add-connector seed skill
 (`source/host/extensions/managed-setup/seed-skills/add-connector/SKILL.md`) says **the Marketplace**
 rather than Cursor's.
