@@ -77,6 +77,10 @@ relay_run() {
   # host. It is not optional: server.mjs reads and writes the box's secrets, connectors and window
   # surfaces exclusively through `docker exec`, because those files live in a volume with no host
   # path. README.md item 8 says this out loud so the decision is the operator's, not an accident.
+  # TITAN_JOB_TOKEN is passed only when the operator exported one: unset, /v1 answers 503 until a
+  # token is generated in Settings -> Job bus, which writes job-bus.json into the profile mount
+  # below. That is why the mount is no longer read-only (docs/JOB-BUS.md section 2); the gateway
+  # token beside it is still 0600 on the host and nothing in the console writes it.
   docker run --detach --name "$RELAY" \
     --network "$NET" \
     --restart unless-stopped \
@@ -87,9 +91,10 @@ relay_run() {
     --env SAND_HOST_GATEWAY_URL="http://$BOX:1340" \
     --env SAND_BOX_CONTAINER="$BOX" \
     --env SAND_PROFILE_DIRS=/profile \
+    ${TITAN_JOB_TOKEN:+--env TITAN_JOB_TOKEN="$TITAN_JOB_TOKEN"} \
     --volume /var/run/docker.sock:/var/run/docker.sock \
     --volume "$ROOT/ui:/app/ui" \
-    --volume "$ROOT/profile:/profile:ro" \
+    --volume "$ROOT/profile:/profile" \
     ${authmount[@]+"${authmount[@]}"} \
     "$RELAY_IMAGE" node /app/ui/server.mjs >/dev/null
 

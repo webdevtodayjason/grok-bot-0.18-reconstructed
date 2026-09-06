@@ -22,7 +22,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
-import { copyFileSync, cpSync, mkdtempSync } from "node:fs";
+import { copyFileSync, cpSync, mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -163,7 +163,9 @@ const PASSWORD = "a password these tests wrote themselves";
 async function startRelay(env, { pages = false } = {}) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const dir = mkdtempSync(path.join(tmpdir(), "relay-proxy-"));
-    for (const name of ["server.mjs", "auth.mjs", "subscriptions.mjs"]) {
+    // Every .mjs in ui/, not a fixed list: the relay grew a module once and these tests answered
+    // by failing to start a server at all, which looks nothing like the guard they exist to check.
+    for (const name of readdirSync(path.join(repoRoot, "ui")).filter((file) => file.endsWith(".mjs"))) {
       copyFileSync(path.join(repoRoot, "ui", name), path.join(dir, name));
     }
     if (pages) {
