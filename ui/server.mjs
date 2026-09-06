@@ -322,6 +322,27 @@ function endAndClose(req, res, status, headers, payload) {
   return res.end(payload, () => req.destroy());
 }
 
+// Behind a proxy that is still forwarding the body, destroying the request turns our 413 into the
+// proxy's 502: the deploy gate's 64 KB login probe came back 413 and 502 on alternate runs through
+// Cloudflare on 2026-09-06. A body the size of a form is drained (never buffered) and the
+// connection closed normally; only a body past DRAIN_LIMIT is still cut off, because draining that
+// is the attack the cap exists for.
+const DRAIN_LIMIT = 256 * 1024;
+async function drainThenEnd(req, res, status, headers, payload) {
+  const declared = Number.parseInt(req.headers["content-length"] ?? "", 10);
+  if (Number.isFinite(declared) && declared > DRAIN_LIMIT) return endAndClose(req, res, status, headers, payload);
+  let seen = 0;
+  const drained = await new Promise((resolve) => {
+    req.on("data", (chunk) => { seen += chunk.length; if (seen > DRAIN_LIMIT) { req.pause(); resolve(false); } });
+    req.on("end", () => resolve(true));
+    req.on("error", () => resolve(false));
+    req.resume();
+  });
+  if (!drained) return endAndClose(req, res, status, headers, payload);
+  res.writeHead(status, { "cache-control": "no-store", connection: "close", ...headers });
+  return res.end(payload);
+}
+
 async function handleLogin(req, res, url) {
   const wantsHtml = String(req.headers.accept ?? "").includes("text/html");
   const key = clientOf(req);
@@ -346,8 +367,8 @@ async function handleLogin(req, res, url) {
     // It counts as a failure: a flood of oversized bodies is an attack on this port, and the
     // lockout is the only thing that makes any of it slow.
     throttle.recordFailure(key);
-    if (!wantsHtml) return endAndClose(req, res, 413, { "content-type": "application/json" }, JSON.stringify({ error: "that is not a password" }));
-    return endAndClose(req, res, 413, { "content-type": "text/html; charset=utf-8" },
+    if (!wantsHtml) return drainThenEnd(req, res, 413, { "content-type": "application/json" }, JSON.stringify({ error: "that is not a password" }));
+    return drainThenEnd(req, res, 413, { "content-type": "text/html; charset=utf-8" },
       loginPage({ error: "That request was too large to be a password." }));
   }
   const isJson = String(req.headers["content-type"] ?? "").includes("application/json");
@@ -396,13 +417,18 @@ async function readBody(req, maxBytes = Infinity) {
   if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge();
   const chunks = [];
   let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    // A chunked body declares no length, so the count has to be kept while it arrives. Pausing
-    // rather than destroying leaves the socket alive long enough for the caller to answer on it.
-    if (size > maxBytes) throw tooLarge();
-    chunks.push(chunk);
-  }
+  // Events rather than for-await: leaving a for-await early destroys the stream underneath it,
+  // which is the socket reset the comment on drainThenEnd describes. A chunked body declares no
+  // length, so the count is kept while it arrives; pausing leaves the socket alive to answer on.
+  await new Promise((resolve, reject) => {
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) { reject(tooLarge()); return; }
+      chunks.push(chunk);
+    });
+    req.on("end", resolve);
+    req.on("error", reject);
+  });
   return Buffer.concat(chunks).toString("utf8");
 }
 
@@ -544,7 +570,7 @@ async function handleJobBus(req, res, url) {
   catch (error) {
     if (error?.code !== "BODY_TOO_LARGE") throw error;
     // The caller is still uploading, so the answer has to take the connection with it.
-    return endAndClose(req, res, 413, { "content-type": "application/json" },
+    return drainThenEnd(req, res, 413, { "content-type": "application/json" },
       JSON.stringify({ error: "job body too large" }));
   }
   const shaped = jobCreateArgs(raw, req.headers["idempotency-key"],

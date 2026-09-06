@@ -215,3 +215,30 @@ test("the desktop proxy is behind the same login, over HTTP and over the upgrade
     assert.match(answer, /^HTTP\/1\.1 401/);
   } finally { relay.stop(); }
 });
+
+// A 413 through a proxy. The relay used to answer 413 and destroy the request in the same breath,
+// which a proxy still forwarding the body reports as a 502 of its own (Cloudflare, 2026-09-06, on
+// the deploy gate's 64 KB login probe: 413 and 502 on alternate runs). A form-sized body is now
+// drained before the answer, so the client can finish sending and read the 413 in peace.
+test("an oversized login body gets its 413 without the socket being reset under it", async () => {
+  const relay = await startRelay();
+  try {
+    const { createConnection } = await import("node:net");
+    const url = new URL(relay.base);
+    const body = `password=${"a".repeat(64 * 1024)}`;
+    const head = `POST /login HTTP/1.1\r\nhost: ${url.host}\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: ${body.length}\r\n\r\n`;
+    const socket = createConnection({ host: url.hostname, port: Number(url.port) });
+    const errors = [];
+    socket.on("error", (error) => errors.push(error.code ?? String(error)));
+    await new Promise((resolve) => socket.once("connect", resolve));
+    socket.write(head + body.slice(0, 20_000));
+    // The rest goes only after the relay has answered, which is exactly the proxy's timing.
+    let received = "";
+    await new Promise((resolve) => { socket.on("data", (chunk) => { received += chunk; if (/\r\n\r\n/.test(received)) resolve(); }); setTimeout(resolve, 5000).unref(); });
+    assert.match(received, /^HTTP\/1\.1 413 /, `the relay answered 413 first: ${received.slice(0, 40)}`);
+    await new Promise((resolve) => socket.write(body.slice(20_000), () => resolve()));
+    await new Promise((resolve) => { socket.once("close", resolve); setTimeout(resolve, 5000).unref(); });
+    assert.deepEqual(errors, [], "no reset on the client while it was still sending");
+    assert.match(received, /that is not a password/);
+  } finally { relay.stop(); }
+});
