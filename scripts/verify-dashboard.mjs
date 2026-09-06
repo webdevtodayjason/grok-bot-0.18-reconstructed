@@ -966,14 +966,16 @@ try {
         const reached = neighbour == null ? null : await until(async () => ((await rowsFor(neighbour.id)).some((w) => w.id === ownedRow.id) ? true : null), 12_000, 800);
         check(reached === true, "Make global puts the skill in every agent's library", neighbour ? `read back through ${neighbour.name}` : "no second agent");
       }
-      // Close the Skills panel by its own close control rather than pressing Escape. Escape reaches
-      // whatever the last click left focused inside the panel, and when it does not close the
-      // dialog the modal stays up and swallows the #room-menu click below -- which is how a run
-      // aborted here, 1100 lines before the bleed sweep at the end of this gate ever executed. The
-      // close() behind it is the same call the button makes, so a missed click cannot leave the
-      // modal up either.
+      // Escape did not reach this dialog, and a Skills panel left open holds its backdrop over
+      // #room-menu: the click below then spent 30s timing out and every check after it -- the
+      // whole agent-details run, the marketplace section and the bleed sweep at the end of this
+      // file -- never executed. Close it by the button the operator would use, then call close()
+      // behind it so a missed click cannot leave the modal up, and fail here rather than in a
+      // click timeout if it stays open anyway.
       await page.click("[data-close-dialog]", { timeout: 8000 }).catch(() => {});
       await page.evaluate(() => document.getElementById("panel-dialog")?.close());
+      const skillsPanelClosed = await page.waitForSelector("#panel-dialog[open]", { state: "detached", timeout: 5_000 }).then(() => true).catch(() => false);
+      check(skillsPanelClosed, "the Skills panel closes, leaving the room menu underneath it clickable");
       await page.waitForTimeout(500);
     }
 
@@ -2308,6 +2310,17 @@ try {
         return /Pasted \d+ characters into the box/.test(line) ? line : null;
       }), 12_000, 500);
       check(said != null, "VNCPASTE-5: and the pane says so on its own line, where a modal's backdrop cannot hide it", said ?? `line read: ${probe.note}`);
+      // The way out, taken the way an operator with no keyboard would take it. The chord is not
+      // enough on its own -- Chrome reads Cmd/Ctrl+Shift+B as Show Bookmarks Bar -- and hiding
+      // noVNC's control bar anchor takes the client's own drag handle with it, so this button is
+      // the only pointer route left to the clipboard panel underneath.
+      const barBack = await page.evaluate(async () => {
+        document.getElementById("desktop-vnc-bar")?.click();
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        const root = document.querySelector("#desktop-window iframe[data-box-vnc]")?.contentDocument?.documentElement;
+        return root == null ? null : root.classList.contains("titanbot-vnc-bar");
+      });
+      check(barBack === true, "VNCPASTE-6: the pane's own button brings noVNC's control bar back, with no keyboard", String(barBack));
     }
   }
   check(errors.length === 0, "no page errors", errors.slice(0, 2).join(" | "));
