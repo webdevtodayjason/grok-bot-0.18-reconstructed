@@ -78,9 +78,11 @@ test("it refuses a destination that is not a mount point", () => {
   // The failure this prevents: /mnt/rosa-storage with the array unmounted is an ordinary empty
   // directory, and a nightly job would fill it with the only copy of the data, on the disk that
   // copy exists to survive.
-  assert.throws(() => snapshot({ TITANBOT_BACKUP_REQUIRE_MOUNT: "1" }), (error) => {
+  // The guard now asks which mounted filesystem holds the destination; pinning an expected mount that
+  // is not the one the scratch directory sits on is how a Mac (whose scratch is never on "/") drives the refusal.
+  assert.throws(() => snapshot({ TITANBOT_BACKUP_REQUIRE_MOUNT: "1", TITANBOT_BACKUP_MOUNT: "/mnt/an-array-that-is-not-here" }), (error) => {
     const output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
-    assert.match(output, /mount point|mountpoint\(1\)/);
+    assert.match(output, /expected mount|root filesystem/);
     return true;
   });
   assert.ok(!existsSync(dest) || execFileSync("find", [dest, "-name", "manifest.json"], { encoding: "utf8" }).trim() === "",

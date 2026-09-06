@@ -21,8 +21,12 @@
 #
 #   the destination must be a MOUNT POINT.  /mnt/rosa-storage with the array unmounted is an empty
 #   directory on the root filesystem, and a nightly job would happily fill it with the only copy of
-#   the data, on the disk the copy exists to survive. `mountpoint -q` is the check. The dev box has
-#   no mountpoint(1) and no array; TITANBOT_BACKUP_REQUIRE_MOUNT=0 is how the gate says so out loud.
+#   the data, on the disk the copy exists to survive. The check: the destination must lie on a
+#   mounted filesystem other than the root one (the nearest existing ancestor's mount point, via
+#   POSIX `df -P`, must not be "/"; TITANBOT_BACKUP_MOUNT pins which mount). Demanding that the
+#   destination directory itself be a mount point refused every sensible path under the array
+#   (2026-09-06, /mnt/rosa-storage/archives/titanbot/backups). The dev box has no array;
+#   TITANBOT_BACKUP_REQUIRE_MOUNT=0 is how the gate says so out loud.
 #
 #   there must be room for TWICE the last snapshot.  A snapshot that runs out of space part way
 #   through is a torn copy that looks like a snapshot, and it lands next to good ones with the same
@@ -62,8 +66,12 @@ command -v rsync >/dev/null || die "rsync is not on PATH"
 step "destination"
 mkdir -p "$DEST_ROOT/$INSTANCE" || die "could not create $DEST_ROOT/$INSTANCE"
 if [ "$REQUIRE_MOUNT" = 1 ]; then
-  command -v mountpoint >/dev/null || die "mountpoint(1) is not on PATH; set TITANBOT_BACKUP_REQUIRE_MOUNT=0 only if you know this destination is not a separate filesystem"
-  mountpoint -q "$DEST_ROOT" || die "$DEST_ROOT is not a mount point. If the array is unmounted this job would write the only copy of the data onto the disk it exists to survive."
+  probe="$DEST_ROOT"; while [ ! -e "$probe" ]; do probe="$(dirname "$probe")"; done
+  mount_of="$(df -P "$probe" 2>/dev/null | awk 'NR==2 { print $6 }')"   # POSIX df: column 6 is the mount point, on Linux and macOS alike
+  [ -n "$mount_of" ] || die "could not tell which filesystem holds $DEST_ROOT; set TITANBOT_BACKUP_REQUIRE_MOUNT=0 only for a dev box with no array"
+  [ "$mount_of" != "/" ] || die "$DEST_ROOT is on the root filesystem. If the array is unmounted this job would write the only copy of the data onto the disk it exists to survive; set TITANBOT_BACKUP_REQUIRE_MOUNT=0 only for a dev box with no array"
+  if [ -n "${TITANBOT_BACKUP_MOUNT:-}" ] && [ "$mount_of" != "$TITANBOT_BACKUP_MOUNT" ]; then die "$DEST_ROOT is on $mount_of, not on the expected mount $TITANBOT_BACKUP_MOUNT"; fi
+  say "destination is on the mounted filesystem $mount_of"
   say "$DEST_ROOT is a mount point"
 else
   say "MOUNT CHECK OFF (TITANBOT_BACKUP_REQUIRE_MOUNT=0): $DEST_ROOT is not required to be a separate filesystem"
