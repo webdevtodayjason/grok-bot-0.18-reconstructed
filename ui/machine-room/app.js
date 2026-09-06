@@ -35,6 +35,41 @@
             text: "The team is online. Give me the outcome and I’ll coordinate the work across the right people.",
             time: "5:30 PM",
           },
+          {
+            id: "chief-ask-queue",
+            authorId: "you",
+            authorName: "You",
+            type: "text",
+            text: "Read the overnight queue and tell me where it stands.",
+            time: "5:34 PM",
+          },
+          // Both claim-provenance verdicts, so the offline console shows the chip in each of its
+          // two tones without a gateway (docs/EVIDENCE-CONTRACT.md, Presentation).
+          {
+            id: "chief-queue-report",
+            authorId: "chief",
+            authorName: "Chief of Staff",
+            type: "text",
+            text: "The queue holds 42 rows this morning and 3 of them are marked urgent. The counts come from ticket-audit.csv.",
+            time: "5:35 PM",
+            evidence: { attemptId: "demo-attempt-queue", verdict: "evidenced", receipts: 2, attestations: ["demo-att-queue-1", "demo-att-queue-2", "demo-att-queue-3"], missing: [], checkedBy: "containment@1" },
+          },
+          {
+            id: "chief-queue-link",
+            authorId: "chief",
+            authorName: "Chief of Staff",
+            type: "text",
+            text: "The walkthrough clip the client sent has captions at https://captions.example.com/captions/4821.vtt if you want the transcript.",
+            time: "5:36 PM",
+            evidence: {
+              attemptId: "demo-attempt-link",
+              verdict: "unsupported",
+              receipts: 2,
+              attestations: ["demo-att-link-1"],
+              missing: ["https://captions.example.com/captions/4821.vtt"],
+              checkedBy: "containment@1",
+            },
+          },
         ],
       },
       {
@@ -800,12 +835,55 @@
     return "";
   }
 
+  // What the claim-provenance check is, in one sentence, on every chip. The operator who found
+  // the old system line read it as an error, so the chip has to say what it is on hover.
+  const EVIDENCE_CHECK = "Titanbot compares the names, paths and links in a reply with what its tools returned in the same turn.";
+  const EVIDENCE_COPY = {
+    evidenced: (stamp) => {
+      // The verdict is decided against the attested tool results, never the action receipts:
+      // receipts count shell and MCP actions only, so a reply backed by read or browser results
+      // has receipts 0 and would have read "Backed by 0 tool results" here. decideVerdict returns
+      // "unverified" when nothing was attested, so on this verdict the count is never 0; the
+      // wordless form is only for a stamp too old to carry the list.
+      const n = (stamp.attestations ?? []).length;
+      return { text: n ? `\u2713 Backed by ${n} tool result${n === 1 ? "" : "s"}` : "\u2713 Backed by the tool results", title: "" };
+    },
+    unsupported: (stamp) => {
+      const n = (stamp.missing ?? []).length;
+      return {
+        text: n ? `${n} detail${n === 1 ? "" : "s"} not backed by a tool result` : "A detail not backed by a tool result",
+        title: "The reply was delivered. A link, path or value in it was not found in any tool result of this turn. Open to see which.",
+      };
+    },
+    unverified: () => ({ text: "Nothing ran to check this", title: "" }),
+    // Not the reply: this verdict fires when an attestation head ran past the length the check
+    // reads (evidence-verdict.ts), so what was cut is a tool result. Saying "output" left the
+    // operator reading it as the reply itself having been truncated.
+    undecidable: () => ({
+      text: "A tool result was too long to check",
+      title: "The reply itself is complete. One tool result ran past the length the check reads, so part of the reply could not be matched against it.",
+    }),
+  };
+
+  // GW-13 / EVID-UX-1: the verdict, drawn inside the reply's own row. Never the missing token
+  // itself -- the line this replaced printed a signed caption URL under the reply and an operator
+  // read the whole row as an error. The tokens live in the Claim provenance panel the chip opens.
+  // "conversational" means the reply asserted nothing checkable, so it carries no chip at all.
+  function evidenceChipMarkup(message) {
+    const stamp = message.evidence;
+    const copy = stamp && EVIDENCE_COPY[stamp.verdict];
+    if (!copy) return "";
+    const { text, title } = copy(stamp);
+    const attrs = `class="evidence-chip" data-verdict="${escapeHtml(stamp.verdict)}" title="${escapeHtml(title ? `${title} ${EVIDENCE_CHECK}` : EVIDENCE_CHECK)}"`;
+    // No attemptId means the host stamped a verdict whose receipts it cannot serve, so the chip
+    // states the verdict and is not a control that would open an empty panel.
+    if (!stamp.attemptId) return `<span ${attrs}><span>${escapeHtml(text)}</span></span>`;
+    return `<button type="button" ${attrs} data-evidence="1" data-message-id="${escapeHtml(message.id)}"><span>${escapeHtml(text)}</span></button>`;
+  }
+
   function messageMarkup(message) {
     if (message.type === "system") {
-      // An evidence pill is a disclosure: the host stored the receipts behind the verdict and
-      // getAgentEvidence reads them, so the pill opens them rather than only naming the verdict.
-      const evidence = message.evidence?.attemptId ? ' data-evidence="1" role="button" tabindex="0"' : "";
-      return `<article class="message-row is-system${message.exchange ? " is-exchange" : ""}${evidence ? " is-evidence" : ""}" data-message-id="${escapeHtml(message.id)}"${message.exchange ? ' data-exchange="1" role="button" tabindex="0"' : ""}${evidence}><div class="message-bubble">${escapeHtml(message.text)}</div></article>`;
+      return `<article class="message-row is-system${message.exchange ? " is-exchange" : ""}" data-message-id="${escapeHtml(message.id)}"${message.exchange ? ' data-exchange="1" role="button" tabindex="0"' : ""}><div class="message-bubble">${escapeHtml(message.text)}</div></article>`;
     }
     const isUser = message.authorId === "you";
     const author = workerById(message.authorId);
@@ -813,7 +891,7 @@
     const body = isWorking ? `<div class="typing-dots" aria-label="${escapeHtml(message.authorName)} is working"><i></i><i></i><i></i></div>`
       : message.type === "attachment" && message.attachment ? `${paragraphMarkup(message.text)}${attachmentMarkup(message)}`
       : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
-    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? avatarMarkup(author, "message-avatar") : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div></div></article>`;
+    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? avatarMarkup(author, "message-avatar") : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${evidenceChipMarkup(message)}</div></article>`;
   }
 
   // The transcript is a tail window; the row above it says the host holds more and offers to
@@ -3462,9 +3540,14 @@
     const message = contextMessages().find((item) => item.id === messageId);
     const attemptId = message?.evidence?.attemptId;
     if (!attemptId) return;
-    const missing = (message.evidence.missing ?? []);
-    openPanel("Claim provenance", `Evidence · ${message.evidence.verdict}`,
-      `<div class="panel-intro"><p>The host checked this reply against the tool results of attempt <code>${escapeHtml(attemptId)}</code>.</p><span class="status-pill${message.evidence.verdict === "evidenced" ? " success" : ""}">${escapeHtml(message.evidence.verdict)}</span></div><div class="evidence-view" data-evidence-body>Reading the receipts from the host…</div>`);
+    // Masked like the heads: the missing list is where a signed URL the reply quoted would land.
+    const missing = (message.evidence.missing ?? []).map((token) => maskSecrets(String(token)));
+    // The subtitle is the chip's own sentence, not the internal verdict word. Printing that word
+    // here, and again in a pill, put back the "Evidence: unsupported" line the chip exists to
+    // remove, one click behind it.
+    const summary = EVIDENCE_COPY[message.evidence.verdict];
+    openPanel("Claim provenance", summary ? summary(message.evidence).text : "Checked against the tool results",
+      `<div class="panel-intro"><p>Checked against what the tools returned while writing this reply. Attempt <code>${escapeHtml(attemptId)}</code></p></div><div class="evidence-view" data-evidence-body>Reading the receipts from the host…</div>`);
     adapter.getEvidence(activeContext().id, attemptId).then(({ receipts, attestations }) => {
       const body = elements.panelContent.querySelector("[data-evidence-body]");
       if (!body) return;
@@ -3474,9 +3557,9 @@
         : `<div class="empty-state">No action receipts were written for this attempt.</div>`;
       evidenceHeads = attestations.map((a) => maskSecrets(String(a.head ?? "").slice(0, 600)));
       const attRows = attestations.length
-        ? attestations.map((a, i) => `<div class="panel-card"><div class="setting-row"><div><strong>${escapeHtml(a.tool ?? "tool")}</strong><small>${a.ok ? "ok" : "failed"} · ${Number(a.bytes) || 0} bytes${a.truncated ? " · truncated" : ""}</small></div><span class="status-pill${a.ok ? " success" : ""}">${escapeHtml(String(a.sha256 ?? "").slice(0, 12))}</span></div><pre class="evidence-head" data-head-slot="${i}">The host kept this result out of model context. It is not on this page until you ask for it.</pre><div class="form-actions"><button class="ghost-button" type="button" data-reveal-head="${i}">Show output</button></div></div>`).join("")
+        ? attestations.map((a, i) => `<div class="panel-card"><div class="setting-row"><div><strong>${escapeHtml(a.tool ?? "tool")}</strong><small>${a.ok ? "ok" : "failed"} · ${Number(a.bytes) || 0} bytes${a.truncated ? " · truncated" : ""}</small></div><span class="status-pill${a.ok ? " success" : ""}">${escapeHtml(String(a.sha256 ?? "").slice(0, 12))}</span></div><pre class="evidence-head" data-head-slot="${i}">Held by the host, apart from the model's own record. Not on this page until you ask for it.</pre><div class="form-actions"><button class="ghost-button" type="button" data-reveal-head="${i}">Show output</button></div></div>`).join("")
         : `<div class="empty-state">No tool result was attested for this attempt.</div>`;
-      body.innerHTML = `<div class="tag-list"><span class="tag">${receipts.length} receipt${receipts.length === 1 ? "" : "s"}</span><span class="tag">${attestations.length} attestation${attestations.length === 1 ? "" : "s"}</span>${tools.map((t) => `<span class="tag">tool · ${escapeHtml(t)}</span>`).join("")}</div>${missing.length ? `<div class="empty-state">Backed by no tool result this attempt: ${escapeHtml(missing.join(", "))}</div>` : ""}<div class="plugin-section-title"><span>Actions taken</span></div>${receiptRows}<div class="plugin-section-title"><span>Attested tool output</span></div>${attRows}`;
+      body.innerHTML = `<div class="tag-list"><span class="tag">${receipts.length} receipt${receipts.length === 1 ? "" : "s"}</span><span class="tag">${attestations.length} attestation${attestations.length === 1 ? "" : "s"}</span>${tools.map((t) => `<span class="tag">tool · ${escapeHtml(t)}</span>`).join("")}</div>${missing.length ? `<div class="plugin-section-title"><span>Named in the reply, found in no tool result</span></div><div class="empty-state">${escapeHtml(missing.join(", "))}</div>` : ""}<div class="plugin-section-title"><span>Actions taken</span></div>${receiptRows}<div class="plugin-section-title"><span>Attested tool output</span></div>${attRows}`;
     }).catch((error) => {
       const body = elements.panelContent.querySelector("[data-evidence-body]");
       if (body) body.innerHTML = `<div class="empty-state">The host could not return the receipts for this attempt: ${escapeHtml(error.message)}</div>`;
@@ -3518,11 +3601,13 @@
     adapter.decideApproval(activeContext(), action.dataset.messageId, action.dataset.decide);
   });
 
-  // Both disclosures carry role="button" tabindex="0", so a keyboard user can focus them; without
-  // this they were focusable controls that did nothing on Enter or Space.
+  // An agent-to-agent blurb carries role="button" tabindex="0", so a keyboard user can focus it;
+  // without this it was a focusable control that did nothing on Enter or Space. The evidence chip
+  // is a real <button>, whose native activation already fires the click handler above.
   elements.transcript.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
     const evidence = event.target.closest?.("[data-evidence]");
+    if (evidence && evidence.tagName === "BUTTON") return;
     const exchange = evidence ? null : event.target.closest?.("[data-exchange]");
     if (!evidence && !exchange) return;
     event.preventDefault();

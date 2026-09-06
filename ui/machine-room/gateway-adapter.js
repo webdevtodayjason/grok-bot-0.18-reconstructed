@@ -272,27 +272,12 @@
           ...(e.evidence ? { evidence: e.evidence } : {}),
         };
       })
-      .filter((m) => m.text || m.card || m.attachment)
       // Claim provenance (docs/EVIDENCE-CONTRACT.md): the host stamps every text reply with a verdict
-      // it computed from the tool results of that attempt. Label, never suppress: the reply stays,
-      // a pill under it says what the receipts could not back.
-      .flatMap((m) => {
-        const v = m.evidence?.verdict;
-        // "conversational" means the reply made no checkable claim, so there are no receipts to
-        // disclose and a pill under every such line would be noise. Every other verdict gets one,
-        // and the pill carries the attemptId so a click can read the receipts behind it.
-        if (v == null || v === "conversational") return [m];
-        const missing = (m.evidence.missing ?? []).slice(0, 3).join(", ");
-        const receipts = Number(m.evidence.receipts) || 0;
-        const why = v === "evidenced" ? `${receipts} receipt${receipts === 1 ? "" : "s"} behind this reply — open for the tools and their attested output`
-          : v === "unverified" ? "no tool ran in this attempt"
-          : v === "undecidable" ? "a tool result was truncated before the check"
-          : `${missing} in no tool result this attempt`;
-        return [m, {
-          id: `${m.id}-evidence`, type: "system", text: `Evidence: ${v} · ${why}`,
-          evidence: { attemptId: m.evidence.attemptId ?? null, verdict: v, missing: m.evidence.missing ?? [] },
-        }];
-      });
+      // it computed from the tool results of that attempt. The stamp rides on the reply itself and
+      // the view draws it as a chip inside that reply's row. It used to be synthesized here as a
+      // separate system line reading "Evidence: unsupported · <url> in no tool result this attempt",
+      // which an operator read as an error under a reply that had in fact been delivered.
+      .filter((m) => m.text || m.card || m.attachment);
   }
 
   // Agents the host is currently raising an error tray for. Rebuilt each pass, never accumulated:

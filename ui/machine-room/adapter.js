@@ -316,6 +316,21 @@
         state.desktop.paused = Boolean(paused);
         return emit("desktop:pause", { paused: state.desktop.paused });
       },
+
+      // The Claim provenance panel behind an evidence chip. Live, this is getAgentEvidence over
+      // the host's ledger; offline there is no ledger, so it answers from the same stamp the chip
+      // was drawn from -- both of its lists, so the chip's count and the panel's two counts can
+      // never disagree. The heads stay empty: an invented tool-result head would be the one lie
+      // this demo must not tell, and the reveal already says so for a head the host never stored.
+      getEvidence(workerId, attemptId) {
+        const worker = workerById(workerId);
+        const message = (worker ? worker.messages : []).find((item) => item.evidence && item.evidence.attemptId === attemptId);
+        const stamp = message ? message.evidence : {};
+        const count = Number(stamp.receipts) || 0;
+        const receipts = Array.from({ length: count }, (unused, index) => ({ type: "shell_command", command: `demo action ${index + 1}` }));
+        const attestations = (stamp.attestations ?? []).map((eventId) => ({ eventId, tool: "shell", ok: true, bytes: 0, head: "" }));
+        return Promise.resolve({ receipts, attestations });
+      },
     };
   }
 

@@ -2010,8 +2010,24 @@ dialog[open] {
 .desktop-workspace {
   display: grid;
   grid-template-columns: 158px minmax(0, 1fr) 220px;
+  /* MR-33: the one row is bounded by the frame, not by its tallest column. An implicit auto row
+     grows to the timeline's content, and a long run pushed the whole grid out of the frame: the
+     footer sat in the middle of the desktop and the header scrolled off the top of the dialog. */
+  grid-template-rows: minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
+}
+
+/* Each column scrolls on its own inside that row. Grid items default to min-height: auto, which is
+   the other half of the same overflow. */
+.desktop-workspace > * {
+  min-width: 0;
+  min-height: 0;
+}
+
+.app-previews {
+  overflow-y: auto;
 }
 
 .app-previews {
@@ -2216,6 +2232,11 @@ dialog[open] {
   padding: 20px 17px;
   border-left: 1px solid var(--glass-edge-soft);
   background: rgba(7, 16, 20, 0.28);
+  /* MR-33: the rail scrolls; a shell line with no spaces (a URL, a token) wraps inside its 220px
+     instead of running out of the dialog. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .action-timeline > strong {
@@ -2237,6 +2258,7 @@ dialog[open] {
   padding: 0 0 18px 22px;
   color: var(--text-secondary);
   font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 .action-timeline li::before {
@@ -2545,6 +2567,19 @@ dialog[open] {
   color: rgba(255, 255, 255, 0.94);
 }
 
+[data-theme="mist"] .evidence-chip {
+  border-color: rgba(30, 39, 43, 0.18);
+  background: rgba(242, 241, 236, 0.88);
+}
+
+[data-theme="mist"] .evidence-chip[data-verdict="evidenced"] { border-color: rgba(49, 182, 184, 0.5); }
+
+[data-theme="mist"] .evidence-chip[data-verdict="unsupported"] {
+  border-color: rgba(150, 96, 14, 0.4);
+  color: #7a4f07;
+  background: rgba(249, 234, 208, 0.92);
+}
+
 @media (max-width: 1180px) {
   .stage {
     grid-template-columns: minmax(210px, 240px) minmax(400px, 1fr) 210px;
@@ -2769,10 +2804,59 @@ dialog[open] {
 .exchange-message p { margin: 6px 0 0; white-space: pre-wrap; }
 .exchange-footer { text-align: center; font-size: 12px; color: var(--text-secondary); padding-top: 10px; }
 
-/* An evidence pill is a disclosure: the receipts behind the verdict are one click away, so the
-   row reads as clickable the same way an agent-to-agent blurb does. */
-.message-row.is-evidence .message-bubble { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
-.message-row.is-evidence .message-bubble:hover { background: rgba(16, 25, 30, 0.85); }
+/* -- EVID-UX-1: the claim-provenance verdict, in the reply's own row --------------------------
+   This used to be a separate dotted system line under the reply, reading
+   "Evidence: unsupported - <signed url> in no tool result this attempt". An operator read that as
+   an error on a reply that had in fact been delivered. The verdict belongs to the reply, so it is
+   a small chip in the same article, and the receipts stay one click away in Claim provenance.
+   Bounded on purpose: overflow hidden here and the ellipsis on the inner span keep the chip inside
+   the message column however narrow the column gets. */
+.evidence-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  margin: 6px 0 0 4px;
+  padding: 2px 9px;
+  overflow: hidden;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-pill);
+  color: var(--text-tertiary);
+  background: rgba(20, 29, 34, 0.6);
+  backdrop-filter: blur(var(--blur-soft));
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.evidence-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The verdict rules carry a theme attribute in mist, which outranks a bare .evidence-chip:hover,
+   so the hover selector carries [data-verdict] too: without it the evidenced and unsupported
+   chips had no hover feedback at all in the light theme. */
+button.evidence-chip:hover,
+button.evidence-chip[data-verdict]:hover { border-color: var(--glass-edge); color: var(--text-secondary); }
+
+/* --glass-edge is near-white in mist, which on a light chip erases the edge instead of raising
+   it, so the light theme moves the border the other way. */
+[data-theme="mist"] button.evidence-chip:hover,
+[data-theme="mist"] button.evidence-chip[data-verdict]:hover { border-color: rgba(30, 39, 43, 0.34); }
+
+.evidence-chip[data-verdict="evidenced"] { border-color: rgba(127, 227, 220, 0.34); }
+
+/* The attention colour the console already uses for an agent waiting on a person
+   (.status-pill.attention, .needs-you-pill), never the error red: the reply was delivered and the
+   check simply could not back part of it. */
+.evidence-chip[data-verdict="unsupported"] {
+  border-color: rgba(231, 162, 60, 0.35);
+  color: var(--amber-500);
+  background: rgba(58, 41, 16, 0.72);
+}
+
 .evidence-view { display: flex; flex-direction: column; gap: 10px; }
 .evidence-view .panel-card { display: grid; gap: 8px; }
 .evidence-head { margin: 0; padding: 8px 10px; border-radius: 10px; background: rgba(0, 0, 0, 0.28); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; }

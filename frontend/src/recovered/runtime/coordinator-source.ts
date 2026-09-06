@@ -527,7 +527,7 @@ const TELEMETRY_DOMAIN_BY_METHOD: Record<CoordinatorMethod, string> = {
   getAgentAvatar: "roster", searchMedia: "search", getCloudAgentInfo: "cloud_agents",
   getListenerIntegrations: "listeners", getListenerConnectUrl: "listeners",
   getAgentWorkflows: "workflows", createAgentWorkflow: "workflows", updateAgentWorkflow: "workflows",
-  setAgentWorkflowEnabled: "workflows", deleteAgentWorkflow: "workflows", runAgentWorkflowNow: "workflows",
+  setAgentWorkflowEnabled: "workflows", setAgentWorkflowOwner: "workflows", deleteAgentWorkflow: "workflows", runAgentWorkflowNow: "workflows",
   importAgentWorkflowText: "workflows", importAgentWorkflowUrl: "workflows", portAgentLocalSkills: "workflows",
   skillsCatalog: "skills", syncPluginSkills: "skills", getPluginSyncStatus: "skills",
   getSkillPublishTargets: "skills", publishSkill: "skills", resyncPublishedSkill: "skills", unpublishSkill: "skills",

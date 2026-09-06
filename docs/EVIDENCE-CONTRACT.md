@@ -108,6 +108,8 @@ message they need to see next to its verdict.
 - Machine Room: the adapter renders one `system` pill after an `unverified` or `unsupported`
   message, for example `Evidence: unsupported · grokbot-verify-x1ipm3y.txt is in no tool result
   this attempt`. `app.js` and the stylesheets stay untouched, per the handoff rule.
+  (Superseded 2026-09-05: the pill is a chip in the reply's row and `app.js` and `styles.css` do
+  carry it. See "Presentation" in section 10 for why and for the copy.)
 - Gate: `verify-work-report --require-evidence` passes a round only when the delivered message's
   verdict is `evidenced` and the sentinel appears in an attestation head from this attempt. The
   sentinel stops being the proof; the receipt is.
@@ -242,7 +244,7 @@ ACCEPTANCE:
 NON-GOALS:
   - `source/host/runner/system-prompt.ts` (no prompt-level fix; the model may make claims)
   - `source/host/extensions/inference/**` (the 64K window is hygiene, tracked separately)
-  - `ui/machine-room/app.js` and `ui/machine-room/styles.css` (handoff rule)
+  - `ui/machine-room/app.js` and `ui/machine-room/styles.css` (handoff rule; superseded by EVID-UX-1 on 2026-09-05, which owns the chip in both)
   - the completion checks in `source/host/extensions/transcript/turn-runtime.ts`
   - any message suppression, redrive, or retry on a bad verdict
   - any LLM judge; containment@1 is the only rule in this round
@@ -284,7 +286,37 @@ point. All acceptance gates share the one box and must run sequentially.
   separate `file_read` receipt was needed. Non-work tools (SendMessage, communicate, update_state,
   todo, sleep, wait) are skipped so a sent message never counts as evidence for the next claim.
 - **Tokens.** Bare numbers need five digits, hex twelve, and file names need a known extension, so
-  a version like `grok-4.6` or a year is not a claim. Rule name unchanged: `containment@1`.
+  a version like `grok-4.6` or a year is not a claim. Rule name unchanged: `containment@1`
+- 2026-09-05 23:40: a token written as a shape is not a claim either: `captions/NNN.vtt?expires=...&sig=...`,
+  `<id>`, `{slug}`, `****`, `[redacted` (Scribe, attempt 9c096226, verdict `unsupported` for a URL it was describing,
+  not quoting). Rule name unchanged..
 - **Gateway.** `getAgentEvidence {id, attemptId?}` is implemented in `host-gateway-api.ts` directly
   over the session store and the ledger file; no manager registry entry.
+- **Presentation (EVID-UX-1, 2026-09-05).** The verdict is a chip inside the reply's own row, not a
+  system line under it. It shipped as a synthesized `system` message reading
+  `Evidence: unsupported · https://captions.vimeo.com/captions/NNN.vtt?expires=…&sig=… in no tool
+  result this attempt`, dotted-underlined and centred; Jason read it as an error on a reply that had
+  in fact been delivered. Label, never suppress, was never meant to look like a failure. What the
+  operator sees now, per verdict, with no jargon and no token in the chip itself:
+
+  | Verdict | Chip | Tone |
+  |---|---|---|
+  | `evidenced` | `✓ Backed by 3 tool results` | quiet, teal outline |
+  | `unsupported` | `1 detail not backed by a tool result` | the console's attention amber, never the error red |
+  | `unverified` | `Nothing ran to check this` | neutral |
+  | `undecidable` | `A tool result was too long to check` | neutral |
+  | `conversational` | no chip | -- |
+
+  The evidenced count is `attestations.length`, the same list `decideVerdict` reads, not
+  `receipts`: receipts are the shell and MCP action records, so a reply backed by read or browser
+  results carries none and the chip would have claimed "0 tool results". The `undecidable` chip
+  names the tool result as the thing that was cut, because the truncation the verdict tests for is
+  an attestation head, and its hover adds that the reply itself is complete.
+
+  Every chip carries the same hover sentence saying what the check is ("Titanbot compares the names,
+  paths and links in a reply with what its tools returned in the same turn"), and clicking one opens
+  the same Claim provenance panel as before, whose missing list is now headed "Named in the reply,
+  found in no tool result". The missing token is disclosed there, never printed under the reply.
+  The panel reuses the chip's own sentence as its subtitle and carries no verdict pill: printing
+  the raw verdict word one click behind the chip put back the line the chip removed.
 - **Budget.** Sixteen files against the twelve the draft estimated; reported in §6m of the audit.
