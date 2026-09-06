@@ -1819,6 +1819,88 @@ try {
     check(boxAfterArm?.state === boxNow?.state, "and the box is untouched after that click", `${boxNow?.state} → ${boxAfterArm?.state}`);
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);
 
+    // -- qol/panels: no panel scrolls sideways and nothing in one hangs over the card it sits in.
+    // The operator's screenshots: the Agent details right column ran its Name, Description and
+    // Role controls past the card's right edge (84px, measured at 1440x1000), and several panels
+    // scrolled left and right. One sweep for all of them. For the panel and for every card in it:
+    // scrollWidth must not exceed clientWidth, and no descendant's right edge may pass the box's
+    // own content edge. Content inside its own horizontal scroller -- a pre of attested tool
+    // output -- is exempt, because scrolling there instead of widening the card is the shape the
+    // fix asks for. A failure prints the worst offender: which box, which element, how far over.
+    const panelBleed = async (label, selector) => page.evaluate(({ sel, lbl }) => {
+      const root = document.querySelector(sel);
+      if (!root) return { label: lbl, found: false };
+      // Content edge, not border-box edge: clientLeft skips the border and clientWidth excludes a
+      // vertical scrollbar, so a panel that scrolls down is not read as 15px too wide.
+      const contentRight = (el) => el.getBoundingClientRect().left + el.clientLeft + el.clientWidth;
+      const scan = (box) => {
+        const edge = contentRight(box);
+        const over = [];
+        for (const el of box.querySelectorAll("*")) {
+          const cs = getComputedStyle(el);
+          if (cs.display === "none" || cs.visibility === "hidden") continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) continue;
+          let ownScroller = false;
+          for (let parent = el.parentElement; parent && parent !== box; parent = parent.parentElement) {
+            const x = getComputedStyle(parent).overflowX;
+            if (x === "auto" || x === "scroll") { ownScroller = true; break; }
+          }
+          if (ownScroller) continue;
+          const past = Math.round(rect.right - edge);
+          if (past > 1) over.push({ past, what: `${el.tagName.toLowerCase()}${el.className ? `.${String(el.className).trim().split(/\s+/)[0]}` : ""}`, text: (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 40) });
+        }
+        over.sort((a, b) => b.past - a.past);
+        return { scroll: box.scrollWidth - box.clientWidth, worst: over[0] ?? null };
+      };
+      const boxes = [{ name: "panel", el: root }];
+      root.querySelectorAll(".panel-card, .settings-section, .routine-card, .plugin-card, .marketplace-card, .file-tile, .empty-state")
+        .forEach((el, i) => boxes.push({ name: `${String(el.className).trim().split(/\s+/)[0]}#${i}`, el }));
+      const bad = boxes.map((b) => ({ name: b.name, ...scan(b.el) })).filter((b) => b.scroll > 1 || b.worst);
+      bad.sort((a, b) => (b.worst?.past ?? b.scroll) - (a.worst?.past ?? a.scroll));
+      // A closed dialog keeps its markup at zero size, where nothing can bleed and the sweep
+      // would pass having measured nothing. The width is what says the panel was really open.
+      return { label: lbl, found: true, width: Math.round(root.getBoundingClientRect().width), boxes: boxes.length, bad: bad.slice(0, 3) };
+    }, { sel: selector, lbl: label });
+    const sweepPanel = async (label, open, selector = "#panel-content") => {
+      await page.keyboard.press("Escape"); await page.waitForTimeout(400);
+      const opened = await open().then(() => true).catch((error) => String(error?.message ?? error).slice(0, 90));
+      if (opened !== true) { check(false, `the ${label} panel opens for the bleed sweep`, String(opened)); return; }
+      await page.waitForTimeout(1500);
+      const seen = await panelBleed(label, selector);
+      const worst = seen.bad?.[0] ?? null;
+      check(seen.found === true && seen.width > 0 && (seen.bad?.length ?? 0) === 0, `no horizontal scroll or bleed in the ${label} panel`,
+        worst
+          ? `${worst.name} scrolls ${worst.scroll}px${worst.worst ? `, ${worst.worst.what} is ${worst.worst.past}px past its edge ("${worst.worst.text}")` : ""}`
+          : !seen.found ? `${selector} not on the page`
+            : seen.width > 0 ? `${seen.boxes} box(es) measured across ${seen.width}px` : "the panel never opened");
+    };
+    await sweepPanel("Marketplace", () => page.click('[data-capability="marketplace"]', { timeout: 8000 }));
+    await sweepPanel("Agent details", () => page.click("#room-menu", { timeout: 8000 }));
+    await sweepPanel("Routines", () => page.click('[data-capability="routines"]', { timeout: 8000 }));
+    await sweepPanel("Skills", () => page.click('[data-capability="skills"]', { timeout: 8000 }));
+    // Files is the desktop dialog rather than the panel dialog: the capability button calls
+    // openDesktop("files"), so the box measured is that dialog's own file view.
+    await sweepPanel("Files", () => page.click('[data-capability="files"]', { timeout: 8000 }), "#desktop-dialog .files-view");
+    await sweepPanel("Settings", () => page.click("#settings-button", { timeout: 8000 }));
+    // Claim provenance opens from an evidence pill in the transcript and fills from getEvidence,
+    // so it is measured only once the receipts are in it -- an empty body has nothing to bleed.
+    await sweepPanel("Claim provenance", async () => {
+      for (let i = 0; i < 400; i += 1) await page.mouse.wheel(0, 2000);
+      await page.waitForTimeout(600);
+      const sweepPills = await page.$$(".message-row.is-evidence");
+      if (sweepPills.length === 0) throw new Error("no evidence pill in the transcript to open");
+      const pill = sweepPills.at(-1);
+      await pill.scrollIntoViewIfNeeded();
+      await pill.click();
+      const filled = await until(async () => {
+        const body = await page.evaluate(() => document.querySelector("[data-evidence-body]")?.textContent ?? "");
+        return body && !/Reading the receipts from the host/.test(body) ? body : null;
+      }, 30_000, 1000);
+      if (!filled) throw new Error("getEvidence did not fill the disclosure within 30s");
+    });
+    await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+
     // -- CP-10 item 2 / GW-11: the masked credential card. The host only writes a secret-request
     // entry when an agent asks for one, which needs a model turn this gate will not spend, so the
     // entry itself is synthetic: getAgentTranscriptTail's answer is intercepted on its way into
