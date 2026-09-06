@@ -187,10 +187,11 @@ never be checked before being pasted.
 7. The job bus token, if you want the Chief of Staff to reach this instance
    (`docs/JOB-BUS.md` §8). Two ways, and only one of them is needed:
    - **Environment Variables**: `TITAN_JOB_TOKEN` = a value you mint yourself
-     (`openssl rand -hex 24`). The compose passes it through as `${TITAN_JOB_TOKEN:-}`, so an
-     empty field deploys fine. Check the field's NAME after the first deploy: Coolify builds it
-     from everything between the braces and may create `TITAN_JOB_TOKEN:-`, which no shell will
-     export. If it did, use the console instead.
+     (`openssl rand -hex 24`). The compose passes it through as `${TITAN_JOB_TOKEN}`, with no `:-`
+     default: Coolify builds a field's NAME from everything between the braces, so the defaulted
+     form comes out as a field literally named `TITAN_JOB_TOKEN:-` and your value never reaches the
+     relay. Leaving the field empty still deploys; compose resolves it to the empty string and says
+     so in the build log.
    - **Settings → Job bus → Generate** in the console. The token is shown once, and it is written
      to `job-bus.json` in the mounted profile directory at mode 0600. This is the way that needs
      no Coolify field at all, and it is the one to use if the env field came out misnamed.
