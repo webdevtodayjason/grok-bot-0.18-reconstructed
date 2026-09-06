@@ -51,6 +51,12 @@ set -uo pipefail
 DEST_ROOT="${TITANBOT_BACKUP_DEST:-/mnt/rosa-storage/archives/titanbot/backups}"
 INSTANCE="${TITANBOT_INSTANCE:-titanbot}"
 BOX="${TITANBOT_BOX:-titanbot-box}"
+# Coolify names the box container titanbot-box-<service uuid>, so the default name is right only on
+# a hand-installed box. When the name does not exist, the label every install carries finds it.
+if ! docker inspect "$BOX" >/dev/null 2>&1; then
+  by_label="$(docker ps --filter label=com.titanbot.role=box --format '{{.Names}}' 2>/dev/null | head -n 1)"
+  [ -n "$by_label" ] && BOX="$by_label"
+fi
 VOLUME_PREFIX="${TITANBOT_VOLUME_PREFIX:-titanbot-box}"
 ROOT="${TITANBOT_ROOT:-/home/sem/titanbot}"
 KEEP="${TITANBOT_BACKUP_KEEP:-14}"
@@ -122,11 +128,17 @@ copy_volume() {
   fi
   COPY_METHOD=docker-stream
   # --entrypoint tar: the box image ships its own entrypoint, and this container must do one thing.
-  docker run --rm --entrypoint tar \
-    --volume "$volume:/src:ro" \
-    "$(docker inspect "$BOX" --format '{{.Config.Image}}' 2>/dev/null || echo alpine)" \
-    -C /src -cf - . 2>/dev/null | tar -xf - -C "$target"
-  return $?
+  # The image is the box's own, which is present by definition. An image that is not present
+  # (alpine on the R750, 2026-09-06) made docker print "Unable to find image" INTO the stream, and
+  # the host tar unpacked nothing while the run reported a copy.
+  local image err rc
+  image="$(docker inspect "$BOX" --format '{{.Config.Image}}' 2>/dev/null)"
+  [ -n "$image" ] || die "no box container named $BOX to borrow an image from; set TITANBOT_BOX"
+  err="$(mktemp)"
+  docker run --rm --entrypoint tar --volume "$volume:/src:ro" "$image" -C /src -cf - . 2>"$err" | tar -xf - -C "$target"
+  rc=$?
+  if [ $rc -ne 0 ] || [ -s "$err" ]; then say "  stream of $volume: $(head -c 300 "$err" | tr '\n' ' ')"; rm -f "$err"; return 1; fi
+  rm -f "$err"; return 0
 }
 
 # The volumes whose copy is retaken under the pause: the agents' sqlite stores live in sand-data,

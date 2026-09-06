@@ -93,6 +93,8 @@ export async function writeStore(store) {
   const tmp = `${STORE_FILE}.${process.pid}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
   await fs.chmod(tmp, 0o600).catch(() => {});
+  // Owned like the directory, for the same reason server.mjs's ownLikeParent gives: the relay is root.
+  try { const parent = await fs.stat(path.dirname(STORE_FILE)); await fs.chown(tmp, parent.uid, parent.gid); } catch {}
   await fs.rename(tmp, STORE_FILE);
 }
 /** Every secret string the store holds, for the leak gate. Never printed by anything else. */

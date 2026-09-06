@@ -42,7 +42,7 @@ import {
   createRateLimiter, jobBusTokenFile, jobCreateArgs, jobSubmitterId, newJobToken, resolveJobToken,
   routeJobBus,
 } from "./job-bus-edge.mjs";
-import { chmod, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
@@ -324,6 +324,14 @@ const LOGIN_BODY_LIMIT = 8 * 1024;
 // Answering without having read the body leaves the client still uploading, so the answer has to
 // take the connection down with it. Ending the response first and destroying the request in its
 // callback is the difference between the caller seeing a status and seeing a reset socket.
+
+// Files this process writes into bind-mounted directories (the profile, the ui directory) must end
+// up owned by the directory's owner, not by root: the relay runs as root inside its container, and a
+// root-owned job-bus.json or subscriptions.json was unreadable to the operator's own backup on the
+// R750 (2026-09-06). A chown that cannot happen (same user, or not root) is not an error.
+async function ownLikeParent(file) {
+  try { const parent = await stat(path.dirname(file)); await chown(file, parent.uid, parent.gid); } catch {}
+}
 function endAndClose(req, res, status, headers, payload) {
   res.writeHead(status, { "cache-control": "no-store", connection: "close", ...headers });
   return res.end(payload, () => req.destroy());
@@ -631,6 +639,7 @@ async function writeJobToken(token) {
   if (file == null) return "no profile directory to write the token to: SAND_PROFILE_DIRS is unset";
   try {
     await writeFile(file, JSON.stringify({ token }), { mode: 0o600 });
+    await ownLikeParent(file);
     // writeFile's mode only applies to a file it creates, and this one is rewritten every time
     // the operator rotates the token.
     await chmod(file, 0o600);
@@ -1112,6 +1121,7 @@ const server = createServer(async (req, res) => {
       const catalog = await readCatalog();
       const endpoints = (catalog.endpoints ?? []).filter((e) => e.id !== entry.id).concat([entry]);
       await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints }, null, 2));
+      await ownLikeParent(ENDPOINTS_FILE);
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ adopted: id, endpoint: entry }));
     }
@@ -1120,6 +1130,7 @@ const server = createServer(async (req, res) => {
       await forgetSubscription(id);
       const catalog = await readCatalog();
       await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints: (catalog.endpoints ?? []).filter((e) => e.subscription !== id) }, null, 2));
+      await ownLikeParent(ENDPOINTS_FILE);
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ forgot: id }));
     }
@@ -1160,6 +1171,7 @@ const server = createServer(async (req, res) => {
         apiKey: e.apiKey === "set"
           ? (current.endpoints ?? []).find((c) => c.id === e.id)?.apiKey ?? "" : (e.apiKey ?? "") }));
       await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints: merged }, null, 2));
+      await ownLikeParent(ENDPOINTS_FILE);
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ saved: merged.length }));
     }
