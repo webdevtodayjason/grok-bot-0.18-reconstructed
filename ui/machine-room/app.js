@@ -2093,13 +2093,28 @@
     }).catch((error) => { version.textContent = `Could not read the host version: ${error.message}`; });
   }
 
-  // ---- JOBBUS-3: Settings -> Job bus (docs/JOB-BUS.md §7) ------------------------------------
+  // ---- JOBBUS-3: Settings -> Job bus (docs/JOB-BUS.md §7, hardened by §10.7) -------------------
   // Every value on this card is read back from the relay and the host after the panel opens, the
   // way the endpoint rows are. A click never paints its own outcome: the card refills from what
   // answered, so it cannot say a token is configured because a button was pressed.
+  //
+  // The settings half goes through jobBusGetSettings / jobBusSetSettings, the bus's own file, not
+  // getHostSettings: §10.7 retired the SAND_JOB_BUS_* names, and a bus that read its policy from
+  // the host settings map would be armed by anything that writes that map.
   const JOB_STATUS_PILL = {
     queued: "status-pill", running: "status-pill", needs_human: "status-pill attention",
     done: "status-pill success", failed: "status-pill bad", cancelled: "status-pill muted",
+  };
+  // The shape §10.7 fixes. It is what the card draws over a host that answered a partial object,
+  // and never what it draws when the host answered nothing at all: that case says so instead.
+  const JOB_BUS_DEFAULTS = {
+    enabled: false,
+    workers: { "nextgen.chapter": "Scribe" },
+    repos: ["webdevtodayjason/nextgen-training"],
+    allowedConnectors: ["github"],
+    timeoutMin: 120,
+    queueTimeoutMin: 60,
+    maxOpen: 20,
   };
   // The full id is on the row's title; the table shows enough of it to match a CoS log line.
   const shortJobId = (id) => (String(id).length > 15 ? `${String(id).slice(0, 15)}…` : String(id));
@@ -2115,20 +2130,57 @@
     return "";
   }
 
+  // §10.2 stores an agent id and accepts a name only while exactly one agent carries it. The card
+  // does the same resolution on the way in, so a mapping written as "Scribe" selects that agent
+  // and is saved back as its id, and an ambiguous or absent name is left exactly as it was found.
+  function jobBusAgentId(value) {
+    const roster = state.workers ?? [];
+    if (roster.some((worker) => worker.id === value)) return value;
+    const named = roster.filter((worker) => worker.name === value);
+    return named.length === 1 ? named[0].id : value;
+  }
+
+  function jobBusAgentOptions(selected) {
+    const roster = state.workers ?? [];
+    const options = roster.map((worker) =>
+      `<option value="${escapeHtml(worker.id)}"${worker.id === selected ? " selected" : ""}>${escapeHtml(worker.name)}</option>`);
+    // A mapping naming an agent this box does not have is kept on screen and kept on save: the
+    // bus stops those jobs on needs_human no_worker, which is the honest outcome. Repointing it
+    // at whoever happens to be first in the roster would run the work somewhere nobody chose.
+    if (!selected) options.unshift(`<option value="" selected>Choose an agent</option>`);
+    else if (!roster.some((worker) => worker.id === selected)) {
+      options.unshift(`<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} (not an agent on this box)</option>`);
+    }
+    return options.join("");
+  }
+
   function jobBusWorkerRow(type, agent) {
-    return `<div class="job-bus-worker-row" data-job-bus-worker><input type="text" aria-label="Job type" placeholder="nextgen.chapter" data-job-bus-worker-type value="${escapeHtml(type)}" /><span class="job-bus-arrow" aria-hidden="true">&rarr;</span><input type="text" aria-label="Agent name" placeholder="Scribe" data-job-bus-worker-agent value="${escapeHtml(agent)}" /></div>`;
+    return `<div class="job-bus-worker-row" data-job-bus-worker><input type="text" aria-label="Job type" placeholder="nextgen.chapter" data-job-bus-worker-type value="${escapeHtml(type)}" /><span class="job-bus-arrow" aria-hidden="true">&rarr;</span><select aria-label="Worker agent" data-job-bus-worker-agent>${jobBusAgentOptions(agent)}</select><button class="ghost-button" type="button" data-job-bus-row-remove aria-label="Remove this job type">Remove</button></div>`;
+  }
+
+  // The repos allowlist and the connectors the per-job clone keeps are both plain lists of
+  // strings, so one row builder draws them rather than two that drift apart.
+  function jobBusListRow(kind, value) {
+    const label = kind === "repo" ? "Allowed repository" : "Allowed connector";
+    const placeholder = kind === "repo" ? "owner/name" : "github";
+    return `<div class="job-bus-list-row" data-job-bus-${kind}><input type="text" aria-label="${label}" placeholder="${placeholder}" data-job-bus-${kind}-value value="${escapeHtml(String(value ?? ""))}" /><button class="ghost-button" type="button" data-job-bus-row-remove aria-label="Remove this entry">Remove</button></div>`;
   }
 
   function jobBusSection() {
     if (typeof adapter.getJobBusStatus !== "function") return "";
-    return `<section class="settings-section" data-job-bus><h3>Job bus</h3><p>An allowlisted job API for the Chief of Staff. It publishes no shell, no browser and no desktop: a caller posts a job of an allowed type and reads back a result the host checked against the receipts of the tools its worker actually ran. The contract is docs/JOB-BUS.md.</p>`
-      + `<div class="setting-row"><div><strong>Status</strong><small data-job-bus-state>Reading from the relay…</small></div><span class="status-pill" data-job-bus-pill>…</span></div>`
+    return `<section class="settings-section" data-job-bus><h3>Job bus</h3><p>An allowlisted job API for the Chief of Staff. It publishes no shell, no browser and no desktop: a caller posts a job of an allowed type and reads back a result the host checked against the receipts of the tools its worker actually ran, and against GitHub itself. The contract is docs/JOB-BUS.md.</p>`
+      + `<div class="setting-row"><div><strong>Enabled</strong><small data-job-bus-enabled-note>Reading from the host…</small></div><button class="switch" type="button" data-job-bus-enabled aria-pressed="false"></button></div>`
+      + `<div class="setting-row"><div><strong>Token</strong><small data-job-bus-state>Reading from the relay…</small></div><span class="status-pill" data-job-bus-pill>…</span></div>`
       + `<div class="setting-row"><div><strong>Base URL</strong><small data-job-bus-base>…</small></div></div>`
-      + `<div class="setting-row"><div><strong>Token</strong><small>Generate one here, or paste the value you set on the deployment. It is compared in constant time and never written to a log, an audit row or a job body.</small></div><div class="field"><input id="job-bus-token" type="password" autocomplete="off" placeholder="At least 32 characters" data-job-bus-input /></div></div>`
+      + `<div class="setting-row"><div><strong>Set the bearer</strong><small>Generate one here, or paste the value you set on the deployment. It is compared in constant time and never written to a log, an audit row or a job body. Generating or setting one also turns the bus on.</small></div><div class="field"><input id="job-bus-token" type="password" autocomplete="off" placeholder="At least 32 characters" data-job-bus-input /></div></div>`
       + `<div class="form-actions"><button class="primary-button" type="button" data-job-bus-generate>Generate</button><button class="ghost-button" type="button" data-job-bus-set>Set</button><button class="danger-button" type="button" data-job-bus-clear>Clear</button></div>`
       + `<div class="job-bus-minted" data-job-bus-minted hidden><label for="job-bus-minted-value">The new token</label><div class="job-bus-copy-row"><input id="job-bus-minted-value" type="text" readonly data-job-bus-minted-value /><button class="ghost-button" type="button" data-job-bus-copy>Copy</button></div><small class="field-hint">Copy it now. This is the only time it is shown, and nothing on this box can read it back.</small></div>`
       + `<div class="job-bus-block"><strong>Try it</strong><pre class="job-bus-curl" data-job-bus-curl></pre></div>`
-      + `<div class="job-bus-block"><strong>Workers</strong><small class="field-hint">Which agent runs each job type, held in the host settings as SAND_JOB_BUS_WORKERS. A type with no agent on this box stops its jobs on needs_human rather than running them somewhere else.</small><div data-job-bus-workers></div><div class="form-actions"><button class="ghost-button" type="button" data-job-bus-worker-add>Add a type</button><button class="primary-button" type="button" data-job-bus-workers-save>Save workers</button></div></div>`
+      + `<div class="job-bus-block"><strong>Workers</strong><small class="field-hint">Which agent runs each job type. The bus never sends the prompt into that agent's own conversation: it clones the agent per job, strips every connector but the ones below, and deletes the clone when the job ends. A type pointing at no agent on this box stops its jobs on needs_human rather than running them somewhere else.</small><div data-job-bus-workers></div><div class="form-actions"><button class="ghost-button" type="button" data-job-bus-worker-add>Add a type</button></div></div>`
+      + `<div class="job-bus-block"><strong>Repositories</strong><small class="field-hint">The only repositories a job may name. A payload pointing anywhere else is refused with 400 before any worker sees it.</small><div data-job-bus-repos></div><div class="form-actions"><button class="ghost-button" type="button" data-job-bus-repo-add>Add a repository</button></div></div>`
+      + `<div class="job-bus-block"><strong>Connectors the clone keeps</strong><small class="field-hint">Everything else is stripped from the per-job clone before the prompt is sent. If they cannot be stripped the job stops on needs_human rather than running with them.</small><div data-job-bus-connectors></div><div class="form-actions"><button class="ghost-button" type="button" data-job-bus-connector-add>Add a connector</button></div></div>`
+      + `<div class="job-bus-block"><strong>Limits</strong><small class="field-hint">Minutes for the two timeouts, a count for the open jobs. Queued past the first, a job fails as queued too long; running past the second it fails as timed out; a create beyond the third answers 429 queue full.</small><div class="job-bus-limits"><label>Queue timeout (min)<input type="number" min="1" step="1" data-job-bus-queue-timeout /></label><label>Run timeout (min)<input type="number" min="1" step="1" data-job-bus-timeout /></label><label>Max open jobs<input type="number" min="1" step="1" data-job-bus-max-open /></label></div></div>`
+      + `<div class="form-actions"><button class="primary-button" type="button" data-job-bus-settings-save>Save job bus settings</button></div>`
       + `<div class="job-bus-block"><strong>Jobs</strong><div class="job-bus-table-wrap"><table class="job-bus-table"><thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Worker</th><th>Created</th><th>Result</th></tr></thead><tbody data-job-bus-rows><tr><td colspan="6">Reading from the host…</td></tr></tbody></table></div></div>`
       + `</section>`;
   }
@@ -2146,7 +2198,7 @@
         : status.source === "file" ? " from the token file the console wrote beside the relay's profile" : "";
       line.textContent = status.configured
         ? `Configured${where}.`
-        : "No token, so every /v1 request is refused with 503. Generate one, or set TITAN_JOB_TOKEN on the deployment.";
+        : "No token, so every /v1 request is refused with 401. Generate one, or set TITAN_JOB_TOKEN on the deployment.";
       pill.textContent = status.configured ? (status.source === "env" ? "env" : "configured") : "not configured";
       pill.className = status.configured ? "status-pill success" : "status-pill attention";
       const url = status.base_url ?? "";
@@ -2165,14 +2217,83 @@
       pill.textContent = "unknown";
       pill.className = "status-pill";
     });
-    if (typeof adapter.getJobBusWorkers === "function") {
-      const workers = root.querySelector("[data-job-bus-workers]");
-      adapter.getJobBusWorkers().then((mapping) => {
-        const rows = Object.entries(mapping ?? {});
-        workers.innerHTML = (rows.length ? rows : [["nextgen.chapter", "Scribe"]]).map(([type, agent]) => jobBusWorkerRow(type, String(agent ?? ""))).join("");
-      }).catch(() => { workers.innerHTML = jobBusWorkerRow("nextgen.chapter", "Scribe"); });
-    }
+    fillJobBusSettings(root);
     fillJobBusRows();
+  }
+
+  // Only the switch and its line, so arming the bus does not throw away an edit somebody is part
+  // way through in the lists below it.
+  function fillJobBusEnabled(root, settings) {
+    const note = root.querySelector("[data-job-bus-enabled-note]");
+    const toggle = root.querySelector("[data-job-bus-enabled]");
+    if (!note || !toggle) return;
+    if (settings == null) {
+      toggle.setAttribute("aria-pressed", "false");
+      toggle.disabled = true;
+      note.textContent = "This box's host has no job bus settings. Ship a bundle that carries jobBusGetSettings.";
+      return;
+    }
+    const on = settings.enabled === true;
+    toggle.setAttribute("aria-pressed", String(on));
+    toggle.disabled = false;
+    note.textContent = on
+      ? "On. A job of an allowed type is accepted from the bearer."
+      : "Off. Every create answers 503 job bus is disabled, whatever the token says.";
+  }
+
+  function fillJobBusSettings(root) {
+    if (typeof adapter.getJobBusSettings !== "function") { fillJobBusEnabled(root, null); return; }
+    Promise.resolve(adapter.getJobBusSettings()).then((answer) => {
+      fillJobBusEnabled(root, answer);
+      // null is a host older than §10.7. The editors below are left empty rather than filled with
+      // the defaults, because a filled form is a claim about what the box holds.
+      if (answer == null) return;
+      const settings = { ...JOB_BUS_DEFAULTS, ...answer };
+      const workers = root.querySelector("[data-job-bus-workers]");
+      const mapping = Object.entries(settings.workers ?? {});
+      workers.innerHTML = (mapping.length ? mapping : Object.entries(JOB_BUS_DEFAULTS.workers))
+        .map(([type, agent]) => jobBusWorkerRow(type, jobBusAgentId(String(agent ?? "")))).join("");
+      const repos = root.querySelector("[data-job-bus-repos]");
+      const repoList = Array.isArray(settings.repos) ? settings.repos : [];
+      repos.innerHTML = repoList.length ? repoList.map((repo) => jobBusListRow("repo", repo)).join("")
+        : `<p class="field-hint">No repository is allowed, so every nextgen.chapter create is refused.</p>`;
+      const connectors = root.querySelector("[data-job-bus-connectors]");
+      const connectorList = Array.isArray(settings.allowedConnectors) ? settings.allowedConnectors : [];
+      connectors.innerHTML = connectorList.length ? connectorList.map((id) => jobBusListRow("connector", id)).join("")
+        : `<p class="field-hint">The clone keeps no connector at all.</p>`;
+      const number = (selector, value) => { const field = root.querySelector(selector); if (field) field.value = String(value); };
+      number("[data-job-bus-queue-timeout]", settings.queueTimeoutMin);
+      number("[data-job-bus-timeout]", settings.timeoutMin);
+      number("[data-job-bus-max-open]", settings.maxOpen);
+    }).catch((error) => {
+      const note = root.querySelector("[data-job-bus-enabled-note]");
+      if (note) note.textContent = `The host did not answer for the job bus settings: ${error.message}`;
+    });
+  }
+
+  // Everything the operator can edit on this card, read out of the DOM in one place so the save
+  // and the gate are looking at the same fields.
+  function jobBusSettingsFromCard(root) {
+    const workers = {};
+    for (const row of root.querySelectorAll("[data-job-bus-worker]")) {
+      const type = row.querySelector("[data-job-bus-worker-type]").value.trim();
+      const agent = row.querySelector("[data-job-bus-worker-agent]").value.trim();
+      if (type && agent) workers[type] = agent;
+    }
+    const list = (kind) => Array.from(root.querySelectorAll(`[data-job-bus-${kind}-value]`))
+      .map((field) => field.value.trim()).filter((value) => value.length > 0);
+    const number = (selector, fallback) => {
+      const raw = Number(root.querySelector(selector)?.value);
+      return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+    };
+    return {
+      workers,
+      repos: list("repo"),
+      allowedConnectors: list("connector"),
+      queueTimeoutMin: number("[data-job-bus-queue-timeout]", JOB_BUS_DEFAULTS.queueTimeoutMin),
+      timeoutMin: number("[data-job-bus-timeout]", JOB_BUS_DEFAULTS.timeoutMin),
+      maxOpen: number("[data-job-bus-max-open]", JOB_BUS_DEFAULTS.maxOpen),
+    };
   }
 
   function fillJobBusRows() {
@@ -2183,7 +2304,12 @@
       if (jobs.length === 0) { body.innerHTML = `<tr><td colspan="6">No jobs yet.</td></tr>`; return; }
       body.innerHTML = jobs.map((job) => {
         const summary = jobLine(job);
-        return `<tr data-job-bus-row="${escapeHtml(job.id)}"><td class="job-bus-id" title="${escapeHtml(job.id)}">${escapeHtml(shortJobId(job.id))}</td><td>${escapeHtml(job.type ?? "")}</td><td><span class="${JOB_STATUS_PILL[job.status] ?? "status-pill"}">${escapeHtml(String(job.status ?? "").replace("_", " "))}</span></td><td>${escapeHtml(job.worker?.agentName ?? "")}</td><td>${escapeHtml(jobWhen(job.created_at))}</td><td class="job-bus-line" title="${escapeHtml(summary)}">${escapeHtml(summary)}</td></tr>`;
+        // The Worker column is the per-job clone, the agent that actually held the tools. Its
+        // source is on the cell's title, because "Scribe · job 4f1c0b" on its own does not say
+        // which Scribe it came from once the clone has been deleted.
+        const worker = job.worker?.agentName ?? "";
+        const from = job.worker?.sourceAgentId ? `cloned from ${job.worker.sourceAgentId}` : "";
+        return `<tr data-job-bus-row="${escapeHtml(job.id)}"><td class="job-bus-id" title="${escapeHtml(job.id)}">${escapeHtml(shortJobId(job.id))}</td><td>${escapeHtml(job.type ?? "")}</td><td><span class="${JOB_STATUS_PILL[job.status] ?? "status-pill"}">${escapeHtml(String(job.status ?? "").replace("_", " "))}</span></td><td class="job-bus-worker" title="${escapeHtml(from)}">${escapeHtml(worker)}</td><td>${escapeHtml(jobWhen(job.created_at))}</td><td class="job-bus-line" title="${escapeHtml(summary)}">${escapeHtml(summary)}</td></tr>`;
       }).join("");
     }).catch((error) => { body.innerHTML = `<tr><td colspan="6">The host did not answer for the job list: ${escapeHtml(error.message)}</td></tr>`; });
   }
@@ -3185,20 +3311,41 @@
       // page served over plain http to anything but localhost.
       Promise.resolve(copy).then(() => showToast("Token copied."))
         .catch(() => { value.focus(); value.select(); showToast("This browser would not let the page write the clipboard. It is selected, so copy it."); });
+    } else if (target.hasAttribute("data-job-bus-enabled")) {
+      // The one control on this card that writes on the click, because it is the arm and disarm
+      // and a switch that needed a Save underneath it would sit there lying about the bus. What
+      // is painted afterwards is the host's answer, read back, not the position it was dragged to.
+      const root = elements.panelContent.querySelector("[data-job-bus]");
+      const enabled = target.getAttribute("aria-pressed") !== "true";
+      target.disabled = true;
+      Promise.resolve(adapter.setJobBusSettings({ enabled }))
+        .then(() => showToast(enabled ? "The job bus is on." : "The job bus is off. Every create answers 503."))
+        .catch((error) => showToast(`The job bus was not switched: ${error.message}`))
+        .finally(() => {
+          target.disabled = false;
+          // Only the switch, so a toggle does not wipe an edit in the lists under it.
+          Promise.resolve(adapter.getJobBusSettings()).then((settings) => fillJobBusEnabled(root, settings)).catch(() => {});
+        });
     } else if (target.hasAttribute("data-job-bus-worker-add")) {
       const rows = elements.panelContent.querySelector("[data-job-bus-workers]");
       rows.insertAdjacentHTML("beforeend", jobBusWorkerRow("", ""));
-    } else if (target.hasAttribute("data-job-bus-workers-save")) {
-      const mapping = {};
-      for (const row of elements.panelContent.querySelectorAll("[data-job-bus-worker]")) {
-        const type = row.querySelector("[data-job-bus-worker-type]").value.trim();
-        const agent = row.querySelector("[data-job-bus-worker-agent]").value.trim();
-        if (type && agent) mapping[type] = agent;
-      }
+    } else if (target.hasAttribute("data-job-bus-repo-add") || target.hasAttribute("data-job-bus-connector-add")) {
+      const repo = target.hasAttribute("data-job-bus-repo-add");
+      const rows = elements.panelContent.querySelector(repo ? "[data-job-bus-repos]" : "[data-job-bus-connectors]");
+      // The empty-list hint is a paragraph, not a row, so it is cleared rather than appended to.
+      if (rows.querySelector(".field-hint")) rows.innerHTML = "";
+      rows.insertAdjacentHTML("beforeend", jobBusListRow(repo ? "repo" : "connector", ""));
+    } else if (target.hasAttribute("data-job-bus-row-remove")) {
+      target.closest("[data-job-bus-worker], [data-job-bus-repo], [data-job-bus-connector]")?.remove();
+    } else if (target.hasAttribute("data-job-bus-settings-save")) {
+      const root = elements.panelContent.querySelector("[data-job-bus]");
+      const settings = jobBusSettingsFromCard(root);
       target.disabled = true;
-      Promise.resolve(adapter.setJobBusWorkers(mapping))
-        .then(() => showToast(`Worker mapping saved on the host: ${Object.keys(mapping).length} type(s)`))
-        .catch((error) => showToast(`The worker mapping was not saved: ${error.message}`))
+      // `enabled` is deliberately not in this write: the switch owns it, so a Save cannot arm a
+      // bus the operator only meant to re-point.
+      Promise.resolve(adapter.setJobBusSettings(settings))
+        .then(() => showToast(`Job bus settings saved: ${Object.keys(settings.workers).length} type(s), ${settings.repos.length} repo(s)`))
+        .catch((error) => showToast(`The job bus settings were not saved: ${error.message}`))
         .finally(() => { target.disabled = false; fillJobBus(); });
     } else if (target.hasAttribute("data-open-context-browser")) {
       openDesktop("browser");

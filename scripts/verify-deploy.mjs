@@ -15,8 +15,9 @@
 //                 roster paints
 //   6. desktop    a probe agent's screen opens through the relay's own /vnc route, the frame is
 //                 noVNC, and its websocket reaches the box
-//   7. job bus    /v1/health is 401 or 503 without a bearer and never 200, and 200 with the one
-//                 given as --job-token (docs/JOB-BUS.md §9)
+//   7. job bus    /v1/health is 401 without a bearer and never 200, the bearer given as
+//                 --job-token opens /v1 and nothing else, and it is 200 with that bearer
+//                 (docs/JOB-BUS.md §9, amended by §10.6 and §10.8)
 //   8. lockout    six wrong passwords in a row hit the rate limit
 //
 // With --url it runs against any base URL instead of the tailnet one, which is what the Coolify
@@ -157,8 +158,9 @@ if (EXTERNAL) {
   // Where the publish is concerned there is nothing to assert POSITIVELY against an arbitrary
   // base: inside Coolify the right answer is no published port at all, because only the proxy
   // reaches the relay. What still has to hold is that nothing is on a public interface, which is
-  // the check below this one.
-  check(true, "published ports are not asserted against a base URL this gate was handed",
+  // the check below this one. docs/JOB-BUS.md §10.8 asks this gate to SAY that rather than let a
+  // reader assume the bindings were checked, so the line stands whichever way the gate was run.
+  check(true, "published ports are not asserted against a base URL this gate was handed (they are, run on the server)",
     `relay ${relayBindings.map((b) => `${b.container}->${b.host}`).join(" ") || "nothing published"}; box ${boxBindings.map((b) => b.host).join(" ") || "nothing published"}`);
 } else {
   check(relayBindings.length === 1 && relayBindings[0].container === "7777/tcp" && relayBindings[0].host === `${BIND}:${PORT}`,
@@ -430,21 +432,32 @@ try {
 }
 
 step("the job bus edge");
-// docs/JOB-BUS.md §9: the only two things a deploy gate can say about the bus from outside are
-// that its door is shut and that the right key opens it. Health is authenticated on the public
-// host, so a 200 without a bearer would be the whole bus standing open; 401 (configured) and 503
-// (no token on this deployment) are both correct and are the only correct answers.
+// docs/JOB-BUS.md §9: the only things a deploy gate can say about the bus from outside are that
+// its door is shut, that the right key opens it, and that the key opens nothing else. Health is
+// authenticated on the public host, so a 200 without a bearer would be the whole bus standing
+// open. §10.6 narrowed the closed answer to exactly 401: an unconfigured bus and a wrong key look
+// identical from outside, so nobody can probe a deployment to learn whether a token is set yet. A
+// 503 here is a relay older than §10.6, which is a finding rather than a pass.
 const jobHealth = await hit("/v1/health");
-check(jobHealth.status === 401 || jobHealth.status === 503,
-  "GET /v1/health with no bearer is 401 or 503, never 200", `HTTP ${jobHealth.status}`);
+check(jobHealth.status === 401, "GET /v1/health with no bearer is 401, never 200 and never 503",
+  `HTTP ${jobHealth.status}${jobHealth.status === 503 ? " (a relay from before §10.6 answers 503 when no token is set)" : ""}`);
 if (JOB_TOKEN == null) {
   unresolved("GET /v1/health with the job bus bearer is 200",
     "no --job-token was given, so this gate cannot hold the bus's own credential");
+  unresolved("the job bus bearer opens /v1 and nothing else", "the same missing --job-token");
 } else {
   const opened = await hit("/v1/health", { headers: { authorization: `Bearer ${JOB_TOKEN}` } });
   const body = await opened.json().catch(() => null);
   check(opened.status === 200 && body?.ok === true,
     "and 200 with the token from --job-token", `HTTP ${opened.status}, queue_depth ${body?.queue_depth ?? "absent"}`);
+  // §10.8: a bearer that also opened the console would make every rule inside the bus decorative.
+  for (const route of ["/api/listAgents", "/", "/vnc/1/", "/box/surface"]) {
+    const answer = await hit(route, { headers: { authorization: `Bearer ${JOB_TOKEN}`, accept: "text/html" } });
+    const location = String(answer.headers.get("location") ?? "");
+    const refused = answer.status === 401 || answer.status === 403 || answer.status === 404
+      || (answer.status >= 300 && answer.status < 400 && location.startsWith("/login"));
+    check(refused, `the job bus bearer is refused on ${route}`, `HTTP ${answer.status}${location ? ` -> ${location}` : ""}`);
+  }
 }
 
 step("the Machine Room in a real browser");

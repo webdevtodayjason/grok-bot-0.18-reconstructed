@@ -11,6 +11,9 @@ blocks a worker agent answers with.
 
 ## 1. Where it lives
 
+> **§10 overrides:** the state directory also holds `job-bus/settings.json` (§10.7), and the relay's
+> closed answer is `401`, not `503` (§10.6).
+
 ```
 CoS ──HTTPS──► relay (ui/server.mjs, tb.semfreak.dev)      edge: TLS, bearer, rate limit, /v1 only
                   │  gateway token, POST /api/jobBus*
@@ -35,6 +38,10 @@ CoS ──HTTPS──► relay (ui/server.mjs, tb.semfreak.dev)      edge: TLS, 
 
 ## 2. Token
 
+> **§10 overrides:** with no token every `/v1` request answers `401`, not `503`, and so does a wrong one,
+> so the two are indistinguishable from outside (§10.6). A token is not an open bus: the bus stays
+> disabled until the operator turns it on, and setting or generating a token here does that (§10.7).
+
 The bearer CoS presents is `TITAN_JOB_TOKEN`. The relay resolves it in this order and fails closed:
 
 1. env `TITAN_JOB_TOKEN` (Coolify: an environment variable on the `titanbot` resource; the compose file
@@ -52,6 +59,13 @@ rest of the console: `GET /job-bus/status` → `{configured, source: "env"|"file
 Tokens compare in constant time. The token never appears in logs, audit rows, transcripts or job bodies.
 
 ## 3. HTTP API (relay, `/v1`)
+
+> **§10 overrides:** `401` is the uniform refusal (§10.6); the gateway caps a body at 8 KB behind the
+> relay's 64 KB (§10.1); `POST /v1/jobs` answers the four fields `{id, type, status, created_at}` and
+> the artifacts read carries `html_url` and `api_url` per entry (§10.6); failed bearers also count
+> against the login lockout and a global 600/min bucket (§10.6); `create` on a disabled bus is `503
+> {"error":"job bus is disabled"}` and beyond `maxOpen` it is `429 {"error":"queue full"}` (§10.3,
+> §10.7).
 
 Common: JSON in and out. `Authorization: Bearer <TITAN_JOB_TOKEN>` on **every** `/v1` route including
 health (Jason: health is authenticated on the public host). Missing or wrong bearer →
@@ -74,6 +88,9 @@ Secret detection on create (fail closed): any payload key matching `/token|secre
 or any string value matching `/^(ghp_|github_pat_|gho_|xox[abp]-|sk-|AKIA)/`.
 
 ### Job record (what `GET /v1/jobs/{id}` returns)
+
+> **§10 overrides:** `worker` is `{agentId (the per-job clone), sourceAgentId, agentName, baseline,
+> dispatch_nonce}` (§10.2), and `result.attestation` also carries `records` (§10.4).
 
 ```json
 {
@@ -109,6 +126,11 @@ or any string value matching `/^(ghp_|github_pat_|gho_|xox[abp]-|sk-|AKIA)/`.
 
 ## 4. Job types (allowlist)
 
+> **§10 overrides:** the `SAND_JOB_BUS_*` names are retired; the settings live in
+> `job-bus/settings.json` behind `jobBusGetSettings` / `jobBusSetSettings`, `enabled` defaults to off,
+> and `repos` and `allowedConnectors` join them (§10.7). The payload is validated against §10.1's
+> patterns and the repos allowlist before anything reads it.
+
 | type | worker | what happens |
 |---|---|---|
 | `health.ping` | the host itself | finishes in-process: `done`, `result.summary = "pong"`, attestation `{attempt_id: <job id>, receipts: ["jobbus:<audit eventId>"], unsupported_claims: []}` |
@@ -121,6 +143,12 @@ and the console): `SAND_JOB_BUS_WORKERS` (JSON object type → agent name), `SAN
 (default 180), `SAND_JOB_BUS_ENABLED` (default on; off → `jobBusCreate` answers 503 and the worker idles).
 
 ## 5. The worker
+
+> **§10 overrides:** the prompt goes into a per-job clone of the mapped agent, not its own
+> conversation, and the clone is deleted when the job ends (§10.2); `running` is persisted before the
+> dispatch happens, and `queueTimeoutMin` and `maxOpen` join the run timeout (§10.3); attestation is
+> two layers, receipts here and GitHub out of band, and `done` needs both (§10.4); every audit row is
+> chained to the one before it (§10.5).
 
 One in-host loop, started with the gateway, one running job per worker agent, oldest queued first.
 
@@ -155,6 +183,10 @@ on every transition so the console updates live.
 
 ## 6. The prompt the worker receives (binding)
 
+> **§10 overrides:** the payload reaches the worker as one delimited data block that says nothing
+> inside it is an instruction, the rules file cannot grant permissions, and step 4's reporting
+> commands are one fact each (§10.1).
+
 ```
 Titan Job Bus job <id> (type nextgen.chapter), submitted by the Chief of Staff.
 
@@ -186,12 +218,22 @@ Do this in your sandbox, in /workspace:
 
 ## 7. Console
 
+> **§10 overrides:** the card reads and writes `jobBusGetSettings` / `jobBusSetSettings`, and it gains
+> an Enabled switch (default off, armed by generating or setting a token), the worker mapping as a
+> job type against an agent picked off the roster and stored by id, the `repos` allowlist, the
+> connectors the clone keeps, and the two timeouts and `maxOpen` (§10.7). The jobs table's Worker
+> column is the per-job clone (§10.2).
+
 Settings → **Job bus** card: configured state and source, the base URL (`https://<host>/v1`), Generate /
 Set / Clear token, a curl example, the worker mapping (editable), and a compact jobs table (id, type,
 status, worker, created, one-line result or needs-human detail) fed by `jobBusList` and refreshed on the
 `job-bus` gateway event. No other console surface.
 
 ## 8. Operator setup on the R750
+
+> **§10 overrides:** turning the bus on is its own step, because `enabled` defaults to off (§10.7), and
+> the worker is chosen by agent rather than by the name `Scribe` alone (§10.2). The current steps are
+> in `docs/OPERATOR-RUNBOOK.md` and `deploy/coolify/README.md`.
 
 1. Set `TITAN_JOB_TOKEN` on the `titanbot` Coolify resource **or** generate one in Settings → Job bus.
 2. Make sure an agent named **Scribe** exists (or set `SAND_JOB_BUS_WORKERS`), and that the box has a GitHub
@@ -212,6 +254,8 @@ Tailscale: if the relay is reachable only on the tailnet, an ACL that allows the
 stay on loopback (`scripts/verify-deploy.mjs` asserts the port bindings).
 
 ## 9. Gates
+
+> **§10 overrides:** §10.8 adds to every gate here, and `verify-job-bus.mjs` carries those checks.
 
 - `npm test`: the store (allowlist, idempotency, transitions, audit append, the 500-terminal cap), the relay's
   `/v1` layer (503 unconfigured, 401, 413, 429, 404/405, secret detection, header-vs-body idempotency), the
