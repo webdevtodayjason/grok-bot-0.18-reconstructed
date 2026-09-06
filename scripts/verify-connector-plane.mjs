@@ -72,8 +72,10 @@
 //              `gh auth setup-git`, which points git's credential helper at `gh`, and `gh` reads
 //              GITHUB_TOKEN out of the same shell environment the secret store already fills. This
 //              arm stores an invented GITHUB_TOKEN and then asks git itself: the helper is
-//              configured, and `git ls-remote https://github.com/cli/cli` comes back an
-//              AUTHENTICATION FAILURE rather than a username prompt or a hang. Off by default:
+//              configured, and `git ls-remote https://github.com/cli/cli-credential-probe` comes
+//              back a REFUSAL FROM GITHUB rather than a username prompt or a hang. That path does
+//              not exist on purpose: github.com answers 401 for it, which is what makes git ask the
+//              helper at all. Off by default:
 //              --gh-tool. Like (m) it never runs the installer; if `gh` is not in the box it says
 //              so and skips the two legs that need it.
 import { execFile } from "node:child_process";
@@ -120,10 +122,12 @@ const SHELL_FIELD = "CODERABBIT_API_KEY";
 // QOL-GH. (o)'s field, guarded the same way: an operator's real GitHub token is not this gate's to
 // overwrite or delete, so the arm refuses to start if the host already holds one.
 const GH_FIELD = "GITHUB_TOKEN";
-// A public repository on purpose: what is under test is whether GitHub REFUSES the invented token,
-// which it does for a public repo too. An anonymous clone of this URL would succeed, so a pass here
-// can only mean the helper handed over a credential.
-const GH_REMOTE = "https://github.com/cli/cli";
+// A github.com path that does NOT exist, on purpose. git over https fetches /info/refs anonymously
+// first and only consults a credential helper after a 401, so a public repository is read straight
+// through and would prove nothing. github.com answers 401 for a path it will not admit to, which
+// forces git to ask the helper; what comes back then -- the credential refused, or "Repository not
+// found" once one was accepted for transport -- is proof a credential was handed over.
+const GH_REMOTE = "https://github.com/cli/cli-credential-probe";
 const PROBE_PREFIX = "probe-u3";
 const TURN_TIMEOUT_MS = 300_000;
 // CONNECT-3. The preset the console's "TinyFish (API key)" button writes, name and all. The gate
@@ -1578,9 +1582,10 @@ try {
       // The claim the whole arm exists for. GIT_TERMINAL_PROMPT=0 and GIT_ASKPASS=/bin/false mean
       // git CANNOT prompt or block on a tty: with no helper this comes back "could not read
       // Username for 'https://github.com': terminal prompts disabled" in well under a second, which
-      // is precisely the failure scribe hit. A pass is the other answer -- GitHub rejecting the
-      // credential the helper handed over. Anonymous success is a FAILURE here: this repository is
-      // public, so an ls-remote that succeeds means the helper handed over nothing.
+      // is precisely the failure scribe hit. A pass is the other answer -- github.com answering on
+      // a credential the helper handed over, which for a path that does not exist is either an
+      // authentication failure or "Repository not found"; both mean git got past the 401 with
+      // something in hand.
       const ghRun = await inBoxWithEnv({ GITHUB_TOKEN: GH_KEY }, [
         `export HOME=${ghHome}`,
         'export PATH="$HOME/.local/bin:$PATH"',
@@ -1595,18 +1600,14 @@ try {
       // The invented token must not reach a log: it is struck from what this gate prints.
       const ghText = ghRun.split(GH_KEY).join("[redacted]").replace(/gh-gate-exit:\d+\n?/, "").trim();
       console.log(ghText.split("\n").map((line) => `      ${line}`).join("\n") || "      (no output)");
-      if (/could not read Username|terminal prompts disabled|Authentication prompt|askpass/i.test(ghText)) {
+      if (/could not read Username|terminal prompts disabled|Authentication prompt|askpass|unable to (get|read) (password|username)/i.test(ghText)) {
         fail(`git asked for a username instead of using the helper: ${ghText.replace(/\n/g, " | ")}`);
       }
       if (ghStatus === 124 || ghStatus === 137) fail(`git ls-remote hung and was killed after 60 s (exit ${ghStatus})`);
-      if (ghStatus === 0) {
-        fail(`git ls-remote ${GH_REMOTE} SUCCEEDED with an invented token; that is an anonymous read, `
-          + "which means the credential helper handed git nothing");
+      if (!/Authentication failed|Invalid username or (token|password)|invalid credentials|Bad credentials|HTTP (401|403)|403 Forbidden|401 Unauthorized|Repository not found|repository '[^']*' not found/i.test(ghText)) {
+        fail(`git ls-remote ${GH_REMOTE} exited ${ghStatus}, but github.com did not answer on a credential: ${ghText.replace(/\n/g, " | ")}`);
       }
-      if (!/Authentication failed|Invalid username or (token|password)|invalid credentials|Bad credentials|HTTP (401|403)|403 Forbidden|401 Unauthorized/i.test(ghText)) {
-        fail(`git ls-remote failed with exit ${ghStatus}, but not with an authentication failure: ${ghText.replace(/\n/g, " | ")}`);
-      }
-      ok(`git ls-remote ${GH_REMOTE} answered an authentication failure (exit ${ghStatus}) — a credential was offered and refused, and nothing prompted`);
+      ok(`git ls-remote ${GH_REMOTE} came back on the credential the helper handed over (exit ${ghStatus}) — nothing prompted`);
     }
 
     // Same custody claim (m) makes, for the store this arm filled: one file holds the value, 0600,
