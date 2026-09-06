@@ -371,7 +371,7 @@ try {
       const panel = await page.evaluate(() => document.getElementById("panel-dialog")?.textContent ?? "");
       check(!secrets.some((s) => panel.includes(s)), "no adopted secret in the evidence disclosure");
       const heads = await page.$$eval("[data-head-slot]", (els) => els.map((e) => e.textContent.trim()));
-      check(heads.length === 0 || heads.every((h) => /not on this page until you ask/.test(h)), "attested tool output stays out of the DOM until asked for", `${heads.length} slot(s)`);
+      check(heads.length === 0 || heads.every((h) => /not on this page until you ask/i.test(h)), "attested tool output stays out of the DOM until asked for", `${heads.length} slot(s)`);
     } else {
       check(true, "no evidence chip on Atera to open in the leak pass");
     }
@@ -1822,7 +1822,7 @@ try {
     const ledgerRows = await until(() => page.evaluate(() => { const l = document.querySelector("[data-audit-list]"); return l && l.textContent.trim() ? l.querySelectorAll("[data-audit-row]").length : null; }), 10_000, 500);
     check(hostLedger != null && ledgerRows === hostLedger.rows.length, "AUDIT-1: the Action ledger disclosure lists getAgentActionAudit's rows for this agent", `${ledgerRows ?? "none"} on the panel, ${hostLedger?.rows?.length ?? "?"} on the host`);
     const ledgerHeads = await page.$$eval("[data-audit-head-slot]", (els) => els.map((e) => e.textContent.trim()));
-    check(ledgerHeads.length === (ledgerRows ?? 0) && ledgerHeads.every((h) => /not on this page until you ask/.test(h)), "and every row's tool output is withheld until asked for", `${ledgerHeads.length} slot(s)`);
+    check(ledgerHeads.length === (ledgerRows ?? 0) && ledgerHeads.every((h) => /not on this page until you ask/i.test(h)), "and every row's tool output is withheld until asked for", `${ledgerHeads.length} slot(s)`);
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);
     const filesTab = await page.evaluate(() => document.querySelector("[data-desktop-app='files'] small")?.textContent?.trim() ?? "");
     check(filesTab === "Files from this conversation", "the Files tab is labelled for what it renders", filesTab);
@@ -2005,11 +2005,11 @@ try {
       // the DOM until one attestation is asked for, and the reveal is per-attestation.
       const heads = await page.$$eval("[data-head-slot]", (els) => els.map((e) => e.textContent.trim()));
       const reveal = await page.$$("[data-reveal-head]");
-      check(heads.length === 0 || heads.every((h) => /not on this page until you ask/.test(h)), "attested tool output is withheld until asked for", `${heads.length} slot(s), ${reveal.length} reveal button(s)`);
+      check(heads.length === 0 || heads.every((h) => /not on this page until you ask/i.test(h)), "attested tool output is withheld until asked for", `${heads.length} slot(s), ${reveal.length} reveal button(s)`);
       if (reveal.length > 0) {
         await reveal[0].click(); await page.waitForTimeout(600);
         const shown = await page.evaluate(() => document.querySelector("[data-head-slot='0']")?.textContent?.trim() ?? "");
-        check(shown.length > 0 && !/not on this page until you ask/.test(shown), "and one click reveals that one attestation's output", shown.slice(0, 70));
+        check(shown.length > 0 && !/not on this page until you ask/i.test(shown), "and one click reveals that one attestation's output", shown.slice(0, 70));
       }
       await page.keyboard.press("Escape"); await page.waitForTimeout(500);
     }
