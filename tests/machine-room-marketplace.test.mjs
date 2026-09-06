@@ -288,6 +288,24 @@ test("Add writes the catalog's own entry through the connector path, with env na
   assert.ok(calls.some((c) => c.method === "refreshMcp"));
 });
 
+test("Add on a shell-tool row runs the box installer and writes nothing to connectors.json", async () => {
+  // A shell tool's `install` is a string -- its shell-tool id -- not a {command,args,env} entry.
+  // Add has to read that and reach installShellTool; a typeof check that only recognised the
+  // object shape sent CodeRabbit CLI to the MCP connector editor, which writes nothing at all.
+  const { createGatewayAdapter, posts, calls } = await loadAdapter(answers({ installShellTool: { ok: true, output: "" } }));
+  const adapter = createGatewayAdapter(seed());
+  const catalog = await adapter.listMarketplace();
+  const item = catalog.plugins.find((p) => p.id === "coderabbit");
+  assert.equal(item.kind, "shell-tool");
+  assert.equal(typeof item.install, "string");
+  const result = await adapter.addMarketplacePlugin(item, "w1");
+  assert.equal(result.accepted, true);
+  assert.deepEqual(calls.filter((c) => c.method === "installShellTool").map((c) => c.args.id), ["coderabbit"]);
+  // Nothing about a shell tool belongs in connectors.json, and the host has no server to re-read.
+  assert.equal(posts.length, 0);
+  assert.equal(calls.filter((c) => c.method === "refreshMcp").length, 0);
+});
+
 test("Uninstall is the same removeConnector write, and clearing a stored value is its own call", async () => {
   const removed = [];
   const { createGatewayAdapter, posts } = await loadAdapter(answers({
@@ -302,4 +320,23 @@ test("Uninstall is the same removeConnector write, and clearing a stored value i
   assert.equal(result.accepted, true);
   assert.equal(posts.at(-1).mcpServers.tinyfish, undefined);
   assert.ok(posts.at(-1).mcpServers.localfiles);
+});
+
+// The two rules the click path in ui/machine-room/app.js has to keep. They are drawn markup with
+// no adapter behind them, so they are pinned against the source the browser gate then exercises.
+test("the click path keeps Add's door narrow and Settings to one open card", async () => {
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  // Add falls back to the connector editor only for the catalog's explicit door -- a row that says
+  // `opensEditor` and carries no install. A shell tool's install is a STRING, so a typeof-object
+  // test on it threw CodeRabbit CLI and TinyFish CLI back to the editor instead of installing them.
+  assert.match(source, /if \(item\.opensEditor === true \|\| item\.install == null\) \{/);
+  assert.doesNotMatch(source, /typeof item\.install !== "object"/);
+  // Settings draws Providers and Chat listeners from the same cards, and one card is open at a
+  // time: a section that fell back to its own first member put a listener's Connect form and its
+  // masked token input on the page beside every provider card.
+  const start = source.indexOf("function pluginGroupSection(");
+  assert.notEqual(start, -1, "app.js no longer builds the Settings plugin sections here");
+  const section = source.slice(start, source.indexOf("function settingsPanel(", start));
+  assert.match(section, /members\.find\(\(plugin\) => plugin\.id === selectedPluginId\) \?\? null/);
+  assert.equal(section.split('class="plugin-detail"').length - 1, 1);
 });

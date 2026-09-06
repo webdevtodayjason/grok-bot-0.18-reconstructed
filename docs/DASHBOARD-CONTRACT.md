@@ -42,7 +42,8 @@ DISPOSITION LOG as the last action before done — done is not claimable without
   The Plugins tab is the host's catalog (`listMarketplace`) with an installed strip, a search
   field, category chips and a card per plugin; a card opens that plugin's page with its Accounts
   and Connectors boxes. Providers and chat listeners are NOT in it — they are Settings sections
-  (`pluginGroupSection`, Providers directly under Inference), drawn from the same cards. Provider
+  (`pluginGroupSection`, Providers directly under Inference), drawn from the same cards; one card
+  is open at a time, so only the section holding the selection draws a detail pane. Provider
   cards get a "Use this endpoint" button when adopted and an "answering now" pill when live
   (`pluginDetailMarkup`, `handlePanelClick` → `adapter.setModel`, box-wide). See
   [docs/MARKETPLACE.md](MARKETPLACE.md).

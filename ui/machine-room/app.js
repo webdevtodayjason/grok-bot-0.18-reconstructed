@@ -1880,10 +1880,16 @@
     const members = state.plugins.filter((plugin) => (plugin.group ?? "Connectors") === group);
     const head = `<h3>${escapeHtml(title)}</h3><p>${escapeHtml(blurb)}</p>`;
     if (!members.length) return `<section class="settings-section" data-plugin-group="${escapeHtml(group)}">${head}<div class="empty-state">${escapeHtml(empty)}</div></section>`;
-    // Only a selection inside THIS group counts: picking a listener must not empty the provider
-    // detail beside it, so each section falls back to its own first card.
-    const selected = members.find((plugin) => plugin.id === selectedPluginId) ?? members[0];
-    return `<section class="settings-section" data-plugin-group="${escapeHtml(group)}">${head}<div class="plugin-browser"><aside class="plugin-sidebar">${members.map((plugin) => pluginNavButton(plugin, selected.id)).join("")}</aside><section class="plugin-detail">${pluginDetailMarkup(selected)}</section></div></section>`;
+    // One selection on the page, one open card. Falling back to each section's own first member
+    // put TWO detail panes on Settings at once: the Slack listener's Connect form, its masked
+    // token input and its Cursor-route button sat beside every provider card, which is a change
+    // in what a provider card shows and this move was meant to change only where they live.
+    // The section that owns the selection draws the detail; the other draws its cards alone.
+    const selected = members.find((plugin) => plugin.id === selectedPluginId) ?? null;
+    const detail = selected
+      ? `<section class="plugin-detail">${pluginDetailMarkup(selected)}</section>`
+      : `<div class="empty-state">Pick one to open it.</div>`;
+    return `<section class="settings-section" data-plugin-group="${escapeHtml(group)}">${head}<div class="plugin-browser"><aside class="plugin-sidebar">${members.map((plugin) => pluginNavButton(plugin, selected?.id ?? null)).join("")}</aside>${detail}</div></section>`;
   }
 
   function settingsPanel() {
@@ -2467,7 +2473,11 @@
       // catalog's door to that editor: there is nothing to write until an operator types one in.
       const item = marketplaceItemById(target.dataset.marketplaceAdd);
       if (!item) { showToast("That plugin is no longer in this host's catalog."); return; }
-      if (typeof item.install !== "object" || item.install === null || !item.install.command) {
+      // The editor is the catalog's explicit door -- `opensEditor` on a row with no install of its
+      // own -- and nothing else. A shell tool's install IS a string (its shell-tool id), so a
+      // typeof check on it sent CodeRabbit CLI and TinyFish CLI to the connector editor instead of
+      // to installShellTool: two of nine rows whose Add did the wrong thing.
+      if (item.opensEditor === true || item.install == null) {
         marketplacePluginId = null;
         paintMarketplaceBody();
         const editor = elements.panelContent.querySelector("[data-connector-editor]");

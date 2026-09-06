@@ -1188,6 +1188,49 @@ try {
       if (afterRemove?.mcpServers?.[PROBE_CONNECTOR] == null) probeConnectorAdded = false;
     }
 
+    // -- MARKET-1: the other half of Add. A shell-tool row's `install` is a shell-tool id, not a
+    // {command,args,env} entry, so its Add has to reach installShellTool and open the same plugin
+    // page -- not fall through to the MCP connector editor, which is the catalog's door for a
+    // custom server and writes nothing. The installer itself is never run from here
+    // (shell-tool-catalog.ts: "Run inside the box as user box. Never run by the gate." -- it is a
+    // curl|sh on a shared box), so installShellTool is recorded and stubbed on the adapter the
+    // page already exposes for the Bots tab, and what is asserted is the route the click took.
+    const shellRow = catalogPlugins.find((plugin) => String(plugin.kind) === "shell-tool") ?? null;
+    if (shellRow) await openMarketplace();
+    // A featured row is drawn twice on purpose (once under Featured, once under its own category),
+    // so this counts buttons rather than expecting one, and clicks the first of them.
+    const shellAddable = shellRow ? (await page.$$(`[data-marketplace-add="${shellRow.id}"]`)).length > 0 : false;
+    if (!shellRow || !shellAddable) {
+      console.log(`  INFO  ${shellRow ? `${shellRow.id} is already installed in this box, so its Add button is not on the page` : "this host's catalog has no shell-tool row"}; the shell-tool Add route is pinned by tests/machine-room-marketplace.test.mjs`);
+    } else {
+      const stubbed = await page.evaluate(() => {
+        const held = window.__machineRoomAdapter;
+        if (!held || typeof held.installShellTool !== "function") return false;
+        window.__gateShellInstalls = [];
+        window.__gateRealInstallShellTool = held.installShellTool;
+        held.installShellTool = (id) => { window.__gateShellInstalls.push(String(id)); return Promise.resolve({ accepted: true, message: "recorded by the gate" }); };
+        return true;
+      });
+      const shellBefore = JSON.stringify((await relay("/connectors").catch(() => null))?.mcpServers ?? null);
+      await page.click(`[data-marketplace-add="${shellRow.id}"]`, { timeout: 12_000 });
+      await page.waitForTimeout(2000);
+      const shellPage = await page.evaluate(() => document.querySelector("[data-marketplace-account]")?.dataset.marketplaceAccount ?? null);
+      const editorsOpen = (await page.$$("[data-connector-editor][open]")).length;
+      const recorded = await page.evaluate(() => window.__gateShellInstalls ?? []);
+      check(stubbed && shellPage === String(shellRow.id) && editorsOpen === 0,
+        `Add on the ${shellRow.name} shell tool opens its own plugin page, not the connector editor`,
+        `page ${shellPage}, ${editorsOpen} editor(s) open${stubbed ? "" : ", installShellTool not stubbable"}`);
+      check(recorded.length === 1 && recorded[0] === String(shellRow.install ?? shellRow.id),
+        "and routes through installShellTool with the catalog's shell-tool id", recorded.join(", ") || "no installShellTool call");
+      const shellAfter = JSON.stringify((await relay("/connectors").catch(() => null))?.mcpServers ?? null);
+      check(shellAfter === shellBefore, "and writes nothing to connectors.json for it", `${shellBefore.length} vs ${shellAfter.length} chars`);
+      await page.evaluate(() => {
+        const held = window.__machineRoomAdapter;
+        if (held && window.__gateRealInstallShellTool) held.installShellTool = window.__gateRealInstallShellTool;
+        delete window.__gateRealInstallShellTool; delete window.__gateShellInstalls;
+      });
+    }
+
     // -- MARKET-1: Add and Uninstall, on the one catalog row this gate may safely write. The
     // entry is the preset's, with the env name and NO value, so nothing authenticates and nothing
     // of the operator's is touched; connectors.json is compared byte for byte before and after.
@@ -1401,6 +1444,15 @@ try {
     // -- The Files view is real, and labelled as what it is.
     apiCalls.length = 0;
     await clickText("Atera Triage"); await page.waitForTimeout(2500);
+    // Loading a conversation here is two serial round trips -- getAgentTranscriptTail beside four
+    // other reads, then getConversationOutline for the tool rows woven into it -- and the checks
+    // below are about what those produced, not how fast they arrived. A fixed 2.5s made them a
+    // latency measurement of everything that ran earlier in this file, and this wave's Marketplace
+    // and Bots arcs (a connector Add whose unkeyed server burns the host's own 60s MCP connect,
+    // an agent created, four workflows imported into it and the agent deleted) pushed a long
+    // conversation past it: 0 rows on the page that renders 213 as soon as the answer lands.
+    // Wait for the transcript to be on screen, with a cap, then assert what it says.
+    await until(async () => ((await page.$$(".message-row")).length > 0 ? true : null), 30_000, 1000);
     // -- GW-03(b): the conversation is a tail window. Nothing on this page asks for the whole
     // transcript, the outline's tool rows and the evidence pills still weave into the tail, and
     // the row above it pages older entries in through getAgentTranscriptPage.
@@ -1593,8 +1645,17 @@ try {
       const evidenced = await page.evaluateHandle(() => Array.from(document.querySelectorAll(".message-row.is-evidence")).find((el) => /evidenced/.test(el.textContent)) ?? null);
       const target = evidenced.asElement() ?? pills.at(-1);
       await target.scrollIntoViewIfNeeded();
-      await target.click(); await page.waitForTimeout(2500);
-      const text = await page.evaluate(() => document.getElementById("panel-dialog")?.textContent?.replace(/\s+/g, " ") ?? "");
+      await target.click(); await page.waitForTimeout(1200);
+      // The disclosure opens empty and fills from getEvidence. Until that answers, its body reads
+      // "Reading the receipts from the host…" -- which already carries the word "receipt", so a
+      // fixed wait that ran out early half-satisfied the check below while naming no tool and
+      // holding no attestation. Wait for the answer instead, and report whatever is there at the
+      // cap so a genuinely empty disclosure still fails with its own words.
+      const readReceipts = async () => page.evaluate(() => document.getElementById("panel-dialog")?.textContent?.replace(/\s+/g, " ") ?? "");
+      const text = await until(async () => {
+        const seen = await readReceipts();
+        return seen && !/Reading the receipts from the host/.test(seen) ? seen : null;
+      }, 30_000, 1000) ?? await readReceipts();
       check(/receipt/.test(text) && /attestation/.test(text), "the pill opens a disclosure with the receipt and attestation counts", text.slice(0, 130));
       check(/tool · \S/.test(text), "the disclosure names at least one tool", (/tool · [^ ]+/.exec(text) ?? ["none"])[0]);
       // An attested head is the raw tool result the host keeps out of model context. It is not in
