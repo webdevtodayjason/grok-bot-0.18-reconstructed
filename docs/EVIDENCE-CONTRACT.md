@@ -284,7 +284,10 @@ point. All acceptance gates share the one box and must run sequentially.
   separate `file_read` receipt was needed. Non-work tools (SendMessage, communicate, update_state,
   todo, sleep, wait) are skipped so a sent message never counts as evidence for the next claim.
 - **Tokens.** Bare numbers need five digits, hex twelve, and file names need a known extension, so
-  a version like `grok-4.6` or a year is not a claim. Rule name unchanged: `containment@1`.
+  a version like `grok-4.6` or a year is not a claim. Rule name unchanged: `containment@1`
+- 2026-09-05 23:40: a token written as a shape is not a claim either: `captions/NNN.vtt?expires=...&sig=...`,
+  `<id>`, `{slug}`, `****`, `[redacted` (Scribe, attempt 9c096226, verdict `unsupported` for a URL it was describing,
+  not quoting). Rule name unchanged..
 - **Gateway.** `getAgentEvidence {id, attemptId?}` is implemented in `host-gateway-api.ts` directly
   over the session store and the ledger file; no manager registry entry.
 - **Budget.** Sixteen files against the twelve the draft estimated; reported in §6m of the audit.

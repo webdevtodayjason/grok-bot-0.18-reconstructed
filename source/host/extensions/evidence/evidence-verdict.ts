@@ -27,9 +27,16 @@ const TOKEN_PATTERN = new RegExp(
   "gi",
 );
 
+// A token the model wrote as a shape rather than a value: "captions/NNN.vtt?expires=...&sig=...",
+// "<id>", "{slug}", "****". Scribe described what a caption URL looks like and the rule read it
+// as a URL it never fetched (2026-09-05, attempt 9c096226). A shape is not a claim; the real
+// URLs, had it quoted one, would still have to be in a head. Rule name unchanged, as with the
+// version-and-year exclusion: the check is the same, the input is cleaner.
+const PLACEHOLDER = /\.{3}|…|\bN{3,}\b|\bX{3,}\b|<[^>]*>|\{[^}]*\}|\*{3,}|\[redacted/i;
+
 export function evidenceTokens(text: string): string[] {
   const seen = new Set<string>();
-  for (const match of String(text ?? "").matchAll(TOKEN_PATTERN)) seen.add(match[0]);
+  for (const match of String(text ?? "").matchAll(TOKEN_PATTERN)) if (!PLACEHOLDER.test(match[0])) seen.add(match[0]);
   return [...seen];
 }
 

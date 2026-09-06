@@ -62,3 +62,13 @@ test("tokens the user said are not claims; the rule is versioned", () => {
   assert.deepEqual(evidenceTokens("grok-4.6 e.g. 2026 /workspace a1b2c3d4e5f6a7b8 12345 https://x.y/z p.txt"), ["a1b2c3d4e5f6a7b8", "12345", "https://x.y/z", "p.txt"]);
   assert.equal(EVIDENCE_CHECKER, "containment@1");
 });
+
+
+test("a URL written as a shape is not a claim: Scribe's captions/NNN.vtt?expires=...&sig=... (attempt 9c096226)", () => {
+  const shape = "The tracks come from https://captions.vimeo.com/captions/NNN.vtt?expires=...&sig=... and <lessonId> pages.";
+  assert.deepEqual(evidenceTokens(shape), [], "no token survives from a schematic URL or an angle-bracket placeholder");
+  const real = "Saved https://captions.vimeo.com/captions/8127/abc.vtt?expires=1757100000&sig=9f1e to /workspace/c05-ch1-nist-framework.vtt";
+  const r = decideVerdict(real, "", [{ head: "SAVED /workspace/c05-ch1-nist-framework.vtt 412 lines", truncated: false }]);
+  assert.equal(r.verdict, "unsupported", "a real URL the tools never printed is still a claim");
+  assert.deepEqual(r.missing, ["https://captions.vimeo.com/captions/8127/abc.vtt?expires=1757100000&sig=9f1e"]);
+});
