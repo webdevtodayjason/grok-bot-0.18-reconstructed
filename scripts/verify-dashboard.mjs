@@ -742,14 +742,25 @@ try {
         const el = document.getElementById("message-input");
         if (!el || el.tagName !== "TEXTAREA") return { tag: el ? el.tagName : "missing" };
         const set = (value) => { el.value = value; el.dispatchEvent(new Event("input", { bubbles: true })); return Math.round(el.getBoundingClientRect().height); };
+        const box = (sel) => { const b = document.querySelector(sel)?.getBoundingClientRect(); return b ? { y: Math.round(b.y), h: Math.round(b.height) } : null; };
         const one = set("one line");
         const three = set("one\ntwo\nthree");
         const twenty = set(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n"));
+        // Read the geometry while the box is still at its eight-line cap: a grown composer that
+        // leaves its shelf is the failure the height numbers alone cannot see.
+        const grown = { composer: box(".composer"), bar: box(".control-shelf") };
         set("");
-        return { tag: el.tagName, one, three, twenty };
+        return { tag: el.tagName, one, three, twenty, grown };
       });
       check(grows.tag === "TEXTAREA", "the composer is a textarea, not a one-line input", JSON.stringify(grows));
       check(grows.three > grows.one && grows.twenty > grows.three && grows.twenty <= grows.one * 9, "and it follows its content, stopping around eight lines", JSON.stringify(grows));
+      check(
+        !!grows.grown?.composer && !!grows.grown?.bar
+          && grows.grown.composer.y >= grows.grown.bar.y - 1
+          && grows.grown.composer.y + grows.grown.composer.h <= grows.grown.bar.y + grows.grown.bar.h + 1,
+        "and the shelf grows with it, so an eight-line composer stays inside the bar",
+        JSON.stringify(grows.grown),
+      );
 
       // Shift+Enter opens a line and sends nothing; Enter sends, and the transcript keeps both.
       const userRows = () => page.evaluate(() => document.querySelectorAll("#transcript .message-row.is-user").length);
