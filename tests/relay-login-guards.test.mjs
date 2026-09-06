@@ -231,14 +231,17 @@ test("an oversized login body gets its 413 without the socket being reset under 
     const errors = [];
     socket.on("error", (error) => errors.push(error.code ?? String(error)));
     await new Promise((resolve) => socket.once("connect", resolve));
-    socket.write(head + body.slice(0, 20_000));
-    // The rest goes only after the relay has answered, which is exactly the proxy's timing.
     let received = "";
-    await new Promise((resolve) => { socket.on("data", (chunk) => { received += chunk; if (/\r\n\r\n/.test(received)) resolve(); }); setTimeout(resolve, 5000).unref(); });
-    assert.match(received, /^HTTP\/1\.1 413 /, `the relay answered 413 first: ${received.slice(0, 40)}`);
+    socket.on("data", (chunk) => { received += chunk; });
+    socket.write(head + body.slice(0, 20_000));
+    // A pause with the body half sent is the proxy's timing. The old relay had already answered and
+    // destroyed the socket by now, so the second write below died with a reset; the new one is
+    // still draining and answers only once the body is in.
+    await new Promise((resolve) => setTimeout(resolve, 400));
     await new Promise((resolve) => socket.write(body.slice(20_000), () => resolve()));
     await new Promise((resolve) => { socket.once("close", resolve); setTimeout(resolve, 5000).unref(); });
     assert.deepEqual(errors, [], "no reset on the client while it was still sending");
+    assert.match(received, /^HTTP\/1\.1 413 /, `the relay answered 413: ${received.slice(0, 40)}`);
     assert.match(received, /that is not a password/);
   } finally { relay.stop(); }
 });
