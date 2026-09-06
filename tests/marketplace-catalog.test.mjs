@@ -75,8 +75,12 @@ test("every plugin carries a category from the declared list", () => {
     );
     assert.ok(plugin.tagline.length > 0 && !plugin.tagline.includes("\n"), `plugin ${plugin.id} tagline is not one line`);
     assert.ok(plugin.icon.letter.length > 0 && plugin.icon.color.startsWith("#"), `plugin ${plugin.id} icon`);
-    // No external images, by contract: the icon is a letter on a colour and nothing else.
-    assert.equal(Object.keys(plugin.icon).sort().join(","), "color,letter");
+    // QOL-LOGOS relaxed this by exactly one field. The icon is a letter on a colour, and it may
+    // also name a LOCAL logo file the relay serves out of ui/machine-room/ -- never a URL, and
+    // nothing else: tests/marketplace-logos.test.mjs holds each of those paths against the repo.
+    assert.ok(["color,letter", "color,file,letter"].includes(Object.keys(plugin.icon).sort().join(",")),
+      `plugin ${plugin.id} icon carries ${Object.keys(plugin.icon).sort().join(",")}`);
+    assert.equal(catalog.marketplaceLogoProblem(`plugin ${plugin.id}`, plugin.icon.file), null);
   }
   // The seed the contract names, in full.
   assert.deepEqual(catalog.MARKETPLACE_PLUGINS.map((plugin) => plugin.id), [

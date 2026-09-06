@@ -84,12 +84,27 @@
   const SHAPES = { circle: "50%", squircle: "30%", rounded: "18%", square: "8%" };
   const FACES = ["◕ ◡ ◕", "• ᴗ •", "◠ ‿ ◠", "◔ ◡ ◔", "> ◡ <", "◉ ‿ ◉"];
   const faceFor = (id) => FACES[[...String(id)].reduce((n, c) => n + c.charCodeAt(0), 0) % FACES.length];
+  // QOL-LOGOS: a template may carry a tile FILE beside its colour and shape -- a path relative to
+  // /machine-room/, which the relay serves out of ui/machine-room/ the same way it serves this
+  // script. It is never a URL: nothing on this page is fetched from the internet, so the drawn
+  // face below is what a template with no file (or a file that will not load) still gets.
+  const LOGO_PREFIX = "marketplace/logos/";
+  const logoSrc = (file) => {
+    const value = text(file);
+    if (!value.startsWith(LOGO_PREFIX) || value.split("/").includes("..")) return "";
+    return /^[\w./-]+\.(svg|png)$/i.test(value) ? value : "";
+  };
   function tileMarkup(bot, size) {
     const tile = (bot && bot.tile) || {};
     const color = text(tile.color) || "#8b69ea";
     const radius = SHAPES[text(tile.shape)] ?? SHAPES.squircle;
     const px = size === "large" ? 56 : 34;
-    return `<span aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:${px}px;height:${px}px;border-radius:${radius};background:${escapeHtml(color)};color:#0d0f14;font-size:${size === "large" ? 13 : 8}px;letter-spacing:-0.5px;font-weight:700">${escapeHtml(faceFor(bot && bot.id))}</span>`;
+    const src = logoSrc(tile.file);
+    const face = src
+      ? `<img class="marketplace-tile-img" src="${escapeHtml(src)}" alt="" data-marketplace-logo="${escapeHtml(src)}" data-marketplace-letter="${escapeHtml(faceFor(bot && bot.id))}" style="width:100%;height:100%;object-fit:contain;border-radius:${radius === "50%" ? "50%" : "18%"}" />`
+      : escapeHtml(faceFor(bot && bot.id));
+    const padding = src ? "padding:5px;" : "";
+    return `<span aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;box-sizing:border-box;${padding}width:${px}px;height:${px}px;border-radius:${radius};background:${escapeHtml(color)};color:#0d0f14;font-size:${size === "large" ? 13 : 8}px;letter-spacing:-0.5px;font-weight:700">${face}</span>`;
   }
 
   // ------------------------------------------------------------------ the import sequence

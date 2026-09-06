@@ -3061,3 +3061,64 @@ dialog[open] {
 .marketplace-actions { flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .marketplace-actions .tag { display: inline-flex; align-items: center; gap: 6px; }
 .marketplace-card .plugin-icon, [data-marketplace-body] .plugin-hero .plugin-icon { color: var(--text-primary); font-weight: 600; }
+
+/* QOL-LOGOS: one standard tile, and the marketplace card polish that goes with it.
+
+   ONE SIZE. A marketplace tile is 40px on a card and in the installed strip and 64px on the plugin
+   page, and nothing else: the size lives here rather than in the markup so no view can invent a
+   third one. The logo sits INSIDE it with 6px of padding and object-fit: contain, on a rounded
+   tile whose background is the catalog's own colour, so a wide mark and a square one land on the
+   same footprint. A plugin with no logo keeps the letter, on the same tile.
+
+   THE CARD. Three fixes visible in the operator's screenshot: the "✓ Added" pill was being
+   shrunk by the flex row until its own overflow:hidden clipped it, the copy could grow the card
+   instead of truncating, and the chips row could run past its edge. */
+.marketplace-tile {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 40px;
+  height: 40px;
+  padding: 6px;
+  border-radius: 11px;
+  overflow: hidden;
+}
+
+.marketplace-tile.is-large {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  font-size: 26px;
+}
+
+.marketplace-tile-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.marketplace-tile.is-large .marketplace-tile-img { border-radius: 9px; }
+
+/* The plugin page's hero tile is a marketplace tile, so the panel's own 48px rule must not win. */
+[data-marketplace-body] .plugin-hero .marketplace-tile { width: 64px; height: 64px; }
+
+/* The Add button and the "✓ Added" pill: never shrunk, never clipped. */
+.marketplace-card-action { flex: 0 0 auto; max-width: 50%; }
+.marketplace-card .status-pill.marketplace-card-action { overflow: visible; }
+
+/* The name and the tagline truncate on their own line; neither wraps under the button. */
+.marketplace-card-open { min-width: 0; align-items: center; }
+.marketplace-card-copy { min-width: 0; }
+.marketplace-card-copy strong,
+.marketplace-card-copy small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The chips wrap onto a second row rather than running past the panel. */
+.marketplace-chips { min-width: 0; row-gap: 6px; }
+.marketplace-chips .tag { max-width: 100%; white-space: nowrap; }
