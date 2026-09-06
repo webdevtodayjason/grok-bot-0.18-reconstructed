@@ -2020,6 +2020,131 @@
       });
   }
 
+  // -- qol/vnc-paste: the operator's clipboard, into the box ------------------------------------
+  // The pane is an iframe onto the box's own noVNC and the relay appends a small bridge to that
+  // page on the way through (ui/vnc-bridge.mjs, which also hides noVNC's control bar). This is the
+  // console half. A paste that belongs to the pane goes to the frame instead of to the page, and
+  // what the box copies comes back the other way. Both halves talk in postMessage only: the frame
+  // is same-origin so this code COULD reach into its document, and not doing that is the point --
+  // the box image owns that client, and a console that pokes at its internals breaks on the next
+  // image. Four message types, both directions, nothing else.
+  let desktopPointerOver = false;
+  let desktopPasteNoteDefault = "";
+  let desktopPasteNoteTimer = 0;
+
+  function desktopVncFrame() {
+    if (!elements.desktopDialog.open) return null;
+    return elements.desktopWindow.querySelector("iframe[data-box-vnc]") ?? null;
+  }
+
+  // The desktop dialog is modal, so it sits in the top layer and an ordinary toast fired while it
+  // is open renders behind its own backdrop where nobody reads it (the same reason the teach
+  // refusal is said in its header). So the pane's one line of copy doubles as its toast: it says
+  // what just happened for a few seconds and then goes back to naming the shortcuts.
+  function sayInDesktopPanel(message) {
+    const note = document.getElementById("desktop-paste-note");
+    if (note == null) return;
+    window.clearTimeout(desktopPasteNoteTimer);
+    note.textContent = message;
+    note.classList.add("is-said");
+    desktopPasteNoteTimer = window.setTimeout(() => {
+      note.textContent = desktopPasteNoteDefault;
+      note.classList.remove("is-said");
+    }, 3600);
+  }
+
+  // A paste belongs to the box when the desktop is open and nothing on the page wants the text
+  // more: not a field being typed in, and either the pointer is over the screen or the focus is
+  // somewhere in this dialog -- which is where it is from the moment the pane opens until the
+  // screen itself is clicked. Once the screen has the focus the browser never delivers a paste
+  // here at all; that case is the bridge's Cmd+V chord below.
+  function desktopPasteTarget() {
+    const frame = desktopVncFrame();
+    if (frame == null) return null;
+    const active = document.activeElement;
+    if (active != null && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return null;
+    if (!desktopPointerOver && !(active != null && elements.desktopDialog.contains(active))) return null;
+    return frame;
+  }
+
+  function sendClipboardToBox(frame, text) {
+    if (frame == null || typeof text !== "string" || text.length === 0) return false;
+    frame.contentWindow?.postMessage({ type: "titanbot-vnc-paste", text }, window.location.origin);
+    return true;
+  }
+
+  function handleDesktopPaste(event) {
+    const frame = desktopPasteTarget();
+    if (frame == null) return;
+    const data = event.clipboardData;
+    const text = data ? data.getData("text/plain") : "";
+    if (typeof text === "string" && text.length > 0) { event.preventDefault(); sendClipboardToBox(frame, text); return; }
+    // A screenshot on the clipboard has nowhere to go: clipboardPasteFrom carries text, and the
+    // RFB cut-text message it writes has no other kind. Say so rather than swallowing it.
+    const items = data ? Array.from(data.items ?? []) : [];
+    if (items.some((item) => item.kind === "file")) {
+      event.preventDefault();
+      sayInDesktopPanel("Only text can be pasted into the box — an image has nowhere to land.");
+    }
+  }
+
+  // The shortcut that brings noVNC's own control bar back inside the frame. The bridge listens for
+  // the same chord on its side; this one covers the half of the time the focus is out here.
+  function handleDesktopChord(event) {
+    if (!event.shiftKey || !(event.metaKey || event.ctrlKey)) return;
+    if (String(event.key).toLowerCase() !== "b") return;
+    const frame = desktopVncFrame();
+    if (frame == null) return;
+    event.preventDefault();
+    frame.contentWindow?.postMessage({ type: "titanbot-vnc-bar" }, window.location.origin);
+  }
+
+  // Cmd+V with the screen focused never reaches this page -- noVNC stops the keydown on its canvas
+  // and forwards it to the box, where Super+V means nothing. The bridge takes that chord back and
+  // asks here instead. This is the one place the async clipboard read is worth attempting: a
+  // document still counts as focused while a frame inside it holds the focus, so the browser is
+  // allowed to answer. When it refuses, the way out is the control bar.
+  function serveClipboardRequest(frame) {
+    const read = navigator.clipboard?.readText?.();
+    if (read == null) { sayInDesktopPanel("This browser will not hand over the clipboard — ⌘/Ctrl + Shift + B shows noVNC’s own clipboard bar."); return; }
+    read
+      .then((text) => { if (!sendClipboardToBox(frame, text)) sayInDesktopPanel("Nothing on the clipboard to send to the box."); })
+      .catch(() => sayInDesktopPanel("The browser refused to read the clipboard — ⌘/Ctrl + Shift + B shows noVNC’s own clipboard bar."));
+  }
+
+  function handleVncBridgeMessage(event) {
+    if (event.origin !== window.location.origin) return;
+    const data = event.data;
+    if (data == null || typeof data !== "object") return;
+    const frame = desktopVncFrame();
+    if (frame == null || event.source !== frame.contentWindow) return;
+    if (data.type === "titanbot-vnc-pasted") {
+      const chars = Number(data.chars) || 0;
+      sayInDesktopPanel(`Pasted ${chars} character${chars === 1 ? "" : "s"} into the box`);
+    } else if (data.type === "titanbot-vnc-paste-failed") {
+      sayInDesktopPanel(`Could not paste into the box: ${String(data.reason ?? "the bridge gave no reason")}`);
+    } else if (data.type === "titanbot-vnc-paste-request") {
+      serveClipboardRequest(frame);
+    } else if (data.type === "titanbot-vnc-clipboard") {
+      // The other direction: something copied inside the box. Only while this page has the focus,
+      // which is the only time the browser permits the write at all, and never noisily.
+      const text = typeof data.text === "string" ? data.text : "";
+      if (text.length === 0 || !document.hasFocus() || navigator.clipboard?.writeText == null) return;
+      navigator.clipboard.writeText(text).catch(() => {});
+    }
+  }
+
+  function wireDesktopPaste() {
+    const note = document.getElementById("desktop-paste-note");
+    desktopPasteNoteDefault = note ? note.textContent : "";
+    elements.desktopWindow.addEventListener("mouseenter", () => { desktopPointerOver = true; });
+    elements.desktopWindow.addEventListener("mouseleave", () => { desktopPointerOver = false; });
+    document.addEventListener("paste", handleDesktopPaste);
+    document.addEventListener("keydown", handleDesktopChord);
+    window.addEventListener("message", handleVncBridgeMessage);
+  }
+  // -- end qol/vnc-paste ------------------------------------------------------------------------
+
   function renderDesktop(appName) {
     activeDesktopApp = appName || activeDesktopApp;
     const context = activeContext();
@@ -3479,6 +3604,7 @@
   }
 
   document.getElementById("open-desktop").addEventListener("click", () => openDesktop("browser"));
+  wireDesktopPaste(); // qol/vnc-paste
   elements.scheduleButton.addEventListener("click", renderRoutinesPanel);
   document.getElementById("teach-button").addEventListener("click", (event) => openTeachMode(event.currentTarget));
   document.getElementById("finish-teach").addEventListener("click", () => stopTeachMode(true));

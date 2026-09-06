@@ -3061,3 +3061,23 @@ dialog[open] {
 .marketplace-actions { flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .marketplace-actions .tag { display: inline-flex; align-items: center; gap: 6px; }
 .marketplace-card .plugin-icon, [data-marketplace-body] .plugin-hero .plugin-icon { color: var(--text-primary); font-weight: 600; }
+
+/* qol/vnc-paste: the desktop pane's clipboard note. One line in the desktop footer, between the
+   live status and the run controls, sized like the status line beside it so it reads as a caption
+   and not as a warning. It wraps to nothing on a narrow dialog rather than pushing Pause off. */
+.desktop-paste-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+/* The same line while it stands in for a toast. The desktop dialog is modal, so a real toast would
+   render behind its own backdrop; this is where the pane says what just happened instead. */
+.desktop-paste-note.is-said {
+  color: var(--text-primary);
+}

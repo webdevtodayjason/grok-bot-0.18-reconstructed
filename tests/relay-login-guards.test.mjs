@@ -26,7 +26,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 // test that silently stops testing anything is worse than no test.
 function serverCopy() {
   const dir = mkdtempSync(path.join(tmpdir(), "relay-bind-"));
-  for (const name of ["server.mjs", "auth.mjs", "subscriptions.mjs"]) {
+  for (const name of ["server.mjs", "auth.mjs", "subscriptions.mjs", "vnc-bridge.mjs"]) {
     copyFileSync(path.join(repoRoot, "ui", name), path.join(dir, name));
   }
   return path.join(dir, "server.mjs");
