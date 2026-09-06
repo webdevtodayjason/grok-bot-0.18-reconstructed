@@ -301,14 +301,22 @@ point. All acceptance gates share the one box and must run sequentially.
 
   | Verdict | Chip | Tone |
   |---|---|---|
-  | `evidenced` | `✓ Backed by 7 tool results` | quiet, teal outline |
+  | `evidenced` | `✓ Backed by 3 tool results` | quiet, teal outline |
   | `unsupported` | `Names 1 thing no tool returned` | the console's attention amber, never the error red |
   | `unverified` | `Nothing ran to check this` | neutral |
-  | `undecidable` | `Output was cut short, could not check` | neutral |
+  | `undecidable` | `A tool result was too long to check` | neutral |
   | `conversational` | no chip | -- |
+
+  The evidenced count is `attestations.length`, the same list `decideVerdict` reads, not
+  `receipts`: receipts are the shell and MCP action records, so a reply backed by read or browser
+  results carries none and the chip would have claimed "0 tool results". The `undecidable` chip
+  names the tool result as the thing that was cut, because the truncation the verdict tests for is
+  an attestation head, and its hover adds that the reply itself is complete.
 
   Every chip carries the same hover sentence saying what the check is ("Titanbot compares the names,
   paths and links in a reply with what its tools returned in the same turn"), and clicking one opens
   the same Claim provenance panel as before, whose missing list is now headed "Named in the reply,
   found in no tool result". The missing token is disclosed there, never printed under the reply.
+  The panel reuses the chip's own sentence as its subtitle and carries no verdict pill: printing
+  the raw verdict word one click behind the chip put back the line the chip removed.
 - **Budget.** Sixteen files against the twelve the draft estimated; reported in §6m of the audit.

@@ -320,6 +320,30 @@ try {
     check(chipState.systemLines.length === 0, "no message on the page is a synthesized \"Evidence:\" system line", chipState.systemLines.slice(0, 2).join(" | "));
     check(chipState.unsupported.length > 0 && chipState.unsupported.every((text) => !/http/i.test(text)), "an unsupported chip names no URL: the missing token stays in the disclosure", chipState.unsupported.join(" | "));
     check(chipState.overflowing.length === 0 && chipState.outsideRow === 0, "and no chip overflows itself or bleeds past its message row", chipState.overflowing.slice(0, 2).join(" | ") || `${chipState.verdicts.length} chip(s) inside their rows`);
+
+    // The number on an evidenced chip is the attested tool results the verdict was decided
+    // against, never the action receipts: the two lists differ, and the earlier chip counted the
+    // wrong one. One click behind it the panel must not print the raw verdict word either, or the
+    // "Evidence: unsupported" line the chip removed is simply one click further in.
+    const evidencedChip = (await page.$$('.evidence-chip[data-verdict="evidenced"]')).at(0) ?? null;
+    if (!evidencedChip) {
+      check(false, "an evidenced chip is on screen to open");
+    } else {
+      const chipText = await evidencedChip.evaluate((el) => el.textContent.trim());
+      await evidencedChip.scrollIntoViewIfNeeded();
+      await evidencedChip.click();
+      const panelText = await until(async () => {
+        const seen = await page.evaluate(() => document.getElementById("panel-dialog")?.textContent?.replace(/\s+/g, " ") ?? "");
+        return seen && !/Reading the receipts from the host/.test(seen) ? seen : null;
+      }, 20_000, 500) ?? "";
+      const claimed = Number((/Backed by (\d+) tool result/.exec(chipText) ?? [])[1] ?? -1);
+      const attested = Number((/(\d+) attestation/.exec(panelText) ?? [])[1] ?? -2);
+      const receipted = Number((/(\d+) receipt/.exec(panelText) ?? [])[1] ?? -3);
+      check(claimed >= 0 && claimed === attested, "the evidenced chip counts the attested tool results the panel lists", `chip ${claimed}, panel ${attested} attestation(s) and ${receipted} receipt(s)`);
+      check(claimed !== receipted, "and that count is not the action-receipt count wearing the tool-result label", `${claimed} vs ${receipted}`);
+      check(!/\b(evidenced|unsupported|unverified|undecidable)\b/.test(panelText), "the panel behind the chip prints no raw verdict word", panelText.slice(0, 140));
+      await page.keyboard.press("Escape"); await page.waitForTimeout(400);
+    }
   } else if (LEAKS) {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     const { storedSecrets } = await import(path.join(repoRoot, "ui", "subscriptions.mjs"));

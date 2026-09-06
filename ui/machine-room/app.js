@@ -52,7 +52,7 @@
             type: "text",
             text: "The queue holds 42 rows this morning and 3 of them are marked urgent. The counts come from ticket-audit.csv.",
             time: "5:35 PM",
-            evidence: { attemptId: "demo-attempt-queue", verdict: "evidenced", receipts: 7, missing: [], checkedBy: "containment@1" },
+            evidence: { attemptId: "demo-attempt-queue", verdict: "evidenced", receipts: 2, attestations: ["demo-att-queue-1", "demo-att-queue-2", "demo-att-queue-3"], missing: [], checkedBy: "containment@1" },
           },
           {
             id: "chief-queue-link",
@@ -65,6 +65,7 @@
               attemptId: "demo-attempt-link",
               verdict: "unsupported",
               receipts: 2,
+              attestations: ["demo-att-link-1"],
               missing: ["https://captions.example.com/captions/4821.vtt"],
               checkedBy: "containment@1",
             },
@@ -839,8 +840,13 @@
   const EVIDENCE_CHECK = "Titanbot compares the names, paths and links in a reply with what its tools returned in the same turn.";
   const EVIDENCE_COPY = {
     evidenced: (stamp) => {
-      const n = Number(stamp.receipts) || 0;
-      return { text: `\u2713 Backed by ${n} tool result${n === 1 ? "" : "s"}`, title: "" };
+      // The verdict is decided against the attested tool results, never the action receipts:
+      // receipts count shell and MCP actions only, so a reply backed by read or browser results
+      // has receipts 0 and would have read "Backed by 0 tool results" here. decideVerdict returns
+      // "unverified" when nothing was attested, so on this verdict the count is never 0; the
+      // wordless form is only for a stamp too old to carry the list.
+      const n = (stamp.attestations ?? []).length;
+      return { text: n ? `\u2713 Backed by ${n} tool result${n === 1 ? "" : "s"}` : "\u2713 Backed by the tool results", title: "" };
     },
     unsupported: (stamp) => {
       const n = (stamp.missing ?? []).length;
@@ -850,7 +856,13 @@
       };
     },
     unverified: () => ({ text: "Nothing ran to check this", title: "" }),
-    undecidable: () => ({ text: "Output was cut short, could not check", title: "" }),
+    // Not the reply: this verdict fires when an attestation head ran past the length the check
+    // reads (evidence-verdict.ts), so what was cut is a tool result. Saying "output" left the
+    // operator reading it as the reply itself having been truncated.
+    undecidable: () => ({
+      text: "A tool result was too long to check",
+      title: "The reply itself is complete. One tool result ran past the length the check reads, so part of the reply could not be matched against it.",
+    }),
   };
 
   // GW-13 / EVID-UX-1: the verdict, drawn inside the reply's own row. Never the missing token
@@ -3509,8 +3521,12 @@
     const attemptId = message?.evidence?.attemptId;
     if (!attemptId) return;
     const missing = (message.evidence.missing ?? []);
-    openPanel("Claim provenance", `Evidence · ${message.evidence.verdict}`,
-      `<div class="panel-intro"><p>Checked against what the tools returned while writing this reply. <code>${escapeHtml(attemptId)}</code></p><span class="status-pill${message.evidence.verdict === "evidenced" ? " success" : ""}">${escapeHtml(message.evidence.verdict)}</span></div><div class="evidence-view" data-evidence-body>Reading the receipts from the host…</div>`);
+    // The subtitle is the chip's own sentence, not the internal verdict word. Printing that word
+    // here, and again in a pill, put back the "Evidence: unsupported" line the chip exists to
+    // remove, one click behind it.
+    const summary = EVIDENCE_COPY[message.evidence.verdict];
+    openPanel("Claim provenance", summary ? summary(message.evidence).text : "Checked against the tool results",
+      `<div class="panel-intro"><p>Checked against what the tools returned while writing this reply. Attempt <code>${escapeHtml(attemptId)}</code></p></div><div class="evidence-view" data-evidence-body>Reading the receipts from the host…</div>`);
     adapter.getEvidence(activeContext().id, attemptId).then(({ receipts, attestations }) => {
       const body = elements.panelContent.querySelector("[data-evidence-body]");
       if (!body) return;
