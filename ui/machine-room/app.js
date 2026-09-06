@@ -851,8 +851,8 @@
     unsupported: (stamp) => {
       const n = (stamp.missing ?? []).length;
       return {
-        text: n ? `Names ${n} thing${n === 1 ? "" : "s"} no tool returned` : "Names something no tool returned",
-        title: "The reply names a link, path or value that none of its tool results contain. Open to see which.",
+        text: n ? `${n} detail${n === 1 ? "" : "s"} not backed by a tool result` : "A detail not backed by a tool result",
+        title: "The reply was delivered. A link, path or value in it was not found in any tool result of this turn. Open to see which.",
       };
     },
     unverified: () => ({ text: "Nothing ran to check this", title: "" }),
@@ -3520,7 +3520,8 @@
     const message = contextMessages().find((item) => item.id === messageId);
     const attemptId = message?.evidence?.attemptId;
     if (!attemptId) return;
-    const missing = (message.evidence.missing ?? []);
+    // Masked like the heads: the missing list is where a signed URL the reply quoted would land.
+    const missing = (message.evidence.missing ?? []).map((token) => maskSecrets(String(token)));
     // The subtitle is the chip's own sentence, not the internal verdict word. Printing that word
     // here, and again in a pill, put back the "Evidence: unsupported" line the chip exists to
     // remove, one click behind it.

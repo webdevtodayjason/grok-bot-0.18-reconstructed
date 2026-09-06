@@ -244,7 +244,7 @@ ACCEPTANCE:
 NON-GOALS:
   - `source/host/runner/system-prompt.ts` (no prompt-level fix; the model may make claims)
   - `source/host/extensions/inference/**` (the 64K window is hygiene, tracked separately)
-  - `ui/machine-room/app.js` and `ui/machine-room/styles.css` (handoff rule)
+  - `ui/machine-room/app.js` and `ui/machine-room/styles.css` (handoff rule; superseded by EVID-UX-1 on 2026-09-05, which owns the chip in both)
   - the completion checks in `source/host/extensions/transcript/turn-runtime.ts`
   - any message suppression, redrive, or retry on a bad verdict
   - any LLM judge; containment@1 is the only rule in this round
@@ -302,7 +302,7 @@ point. All acceptance gates share the one box and must run sequentially.
   | Verdict | Chip | Tone |
   |---|---|---|
   | `evidenced` | `✓ Backed by 3 tool results` | quiet, teal outline |
-  | `unsupported` | `Names 1 thing no tool returned` | the console's attention amber, never the error red |
+  | `unsupported` | `1 detail not backed by a tool result` | the console's attention amber, never the error red |
   | `unverified` | `Nothing ran to check this` | neutral |
   | `undecidable` | `A tool result was too long to check` | neutral |
   | `conversational` | no chip | -- |

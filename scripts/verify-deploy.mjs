@@ -76,7 +76,7 @@ const URL_BASE = (urlFlag ?? process.env.TITANBOT_URL ?? `http://${BIND}:${PORT}
 const EXTERNAL = urlFlag != null;
 const OVER_TLS = URL_BASE.startsWith("https://");
 const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR
-  ?? "/private/tmp/claude-501/-Users-sem-orca-workspaces-grok-bot-0-18-reconstructed-gb/5d8b03a4-9c9b-4e51-af12-2606d5d99b44/scratchpad/pw";
+  ?? new URL("../.cache/playwright", import.meta.url).pathname;
 const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 let failures = 0;

@@ -50,7 +50,7 @@ const GATEWAY = process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:1340";
 // bearer upstream, so the page needs no credential of its own.
 const RELAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:7777";
 const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR
-  ?? "/private/tmp/claude-501/-Users-sem-orca-workspaces-grok-bot-0-18-reconstructed-gb/5d8b03a4-9c9b-4e51-af12-2606d5d99b44/scratchpad/pw";
+  ?? new URL("../.cache/playwright", import.meta.url).pathname;
 const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const SETTINGS = "/home/box/sand-data/sand-host-settings.json";

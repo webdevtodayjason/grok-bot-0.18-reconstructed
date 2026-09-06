@@ -3,7 +3,7 @@
 Armed 2026-09-02 22:50 CDT on Jason's "Go"; built and browser-verified the same hour (`9970c67`): nine checks pass, the switch moves the box and the gate restores it, no secret in the DOM. This one edits the handoff's own layout
 (`ui/machine-room/app.js`, `styles.css`), which every earlier round left byte-identical; that is
 the point of the contract. Verification is a real browser, headless Chrome through Playwright from
-the session scratchpad (`GROK_BOT_PLAYWRIGHT_DIR`), never a dependency in the repo.
+`.cache/playwright` (`scripts/setup-gates.sh` installs it; `GROK_BOT_PLAYWRIGHT_DIR` overrides), never a dependency in the repo.
 
 === LOCKED CONTRACT ===
 GOAL: The dashboard has a Providers section: the subscriptions found on this machine as cards

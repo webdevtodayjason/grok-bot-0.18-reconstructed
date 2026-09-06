@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // verify-dashboard.mjs -- the dashboard gate (docs/DASHBOARD-CONTRACT.md), in a real browser.
-// Headless Chrome through playwright-core from GROK_BOT_PLAYWRIGHT_DIR (never a repo dependency).
+// Headless Chrome through playwright-core from GROK_BOT_PLAYWRIGHT_DIR, default .cache/playwright
+// (scripts/setup-gates.sh installs it there; never a repo dependency).
 // Default: the Machine Room's modals tell the truth -- the Marketplace opens on its Plugins tab
 // with the host's own catalog and no provider anywhere in it (MARKET-1: providers and chat
 // listeners are Settings sections now), Add and Uninstall on a catalog card write and unwrite
@@ -55,7 +56,7 @@ const NOTES_LINE = "gate attachment probe: the quick brown fox jumps over the la
 const NOTES_TEXT = NOTES_LINE.repeat(40);
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR ?? "/private/tmp/claude-501/-Users-sem-orca-workspaces-grok-bot-0-18-reconstructed-gb/5d8b03a4-9c9b-4e51-af12-2606d5d99b44/scratchpad/pw";
+const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR ?? new URL("../.cache/playwright", import.meta.url).pathname;
 const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:7777";
 const LEAKS = process.argv.includes("--leaks");
