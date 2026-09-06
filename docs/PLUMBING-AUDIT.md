@@ -223,11 +223,18 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
   (`scripts/verify-dashboard.mjs`: the EVID-UX-1 chip checks then the JOBBUS-3 card checks;
   `ui/machine-room/adapter.js`: `getEvidence` then the seven job-bus shapes). Bundle
   `bb3896f4eeba8044e10394b56027c09d4fc97105a8baea1a08e8bbaf7bf97c32`, the same sha inside
-  `grok-bot-local-vm` at `/home/box/sand-host/host-main.cjs`. Gates on the Mac box against that bundle:
+  `grok-bot-local-vm` at `/home/box/sand-host/host-main.cjs`; checkable, not remembered: `scripts/bundle-identity.sh`
+  through `scripts/on-box.sh` prints built, deployed and in-box and answers `VERDICT: match -- built, deployed and
+  running are all bb3896f4` (log `c2fix-bundle-identity.log`; the sha had been written from prose and is now
+  backed by a run, the condition GATE-9 closed once already). Gates on the Mac box against that bundle:
   verify-gateway-reads 11/11, verify-job-bus 58/58 (its first run ever), verify-dashboard --offline 41/41,
-  verify-dashboard --leaks 7/7, verify-machine-room --e2e 6/6, verify-windows 14/14; verify-dashboard 280/281
-  and 270/274, the failures older than the merge (see below). `npm test` 663/663 and the source typecheck
-  clean at the merge commit.
+  verify-dashboard --leaks 7/7, verify-machine-room --e2e 6/6, verify-windows 14/14. `npm test` 663/663 and the
+  source typecheck clean (logs `c2fix-npm-test.log`, `c2fix-typecheck.log`, at the fix commit below).
+  verify-dashboard on the merge itself read 280 PASS / 1 FAIL and then 270 PASS / 4 FAIL, and that second
+  number was reported as a tally when it was a coverage loss: normalised to check names, run 1 carried 281
+  checks and run 2 carried 274, so seven never executed and four of the seven were the EVID-UX-1 disclosure
+  legs the merge was supposed to preserve. Both conditions were the gate, not the product, and both are fixed
+  below rather than left for a human.
   The job-bus gate's first run failed five checks and all five were the gate, not the bus, fixed in
   `dfda73e`: its "the job bearer opens nothing but /v1" leg ran against a relay with no console password, so
   every route answered the bearer, no bearer and a wrong bearer alike (it now mints a password of its own into
@@ -240,14 +247,39 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
   `DEFAULT_JOB_BUS_SETTINGS` with `enabled:false`. Residual: the `job-bus/` directory did not exist before the
   run and now holds `settings.json` (the defaults), `jobs.json` and the append-only `audit.jsonl` — inherent to
   having run jobs, and the values are the ones the host used when the file was absent.
-  Older than this merge, left alone per the rules and reproduced by a second run: verify-dashboard's "the key
-  form says where the value goes" on the Z.AI card (the check reads `.plugin-detail .field-hint` and gets an
-  empty string while Z.AI is the live provider; identical at the merge base `0e3b4ac`, from `526a013`
-  2026-09-03). Also seen once each, passing in run 1 and failing in run 2 off the same code and the same box:
-  "evidence chips render on Atera's stamped replies" (7 chips then 0), "an agent-to-agent blurb is present"
-  (2 then 0) and "picking a message row ... flashes the entry" (flashed true then null) — the data is still
-  there (`getAgentTranscriptTail` on Atera Triage carries 24 evidence stamps), so these are console timing on a
-  500-row tail, of a piece with MR-35.
+  **Correction (the C2 skeptic pass).** The sentence that stood here, that the verify-dashboard failures were
+  older than the merge and so were left alone, was wrong on the first one, and the rest of it was accounting
+  rather than a finding. Four gate defects, all in the same family as the four the job-bus gate's own first run
+  exposed and which were fixed in `dfda73e`:
+
+  - The Z.AI "the key form says where the value goes" FAIL. The *check* is old and byte-identical at the merge
+    base; the *failure* is not. Its guard was `page.$$("input[type=password]")`, a document-wide query, and
+    `settingsPanel()` renders the Providers group, the Listeners group and `jobBusSection()` into one
+    `.settings-list`. This merge added `<input id="job-bus-token" type="password">` to that panel (4 password
+    inputs at `fcf0f7f`, 5 at `304670c`), so the guard saw the bus bearer, believed the Z.AI card had a key
+    form, and ran the hint check against a card that has none. All three probes are now scoped to
+    `.plugin-detail`, the card under test, and the leg reads `key false, switch false, live true` again.
+  - The disclosure legs that "flaked". `evidence chips render on Atera's stamped replies` measured a 500-row
+    tail 600ms after the scroll, and its `if (chips.length > 0)` guard silently removed four downstream checks
+    from the run when it lost the race. The presence check now waits for the tail (20s) instead of guessing,
+    and a guard that is still false now names the checks it took out, as `SKIP … not reached`. The summary
+    prints three tallies (`N PASS / N FAIL / N not reached`) so a coverage change is visible in the run instead
+    of only in a diff of two logs.
+  - `every avatar carries its agent's accent and breathes` asserted the opposite of what `styles.css:495` says:
+    `.worker-card[data-status="attention"] .worker-avatar { animation: none; border-color: var(--warning) }`:
+    an agent that wants a human deliberately stops breathing and turns amber. The check passed only while no
+    agent on the box was in attention and read that intended state as a wrong accent. It now asserts the
+    stylesheet's contract per card, off the card's own `data-status`.
+  - The four AUTOMATION-3 routine-card legs. Their `until` predicate was "a card with that name is on the
+    panel", which the plant itself satisfies on the first iteration, so the loop returned a card drawn before
+    the staged run reached the roster record and the legs read `ready / Never run` against a routine the
+    gateway was already reporting as errored. The predicate now waits for the failed run to be on the card, and
+    keeps the last card seen so a genuinely wrong card still fails in its own words.
+
+  After the four: verify-dashboard 280 PASS / 0 FAIL / 0 not reached twice at the same coverage
+  (`c2fix-dashboard-rerun.log`, `c2fix-dashboard-confirm.log`), `--offline` 41/41 and `--leaks` 7/7 on the
+  changed harness. Roster 4 agents before and after. Nothing under `source/` changed, so no rebuild or redeploy:
+  the bundle is still `bb3896f4`.
 
 - **2026-09-04 morning to midday (Wave U1: login, memory, auto review; and the R750's first hours).**
   AUTH-1: a password on the relay (scrypt hash, signed session, lockout, bearer kept for scripts,

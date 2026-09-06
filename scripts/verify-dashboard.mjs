@@ -83,7 +83,15 @@ const { chromium } = createRequire(path.join(PW_DIR, "package.json"))("playwrigh
 const FORBIDDEN = ["Standalone demo", "Not wired yet", "Continue in prototype", "discarded by this demo"];
 
 let failures = 0;
-const check = (ok, label, detail = "") => { console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`); if (!ok) failures += 1; };
+let passes = 0;
+// Checks that live behind an `if (presence)` guard. When the guard is false they used to vanish
+// from the run entirely, so two runs of the same file reported different totals (281 checks, then
+// 274) and the seven that never executed were reported as neither passed nor failed. A skipped
+// check is not a passing one: name it, count it, and print the third tally in the summary so a
+// reader can see coverage moved rather than having to diff two logs to find out.
+let notReachedCount = 0;
+const check = (ok, label, detail = "") => { console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`); if (ok) passes += 1; else failures += 1; };
+const notReached = (why, ...labels) => { for (const label of labels) { console.log(`  SKIP  ${label} — not reached: ${why}`); notReachedCount += 1; } };
 const relay = async (route, body) => { const res = await fetch(`${GATEWAY}${route}`, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}); return res.json(); };
 // The relay holds the gateway token and adds it upstream, so a gate call needs no credential.
 const gw = async (method, args = {}) => {
@@ -791,8 +799,20 @@ try {
           }
           const header = await page.evaluate(() => { const el = document.getElementById("room-subtitle"); return el ? { text: el.textContent.trim(), overflow: el.scrollWidth > el.clientWidth + 1 } : null; });
           check(header != null && header.overflow === false, "the conversation header's second line fits its box", JSON.stringify(header));
-          const rings = await page.evaluate(() => Array.from(document.querySelectorAll(".worker-card")).map((el) => ({ accent: getComputedStyle(el).getPropertyValue("--accent").trim(), border: getComputedStyle(el.querySelector(".worker-avatar")).borderTopColor, animation: getComputedStyle(el.querySelector(".worker-avatar")).animationName })));
-          check(rings.length > 0 && rings.every((r) => r.accent && r.animation && r.animation !== "none"), "every avatar carries its agent's accent and breathes", JSON.stringify(rings.slice(0, 3)));
+          // styles.css:495 -- an agent that wants a human deliberately STOPS breathing and turns
+          // amber (`.worker-card[data-status="attention"] .worker-avatar { animation: none;
+          // border-color: var(--warning) }`). The old assertion was "every avatar breathes", which
+          // reads that intended state as a defect: it passed only while no agent on this box was in
+          // attention, and failed the moment one was, reporting the warning colour as a wrong accent.
+          // Assert the contract the stylesheet actually states, per card, off its own data-status.
+          const rings = await page.evaluate(() => Array.from(document.querySelectorAll(".worker-card")).map((el) => ({
+            status: el.getAttribute("data-status") ?? "",
+            accent: getComputedStyle(el).getPropertyValue("--accent").trim(),
+            border: getComputedStyle(el.querySelector(".worker-avatar")).borderTopColor,
+            animation: getComputedStyle(el.querySelector(".worker-avatar")).animationName,
+          })));
+          const ringOk = (r) => Boolean(r.accent) && (r.status === "attention" ? r.animation === "none" : r.animation !== "none" && Boolean(r.animation));
+          check(rings.length > 0 && rings.every(ringOk), "every avatar carries its agent's accent, and breathes unless the agent wants a human", JSON.stringify(rings.filter((r) => !ringOk(r)).slice(0, 3)) + ` of ${rings.length}, ${rings.filter((r) => r.status === "attention").length} in attention`);
         } finally {
           await gw("deleteAgents", { ids: [liveId] }).catch((e) => console.log(`  INFO  roster probe NOT deleted: ${e.message}`));
         }
@@ -1884,16 +1904,21 @@ try {
 
     // -- The Providers switch still moves the box (docs/DASHBOARD-CONTRACT.md).
     await pickPlugin("sub:zai", openSettingsPanel);
-    const hasKeyField = (await page.$$("input[type=password]")).length > 0;
-    const hasSwitch = (await page.$$("[data-use-endpoint]")).length > 0;
-    const isLive = (await page.$$eval(".provider-switch .status-pill", (els) => els.map((e) => e.textContent.trim()))).includes("answering now");
+    // Scoped to the card under test. These three were document-wide, and the Settings panel renders
+    // the Providers group, the Listeners group and the Job bus section into ONE .settings-list, so
+    // any password input anywhere on the panel -- the job bus bearer, a connector's secret field --
+    // read as "the Z.AI card offers a key field" and sent the run into the hint check below against
+    // a card that has no key form. That is what made this leg fail on a bus the leg is not about.
+    const hasKeyField = (await page.$$(".plugin-detail input[type=password]")).length > 0;
+    const hasSwitch = (await page.$$(".plugin-detail [data-use-endpoint]")).length > 0;
+    const isLive = (await page.$$eval(".plugin-detail .provider-switch .status-pill", (els) => els.map((e) => e.textContent.trim()))).includes("answering now");
     check(hasKeyField || hasSwitch || isLive, "the Z.AI card offers a key field, a switch, or shows it is answering", `key ${hasKeyField}, switch ${hasSwitch}, live ${isLive}`);
     if (hasKeyField) {
       const hint = await page.evaluate(() => document.querySelector(".plugin-detail .field-hint")?.textContent?.trim() ?? "");
       check(/0600 store/.test(hint), "the key form says where the value goes", hint.slice(0, 110));
     }
     if (hasSwitch) {
-      await page.click("[data-use-endpoint]"); await page.waitForTimeout(2500);
+      await page.click(".plugin-detail [data-use-endpoint]"); await page.waitForTimeout(2500);
       const live = await relay("/model");
       check(/z\.ai/.test(String(live?.endpoint ?? "") + String(live?.baseUrl ?? "")) || /glm/.test(String(live?.model ?? "")), "the switch moved the box to Z.AI", `${live?.model} · ${live?.endpoint ?? live?.baseUrl ?? ""}`);
     }
@@ -2096,9 +2121,21 @@ try {
     await page.keyboard.press("Escape"); await page.waitForTimeout(800);
 
     // -- GW-13: an evidence chip opens the receipts behind the verdict.
-    for (let i = 0; i < 400; i += 1) await page.mouse.wheel(0, 2000); await page.waitForTimeout(600);
+    // A 500-row tail renders in batches, and a fixed 600ms after the scroll made the chip-presence
+    // leg a race: on the confirming rerun it read zero chips and took the four legs below it out of
+    // the run entirely. Wait for the tail to actually carry chips, then report whatever is there at
+    // the cap, so a genuinely chip-less conversation still fails with its own number.
+    for (let i = 0; i < 400; i += 1) await page.mouse.wheel(0, 2000);
+    await until(async () => (await page.$$(".evidence-chip")).length > 0 || null, 20_000, 1000);
     const chips = await page.$$(".evidence-chip");
     check(chips.length > 0, "evidence chips render on Atera's stamped replies", `${chips.length} chip(s)`);
+    if (chips.length === 0) {
+      notReached("no evidence chip on the tail to open",
+        "the chip opens a disclosure with the receipt and attestation counts",
+        "the disclosure names at least one tool",
+        "attested tool output is withheld until asked for",
+        "and one click reveals that one attestation's output");
+    }
     if (chips.length > 0) {
       // The verdict word is on the chip's data-verdict, not in its sentence: the copy says what
       // the reader gets out of it, not which of five internal words the host picked.
@@ -2123,6 +2160,7 @@ try {
       const heads = await page.$$eval("[data-head-slot]", (els) => els.map((e) => e.textContent.trim()));
       const reveal = await page.$$("[data-reveal-head]");
       check(heads.length === 0 || heads.every((h) => /not on this page until you ask/i.test(h)), "attested tool output is withheld until asked for", `${heads.length} slot(s), ${reveal.length} reveal button(s)`);
+      if (reveal.length === 0) notReached("the disclosure offered no per-attestation reveal button", "and one click reveals that one attestation's output");
       if (reveal.length > 0) {
         await reveal[0].click(); await page.waitForTimeout(600);
         const shown = await page.evaluate(() => document.querySelector("[data-head-slot='0']")?.textContent?.trim() ?? "");
@@ -2193,7 +2231,14 @@ try {
           check(wrote.code === 0 && readBack != null, "and a failed scheduled run staged on that history reads back through the gateway", `exit ${wrote.code}${wrote.out ? ` ${wrote.out.trim().slice(0, 120)}` : ""}; ${readBack == null ? "no error run came back" : `${readBack.status}/${readBack.trigger}`}`);
           // The panel does not repaint on the adapter's own heartbeat, so each attempt closes it and
           // opens it again: the reopen is what re-reads the roster record the heartbeat refreshed.
-          const shown = await until(async () => {
+          // The predicate used to be "a card with that name is on the panel", which the plant itself
+          // satisfies on the first iteration -- so the loop returned a card drawn BEFORE the staged
+          // run reached the roster record, and the four legs below it read "ready / Never run" and
+          // failed on a routine the gateway was already reporting as errored. Wait for the run to be
+          // ON the card, and keep the last card seen so a genuinely wrong card still fails in its
+          // own words at the cap rather than as "no card".
+          let lastCard = null;
+          const readCard = async () => {
             await page.keyboard.press("Escape").catch(() => {});
             await page.waitForTimeout(300);
             await page.click("#schedule-button", { timeout: 5000 }).catch(() => {});
@@ -2209,8 +2254,13 @@ try {
                 text: card.textContent.replace(/\s+/g, " ").trim(),
               };
             }, FAILED_NAME);
-          }, 40_000, 1000);
-          check(shown != null, "the planted routine reaches the routines panel", shown == null ? "no card with that name after 40s" : "card found");
+          };
+          const shown = await until(async () => {
+            const card = await readCard();
+            if (card != null) lastCard = card;
+            return card != null && card.failedLine !== "" ? card : null;
+          }, 40_000, 1000) ?? lastCard;
+          check(shown != null, "the planted routine reaches the routines panel carrying its failed run", shown == null ? "no card with that name after 40s" : `card found${shown.failedLine === "" ? " but with no failed-run line after 40s" : ""}`);
           if (shown != null) {
             check(/Last run failed/.test(shown.failedLine), "the card says the last run failed, out of the success green", shown.failedLine.slice(0, 160) || shown.text.slice(0, 160));
             check(/on its schedule/.test(shown.failedLine), "and names the trigger, so a run nobody pressed can be told from a test run", shown.failedLine.slice(0, 160));
@@ -2228,6 +2278,12 @@ try {
     // -- The exchange viewer (docs/DASHBOARD-CONTRACT.md) still opens view-only.
     const blurbs = await page.$$(".message-row.is-exchange");
     check(blurbs.length > 0, "an agent-to-agent blurb is present in Atera's conversation", `${blurbs.length} blurb(s)`);
+    if (blurbs.length === 0) {
+      notReached("no agent-to-agent blurb on the tail to open",
+        "the blurb opens the view-only exchange viewer",
+        "the viewer shows the exchange itself, both directions",
+        "no agent-to-agent message appears as a bubble from you");
+    }
     if (blurbs.length > 0) {
       await blurbs.at(-1).click(); await page.waitForTimeout(1200);
       const text = await page.evaluate(() => document.getElementById("panel-dialog")?.textContent?.replace(/\s+/g, " ") ?? "");
@@ -2608,5 +2664,6 @@ try {
   if (previousRow) { await relay("/endpoints/use", { id: previousRow.id }).catch(() => {}); console.log(`  INFO  box restored to ${previousRow.name}`); }
   else console.log("  INFO  box left where the gate found it (no catalog row matched the live endpoint)");
 }
-console.log(`\n${failures === 0 ? "OK" : `${failures} FAILED`}`);
+console.log(`\n${passes} PASS / ${failures} FAIL / ${notReachedCount} not reached`);
+console.log(`${failures === 0 ? "OK" : `${failures} FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
