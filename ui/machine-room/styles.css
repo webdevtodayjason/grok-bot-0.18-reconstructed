@@ -56,7 +56,10 @@ select:focus-visible {
   position: relative;
   isolation: isolate;
   display: grid;
-  grid-template-rows: 68px minmax(0, 1fr) 112px;
+  /* The shelf's row is content-sized, not a fixed bar: the composer grows to eight lines
+     (QOL-COMPOSER) and a fixed track would leave it hanging out of the shelf with its last
+     line clipped under the edge. The stage's 1fr gives back what the shelf takes. */
+  grid-template-rows: 68px minmax(0, 1fr) minmax(112px, auto);
   width: 100%;
   height: 100dvh;
   min-height: 650px;
@@ -2565,7 +2568,7 @@ dialog[open] {
 
 @media (max-width: 940px) {
   .app-shell {
-    grid-template-rows: 68px minmax(0, 1fr) 92px;
+    grid-template-rows: 68px minmax(0, 1fr) minmax(92px, auto);
   }
 
   .traffic-lights,
@@ -2631,7 +2634,7 @@ dialog[open] {
   }
 
   .app-shell {
-    grid-template-rows: 60px minmax(0, 1fr) 82px;
+    grid-template-rows: 60px minmax(0, 1fr) minmax(82px, auto);
     min-height: 100dvh;
   }
 
