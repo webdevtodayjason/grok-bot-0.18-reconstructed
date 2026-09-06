@@ -13,6 +13,18 @@
  * of request phrases -- the wordings an agent actually uses when it hands a step back to the
  * person it is talking to. Everything else is left alone, because a badge that lights on an
  * ordinary sign-off is worse than one that misses the odd oblique ask.
+ *
+ * Two things keep it from lying, and both cost real asks:
+ *
+ * - The read is bounded to ONE TURN (`operatorAskForTurn`, given the last entry id from before the
+ *   run). Scanning the whole conversation re-lit an ask the operator had already answered every
+ *   time a turn ended without delivering anything to them -- and turns like that are ordinary: a
+ *   bare reaction settles the delivery obligation, a peer message counts as a send, and a turn can
+ *   end delivering nothing at all once the reply nudges give up.
+ * - Only the LAST sentence of that message is classified. A backwards scan over every sentence read
+ *   an agent's own rhetorical question ("Why? Because the box restarted. Everything is green now.")
+ *   as an ask. The trade is real and deliberate: an ask buried before a closing "I'll hold until you
+ *   say" is missed, which is the cheaper of the two mistakes.
  */
 
 export type OperatorAskKind = "question" | "request" | "widget";
@@ -70,10 +82,11 @@ function trimReason(text: string): string {
 }
 
 /**
- * The last message the agent actually delivered to the operator on this conversation: not
- * hidden, not threaded (`branched` -- a threaded message is explicitly not where a question
- * belongs), and not addressed to a peer agent. The same three exclusions the roster's own
- * last-entry projection uses, so the badge and the sidebar preview are reading the same message.
+ * The last message the agent actually delivered to the operator inside the window it is given --
+ * one turn's worth of entries, never the whole conversation. Not hidden, not threaded (`branched`
+ * -- a threaded message is explicitly not where a question belongs), and not addressed to a peer
+ * agent. The same three exclusions the roster's own last-entry projection uses, so the badge and
+ * the sidebar preview are reading the same message.
  */
 export function lastAddressedMessage(
   entries: readonly Record<string, unknown>[],
@@ -114,31 +127,51 @@ export function classifyOperatorAsk(
   if (message.type === "widget") {
     const prompt = message.text.trim();
     // A question widget IS the ask; it ends the turn by contract (see the system prompt's
-    // "Asking for decisions"), and until now it lit nothing on the roster either.
+    // "Asking for decisions"). This branch was unreachable from the host until the guard on
+    // `awaitingUserSelection` came off, since every widget send raises that flag.
     return prompt.length === 0
       ? { kind: "widget", reason: "Waiting for your answer." }
       : { kind: "widget", reason: trimReason(prompt) };
   }
   if (message.type !== "text") return null;
-  const visible = stripCode(message.text);
-  const lines = sentences(visible);
-  // Backwards: the closing ask is the one the operator is looking at, so when a message both
-  // reports and then asks, the reason quotes the ask rather than the first line of the report.
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const sentence = lines[i] as string;
-    if (sentence.endsWith("?")) return { kind: "question", reason: trimReason(sentence) };
-    if (OPERATOR_REQUEST.test(sentence) || OPERATOR_IMPERATIVE.test(sentence)) {
-      return { kind: "request", reason: trimReason(sentence) };
-    }
+  const lines = sentences(stripCode(message.text));
+  // The last sentence, and only the last. A turn that hands the step back ends on the ask -- the
+  // system prompt tells the model to do exactly that -- so anything earlier in the message is the
+  // report around it, and a question mark in the report is the agent's own aside, not an ask.
+  const sentence = lines.at(-1);
+  if (sentence == null) return null;
+  if (sentence.endsWith("?")) return { kind: "question", reason: trimReason(sentence) };
+  if (OPERATOR_REQUEST.test(sentence) || OPERATOR_IMPERATIVE.test(sentence)) {
+    return { kind: "request", reason: trimReason(sentence) };
   }
   return null;
 }
 
-/** The whole read, transcript in and verdict out -- what the host calls at the end of a turn. */
-export function operatorAskFromTranscript(
+/**
+ * The entries this turn appended, given the id of the last entry that existed before it started.
+ * Null -- not an empty list -- when that entry is gone (the conversation was cleared or rewritten
+ * mid-turn): the window cannot be trusted, so nothing is classified. A null id means the transcript
+ * was empty before the turn, so every entry belongs to it.
+ */
+export function entriesSinceTurnStart(
   entries: readonly Record<string, unknown>[],
+  sinceEntryId: string | null,
+): readonly Record<string, unknown>[] | null {
+  if (sinceEntryId == null) return entries;
+  const index = entries.findIndex((entry) => entry != null && entry.id === sinceEntryId);
+  return index < 0 ? null : entries.slice(index + 1);
+}
+
+/**
+ * The whole read -- transcript in, this turn's boundary in, verdict out. What the host calls at the
+ * end of a turn.
+ */
+export function operatorAskForTurn(
+  entries: readonly Record<string, unknown>[],
+  sinceEntryId: string | null,
 ): OperatorAsk | null {
-  return classifyOperatorAsk(lastAddressedMessage(entries));
+  const turnEntries = entriesSinceTurnStart(entries, sinceEntryId);
+  return turnEntries == null ? null : classifyOperatorAsk(lastAddressedMessage(turnEntries));
 }
 
 /** The awaiting-state tab this classifier owns; `box` and `auto-review` are the other two. */
