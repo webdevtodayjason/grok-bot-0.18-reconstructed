@@ -6,6 +6,7 @@
 // Importing each suite registers its tests with the runner exactly as passing the glob does.
 import "./deploy-sync-ships-relay-modules.test.mjs";
 import "./host-bundle-ship.test.mjs";
+import "./backup-snapshot.test.mjs";
 import "./agent-state-results.test.mjs";
 import "./backend-mcp-exec-json.test.mjs";
 import "./codex-direct-responses.test.mjs";

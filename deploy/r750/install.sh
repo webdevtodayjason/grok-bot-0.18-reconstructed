@@ -294,6 +294,35 @@ else
   say "         the connector editor will silently return nothing."
 fi
 
+step "nightly snapshot"
+# BACKUP-1. There was no backup job of any kind on this server: a lost volume was a lost instance.
+# USER units, because this whole install runs as sem with no sudo. The timer needs linger to fire
+# when nobody is logged in, and enabling linger for one's own user is the one thing here that may
+# ask for a password on a locked-down polkit -- so it is attempted, reported, and never fatal.
+BACKUP_UNITS="$HOME/.config/systemd/user"
+if [ -f "$ROOT/deploy/backup/snapshot.sh" ]; then
+  mkdir -p "$BACKUP_UNITS"
+  cp "$ROOT/deploy/backup/titanbot-backup.service" "$ROOT/deploy/backup/titanbot-backup.timer" "$BACKUP_UNITS/"
+  say "installed titanbot-backup.{service,timer} into $BACKUP_UNITS"
+  if systemctl --user daemon-reload 2>/dev/null; then
+    if systemctl --user enable --now titanbot-backup.timer 2>/dev/null; then
+      say "timer enabled: $(systemctl --user list-timers titanbot-backup.timer --no-pager --no-legend 2>/dev/null | head -n 1)"
+    else
+      say "WARNING: could not enable the timer; run: systemctl --user enable --now titanbot-backup.timer"
+    fi
+    loginctl enable-linger "$(id -un)" 2>/dev/null \
+      && say "linger on for $(id -un), so the timer fires with nobody logged in" \
+      || say "WARNING: linger is NOT on; the timer only fires while $(id -un) has a session. Run: loginctl enable-linger $(id -un)"
+  else
+    say "no systemd --user here; the units are in place. Enable them yourself, or run the snapshot from cron:"
+    say "    10 4 * * *  /bin/bash $ROOT/deploy/backup/snapshot.sh"
+  fi
+  say "first drill:  bash $ROOT/deploy/backup/restore-drill.sh"
+else
+  say "WARNING: $ROOT/deploy/backup/snapshot.sh is missing, so no nightly snapshot was installed."
+  say "         Run deploy/r750/sync.sh from the Mac; it ships the backup directory."
+fi
+
 printf '\n== done\n'
 say "console      http://$RELAY_BIND:$RELAY_PORT/"
 say "operator     http://$RELAY_BIND:$RELAY_PORT/operator"

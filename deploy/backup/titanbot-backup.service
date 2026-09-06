@@ -1,0 +1,18 @@
+[Unit]
+Description=Titanbot instance snapshot (volumes + relay side)
+Documentation=file://%h/titanbot/deploy/backup/snapshot.sh
+# The destination is a mounted array. Without this the job would run at boot before the mount and
+# refuse (snapshot.sh checks mountpoint), which is the safe direction but a nightly failure mail.
+RequiresMountsFor=/mnt/rosa-storage
+
+[Service]
+Type=oneshot
+# A snapshot pauses the box, so it must not run while a deploy is recreating it; the pause is
+# seconds and the whole run is minutes, and this ceiling only stops a wedged copy holding the box.
+TimeoutStartSec=30min
+Environment=TITANBOT_BACKUP_DEST=/mnt/rosa-storage/titanbot/backups
+Environment=TITANBOT_INSTANCE=titanbot
+Environment=TITANBOT_ROOT=%h/titanbot
+ExecStart=/bin/bash %h/titanbot/deploy/backup/snapshot.sh
+Nice=10
+IOSchedulingClass=idle

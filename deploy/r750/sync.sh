@@ -118,7 +118,11 @@ rsync -a "$REPO/scripts/box-patches/apply-start-window-fix.sh" "$HOST:$ROOT/depl
 # lives here rather than under deploy/coolify on the server because that is the directory the
 # compose file mounts and the only one the container can see.
 rsync -a "$REPO/deploy/coolify/init-box.sh" "$HOST:$ROOT/deploy/"
-say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,apply-start-window-fix.sh,init-box.sh}"
+# BACKUP-1: the snapshot job, its restore drill and the two systemd units install.sh copies into
+# ~/.config/systemd/user. A directory, because the units name paths inside it.
+ssh "$HOST" "mkdir -p '$ROOT/deploy/backup'"
+rsync -a --delete "$REPO/deploy/backup/" "$HOST:$ROOT/deploy/backup/"
+say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,apply-start-window-fix.sh,init-box.sh,backup/}"
 
 if [ "$INSTALL" = no ]; then
   printf '\n== shipped, not installed\n'

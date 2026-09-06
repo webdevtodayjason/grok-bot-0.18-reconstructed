@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightly titanbot instance snapshot at 04:10
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+# A server that was off at 04:10 still gets its snapshot, once, when it comes back.
+Persistent=true
+# 04:10 exactly for every instance on a host would queue the pauses; a few minutes of spread costs
+# nothing and keeps two boxes from being frozen at the same moment.
+RandomizedDelaySec=5min
+Unit=titanbot-backup.service
+
+[Install]
+WantedBy=timers.target
