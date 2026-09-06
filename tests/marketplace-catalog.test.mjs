@@ -84,7 +84,8 @@ test("every plugin carries a category from the declared list", () => {
   }
   // The seed the contract names, in full.
   assert.deepEqual(catalog.MARKETPLACE_PLUGINS.map((plugin) => plugin.id), [
-    "github", "slack", "linear", "google", "tinyfish", "localfiles", "coderabbit", "tinyfish-cli", "custom-mcp",
+    "github", "slack", "linear", "google", "tinyfish", "localfiles", "coderabbit", "tinyfish-cli", "github-cli",
+    "custom-mcp",
   ]);
 });
 

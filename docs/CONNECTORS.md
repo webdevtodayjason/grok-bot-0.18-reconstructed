@@ -8,6 +8,10 @@ two or three things that bite. Every fact here comes from that service's report 
 `docs/connectors/` (TinyFish's is `docs/CONNECTORS-TINYFISH.md`); the reports carry the sources,
 the version pins and the reasoning, and nothing is claimed here that is not in one of them.
 
+A last section covers the **GitHub CLI (gh)**, which is not one of the six and not a connector at
+all: it is the shell tool that gives `git` inside the box a credential, so an agent that commits can
+also push.
+
 ## How it works
 
 A connector is one entry in `/home/box/sand-data/connectors.json`, and that file is the whole
@@ -398,3 +402,98 @@ object per line, with `type` values `review_context`, `status`, `heartbeat`, `fi
   `status: "awaiting_confirmation"` and waits for `--use-credits`.
 
 Full report: [docs/connectors/coderabbit.md](connectors/coderabbit.md).
+
+## GitHub CLI (gh)
+
+**No preset, and no entry in `connectors.json`.** This is a shell tool, like the CodeRabbit and
+TinyFish CLIs: a program the agent runs itself, with its credential in the box shell's environment.
+It is not the **GitHub** plugin above and does not replace it — that one is an MCP server the model
+calls, read-only by construction; this one is for `git`.
+
+**The problem it fixes.** An agent committed inside the box and then could not push. `git pull`
+answered:
+
+```
+fatal: could not read Username for 'https://github.com': No such device or address
+```
+
+That is not a missing token, it is a missing *credential helper*. Git over https asks a helper for a
+username and password; with none configured it falls back to prompting on a terminal, and the box's
+shell has nobody typing at it. Setting `GITHUB_TOKEN` alone changes nothing, because plain `git` has
+never read that variable.
+
+**Install it from the console.** **Marketplace** → **Plugins** → **GitHub CLI (gh)** → **Install in
+the box**. That button runs GitHub's own documented Linux install
+([cli/cli docs/install_linux.md](https://github.com/cli/cli/blob/trunk/docs/install_linux.md)) in the
+box as the host's user, capped at five minutes, and shows the tail of its output on the card. It
+picks one of two documented routes, because one container is not every container:
+
+- the official **apt repository** — the `githubcli-archive-keyring.gpg` keyring under
+  `/etc/apt/keyrings`, a `signed-by=` line in `/etc/apt/sources.list.d/github-cli.list`, then
+  `apt-get install -y gh` — used when `apt-get` is present *and* this user can reach root without a
+  password;
+- otherwise the official **precompiled tarball** for the box's architecture, unpacked into
+  `~/.local/bin/gh`. That is the same directory the CodeRabbit installer uses, and the reason the
+  host probes for a shell tool with `/bin/sh -lc` from the user's home.
+
+An already-installed `gh` is left alone. Either way the install then runs the step the whole entry
+exists for:
+
+```bash
+gh auth setup-git --hostname github.com
+```
+
+which writes `credential."https://github.com".helper = !gh auth git-credential` into that user's
+global git config. From then on every https fetch and push asks `gh` for the credential, and `gh`
+reads `GITHUB_TOKEN` out of its own environment. If the token has not been stored yet, `setup-git`
+has no host to name and exits non-zero; the install writes the same helper line by hand instead,
+because the helper does not need the token until git actually calls it. The last line of the install
+reads the key back with `git config --global --get-regexp`, so an install that did not leave a
+helper behind fails on the card rather than leaving `git push` to discover it.
+
+**The credential.** A **fine-grained personal access token** minted at
+<https://github.com/settings/personal-access-tokens/new>: one resource owner, only the repositories
+it may touch, an expiry, and **Contents: write** on those repositories for pushing (**Metadata:
+read** comes with it automatically). The same permissions table as the GitHub connector's token
+(`docs/connectors/github.md`), one grant wider because that connector is read-only and this one
+pushes. Organization approval may be required, and a pending token can only read public resources.
+
+Paste it into the card's `GITHUB_TOKEN` field. It goes into the `shell` section of the same 0600
+store, and the host merges it into the environment of the box shell the agent runs commands in —
+**not** into any connector process. Note the two names are different on purpose: the GitHub
+connector's slot is `GITHUB_PERSONAL_ACCESS_TOKEN` in a connector's environment, this is
+`GITHUB_TOKEN` in the shell's, and filling one does not fill the other. Revoke by deleting the token
+on the same settings page. Taking it back out of the card empties the variable rather than removing
+it — the name stays in the running box shell with an empty value until the box restarts, which `gh`
+treats as no token at all.
+
+**First call.** `gh --version`, then `gh auth status` (expect it to report the token came from the
+`GITHUB_TOKEN` environment variable), then the one that matters:
+
+```bash
+git ls-remote https://github.com/cli/cli
+```
+
+A good answer is a list of refs. A **bad token** gives `remote: Invalid username or token` and
+`fatal: Authentication failed` — which is still a pass for the plumbing, because it means a
+credential was offered and refused rather than asked for. What must never come back is
+`could not read Username`: that is the original bug, and it means the helper is not configured.
+
+**What bites.**
+
+- **`gh` and `git` read different variables.** `gh` accepts `GH_TOKEN` first and `GITHUB_TOKEN`
+  second; `git` reads neither. Only the credential helper connects them, so an install that skipped
+  `gh auth setup-git` looks completely healthy from `gh auth status` and still cannot push.
+- **The helper is per-user, and so is `~/.local/bin`.** The install runs as whoever the host runs
+  as. A shell running as a different user in the same container has a different `HOME`, a different
+  global git config, and no `gh` on its `PATH`.
+- **ssh remotes are not covered.** This is an https credential helper. A repository cloned from
+  `git@github.com:` never asks it; change the remote to the https URL or add a key.
+- **Fine-grained tokens are per-owner.** One token cannot push to repositories owned by two
+  different accounts or organizations. Nothing warns you; the second push 403s.
+- **Box storage is ephemeral.** The token is re-merged into the shell environment on every box
+  bring-up from the host's store, but `gh`'s own installed binary is not: after a box rebuild the
+  card's **Install in the box** has to run again, and the credential-helper line goes with it.
+
+Source: [cli/cli `docs/install_linux.md`](https://github.com/cli/cli/blob/trunk/docs/install_linux.md).
+Token permissions: [docs/connectors/github.md](connectors/github.md).

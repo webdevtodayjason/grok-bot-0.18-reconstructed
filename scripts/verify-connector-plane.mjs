@@ -54,7 +54,8 @@
 //   node scripts/verify-connector-plane.mjs --google-stdio    add (l), Google's package and tokens
 //   node scripts/verify-connector-plane.mjs --shell-secrets   add (m), the shell-tool credential
 //   node scripts/verify-connector-plane.mjs --plugin-tools    add (n), the agent's plugin tools
-//              (h) through (n) imply --no-restart and --no-model so each arm fits its budget
+//   node scripts/verify-connector-plane.mjs --gh-tool         add (o), git's credential in the box
+//              (h) through (o) imply --no-restart and --no-model so each arm fits its budget
 //
 //   PLUGINTOOLS-1  the agent's four plugin tools against the Marketplace catalog. SearchPlugins,
 //              GetPlugin, InstallPlugin and UninstallPlugin used to resolve against Cursor's
@@ -63,6 +64,18 @@
 //              holds the box's connectors.json to what actually happened: the entry appears, then
 //              it is gone and the file is byte-identical to what the arm found. Off by default:
 //              --plugin-tools. It runs one model turn and needs ~450 s.
+//
+//   QOL-GH     git in the box, with a credential. Scribe committed inside the box and could not
+//              push: `git pull` answered "could not read Username for https://github.com", because
+//              git over https with no credential helper has nowhere to get one and prompts into a
+//              shell nobody is typing at. The GitHub CLI shell tool's install ends with
+//              `gh auth setup-git`, which points git's credential helper at `gh`, and `gh` reads
+//              GITHUB_TOKEN out of the same shell environment the secret store already fills. This
+//              arm stores an invented GITHUB_TOKEN and then asks git itself: the helper is
+//              configured, and `git ls-remote https://github.com/cli/cli` comes back an
+//              AUTHENTICATION FAILURE rather than a username prompt or a hang. Off by default:
+//              --gh-tool. Like (m) it never runs the installer; if `gh` is not in the box it says
+//              so and skips the two legs that need it.
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -83,6 +96,7 @@ const SLACK_STDIO = process.argv.includes("--slack-stdio");
 const GOOGLE_STDIO = process.argv.includes("--google-stdio");
 const SHELL_SECRETS = process.argv.includes("--shell-secrets");
 const PLUGIN_TOOLS = process.argv.includes("--plugin-tools");
+const GH_TOOL = process.argv.includes("--gh-tool");
 // (h) spends a minute of its own on two deliberate 30 s windows, so on top of the docker restart
 // in (a) and the model turn in (b) it does not fit the 280 s these gates are run under. The
 // contract names the arm `--tinyfish-key` with no other flags, so the flag carries the two skips.
@@ -95,12 +109,21 @@ const CREDENTIAL_ARM = [
   ["--shell-secrets", SHELL_SECRETS],
   // (n) runs a model turn of its own, so it skips (b)'s for exactly the same budget reason.
   ["--plugin-tools", PLUGIN_TOOLS],
+  // QOL-GH: (o) spends its budget on a real network round trip to github.com, so it skips both too.
+  ["--gh-tool", GH_TOOL],
 ].find(([, on]) => on)?.[0];
 const SKIP_RESTART = NO_RESTART || CREDENTIAL_ARM != null;
 const SKIP_MODEL = NO_MODEL || CREDENTIAL_ARM != null;
 // CONNECT-5. The one shell-tool field this arm touches. It refuses to run at all if the host
 // already holds a value under it: an operator's real CodeRabbit key is not this gate's to delete.
 const SHELL_FIELD = "CODERABBIT_API_KEY";
+// QOL-GH. (o)'s field, guarded the same way: an operator's real GitHub token is not this gate's to
+// overwrite or delete, so the arm refuses to start if the host already holds one.
+const GH_FIELD = "GITHUB_TOKEN";
+// A public repository on purpose: what is under test is whether GitHub REFUSES the invented token,
+// which it does for a public repo too. An anonymous clone of this URL would succeed, so a pass here
+// can only mean the helper handed over a credential.
+const GH_REMOTE = "https://github.com/cli/cli";
 const PROBE_PREFIX = "probe-u3";
 const TURN_TIMEOUT_MS = 300_000;
 // CONNECT-3. The preset the console's "TinyFish (API key)" button writes, name and all. The gate
@@ -148,6 +171,20 @@ const docker = (args) => new Promise((resolve, reject) =>
   execFile("docker", args, { maxBuffer: 64 << 20 }, (error, out, err) =>
     (error ? reject(new Error(`docker ${args.slice(0, 3).join(" ")}: ${err || error.message}`)) : resolve(out))));
 const inBox = (script) => docker(["exec", BOX, "sh", "-c", script]);
+/**
+ * QOL-GH. The same shell with values in its environment, and never a non-zero exit of its own: the
+ * arm below wants git's failure TEXT, and `docker exec` turning that into a rejected promise would
+ * throw the evidence away. Every script handed to this appends its own `exit 0`.
+ *
+ * The values passed here are invented by this gate and exist for the length of one arm. They do go
+ * on a `docker exec` command line, which the host's process table can see; a real credential would
+ * not be passed this way, and this gate never reads one.
+ */
+const inBoxWithEnv = (env, script) => docker([
+  "exec",
+  ...Object.entries(env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
+  BOX, "sh", "-c", script,
+]);
 
 const waitForHost = async (label) => {
   const deadline = Date.now() + 180_000;
@@ -710,6 +747,10 @@ let shellStoreSnapshotTaken = false;
 // for the same reason (m) is: the newest write is the one that has to be undone first.
 let pluginToolsSnapshot = null;
 let pluginToolsAgentId = null;
+// QOL-GH (o). The newest arm, so the newest snapshot, so the first one unwound.
+let ghSecretSet = false;
+let ghStoreSnapshot = null;
+let ghStoreSnapshotTaken = false;
 
 // The finally block below is the whole cleanup, and a killed process never reaches it: these arms
 // run under `timeout`, which sends SIGTERM. Re-raising after the handler runs keeps the exit status
@@ -721,6 +762,10 @@ const restoreOnSignal = async (signal) => {
       await callRaw("refreshMcp", {});
     }
     if (pluginToolsAgentId != null) await callRaw("deleteAgent", { id: pluginToolsAgentId });
+    // QOL-GH: an invented GITHUB_TOKEN left in the store outlives this process, and the next run of
+    // (o) would refuse to start because it looks like an operator's key. A kill has to clear it.
+    if (ghSecretSet) await callRaw("deleteShellSecret", { field: GH_FIELD });
+    if (ghStoreSnapshotTaken) await restoreSecretStoreBase64(ghStoreSnapshot);
   } catch (error) { console.error(`cleanup on ${signal}: ${error.message}`); }
   process.exit(signal === "SIGINT" ? 130 : 143);
 };
@@ -1451,6 +1496,152 @@ try {
     ok("the probe agent is deleted");
   }
 
+  // ------------------------------- (o) QOL-GH git in the box, with a credential instead of a prompt
+  if (GH_TOOL) {
+    console.log("\n(o) QOL-GH — GITHUB_TOKEN in the box shell, and git authenticating instead of prompting");
+
+    // The catalog is READ, never executed, for the same reason (m) reads it: this install adds an
+    // apt repository or drops a binary in ~/.local/bin, and neither is a gate's to do on a shared
+    // box. What is checked here is that the entry ends by giving GIT a credential helper -- an
+    // install that stopped at `gh --version` would leave the bug exactly where it was found.
+    const ghCatalogue = await call("listShellTools");
+    const ghEntry = Array.isArray(ghCatalogue) ? ghCatalogue.find((tool) => tool.id === "github-cli") : null;
+    if (ghEntry == null) fail(`listShellTools carries no github-cli entry; it has ${(ghCatalogue ?? []).map((tool) => tool.id).join(", ") || "nothing"}`);
+    if (ghEntry.field !== GH_FIELD) fail(`the github-cli entry's field is ${ghEntry.field}, expected ${GH_FIELD}`);
+    if (!/gh auth setup-git/.test(String(ghEntry.install))) fail("the github-cli install never runs `gh auth setup-git`, so git would still have no credential helper");
+    if (!/cli\.github\.com\/packages/.test(String(ghEntry.install))) fail("the github-cli install does not use the documented apt repository");
+    if (String(ghEntry.install).includes("$GITHUB_TOKEN")) fail("the github-cli install puts the token on a command line");
+    ok(`the catalog carries github-cli (${ghEntry.field}, binary gh) and its install ends in gh auth setup-git — the installer is not run here`);
+
+    const ghHeld = await call("listShellSecretFields");
+    if ((ghHeld?.stored ?? []).includes(GH_FIELD)) {
+      fail(`the host already holds a ${GH_FIELD}; this arm will not overwrite an operator's token`);
+    }
+    if (!(ghHeld?.fields ?? []).includes(GH_FIELD)) fail(`listShellSecretFields does not offer ${GH_FIELD}`);
+    ghStoreSnapshot = await readFileBase64(SECRET_STORE);
+    ghStoreSnapshotTaken = true;
+
+    const ghBefore = await call("probeShellSecret", { field: GH_FIELD });
+    if (ghBefore?.state !== "unset") fail(`the box shell already reports ${GH_FIELD} ${ghBefore?.state}; the check would prove nothing`);
+    ok(`before anything is stored, the box's own shell reports ${GH_FIELD} unset`);
+
+    // Invented here and nowhere else. It is deliberately shaped like a GitHub token and is not one:
+    // the whole point of the ls-remote below is that GitHub REFUSES it.
+    const GH_KEY = `ghp_verify${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 12)}`;
+    console.log(`  probe value: ${GH_KEY.length} characters (never printed)`);
+    const ghStored = await call("setShellSecret", { field: GH_FIELD, value: GH_KEY });
+    ghSecretSet = true;
+    if (ghStored?.stored !== true) fail("setShellSecret did not report the token stored");
+    if (ghStored?.applied !== true) fail("setShellSecret stored the token but did not push it into the live box");
+    if (JSON.stringify(ghStored).includes(GH_KEY)) fail("setShellSecret echoed the token back");
+    const ghProbed = await call("probeShellSecret", { field: GH_FIELD });
+    if (ghProbed?.state !== "set") fail(`the box shell reports ${GH_FIELD} ${ghProbed?.state} after it was stored`);
+    if (JSON.stringify(ghProbed).includes(GH_KEY)) fail("probeShellSecret answered with the token");
+    ok(`setShellSecret stored=true applied=true, and the box's own shell now reports ${GH_FIELD} set`);
+
+    // `gh` is a program, and nothing records that it was installed, so the box's shell is the only
+    // authority -- the same claim probeShellToolBinary makes. `-lc` from home is what puts
+    // ~/.local/bin on PATH, which is where the tarball route lands the binary.
+    const ghWhich = (await inBox('sh -lc \'PATH="$HOME/.local/bin:$PATH"; command -v gh\' 2>/dev/null || true')).trim();
+    const gitWhich = (await inBox("command -v git 2>/dev/null || true")).trim();
+    if (gitWhich.length === 0) fail("this box has no git at all, so there is nothing for a credential helper to serve");
+    if (ghWhich.length === 0) {
+      console.log(`  --  gh is not installed in this box, so the credential-helper and ls-remote legs are SKIPPED.`);
+      console.log(`  --  this gate never runs the installer (${ghEntry.install.split("\n").length} lines, an apt repository or a release tarball).`);
+      console.log(`  --  install it from the console: Marketplace -> Plugins -> GitHub CLI (gh) -> Install in the box,`);
+      console.log(`      or through the gateway: curl -sS -X POST -H "authorization: Bearer <token>" -H 'content-type: application/json' -d '{"id":"github-cli"}' ${GATEWAY}/api/installShellTool`);
+    } else {
+      ok(`the box's shell finds gh at ${ghWhich}`);
+
+      // Which HOME carries the config is not something this script can assume: the installer runs
+      // as whoever the host runs as, and `docker exec` need not be that user. So the answer is
+      // looked for where it can be, and the one that has it is named in the output rather than
+      // guessed at. `git config --global` reads $HOME/.gitconfig, so HOME is the whole question.
+      const ghDefaultHome = (await inBox('printf %s "$HOME"')).trim() || "/root";
+      const ghHomes = [...new Set([ghDefaultHome, "/home/box", "/root"])];
+      let ghHome = null;
+      let ghHelper = "";
+      for (const home of ghHomes) {
+        const found = (await inBox(`HOME=${home} git config --global --get-regexp '^credential\\..*helper$' 2>/dev/null || true`)).trim();
+        if (/gh auth git-credential/.test(found)) { ghHome = home; ghHelper = found; break; }
+      }
+      if (ghHome == null) {
+        fail(`no global git config under ${ghHomes.join(", ")} names gh as a credential helper; `
+          + "`gh auth setup-git` has not run in this box, so git over https still has nowhere to get a username");
+      }
+      // The helper is URL-scoped, the shape `gh auth setup-git` writes: credential.https://github.com.helper.
+      if (!/^credential\.https:\/\/github\.com\.helper /m.test(ghHelper)) {
+        fail(`the credential helper is configured under an unexpected key: ${ghHelper.replace(/\n/g, " | ")}`);
+      }
+      ok(`HOME=${ghHome} carries ${ghHelper.split("\n").filter((line) => /gh auth git-credential/.test(line)).join(" | ")}`);
+
+      // The claim the whole arm exists for. GIT_TERMINAL_PROMPT=0 and GIT_ASKPASS=/bin/false mean
+      // git CANNOT prompt or block on a tty: with no helper this comes back "could not read
+      // Username for 'https://github.com': terminal prompts disabled" in well under a second, which
+      // is precisely the failure scribe hit. A pass is the other answer -- GitHub rejecting the
+      // credential the helper handed over. Anonymous success is a FAILURE here: this repository is
+      // public, so an ls-remote that succeeds means the helper handed over nothing.
+      const ghRun = await inBoxWithEnv({ GITHUB_TOKEN: GH_KEY }, [
+        `export HOME=${ghHome}`,
+        'export PATH="$HOME/.local/bin:$PATH"',
+        "export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false",
+        'TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout 60"',
+        `out=$($TO git ls-remote ${GH_REMOTE} 2>&1); status=$?`,
+        `printf '%s\\n' "$out" | tail -n 8`,
+        'echo "gh-gate-exit:$status"',
+        "exit 0",
+      ].join("\n"));
+      const ghStatus = Number(/gh-gate-exit:(\d+)/.exec(ghRun)?.[1] ?? "-1");
+      // The invented token must not reach a log: it is struck from what this gate prints.
+      const ghText = ghRun.split(GH_KEY).join("[redacted]").replace(/gh-gate-exit:\d+\n?/, "").trim();
+      console.log(ghText.split("\n").map((line) => `      ${line}`).join("\n") || "      (no output)");
+      if (/could not read Username|terminal prompts disabled|Authentication prompt|askpass/i.test(ghText)) {
+        fail(`git asked for a username instead of using the helper: ${ghText.replace(/\n/g, " | ")}`);
+      }
+      if (ghStatus === 124 || ghStatus === 137) fail(`git ls-remote hung and was killed after 60 s (exit ${ghStatus})`);
+      if (ghStatus === 0) {
+        fail(`git ls-remote ${GH_REMOTE} SUCCEEDED with an invented token; that is an anonymous read, `
+          + "which means the credential helper handed git nothing");
+      }
+      if (!/Authentication failed|Invalid username or (token|password)|invalid credentials|Bad credentials|HTTP (401|403)|403 Forbidden|401 Unauthorized/i.test(ghText)) {
+        fail(`git ls-remote failed with exit ${ghStatus}, but not with an authentication failure: ${ghText.replace(/\n/g, " | ")}`);
+      }
+      ok(`git ls-remote ${GH_REMOTE} answered an authentication failure (exit ${ghStatus}) — a credential was offered and refused, and nothing prompted`);
+    }
+
+    // Same custody claim (m) makes, for the store this arm filled: one file holds the value, 0600,
+    // and the host log does not. `gh` itself never writes the token anywhere -- it reads it out of
+    // the environment on each call -- so a hit outside the store would be a real leak.
+    const ghHits = (await inBox(`grep -rl -- ${GH_KEY} ${DATA} 2>/dev/null || true`))
+      .split("\n").map((line) => line.trim()).filter(Boolean);
+    if (ghHits.length !== 1 || !ghHits[0].endsWith("/connector-env-secrets.json")) {
+      fail(`the token is in ${ghHits.length} file(s) under ${DATA}; expected only connector-env-secrets.json`);
+    }
+    const ghLogHit = (await inBox(`grep -c -- ${GH_KEY} /tmp/sand-host.log 2>/dev/null | head -1`)).trim();
+    if (ghLogHit !== "" && ghLogHit !== "0") fail(`the host log contains the token ${ghLogHit} time(s)`);
+    ok(`only ${ghHits[0]} holds it, and the host log does not`);
+
+    const ghRemoved = await call("deleteShellSecret", { field: GH_FIELD });
+    ghSecretSet = ghRemoved?.removed !== true;
+    if (ghRemoved?.removed !== true) fail("deleteShellSecret did not remove the token");
+    if ((ghRemoved?.stored ?? []).includes(GH_FIELD)) fail("the store still lists the field after the delete");
+    const ghAfter = await call("probeShellSecret", { field: GH_FIELD });
+    if (ghAfter?.state !== "unset") fail(`the box shell still reports ${GH_FIELD} ${ghAfter?.state} after the delete`);
+    const ghSurvivors = (await inBox(`grep -rl -- ${GH_KEY} ${DATA} 2>/dev/null || true`)).trim();
+    if (ghSurvivors.length > 0) fail(`the token survives the delete in: ${ghSurvivors}`);
+    await restoreSecretStoreBase64(ghStoreSnapshot);
+    const ghStoreNow = await readFileBase64(SECRET_STORE);
+    if (ghStoreNow !== ghStoreSnapshot) {
+      fail(`connector-env-secrets.json is not byte-identical to what this arm found (${ghStoreSnapshot == null ? "it did not exist" : "it existed"} before, ${ghStoreNow == null ? "it does not exist" : "it exists"} now)`);
+    }
+    ghStoreSnapshotTaken = false;
+    // What is NOT undone, said out loud: the git credential helper this arm read is the box's own
+    // configuration and was never written here, and the delete pushes GITHUB_TOKEN into the live
+    // exec daemon as the EMPTY STRING because the control plane can set but not unset. An empty
+    // name is not a credential, and a box restart drops it.
+    ok(`the token is gone from ${DATA} and the store is byte-identical; ${GH_FIELD} stays in the box shell as an empty name until the box restarts`);
+  }
+
   console.log("\nPASS — connector plane");
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
@@ -1469,6 +1660,13 @@ try {
   // CONNECT-5: (m) unwinds before (h) for the same reason (h) unwinds before (c) -- the later arm
   // took the later snapshot, so the later arm's restore has to be overwritten by nobody.
   // PLUGINTOOLS-1: (n) is the newest arm and took the newest snapshot, so it unwinds before (m).
+  // QOL-GH: (o) is newer still, and it snapshots the same secret store (m) does, so it goes first.
+  try {
+    if (ghSecretSet) await callRaw("deleteShellSecret", { field: GH_FIELD });
+  } catch (error) { console.error(`cleanup: gh token — ${error.message}`); }
+  try {
+    if (ghStoreSnapshotTaken) await restoreSecretStoreBase64(ghStoreSnapshot);
+  } catch (error) { console.error(`cleanup: secret store after (o) — ${error.message}`); }
   try {
     if (pluginToolsSnapshot != null && await readConnectorsBase64() !== pluginToolsSnapshot) {
       await restoreConnectorsBase64(pluginToolsSnapshot);

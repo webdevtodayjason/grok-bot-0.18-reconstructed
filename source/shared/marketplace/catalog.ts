@@ -345,6 +345,33 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
     }),
   }),
   Object.freeze({
+    id: "github-cli",
+    name: "GitHub CLI (gh)",
+    tagline: "Give git in the box a credential it can push with",
+    description:
+      "An agent that commits inside the box could not push: git over https with no credential helper has "
+      + "nowhere to get a username and answers \"could not read Username for https://github.com\". This "
+      + "installs GitHub's own CLI from its documented Debian package (or its precompiled tarball into "
+      + "~/.local/bin where apt is out of reach) and then runs `gh auth setup-git`, which points git's "
+      + "credential helper at gh. gh reads GITHUB_TOKEN from the shell environment the host merges the "
+      + "stored value into, so git authenticates without a token ever landing in a remote URL or a file.",
+    category: "Development",
+    featured: false,
+    // The binary's own name rather than an initial: a second "G" tile beside the GitHub connector's
+    // would be the one thing an operator must not confuse this card with. Two glyphs at 18px sit
+    // inside the 38px tile the console draws.
+    icon: Object.freeze({ letter: "gh", color: "#1f2328" }),
+    source: Object.freeze({ label: "cli/cli", url: "https://github.com/cli/cli/blob/trunk/docs/install_linux.md" }),
+    kind: "shell-tool",
+    install: "github-cli",
+    credentialHints: Object.freeze({
+      GITHUB_TOKEN:
+        "A fine-grained personal access token from github.com/settings/personal-access-tokens/new, one owner "
+        + "and only the repositories it may touch; pushing needs Contents: write. It is the shell's own copy — "
+        + "the GitHub connector's GITHUB_PERSONAL_ACCESS_TOKEN is a different name in a different environment.",
+    }),
+  }),
+  Object.freeze({
     id: "custom-mcp",
     name: "Custom MCP server",
     tagline: "Add any stdio MCP server by hand",
