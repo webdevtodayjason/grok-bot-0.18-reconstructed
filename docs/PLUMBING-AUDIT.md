@@ -217,6 +217,38 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
   40/40 against https://tb.semfreak.dev. The TinyFish recipe in docs/CONNECTORS-TINYFISH.md.
   Also VNC-2 and AUTH-2 (the desktop through the relay; a bearer mints a session).
 
+- **2026-09-06 (the Titan Job Bus onto the trunk, `304670c`).** The three job-bus lanes merged into
+  `webdevtodayjason/gb`: the host extension, the relay's `/v1` edge, the Settings card, the gate and the
+  deploy entries. Two files carried real conflicts and both kept every block in merge order
+  (`scripts/verify-dashboard.mjs`: the EVID-UX-1 chip checks then the JOBBUS-3 card checks;
+  `ui/machine-room/adapter.js`: `getEvidence` then the seven job-bus shapes). Bundle
+  `bb3896f4eeba8044e10394b56027c09d4fc97105a8baea1a08e8bbaf7bf97c32`, the same sha inside
+  `grok-bot-local-vm` at `/home/box/sand-host/host-main.cjs`. Gates on the Mac box against that bundle:
+  verify-gateway-reads 11/11, verify-job-bus 58/58 (its first run ever), verify-dashboard --offline 41/41,
+  verify-dashboard --leaks 7/7, verify-machine-room --e2e 6/6, verify-windows 14/14; verify-dashboard 280/281
+  and 270/274, the failures older than the merge (see below). `npm test` 663/663 and the source typecheck
+  clean at the merge commit.
+  The job-bus gate's first run failed five checks and all five were the gate, not the bus, fixed in
+  `dfda73e`: its "the job bearer opens nothing but /v1" leg ran against a relay with no console password, so
+  every route answered the bearer, no bearer and a wrong bearer alike (it now mints a password of its own into
+  a temp file and points the relay at it through the new `SAND_UI_AUTH_FILE`, and checks `/auth/state` first so
+  a missing lock says so); `/api/listAgents` was asked with GET on a relay that answers `/api/*` on POST only;
+  the audit leg expected the ping to owe two rows when a `health.ping` passes through `running` as well, so 9
+  not 8; and `settingsBefore` was read AFTER the relay's own start armed the bus, so the restore wrote
+  `enabled:true` back onto a box whose bus had never been on. Receipts that the box was left as found: roster 4
+  agents before and after, `jobBusList` 6 jobs and none open, `job-bus/settings.json` equal to
+  `DEFAULT_JOB_BUS_SETTINGS` with `enabled:false`. Residual: the `job-bus/` directory did not exist before the
+  run and now holds `settings.json` (the defaults), `jobs.json` and the append-only `audit.jsonl` — inherent to
+  having run jobs, and the values are the ones the host used when the file was absent.
+  Older than this merge, left alone per the rules and reproduced by a second run: verify-dashboard's "the key
+  form says where the value goes" on the Z.AI card (the check reads `.plugin-detail .field-hint` and gets an
+  empty string while Z.AI is the live provider; identical at the merge base `0e3b4ac`, from `526a013`
+  2026-09-03). Also seen once each, passing in run 1 and failing in run 2 off the same code and the same box:
+  "evidence chips render on Atera's stamped replies" (7 chips then 0), "an agent-to-agent blurb is present"
+  (2 then 0) and "picking a message row ... flashes the entry" (flashed true then null) — the data is still
+  there (`getAgentTranscriptTail` on Atera Triage carries 24 evidence stamps), so these are console timing on a
+  500-row tail, of a piece with MR-35.
+
 - **2026-09-04 morning to midday (Wave U1: login, memory, auto review; and the R750's first hours).**
   AUTH-1: a password on the relay (scrypt hash, signed session, lockout, bearer kept for scripts,
   refusal to bind off loopback without it), shipped to the R750 and proven by the deploy gate.
