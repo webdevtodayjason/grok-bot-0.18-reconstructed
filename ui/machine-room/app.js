@@ -3365,8 +3365,10 @@
     const tray = document.getElementById("attachment-tray");
     if (!tray) return;
     tray.hidden = pendingAttachments.length === 0;
+    // QOL-COMPOSER: `note` says how a file got here when it was not picked by hand (a drop, or a
+    // paste too big for the box), so the chip explains itself rather than appearing from nowhere.
     tray.innerHTML = pendingAttachments.map((a, i) =>
-      `<span class="tag">▱ ${escapeHtml(a.name)}${a.pending ? " · uploading…" : ""}<button class="member-remove" type="button" data-drop-attachment="${i}" aria-label="Remove ${escapeHtml(a.name)}">×</button></span>`).join("");
+      `<span class="tag">▱ ${escapeHtml(a.name)}${a.pending ? " · uploading…" : a.note ? ` · ${escapeHtml(a.note)}` : ""}<button class="member-remove" type="button" data-drop-attachment="${i}" aria-label="Remove ${escapeHtml(a.name)}">×</button></span>`).join("");
   }
 
   document.getElementById("composer-plus").addEventListener("click", () => {
@@ -3381,15 +3383,15 @@
     renderAttachmentTray();
   });
 
-  document.getElementById("composer-file").addEventListener("change", async (event) => {
+  // QOL-COMPOSER: lifted out of the picker's handler so the picker, a drop and an oversized paste
+  // all stage a file the same way. `note` is what the chip says the file came from.
+  async function stageAttachmentFiles(files, note = "") {
     const context = activeContext();
-    const files = [...(event.target.files ?? [])];
-    event.target.value = "";
-    for (const file of files) {
+    for (const file of [...(files ?? [])]) {
       // The host reads attachments back in 8MB chunks; refuse anything larger here rather than
       // after a long base64 round trip that fails at the far end.
       if (file.size > 8 * 1024 * 1024) { showToast(`${file.name} is larger than 8MB — the host will not take it.`); continue; }
-      const entry = { name: file.name, path: null, pending: true };
+      const entry = { name: file.name, path: null, pending: true, note };
       pendingAttachments.push(entry);
       renderAttachmentTray();
       try {
@@ -3405,7 +3407,116 @@
       }
       renderAttachmentTray();
     }
+  }
+
+  document.getElementById("composer-file").addEventListener("change", async (event) => {
+    const files = [...(event.target.files ?? [])];
+    event.target.value = "";
+    await stageAttachmentFiles(files);
   });
+
+  // ==== QOL-COMPOSER =========================================================================
+  // The composer was one <input>: a second line was impossible, a dropped file did nothing (the
+  // browser navigated away from the console and opened it), and a pasted document filled a
+  // one-line box with a wall nobody could read back. Everything below is that one box growing up.
+
+  // --8<-- QOL-COMPOSER paste helpers (pure; lifted whole by tests/composer-paste.test.mjs)
+  // A paste this size is a document, not a sentence. It becomes a file the agent can read rather
+  // than a wall of text in a chat bubble.
+  const PASTE_MAX_CHARS = 4000;
+  const PASTE_MAX_LINES = 40;
+  function pasteIsFileSized(text) {
+    const value = String(text ?? "");
+    if (!value) return false;
+    return value.length > PASTE_MAX_CHARS || value.split("\n").length > PASTE_MAX_LINES;
+  }
+  // Enough of markdown to name the file honestly: a heading, a fence, a list, a quote, a table, a
+  // link, or bold. Anything else gets .txt, because .md on a log file is a small lie.
+  function looksLikeMarkdown(text) {
+    const value = String(text ?? "");
+    return /^\s{0,3}#{1,6}\s+\S/m.test(value)
+      || /^\s*```/m.test(value)
+      || /^\s{0,3}([-*+]|\d+[.)])\s+\S/m.test(value)
+      || /^\s{0,3}>\s+\S/m.test(value)
+      || /^\s*\|[^\n]*\|\s*$/m.test(value)
+      || /\[[^\]\n]+\]\([^)\n]+\)/.test(value)
+      || /\*\*\S[^\n]{0,200}?\*\*/.test(value);
+  }
+  function pastedFileName(text, at = new Date()) {
+    const pad = (n) => String(n).padStart(2, "0");
+    const stamp = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`;
+    return `pasted-${stamp}.${looksLikeMarkdown(text) ? "md" : "txt"}`;
+  }
+  // --8<-- end QOL-COMPOSER paste helpers
+
+  // Eight lines is where a composer stops being a composer; past that the box scrolls itself.
+  const COMPOSER_MAX_LINES = 8;
+  function autosizeComposer() {
+    const el = elements.messageInput;
+    if (!el || el.tagName !== "TEXTAREA") return;
+    // The stylesheet gives this box no padding and no border, so scrollHeight is the text's own
+    // height and the cap is a plain multiple of the line box.
+    const line = parseFloat(getComputedStyle(el).lineHeight) || 20;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, Math.round(line * COMPOSER_MAX_LINES))}px`;
+  }
+  elements.messageInput.addEventListener("input", autosizeComposer);
+  // After the submit handler above has cleared the value, not before it.
+  elements.composer.addEventListener("submit", () => { requestAnimationFrame(autosizeComposer); });
+  autosizeComposer();
+
+  elements.messageInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+    // An IME candidate window takes the same Enter to commit a character; that is not a send.
+    if (event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    if (typeof elements.composer.requestSubmit === "function") elements.composer.requestSubmit();
+    else elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+
+  // Drag and drop. The listeners are on the document because a file aimed at the conversation
+  // lands on whichever row happens to be under the cursor, and because a drop the page ignores is
+  // a drop the browser honours -- it leaves the console and opens the file.
+  const dragCarriesFiles = (transfer) => !!transfer && [...(transfer.types ?? [])].includes("Files");
+  let dropGlowTimer = 0;
+  const showDropGlow = (on) => { if (on) document.body.dataset.composerDrop = "1"; else delete document.body.dataset.composerDrop; };
+  document.addEventListener("dragover", (event) => {
+    if (!dragCarriesFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    try { event.dataTransfer.dropEffect = "copy"; } catch { /* a synthetic drag has no effect to set */ }
+    showDropGlow(true);
+    // dragleave fires at every child boundary, so the glow is cleared by the drag going quiet
+    // rather than by counting enters against leaves and getting it wrong on a fast cursor.
+    clearTimeout(dropGlowTimer);
+    dropGlowTimer = setTimeout(() => showDropGlow(false), 200);
+  });
+  document.addEventListener("dragend", () => { clearTimeout(dropGlowTimer); showDropGlow(false); });
+  document.addEventListener("drop", (event) => {
+    if (!dragCarriesFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    clearTimeout(dropGlowTimer); showDropGlow(false);
+    const files = [...(event.dataTransfer.files ?? [])];
+    if (files.length === 0) return;
+    if (activeContext().kind !== "worker") { showToast("Drop a file on a direct conversation — a room has no attachment store."); return; }
+    stageAttachmentFiles(files);
+  });
+
+  elements.messageInput.addEventListener("paste", (event) => {
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    if (!pasteIsFileSized(text)) return;
+    // A room has nowhere to put it, so the paste goes in as text rather than being swallowed.
+    if (activeContext().kind !== "worker") return;
+    event.preventDefault();
+    const name = pastedFileName(text);
+    const lines = text.split("\n").length;
+    stageAttachmentFiles(
+      [new File([text], name, { type: name.endsWith(".md") ? "text/markdown" : "text/plain" })],
+      // en-US explicitly: the console's copy is English, and the chip's wording is asserted.
+      `pasted ${text.length.toLocaleString("en-US")} characters, ${lines} line${lines === 1 ? "" : "s"}`,
+    );
+  });
+  // ==== end QOL-COMPOSER ======================================================================
+
   // -- GW-09: attachment slots, filled after each transcript render. An image is
   // readAttachmentImage; anything else is a bounded text preview through readAttachmentText
   // (the host's 64 KB head), shown a slice at a time, then readAttachmentChunk once the head is

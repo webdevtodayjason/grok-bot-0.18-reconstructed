@@ -127,7 +127,9 @@
           <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachment">＋</button>
           <input id="composer-file" type="file" multiple hidden />
           <label class="sr-only" for="message-input">Message the selected room</label>
-          <input id="message-input" name="message" autocomplete="off" placeholder="Ask MSP Team…" />
+          <!-- QOL-COMPOSER: a textarea, not an input. Enter sends, Shift+Enter opens a line, and
+               the box grows with what is in it up to eight lines (autosizeComposer in app.js). -->
+          <textarea id="message-input" name="message" rows="1" autocomplete="off" placeholder="Ask MSP Team…"></textarea>
           <button class="send-button" type="submit"><span>➤</span> Send</button>
         </form>
         <div class="shelf-utilities">

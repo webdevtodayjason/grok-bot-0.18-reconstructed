@@ -731,6 +731,110 @@ try {
       }
     }
 
+    // -- QOL-COMPOSER: the composer grew up. It is a textarea that follows its content, Enter
+    // sends and Shift+Enter opens a line, a file dropped on the conversation attaches the way the
+    // "+" does, and a paste too big for the box becomes a file rather than a wall of text. All of
+    // it on the probe agent, which is still the open conversation.
+    if (probeAgentId) {
+      if (!(await page.evaluate(() => document.getElementById("room-title")?.textContent)).startsWith("Unread probe")) await clickText(probeName);
+      // The box itself: one line at rest, taller with content, and stopping around eight lines.
+      const grows = await page.evaluate(() => {
+        const el = document.getElementById("message-input");
+        if (!el || el.tagName !== "TEXTAREA") return { tag: el ? el.tagName : "missing" };
+        const set = (value) => { el.value = value; el.dispatchEvent(new Event("input", { bubbles: true })); return Math.round(el.getBoundingClientRect().height); };
+        const one = set("one line");
+        const three = set("one\ntwo\nthree");
+        const twenty = set(Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n"));
+        set("");
+        return { tag: el.tagName, one, three, twenty };
+      });
+      check(grows.tag === "TEXTAREA", "the composer is a textarea, not a one-line input", JSON.stringify(grows));
+      check(grows.three > grows.one && grows.twenty > grows.three && grows.twenty <= grows.one * 9, "and it follows its content, stopping around eight lines", JSON.stringify(grows));
+
+      // Shift+Enter opens a line and sends nothing; Enter sends, and the transcript keeps both.
+      const userRows = () => page.evaluate(() => document.querySelectorAll("#transcript .message-row.is-user").length);
+      const rowsBefore = await userRows();
+      await page.click("#message-input");
+      await page.keyboard.type("composer line one");
+      await page.keyboard.press("Shift+Enter");
+      await page.keyboard.type("composer line two");
+      const held = await page.evaluate(() => document.getElementById("message-input").value);
+      check(held.split("\n").length === 2 && /composer line one/.test(held) && /composer line two/.test(held), "Shift+Enter opens a second line in the composer", JSON.stringify(held));
+      check((await userRows()) === rowsBefore, "and sends nothing", `${rowsBefore} user rows before and after`);
+      await page.keyboard.press("Enter");
+      const sent = await until(() => page.evaluate(() => {
+        const rows = document.querySelectorAll("#transcript .message-row.is-user");
+        const last = rows[rows.length - 1];
+        if (!last) return null;
+        const paras = [...last.querySelectorAll(".message-bubble p")].map((p) => p.textContent.trim());
+        return paras.includes("composer line one") && paras.includes("composer line two") ? { paras, left: document.getElementById("message-input").value } : null;
+      }), 15_000, 500);
+      check(sent != null, "Enter sends it and the transcript keeps both lines", sent ? JSON.stringify(sent.paras) : "no two-line user row inside 15s");
+      check(sent != null && sent.left === "", "and the composer is empty afterwards", sent ? JSON.stringify(sent.left) : "");
+
+      // A synthetic drop over the conversation, carrying the same DataTransfer a real drag does.
+      const dropNames = ["gate-drop-a.txt", "gate-drop-b.txt"];
+      const dropped = await page.evaluate((names) => {
+        const transfer = new DataTransfer();
+        for (const name of names) transfer.items.add(new File([`${name} from the gate\n`], name, { type: "text/plain" }));
+        const target = document.getElementById("transcript");
+        target.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+        const glowing = document.body.dataset.composerDrop === "1";
+        target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+        return { glowing, cleared: document.body.dataset.composerDrop !== "1" };
+      }, dropNames);
+      check(dropped.glowing === true, "dragging files over the conversation lights the drop target", JSON.stringify(dropped));
+      check(dropped.cleared === true, "and the highlight goes out on the drop", JSON.stringify(dropped));
+      const chips = await until(() => page.evaluate(() => {
+        const tray = document.getElementById("attachment-tray");
+        if (!tray || tray.hidden) return null;
+        const tags = [...tray.querySelectorAll(".tag")].map((t) => t.textContent);
+        return tags.length === 2 && !tags.some((t) => /uploading/.test(t)) ? tags : null;
+      }), 20_000, 500);
+      check(chips != null, "and both dropped files stage as chips through uploadAttachment", chips ? JSON.stringify(chips) : await page.evaluate(() => document.getElementById("attachment-tray")?.textContent ?? "the tray is empty"));
+      // The MR-26 geometry with files staged. The tray was an unstyled fourth item in a
+      // three-column shelf, so the first chip pushed the composer into the utilities' column and
+      // clipped its text under the shelf's edge; it floats above the composer now.
+      const trayShelf = await page.evaluate(() => {
+        const r = (sel) => { const el = document.querySelector(sel); if (!el) return null; const b = el.getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) }; };
+        return { bar: r(".control-shelf"), util: r(".shelf-utilities"), composer: r(".composer"), tray: r("#attachment-tray") };
+      });
+      check(!!trayShelf.composer && !!trayShelf.util && trayShelf.composer.x + trayShelf.composer.w <= trayShelf.util.x + 1 && trayShelf.util.y + trayShelf.util.h <= trayShelf.bar.y + trayShelf.bar.h + 1, "a staged tray does not take the composer's column", JSON.stringify(trayShelf));
+      check(!!trayShelf.tray && !!trayShelf.bar && trayShelf.tray.y + trayShelf.tray.h <= trayShelf.bar.y + 2, "it floats above the shelf instead", JSON.stringify(trayShelf.tray));
+      const attachmentNames = async () => ((await gw("getAgentTranscriptTail", { id: probeAgentId, limit: 40 }))?.entries ?? [])
+        .filter((e) => e.kind === "user-attachment")
+        .map((e) => e.file_name || String(e.file_path ?? "").split("/").pop());
+      await page.fill("#message-input", "Two dropped files. No reply needed.");
+      await page.keyboard.press("Enter");
+      const delivered = await until(async () => {
+        const names = await attachmentNames();
+        return dropNames.every((n) => names.includes(n)) ? names.slice(-4) : null;
+      }, 20_000, 1000);
+      check(delivered != null, "and the send delivers both of them to the host", delivered ? JSON.stringify(delivered) : "neither dropped file reached the transcript inside 20s");
+      check((await page.evaluate(() => document.getElementById("attachment-tray")?.hidden)) === true, "the tray empties on the send");
+
+      // A paste no one-line box could hold. It becomes a file, and the chip says so.
+      const pastedInto = await page.evaluate(() => {
+        const el = document.getElementById("message-input");
+        el.focus();
+        const transfer = new DataTransfer();
+        transfer.setData("text/plain", "p".repeat(5000));
+        el.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
+        return el.value;
+      });
+      check(pastedInto === "", "a 5,000-character paste never lands in the composer", JSON.stringify(pastedInto.slice(0, 40)));
+      const pasteChip = await until(() => page.evaluate(() => {
+        const tray = document.getElementById("attachment-tray");
+        if (!tray || tray.hidden) return null;
+        const tags = [...tray.querySelectorAll(".tag")].map((t) => t.textContent);
+        return tags.length === 1 && !/uploading/.test(tags[0]) ? tags[0] : null;
+      }), 20_000, 500);
+      check(pasteChip != null && /pasted-\d{8}-\d{6}\.txt/.test(pasteChip), "it stages as one pasted-<stamp>.txt file instead", pasteChip ?? "no chip inside 20s");
+      check(pasteChip != null && /pasted 5,000 characters/.test(pasteChip), "and the chip says what happened", pasteChip ?? "");
+      await page.click("#attachment-tray [data-drop-attachment]");
+      check((await page.evaluate(() => document.getElementById("attachment-tray")?.hidden)) === true, "and a staged chip can be taken back off before the send");
+    }
+
     // -- GW-05: the Skills panel, on the probe agent, every step read back through getAgentWorkflows.
     if (probeAgentId) {
       if (!(await page.evaluate(() => document.getElementById("room-title")?.textContent)).startsWith("Unread probe")) await clickText(probeName);

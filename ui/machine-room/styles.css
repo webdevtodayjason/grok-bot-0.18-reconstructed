@@ -3220,3 +3220,68 @@ dialog[open] {
 
 .file-tile,
 .browser-page-head { overflow-wrap: anywhere; }
+
+/* Composer quality of life (QOL-COMPOSER). The box is a <textarea> now: it grows with what is in
+   it up to eight lines and scrolls past that, so the pill cannot stay a fixed 54px bar. The glow
+   is what a file dragged over the console looks like -- the drop lands in the conversation and
+   the composer, so those two are what light up. */
+.composer {
+  height: auto;
+  min-height: 54px;
+}
+
+.composer textarea {
+  width: 100%;
+  min-width: 0;
+  /* No padding and no border of its own: autosizeComposer reads scrollHeight as the text's own
+     height and caps it at eight line boxes, which only holds while this box has no chrome. */
+  padding: 0;
+  border: 0;
+  outline: 0;
+  font: inherit;
+  line-height: 20px;
+  color: var(--text-primary);
+  background: transparent;
+  resize: none;
+  overflow-y: auto;
+  /* The same eight lines as COMPOSER_MAX_LINES, so the box stops here even with scripting off. */
+  max-height: 160px;
+}
+
+.composer textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+body[data-composer-drop="1"] .conversation-space,
+body[data-composer-drop="1"] .composer {
+  outline: 2px dashed rgba(127, 227, 220, 0.7);
+  outline-offset: -6px;
+  box-shadow: inset 0 0 0 100vmax rgba(49, 182, 184, 0.08);
+}
+
+body[data-composer-drop="1"] .composer {
+  border-color: var(--teal-500);
+}
+
+/* The attachment tray carried the same bug MR-26 fixed for .composer-status, and nothing had
+   styled it: an unstyled fourth item in a three-column shelf, so the first staged chip pushed the
+   composer into the utilities' column and clipped its text under the shelf's edge. The "+" picker
+   made that a rare state; dropping files makes it a common one. It floats above the composer the
+   way the status does, and stays clickable, because the × on a chip is how a file is taken off
+   again. Scoped to :not([hidden]) so an author `display` cannot beat the `hidden` attribute. */
+.attachment-tray:not([hidden]) {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: min(72ch, 100%);
+}
+
+/* Both float above the shelf, so the status steps up over a tray that is showing beneath it. */
+.attachment-tray:not([hidden]) ~ .composer-status {
+  bottom: calc(100% + 44px);
+}
