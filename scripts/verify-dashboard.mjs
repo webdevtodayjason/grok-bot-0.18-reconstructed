@@ -938,7 +938,9 @@ try {
       // category -- because there is one catalog and it has to give one answer.
       const probe = String(catalogPlugins[0].name).slice(0, 4);
       await page.fill("#marketplace-search", probe); await page.waitForTimeout(700);
-      const found = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
+      // Deduped: a featured plugin is drawn twice on purpose, once under Featured and once under
+      // its own category, the way the sectioned catalog this page is modelled on does it.
+      const found = [...new Set(await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard)))];
       const wanted = catalogPlugins
         .filter((plugin) => [plugin.name, plugin.tagline, plugin.category].some((field) => String(field ?? "").toLowerCase().includes(probe.toLowerCase())))
         .map((plugin) => String(plugin.id));
@@ -1211,10 +1213,18 @@ try {
       check(spec?.command === String(addRow.install?.command ?? ""), "Add on the TinyFish card writes the catalog's own entry into connectors.json", JSON.stringify(spec ?? null).slice(0, 140));
       check(spec != null && Object.values(spec.env ?? {}).every((v) => v === ""), "with the environment value named and nothing written into that 0600 file", JSON.stringify(spec?.env ?? null));
       check(Object.keys(filesBefore?.mcpServers ?? {}).every((name) => written?.mcpServers?.[name]), "and the connectors already on the box survived the write");
-      // ...and lands on that plugin's page, which is where the credential goes.
+      // ...and lands on that plugin's page, which is where the credential goes. The page opens on
+      // the click, not on the connect: a remote connector with no key yet burns the host's whole
+      // 60s MCP connect timeout before its card can say anything, and the credential card is what
+      // the operator needs in front of them meanwhile.
       const opened = await until(() => page.evaluate(() => document.querySelector("[data-marketplace-account]")?.dataset.marketplaceAccount ?? null), 20_000, 1000);
       check(opened === "tinyfish", "and opens the TinyFish plugin page", `account row for ${opened}`);
-      const accountRow = await page.evaluate(() => document.querySelector("[data-marketplace-account]")?.textContent?.replace(/\s+/g, " ").trim() ?? "");
+      // Needs auth is the state AFTER the host has finished failing to connect it, so this poll
+      // has to outlast that 60s timeout; it settles as soon as the card lands, not on the cap.
+      const accountRow = await until(async () => {
+        const row = await page.evaluate(() => document.querySelector("[data-marketplace-account]")?.textContent?.replace(/\s+/g, " ").trim() ?? "");
+        return /Needs auth/.test(row) ? row : null;
+      }, 100_000, 2500) ?? await page.evaluate(() => document.querySelector("[data-marketplace-account]")?.textContent?.replace(/\s+/g, " ").trim() ?? "");
       check(/Needs auth/.test(accountRow), "whose Accounts row says Needs auth", accountRow.slice(0, 140));
       check((await page.$$("[data-connector-secret-form] input[type=password]")).length > 0, "and offers the credential card to answer it with");
       // Uninstall. Nothing was stored for it, so the clear offer is not drawn and the entry alone

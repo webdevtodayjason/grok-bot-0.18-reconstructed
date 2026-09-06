@@ -2476,13 +2476,27 @@
         return;
       }
       target.disabled = true;
+      // Open the page on the click, not when the write's refresh comes back. The entry itself is
+      // one fast round trip, but redrawing the cards behind it waits on the host connecting the
+      // server it just launched -- and a connector whose key is not stored yet spends the host's
+      // full 60s MCP connect timeout failing, which is the normal case for an Add. Holding the
+      // page behind that leaves a disabled button and nothing else on screen for a minute, when
+      // the credential card that ends the wait is exactly what the operator came here for.
+      // Its state pill catches up on the refresh below; a write that is refused takes it back.
+      marketplacePluginId = item.id;
+      marketplaceArmedUninstall = null;
+      paintMarketplaceBody();
       Promise.resolve(adapter.addMarketplacePlugin(item, contextLead()?.id))
         .then((result) => {
           showToast(result?.message ?? `${item.name} added`);
-          if (result?.accepted !== false) { marketplacePluginId = item.id; marketplaceArmedUninstall = null; }
+          if (result?.accepted === false) marketplacePluginId = null;
           refreshMarketplace();
         })
-        .catch((error) => { target.disabled = false; showToast(`${item.name} was not added: ${error.message}`); });
+        .catch((error) => {
+          marketplacePluginId = null;
+          paintMarketplaceBody();
+          showToast(`${item.name} was not added: ${error.message}`);
+        });
     } else if (target.dataset.marketplaceUninstall) {
       const name = target.dataset.marketplaceUninstall;
       // Armed on the label, not on a repaint: redrawing the page here would put the "also clear"
