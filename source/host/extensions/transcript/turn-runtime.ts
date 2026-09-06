@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isMessageAddress } from "../../../shared/message-reference.js";
 import {
   OPERATOR_ASK_AWAITING_TAB_ID,
-  operatorAskFromTranscript,
+  operatorAskForTurn,
 } from "../../../shared/awaiting-operator.js";
 import { sandDualSurfaceToolTelemetry } from "../../../shared/agents/agent-tool-names.js";
 import { SAND_REACTION_AGENT } from "../../../shared/transcript.js";
@@ -564,6 +564,10 @@ export class TurnRuntime {
       });
       this.activeTurns.set(session.id, turn);
       this.activeRequestSources.set(session.id, "turn");
+      // QOL-NEEDS-YOU: where this turn starts on the transcript. The operator-ask read at the end
+      // classifies only what gets appended after this entry -- read the whole conversation instead
+      // and a turn that delivers nothing to the operator re-lights an ask they already answered.
+      const turnStartEntryId = session.db.getTranscriptEntries().at(-1)?.id ?? null;
       try {
         const unansweredPrompts =
           this.tm.widgetResponses.collectUnansweredQuestionPrompts(session);
@@ -621,7 +625,13 @@ export class TurnRuntime {
         setTurnTraceAttributes(turnTrace, {
           "sand.outcome": resolveTurnTraceOutcome(settledResult),
         });
-        this.noteOperatorAsk(session, settledResult, epoch, turnTrace);
+        this.noteOperatorAsk(
+          session,
+          settledResult,
+          epoch,
+          turnStartEntryId,
+          turnTrace,
+        );
         await this.tm.roster.emitAgentUpdate(session.id);
         this.tm.automationRuntime.emitAutomations(session);
       } catch (error) {
@@ -688,27 +698,35 @@ export class TurnRuntime {
    * amber "Waiting on you" and the existing notification decider all say so. Cleared by the
    * operator's next message to this agent (send-acceptance.ts clears the badge on accept).
    *
-   * Guards, in order: a turn that did not really end (aborted, quiesced for an upgrade, or parked
-   * on a user selection) is not waiting on an answer; a newer turn already started, so this one's
-   * closing message is stale; and a badge already on the row belongs to the box hand-off or an
-   * auto-review approval, which are structured facts and outrank a read of prose.
+   * Guards, in order: a turn that did not really end (aborted, or quiesced for an upgrade) is not
+   * waiting on an answer; a newer turn already started, so this one's closing message is stale; and
+   * a badge already on the row belongs to the box hand-off or an auto-review approval, which are
+   * structured facts and outrank a read of prose.
+   *
+   * `awaitingUserSelection` is deliberately NOT a guard. Every widget, secret request and
+   * auto-review approval sets it, so guarding on it made the classifier's widget branch dead code:
+   * a question widget is the clearest ask there is and lit nothing on the roster. The classifier
+   * sorts the three out on its own -- a widget is an ask, a secret request and an approval carry
+   * their own surfaces and classify as null.
+   *
+   * `turnStartEntryId` is the last entry that existed before the run; only what came after it is
+   * this turn's, and a turn that appended nothing addressed to the operator asks nothing.
    */
   noteOperatorAsk(
     session: LiveTranscriptSession,
     result: TurnResult,
     epoch: number,
+    turnStartEntryId: string | null,
     turnTrace?: HostTrace,
   ): void {
     try {
-      if (
-        result.aborted ||
-        result.quiescedForUpgrade === true ||
-        result.awaitingUserSelection === true
-      )
-        return;
+      if (result.aborted || result.quiescedForUpgrade === true) return;
       if (epoch !== this.tm.sendPipeline.currentTurnEpoch(session)) return;
       if (session.db.getAwaitingUserResponse() != null) return;
-      const ask = operatorAskFromTranscript(session.db.getMainTranscriptEntries());
+      const ask = operatorAskForTurn(
+        session.db.getTranscriptEntries(),
+        turnStartEntryId,
+      );
       if (ask == null) return;
       session.db.setAwaitingUserResponse({
         tabId: OPERATOR_ASK_AWAITING_TAB_ID,

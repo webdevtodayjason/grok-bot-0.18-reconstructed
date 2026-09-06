@@ -88,12 +88,15 @@ let plainRequests = 0;
 // QOL-NEEDS-YOU arm. Out of "loop" the stub stops looping and answers like a real turn: one
 // SendMessage, then plain text so the turn settles on a closing message. "ask" closes with a
 // question the host's classifier must catch; "quiet" closes with a statement it must leave alone.
+// "quiet" carries a rhetorical question the agent answers itself, because that is what the first
+// cut got wrong: it scanned every sentence backwards and put "Was anything else outstanding?" on
+// the row while nothing was owed. Only the LAST sentence decides now, and this measures it live.
 let stubMode = "loop";
 let phaseSends = 0;
 const setStubMode = (mode) => { stubMode = mode; phaseSends = 0; };
 const PHASE_MESSAGE = {
   ask: "I pulled the report, but the vendor portal signed me out. Can you sign in on the box and tell me when you're through?",
-  quiet: "Thanks, I'm through and the report is filed. Nothing else is outstanding.",
+  quiet: "Thanks, I'm through and the report is filed. Was anything else outstanding? No, that was the last of it.",
 };
 const sse = (res, payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
 const chunk = (delta, finish = null) => ({
@@ -291,7 +294,7 @@ try {
     check(cleared.doneAt !== 0 && cleared.doneAt - repliedAt <= HEARTBEAT_MS, "cleared within one console heartbeat of the reply", cleared.doneAt === 0 ? "never cleared" : `${cleared.doneAt - repliedAt}ms of ${HEARTBEAT_MS}ms`);
     check(cleared.sawAt !== 0, "the follow-up turn delivered its closing statement", cleared.sawAt !== 0 ? String(cleared.row?.lastMessagePreview ?? "").slice(0, 120) : "no closing message in 75s");
     const after = await agentRow();
-    check(after != null && after.awaitingUserResponse == null, "a turn that closes on a statement does not raise the badge", after == null ? "no roster row" : JSON.stringify(after.awaitingUserResponse));
+    check(after != null && after.awaitingUserResponse == null, "a turn that closes on a statement, rhetorical question and all, does not raise the badge", after == null ? "no roster row" : JSON.stringify(after.awaitingUserResponse));
     setStubMode("loop");
   }
 } catch (error) {
