@@ -5,7 +5,7 @@
 // anything outside node builtins: the relay has no node_modules at all.
 //
 // The contract is docs/JOB-BUS.md sections 2 and 3. Every name here is from it.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -23,9 +23,10 @@ export function jobBusTokenFile(env = process.env) {
   return dir == null ? null : path.join(dir, "job-bus.json");
 }
 
-// Env first, then the file the console writes, then unconfigured -- which is a 503 rather than an
-// open door. Resolved on every request on purpose: generating a token in Settings has to work
-// without restarting the relay, and one small readFileSync is cheaper than the fetch that follows.
+// Env first, then the file the console writes, then unconfigured -- which /v1 answers as the same
+// 401 as a wrong token, because whether a bus exists here is not something a stranger gets to
+// learn. Resolved on every request on purpose: generating a token in Settings has to work without
+// restarting the relay, and one small readFileSync is cheaper than the fetch that follows.
 export function resolveJobToken(env = process.env) {
   const fromEnv = String(env.TITAN_JOB_TOKEN ?? "").trim();
   if (fromEnv.length > 0) return { token: fromEnv, source: "env" };
@@ -42,8 +43,16 @@ export function resolveJobToken(env = process.env) {
 // 48 hex characters, shown once by the console.
 export const newJobToken = () => randomBytes(24).toString("hex");
 
-// 120 requests a minute per client, in fixed windows, with the same bounded-map shape as the
-// login throttle: the key comes from the caller, so an unbounded map would be a memory leak.
+// Which bearer a create call arrived on, in a form the audit can keep. Eight hex of a sha256 is
+// enough to tell one token's jobs from another's across a rotation, and short enough that the row
+// is not a hash anyone can grind back into the token it names. docs/JOB-BUS.md 10.5.
+export const jobSubmitterId = (token) =>
+  createHash("sha256").update(String(token ?? ""), "utf8").digest("hex").slice(0, 8);
+
+// Fixed windows, with the same bounded-map shape as the login throttle: the key comes from the
+// caller, so an unbounded map would be a memory leak. The bus runs two of these -- 120 a minute
+// keyed by client, and one global bucket of 600 -- so a fleet of addresses cannot spend the box's
+// whole minute between them. docs/JOB-BUS.md 10.6.
 export function createRateLimiter({ limit = 120, windowMs = 60_000, capacity = 4096 } = {}) {
   const seen = new Map();
   return {
@@ -71,7 +80,7 @@ export function createRateLimiter({ limit = 120, windowMs = 60_000, capacity = 4
 // What the relay guarantees about a create call, and no more: it is JSON, it names a type, and it
 // carries an idempotency key. The allowlist, the payload shape and the secret sweep are the
 // gateway's, because they are the same rules whether a job arrives over HTTP or from the console.
-export function jobCreateArgs(raw, headerKey) {
+export function jobCreateArgs(raw, headerKey, { client = null, submitterId = null } = {}) {
   let parsed;
   try { parsed = JSON.parse(String(raw ?? "").trim().length > 0 ? raw : "{}"); }
   catch { return { error: "body must be JSON" }; }
@@ -95,6 +104,11 @@ export function jobCreateArgs(raw, headerKey) {
       callback_url: parsed.callback_url ?? null,
       // The bearer's label. CoS never names itself, so a job cannot claim a different submitter.
       submitter: "cos",
+      // Who actually presented a token, and from where. Both come from the request rather than the
+      // body for the same reason `submitter` is fixed: a caller must not be able to write its own
+      // audit row. docs/JOB-BUS.md 10.5.
+      client,
+      submitter_id: submitterId,
     },
   };
 }

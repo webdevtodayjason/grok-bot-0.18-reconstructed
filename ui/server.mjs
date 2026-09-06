@@ -32,7 +32,8 @@ import {
   safeEqual, safeNextPath, serializeCookie, verifyPassword,
 } from "./auth.mjs";
 import {
-  createRateLimiter, jobBusTokenFile, jobCreateArgs, newJobToken, resolveJobToken, routeJobBus,
+  createRateLimiter, jobBusTokenFile, jobCreateArgs, jobSubmitterId, newJobToken, resolveJobToken,
+  routeJobBus,
 } from "./job-bus-edge.mjs";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
@@ -453,6 +454,11 @@ async function relayAvatar(req, res, pathname) {
 const JOB_BUS_BODY_LIMIT = 64 * 1024;
 const JOB_BUS_REALM = { "www-authenticate": 'Bearer realm="titan-job-bus"' };
 const jobBusLimiter = createRateLimiter({ limit: 120, windowMs: 60_000 });
+// One bucket for the whole bus, on top of the per-client one. Without it a caller with a range of
+// addresses gets 120 a minute per address and the box wears the sum. One fixed key, so the map
+// never grows. docs/JOB-BUS.md 10.6.
+const jobBusGlobalLimiter = createRateLimiter({ limit: 600, windowMs: 60_000, capacity: 1 });
+const JOB_BUS_GLOBAL = "bus";
 
 async function jobBusCall(command, args) {
   const upstream = await fetch(`${GATEWAY}/api/${command}`, {
@@ -481,18 +487,44 @@ function answerUpstream(res, upstream, status = upstream.status, text = upstream
 }
 
 async function handleJobBus(req, res, url) {
-  const configured = resolveJobToken();
-  if (configured.token.length === 0) return fail(res, 503, "job bus not configured");
+  const client = clientOf(req);
 
-  const header = String(req.headers.authorization ?? "");
-  const presented = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (presented.length === 0 || !safeEqual(presented, configured.token)) {
-    return fail(res, 401, "unauthorized", JOB_BUS_REALM);
+  // The same lockout the login uses, keyed the same way, because a bearer is guessed exactly the
+  // way a password is and there is no reason the bus should be the cheaper of the two doors to
+  // knock on. Checked before the body and before the token compare: an address already locked out
+  // must not be able to make this process do work on its behalf.
+  const lockedMs = throttle.retryAfterMs(client);
+  if (lockedMs > 0) {
+    const seconds = Math.ceil(lockedMs / 1000);
+    return fail(res, 429, `too many attempts; wait ${seconds}s`, { "retry-after": String(seconds) });
   }
 
+  const configured = resolveJobToken();
+  const header = String(req.headers.authorization ?? "");
+  const presented = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  // One answer for unconfigured, missing and wrong. The 503 that used to say "job bus not
+  // configured" told an unauthenticated stranger that this host runs a bus and that its token is
+  // currently unset, which is the one moment it is worth knowing. The console still says it, to a
+  // caller that already signed in. docs/JOB-BUS.md 10.6.
+  if (configured.token.length === 0 || presented.length === 0 || !safeEqual(presented, configured.token)) {
+    const lockoutMs = throttle.recordFailure(client);
+    // recordFailure only reports a wait on the attempt that trips the lock, and a locked client is
+    // turned away above, so this fires once per lockout rather than once per refused request.
+    if (lockoutMs > 0) {
+      console.log(`job bus bearer locked out for ${client}`);
+      jobBusCall("jobBusAudit", { event: "auth_locked", client })
+        .catch((error) => console.log(`job bus audit failed: ${error?.message ?? error}`));
+    }
+    return fail(res, 401, "unauthorized", JOB_BUS_REALM);
+  }
+  // A good bearer deliberately does NOT clear the count. The bucket is shared with the console
+  // login, and clearing it here would let anyone holding the bus token reset a password lockout on
+  // their address. A lockout expires on its own, which is all this needs to be.
+
   // Per client, the same address the login lockout counts, so a proxy in front does not collapse
-  // every caller into one bucket.
-  const wait = jobBusLimiter.retryAfterSeconds(clientOf(req));
+  // every caller into one bucket; then the whole bus, so many addresses cannot outrun it together.
+  const wait = jobBusLimiter.retryAfterSeconds(client)
+    || jobBusGlobalLimiter.retryAfterSeconds(JOB_BUS_GLOBAL);
   if (wait > 0) return fail(res, 429, `too many requests; wait ${wait}s`, { "retry-after": String(wait) });
 
   const route = routeJobBus(url.pathname);
@@ -509,18 +541,24 @@ async function handleJobBus(req, res, url) {
     return endAndClose(req, res, 413, { "content-type": "application/json" },
       JSON.stringify({ error: "job body too large" }));
   }
-  const shaped = jobCreateArgs(raw, req.headers["idempotency-key"]);
+  const shaped = jobCreateArgs(raw, req.headers["idempotency-key"],
+    { client, submitterId: jobSubmitterId(presented) });
   if (shaped.error != null) return fail(res, 400, shaped.error);
 
   const upstream = await jobBusCall("jobBusCreate", shaped.args);
   if (upstream.status !== 200) return answerUpstream(res, upstream);
   // jobBusCreate answers {created, job}. The status is the only place a REST client can see the
   // difference between a job it just made and one its retry found, so it is `created` that picks
-  // 201 or 200, never a timestamp comparison, and the body CoS reads is the job itself.
+  // 201 or 200, never a timestamp comparison.
   let body;
   try { body = JSON.parse(upstream.text); } catch { body = null; }
   if (body?.job == null) return answerUpstream(res, upstream);
-  return answerUpstream(res, upstream, body.created === true ? 201 : 200, JSON.stringify(body.job));
+  // Four fields, not the whole record. A create answer that echoed the job would hand back the
+  // payload and the worker's agent ids to whoever posted it; CoS reads the rest with GET
+  // /v1/jobs/{id} when it wants it. docs/JOB-BUS.md 10.6.
+  const { id, type, status, created_at } = body.job;
+  return answerUpstream(res, upstream, body.created === true ? 201 : 200,
+    JSON.stringify({ id, type, status, created_at }));
 }
 
 // ---- the job bus token, from the console --------------------------------------------------
