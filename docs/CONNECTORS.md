@@ -471,13 +471,15 @@ treats as no token at all.
 `GITHUB_TOKEN` environment variable), then the one that matters:
 
 ```bash
-git ls-remote https://github.com/cli/cli
+git ls-remote https://github.com/cli/cli-credential-probe
 ```
 
-A good answer is a list of refs. A **bad token** gives `remote: Invalid username or token` and
-`fatal: Authentication failed` — which is still a pass for the plumbing, because it means a
-credential was offered and refused rather than asked for. What must never come back is
-`could not read Username`: that is the original bug, and it means the helper is not configured.
+That path does not exist, and that is the point: github.com answers 401 for it, so git has to ask
+the credential helper. A public URL would be read anonymously and would say nothing about the
+helper. A good answer is `remote: Repository not found` or `fatal: Authentication failed` — both
+mean a credential was handed over and github.com answered on it, which is the plumbing working.
+What must never come back is `could not read Username`: that is the original bug, and it means the
+helper is not configured.
 
 **What bites.**
 
