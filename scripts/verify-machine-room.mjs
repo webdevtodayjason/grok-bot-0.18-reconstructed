@@ -12,10 +12,15 @@
  *   node scripts/verify-machine-room.mjs --assert-no-silent-mocks demo data rendered as if real
  *   node scripts/verify-machine-room.mjs --all
  *
- * Needs playwright. It is not a dependency of this repo, so the path is configurable:
- *   PLAYWRIGHT_DIR=/path/to/node_modules node scripts/verify-machine-room.mjs --all
+ * Needs playwright. It is not a dependency of this repo, so it is resolved the same way the other
+ * browser gates resolve it: GROK_BOT_PLAYWRIGHT_DIR, defaulting to .cache/playwright, which
+ * scripts/setup-gates.sh fills. PLAYWRIGHT_DIR stays as a fallback alias for a node_modules holding
+ * the full playwright package.
+ *   node scripts/verify-machine-room.mjs --all
  */
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -68,18 +73,28 @@ async function displayOfOpenSurface(page) {
   return token ? `:${token}` : ":1";
 }
 
+const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR
+  ?? process.env.PLAYWRIGHT_DIR
+  ?? new URL("../.cache/playwright", import.meta.url).pathname;
+
 async function loadPlaywright() {
-  const dir = process.env.PLAYWRIGHT_DIR;
+  const tried = [];
+  // The install scripts/setup-gates.sh makes: playwright-core under a directory with its own
+  // package.json. This is what verify-dashboard, verify-deploy and verify-review all use.
+  try { return createRequire(path.join(PW_DIR, "package.json"))("playwright-core"); }
+  catch (error) { tried.push(`playwright-core in ${PW_DIR}: ${String(error.message).split("\n")[0]}`); }
+  // A plain node_modules directory holding the full playwright package, the old PLAYWRIGHT_DIR shape.
   try {
     // A directory import resolves to the package's CJS entry, whose named exports do not survive
     // the ESM bridge -- take the default and fall back to the namespace.
-    const mod = dir ? await import(`${dir}/playwright/index.js`) : await import("playwright");
+    const mod = await import(`${PW_DIR}/playwright/index.js`);
     return mod.chromium ? mod : (mod.default ?? mod);
-  } catch (error) {
-    console.error("playwright is not resolvable. Set PLAYWRIGHT_DIR to a node_modules holding it.");
-    console.error(String(error.message));
-    process.exit(2);
-  }
+  } catch (error) { tried.push(`playwright in ${PW_DIR}/playwright: ${String(error.message).split("\n")[0]}`); }
+  try { const mod = await import("playwright"); return mod.chromium ? mod : (mod.default ?? mod); }
+  catch (error) { tried.push(`playwright from this repo: ${String(error.message).split("\n")[0]}`); }
+  console.error("playwright is not resolvable. Run scripts/setup-gates.sh, or set GROK_BOT_PLAYWRIGHT_DIR.");
+  for (const line of tried) console.error(`  ${line}`);
+  process.exit(2);
 }
 
 const { chromium } = await loadPlaywright();
@@ -88,7 +103,11 @@ const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 const pageErrors = [];
 page.on("pageerror", (e) => pageErrors.push(String(e)));
 
-await page.goto(UI, { waitUntil: "networkidle" });
+// Never "networkidle": the console holds an EventSource open for the whole session, so the network
+// is never idle and the wait can only time out. Load, then wait for the page's own readiness flag.
+await page.goto(UI, { waitUntil: "domcontentloaded" });
+await page.waitForFunction(() => window.__machineRoomLive !== undefined, null, { timeout: 30_000 })
+  .catch(() => {});
 await page.waitForTimeout(2600);
 
 const live = await page.evaluate(() => window.__machineRoomLive);

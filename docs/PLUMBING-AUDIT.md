@@ -752,12 +752,12 @@ navigates nothing. Typing a URL does not browse. Same for the `Context7` / `Repo
 **Acceptance harness (contract 2026-08-30).** Six commands, all green as of wave 3:
 
 ```
-PLAYWRIGHT_DIR=<node_modules with playwright> node scripts/verify-machine-room.mjs --assert-no-silent-mocks
-PLAYWRIGHT_DIR=...                            node scripts/verify-machine-room.mjs --e2e
-PLAYWRIGHT_DIR=...                            node scripts/verify-machine-room.mjs --surfaces
-SAND_PROFILE_DIRS=...                         node scripts/verify-local-turn.mjs --rounds 5
-                                              node scripts/verify-agent-identity.mjs
-                                              node --test tests/*.test.mjs      # the glob matters
+node scripts/verify-machine-room.mjs --assert-no-silent-mocks
+node scripts/verify-machine-room.mjs --e2e
+node scripts/verify-machine-room.mjs --surfaces
+SAND_PROFILE_DIRS=... node scripts/verify-local-turn.mjs --rounds 5
+node scripts/verify-agent-identity.mjs
+node --test tests/*.test.mjs      # the glob matters
 ```
 
 `node --test tests/` alone fails on this Node with `Cannot find module .../tests`; the suite is

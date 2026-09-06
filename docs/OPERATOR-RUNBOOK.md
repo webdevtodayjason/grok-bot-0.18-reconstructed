@@ -89,7 +89,7 @@ thing to check before trusting anything on screen.
 ## Verify it yourself
 
 ```sh
-PLAYWRIGHT_DIR=<node_modules with playwright> node scripts/verify-machine-room.mjs --all
+node scripts/verify-machine-room.mjs --all
 SAND_PROFILE_DIRS=... node scripts/verify-local-turn.mjs --rounds 5
 node scripts/verify-agent-identity.mjs
 node --test tests/
