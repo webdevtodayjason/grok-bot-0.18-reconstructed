@@ -59,15 +59,31 @@ node scripts/build-box-exec-daemon.mjs "$BUILD/box-exec-daemon/main.cjs" >/dev/n
 DAEMON="$BUILD/box-exec-daemon/main.cjs"
 say "box-exec-daemon/main.cjs  $(wc -c < "$DAEMON" | tr -d ' ') bytes  sha256 $(shasum -a 256 "$DAEMON" | cut -d' ' -f1)"
 
+step "stage the host bundle version"
+# SHIP-2. The box's own self-upgrade reads <base>/sand-host-bundle-latest.version and then
+# <base>/sand-host-bundle-<version>.tgz, and the relay serves both out of this runtime directory.
+# Only the version file is written here: the tarball is composed inside the box at request time,
+# because the supervisor prunes every entry of /home/box/sand-host the archive does not carry and
+# the parts of that tree this repo does not build come from the box image. ui/host-bundle.mjs says
+# it in full. A clean tree's version is its short git sha; sync.sh already refuses a dirty one.
+node scripts/stage-host-bundle.mjs --dir "$BUILD/dist/host" --host-main "$BUNDLE" \
+  || die "the host bundle version could not be staged"
+VERSION_FILE="$BUILD/dist/host/sand-host-bundle-latest.version"
+[ -f "$VERSION_FILE" ] || die "$VERSION_FILE was not produced"
+say "version $(cat "$VERSION_FILE")"
+
 step "prepare the tree on $HOST"
 ssh "$HOST" "mkdir -p '$ROOT/runtime' '$ROOT/profile' '$ROOT/credential' '$ROOT/ui' '$ROOT/deploy' && chmod 700 '$ROOT/profile' '$ROOT/credential'"
 say "$ROOT/{runtime,profile,credential,ui,deploy}"
 
 step "ship the artifacts"
 rsync -a "$BUNDLE" "$HOST:$ROOT/runtime/host-main.cjs"
+# Beside the bundle, always: install.sh refuses to run without it, and a relay advertising a version
+# whose bytes are not the ones next to it is the one failure this pair exists to make impossible.
+rsync -a "$VERSION_FILE" "$HOST:$ROOT/runtime/sand-host-bundle-latest.version"
 # The DIRECTORY is what the box bind-mounts, so ship it as one and delete anything stale in it.
 rsync -a --delete "$BUILD/box-exec-daemon/" "$HOST:$ROOT/runtime/box-exec-daemon/"
-say "runtime/host-main.cjs and runtime/box-exec-daemon/"
+say "runtime/host-main.cjs, runtime/sand-host-bundle-latest.version and runtime/box-exec-daemon/"
 
 step "ship the relay"
 # Named files, never the ui/ directory. That is the whole protection: ui/endpoints.json (API keys)

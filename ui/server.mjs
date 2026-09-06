@@ -22,10 +22,17 @@
 //                            CF-Connecting-IP. See the block above CLOUDFLARE_RANGES.
 //   TITAN_JOB_TOKEN          the job bus bearer for /v1; unset falls back to the file the
 //                            console writes, and neither means /v1 answers 503. docs/JOB-BUS.md
+//   SAND_HOST_RUNTIME_DIR    the ship's runtime directory (host-main.cjs plus the version file
+//                            stage-host-bundle.mjs writes). Unset means /runtime answers 503 and
+//                            the box simply never finds a host bundle to update to. SHIP-2.
 import { createServer } from "node:http";
 import net from "node:net";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
 import { rewriteVncAsset } from "./vnc-bridge.mjs";
+import {
+  BOX_INCOMING_ENTRY, BOX_TARBALL_PATH, LATEST_VERSION_FILE, RUNTIME_ROUTE_PREFIX,
+  composeHostBundleScript, formatLatestVersionFile, parseLatestVersionFile, parseRuntimeRequest,
+} from "./host-bundle.mjs";
 import {
   SESSION_LIFETIME_MS, clientAddress, createLoginThrottle, createSession, edgeAddress,
   isLoopbackHost, isSecureRequest, parseCookies, parseTrustedProxies, readAuthFile, readSession,
@@ -37,7 +44,7 @@ import {
 } from "./job-bus-edge.mjs";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 
 // Which model answers is an OPERATOR decision, not a rebuild. The host resolves it from
@@ -702,6 +709,73 @@ async function handleJobBusConsole(req, res, url) {
 //
 // :1 is the shared seat and the box serves it on 6080 with no token. Every fork display is behind
 // the token-websockify on 6081, where the token IS the display number.
+// ---- the host-only ship (docs/GAP-ANALYSIS.md SHIP-2) ------------------------------------------
+// The runtime directory a ship writes, served back to the box in the layout the host's own
+// self-upgrade already knows how to read. ui/host-bundle.mjs carries the layout rules and why.
+const RUNTIME_DIR = process.env.SAND_HOST_RUNTIME_DIR?.trim() ?? "";
+// One compose at a time. The staging paths inside the box are fixed, so two overlapping requests
+// would build into each other's tree; the tarball is ~15 MB and takes seconds, so a queue costs
+// nothing and a second name would only move the race.
+let bundleCompose = Promise.resolve();
+const runExec = (args, input) => new Promise((resolve, reject) => {
+  const child = execFile("docker", args, { maxBuffer: 8 << 20 }, (error, out, err) =>
+    (error ? reject(new Error(`${args.slice(0, 3).join(" ")}: ${String(err || error.message).trim().slice(0, 400)}`)) : resolve(String(out))));
+  if (input != null) child.stdin.end(input);
+});
+
+async function readLatestBundleVersion() {
+  if (RUNTIME_DIR.length === 0) return null;
+  try { return parseLatestVersionFile(await readFile(path.join(RUNTIME_DIR, LATEST_VERSION_FILE), "utf8")); } catch { return null; }
+}
+
+// Build the tarball in the box and stream it back with a real content-length. It is written to a
+// file first and measured rather than streamed straight out of tar, so a compose that fails still
+// fails as an HTTP status the host can report instead of as a truncated body it would try to
+// extract.
+async function serveHostBundleTarball(res, version) {
+  await runExec(["cp", path.join(RUNTIME_DIR, "host-main.cjs"), `${BOX}:${BOX_INCOMING_ENTRY}`]);
+  await runExec(["exec", BOX, "sh", "-c", composeHostBundleScript({ version })]);
+  const size = Number.parseInt(String(await runExec(["exec", BOX, "stat", "-c", "%s", BOX_TARBALL_PATH])).trim(), 10);
+  if (!Number.isInteger(size) || size <= 0) throw new Error("the composed bundle measured 0 bytes");
+  await new Promise((resolve, reject) => {
+    res.writeHead(200, { "content-type": "application/gzip", "content-length": String(size), "cache-control": "no-store" });
+    const child = spawn("docker", ["exec", BOX, "cat", BOX_TARBALL_PATH], { stdio: ["ignore", "pipe", "ignore"] });
+    child.stdout.pipe(res);
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`cat exited ${code}`))));
+  });
+  await runExec(["exec", BOX, "rm", "-f", BOX_TARBALL_PATH]).catch(() => {});
+}
+
+async function handleRuntimeBundle(req, res, url) {
+  const asked = parseRuntimeRequest(url.pathname);
+  // 404 rather than 401 on a bad token: this route is reached before the console's login, and a
+  // refusal that distinguished "wrong token" from "no such file" would confirm the path exists to
+  // anyone who found it.
+  if (asked == null || TOKEN.length === 0 || !safeEqual(asked.token, TOKEN)) return fail(res, 404, "not found");
+  if (RUNTIME_DIR.length === 0) return fail(res, 503, "no SAND_HOST_RUNTIME_DIR on this relay, so no host bundle is served");
+  const latest = await readLatestBundleVersion();
+  if (latest == null) return fail(res, 404, "no staged host bundle version");
+  if (asked.kind === "version") {
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+    return res.end(formatLatestVersionFile(latest));
+  }
+  // Only the staged version, never an arbitrary one: the box already holds the tree every other
+  // version would be composed from, so serving "any sha" would mean serving the same bytes under a
+  // name that lies about them.
+  if (asked.version !== latest) return fail(res, 404, "not the staged host bundle version");
+  const mine = bundleCompose.then(() => serveHostBundleTarball(res, latest));
+  bundleCompose = mine.catch(() => {});
+  try {
+    await mine;
+  } catch (error) {
+    console.log(`runtime bundle compose failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (!res.headersSent) return fail(res, 502, "the host bundle could not be composed in the box");
+    res.destroy();
+  }
+  return undefined;
+}
+
 const BOX_HOST = new URL(GATEWAY).hostname;
 const VNC_ROUTE = /^\/vnc\/([1-9][0-9]?)\/(.*)$/;
 const vncTarget = (display) => (display === 1 ? { port: 6080, query: "" } : { port: 6081, query: `?token=${display}` });
@@ -786,6 +860,13 @@ const server = createServer(async (req, res) => {
     // its own bearer. A console session must not open it and its bearer must not open anything
     // else, so the two doors never see each other's credential.
     if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return await handleJobBus(req, res, url);
+    // Before the console's login too, and for the same reason the job bus is: the caller is the
+    // box's own host process asking for its next bundle, and it can hold neither a session cookie
+    // nor an authorization header. Its credential is the token segment in the path. SHIP-2.
+    if (url.pathname.startsWith(RUNTIME_ROUTE_PREFIX)) {
+      if (req.method !== "GET") return fail(res, 405, "GET");
+      return await handleRuntimeBundle(req, res, url);
+    }
     // Whether a password is configured is not a secret: the login page announces it to anyone who
     // asks for it. The console reads this to decide whether to draw a Log out control.
     if (req.method === "GET" && url.pathname === "/auth/state") {

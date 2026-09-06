@@ -94,6 +94,10 @@ relay_run() {
     say "passing TITAN_JOB_TOKEN through to the relay (it wins over the console's token file)"
   fi
 
+  # SHIP-2: the runtime directory is mounted READ-ONLY at /runtime, and SAND_HOST_RUNTIME_DIR points
+  # the relay's /runtime/<token>/ route at it. That route serves the box its next host bundle, so the
+  # relay must be able to read the ship's artifacts and must never be able to rewrite them: the
+  # version it advertises and the bytes a recreate would boot are one pair a ship writes together.
   docker run --detach --name "$RELAY" \
     --network "$NET" \
     --restart unless-stopped \
@@ -105,9 +109,11 @@ relay_run() {
     --env SAND_HOST_GATEWAY_URL="http://$BOX:1340" \
     --env SAND_BOX_CONTAINER="$BOX" \
     --env SAND_PROFILE_DIRS=/profile \
+    --env SAND_HOST_RUNTIME_DIR=/runtime \
     --volume /var/run/docker.sock:/var/run/docker.sock \
     --volume "$ROOT/ui:/app/ui" \
     --volume "$ROOT/profile:/profile" \
+    --volume "$ROOT/runtime:/runtime:ro" \
     ${authmount[@]+"${authmount[@]}"} \
     "$RELAY_IMAGE" node /app/ui/server.mjs >/dev/null
 
