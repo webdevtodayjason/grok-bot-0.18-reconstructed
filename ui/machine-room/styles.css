@@ -1635,6 +1635,27 @@ dialog[open] {
   background: rgba(231, 162, 60, 0.1);
 }
 
+/* SECRET-1. The inline credential card: the custody hint under the masked field, and the green
+   "Saved" pill the card collapses to. The hint is one step brighter than a plain .field-hint
+   because it is a promise about where the value goes, not a caption, and it sits on the card's
+   tinted ground rather than on a panel. */
+/* `.field .secret-hint` and not `.secret-hint`: .field-hint is declared further down this file and
+   would otherwise win the tie and paint the custody line at --text-tertiary, which on the card's
+   ground reads as a caption nobody looks at. Measured in both themes, not assumed. */
+.field .secret-hint {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.secret-saved-pill {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+/* No theme override: the hint uses --text-secondary and the pill its shipped .success mix, which
+   is what the card's own <small> and every other status pill already do on this tinted ground.
+   Checked in both dusk and mist rather than assumed. */
+
 .routine-list,
 .plugin-list,
 .settings-list,

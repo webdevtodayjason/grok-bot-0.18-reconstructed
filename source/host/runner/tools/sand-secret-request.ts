@@ -9,10 +9,16 @@ export const summarizeSecretRequest=(r:{label:string}):string=>`Requested a secr
  * means the config push returned, NOT that the stdio server is back up -- the restart is a stop
  * plus a respawn on next discovery -- so the beat says the tools pick it up on their next call
  * rather than promising it is live this instant.
+ *
+ * SECRET-1 adds a third destination: the agent's OWN box shell. That beat has to name the variable
+ * and say whether the live box took the update, because "stored" and "your next command sees it"
+ * are two different claims and only the second is what the agent was asking for.
  */
-export function buildSecretProvidedAck(r:{label:string;target:{kind:string}},outcome?:{destination:string;server?:string;restarted?:boolean}):string{
+export function buildSecretProvidedAck(r:{label:string;target:{kind:string}},outcome?:{destination:string;server?:string;restarted?:boolean;shellField?:string;applied?:boolean}):string{
   const destination=outcome?.destination??r.target.kind;
-  const tail=outcome?.server!=null
+  const tail=outcome?.shellField!=null
+    ? `It is set in your shell's environment as $${outcome.shellField}; commands you run from now on see it (applied: ${outcome.applied===true?"yes":"no"}).${outcome.applied===true?" Confirm to the user that it is set, then continue.":" The store has it but the live box did not take the update, so tell the user it lands when the box next comes up; do not report it usable yet."}`
+    :outcome?.server!=null
     ? outcome.restarted===true
       ? `The "${outcome.server}" connector was restarted with it; its tools pick the value up on their next call, so check before reporting it live. Confirm to the user that it is set, then continue.`
       : `It is stored for the "${outcome.server}" connector, but the connector did not restart, so tell the user it may need a restart before its tools can use it.`

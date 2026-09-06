@@ -8,6 +8,11 @@ import {
   settlePendingLocalToolPermissionEntry,
 } from "../../../shared/transcript.js";
 import { buildSecretProvidedAck } from "../../runner/tools/sand-secret-request.js";
+import {
+  isShellEnvSecretField,
+  isShellSecretConnector,
+  shellEnvSecretFieldRefusal,
+} from "../shell-tools/shell-secret-field.js";
 import { SPEND_GUARD_VALUE_PREFIX } from "./sand-automation-spend-guard.js";
 import {
   describeReactedMessageQuote,
@@ -393,7 +398,11 @@ export class WidgetResponses {
         [
           `[The user securely provided the requested secret: "${request.label}", but the host REFUSED the field and discarded the value: nothing was stored. You never see the value and it is not in this conversation.]`,
           `Reason: ${routed.refused}`,
-          "Do not ask for it again. Tell the user the field was refused and that a connector credential goes in that connector's card in the console's Plugins panel.",
+          isShellSecretConnector(request.target?.platform)
+          // SECRET-1. The connector advice is wrong for a shell field: there is no Plugins card
+          // behind it. What was refused is the VARIABLE NAME, and the fix is a legal one.
+          ? "Do not ask for it again with the same field. Tell the user the variable name was refused; if you still need the value, ask once more with an UPPERCASE variable name that is not process control, not the shell's own HOME/PWD/USER and not a SAND_* switch."
+          : "Do not ask for it again. Tell the user the field was refused and that a connector credential goes in that connector's card in the console's Plugins panel.",
         ].join("\n"),
         "Agent failed to resume after a refused secret",
       );
@@ -434,12 +443,38 @@ export class WidgetResponses {
     target: any,
     value: string,
   ): Promise<
-    | { destination: string; server?: string; restarted?: boolean }
+    | { destination: string; server?: string; restarted?: boolean; shellField?: string; applied?: boolean }
     | { refused: string }
     | null
   > {
     if (target.kind !== "channel-credential") return null;
     const platform = typeof target.platform === "string" ? target.platform.trim() : "";
+    // SECRET-1. The reserved connector name. The original product answers a card like "Titan Job
+    // Bus token ... it'll land as env TITAN_JOB_TOKEN for this box" and the value becomes an
+    // environment variable of the agent's OWN shell; every other destination this method knows is
+    // somebody else's process. The shell store from CONNECT-5 already IS that environment, so the
+    // route is a name, not a new store. It returns before the connector and channel branches:
+    // "shell" must never fall through to a store the agent can read back.
+    if (isShellSecretConnector(platform)) {
+      const field = typeof target.field === "string" ? target.field.trim() : "";
+      // The field name comes from the model. A refusal is answered the way the connector branch
+      // answers one -- nothing is stored anywhere, and the agent is told the request went
+      // unanswered rather than handed an ack that says the value reached its destination.
+      if (!isShellEnvSecretField(field)) return { refused: shellEnvSecretFieldRefusal(field) };
+      if (this.tm.shellSecretSink == null) return null;
+      let applied = false;
+      try {
+        const stored = await this.tm.shellSecretSink({ field, value });
+        if (stored == null || stored.stored !== true) return null;
+        applied = stored.applied === true;
+      } catch (error) {
+        console.log(
+          `[sand:transcript] shell secret sink refused the value (${errorLogTag(error)}); nothing was stored`,
+        );
+        return { refused: errorMessage(error) };
+      }
+      return { destination: `your shell's environment as $${field}`, shellField: field, applied };
+    }
     // The connector route and the chat-channel route share ONE namespace -- `target.platform` --
     // and the collision is not hypothetical: the worked example in local-connectors.ts is a local
     // connector named `github`, and github is also one of the two chat platforms. On such a box a

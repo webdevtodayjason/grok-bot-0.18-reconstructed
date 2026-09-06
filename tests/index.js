@@ -22,6 +22,7 @@ import "./publication-packaging.test.mjs";
 import "./reconstructed-updater-guard.test.mjs";
 import "./research-archives.test.mjs";
 import "./router-settings.test.mjs";
+import "./secret-request-shell.test.mjs";
 import "./ui-routine-triggers.test.mjs";
 import "./routine-run-failure.test.mjs";
 import "./machine-room-decisions.test.mjs";

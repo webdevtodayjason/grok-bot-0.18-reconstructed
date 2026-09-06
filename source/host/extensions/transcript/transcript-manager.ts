@@ -177,6 +177,12 @@ export class TranscriptManager {
   connectorSecretSink:
     | ((args: { server: string; field: string; value: string }) => Promise<{ server: string; serverId: string; field: string; stored: boolean; restarted: boolean } | null>)
     | undefined;
+  // SECRET-1. Set by the host alongside the connector sink: routes a submitted secret into the
+  // AGENT'S OWN box shell environment, which is what the reserved connector name "shell" means.
+  // `applied` is the live box taking the update, which is a different claim from `stored`.
+  shellSecretSink:
+    | ((args: { field: string; value: string }) => Promise<{ field: string; stored: boolean; applied: boolean } | null>)
+    | undefined;
   automationConfigChanged: (() => unknown) | undefined;
   shouldEmitAutomations = () => true;
   disposed = false;
@@ -264,6 +270,9 @@ export class TranscriptManager {
   }
   setConnectorSecretSink(sink: NonNullable<TranscriptManager["connectorSecretSink"]>): void {
     this.connectorSecretSink = sink;
+  }
+  setShellSecretSink(sink: NonNullable<TranscriptManager["shellSecretSink"]>): void {
+    this.shellSecretSink = sink;
   }
   setAutomationConfigChanged(onChanged: () => unknown): void {
     this.automationConfigChanged = onChanged;

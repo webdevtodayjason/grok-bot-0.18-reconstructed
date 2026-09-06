@@ -1,7 +1,13 @@
 import { z } from "zod";
+import {
+  isShellEnvSecretField,
+  isShellSecretConnector,
+  shellEnvSecretFieldRefusal,
+  SHELL_SECRET_CONNECTOR,
+} from "../../extensions/shell-tools/shell-secret-field.js";
 import { sandWidgetSchema } from "../../../shared/sand-widgets.js";
 export const SEND_MESSAGE_TYPES = ["text", "attachment", "widget", "cursor-agent", "secret-request"] as const;
-export const SEND_MESSAGE_TYPE_DESCRIPTION = "text for chat messages, attachment for actual files or standalone media, widget for an interactive question with selectable options, cursor-agent to reference a Cursor cloud agent by its bcId (renders as a card that opens the agent in Cursor on click), secret-request to ask the user for a credential through a secure masked input (never a chat paste).";
+export const SEND_MESSAGE_TYPE_DESCRIPTION = "text for chat messages, attachment for actual files or standalone media, widget for an interactive question with selectable options, cursor-agent to reference a Cursor cloud agent by its bcId (renders as a card that opens the agent in Cursor on click), secret-request to ask the user for a credential through a secure masked input (never a chat paste) -- with connector \"shell\" the value lands as an environment variable of your own box shell.";
 export type SendMessageType = typeof SEND_MESSAGE_TYPES[number];
 export interface SendMessageInput {
   readonly type: SendMessageType; readonly content?: string | undefined; readonly url?: string | undefined;
@@ -21,6 +27,12 @@ export function refineSendMessage(value: SendMessageInput): SendMessageIssue[] {
   for (const { field, types } of TYPE_FIELDS) if (!types.includes(value.type) && isFieldProvided(value[field])) { const allowed = types.map((type) => `type:${type}`).join(" or "); issues.push({ path: [String(field)], message: `${String(field)} is only valid with ${allowed} and cannot ride a type:${value.type} message \u2014 it would be silently dropped. Nothing was sent. Re-send as separate SendMessage calls, one per type: this field on its own properly-typed message (${allowed}), and any text as its own type:text message.` }); }
   if (value.channel && value.type !== "text" && value.type !== "attachment") issues.push({ path: ["channel"], message: "channel can only be set for type:text or type:attachment, not widgets or cursor-agent cards" });
   if ((value.images?.length ?? 0) > 0 && value.type !== "text") issues.push({ path: ["images"], message: "images can only be set for type:text (they attach to a text message); for a standalone attachment use type:attachment with url" });
+  // SECRET-1. The reserved connector name "shell" means the agent's OWN box shell environment, and
+  // `field` is then the variable name. Refusing a bad name here rather than after the human has
+  // typed the value is the whole point: a card the host cannot honour must never be drawn.
+  if (value.type === "secret-request" && value.secret != null && isShellSecretConnector(value.secret.connector) && !isShellEnvSecretField(value.secret.field)) {
+    issues.push({ path: ["secret", "field"], message: `connector "${SHELL_SECRET_CONNECTOR}" writes the value into your own shell's environment, so field is the variable name. ${shellEnvSecretFieldRefusal(value.secret.field)} Re-send with an UPPERCASE variable name, e.g. "TITAN_JOB_TOKEN".` });
+  }
   if (value.type === "text") {
     if (!value.content) issues.push({ path: ["content"], message: "content is required when type is text" });
     for (const [index, image] of (value.images ?? []).entries()) if (!isValidAttachmentUrl(image.url)) issues.push({ path: ["images", index, "url"], message: "each images url must include a file:// or https:// scheme" });
@@ -46,8 +58,8 @@ const objectSchema = z.object({
   secret: z.object({
     label: z.string().trim().min(1).describe('What credential to ask for, shown as the card title and echoed in the field placeholder ("Paste your \u2026"), e.g. "Slack bot token".'),
     description: z.string().trim().optional().describe("Optional short help shown under the label."),
-    connector: z.string().trim().min(1).describe("The connector/platform the secret is for. The value is written to that connector's per-agent credential file."),
-    field: z.string().trim().min(1).describe('The credential field name to store the value under, e.g. "token".'),
-  }).optional().describe("Required when type is secret-request. Asks the user for a credential through a masked secure input; the value goes straight to the connector's credential file and never reaches you or the chat. You only learn that it was provided."),
+    connector: z.string().trim().min(1).describe('Where the value has to land. Use the reserved name "shell" when the credential is for a COMMAND you run in your own box shell -- the value is set as an environment variable of that shell and every command you run from then on sees it, without you ever seeing the value. Otherwise name the connector/platform: a local stdio connector gets it in that server\'s process environment, and a chat platform (slack, github) gets it in that channel\'s credential store.'),
+    field: z.string().trim().min(1).describe('The name to store the value under. With connector "shell" this is the ENVIRONMENT VARIABLE NAME, UPPERCASE, e.g. "TITAN_JOB_TOKEN" -- the value then lands as $TITAN_JOB_TOKEN in your shell (process-control names such as PATH, NODE_OPTIONS and LD_*, the shell\'s own HOME/PWD/USER, and the host\'s SAND_* switches are refused). For a connector or a chat platform it is that credential\'s field name, e.g. "token".'),
+  }).optional().describe('Required when type is secret-request. Asks the user for a credential through a masked secure input; the value goes straight to its destination and never reaches you or the chat. You only learn that it was provided and where it landed. Use connector "shell" with an UPPERCASE field to get a token you need for a shell command as an environment variable of your own box.'),
 });
 export const sendMessageParameters = objectSchema.superRefine((value, ctx) => { for (const issue of refineSendMessage(value)) ctx.addIssue({ code: "custom", path: [...issue.path], message: issue.message }); });

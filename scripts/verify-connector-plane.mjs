@@ -42,6 +42,14 @@
 //              box shell the agent's shell tool spawns. Off by default: --shell-secrets. It does
 //              NOT run either installer; the catalog is read, not executed.
 //
+// SECRET-1 gives this gate GATE-8's three exit codes, for GATE-8's reason: (m2) asks a MODEL to
+// raise the inline credential card, and a model that does not raise it in time is neither a pass
+// nor a failure. Left out of the status, exit 0 would mean two different things.
+//
+//   0  every leg reached a verdict and every verdict was a pass
+//   1  a leg failed
+//   3  every leg that reached a verdict passed, and at least one reached none
+//
 //   node scripts/verify-connector-plane.mjs            all of it
 //   node scripts/verify-connector-plane.mjs --no-restart   skip the docker restart in (a)
 //   node scripts/verify-connector-plane.mjs --no-model     skip the one model turn in (b)
@@ -52,7 +60,7 @@
 //   node scripts/verify-connector-plane.mjs --linear-key      add (j), Linear's preset
 //   node scripts/verify-connector-plane.mjs --slack-stdio     add (k), Slack's package and token
 //   node scripts/verify-connector-plane.mjs --google-stdio    add (l), Google's package and tokens
-//   node scripts/verify-connector-plane.mjs --shell-secrets   add (m), the shell-tool credential
+//   node scripts/verify-connector-plane.mjs --shell-secrets   add (m) and (m2), the shell-tool credential
 //   node scripts/verify-connector-plane.mjs --plugin-tools    add (n), the agent's plugin tools
 //   node scripts/verify-connector-plane.mjs --gh-tool         add (o), git's credential in the box
 //              (h) through (o) imply --no-restart and --no-model so each arm fits its budget
@@ -79,6 +87,7 @@
 //              --gh-tool. Like (m) it never runs the installer; if `gh` is not in the box it says
 //              so and skips the two legs that need it.
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -125,6 +134,10 @@ const SHELL_FIELD = "CODERABBIT_API_KEY";
 // QOL-GH. (o)'s field, guarded the same way: an operator's real GitHub token is not this gate's to
 // overwrite or delete, so the arm refuses to start if the host already holds one.
 const GH_FIELD = "GITHUB_TOKEN";
+// SECRET-1. The variable the inline-card leg asks for. Nothing on this box or any other uses this
+// name, so the leg cannot collide with an operator's credential; it still refuses to run if the
+// host already holds one under it.
+const INLINE_FIELD = "VERIFY_INLINE_TOKEN";
 // A github.com path that does NOT exist, on purpose. git over https fetches /info/refs anonymously
 // first and only consults a credential helper after a 401, so a public repository is read straight
 // through and would prove nothing. github.com answers 401 for a path it will not admit to, which
@@ -775,6 +788,13 @@ async function runStdioTokenArm(arm) {
 let shellSecretSet = false;
 let shellStoreSnapshot = null;
 let shellStoreSnapshotTaken = false;
+// SECRET-1: the inline-card leg's own unwind. It runs after (m)'s store restore and takes its own
+// snapshot, so it carries its own three.
+let inlineSecretSet = false;
+let inlineStoreSnapshot = null;
+let inlineStoreSnapshotTaken = false;
+let inlineAgentId = null;
+let inlineInconclusive = null;
 // PLUGINTOOLS-1 (n). Its own snapshot and its own probe agent, unwound before every earlier arm's
 // for the same reason (m) is: the newest write is the one that has to be undone first.
 let pluginToolsSnapshot = null;
@@ -1415,6 +1435,141 @@ try {
     // plane can set, it cannot unset), so the name itself outlives this arm in the box shell's
     // environment until the box restarts. That is a name with nothing in it, not a credential.
     ok(`the value is gone from ${DATA} and the store is byte-identical to the file this arm found; ${SHELL_FIELD} stays in the box shell as an empty name until the box restarts`);
+
+    // ------------------------------------------------ SECRET-1: the same store, asked for INLINE
+    //
+    // Everything above this line is the OPERATOR's door: setShellSecret, typed into the console.
+    // The ask is the agent's own door -- the masked card it raises mid-conversation, whose value
+    // lands as an environment variable of its own box. This leg runs that path end to end and
+    // touches no shortcut: the model raises the card, the console's command answers it, and the
+    // box's own shell is asked whether it now has the value.
+    //
+    // It is INCONCLUSIVE, never a failure, when the model does not raise the card in time. What is
+    // under test is the route, not the model's willingness to use a tool on the first prompt; a leg
+    // that fails on that would be a gate that goes red for the weather.
+    console.log("\n(m2) SECRET-1: the agent asks for a credential inline, and it lands in its own shell");
+
+    const inlineHeld = await call("listShellSecretFields");
+    if ((inlineHeld?.stored ?? []).includes(INLINE_FIELD)) {
+      fail(`the host already holds a ${INLINE_FIELD}; this leg will not overwrite it`);
+    }
+    inlineStoreSnapshot = await readFileBase64(SECRET_STORE);
+    inlineStoreSnapshotTaken = true;
+
+    const inlineBefore = await call("probeShellSecret", { field: INLINE_FIELD });
+    if (inlineBefore?.state !== "unset") {
+      fail(`the box shell already reports ${INLINE_FIELD} ${inlineBefore?.state}; the check would prove nothing`);
+    }
+    ok(`before anything is asked for, the box's own shell reports ${INLINE_FIELD} unset`);
+
+    const inlineCreated = await call("createAgent", { name: `verify-secret-${Math.random().toString(36).slice(2, 8)}` });
+    inlineAgentId = inlineCreated?.agent?.id ?? inlineCreated?.id;
+    if (inlineAgentId == null) fail("createAgent returned no agent id for the inline-card leg");
+
+    await call("sendPrompt", {
+      agentId: inlineAgentId,
+      prompt: [
+        "Ask me for a credential using the secure masked card, and do nothing else this turn.",
+        'Call SendMessage once with type "secret-request" and secret set to exactly:',
+        '{ "label": "Verify inline token", "description": "A throwaway value for a verification gate. Never share it in chat.",',
+        `  "connector": "shell", "field": "${INLINE_FIELD}" }`,
+        "Send no other message and call no other tool.",
+      ].join("\n"),
+    });
+
+    // The card is a transcript entry, so the transcript is where it is waited for -- the same
+    // surface the console reads and the same entry id submitSecret takes.
+    const inlineDeadline = Date.now() + 120_000;
+    let inlineEntry = null;
+    while (Date.now() < inlineDeadline) {
+      await sleep(5000);
+      const transcript = await call("getAgentTranscript", { id: inlineAgentId }).catch(() => []);
+      inlineEntry = (Array.isArray(transcript) ? transcript : []).find((entry) =>
+        entry.kind === "send-message" && entry.message?.type === "secret-request") ?? null;
+      if (inlineEntry != null) break;
+    }
+
+    if (inlineEntry == null) {
+      inlineInconclusive = `the model did not raise a secret-request card within 120 s, so the route was never exercised from its own end (the operator-door legs above still passed)`;
+      console.log(`  --  INCONCLUSIVE: ${inlineInconclusive}`);
+      console.log(`  --  nothing was stored and nothing was submitted; the leg unwinds as if it had run.`);
+    } else {
+      const asked = inlineEntry.message.secretRequest ?? {};
+      const askedTarget = asked.target ?? {};
+      if (String(askedTarget.platform ?? "").toLowerCase() !== "shell") {
+        fail(`the card names connector ${JSON.stringify(askedTarget.platform)}, not "shell"; the shell route was not the one asked for`);
+      }
+      if (askedTarget.field !== INLINE_FIELD) {
+        fail(`the card asks for field ${JSON.stringify(askedTarget.field)}, not ${INLINE_FIELD}`);
+      }
+      ok(`the agent raised a masked card: "${asked.label}" -> connector shell, field ${askedTarget.field}`);
+
+      // Invented here and nowhere else. It is not a credential to anything.
+      const INLINE_VALUE = `inline-verify-${Math.random().toString(36).slice(2, 14)}`;
+      const inlineDigest = createHash("sha256").update(INLINE_VALUE).digest("hex");
+      console.log(`  probe value: ${INLINE_VALUE.length} characters (never printed)`);
+
+      await call("submitSecret", { entryId: inlineEntry.id, value: INLINE_VALUE, agentId: inlineAgentId });
+      inlineSecretSet = true;
+
+      // The host's own stamp, not this script's optimism: secretProvided on the entry is what the
+      // console reads to collapse the card, and it is only set once routeSecret returned a
+      // destination.
+      const stampDeadline = Date.now() + 60_000;
+      let inlineStamped = false;
+      while (Date.now() < stampDeadline) {
+        const transcript = await call("getAgentTranscript", { id: inlineAgentId }).catch(() => []);
+        const entry = (Array.isArray(transcript) ? transcript : []).find((item) => item.id === inlineEntry.id);
+        if (entry?.secretProvided === true) { inlineStamped = true; break; }
+        await sleep(3000);
+      }
+      if (!inlineStamped) fail("the host never stamped secretProvided on the card, so nothing was routed");
+      ok("the host stamped the card provided, which it only does once the value reached a destination");
+
+      // Two claims, asked of two different places. The box's own shell says the NAME is set -- the
+      // same question (m) asks of setShellSecret -- and the store's digest says it is the same
+      // VALUE that was submitted. Neither prints it.
+      const inlineProbed = await call("probeShellSecret", { field: INLINE_FIELD });
+      if (inlineProbed?.state !== "set") {
+        fail(`the box shell reports ${INLINE_FIELD} ${inlineProbed?.state} after the card was answered`);
+      }
+      if (JSON.stringify(inlineProbed).includes(INLINE_VALUE)) fail("probeShellSecret answered with the value");
+      const storedDigest = (await docker(["exec", BOX, "node", "-e",
+        `const v=(JSON.parse(require('fs').readFileSync(${JSON.stringify(SECRET_STORE)},'utf8')).shell||{})[${JSON.stringify(INLINE_FIELD)}];process.stdout.write(v==null?'absent':require('crypto').createHash('sha256').update(v).digest('hex'))`,
+      ])).trim();
+      if (storedDigest !== inlineDigest) {
+        fail(`the store holds ${storedDigest === "absent" ? "nothing" : "a different value"} under ${INLINE_FIELD}: sha256 ${storedDigest.slice(0, 16)}… against the submitted ${inlineDigest.slice(0, 16)}…`);
+      }
+      ok(`the box shell reports ${INLINE_FIELD} set and the store's sha256 matches the value submitted through the card (${inlineDigest.slice(0, 16)}…)`);
+
+      // The ack the model was resumed with has to name the variable. It is a hidden prompt, so the
+      // transcript is not where it shows; what this can check is that the value is in no entry.
+      const finalTranscript = await call("getAgentTranscript", { id: inlineAgentId }).catch(() => []);
+      if (JSON.stringify(finalTranscript).includes(INLINE_VALUE)) {
+        fail("the submitted value is somewhere in the agent's transcript");
+      }
+      ok("and the value is in no transcript entry of the agent that asked for it");
+
+      const inlineRemoved = await call("deleteShellSecret", { field: INLINE_FIELD });
+      inlineSecretSet = inlineRemoved?.removed !== true;
+      if (inlineRemoved?.removed !== true) fail("deleteShellSecret did not remove the inline field");
+      const inlineAfter = await call("probeShellSecret", { field: INLINE_FIELD });
+      if (inlineAfter?.state !== "unset") fail(`the box shell still reports ${INLINE_FIELD} ${inlineAfter?.state} after the delete`);
+
+      const inlineSurvivors = (await inBox(`grep -rl -- ${INLINE_VALUE} ${DATA} 2>/dev/null || true`)).trim();
+      if (inlineSurvivors.length > 0) fail(`the value survives the delete in: ${inlineSurvivors}`);
+      ok(`after the delete the box shell reports ${INLINE_FIELD} unset and no file under ${DATA} holds the value`);
+    }
+
+    await restoreSecretStoreBase64(inlineStoreSnapshot);
+    const inlineStoreNow = await readFileBase64(SECRET_STORE);
+    if (inlineStoreNow !== inlineStoreSnapshot) {
+      fail("connector-env-secrets.json is not byte-identical to what the inline-card leg found");
+    }
+    inlineStoreSnapshotTaken = false;
+    await call("deleteAgent", { id: inlineAgentId });
+    inlineAgentId = null;
+    ok("the probe agent is deleted and the secret store is byte-identical to the file this leg found");
   }
 
   // ---------------------------------- (n) PLUGINTOOLS-1 the agent's four tools on the catalog
@@ -1683,7 +1838,13 @@ try {
     ok(`the token is gone from ${DATA} and the store is byte-identical; ${GH_FIELD} stays in the box shell as an empty name until the box restarts`);
   }
 
-  console.log("\nPASS — connector plane");
+  // SECRET-1: an inconclusive leg is a PASS with the reason on the last line, and it takes GATE-8's
+  // exit code rather than 0. A green connector plane must not mean two different things.
+  if (inlineInconclusive != null) {
+    console.log("\nPASS — connector plane");
+    console.log(`  one INCONCLUSIVE leg: ${inlineInconclusive}`);
+    process.exitCode = 3;
+  } else console.log("\nPASS — connector plane");
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
   console.error(`\nFAIL — ${error.message}`);
@@ -1717,6 +1878,16 @@ try {
   try {
     if (pluginToolsAgentId != null) await callRaw("deleteAgent", { id: pluginToolsAgentId });
   } catch (error) { console.error(`cleanup: plugin-tools probe agent — ${error.message}`); }
+  // SECRET-1: the inline-card leg is the newest write inside (m), so it unwinds before (m)'s own.
+  try {
+    if (inlineSecretSet) await callRaw("deleteShellSecret", { field: INLINE_FIELD });
+  } catch (error) { console.error(`cleanup: inline shell secret: ${error.message}`); }
+  try {
+    if (inlineStoreSnapshotTaken) await restoreSecretStoreBase64(inlineStoreSnapshot);
+  } catch (error) { console.error(`cleanup: secret store after the inline-card leg: ${error.message}`); }
+  try {
+    if (inlineAgentId != null) await callRaw("deleteAgent", { id: inlineAgentId });
+  } catch (error) { console.error(`cleanup: inline-card probe agent: ${error.message}`); }
   try {
     if (shellSecretSet) await callRaw("deleteShellSecret", { field: SHELL_FIELD });
   } catch (error) { console.error(`cleanup: shell secret — ${error.message}`); }

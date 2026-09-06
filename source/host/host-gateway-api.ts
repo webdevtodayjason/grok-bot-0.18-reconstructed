@@ -16,12 +16,16 @@ import {
   findShellTool,
 } from "./extensions/shell-tools/shell-tool-catalog.js";
 import {
-  buildShellSecretEnvironmentUpdate,
   deleteShellEnvSecret,
   listShellEnvSecretFields,
+  pushShellEnvSecretsToBox,
   readShellEnvSecrets,
   writeShellEnvSecret,
 } from "./extensions/shell-tools/shell-secrets.js";
+import {
+  isShellEnvSecretField,
+  shellEnvSecretFieldRefusal,
+} from "./extensions/shell-tools/shell-secret-field.js";
 import {
   fetchShellToolSkill,
   probeShellToolBinary,
@@ -285,15 +289,26 @@ export function createHostGatewayApi(
    */
   const pushShellSecretsToBox = async (clearing: readonly string[] = []): Promise<boolean> => {
     try {
-      const box = deps.extensions.api("forever-box").box;
-      if (box == null || typeof box.applyEnvironment !== "function") return false;
-      await box.applyEnvironment(shellCtx, buildShellSecretEnvironmentUpdate(shellRoot(), clearing));
-      return true;
+      return await pushShellEnvSecretsToBox(shellRoot(), deps.extensions.api("forever-box").box, shellCtx, clearing);
     } catch {
       return false;
     }
   };
+  /**
+   * SECRET-1. The WRITE rule, shared with the secret-request card's "shell" route so an agent
+   * asking for a variable inline and an operator typing one in the console are held to one rule.
+   */
   const requireShellField = (field: unknown, command: string): string => {
+    if (!isShellEnvSecretField(field)) {
+      throw new Error(`${command} refused this field. ${shellEnvSecretFieldRefusal(field)}`);
+    }
+    return field;
+  };
+  /**
+   * Reading, probing and DELETING stay on the looser connector rule. A stricter write rule must
+   * never strand a value a laxer past wrote: whatever the store holds has to remain removable.
+   */
+  const requireStoredShellField = (field: unknown, command: string): string => {
     if (!isConnectorEnvFieldName(field)) {
       throw new Error(`${command} needs an environment variable name as \`field\` (process-control names such as PATH, NODE_OPTIONS and LD_* are refused)`);
     }
@@ -1150,7 +1165,7 @@ export function createHostGatewayApi(
       return { field, stored: true, applied: await pushShellSecretsToBox(), fields: shellSecretsSnapshot().fields };
     },
     deleteShellSecret: async (args: any) => {
-      const field = requireShellField(args?.field, "deleteShellSecret");
+      const field = requireStoredShellField(args?.field, "deleteShellSecret");
       const removed = deleteShellEnvSecret(shellRoot(), field);
       // The box control plane can set but not unset, so a delete pushes the empty string: the
       // shell's own `${VAR:+...}` reads that as unset, and the next box restart drops it for real.
@@ -1163,7 +1178,7 @@ export function createHostGatewayApi(
      * value is never in the command, never in the output, and never in this answer.
      */
     probeShellSecret: async (args: any) => {
-      const field = requireShellField(args?.field, "probeShellSecret");
+      const field = requireStoredShellField(args?.field, "probeShellSecret");
       const box = deps.extensions.api("forever-box").box;
       if (box == null || typeof box.mcpResourceAccessor !== "function") {
         throw new Error("this box exposes no shell to probe");

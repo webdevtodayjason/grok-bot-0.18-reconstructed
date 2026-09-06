@@ -54,6 +54,31 @@
             time: "5:35 PM",
             evidence: { attemptId: "demo-attempt-queue", verdict: "evidenced", receipts: 2, attestations: ["demo-att-queue-1", "demo-att-queue-2", "demo-att-queue-3"], missing: [], checkedBy: "containment@1" },
           },
+          // SECRET-1: the inline credential card, in the shape the original product uses --
+          // connector "shell", so the value lands as an environment variable of this agent's own
+          // box. Offline it is the only place the masked field, its custody hint and the collapsed
+          // "Saved" state can be read with no gateway, which is what verify-dashboard --offline
+          // measures. The token itself is a name, never a value: nothing here is a credential.
+          {
+            id: "chief-secret-request",
+            authorId: "chief",
+            authorName: "Chief of Staff",
+            type: "decision",
+            text: "I need the Job Bus token before I can run the dry-run. Put it in the field below rather than in the chat.",
+            time: "5:37 PM",
+            card: {
+              kind: "secret",
+              requestId: null,
+              entryId: "chief-secret-request",
+              status: "pending",
+              field: "TITAN_JOB_TOKEN",
+              platform: "shell",
+              title: "The agent asked for Titan Job Bus token",
+              detail: "Temporary Titan Job Bus bearer token for the CoS dry-run. Never share it in chat. It lands as env TITAN_JOB_TOKEN for this box.",
+              rule: null,
+              options: [],
+            },
+          },
           {
             id: "chief-queue-link",
             authorId: "chief",
@@ -785,6 +810,13 @@
     if (card.status === "sending") {
       return `<div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">Sending your answer…</small></span></div></div>`;
     }
+    // SECRET-1: the answered credential card collapses to one line and a green pill, the way the
+    // original product's card does. Nothing about the value is on screen -- the card says the value
+    // was kept private, and the only thing the page ever held was the input's `value`, cleared on
+    // submit and never written into markup.
+    if (card.kind === "secret" && card.status === "provided") {
+      return `<div class="inline-card secret-card" style="--card-accent:var(--green-500)"><div class="inline-card-header"><span class="inline-card-icon">\u2713</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">Saved securely and kept private.</small></span><span class="status-pill success secret-saved-pill">\u2713 Saved</span></div></div>`;
+    }
     if (card.status && card.status !== "pending") {
       const settled = card.status === "approved" ? "You approved this"
         : card.status === "denied" ? "You denied this"
@@ -813,7 +845,11 @@
           // CP-10 item 2: submitSecret { entryId, value, agentId } is a real host command, so the
           // masked input belongs here. The value lives in the input's value property for the
           // length of the call and is cleared on submit; it is never written into the markup.
-          ? `<div class="field"><label class="sr-only" for="secret-input-${escapeHtml(message.id)}">${escapeHtml(card.field ?? "credential")}</label><input id="secret-input-${escapeHtml(message.id)}" data-secret-input="${escapeHtml(message.id)}" type="password" autocomplete="off" placeholder="${escapeHtml(card.field ?? "credential")}" /></div><button class="card-action primary" type="button" data-submit-secret="${escapeHtml(message.id)}">Send securely</button>`
+          // SECRET-1: the copy is the original product's, word for word -- the masked field, the
+          // hint that says where the value does NOT go, and "Save securely" on the button. The
+          // hint is `aria-describedby` on the input so a screen reader reads the custody promise
+          // with the field rather than after it.
+          ? `<div class="field"><label class="sr-only" for="secret-input-${escapeHtml(message.id)}">${escapeHtml(card.field ?? "credential")}</label><input id="secret-input-${escapeHtml(message.id)}" data-secret-input="${escapeHtml(message.id)}" type="password" autocomplete="off" aria-describedby="secret-hint-${escapeHtml(message.id)}" placeholder="${escapeHtml(card.field ?? "credential")}" /><small class="field-hint secret-hint" id="secret-hint-${escapeHtml(message.id)}">Stored securely, never shown to your agent.</small></div><button class="card-action primary" type="button" data-submit-secret="${escapeHtml(message.id)}">Save securely</button>`
           : `<span class="field-hint">Answer this in the host app. This page has no command to carry a credential to it.</span>`;
     return `<div class="inline-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span>${dismiss}</div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
   }

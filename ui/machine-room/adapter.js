@@ -335,6 +335,31 @@
         return { accepted: true };
       },
 
+      // SECRET-1. The inline credential card with no host behind it. Same contract as the gateway
+      // adapter's method -- it resolves { accepted, message } and the card's own status is what
+      // reports the outcome -- and the same custody: the value is read once, never stored on the
+      // message, never emitted, never logged. `discards` is in the copy because on THIS path that
+      // is the truth, and a "saved" toast with no host behind it would be the one lie this page
+      // must not tell.
+      submitSecretRequest(contextInput, messageId, secretValue) {
+        const context = normalizeContext(contextInput);
+        const messages = contextMessages(context);
+        const message = messages && messages.find((item) => item.id === messageId);
+        const card = message && message.card;
+        const received = typeof secretValue === "string" && secretValue.trim().length > 0;
+        secretValue = "";
+        if (!card || card.kind !== "secret") {
+          return Promise.reject(new Error("only a credential request can be answered this way"));
+        }
+        if (!received) return Promise.resolve({ accepted: false, message: "The host discards an empty value." });
+        card.status = "provided";
+        emit("message:created", { context });
+        return Promise.resolve({
+          accepted: true,
+          message: "Saved securely and kept private. With no gateway behind this page the value is discarded, not stored.",
+        });
+      },
+
       setModel(workerId, modelId) {
         const worker = workerById(workerId);
         if (!worker || !state.models.available.some((model) => model.id === modelId)) return clone(state);

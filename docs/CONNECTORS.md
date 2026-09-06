@@ -58,17 +58,61 @@ missing.
 
 An agent can install the same entry itself with **AddMcpServer** after confirming with the user,
 the way `source/host/extensions/managed-setup/seed-skills/add-connector/SKILL.md` describes for a
-server the catalog does not know. What an agent **cannot** do is set the key: `setConnectorSecret`
+server the catalog does not know. What an agent **cannot** do is hold the key: `setConnectorSecret`
 is a console command and not an agent tool, deliberately, because a key typed into a conversation
-is in the transcript, the model's context and whatever window that was compacted into. So the split
-is always the same — the agent installs the connector, the operator pastes the key on the card, and
-a tool call made before the key is stored answers with an error naming that card rather than a bare
-transport failure. (Note what `AddMcpServer` accepts on this bundle: `name`, `url`, `headers`. The
+is in the transcript, the model's context and whatever window that was compacted into. It can
+**ask** for one, through the masked card in the next section, and that path keeps the same rule:
+the value goes from the input to the store and is never in the conversation. So the split is always
+the same. The agent installs the connector and may ask for its key, the operator is the only one
+who ever sees the value, and a tool call made before the key is stored answers with an error naming
+that card rather than a bare transport failure. (Note what `AddMcpServer` accepts on this bundle: `name`, `url`, `headers`. The
 local `command`/`args`/`env` form the skill describes is the piece CONNECT-3 adds.)
 
 Removing a connector: **Remove this connector** on its card, or its row in the editor, drops it from
 `connectors.json` and re-reads the file. The stored secret is separate — `deleteConnectorSecret`
 takes it out of the store and the field stays on the card as an empty one to fill again.
+
+## Ask for a secret inline
+
+An agent does not have to send the operator to a panel. It can raise a masked card in the
+conversation itself: `SendMessage` with `type: "secret-request"` and
+
+```json
+{ "label": "Titan Job Bus token",
+  "description": "Temporary Titan Job Bus bearer token for the CoS dry-run. Never share in chat.",
+  "connector": "shell",
+  "field": "TITAN_JOB_TOKEN" }
+```
+
+The console draws that as a card with the label as its title, the description under it, a masked
+password field hinted **Stored securely, never shown to your agent.**, and a **Save securely**
+button. On a successful save the card collapses to **Saved securely and kept private.** with a green
+✓ Saved pill. The value goes from the input straight to `submitSecret` and into its store: it is
+never written into the page's markup, never into the transcript, and never into the model's context.
+The agent is resumed with an acknowledgement that says where the value landed and nothing else.
+
+**Where each `connector` name lands.** One namespace, three destinations, and the host picks in
+this order (`widget-responses.ts` `routeSecret`):
+
+| `connector` | Destination |
+| --- | --- |
+| `shell` (reserved) | **The agent's own box shell environment.** `field` is the environment variable name, so `TITAN_JOB_TOKEN` becomes `$TITAN_JOB_TOKEN` in every command that agent runs from then on. Same 0600 store and same push as the console's Shell tools card. |
+| `slack`, `github` | The chat-channel credential store for that platform. These two win the name race against a local connector of the same name, deliberately: a GitHub channel token that landed in an MCP server's env would leave the channel silently unconnected. |
+| any other name | That local stdio connector's process environment, and the connector is restarted so it picks the value up. The name must be a connector this box actually has; if it is not one, the value falls through to the per-agent channel store. |
+
+**The `shell` field rule.** Because the value becomes part of the shell the agent runs commands in,
+the variable name must be **UPPERCASE** (`A-Z`, `0-9`, `_`), and three families are refused:
+process control (`PATH`, `NODE_OPTIONS`, `LD_*`, anything `*_PRELOAD`), the shell's own identity
+(`HOME`, `PWD`, `USER`, `SHELL`, `TERM`, `TMPDIR`), and the host's own `SAND_*` switches. A refused
+name is caught at the tool boundary, so the card is never drawn; if one gets through anyway, nothing
+is stored anywhere and the agent is told the request went unanswered. The rule lives in
+`source/host/extensions/shell-tools/shell-secret-field.ts` and is the same one the console's
+`setShellSecret` enforces.
+
+The gate is `scripts/verify-connector-plane.mjs --shell-secrets`, leg (m2): a probe agent is asked
+to raise the card, the value is submitted through `submitSecret` the way the console does, and the
+box's own shell is then asked whether it has the variable, with the store's sha256 compared against
+what was submitted, so the leg proves the same value arrived without printing it.
 
 ## GitHub
 

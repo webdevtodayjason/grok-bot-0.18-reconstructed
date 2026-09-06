@@ -3,6 +3,7 @@ import {
   readSecretsDocument,
   writeSecretsDocument,
 } from "../mcp/connector-secrets.js";
+import { isShellEnvSecretField } from "./shell-secret-field.js";
 
 /**
  * CONNECT-5. The other half of the connector credential plane: a credential that belongs to a
@@ -63,7 +64,11 @@ export function listShellEnvSecretFields(rootDir: string): string[] {
  * environment of the process that spawns every shell the agent runs.
  */
 export function writeShellEnvSecret(rootDir: string, field: string, value: string): boolean {
-  if (!isConnectorEnvFieldName(field) || value.length === 0) return false;
+  // SECRET-1. The WRITE rule is shell-secret-field.ts's, which is stricter than the connector
+  // store's: uppercase only, and HOME/SAND_* refused on top of process control. Reads and clears
+  // below stay on the looser connector rule on purpose -- whatever a laxer past wrote has to stay
+  // readable and, above all, deletable.
+  if (!isShellEnvSecretField(field) || value.length === 0) return false;
   const shell = { ...readShellEnvSecrets(rootDir), [field]: value };
   writeSecretsDocument(rootDir, {
     ...readSecretsDocument(rootDir),
@@ -107,4 +112,27 @@ export function buildShellSecretEnvironmentUpdate(
   for (const field of clearing) if (isConnectorEnvFieldName(field)) env[field] = "";
   for (const [field, value] of Object.entries(readShellEnvSecrets(rootDir))) env[field] = value;
   return { env, replace: false };
+}
+
+/**
+ * The push half, shared by every writer: the gateway's setShellSecret/deleteShellSecret and the
+ * secret-request route that answers an agent's inline card. One function because "stored" and
+ * "the live box has it" are two different claims, and both callers have to report the second one
+ * honestly. A box that is not up yet is not a failure -- HostBox.ensureReady re-pushes the store
+ * on the next bring-up, which is before any shell can run -- so this answers false rather than
+ * throwing, and the caller says "stored, not yet applied".
+ */
+export async function pushShellEnvSecretsToBox(
+  rootDir: string,
+  box: { applyEnvironment?: (ctx: unknown, update: ShellSecretEnvironmentUpdate) => Promise<unknown> } | null | undefined,
+  ctx: unknown,
+  clearing: readonly string[] = [],
+): Promise<boolean> {
+  try {
+    if (box == null || typeof box.applyEnvironment !== "function") return false;
+    await box.applyEnvironment(ctx, buildShellSecretEnvironmentUpdate(rootDir, clearing));
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -501,7 +501,11 @@ test("a credential request the host already took shows what happened, not anothe
   const { decisionMarkup } = await markupHelpers();
   const html = decisionMarkup({ id: "entry-9", type: "decision", card: { kind: "secret", entryId: "entry-9", status: "provided", field: "apiKey", title: "The agent asked for a credential", options: [] } });
   assert.equal(/type="password"/.test(html), false);
-  assert.match(html, /the host stored it and resumed the agent/i);
+  // SECRET-1: the answered card is the original product's -- one line and a green pill. It says
+  // the value was kept private, and says nothing about the value.
+  assert.match(html, /Saved securely and kept private\./);
+  assert.match(html, /class="status-pill success[^"]*"[^>]*>\u2713 Saved</);
+  assert.equal(/apiKey/.test(html), false);
 });
 
 test("a connector whose secret was never set still gets a field for every env name it declares", async () => {

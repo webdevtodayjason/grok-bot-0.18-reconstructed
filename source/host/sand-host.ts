@@ -1,5 +1,12 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
+import { createContext } from "../packages/context/core.js";
+import { isShellEnvSecretField } from "./extensions/shell-tools/shell-secret-field.js";
+import {
+  pushShellEnvSecretsToBox,
+  writeShellEnvSecret
+} from "./extensions/shell-tools/shell-secrets.js";
+import { getSandRootDir } from "./host-paths.js";
 import {
   commandErrorReportToTelemetry,
   commandSuccessReportToTelemetry
@@ -40,6 +47,10 @@ import {
   type SourceMapRosterPort,
   type TranscriptRosterPort
 } from "./host-roster-bookkeeping.js";
+
+// SECRET-1. The same context name host-gateway-api uses for its shell-secret pushes, so the two
+// writers of this store are one caller as far as the box control plane's logs are concerned.
+const SHELL_SECRET_CONTEXT = createContext().withName("shellTools");
 
 export const BOX_READY_STAGE_MARKER_PATH = "/tmp/sand-box-ready-stage";
 export const BOX_READY_REPORT_ATTEMPTS = 3;
@@ -569,6 +580,24 @@ export class SandHost {
         if (management == null) return null;
         if (optionalMethod(management, "isLocalConnector")?.(args.server) !== true) return null;
         return await optionalMethod(management, "setConnectorSecret")?.(args) ?? null;
+      }
+    );
+    // SECRET-1. The other destination an inline secret card can name: the agent's OWN box shell.
+    // Same shape as the connector sink and set from the same place, because the transcript layer
+    // can see neither the sand data root nor the forever-box the value has to be pushed into.
+    // `stored` is the 0600 write; `applied` is the live exec-daemon taking the environment update,
+    // and the ack the model reads distinguishes the two.
+    optionalMethod(transcript, "setShellSecretSink")?.(
+      async (args: { field: string; value: string }) => {
+        if (!isShellEnvSecretField(args.field)) return null;
+        const rootDir = getSandRootDir();
+        if (!writeShellEnvSecret(rootDir, args.field, args.value)) return null;
+        const applied = await pushShellEnvSecretsToBox(
+          rootDir,
+          extensions.api("forever-box").box,
+          SHELL_SECRET_CONTEXT
+        );
+        return { field: args.field, stored: true, applied };
       }
     );
     void optionalMethod(

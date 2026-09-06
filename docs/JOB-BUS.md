@@ -238,7 +238,10 @@ status, worker, created, one-line result or needs-human detail) fed by `jobBusLi
 1. Set `TITAN_JOB_TOKEN` on the `titanbot` Coolify resource **or** generate one in Settings → Job bus. Either one arms the bus
    (§10.9): the relay sends `jobBusSetSettings {enabled:true}` on its own start when the variable is set, and on the console's token routes.
 2. Make sure an agent named **Scribe** exists (or set `SAND_JOB_BUS_WORKERS`), and that the box has a GitHub
-   credential (Settings → Connectors → GitHub; the `gh` shell tool) so the worker can push.
+   credential (Settings → Connectors → GitHub; the `gh` shell tool) so the worker can push. Titan can also
+   ask for that `GITHUB_TOKEN` itself, inline, on the masked card (`connector: "shell"`, `field:
+   "GITHUB_TOKEN"`; see "Ask for a secret inline" in `docs/CONNECTORS.md`), which lands it in the same
+   shell store the Settings card writes; the operator never has to leave the conversation to paste it.
 3. Smoke from the CoS box:
 
 ```bash

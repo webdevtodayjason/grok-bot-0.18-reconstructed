@@ -290,9 +290,12 @@ try {
     let hint = "";
     for (const id of ids) {
       await pickPlugin(id).catch(() => {});
-      if ((await page.$$("input[type=password]")).length === 0) continue;
+      // Scoped to the open plugin panel, not the page: the transcript now carries a masked
+      // credential card of its own (SECRET-1), and a page-wide `input[type=password]` matched it
+      // for every plugin, including the ones with no secret form and therefore no submit button.
+      if ((await page.$$(".plugin-detail input[type=password]")).length === 0) continue;
       hint = await page.evaluate(() => document.querySelector(".plugin-detail .field-hint")?.textContent?.trim() ?? "");
-      await page.fill("input[type=password]", "not-a-real-key");
+      await page.fill(".plugin-detail input[type=password]", "not-a-real-key");
       await page.click(".plugin-detail button[type=submit]"); await page.waitForTimeout(1200);
       break;
     }
@@ -352,6 +355,52 @@ try {
       check(claimed !== receipted, "and that count is not the action-receipt count wearing the tool-result label", `${claimed} vs ${receipted}`);
       check(!/\b(evidenced|unsupported|unverified|undecidable)\b/.test(panelText), "the panel behind the chip prints no raw verdict word", panelText.slice(0, 140));
       await page.keyboard.press("Escape"); await page.waitForTimeout(400);
+    }
+
+    // SECRET-1: the inline credential card, offline. The copy has to be the product's -- the
+    // description line under the title, the custody hint under the masked field, and "Save
+    // securely" on the button -- and after a submit the value must survive NOWHERE on the page:
+    // not in the input, not in the markup, not in the collapsed card. The probe value is generated
+    // here, is not a credential, and is never printed by this script.
+    await page.keyboard.press("Escape"); await page.waitForTimeout(400);
+    const secretButton = await page.$("[data-submit-secret]");
+    if (!secretButton) {
+      check(false, "the offline conversation carries a masked credential card");
+    } else {
+      const secretId = await secretButton.evaluate((el) => el.dataset.submitSecret);
+      const beforeSecret = await page.evaluate((id) => {
+        const row = document.querySelector(`[data-message-id="${id}"]`);
+        return {
+          card: row?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+          type: row?.querySelector("input[data-secret-input]")?.getAttribute("type") ?? "",
+          hint: row?.querySelector(".secret-hint")?.textContent?.trim() ?? "",
+          button: row?.querySelector("[data-submit-secret]")?.textContent?.trim() ?? "",
+        };
+      }, secretId);
+      check(beforeSecret.type === "password", "the credential field is a masked password input", beforeSecret.type || "no input on the card");
+      check(beforeSecret.hint === "Stored securely, never shown to your agent.", "the hint under the field is the product's custody line", beforeSecret.hint || "no hint");
+      check(beforeSecret.button === "Save securely", "the button says Save securely", beforeSecret.button || "no button");
+      check(/Never share it in chat/.test(beforeSecret.card) && /TITAN_JOB_TOKEN/.test(beforeSecret.card), "the card carries the request's own description line under its title", beforeSecret.card.slice(0, 160));
+
+      const SECRET_PROBE = `offline-secret-${Math.random().toString(36).slice(2, 12)}`;
+      await page.fill(`[data-secret-input="${secretId}"]`, SECRET_PROBE);
+      await page.click(`[data-submit-secret="${secretId}"]`);
+      await page.waitForTimeout(1500);
+      const afterSecret = await page.evaluate(([id, probe]) => {
+        const row = document.querySelector(`[data-message-id="${id}"]`);
+        return {
+          card: row?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+          pill: row?.querySelector(".status-pill.success")?.textContent?.trim() ?? "",
+          inputs: row ? row.querySelectorAll("input").length : -1,
+          inMarkup: document.documentElement.innerHTML.includes(probe),
+          inValues: [...document.querySelectorAll("input")].some((el) => el.value.includes(probe)),
+          inText: document.body.innerText.includes(probe),
+        };
+      }, [secretId, SECRET_PROBE]);
+      check(/Saved securely and kept private\./.test(afterSecret.card), 'a submitted card collapses to "Saved securely and kept private."', afterSecret.card.slice(0, 160));
+      check(/Saved/.test(afterSecret.pill), "with a green Saved pill beside it", afterSecret.pill || "no success pill");
+      check(afterSecret.inputs === 0, "and the masked field is gone from the card", `${afterSecret.inputs} input(s) left on the card`);
+      check(!afterSecret.inMarkup && !afterSecret.inValues && !afterSecret.inText, "no part of the submitted value survives anywhere on the page");
     }
 
     // JOBBUS-3: the Job bus card in both of its states, with no relay and no gateway to answer.
