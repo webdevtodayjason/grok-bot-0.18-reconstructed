@@ -144,6 +144,14 @@ export const SAND_GATEWAY_COMMANDS = {
   // SearchPlugins cannot be looking at two different catalogs.
   listMarketplace: (api: GatewayApi) => api.listMarketplace(),
   getMarketplaceItem: (api: GatewayApi, body: string) => api.getMarketplaceItem(parseCommandArgs(body)),
+  // JOBBUS. The Titan Job Bus (docs/JOB-BUS.md). The relay's /v1 surface is these six commands and
+  // nothing else: an allowlisted job API that returns attested results and never exposes a shell.
+  jobBusHealth: (api: GatewayApi) => api.jobBusHealth(),
+  jobBusCreate: (api: GatewayApi, body: string) => api.jobBusCreate(parseCommandArgs(body)),
+  jobBusGet: (api: GatewayApi, body: string) => api.jobBusGet(parseCommandArgs(body)),
+  jobBusCancel: (api: GatewayApi, body: string) => api.jobBusCancel(parseCommandArgs(body)),
+  jobBusArtifacts: (api: GatewayApi, body: string) => api.jobBusArtifacts(parseCommandArgs(body)),
+  jobBusList: (api: GatewayApi, body: string) => api.jobBusList(parseCommandArgs(body)),
   listShellTools: (api: GatewayApi) => api.listShellTools(),
   listShellSecretFields: (api: GatewayApi) => api.listShellSecretFields(),
   setShellSecret: (api: GatewayApi, body: string) => api.setShellSecret(parseCommandArgs(body)),
