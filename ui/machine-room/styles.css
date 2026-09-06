@@ -2007,8 +2007,24 @@ dialog[open] {
 .desktop-workspace {
   display: grid;
   grid-template-columns: 158px minmax(0, 1fr) 220px;
+  /* MR-33: the one row is bounded by the frame, not by its tallest column. An implicit auto row
+     grows to the timeline's content, and a long run pushed the whole grid out of the frame: the
+     footer sat in the middle of the desktop and the header scrolled off the top of the dialog. */
+  grid-template-rows: minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
+}
+
+/* Each column scrolls on its own inside that row. Grid items default to min-height: auto, which is
+   the other half of the same overflow. */
+.desktop-workspace > * {
+  min-width: 0;
+  min-height: 0;
+}
+
+.app-previews {
+  overflow-y: auto;
 }
 
 .app-previews {
@@ -2213,6 +2229,11 @@ dialog[open] {
   padding: 20px 17px;
   border-left: 1px solid var(--glass-edge-soft);
   background: rgba(7, 16, 20, 0.28);
+  /* MR-33: the rail scrolls; a shell line with no spaces (a URL, a token) wraps inside its 220px
+     instead of running out of the dialog. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .action-timeline > strong {
@@ -2234,6 +2255,7 @@ dialog[open] {
   padding: 0 0 18px 22px;
   color: var(--text-secondary);
   font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 .action-timeline li::before {
