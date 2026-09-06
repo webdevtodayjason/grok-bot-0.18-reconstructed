@@ -173,6 +173,23 @@ export class WorkflowCommands {
       isEnabled,
     );
   }
+  // Ownership moves through the same lifecycle queue every other workflow write does, so a
+  // "Make global" landing while a turn is mid-flight cannot interleave with a create or a delete.
+  setAgentWorkflowOwner(
+    agentId: string,
+    workflowId: string,
+    ownerAgentId: string | null,
+  ): Promise<WorkflowRecord[]> {
+    return this.enqueueWorkflowMutation({
+      agentId,
+      activeMutation: (active) => {
+        active.workflows.setOwner(workflowId, ownerAgentId);
+        return limitSurfacedWorkflows(active.workflows.listAll());
+      },
+      inactiveMutation: () =>
+        this.tm.sessionStore.setAgentWorkflowOwner(agentId, workflowId, ownerAgentId),
+    });
+  }
   deleteAgentWorkflow(
     agentId: string,
     workflowId: string,

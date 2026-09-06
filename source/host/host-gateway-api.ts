@@ -582,6 +582,15 @@ export function createHostGatewayApi(
         args.workflowId,
         args.isEnabled
       ),
+    // ownerAgentId null makes the skill global; a non-empty string gives it to that agent.
+    setAgentWorkflowOwner: (args: any) =>
+      method(manager, "setAgentWorkflowOwner")(
+        args.id,
+        args.workflowId,
+        typeof args.ownerAgentId === "string" && args.ownerAgentId.trim().length > 0
+          ? args.ownerAgentId.trim()
+          : null
+      ),
     deleteAgentWorkflow: (args: any) =>
       method(manager, "deleteAgentWorkflow")(args.id, args.workflowId),
     runAgentWorkflowNow: (args: any) =>

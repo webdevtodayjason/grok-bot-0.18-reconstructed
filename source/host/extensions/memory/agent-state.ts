@@ -9,11 +9,16 @@ import { CANONICAL_AVATAR_FILENAME, invalidateAvatarDataUrlCache, listConvention
 import { isBoxRootPath } from "../../box/box-transfer.js";
 import { FileMemoryStore, getProjectDir, getProjectMemoryShardDir, getUserMemoryShardDir, projectDirExists, type MemoryKind } from "./memory-service.js";
 
-// STATE-1: the runner's state tool (runner/tools/sand-state-tool.ts) reads `detail` on success and
-// `reason` on failure, the shape runner/agent-state.ts defines, while this module answered with
-// `message` alone. A successful save therefore handed the tool undefined, whose `.text` the tool
-// wrapper then read, so every skill, routine and memory write from an agent "failed" after it had
-// landed. Both names are carried so neither reader is wrong.
+/**
+ * One shape, the runner's. update_state reads `detail` off a success and `reason` off a failure
+ * (runner/agent-state.ts) and hands the success straight to `buildSuccessResult(output.text)`;
+ * this module answered `{ ok, message }` instead, so `detail` was always undefined and every
+ * successful write came back to the model as "Error: Cannot read properties of undefined (reading
+ * 'text')" -- for a write that had in fact landed on disk. Measured on the Mac box 2026-09-05: a
+ * probe agent told to save a skill with update_state reported exactly that string. It is not a
+ * skill bug; memory writes, routines, the profile and the avatar all answered the same way.
+ * `message` is carried beside `detail`/`reason` so this module's own callers keep one name to read.
+ */
 export type StateWriteResult = { ok: true; message: string; detail: string } | { ok: false; message: string; reason: string };
 const ok = (message: string): StateWriteResult => ({ ok: true, message, detail: message }), fail = (message: string): StateWriteResult => ({ ok: false, message, reason: message });
 const blank = (value?: string | null): boolean => value == null || value.trim().length === 0;
@@ -54,8 +59,12 @@ export function createSandAgentState(deps: AgentStateDeps) {
     async updateAutomation({ id, spec }: { id: string; spec: unknown }) { const updated = deps.automations.update(id, spec); return updated == null ? fail(`no routine with folder "${id}" exists, or the new fields were invalid.`) : describeAutomation(updated, "Updated"); },
     async setAutomationEnabled({ id, isEnabled }: { id: string; isEnabled: boolean }) { const value = deps.automations.setEnabled(id, isEnabled); return value == null ? fail(`no routine with folder "${id}" exists.`) : ok(`${isEnabled ? "Resumed" : "Paused"} routine "${value.name}" (folder ${value.id}).`); },
     async deleteAutomation({ id }: { id: string }) { const name = deps.automations.get(id)?.name ?? id; return deps.automations.remove(id) ? ok(`Deleted routine "${name}" (folder ${id}).`) : fail(`no routine with folder "${id}" exists.`); },
-    async writeWorkflow(args: { id?: string; name: string; description?: string; body: string }) { const spec = { name: args.name, description: args.description ?? "", body: args.body, trigger: null }, value = args.id == null ? deps.workflows.create(spec) : deps.workflows.update(args.id, spec); return value == null ? fail(args.id == null ? "the workflow could not be saved — a name and a non-empty body are both required." : `no workflow with id "${args.id}" exists, or the new fields were invalid. Cursor-managed skills cannot be edited.`) : ok(`${args.id == null ? "Saved" : "Updated"} workflow "${value.name}" (id ${value.id}).`); },
-    async deleteWorkflow({ id }: { id: string }) { return deps.workflows.remove(id) ? ok(`Deleted workflow ${id}.`) : fail(`no workflow with id "${id}" exists, or it is a Cursor-managed skill, which cannot be deleted.`); },
+    // A skill an agent writes for itself belongs to it: ownerAgentId goes on the create, so the
+    // folder's frontmatter says whose it is and no other agent is offered it. A rewrite passes no
+    // owner at all, which leaves the file's own metadata.owner alone -- editing a global skill must
+    // not quietly claim it, and editing your own must not lose it.
+    async writeWorkflow(args: { id?: string; name: string; description?: string; body: string }) { const spec = { name: args.name, description: args.description ?? "", body: args.body, trigger: null }, value = args.id == null ? deps.workflows.create({ ...spec, ownerAgentId: deps.agentId }) : deps.workflows.update(args.id, spec); return value == null ? fail(args.id == null ? "the workflow could not be saved — a name and a non-empty body are both required." : `no workflow with id "${args.id}" exists, it belongs to another agent, or the new fields were invalid. Cursor-managed skills cannot be edited.`) : ok(`${args.id == null ? `Saved your own workflow "${value.name}" (id ${value.id}) — it is yours until the user makes it global.` : `Updated workflow "${value.name}" (id ${value.id}).`}`); },
+    async deleteWorkflow({ id }: { id: string }) { return deps.workflows.remove(id) ? ok(`Deleted workflow ${id}.`) : fail(`no workflow with id "${id}" exists, it belongs to another agent, or it is a Cursor-managed skill, which cannot be deleted.`); },
     async updateProfile(args: { name?: string; description?: string }) { if (args.name === undefined && args.description === undefined) return fail("nothing to change — pass at least one of name or description."); if (args.name !== undefined && blank(args.name)) return fail("a blank name is not allowed."); const current = deps.readProfile() ?? {}; deps.writeProfile({ ...current, ...(args.name === undefined ? {} : { name: args.name.trim() }), ...(args.description === undefined ? {} : { description: args.description.trim() }) }); return ok(`Updated your ${[args.name !== undefined ? "name" : "", args.description !== undefined ? "description" : ""].filter(Boolean).join(", ")}.`); },
     async updateSettings(args: { hiddenFromSidebar?: boolean; notifyOnAgentUpdates?: boolean }) { const update = { ...(args.hiddenFromSidebar === undefined ? {} : { hiddenFromSidebar: args.hiddenFromSidebar }), ...(args.notifyOnAgentUpdates === undefined ? {} : { notifyOnAgentUpdates: args.notifyOnAgentUpdates }) }; if (Object.keys(update).length === 0) return fail("nothing to change — pass at least one setting field."); deps.writeSettings(update); return ok(`Updated your settings: ${Object.keys(update).join(", ")}.`); },
     async disconnectChannel({ platform }: { platform: string }) { return deps.channels.remove(platform) ? ok(`Disconnected ${platform}. The connector closes the live connection within a few seconds.`) : fail(`${platform} is not connected.`); },

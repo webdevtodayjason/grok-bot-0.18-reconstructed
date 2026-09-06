@@ -603,6 +603,7 @@ const delegations: ReadonlyArray<[string, keyof TranscriptManager]> = [
   ["createAgentWorkflow", "workflowCommands"],
   ["updateAgentWorkflow", "workflowCommands"],
   ["setAgentWorkflowEnabled", "workflowCommands"],
+  ["setAgentWorkflowOwner", "workflowCommands"],
   ["deleteAgentWorkflow", "workflowCommands"],
   ["importAgentWorkflowMarkdown", "workflowCommands"],
   ["importAgentWorkflowSource", "workflowCommands"],

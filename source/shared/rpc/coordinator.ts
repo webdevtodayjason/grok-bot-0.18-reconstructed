@@ -128,6 +128,7 @@ export const COORDINATOR_METHOD_TABLE = {
   createAgentWorkflow: { args: "object", reply: "array" },
   updateAgentWorkflow: { args: "object", reply: "array" },
   setAgentWorkflowEnabled: { args: "object", reply: "array" },
+  setAgentWorkflowOwner: { args: "object", reply: "array" },
   deleteAgentWorkflow: { args: "object", reply: "array" },
   runAgentWorkflowNow: { args: "object", reply: "void" },
   importAgentWorkflowText: { args: "object", reply: "import-result" },

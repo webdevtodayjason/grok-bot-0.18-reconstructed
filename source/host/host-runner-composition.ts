@@ -661,7 +661,7 @@ function asPromptSnapshotStore(value: unknown): PromptSnapshotStore | undefined 
 const SYSTEM_PROMPT_SECTION_MARKERS: Readonly<Record<string, string>> = {
   memory: "Memory: durable facts you have learned about the user",
   routines: "Routines (your scheduling/automation feature)",
-  skills: "Workflows are a GLOBAL, shared library",
+  skills: "User-created skills live as files at",
   timeZone: "Your box and tools run on a UTC clock",
   browser: "You drive this box's browser at the page level with the browser_* tools",
   mcpCustomInstructions: "Custom instructions are configured for some connected tools",
