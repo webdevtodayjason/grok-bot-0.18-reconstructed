@@ -64,3 +64,4 @@ import "./marketplace-logos.test.mjs";
 import "./composer-paste.test.mjs";
 import "./vnc-paste-bridge.test.mjs";
 import "./skill-ownership.test.mjs";
+import "./awaiting-operator.test.mjs";

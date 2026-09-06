@@ -355,18 +355,25 @@
   }
 
   function statusOf(agent) {
-    if (agent.isRunning) return { status: "working", statusText: "Working now" };
+    if (agent.isRunning) return { status: "working", statusText: "Working now", needsYou: false, needsYouReason: "" };
     // The third real state the old operator UI has and this one discarded: blocked on you.
     if (agent.awaitingUserResponse || attentionIds.has(agent.id)) {
+      // QOL-NEEDS-YOU: "attention" covers two different things -- the host says this agent is
+      // waiting on the operator, or its last turn errored. Only the first is a job for a person,
+      // so it gets its own flag: the amber pill and the "N need you" count read this, not the
+      // status, and a failed turn no longer inflates the count.
+      const awaiting = agent.awaitingUserResponse;
       return {
         status: "attention",
-        statusText: agent.awaitingUserResponse ? "Waiting on you" : "The last turn failed",
+        statusText: awaiting ? "Waiting on you" : "The last turn failed",
+        needsYou: Boolean(awaiting),
+        needsYouReason: awaiting && typeof awaiting.reason === "string" ? awaiting.reason : "",
       };
     }
     // The description is what the agent is for; it lives on the profile and the details panel. As
     // the idle status line it ran the whole persona across the sidebar card, the header and the
     // status pill (MR-28), so the status line says the state and nothing else.
-    return { status: "ready", statusText: "Ready for the next task" };
+    return { status: "ready", statusText: "Ready for the next task", needsYou: false, needsYouReason: "" };
   }
 
   // The automation record carries triggerDescription, schedule, isEnabled, lastRunAt and a runs[]
@@ -1339,7 +1346,10 @@
     // Set by reloadRoster when a status, unread count or preview moved; reloadActive emits on it
     // even when the transcript did not change.
     let rosterChanged = false;
-    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.unread}:${x.preview}:${x.name}:${x.role}:${x.avatar}:${x.hidden ? 1 : 0}:${x.notify ? 1 : 0}`).join("|") + `|${state.agentCount}`;
+    // QOL-NEEDS-YOU adds needsYou: an agent already showing "attention" for a failed turn and
+    // then blocked on the operator moves nothing else in this signature, and the pill would not
+    // have been drawn until something unrelated changed.
+    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.needsYou ? 1 : 0}:${x.unread}:${x.preview}:${x.name}:${x.role}:${x.avatar}:${x.hidden ? 1 : 0}:${x.notify ? 1 : 0}`).join("|") + `|${state.agentCount}`;
     // app.js drives the "working" bubble from simulateReply's 1.15s timer, which is right for a
     // demo and wrong for a machine: a real reply takes tens of seconds, so the dots flashed and
     // died and the wait happened in silence. The adapter owns that bubble's lifetime instead --
@@ -1465,6 +1475,9 @@
       }
       r.status = "working";
       r.statusText = "Working now";
+      // QOL-NEEDS-YOU: this branch means a send of ours is still unanswered, so the operator is
+      // not the one being waited on, whatever the roster row still says.
+      r.needsYou = false; r.needsYouReason = "";
       r.messages.push({ id: wait.id, authorId: wait.authorId, authorName: wait.authorName, type: "working", text: "", time: "" });
     }
 
@@ -1498,6 +1511,10 @@
         const next = statusOf(a);
         target.status = next.status;
         target.statusText = next.statusText;
+        // QOL-NEEDS-YOU: carried on every tick like the status it sits beside, so the pill and the
+        // count clear on the same heartbeat the host clears the badge.
+        target.needsYou = next.needsYou;
+        target.needsYouReason = next.needsYouReason;
         target.lastActivityAt = a.lastActivityAt ?? target.lastActivityAt;
         target.unread = Number(a.unreadCount) || 0;
         target.preview = typeof a.lastMessagePreview === "string" ? a.lastMessagePreview : target.preview;
@@ -1695,6 +1712,9 @@
           type: "text", text: clean, time: timeOf(Date.now()),
         });
         r.status = "working"; r.statusText = "Working now";
+        // QOL-NEEDS-YOU: the operator has just answered. The host clears its badge on accept
+        // (send-acceptance.ts), but that is a tick away; drop the pill with the send.
+        r.needsYou = false; r.needsYouReason = "";
         const wait = { sentAtMs: Date.now(), id: `working-${Date.now()}`, authorId: context.id, authorName: r.name };
         awaiting.set(keyOf(context), wait);
         r.messages.push({ id: wait.id, authorId: wait.authorId, authorName: wait.authorName, type: "working", text: "", time: "" });

@@ -442,6 +442,8 @@
     teachTitle: document.getElementById("teach-title"),
     teachTimer: document.getElementById("teach-timer"),
     toast: document.getElementById("toast"),
+    // QOL-NEEDS-YOU: the conversation header's amber pill.
+    headerNeedsYou: document.getElementById("header-needs-you"),
   };
 
   function escapeHtml(value) {
@@ -523,6 +525,36 @@
     return `<span class="${className}">${members.map((worker) => `<img${imageClass} src="${escapeHtml(worker.avatar)}" alt="" />`).join("")}</span>`;
   }
 
+  // ---- QOL-NEEDS-YOU -------------------------------------------------------------------
+  // An agent that ended its turn asking the operator something carries needsYou on its roster
+  // record (gateway-adapter.js statusOf, off the host's awaitingUserResponse). "Attention" alone
+  // could not say this: it also covers a turn that errored, which is not a job for a person.
+  // Three surfaces read the flag -- the sidebar card, the conversation header, and the count
+  // beside the agent count -- so a blocked agent is visible without opening its conversation.
+  function needsYou(record) {
+    return record != null && record.needsYou === true;
+  }
+
+  function needsYouPillMarkup(record, className) {
+    if (!needsYou(record)) return "";
+    const reason = typeof record.needsYouReason === "string" ? record.needsYouReason.trim() : "";
+    return `<span class="${className}" title="${escapeHtml(reason || "This agent is waiting on you")}">Waiting on you</span>`;
+  }
+
+  function needsYouCount() {
+    return [...state.workers, ...state.rooms].filter(needsYou).length;
+  }
+
+  function renderNeedsYouCount() {
+    const slot = document.querySelector("[data-needs-you-count]");
+    if (!slot) return;
+    const count = needsYouCount();
+    slot.hidden = count === 0;
+    slot.textContent = count === 0 ? "" : `${count} need${count === 1 ? "s" : ""} you`;
+    slot.title = count === 0 ? "" : "Agents whose last turn ended asking you something";
+  }
+  // ---- end QOL-NEEDS-YOU ---------------------------------------------------------------
+
   function statusClass(status) {
     if (status === "working") return "working";
     if (status === "attention") return "attention";
@@ -563,7 +595,7 @@
     const selected = sameContext(activeContext(), { kind: "worker", id: worker.id });
     return `<button class="worker-card${selected ? " is-active" : ""}" type="button" data-context-kind="worker" data-context-id="${escapeHtml(worker.id)}" data-status="${escapeHtml(worker.status)}" style="--accent:${escapeHtml(worker.accent)}" aria-pressed="${selected}">
       ${avatarMarkup(worker, "worker-avatar")}
-      <span class="worker-copy"><span class="worker-name"><i class="status-dot ${statusClass(worker.status)}"></i>${escapeHtml(worker.name)}</span><span class="worker-status">${escapeHtml(worker.statusText)}</span></span>
+      <span class="worker-copy"><span class="worker-name"><i class="status-dot ${statusClass(worker.status)}"></i>${escapeHtml(worker.name)}${needsYouPillMarkup(worker, "needs-you-pill")}</span><span class="worker-status">${escapeHtml(worker.statusText)}</span></span>
     </button>`;
   }
 
@@ -599,6 +631,7 @@
       count.textContent = known == null ? "" : `${known} / ${AGENT_CAP} agents`;
       count.title = known == null ? "" : "countAgents, as the host reports it — the cap is the host's";
     }
+    renderNeedsYouCount();
   }
   const AGENT_CAP = 50;
 
@@ -613,6 +646,15 @@
       : `Room · ${members.length} ${members.length === 1 ? "member" : "members"}`;
     elements.messageInput.placeholder = `Ask ${name}…`;
     elements.participantCluster.innerHTML = members.slice(0, 4).map((worker) => avatarMarkup(worker, "participant-avatar", worker.name)).join("");
+    // QOL-NEEDS-YOU: the header carries the same pill, so the conversation you are looking at
+    // says it is blocked on you without a trip back to the sidebar.
+    const headerPill = elements.headerNeedsYou;
+    if (headerPill) {
+      const record = contextRecord(context);
+      const reason = needsYou(record) && typeof record.needsYouReason === "string" ? record.needsYouReason.trim() : "";
+      headerPill.hidden = !needsYou(record);
+      headerPill.title = reason || "This agent is waiting on you";
+    }
   }
 
   function agentContextCard(worker) {
