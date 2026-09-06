@@ -47,10 +47,11 @@
 // (default 7791; the closed-door relay takes the port after it).
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { newAuthRecord } from "../ui/auth.mjs";
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log([
@@ -146,9 +147,17 @@ const v1 = async (route, { method = "GET", body, bearer = JOB_TOKEN, headers = {
 };
 
 // Anything on the relay that is NOT /v1, reached with the job bearer. §10.8: the bus's key opens
-// the bus and nothing else.
-const offBus = (route) => fetch(`${BASE}${route}`, {
-  headers: { authorization: `Bearer ${JOB_TOKEN}`, accept: "text/html" },
+// the bus and nothing else. The method matters: the relay answers /api/* on POST only, so a GET
+// there is 404 from the router rather than a refusal from the door, and this leg would grade the
+// wrong thing.
+const offBus = (route, method = "GET") => fetch(`${BASE}${route}`, {
+  method,
+  headers: {
+    authorization: `Bearer ${JOB_TOKEN}`,
+    accept: "text/html",
+    ...(method === "POST" ? { "content-type": "application/json" } : {}),
+  },
+  body: method === "POST" ? "{}" : undefined,
   redirect: "manual",
   signal: AbortSignal.timeout(20_000),
 }).then((res) => ({ status: res.status, location: String(res.headers.get("location") ?? "") }))
@@ -190,6 +199,13 @@ try {
 let relay = null;
 let closedRelay = null;
 let closedProfileDir = null;
+// The console's password, for this run only. Without one the relay is the loopback no-password
+// relay, every route answers everyone the same, and the "what the job bearer does NOT open" leg
+// below grades a door with no lock -- which is not a pass and not a failure, it is nothing. It is
+// written into a temp directory rather than ui/auth.json: that file is the operator's, the live
+// relay reads it at boot, and a gate that leaves one behind locks him out of his own console.
+let authDir = null;
+let AUTH_FILE_PATH = null;
 let settingsBefore;
 let settingsTouched = false;
 let probeAgentId = null;
@@ -209,10 +225,16 @@ const dropClosedProfile = () => {
   try { rmSync(closedProfileDir, { recursive: true, force: true }); } catch { /* nothing to remove */ }
   closedProfileDir = null;
 };
+const dropAuthDir = () => {
+  if (authDir == null) return;
+  try { rmSync(authDir, { recursive: true, force: true }); } catch { /* nothing to remove */ }
+  authDir = null;
+  AUTH_FILE_PATH = null;
+};
 // SIGTERM never reaches the finally (Node's default handler ends the process), and this gate runs
 // under `timeout`, which sends exactly that. The child relays would outlive it and hold the ports.
 for (const signal of ["SIGTERM", "SIGINT"]) {
-  process.on(signal, () => { stopRelays(); dropClosedProfile(); process.exit(143); });
+  process.on(signal, () => { stopRelays(); dropClosedProfile(); dropAuthDir(); process.exit(143); });
 }
 
 // One relay, started the way the production one is: its own port, its own token (or none), and
@@ -225,6 +247,7 @@ const startRelay = (port, { token, profileDirs }) => spawn(process.execPath, [pa
     SAND_UI_BIND_HOST: "127.0.0.1",
     SAND_PROFILE_DIRS: profileDirs,
     ...(token == null ? {} : { TITAN_JOB_TOKEN: token }),
+    ...(AUTH_FILE_PATH == null ? {} : { SAND_UI_AUTH_FILE: AUTH_FILE_PATH }),
     SAND_HOST_GATEWAY_URL: GATEWAY,
   },
   stdio: ["ignore", "pipe", "pipe"],
@@ -242,8 +265,27 @@ const waitForRelay = async (child, base, log) => {
 };
 
 try {
+  // Read before a relay exists. This gate's own relay carries TITAN_JOB_TOKEN and arms the bus on
+  // its start (§10.9), so a read taken after that comes back enabled:true whatever the box held --
+  // and the finally would then "restore" the box to armed. On a box whose bus has never been on,
+  // that is the gate turning it on and calling it cleanup.
+  step("the settings this run borrows (§10.7), read before anything is started");
+  settingsBefore = await gw("jobBusGetSettings").catch(() => undefined);
+  check(settingsBefore != null, "the host answers jobBusGetSettings", JSON.stringify(settingsBefore ?? null));
+  // 10.9: the read carries `integrity` beside the settings, and the write refuses a key it does not
+  // own -- so what goes back at the end is the settings without it.
+  if (settingsBefore != null) delete settingsBefore.integrity;
+  check(settingsBefore?.integrity === undefined, "and it is written back without the read-only integrity block");
+  console.log(`  INFO  the box holds enabled:${JSON.stringify(settingsBefore?.enabled ?? null)} before this run`);
+
   step("the two relays this gate starts");
+  authDir = mkdtempSync(path.join(tmpdir(), "job-bus-gate-auth-"));
+  AUTH_FILE_PATH = path.join(authDir, "auth.json");
+  writeFileSync(AUTH_FILE_PATH, `${JSON.stringify(newAuthRecord(randomBytes(18).toString("hex")), null, 2)}\n`, { mode: 0o600 });
   let relayLog = "";
+  // From here the settings are this gate's problem: the relay below arms the bus on its own start,
+  // so the finally has to run even if nothing after this line does.
+  settingsTouched = true;
   relay = startRelay(PORT, { token: JOB_TOKEN, profileDirs: process.env.SAND_PROFILE_DIRS ?? "" });
   relay.stdout.on("data", (chunk) => { relayLog += String(chunk); });
   relay.stderr.on("data", (chunk) => { relayLog += String(chunk); });
@@ -314,17 +356,27 @@ try {
   // /api/*, /, /vnc/<n>/ and /box/surface), so a 404 does not mean "refused", it means the route
   // moved -- and a leg that reads a moved route as a pass would keep saying the bearer is contained
   // long after it stopped being asked. A refusal is 401, 403, or a redirect to the login.
-  for (const route of ["/api/listAgents", "/", "/vnc/1/", "/box/surface"]) {
-    const answer = await offBus(route);
+  // The lock first. A relay with no password refuses nobody, so without this the four checks
+  // below would pass on a wide-open console the day the password file goes missing -- the exact
+  // shape of a leg that measures itself. /auth/state is answered before the login on purpose.
+  const authState = await fetch(`${BASE}/auth/state`, { signal: AbortSignal.timeout(20_000) })
+    .then((res) => res.json()).catch((error) => ({ error: String(error?.message ?? error) }));
+  check(authState?.required === true,
+    "the relay this gate started has a console password, so there is a door to be refused at",
+    JSON.stringify(authState));
+  check(authState?.authenticated === false,
+    "and this gate holds no console session", JSON.stringify(authState));
+  for (const [route, method] of [["/api/listAgents", "POST"], ["/", "GET"], ["/vnc/1/", "GET"], ["/box/surface", "GET"]]) {
+    const answer = await offBus(route, method);
     const refused = answer.status === 401 || answer.status === 403
       || (answer.status >= 300 && answer.status < 400 && /\/login/.test(answer.location));
-    check(refused, `the job bearer is refused on ${route}`,
+    check(refused, `the job bearer is refused on ${method} ${route}`,
       answer.status === 404
         ? `HTTP 404: this route is not where the gate thinks it is, so this leg proved nothing`
         : `HTTP ${answer.status}${answer.location ? ` -> ${answer.location}` : ""}`);
   }
 
-  step("the settings this run borrows (§10.7)");
+  step("the switch (§10.7)");
   // §10.9: this gate's relay is started with TITAN_JOB_TOKEN, so the relay arms the bus on its own
   // start -- and that call is fired unawaited before `listen`, so it is still in flight when the
   // health probe above answers. Wait for it to land. Without this the "off until the operator turns
@@ -336,16 +388,9 @@ try {
   }
   check(armLanded, "the relay's own start armed the bus before this gate touched the switch (§10.9)",
     "jobBusGetSettings never reported enabled:true within 10 s of the relay answering");
-  settingsBefore = await gw("jobBusGetSettings").catch(() => undefined);
-  check(settingsBefore != null, "the host answers jobBusGetSettings", JSON.stringify(settingsBefore ?? null));
-  // 10.9: the read carries `integrity` beside the settings, and the write refuses a key it does not
-  // own -- so what goes back at the end is the settings without it.
-  if (settingsBefore != null) delete settingsBefore.integrity;
-  check(settingsBefore?.integrity === undefined, "and it is written back without the read-only integrity block");
   // Off first, because "off until the operator turns it on" is the one default that decides
   // whether shipping this code opens a door by itself.
   await gw("jobBusSetSettings", { enabled: false });
-  settingsTouched = true;
   const whileOff = await v1("/jobs", { method: "POST", body: { type: "health.ping", idempotency_key: `off-${randomBytes(3).toString("hex")}`, payload: {} } });
   check(whileOff.status === 503 && /disabled/i.test(String(whileOff.body?.error ?? "")),
     "with the bus off a create is 503 'job bus is disabled'", `HTTP ${whileOff.status} ${JSON.stringify(whileOff.body)}`);
@@ -533,11 +578,13 @@ try {
 
   step("the audit file (§10.5)");
   const after = await auditLines();
-  // The transitions this run owes: the ping's queued and done, the chapter's queued, needs_human
-  // and cancelled, and, when the clone leg ran, that job's queued, running and its terminal row.
-  // A create the edge refused never became a job, so it owes no row; the duplicate key returned
-  // the first job rather than making a second; and the 429 was refused before a job existed.
-  const expected = 5 + (probeAgentId ? 3 : 0);
+  // The transitions this run owes: the ping's queued, running and done (it is dispatched like any
+  // other job and passes through running on its way, which the first count of this leg missed),
+  // the chapter's queued, needs_human and cancelled, and, when the clone leg ran, that job's
+  // queued, running and its terminal row. A create the edge refused never became a job, so it owes
+  // no row; the duplicate key returned the first job rather than making a second; and the 429 was
+  // refused before a job existed.
+  const expected = 6 + (probeAgentId ? 3 : 0);
   const grew = after.length - auditBefore;
   check(grew === expected, `audit.jsonl grew by exactly the ${expected} rows those transitions owe`,
     `${auditBefore} -> ${after.length} (${grew})`);
@@ -601,6 +648,7 @@ try {
   }
   stopRelays();
   dropClosedProfile();
+  dropAuthDir();
 }
 
 console.log(`\n${failures === 0 ? "OK" : `${failures} FAILED`}`);

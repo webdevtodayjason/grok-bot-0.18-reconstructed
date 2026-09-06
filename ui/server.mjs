@@ -162,7 +162,13 @@ function fail(res, status, message, headers = {}) {
 // AUTH is read once at boot rather than per request. A password change is therefore a restart,
 // which is what set-password.mjs prints, and it means a request path cannot be slowed down or
 // broken by a half-written file.
-const AUTH_FILE = path.join(HERE, "auth.json");
+// The path is overridable so a gate can stand up a relay with a password of its own without
+// writing into the operator's tree: verify-job-bus.mjs has to prove the job bearer opens
+// nothing but /v1, and on a relay with no password every route answers everyone alike, so
+// the leg could only ever have measured the missing lock. Setting this is no weaker than the
+// env that already carries the gateway token; the non-loopback refusal below still applies to
+// whatever file it resolves to.
+const AUTH_FILE = process.env.SAND_UI_AUTH_FILE ?? path.join(HERE, "auth.json");
 const AUTH = readAuthFile(AUTH_FILE);
 const SESSION_COOKIE = "gb_session";
 const throttle = createLoginThrottle();
