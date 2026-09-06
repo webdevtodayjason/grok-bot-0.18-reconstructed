@@ -110,6 +110,29 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-05 night (the job bus integrated, and the one seam that was not joined).** The three
+  Titan Job Bus branches merged onto one trunk. Three conflicts, all of them two pieces appending to
+  the same place: both deploy paths had grown their own way to pass `TITAN_JOB_TOKEN` (the compose
+  had it twice as a repeated YAML key), and the console's stylesheet had two independent appends at
+  the end of the file. `docs/JOB-BUS.md` gained section 10, the hardening pass, which is binding and
+  wins over 1 to 9.
+
+  The seam worth writing down: the store emits every transition as `{type:"job-bus", jobId, status}`
+  through `deps.hostEvents.emit`, and the console's card listens on the gateway's `/events` stream.
+  Those are two different buses. `hostEvents` is the push-notification fan-out and its only
+  subscriber switches on `event.kind`, so every job transition landed there and stopped; the SSE
+  stream is `SandHost.listeners`, reached through a `private emit` nothing outside the class can
+  call. Both halves were written correctly to the contract and nothing joined them, which is exactly
+  the shape of failure this document exists for. `wireEvents` now forwards a job-bus event onto the
+  stream in its `{channel, payload}` envelope, so a client filtering with `?channels=job-bus` sees it
+  and the console's `payload ?? envelope` reader gets the object the contract names either way.
+  `tests/job-bus-event-stream.test.mjs` drives the real class and fails when the forward is removed.
+
+  Measured in this worktree: 574 unit tests green, source typecheck clean, `verify-dashboard.mjs
+  --offline` 22/22 against a relay on 127.0.0.1:7799. The box gates (`verify-job-bus.mjs`,
+  `verify-deploy.mjs`) were not run here; the Mac box belongs to another wave. New row JOBBUS-5 in
+  `GAP-ANALYSIS.md` §0 owns section 10, none of which is built yet.
+
 - **2026-09-05 late (the Titan Job Bus, console, gates, deploy and docs).** `docs/JOB-BUS.md` is
   the contract and three pieces were built to it in parallel: the gateway's store, allowlist,
   worker and audit; the relay's `/v1` edge and its token; and this piece, the console card and the

@@ -85,10 +85,15 @@ test("the relay rewrites on the vnc route and nowhere else", () => {
   assert.ok(call.startsWith("rewriteVncAsset(rest, Buffer.from(await upstream.arrayBuffer()))"),
     "it wraps the proxied body, so the file name decides and the relay does not");
   // The bridge is a sibling module of the relay, and two tests spawn a copy of the relay out of a
-  // temp directory. A copy list that forgot it would fail to boot the server at all.
+  // temp directory. A copy list that forgot it would fail to boot the server at all. Those two
+  // tests now copy every .mjs in ui/ instead of naming modules one at a time, which is the same
+  // guarantee and does not need editing again the next time the relay grows a sibling; accept
+  // either shape, and keep failing on a fixed list that has dropped the bridge.
+  const copiesEveryRelayModule = /readdirSync\(path\.join\(repoRoot, "ui"\)\)[\s\S]{0,120}endsWith\("\.mjs"\)/;
   for (const name of ["relay-login-guards.test.mjs", "relay-trusted-proxies.test.mjs"]) {
     const source = readFileSync(path.join(repoRoot, "tests", name), "utf8");
-    assert.ok(source.includes('"vnc-bridge.mjs"'), `${name} copies the bridge module beside the relay`);
+    assert.ok(source.includes('"vnc-bridge.mjs"') || copiesEveryRelayModule.test(source),
+      `${name} copies the bridge module beside the relay`);
   }
 });
 

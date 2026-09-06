@@ -8,6 +8,7 @@ import "./agent-state-results.test.mjs";
 import "./backend-mcp-exec-json.test.mjs";
 import "./codex-direct-responses.test.mjs";
 import "./inference-extension-readiness.test.mjs";
+import "./job-bus-event-stream.test.mjs";
 import "./job-bus-store.test.mjs";
 import "./job-bus-worker.test.mjs";
 import "./inference-router-transcript.test.mjs";

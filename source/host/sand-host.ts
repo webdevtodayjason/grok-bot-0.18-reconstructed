@@ -898,6 +898,19 @@ export class SandHost {
       kind: "notification-baseline",
       agents: optionalMethod(transcript, "listAgentsSync")?.() ?? []
     });
+    // JOBBUS. The job store emits every transition as `{type:"job-bus", jobId, status}` on
+    // `hostEvents` (docs/JOB-BUS.md section 5, wired in host-gateway-api's JOBBUS block). That bus
+    // is the push-notification fan-out and nothing on it reaches a browser: the notifications
+    // extension switches on `event.kind`, so a job event landed there and stopped. The console's
+    // Job bus card listens on the gateway's SSE stream, which is `this.listeners`, so the two are
+    // joined here. The forward keeps the emitted event whole as the payload and wraps it in the
+    // stream's own `{channel, payload}` envelope, so a subscriber that filters with `?channels=`
+    // can ask for `job-bus` like any other channel and the console's reader, which takes
+    // `payload ?? envelope`, sees the same object the contract names either way.
+    this.hostEvents.subscribe((event: unknown) => {
+      if ((event as { type?: unknown } | null)?.type !== "job-bus") return;
+      this.emit({ channel: "job-bus", payload: event });
+    });
     optionalMethod(transcript, "subscribe")?.(
       (payload: unknown) => this.emit({ channel: "transcript", payload })
     );
