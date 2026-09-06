@@ -955,10 +955,13 @@ try {
         const reached = neighbour == null ? null : await until(async () => ((await rowsFor(neighbour.id)).some((w) => w.id === ownedRow.id) ? true : null), 12_000, 800);
         check(reached === true, "Make global puts the skill in every agent's library", neighbour ? `read back through ${neighbour.name}` : "no second agent");
       }
-      // Close the Skills panel outright rather than pressing Escape. Escape reaches whatever the
-      // last click left focused inside the panel, and when it does not close the dialog the modal
-      // stays up and swallows the #room-menu click below -- which aborted this run before the
-      // marketplace section, and the QOL-LOGOS block under it, ever executed.
+      // Close the Skills panel by its own close control rather than pressing Escape. Escape reaches
+      // whatever the last click left focused inside the panel, and when it does not close the
+      // dialog the modal stays up and swallows the #room-menu click below -- which is how a run
+      // aborted here, 1100 lines before the bleed sweep at the end of this gate ever executed. The
+      // close() behind it is the same call the button makes, so a missed click cannot leave the
+      // modal up either.
+      await page.click("[data-close-dialog]", { timeout: 8000 }).catch(() => {});
       await page.evaluate(() => document.getElementById("panel-dialog")?.close());
       await page.waitForTimeout(500);
     }
@@ -2119,8 +2122,16 @@ try {
       // would pass having measured nothing. The width is what says the panel was really open.
       return { label: lbl, found: true, width: Math.round(root.getBoundingClientRect().width), boxes: boxes.length, bad: bad.slice(0, 3) };
     }, { sel: selector, lbl: label });
+    // Both dialogs are closed by the close() their own close buttons call, never by Escape: Escape
+    // reaches whatever the last click left focused, and a modal left up swallows the next sweep's
+    // click on the control behind it. Files opens the desktop dialog, so the hop off it has to
+    // clear that one as well as the panel dialog.
+    const closeDialogs = async () => {
+      await page.evaluate(() => { document.getElementById("panel-dialog")?.close(); document.getElementById("desktop-dialog")?.close(); });
+      await page.waitForTimeout(400);
+    };
     const sweepPanel = async (label, open, selector = "#panel-content") => {
-      await page.keyboard.press("Escape"); await page.waitForTimeout(400);
+      await closeDialogs();
       const opened = await open().then(() => true).catch((error) => String(error?.message ?? error).slice(0, 90));
       if (opened !== true) { check(false, `the ${label} panel opens for the bleed sweep`, String(opened)); return; }
       await page.waitForTimeout(1500);
@@ -2133,7 +2144,16 @@ try {
             : seen.width > 0 ? `${seen.boxes} box(es) measured across ${seen.width}px` : "the panel never opened");
     };
     await sweepPanel("Marketplace", () => page.click('[data-capability="marketplace"]', { timeout: 8000 }));
-    await sweepPanel("Agent details", () => page.click("#room-menu", { timeout: 8000 }));
+    // #room-menu opens Room roster when the active context is the room and Agent details otherwise,
+    // so this asserts which panel it got before measuring it: a roster measured under the label
+    // "Agent details" would pass the one panel the operator's screenshot was of without touching it.
+    await sweepPanel("Agent details", async () => {
+      await page.click("#room-menu", { timeout: 8000 });
+      await page.waitForTimeout(900);
+      const eyebrow = await page.evaluate(() => document.getElementById("panel-eyebrow")?.textContent?.trim() ?? "");
+      const roleRow = await page.$("[data-save-role]");
+      if (eyebrow !== "Agent details" || roleRow == null) throw new Error(`opened “${eyebrow || "nothing"}”, not Agent details`);
+    });
     await sweepPanel("Routines", () => page.click('[data-capability="routines"]', { timeout: 8000 }));
     await sweepPanel("Skills", () => page.click('[data-capability="skills"]', { timeout: 8000 }));
     // Files is the desktop dialog rather than the panel dialog: the capability button calls
@@ -2156,7 +2176,7 @@ try {
       }, 30_000, 1000);
       if (!filled) throw new Error("getEvidence did not fill the disclosure within 30s");
     });
-    await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+    await closeDialogs();
 
     // -- CP-10 item 2 / GW-11: the masked credential card. The host only writes a secret-request
     // entry when an agent asks for one, which needs a model turn this gate will not spend, so the

@@ -3148,6 +3148,12 @@ dialog[open] {
 .routine-list,
 .plugin-list { min-width: 0; }
 
+/* .panel-intro is not a card, so the card rule below does not reach it, and it is where Claim
+   provenance prints a bare attempt id inside a <code>. An id has nothing to break on: without this
+   the sentence ran past the dialog's edge, and with the body clipping on x it was unreachable
+   rather than merely wide. */
+.panel-intro { overflow-wrap: anywhere; }
+
 .panel-card,
 .settings-section,
 .routine-card,
@@ -3205,7 +3211,6 @@ dialog[open] {
 
 /* Preformatted output scrolls inside its own frame instead of widening the card. */
 #panel-content pre,
-#panel-content code,
 .skill-body,
 .evidence-head,
 .attachment-preview { max-width: 100%; }
