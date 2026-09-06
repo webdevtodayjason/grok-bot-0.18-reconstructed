@@ -1657,8 +1657,12 @@
     const key = String(marketplacePluginId);
     const item = marketplaceItemById(key);
     const install = marketplaceInstallById(key);
+    // The key is a card id when the operator came from the installed strip (the strip emits card
+    // ids verbatim, and a demo card's id carries no colon), and a catalog id when it came from a
+    // catalog card; try the verbatim id first, then the connector card the catalog names.
     const cardId = install?.cardId ?? (key.includes(":") ? key : `mcp:${key}`);
-    const card = state.plugins.find((plugin) => plugin.id === cardId) ?? null;
+    const card = state.plugins.find((plugin) => plugin.id === key)
+      ?? state.plugins.find((plugin) => plugin.id === cardId) ?? null;
     // The tool switches on this page are handled by id through selectedPluginId, and this page can
     // be reached from a catalog card as well as from the installed strip. Pinning it here means it
     // is the card on screen whichever way the operator arrived.
