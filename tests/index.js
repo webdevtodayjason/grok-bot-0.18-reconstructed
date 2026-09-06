@@ -4,6 +4,7 @@
 // module and dies with "Cannot find module .../tests" (reproducible in an empty project, so it is
 // the runtime, not this repo). Node then looks for an index in the directory, which is this file.
 // Importing each suite registers its tests with the runner exactly as passing the glob does.
+import "./agent-state-results.test.mjs";
 import "./backend-mcp-exec-json.test.mjs";
 import "./codex-direct-responses.test.mjs";
 import "./inference-extension-readiness.test.mjs";

@@ -1453,7 +1453,39 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           agentDir: dirname(session.dbPath),
           agentId: session.id,
           readBoxFile: (boxPath: string) =>
-            method(remoteBox, "downloadFile")?.(ctx, session.id, boxPath)
+            method(remoteBox, "downloadFile")?.(ctx, session.id, boxPath),
+          // STATE-1: AgentStateDeps requires these three and `method()` hides that from the type
+          // checker, so an agent's update_state on its own profile died with "deps.readProfile is
+          // not a function" and a settings write would have died the same way. They are the
+          // session's own profile file and the transcript manager's two setting writers.
+          readProfile: () => {
+            const profile = method(sessionApi, "getAgentProfileText")?.(session.id);
+            return profile == null
+              ? null
+              : {
+                  name: String(profile.name ?? ""),
+                  description: String(profile.description ?? ""),
+                  ...(profile.title == null ? {} : { title: String(profile.title) })
+                };
+          },
+          writeProfile: (profile: Record<string, string>) => {
+            const write = method(sessionApi, "updateAgentProfile")?.(session.id, {
+              name: String(profile.name ?? ""),
+              description: String(profile.description ?? ""),
+              ...(profile.title == null ? {} : { title: String(profile.title) })
+            });
+            if (write != null && typeof (write as Promise<unknown>).catch === "function") {
+              void (write as Promise<unknown>).catch((error: unknown) =>
+                console.warn(`[sand][state] profile write from update_state failed: ${String(error)}`)
+              );
+            }
+          },
+          writeSettings: (settings: Record<string, boolean>) => {
+            if ("hiddenFromSidebar" in settings)
+              method(transcript, "setAgentHiddenFromSidebar")?.(session.id, settings.hiddenFromSidebar);
+            if ("notifyOnAgentUpdates" in settings)
+              method(transcript, "setAgentNotifyOnUpdates")?.(session.id, settings.notifyOnAgentUpdates);
+          }
         })
       : undefined;
 

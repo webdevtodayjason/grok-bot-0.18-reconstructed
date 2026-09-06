@@ -9,8 +9,13 @@ import { CANONICAL_AVATAR_FILENAME, invalidateAvatarDataUrlCache, listConvention
 import { isBoxRootPath } from "../../box/box-transfer.js";
 import { FileMemoryStore, getProjectDir, getProjectMemoryShardDir, getUserMemoryShardDir, projectDirExists, type MemoryKind } from "./memory-service.js";
 
-export type StateWriteResult = { ok: true; message: string } | { ok: false; message: string };
-const ok = (message: string): StateWriteResult => ({ ok: true, message }), fail = (message: string): StateWriteResult => ({ ok: false, message });
+// STATE-1: the runner's state tool (runner/tools/sand-state-tool.ts) reads `detail` on success and
+// `reason` on failure, the shape runner/agent-state.ts defines, while this module answered with
+// `message` alone. A successful save therefore handed the tool undefined, whose `.text` the tool
+// wrapper then read, so every skill, routine and memory write from an agent "failed" after it had
+// landed. Both names are carried so neither reader is wrong.
+export type StateWriteResult = { ok: true; message: string; detail: string } | { ok: false; message: string; reason: string };
+const ok = (message: string): StateWriteResult => ({ ok: true, message, detail: message }), fail = (message: string): StateWriteResult => ({ ok: false, message, reason: message });
 const blank = (value?: string | null): boolean => value == null || value.trim().length === 0;
 export const MEMORY_NOTE_PREFIX = "Note: ";
 export const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
