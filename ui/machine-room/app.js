@@ -1769,20 +1769,23 @@
     }
     // QOL-LOGOS: a card is drawn ONCE on the page. Featured is a flag, not a category, so a
     // featured plugin used to be painted twice under All -- once in Featured and again in its own
-    // category -- which is what the operator's screenshot shows. Featured now claims it, and the
-    // category sections skip what Featured already drew. Press the category's own chip and the
-    // section still lists it: Featured is not drawn then, so nothing is being hidden.
-    const drawn = new Set();
-    const sections = marketplaceCategories()
+    // category -- which is what the operator's screenshot shows. The CATEGORY section keeps every
+    // member and Featured yields to it, because the other way round emptied four headings out of
+    // the default view: five of ten plugins are featured, and Communication, Project management,
+    // Web & Search and Code review have no other member. Press the Featured chip and the section
+    // is drawn on its own with all of them, which is what makes the chip worth pressing.
+    const shown = marketplaceCategories()
       .filter((category) => category !== MARKETPLACE_ALL)
-      .filter((category) => marketplaceCategory === MARKETPLACE_ALL || category === marketplaceCategory)
+      .filter((category) => marketplaceCategory === MARKETPLACE_ALL || category === marketplaceCategory);
+    const claimed = new Set(shown
+      .filter((category) => category !== "Featured")
+      .flatMap((category) => items.filter((item) => String(item.category ?? "") === category).map((item) => String(item.id))));
+    const sections = shown
       .map((category) => {
-        const members = (category === "Featured"
-          ? items.filter((item) => item.featured === true)
-          : items.filter((item) => String(item.category ?? "") === category))
-          .filter((item) => !drawn.has(String(item.id)));
+        const members = category === "Featured"
+          ? items.filter((item) => item.featured === true && !claimed.has(String(item.id)))
+          : items.filter((item) => String(item.category ?? "") === category);
         if (!members.length) return "";
-        for (const item of members) drawn.add(String(item.id));
         return `<div class="plugin-group-title">${escapeHtml(category)}</div><div class="marketplace-grid">${members.map(marketplaceCardMarkup).join("")}</div>`;
       })
       .join("");

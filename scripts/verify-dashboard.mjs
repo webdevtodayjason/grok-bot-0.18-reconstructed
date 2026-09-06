@@ -955,7 +955,12 @@ try {
         const reached = neighbour == null ? null : await until(async () => ((await rowsFor(neighbour.id)).some((w) => w.id === ownedRow.id) ? true : null), 12_000, 800);
         check(reached === true, "Make global puts the skill in every agent's library", neighbour ? `read back through ${neighbour.name}` : "no second agent");
       }
-      await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+      // Close the Skills panel outright rather than pressing Escape. Escape reaches whatever the
+      // last click left focused inside the panel, and when it does not close the dialog the modal
+      // stays up and swallows the #room-menu click below -- which aborted this run before the
+      // marketplace section, and the QOL-LOGOS block under it, ever executed.
+      await page.evaluate(() => document.getElementById("panel-dialog")?.close());
+      await page.waitForTimeout(500);
     }
 
     // -- MR-01, MR-05, MR-08, GW-06: the room ••• menu opens the live agent surface.
@@ -1094,9 +1099,9 @@ try {
       // category -- because there is one catalog and it has to give one answer.
       const probe = String(catalogPlugins[0].name).slice(0, 4);
       await page.fill("#marketplace-search", probe); await page.waitForTimeout(700);
-      // Deduped defensively. QOL-LOGOS made Featured claim a card and the category sections skip
-      // what it drew, so each id is on the page once; the Set is what makes this line survive
-      // either rule rather than a claim about which one is in force.
+      // Deduped defensively. QOL-LOGOS made a card land on the page once -- the category section
+      // keeps it and Featured yields -- so each id appears once; the Set is what makes this line
+      // survive either rule rather than a claim about which one is in force.
       const found = [...new Set(await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard)))];
       const wanted = catalogPlugins
         .filter((plugin) => [plugin.name, plugin.tagline, plugin.category].some((field) => String(field ?? "").toLowerCase().includes(probe.toLowerCase())))
@@ -1162,18 +1167,32 @@ try {
       const clipped = await page.evaluate(() => [...document.querySelectorAll("[data-marketplace-card] .marketplace-card-action")]
         .filter((el) => el.scrollWidth > el.clientWidth).map((el) => `${el.closest("[data-marketplace-card]").dataset.marketplaceCard} "${el.textContent.trim()}"`));
       check(clipped.length === 0, "the Add button and the ✓ Added pill are drawn whole, not clipped", clipped.join(", ") || "nothing shrunk to a clip");
-      // A card once on the page: Featured claims a featured plugin and the category sections skip
-      // what it drew. The category chip still lists it -- Featured is not drawn under a chip.
+      // A card once on the page, and no heading emptied to get there. The category section keeps
+      // every member and Featured yields to it, so under All the headings are the catalog's own
+      // categories -- the other way round dropped four of them, because five of ten plugins are
+      // featured and four categories have no other member. The Featured chip is what draws the
+      // Featured section, and it draws all of them.
       const drawnIds = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
       const twice = drawnIds.filter((id, i) => drawnIds.indexOf(id) !== i);
       check(twice.length === 0, "and a card is drawn once, not once under Featured and again under its category", [...new Set(twice)].join(", ") || `${drawnIds.length} cards, ${new Set(drawnIds).size} plugins`);
+      const headings = await page.$$eval("[data-marketplace-sections] .plugin-group-title", (els) => els.map((e) => e.textContent.trim()));
+      const inUse = [...new Set(catalogPlugins.map((plugin) => String(plugin.category ?? "")).filter(Boolean))];
+      const missingHeads = inUse.filter((category) => !headings.includes(category));
+      check(missingHeads.length === 0, `and under All every category the catalog uses keeps its heading (${inUse.length})`,
+        missingHeads.length ? `missing ${missingHeads.join(", ")}` : headings.join(" | "));
       const featuredIds = catalogPlugins.filter((plugin) => plugin.featured === true).map((plugin) => String(plugin.id));
       const withCategory = featuredIds.find((id) => catalogPlugins.some((plugin) => String(plugin.id) === id && String(plugin.category ?? "") !== "Featured")) ?? null;
       if (withCategory) {
         const category = String(catalogPlugins.find((plugin) => String(plugin.id) === withCategory).category);
-        await page.click(`[data-marketplace-category="${category}"]`); await page.waitForTimeout(600);
-        const inCategory = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
-        check(inCategory.includes(withCategory), `and the ${category} chip still lists ${withCategory}, which Featured drew under All`, inCategory.join(", "));
+        const underCategory = await page.evaluate((name) => {
+          const title = [...document.querySelectorAll("[data-marketplace-sections] .plugin-group-title")].find((el) => el.textContent.trim() === name);
+          return title == null ? [] : [...(title.nextElementSibling?.querySelectorAll("[data-marketplace-card]") ?? [])].map((el) => el.dataset.marketplaceCard);
+        }, category);
+        check(underCategory.includes(withCategory), `and the ${category} section lists ${withCategory} in the default view rather than losing it to Featured`, underCategory.join(", ") || `nothing under ${category}`);
+        await page.click(`[data-marketplace-category="Featured"]`); await page.waitForTimeout(600);
+        const underFeatured = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
+        check(featuredIds.every((id) => underFeatured.includes(id)) && underFeatured.length === featuredIds.length,
+          `and the Featured chip draws every featured plugin (${featuredIds.length})`, `${underFeatured.join(", ")} vs ${featuredIds.join(", ")}`);
         await page.click(`[data-marketplace-category="All"]`); await page.waitForTimeout(600);
       }
       // The plugin page's tile is the same tile at the page size. Opened and closed here rather

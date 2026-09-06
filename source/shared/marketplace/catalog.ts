@@ -185,7 +185,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "A maintained stdio Slack server that takes a user OAuth token from the environment, so it acts as the installing user and search works. Posting stays off: that is the server's own default, not a header this entry sets. This is not the Slack chat listener — the listener binds inbound events to an agent, this connector is outbound tools inside the box.",
     category: "Communication",
     featured: true,
-    icon: Object.freeze({ letter: "S", color: "#4a154b", file: "marketplace/logos/slack.png" }),
+    icon: Object.freeze({ letter: "S", color: "#4a154b" }),
     source: Object.freeze({ label: "korotovsky/slack-mcp-server", url: "https://github.com/korotovsky/slack-mcp-server" }),
     kind: "connector",
     connectorName: "slack",
@@ -263,7 +263,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "TinyFish's hosted MCP endpoint, bridged by mcp-remote with the API key carried as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. mcp-remote expands ${TINYFISH_API_KEY} from its own environment at start, so the literal ${...} text is what lands in connectors.json and the key stays in the host's store.",
     category: "Web & Search",
     featured: true,
-    icon: Object.freeze({ letter: "T", color: "#0f766e", file: "marketplace/logos/tinyfish.png" }),
+    icon: Object.freeze({ letter: "T", color: "#0f766e" }),
     source: Object.freeze({ label: "agent.tinyfish.ai/mcp", url: "https://agent.tinyfish.ai/mcp" }),
     kind: "connector",
     connectorName: "tinyfish",
@@ -332,7 +332,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "A pip package that reads TINYFISH_API_KEY out of the environment, with a published SKILL.md the host imports as an agent workflow so the agent learns the commands from their author. Its key lives in the shell section of the secret store, which is a different place from the tinyfish connector's process environment: storing one does not fill the other.",
     category: "Shell tools",
     featured: false,
-    icon: Object.freeze({ letter: "T", color: "#155e75", file: "marketplace/logos/tinyfish-cli.png" }),
+    icon: Object.freeze({ letter: "T", color: "#155e75" }),
     source: Object.freeze({
       label: "webdevtodayjason/cli-anything-tinyfish",
       url: "https://github.com/webdevtodayjason/cli-anything-tinyfish",
@@ -357,9 +357,10 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       + "stored value into, so git authenticates without a token ever landing in a remote URL or a file.",
     category: "Development",
     featured: false,
-    // The binary's own name rather than an initial: a second "G" tile beside the GitHub connector's
-    // would be the one thing an operator must not confuse this card with. Two glyphs at 18px sit
-    // inside the 38px tile the console draws.
+    // The binary's own name rather than an initial, and no logo file on purpose: GitHub's Octocat is
+    // in this repo, but drawing it here would put two identical marks side by side in Development,
+    // and this card is the one an operator must not confuse with the GitHub connector. Two glyphs sit
+    // inside the 40px tile the console draws.
     icon: Object.freeze({ letter: "gh", color: "#1f2328" }),
     source: Object.freeze({ label: "cli/cli", url: "https://github.com/cli/cli/blob/trunk/docs/install_linux.md" }),
     kind: "shell-tool",

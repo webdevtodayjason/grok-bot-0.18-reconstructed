@@ -25,8 +25,9 @@ the second pill.
 chips that wraps rather than overflowing, and a section per category of cards. A card is an icon
 tile, the plugin name, one line of tagline that truncates with an ellipsis, and an **Add** button
 that becomes **✓ Added** once the plugin is installed. **A card is drawn once**: a featured plugin
-is claimed by the Featured section and skipped by its own category section underneath, and pressing
-that category's chip still lists it (Featured is not drawn then). Clicking a card opens the
+is listed by its own category section, and the Featured section under All yields it rather than
+painting it twice — so no category heading empties out. Press the **Featured** chip and the Featured
+section is drawn on its own, listing every featured plugin. Clicking a card opens the
 **plugin page**: the icon and name, **View Source ↗**, **Uninstall**, the description, an
 **Accounts** box, and a **Connectors** box.
 
@@ -224,7 +225,7 @@ and a rebuild, not a file dropped on the box.
   description: "TinyFish's hosted MCP endpoint, bridged into the box over stdio. …",
   category: "Web & Search",
   featured: true,
-  icon: { letter: "T", color: "#0f766e", file: "marketplace/logos/tinyfish.png" },
+  icon: { letter: "T", color: "#0f766e" },
   source: { label: "agent.tinyfish.ai/mcp", url: "https://agent.tinyfish.ai/mcp" },
   kind: "connector",
   connectorName: "tinyfish",

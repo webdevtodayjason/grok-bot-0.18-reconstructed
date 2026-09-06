@@ -20,22 +20,34 @@ installs, which is what the card is for.
 | File | What it is | Source | Licence |
 | --- | --- | --- | --- |
 | `github.svg` | GitHub's Octocat mark on a white plate | `third_party/github/assets/logo.svg` in [cursor/plugins](https://github.com/cursor/plugins) | MIT, Copyright (c) 2026 Cursor (`third_party/github/LICENSE` in that repo) |
-| `slack.png` | Slack's hash mark on Slack aubergine, 128×128, downscaled from the 256×256 original with `sips -Z 128` | Slack's own CDN, `https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png` | Slack brand asset, published by Slack Technologies; used unmodified but for the downscale |
 | `linear.svg` | Linear's mark in Linear's `#5E6AD2`, path unmodified, placed on a 192×192 white plate | [Simple Icons](https://simpleicons.org), `https://cdn.simpleicons.org/linear` | CC0-1.0 (the Simple Icons collection) |
 | `google.svg` | The Google "G" in `#4285F4`, path unmodified, on a 192×192 white plate — the Google Workspace card | [Simple Icons](https://simpleicons.org), `https://cdn.simpleicons.org/google` | CC0-1.0 (the Simple Icons collection) |
-| `tinyfish.png` | TinyFish's app icon, 96×96, unmodified | TinyFish's own site, `https://www.tinyfish.ai/favicon-for-app/icon1.png` | TinyFish brand asset, published by TinyFish |
-| `tinyfish-cli.png` | The same TinyFish icon, byte-identical, for the TinyFish CLI card | as `tinyfish.png` above | as `tinyfish.png` above |
 | `coderabbit.svg` | CodeRabbit's mark in `#FF570A`, path unmodified, on a 192×192 white plate | [Simple Icons](https://simpleicons.org), `https://cdn.simpleicons.org/coderabbit` | CC0-1.0 (the Simple Icons collection) |
 | `localfiles.svg` | The Model Context Protocol mark, path unmodified, on a 192×192 white plate — the Filesystem card is MCP's own reference server | [Simple Icons](https://simpleicons.org), `https://cdn.simpleicons.org/modelcontextprotocol` | CC0-1.0 (the Simple Icons collection) |
 
 **Custom MCP server** deliberately has no file: it is not a vendor, it is the card that opens the
-connector editor, and its `+` reads better than any mark would.
+connector editor, and its `+` reads better than any mark would. **GitHub CLI (gh)** deliberately has
+no file either, though `github.svg` is right here: the same Octocat on two cards in the same
+Development section is the one confusion that card exists to avoid, so it keeps its `gh` tile.
 
 **The white plate.** Simple Icons ships a single-colour path with a transparent background. Four of
 the marks above are the vendor's brand colour, which is also the colour of the tile the catalog
 gives that plugin (Linear's `#5E6AD2` on Linear's `#5e6ad2` tile would be invisible). Each is
 therefore placed, path unmodified, on a 192×192 white square the way cursor/plugins draws its own
 third-party logos, so every logo on the page reads as the same kind of object.
+
+## Marks this catalog does NOT ship, and why
+
+Three cards carried a real logo and no licence. Both vendors publish terms that answer the question,
+and both answers are no, so **Slack**, **TinyFish** and **TinyFish CLI** are back on their letter
+tiles and the files are out of this directory. Recorded here so nobody re-adds them from a favicon:
+
+| Mark | Where the answer is | What it says |
+| --- | --- | --- |
+| Slack | [Slack Brand Terms of Service](https://slack.com/terms-of-service/slack-brand) | "**Most uses require a specific written license**", "Don't use the Slack logo (with or without your company logo)", and "Don't distribute or otherwise make available our logos, marks or assets" — committing the PNG here and serving it is exactly that distribution. |
+| TinyFish | [TinyFish Terms of Service](https://www.tinyfish.ai/terms), *Ownership* | Tiny Fish retains all right in "any trademarks, logos, or service marks displayed on the Services", and "**There are no implied licenses in these Terms** and except as expressly authorized by Tiny Fish, you may not make use of the Services, Site Content, and Marks." TinyFish publishes no brand guidelines granting one. |
+
+Either mark can come back the day there is a written permission to name in this table.
 
 ## Bot template tiles
 
