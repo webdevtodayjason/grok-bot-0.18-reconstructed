@@ -79,7 +79,10 @@
 //              --gh-tool. Like (m) it never runs the installer; if `gh` is not in the box it says
 //              so and skips the two legs that need it.
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const GATEWAY = process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:7777";
 const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
@@ -170,6 +173,31 @@ const callRaw = async (method, args = {}) => {
   try { return { ok: true, value: await call(method, args) }; }
   catch (error) { return { ok: false, message: error.message }; }
 };
+
+/**
+ * CONNECT-5. The shell-tool catalog's own ids, read out of the module the host serves them from
+ * rather than copied into this file. esbuild bundles the TypeScript the same way tests/ does, so
+ * adding or removing a catalog entry moves the expectation with it and never breaks this gate.
+ */
+async function shellToolCatalogIds() {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const stage = mkdtempSync(path.join(repoRoot, "node_modules", ".shell-catalog-gate-"));
+  try {
+    const { build } = await import("esbuild");
+    const result = await build({
+      entryPoints: [path.join(repoRoot, "source/host/extensions/shell-tools/shell-tool-catalog.ts")],
+      bundle: true, write: false, format: "cjs", platform: "node", target: "es2022", logLevel: "silent",
+    });
+    const file = path.join(stage, "shell-tool-catalog.cjs");
+    writeFileSync(file, result.outputFiles[0].text, "utf8");
+    const mod = createRequire(import.meta.url)(file);
+    const ids = (mod.SHELL_TOOLS ?? []).map((tool) => String(tool.id));
+    if (ids.length === 0) fail("the shell-tool catalog module exports no entries");
+    return ids;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
 
 const docker = (args) => new Promise((resolve, reject) =>
   execFile("docker", args, { maxBuffer: 64 << 20 }, (error, out, err) =>
@@ -1293,8 +1321,20 @@ try {
     // leave a tool on the box that the next run would find already there, and neither installer is
     // what this arm is about.
     const catalogue = await call("listShellTools");
-    if (!Array.isArray(catalogue) || catalogue.length !== 2) {
-      fail(`listShellTools returned ${Array.isArray(catalogue) ? catalogue.length : "a non-array"}, expected the two catalog entries`);
+    // What the catalog holds is read out of the catalog MODULE, not written down here. A hardcoded
+    // count is a gate that fails the day someone adds an entry, which is what happened when
+    // github-cli made "the two catalog entries" three.
+    const expected = await shellToolCatalogIds();
+    if (!Array.isArray(catalogue)) {
+      fail(`listShellTools returned a non-array, expected the ${expected.length} catalog entries`);
+    } else {
+      const got = catalogue.map((tool) => String(tool?.id)).sort();
+      const want = [...expected].sort();
+      if (got.join(",") !== want.join(",")) {
+        fail(`listShellTools returned [${got.join(", ")}], the catalog holds [${want.join(", ")}]`);
+      } else {
+        ok(`listShellTools returns every one of the catalog's ${want.length} entries and nothing else`);
+      }
     }
     const coderabbit = catalogue.find((tool) => tool.id === "coderabbit");
     const tinyfishCli = catalogue.find((tool) => tool.id === "tinyfish-cli");
