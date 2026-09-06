@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
 import net from "node:net";
-import { copyFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,7 +26,9 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 // test that silently stops testing anything is worse than no test.
 function serverCopy() {
   const dir = mkdtempSync(path.join(tmpdir(), "relay-bind-"));
-  for (const name of ["server.mjs", "auth.mjs", "subscriptions.mjs", "vnc-bridge.mjs"]) {
+  // Every .mjs in ui/, not a fixed list: the relay grew a module once and these tests answered by
+  // failing to start a server at all, which looks nothing like the guard they exist to check.
+  for (const name of readdirSync(path.join(repoRoot, "ui")).filter((file) => file.endsWith(".mjs"))) {
     copyFileSync(path.join(repoRoot, "ui", name), path.join(dir, name));
   }
   return path.join(dir, "server.mjs");
