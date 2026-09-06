@@ -1107,8 +1107,14 @@ try {
       copyAgentId = copy?.id ?? null;
       check(copy != null && copy.name === `${renamed} copy` && callsTo("duplicateAgent") === 1, "(d) Duplicate creates a copy on the host through duplicateAgent", copy ? copy.name : "no new agent inside 20s");
       if (copyAgentId) {
-        await page.waitForTimeout(1500);
-        await page.click(`[data-context-id="${copyAgentId}"]`).catch(() => {}); await page.waitForTimeout(1500);
+        // The host has the copy before the roster draws it: measured on this box the new card
+        // appears about 6.5 s after duplicateAgent answers, and the old fixed 1.5 s wait clicked a
+        // card that was not there yet. The click swallowed its own failure, so the panel stayed on
+        // the previous agent and the copy's Delete button was waited for until the gate timed out.
+        // Wait for the card the operator would click, and say so when it never arrives.
+        const copyCard = await until(() => page.evaluate((id) => !!document.querySelector(`[data-context-id="${id}"]`) || null, copyAgentId), 30_000, 1000);
+        check(copyCard === true, "the copy appears in the roster the operator is looking at", copyCard ? "" : "no card for the copy inside 30s");
+        await page.click(`[data-context-id="${copyAgentId}"]`); await page.waitForTimeout(1500);
         await page.click("#room-menu"); await page.waitForTimeout(1200);
         await page.click(`[data-delete-agent="${copyAgentId}"]`); await page.waitForTimeout(300);
         const armed = await page.evaluate((id) => document.querySelector(`[data-delete-agent="${id}"]`)?.textContent, copyAgentId);
