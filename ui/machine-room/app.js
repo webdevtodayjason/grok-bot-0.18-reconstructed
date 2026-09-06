@@ -932,6 +932,11 @@
 
   function messageMarkup(message) {
     if (message.type === "system") {
+      // SHOT-4: a tool row the adapter summarised in words carries the verbatim command and output
+      // as its detail. The row opens to show them, so the receipt is one click away and never gone.
+      if (message.detail) {
+        return `<article class="message-row is-system" data-message-id="${escapeHtml(message.id)}"><details class="message-bubble tool-receipt"><summary>${escapeHtml(message.text)}</summary><pre>${escapeHtml(message.detail)}</pre></details></article>`;
+      }
       return `<article class="message-row is-system${message.exchange ? " is-exchange" : ""}" data-message-id="${escapeHtml(message.id)}"${message.exchange ? ' data-exchange="1" role="button" tabindex="0"' : ""}><div class="message-bubble">${escapeHtml(message.text)}</div></article>`;
     }
     const isUser = message.authorId === "you";
@@ -1023,8 +1028,26 @@
     return `<button class="workspace-chip${selected ? " is-active" : ""}" type="button" data-context-kind="${context.kind}" data-context-id="${escapeHtml(context.id)}" style="--chip-accent:${escapeHtml(accent)}">${visual}<span>${escapeHtml(record.name)}</span></button>`;
   }
 
+  // SHOT-5: the strip scrolls sideways when more chips are open than fit beside the composer, so
+  // the chip you are actually talking to is brought into view rather than left severed at the clip.
+  // fade-start / fade-end say which ends still hold chips; the CSS masks those edges, so a cut chip
+  // reads as "there is more this way" instead of a chip sliced through its label.
   function renderWorkspaces() {
     elements.workspaceList.innerHTML = state.openContexts.map(contextChipMarkup).join("");
+    const strip = elements.workspaceList;
+    const edges = () => {
+      const room = strip.scrollWidth - strip.clientWidth;
+      strip.classList.toggle("fade-start", room > 1 && strip.scrollLeft > 1);
+      strip.classList.toggle("fade-end", room > 1 && strip.scrollLeft < room - 1);
+    };
+    const sync = () => {
+      const active = strip.querySelector(".workspace-chip.is-active");
+      if (active) active.scrollIntoView({ inline: "nearest", block: "nearest" });
+      edges();
+    };
+    if (!strip.dataset.edgeWatch) { strip.dataset.edgeWatch = "1"; strip.addEventListener("scroll", edges, { passive: true }); }
+    sync();
+    requestAnimationFrame(sync);
   }
 
   function renderCapabilities() {
@@ -1147,7 +1170,7 @@
       const controls = `<button class="primary-button" type="button" data-run-routine="${escapeHtml(routine.id)}" ${running ? "disabled" : ""}>${running ? "Running…" : "Test run"}</button><button class="ghost-button" type="button" data-toggle-routine="${escapeHtml(routine.id)}" data-routine-paused="${paused}">${paused ? "Resume" : "Pause"}</button><button class="ghost-button" type="button" data-edit-routine="${escapeHtml(routine.id)}">Edit</button><button class="ghost-button" type="button" data-delete-routine="${escapeHtml(routine.id)}">Delete</button>`;
       // The pill names what the routine IS before what its last run did: a paused routine whose
       // last run failed is still paused, and its failure is on the run line below with the reason.
-      return `<article class="routine-card"><div><div class="routine-header"><h3>${escapeHtml(routine.name)}</h3><span class="status-pill ${running ? "working" : paused ? "" : lastFailed ? "attention" : "success"}">${escapeHtml(running ? "running" : paused ? "paused" : lastFailed ? "last run failed" : routine.status)}</span></div><p>${escapeHtml(routine.instruction)}</p><div class="routine-meta"><span class="tag">◷ ${escapeHtml(routine.trigger)}</span><span class="tag">attached · ${escapeHtml(routineScopeLabel(routine))}</span>${coordinator ? `<span class="tag">coordinates · ${escapeHtml(coordinator.name)}</span>` : ""}${delegate ? `<span class="tag">runs as · ${escapeHtml(delegate.name)}</span>` : ""}</div>${routine.nextRunAt ? `<div class="run-result">Next run in ${escapeHtml(formatCountdown(routine.nextRunAt))}</div>` : ""}${lastResult}</div><div style="display:grid;gap:6px;align-content:start">${controls}</div></article>`;
+      return `<article class="routine-card"><div><div class="routine-header"><h3>${escapeHtml(routine.name)}</h3><span class="status-pill ${running ? "working" : paused ? "" : lastFailed ? "attention" : "success"}">${escapeHtml(running ? "running" : paused ? "paused" : lastFailed ? "last run failed" : routine.status)}</span></div><p>${escapeHtml(routine.instruction)}</p><div class="routine-meta"><span class="tag">◷ ${escapeHtml(routine.trigger)}</span><span class="tag">attached · ${escapeHtml(routineScopeLabel(routine))}</span>${coordinator ? `<span class="tag">coordinates · ${escapeHtml(coordinator.name)}</span>` : ""}${delegate ? `<span class="tag">runs as · ${escapeHtml(delegate.name)}</span>` : ""}</div>${routine.nextRunAt ? `<div class="run-result next-run">Next run in ${escapeHtml(formatCountdown(routine.nextRunAt))}</div>` : ""}${lastResult}</div><div style="display:grid;gap:6px;align-content:start">${controls}</div></article>`;
     }).join("") : `<div class="empty-state"><div><strong>No routines attached to ${escapeHtml(name)}</strong><p>Create one here and it will belong to this ${context.kind === "worker" ? "agent" : "room"}—not to the whole system.</p></div></div>`;
     // One form serves both writes: the trigger stack is the hard part of it and an edit that
     // could not reach the stack would only ever be a rename.
@@ -1783,8 +1806,9 @@
     const icons = cards
       .map((card) => {
         const icon = marketplaceIconForCard(card);
+        const catalogId = marketplaceInstalls.find((install) => String(install.cardId) === String(card?.id))?.id ?? null;
         const background = icon?.color ? ` style="background:${escapeHtml(marketplaceColor(icon.color))}"` : "";
-        const face = icon ? marketplaceTileFaceMarkup(icon, card.name) : escapeHtml(card.icon);
+        const face = icon ? marketplaceTileFaceMarkup(icon, card.name, catalogId) : escapeHtml(card.icon);
         return `<button class="plugin-icon marketplace-tile" type="button" data-plugin-id="${escapeHtml(card.id)}" title="${escapeHtml(card.name)}" aria-label="${escapeHtml(card.name)}"${background}>${face}</button>`;
       })
       .join("");
@@ -1822,6 +1846,11 @@
   // no outbound network still paints the whole panel. The letter tile stays the fallback for a
   // plugin the catalog gives no file, and for a file that does not load.
   const MARKETPLACE_LOGO_PREFIX = "marketplace/logos/";
+  // SHOT-6: a catalog row that names no logo file falls back to a letter tile, and the installed
+  // strip then shows bare letters beside real marks. Where a row is plainly the same vendor as a
+  // row that DOES carry a mark, the mark is reused rather than left as an initial. Nothing is
+  // invented here: this maps a catalog id to a file already in marketplace/logos/.
+  const MARKETPLACE_LOGO_ALIASES = { "github-cli": "marketplace/logos/github.svg" };
   const marketplaceLogoSrc = (file) => {
     const value = String(file ?? "").trim();
     if (!value.startsWith(MARKETPLACE_LOGO_PREFIX)) return "";
@@ -1832,18 +1861,18 @@
   // The tile's face: the logo when the catalog names one, the letter otherwise. The letter rides
   // along in data-marketplace-letter so a broken image can be turned back into the letter tile
   // without a second read of the catalog.
-  function marketplaceTileFaceMarkup(icon, name) {
+  function marketplaceTileFaceMarkup(icon, name, id) {
     const letter = String(icon?.letter ?? String(name ?? "?").slice(0, 1)).toUpperCase();
-    const src = marketplaceLogoSrc(icon?.file);
+    const src = marketplaceLogoSrc(icon?.file) || marketplaceLogoSrc(MARKETPLACE_LOGO_ALIASES[String(id ?? "")]);
     if (!src) return escapeHtml(letter);
     return `<img class="marketplace-tile-img" src="${escapeHtml(src)}" alt="" data-marketplace-logo="${escapeHtml(src)}" data-marketplace-letter="${escapeHtml(letter)}" />`;
   }
 
   // The whole tile, at one of the two standard sizes: 40px on a card and in the installed strip,
   // 64px on the plugin page. The size is CSS, not markup, so nothing here can invent a third one.
-  function marketplaceTileMarkup(icon, name, large) {
+  function marketplaceTileMarkup(icon, name, large, id) {
     const color = marketplaceColor(icon?.color);
-    return `<span class="plugin-icon marketplace-tile${large === true ? " is-large" : ""}" style="background:${escapeHtml(color)}">${marketplaceTileFaceMarkup(icon, name)}</span>`;
+    return `<span class="plugin-icon marketplace-tile${large === true ? " is-large" : ""}" style="background:${escapeHtml(color)}">${marketplaceTileFaceMarkup(icon, name, id)}</span>`;
   }
 
   // An installed card's catalog icon, so the strip's tiles are the same tiles as the cards'. The
@@ -1884,7 +1913,7 @@
       : `<button class="primary-button marketplace-card-action" type="button" data-marketplace-add="${escapeHtml(item.id)}">Add</button>`;
     // QOL-LOGOS: one tile at one size (the catalog's logo when it names one, its letter when not),
     // and the action carries its own class so the "✓ Added" pill cannot be squeezed to a clip.
-    return `<div class="plugin-card marketplace-card" data-marketplace-card="${escapeHtml(item.id)}"><button class="marketplace-card-open" type="button" data-marketplace-plugin="${escapeHtml(item.id)}">${marketplaceTileMarkup(item?.icon, item?.name)}<span class="marketplace-card-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.tagline ?? "")}</small></span></button>${action}</div>`;
+    return `<div class="plugin-card marketplace-card" data-marketplace-card="${escapeHtml(item.id)}"><button class="marketplace-card-open" type="button" data-marketplace-plugin="${escapeHtml(item.id)}">${marketplaceTileMarkup(item?.icon, item?.name, false, item?.id)}<span class="marketplace-card-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.tagline ?? "")}</small></span></button>${action}</div>`;
   }
 
   function marketplaceSectionsMarkup() {
@@ -1951,7 +1980,7 @@
     // QOL-LOGOS: the same tile as the card, at the page size. A card with no catalog row behind it
     // keeps its own character and the console's default tile colour.
     const hero = item?.icon
-      ? marketplaceTileMarkup(item.icon, name, true)
+      ? marketplaceTileMarkup(item.icon, name, true, item.id)
       : `<span class="plugin-icon marketplace-tile is-large">${escapeHtml(String(card?.icon ?? name.slice(0, 1)).toUpperCase())}</span>`;
     const description = String(item?.description ?? card?.description ?? "");
     // A catalog row carries the contract's three states. A card with no catalog row keeps the
@@ -2668,10 +2697,10 @@
   // allowed to answer. When it refuses, the way out is the control bar.
   function serveClipboardRequest(frame) {
     const read = navigator.clipboard?.readText?.();
-    if (read == null) { sayInDesktopPanel("This browser will not hand over the clipboard — ⌘/Ctrl + Shift + B shows noVNC’s own clipboard bar."); return; }
+    if (read == null) { sayInDesktopPanel("This browser will not hand over the clipboard — ⌘/Ctrl + Shift + B shows the box’s own clipboard bar."); return; }
     read
       .then((text) => { if (!sendClipboardToBox(frame, text)) sayInDesktopPanel("Nothing on the clipboard to send to the box."); })
-      .catch(() => sayInDesktopPanel("The browser refused to read the clipboard — ⌘/Ctrl + Shift + B shows noVNC’s own clipboard bar."));
+      .catch(() => sayInDesktopPanel("The browser refused to read the clipboard — ⌘/Ctrl + Shift + B shows the box’s own clipboard bar."));
   }
 
   function handleVncBridgeMessage(event) {
@@ -2743,7 +2772,7 @@
     elements.desktopTimeline.innerHTML = steps.length
       ? steps.slice(-12).map((step) => `<li>${escapeHtml(step.text)}</li>`).join("")
       : working
-        ? `<li>Started — the outline reports no tool call for this turn yet</li>`
+        ? `<li>Started — no tool call reported for this turn yet</li>`
         : `<li class="is-pending">Nothing running for this worker</li>`;
     // Naming it honestly: this hides the view, it does not stop the worker. There is no host
     // command to halt a turn in flight, and a button labelled Pause promises exactly that.

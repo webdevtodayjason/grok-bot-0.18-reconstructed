@@ -729,6 +729,35 @@ select:focus-visible {
   font-size: 11px;
 }
 
+/* SHOT-4: a summarised tool row. Closed it is the same pill every other system line is; open it
+   is the verbatim command and output the summary stands on. */
+.tool-receipt > summary {
+  cursor: pointer;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
+.tool-receipt > summary::-webkit-details-marker { display: none; }
+
+.tool-receipt[open] {
+  border-radius: 14px;
+}
+
+.tool-receipt > pre {
+  margin: 8px 0 2px;
+  padding: 9px 11px;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: 10px;
+  color: var(--text-tertiary);
+  background: rgba(0, 0, 0, 0.26);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .message-status {
   margin-left: 8px;
   color: var(--stone-500);
@@ -988,6 +1017,14 @@ select:focus-visible {
   font-size: 9px;
 }
 
+/* SHOT-11: a detail value is a name, and a name cut mid-word ("Z.AI GLM (coding plan) ·…") tells
+   the operator less than nothing. The row stacks its label over its value when the value is long,
+   so the whole endpoint reads instead of eliding. */
+.context-detail-row {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
 .context-detail-row span:first-child {
   color: var(--text-tertiary);
 }
@@ -1001,8 +1038,14 @@ select:focus-visible {
   font-size: 9px;
   font-weight: 550;
   text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* SHOT-11: two lines rather than an ellipsis. The value still cannot widen the card (min-width
+     is still 0) and still clamps, but at two lines a real endpoint name fits whole. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .context-action-row {
@@ -1265,6 +1308,24 @@ select:focus-visible {
   min-width: 0;
   overflow: auto hidden;
   scrollbar-width: none;
+}
+
+/* SHOT-5: an overflowing strip fades out at whichever end still holds chips, so a chip that runs
+   past the composer reads as "there is more this way" instead of a chip sliced through its label.
+   The two classes are set from the strip's own scroll position. */
+.workspace-list.fade-end {
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 34px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 34px), transparent 100%);
+}
+
+.workspace-list.fade-start {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 34px, #000 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 34px, #000 100%);
+}
+
+.workspace-list.fade-start.fade-end {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 34px, #000 calc(100% - 34px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 34px, #000 calc(100% - 34px), transparent 100%);
 }
 
 .workspace-list::-webkit-scrollbar {
@@ -1678,11 +1739,18 @@ dialog[open] {
   margin-top: 12px;
 }
 
+/* SHOT-9: these two lines are card copy, not console output. The monospace 10px read as debug
+   exhaust beside the routine's own designed header, so they take the UI face at a readable size
+   and only the outcome line keeps the success green. */
 .run-result {
   margin-top: 11px;
   color: #a6e9b9;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+.run-result.next-run {
+  color: var(--text-secondary);
 }
 
 /* A failed run in the success green read as a run that went fine. */
@@ -2601,6 +2669,68 @@ dialog[open] {
   background: rgba(249, 234, 208, 0.92);
 }
 
+/* SHOT-2 / SHOT-3: mist is a light theme, and three dark-palette values did not survive the swap.
+   Measured in headless Chrome at 1440x900 on this box: the accent that reads on ink,
+   rgb(127, 227, 220), sits at about 1.5:1 on the near-white card, which is why the right rail's
+   values, the dock's scope label and the roster's Hidden row read as blank; and the ink fill under
+   .icon-button / .ghost-button turned the Search, theme and settings controls and the "Show
+   earlier messages" button into dark blobs with an unreadable label. The accent is redefined for
+   this theme only (every use of it is text, a dot, a hairline or a ring, all of which read better
+   dark on light), and the two control fills are inverted. */
+[data-theme="mist"] {
+  --teal-300: #10706f;
+}
+
+[data-theme="mist"] .icon-button,
+[data-theme="mist"] .dialog-close,
+[data-theme="mist"] .ghost-button {
+  border-color: rgba(30, 39, 43, 0.16);
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+[data-theme="mist"] .icon-button:hover,
+[data-theme="mist"] .dialog-close:hover,
+[data-theme="mist"] .ghost-button:hover {
+  background: rgba(255, 255, 255, 0.9);
+}
+
+[data-theme="mist"] .icon-button.compact {
+  border-color: transparent;
+  background: transparent;
+}
+
+/* The countdown ring keeps an ink plate in mist, so its own label must stay light. */
+[data-theme="mist"] .schedule-ring {
+  color: rgba(255, 255, 255, 0.94);
+}
+
+/* SHOT-3: the inline cards -- the secure credential request among them -- mix their accent into an
+   ink wash, and their field takes an ink fill. On the mist bubble that reads as a card greyed out
+   and a field disabled, which is the opposite of what a credential request should look like. The
+   wash and the fill are inverted for this theme; the accent, the border and the button are the
+   card's own and are left alone. */
+[data-theme="mist"] .inline-card {
+  border-color: color-mix(in srgb, var(--card-accent, var(--teal-500)) 62%, rgba(30, 39, 43, 0.2));
+  background: color-mix(in srgb, var(--card-accent, var(--teal-500)) 8%, rgba(255, 255, 255, 0.72));
+}
+
+[data-theme="mist"] .inline-card-icon {
+  border-color: color-mix(in srgb, var(--card-accent, var(--teal-500)) 62%, rgba(30, 39, 43, 0.2));
+  color: color-mix(in srgb, var(--card-accent, var(--teal-500)) 78%, rgba(30, 39, 43, 0.6));
+  background: rgba(255, 255, 255, 0.72);
+}
+
+[data-theme="mist"] .field input,
+[data-theme="mist"] .field textarea,
+[data-theme="mist"] .field select,
+[data-theme="mist"] .inline-form input,
+[data-theme="mist"] .inline-form select,
+[data-theme="mist"] .search-input {
+  border-color: rgba(30, 39, 43, 0.18);
+  background: rgba(255, 255, 255, 0.78);
+}
+
 @media (max-width: 1180px) {
   .stage {
     grid-template-columns: minmax(210px, 240px) minmax(400px, 1fr) 210px;
@@ -3055,6 +3185,9 @@ button.evidence-chip[data-verdict]:hover { border-color: var(--glass-edge); colo
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* A white wash is invisible on mist's light ground. */
+[data-theme="mist"] .palette-hint kbd { background: rgba(30, 39, 43, 0.1); }
+
 .palette-dialog {
   width: min(640px, calc(100vw - 36px));
   margin-top: 12vh;
@@ -3215,17 +3348,30 @@ button.evidence-chip[data-verdict]:hover { border-color: var(--glass-edge); colo
 .marketplace-card-action { flex: 0 0 auto; max-width: 50%; }
 .marketplace-card .status-pill.marketplace-card-action { overflow: visible; }
 
-/* The name and the tagline truncate on their own line; neither wraps under the button. */
+/* SHOT-6: the name and the tagline stay inside the card and never wrap under the button, but a
+   single nowrap line cut nearly every card in the catalog mid-word ("Read repositories,…",
+   "Custom MCP se…"). Both now wrap to two lines and clamp there, so a card reads whole at the
+   three-column width and only genuinely long copy is ever elided. */
 .marketplace-card-open { min-width: 0; align-items: center; }
 .marketplace-card-copy { min-width: 0; }
 .marketplace-card-copy strong,
 .marketplace-card-copy small {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  /* The one-line rule higher up still sets nowrap, which would defeat the clamp. */
+  white-space: normal;
+  text-overflow: clip;
 }
+
+.marketplace-card-copy strong { -webkit-line-clamp: 2; line-clamp: 2; line-height: 1.25; }
+/* Three lines for the tagline: at this card width two still cut "Read repositories, issues and
+   pull requests" mid-phrase, and the catalog's taglines are one sentence each. */
+.marketplace-card-copy small { -webkit-line-clamp: 3; line-clamp: 3; line-height: 1.3; }
 
 /* The chips wrap onto a second row rather than running past the panel. */
 .marketplace-chips { min-width: 0; row-gap: 6px; }

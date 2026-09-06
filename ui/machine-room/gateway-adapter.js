@@ -197,14 +197,60 @@
     const text = String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" · ");
     return text.length > max ? `${text.slice(0, max - 1)}…` : text;
   };
+  // SHOT-4: a receipt row is read by the owner of the business, not by the engineer who wrote the
+  // command. A heredoc, a redirect and a set of Unix permission bits are the machine's spelling of
+  // "wrote a file", so a shell row that is plainly one of the few things an agent does all day is
+  // headlined in words. Nothing is dropped: the exact command and the exact output ride along as
+  // the row's detail, which the conversation renders behind an expand affordance.
+  const baseName = (path) => String(path).split("/").filter(Boolean).pop() || String(path);
+  function shellHeadline(command, output) {
+    const cmd = String(command ?? "").trim();
+    if (!cmd) return null;
+    // A write: `cat > PATH << 'EOF'`, `printf … > PATH`, `echo … >> PATH`, `… | tee PATH`.
+    // The run of text before the redirect may not cross a separator or a newline, or `echo x; ls
+    // 2>/dev/null` reads as a write to /dev/null; a digit before the arrow is a file-descriptor
+    // redirect for the same reason, and /dev is not a file anyone wrote.
+    const write = cmd.match(/(?:^|[\n|;&]\s*)(?:cat|printf|echo)\b[^>\n;|&]*(?<![0-9&])>>?\s*['"]?([^\s'";|&>]+)/)
+      ?? cmd.match(/\|\s*tee\s+(?:-a\s+)?['"]?([^\s'";|&]+)/);
+    if (write && !/^\/dev\//.test(write[1])) {
+      // `ls -l` on the file it just wrote is the usual confirmation, and its fifth field is the
+      // size in bytes. When the agent asked for something else, the row simply says what it wrote.
+      const size = String(output ?? "").match(/^[-drwxsStT]{10}\S*\s+\d+\s+\S+\s+\S+\s+(\d+)\s/m);
+      return `Wrote ${baseName(write[1])}${size ? ` · ${size[1]} bytes` : ""} · ${write[1]}`;
+    }
+    const host = (url) => { try { return new URL(url).host.replace(/^www\./, ""); } catch { return url; } };
+    const open = cmd.match(/box-chrome\s+['"]?(https?:\/\/[^\s'"]+)/);
+    if (open) return `Opened ${host(open[1])}`;
+    // A fetch, however it is piped afterwards: the page it went to is the part worth reading.
+    const fetched = cmd.match(/\b(?:curl|wget|http)\b[^|;&]*?['"]?(https?:\/\/[^\s'"]+)/);
+    if (fetched) return `Fetched ${host(fetched[1])}`;
+    return null;
+  }
+  // A read row's summary is the tool's arguments as JSON. The path in it is the only part of that
+  // a person reads, so the row says which file was read and keeps the JSON in its detail.
+  function readHeadline(summary) {
+    const path = String(summary ?? "").match(/"(?:path|file_path|filePath)"\s*:\s*"([^"]+)"/);
+    return path ? `Read ${baseName(path[1])} · ${path[1]}` : null;
+  }
   function toolRowText(item) {
-    let text = TOOL_LABELS[item.name] ?? String(item.name ?? "Tool").replace(/ToolCall$/, "");
-    if (item.summary) text += ` · ${oneLine(item.summary, 120)}`;
+    const label = TOOL_LABELS[item.name] ?? String(item.name ?? "Tool").replace(/ToolCall$/, "");
+    const headline = item.name === "shellToolCall" ? shellHeadline(item.summary, item.output)
+      : item.name === "readToolCall" ? readHeadline(item.summary)
+      : null;
+    let text = headline ?? label;
+    if (!headline && item.summary) text += ` · ${oneLine(item.summary, 120)}`;
     if (item.status === "pending") text += " · running";
     if (item.status === "failed") text += " · failed";
-    if (item.output) text += ` → ${oneLine(item.output, 200)}`;
-    else if (typeof item.exitCode === "number") text += ` → exit ${item.exitCode}`;
-    return text;
+    if (!headline) {
+      if (item.output) text += ` → ${oneLine(item.output, 200)}`;
+      else if (typeof item.exitCode === "number") text += ` → exit ${item.exitCode}`;
+    }
+    // The receipt itself, verbatim, for the row that summarised it. Only a summarised row carries
+    // one: a row that already prints its command in full has nothing to hide behind an expander.
+    const detail = headline
+      ? [`${label} · ${String(item.summary ?? "").trim()}`, String(item.output ?? "").trim(), typeof item.exitCode === "number" ? `exit ${item.exitCode}` : ""].filter(Boolean).join("\n\n")
+      : "";
+    return { text, detail };
   }
   const messageKey = (message) => (message?.type === "text" ? `a:${String(message.content ?? "").trim()}` : `a:${JSON.stringify(message ?? null)}`);
   const userText = (e) => (typeof e.content === "string" ? e.content : e.content?.map?.((c) => c.text ?? "").join("") ?? "");
@@ -220,7 +266,7 @@
   }
   // Rows are receipts of work. Progress updates, state edits and agent-to-agent sends are not
   // work, and their arguments are internal JSON nobody should read in a conversation.
-  const NOT_A_RECEIPT = /communicate|update_state|todo|send.?to.?agent|react.?to.?message|sleep|wait/i;
+  const NOT_A_RECEIPT = /communicate|update_state|todo|send.?to.?agent|react.?to.?message|sleep|wait|getmcptools/i;
   // `partial` says the transcript is a tail window, not the whole history. The outline still
   // starts at the beginning of the conversation, so rows that precede an outline entry the window
   // does not hold belong to history that is off screen; carrying them forward would dump every
@@ -233,7 +279,7 @@
     let cursor = 0;
     let pending = [];
     for (const item of items) {
-      if (item?.kind === "tool-call") { pending.push({ kind: "tool-row", id: `tool-${item.id}`, text: toolRowText(item) }); continue; }
+      if (item?.kind === "tool-call") { const row = toolRowText(item); pending.push({ kind: "tool-row", id: `tool-${item.id}`, text: row.text, detail: row.detail }); continue; }
       const key = item ? outlineKey(item) : null;
       if (key == null) continue;
       let at = -1;
@@ -287,7 +333,7 @@
     return collapseAgentExchanges(weaveToolRows(transcript, outline, partial), fallbackName)
       .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || e.kind === "agent-exchange" || e.kind === "user-attachment" || (e.kind === "message" && e.role === "user"))
       .map((e, i) => {
-        if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text };
+        if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text, detail: e.detail ?? "" };
         if (e.kind === "agent-exchange") return { id: e.id, type: "system", text: `${e.count} message${e.count === 1 ? "" : "s"} with ${e.peer}`, peer: e.peer, self: e.self, exchange: e.exchange };
         const mine = e.kind !== "send-message";
         const card = mine ? null : cardOf(e);
