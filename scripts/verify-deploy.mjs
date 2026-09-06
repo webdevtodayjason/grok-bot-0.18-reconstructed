@@ -439,6 +439,10 @@ step("the job bus edge");
 // identical from outside, so nobody can probe a deployment to learn whether a token is set yet. A
 // 503 here is a relay older than §10.6, which is a finding rather than a pass.
 const jobHealth = await hit("/v1/health");
+// The bus shares the login lockout (docs/JOB-BUS.md section 10.6): a /v1 request with no bearer is
+// one of this address's five failures, and the lockout leg at the bottom counts from `refusals`.
+// Without this line the leg tripped one attempt early on every run that reached it.
+refusals += 1;
 check(jobHealth.status === 401, "GET /v1/health with no bearer is 401, never 200 and never 503",
   `HTTP ${jobHealth.status}${jobHealth.status === 503 ? " (a relay from before §10.6 answers 503 when no token is set)" : ""}`);
 if (JOB_TOKEN == null) {
