@@ -325,6 +325,17 @@ try {
   }
 
   step("the settings this run borrows (§10.7)");
+  // §10.9: this gate's relay is started with TITAN_JOB_TOKEN, so the relay arms the bus on its own
+  // start -- and that call is fired unawaited before `listen`, so it is still in flight when the
+  // health probe above answers. Wait for it to land. Without this the "off until the operator turns
+  // it on" leg below races it: both writes go to the same host and whichever lands last wins.
+  let armLanded = false;
+  for (let i = 0; i < 40 && !armLanded; i += 1) {
+    armLanded = (await gw("jobBusGetSettings").catch(() => undefined))?.enabled === true;
+    if (!armLanded) await sleep(250);
+  }
+  check(armLanded, "the relay's own start armed the bus before this gate touched the switch (§10.9)",
+    "jobBusGetSettings never reported enabled:true within 10 s of the relay answering");
   settingsBefore = await gw("jobBusGetSettings").catch(() => undefined);
   check(settingsBefore != null, "the host answers jobBusGetSettings", JSON.stringify(settingsBefore ?? null));
   // 10.9: the read carries `integrity` beside the settings, and the write refuses a key it does not

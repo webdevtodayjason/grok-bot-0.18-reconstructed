@@ -7,7 +7,8 @@
 // a cancel mid-run, and restart recovery.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -29,6 +30,12 @@ const storeModule = await loadModule("source/host/extensions/job-bus/job-store.t
 const workerModule = await loadModule("source/host/extensions/job-bus/job-worker.ts");
 const settingsModule = await loadModule("source/host/extensions/job-bus/job-settings.ts");
 const githubModule = await loadModule("source/host/extensions/job-bus/github-client.ts");
+// Section 10.9's connector claim is about production, so it is tested against the production
+// pieces: the real clone and the real channel store, not a hand-written session store.
+const cloneModule = await loadModule("source/host/agents/agent-clone.ts");
+const channelModule = await loadModule("source/host/extensions/session/channel-store.ts");
+const { cloneAgentDir } = cloneModule.module;
+const { CHANNEL_CONFIG_FILENAME, FileChannelStore, getAgentChannelsDir } = channelModule.module;
 const { createGitHubClient } = githubModule.module;
 const { createJobStore } = storeModule.module;
 const { DEFAULT_JOB_BUS_SETTINGS } = settingsModule.module;
@@ -1042,16 +1049,17 @@ test.after(async () => {
   await workerModule.dispose();
   await settingsModule.dispose();
   await githubModule.dispose();
+  await cloneModule.dispose();
+  await channelModule.dispose();
 });
 
 // ---- section 10.9 --------------------------------------------------------------------------
 
-test("the connector list the host hands the bus sees a connection the clone's credential did not follow", () => {
-  // The production adapter used to be `listAgentChannels().map(platform)`, and that method answers
-  // only connections whose credential the connector-secret store still has. A clone's secrets are
-  // not copied with it, so through that method every clone reads as having no connectors at all:
-  // the strip loop never ran in production and its fail-closed branch was unreachable. Isolation
-  // held by accident. The adapter now reads the clone's own channel directory as well.
+test("the connector list the host hands the bus unions both ways an agent can read as connected", () => {
+  // A unit of the pure adapter, and only that: `listAgentChannels` answers only connections whose
+  // credential the connector-secret store still has, so it takes the channel directory too. What
+  // this does NOT prove is anything about a real clone -- the test below does that, and the answer
+  // there is that a clone has neither.
   const sessionStore = {
     listAgentChannels: (id) => (id === "a1" ? [{ platform: "github" }] : []),
     openChannelStore: (id) => ({ listPlatforms: () => (id === "clone1" ? ["slack", "github"] : ["github"]) }),
@@ -1062,6 +1070,36 @@ test("the connector list the host hands the bus sees a connection the clone's cr
   // is an empty list rather than a throw -- which the worker would have read as "cannot isolate".
   assert.deepEqual([...agentConnectorIds({ listAgentChannels: () => [{ platform: "github" }] }, "a1")], ["github"]);
   assert.deepEqual([...agentConnectorIds(null, "a1")], []);
+});
+
+test("a real clone carries no channel directory, so the strip is dead code and §10.9 says so", async () => {
+  // Against the real cloneAgentDir and the real channel store, not a hand-written session store.
+  // The claim being checked is the honest one: cloneAgentDir copies store.db, the sand profile and
+  // settings, workflow enablement, avatars and automations, and NO `channels/`. So the list the
+  // worker strips from is empty for every clone this tree can make, the loop does not run in
+  // production and `cannot isolate the worker's connectors` is not reachable. Isolation rests on
+  // the clone carrying neither a channel directory nor a connector secret.
+  const root = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-clone-"));
+  try {
+    const sourceDir = path.join(root, "a1");
+    const cloneDir = path.join(root, "clone1");
+    await mkdir(path.join(sourceDir, "channels", "slack"), { recursive: true });
+    await writeFile(path.join(sourceDir, "store.db"), "bytes for cloneAgentDir to copy");
+    await writeFile(path.join(sourceDir, "channels", "slack", CHANNEL_CONFIG_FILENAME), JSON.stringify({ label: "Slack" }));
+    const sessionStore = {
+      // A clone's secrets are not copied with it, so the credentialed list is empty either way.
+      listAgentChannels: () => [],
+      openChannelStore: (id) => new FileChannelStore(getAgentChannelsDir(path.join(root, id))),
+    };
+    assert.deepEqual([...agentConnectorIds(sessionStore, "a1")], ["slack"], "the template reads as connected");
+    cloneAgentDir(sourceDir, cloneDir, "clone1", "Scribe copy", {
+      getAutomationsDir: (dir) => path.join(dir, "automations"),
+      checkpointStore: () => {},
+      rewriteIdentity: () => {},
+    });
+    assert.equal(existsSync(path.join(cloneDir, "channels")), false, "no channels directory came with the clone");
+    assert.deepEqual([...agentConnectorIds(sessionStore, "clone1")], []);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("the per-job clone loses the automations it inherited from the template", async () => {
@@ -1139,6 +1177,69 @@ test("turning the bus off stops dispatch and still finishes what was already run
     await worker.tick();
     assert.equal((await store.get(waiting.id)).status, "queued", "nothing new is dispatched while the bus is off");
     assert.deepEqual(world.clones.map((clone) => clone.id), ["clone1"]);
+  });
+});
+
+test("with the bus off the queue clock stops; the run and needs_human clocks do not", async () => {
+  await withWorker(async ({ store, worker, world }) => {
+    const waiting = await queueChapter(store, "c05-ch7");
+    world.settings = { ...world.settings, enabled: false };
+    // An hour of maintenance. expire() used to sit above the enabled check, so every job CoS had
+    // submitted came back "queued too long" without ever having had a chance to run.
+    world.clock += (world.settings.queueTimeoutMin + 10) * 60_000;
+    await worker.tick();
+    assert.equal((await store.get(waiting.id)).status, "queued", "the switch was off; the job was not queued too long");
+    // And the clock does not settle up the moment the switch goes back: it runs from the resume.
+    world.settings = { ...world.settings, enabled: true };
+    await worker.tick();
+    assert.equal((await store.get(waiting.id)).status, "running", "it is dispatched, not failed");
+  });
+  // The other half: a job already waiting on a person still runs out with the bus off, because it
+  // is not waiting on the switch.
+  await withWorker(async ({ store, worker, world }) => {
+    const { job } = await dispatched(store, worker, world);
+    world.entries = [sendMessage(blockedBlock({ reason: "lms_login", detail: "log in to the LMS" }))];
+    await worker.tick();
+    assert.equal((await store.get(job.id)).status, "needs_human");
+    world.settings = { ...world.settings, enabled: false };
+    world.clock += (world.settings.timeoutMin + 10) * 60_000;
+    await worker.tick();
+    const timedOut = await store.get(job.id);
+    assert.equal(timedOut.status, "failed");
+    assert.equal(timedOut.error, "timed out");
+  });
+});
+
+test("a terminal transition the store cannot write still deletes the per-job clone", async () => {
+  await withWorker(async ({ store, worker, world }) => {
+    const { job } = await dispatched(store, worker, world);
+    world.entries = [sendMessage(goodResult(), { verdict: "evidenced", attemptId: "attempt-1", missing: [] })];
+    world.attestations = receiptedHeads();
+    // jobs.json becomes a directory, so the save behind the `done` transition throws a 503 -- after
+    // the record has already moved in memory. disposeClone used to be the statement AFTER that
+    // throwing await, so the clone was orphaned for the life of the box: the job is terminal, so
+    // store.running() never hands it back and nothing ever tries again.
+    await rm(store.jobsPath);
+    await mkdir(store.jobsPath);
+    // Swallowed the way the loop and `jobBusCreate` swallow it: `tick().catch(() => {})`.
+    await worker.tick().catch(() => {});
+    assert.deepEqual(world.deleted, ["clone1"], "section 10.2 deletes the clone when the job ends, not when the volume co-operates");
+    assert.equal((await store.get(job.id)).status, "done");
+  });
+});
+
+test("a blocked job that the store cannot write still raises the needs-you signal", async () => {
+  await withWorker(async ({ store, worker, world }) => {
+    const { job, cloneId } = await dispatched(store, worker, world);
+    world.entries = [sendMessage(blockedBlock({ reason: "approval", detail: "somebody has to say yes" }))];
+    await rm(store.jobsPath);
+    await mkdir(store.jobsPath);
+    await worker.tick().catch(() => {});
+    // A job blocked with no badge is a job nobody is told about. The transition throws its 503 after
+    // the record has moved, so the signal cannot hang off the statement below it.
+    assert.deepEqual(world.unread, [cloneId]);
+    assert.deepEqual(world.needsYou, [{ agentId: cloneId, reason: "somebody has to say yes" }]);
+    assert.equal((await store.get(job.id)).status, "needs_human");
   });
 });
 

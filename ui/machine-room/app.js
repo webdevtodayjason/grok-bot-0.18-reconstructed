@@ -2253,7 +2253,10 @@
     }
     line.textContent = integrity.ok === true
       ? "The host verified its own job store at start: jobs.json, the audit chain and settings.json."
-      : `A file did not verify at start and was moved aside, so the bus stays off until you look: ${integrity.detail || "see the audit log"}.`;
+      // The quarantine survives a restart now, so the way out has to be said out loud: restarting
+      // the host is no longer it.
+      : `A file did not verify at start and was moved aside, so the bus stays off until you look: ${integrity.detail || "see the audit log"}. `
+        + "Read the .quarantined- copies in job-bus/, then delete job-bus/quarantine.json to clear it. A restart will not.";
   }
 
   function fillJobBusEnabled(root, settings) {

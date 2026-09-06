@@ -17,9 +17,13 @@
 // write, so the host holds the authoritative job state in MEMORY for its lifetime and treats
 // jobs.json as its own cache: it is read back exactly once, at start, and only after it verifies.
 // A jobs.json that fails, or an audit chain that does not verify, is moved aside as
-// `jobs.json.quarantined-<timestamp>` and the bus stays off. What that does NOT close is a shell
-// editing the files between reloads -- the host and the worker share the box's user -- and that
-// residual is written down in the contract rather than dressed up as a defence.
+// `<file>.quarantined-<timestamp>`, the decision is written to `quarantine.json` so the next host
+// starts with the bus still off, and a broken chain is replaced rather than extended. jobs.json is
+// checked against the chain, not only against itself: `status` is what decides the answer CoS gets,
+// and the chain is the one copy of it a rewrite of jobs.json cannot forge on its own. What that
+// does NOT close is a shell editing the files between reloads -- the host and the worker share the
+// box's user -- and that residual is written down in the contract rather than dressed up as a
+// defence.
 //
 // Everything a caller can get wrong answers with a GatewayCommandError carrying the HTTP status the
 // contract names, so the relay passes 400/404/409/413/429/503 through unchanged.
@@ -36,6 +40,12 @@ import { DEFAULT_JOB_BUS_SETTINGS, JOB_BUS_DIRNAME, type JobBusSettings } from "
 export { JOB_BUS_DIRNAME };
 export const JOBS_FILENAME = "jobs.json";
 export const JOB_AUDIT_FILENAME = "audit.jsonl";
+/**
+ * Section 10.9: the quarantine decision, written down beside the files it moved. Moving jobs.json
+ * aside stopped the host that moved it and nothing else, so the next start came up green over the
+ * same tampered volume. An operator clears the quarantine by deleting this file.
+ */
+export const JOB_QUARANTINE_FILENAME = "quarantine.json";
 /** How many finished jobs jobs.json keeps. The audit log keeps all of them, forever. */
 export const TERMINAL_JOB_CAP = 500;
 /** How many pruned idempotency keys stay answerable (section 10.3). */
@@ -370,6 +380,7 @@ export function createJobStore(deps: JobStoreDeps) {
   const directory = join(deps.rootDir, JOB_BUS_DIRNAME);
   const jobsPath = join(directory, JOBS_FILENAME);
   const auditPath = join(directory, JOB_AUDIT_FILENAME);
+  const markerPath = join(directory, JOB_QUARANTINE_FILENAME);
 
   let jobs: JobRecord[] = [];
   let retired: Record<string, RetiredKey> = {};
@@ -424,8 +435,47 @@ export function createJobStore(deps: JobStoreDeps) {
     return record;
   }
 
-  /** What a stored record has to still be. `payload_sha256` is the part a rewrite cannot fake. */
-  function recordSetFault(rows: readonly unknown[]): string | null {
+  /**
+   * What the verified chain says about one job: every status it ever recorded, every payload hash it
+   * saw for it, and the `type idempotency_key` it was created under. jobs.json is checked against
+   * this and not only against itself, because a hash computed from the same file a tamperer writes
+   * is a hash a tamperer can recompute.
+   */
+  interface AuditFacts { readonly statuses: Set<string>; readonly payloadSha: Set<string>; readonly keys: Set<string> }
+
+  function auditFacts(lines: readonly string[]): Map<string, AuditFacts> {
+    const facts = new Map<string, AuditFacts>();
+    for (const line of lines) {
+      let row: JobAuditRow;
+      try { row = JSON.parse(line) as JobAuditRow; } catch { continue; }
+      const jobId = typeof row.jobId === "string" ? row.jobId : "";
+      if (jobId.length === 0) continue;
+      let seen = facts.get(jobId);
+      if (seen == null) {
+        seen = { statuses: new Set<string>(), payloadSha: new Set<string>(), keys: new Set<string>() };
+        facts.set(jobId, seen);
+      }
+      seen.statuses.add(String(row.event));
+      seen.payloadSha.add(String(row.payload_sha256 ?? ""));
+      seen.keys.add(`${String(row.type ?? "")} ${String(row.idempotency_key ?? "")}`);
+    }
+    return facts;
+  }
+
+  /**
+   * What a stored record has to still be. The payload hash is here because a naive edit forgets it,
+   * but it is the one field a tamperer has no reason to touch: the fields that decide what CoS is
+   * told are `status` and, riding on it, `result`, `error` and `needs_human`. So every record is
+   * checked against the audit chain the host just verified, which holds every transition the job
+   * really made -- a jobs.json edited to turn a failed job into a done one with a fabricated result
+   * claims a status the chain never recorded. `retired` is checked the same way, because a forged
+   * entry there makes a create replay as a done job that never ran.
+   */
+  function recordSetFault(
+    rows: readonly unknown[],
+    stored: unknown,
+    facts: Map<string, AuditFacts>,
+  ): string | null {
     for (const row of rows) {
       if (!isJobRecord(row)) return "jobs.json carries a row that is not a job record";
       const job = row as JobRecord;
@@ -434,41 +484,124 @@ export function createJobStore(deps: JobStoreDeps) {
       if (job.payload_sha256 !== sha256(JSON.stringify(job.payload ?? {}))) {
         return `job ${job.id} does not match its payload hash`;
       }
+      const seen = facts.get(job.id);
+      if (seen == null) return `job ${job.id} has no row in the audit chain`;
+      if (!seen.statuses.has(job.status)) {
+        return `job ${job.id} is ${job.status} in jobs.json and the audit chain never recorded that`;
+      }
+      if (!seen.payloadSha.has(job.payload_sha256)) {
+        return `job ${job.id} does not carry the payload hash the audit chain recorded`;
+      }
+      if (!seen.keys.has(`${job.type} ${job.idempotency_key}`)) {
+        return `job ${job.id} does not carry the idempotency key the audit chain recorded`;
+      }
+    }
+    if (stored === undefined || stored === null) return null;
+    if (typeof stored !== "object" || Array.isArray(stored)) {
+      return "jobs.json carries a retired map that is not an object";
+    }
+    for (const [key, value] of Object.entries(stored as Record<string, unknown>)) {
+      const entry = value as RetiredKey | null;
+      if (typeof entry?.id !== "string" || typeof entry.status !== "string") {
+        return `retired key ${key} is not a retired job`;
+      }
+      const seen = facts.get(entry.id);
+      if (seen == null) return `retired key ${key} names ${entry.id}, which has no row in the audit chain`;
+      if (!seen.statuses.has(entry.status)) {
+        return `retired key ${key} claims ${entry.id} is ${entry.status} and the audit chain never recorded that`;
+      }
+      if (!seen.keys.has(key)) return `retired key ${key} does not match the audit chain`;
     }
     return null;
+  }
+
+  /**
+   * Section 10.9. Moving a file aside stopped the host that moved it and nothing else: the next
+   * start found no jobs.json, took the first-start path, and came up green with the tampered
+   * audit.jsonl still on the volume. The decision is written down beside the files it moved so it
+   * outlives the host, and an operator clears it by deleting `quarantine.json` once they have looked
+   * at the `.quarantined-` copies next to it.
+   */
+  async function readQuarantineMarker(): Promise<JobStoreQuarantine[]> {
+    try {
+      const parsed: unknown = JSON.parse(await readFile(markerPath, "utf8"));
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((entry): entry is JobStoreQuarantine => {
+        const record = entry as JobStoreQuarantine | null;
+        return typeof record?.file === "string" && typeof record.movedTo === "string"
+          && typeof record.at === "string" && typeof record.detail === "string";
+      });
+    } catch { return []; }
+  }
+
+  async function writeQuarantineMarker(): Promise<void> {
+    try {
+      await mkdir(directory, { recursive: true });
+      await writeFileAtomic(markerPath, JSON.stringify(quarantines, null, 2), { mode: 0o600 });
+    } catch { /* the quarantine still holds here; the marker is only what carries it to the next host */ }
+  }
+
+  /** The audit file as non-empty lines, read once: the chain check and the fact map both want them. */
+  async function auditLines(): Promise<string[]> {
+    try { return (await readFile(auditPath, "utf8")).split("\n").filter((line) => line.trim().length > 0); }
+    catch { return []; }
   }
 
   async function ensureLoaded(): Promise<void> {
     if (loaded) return;
     loaded = true;
-    let raw: string;
+    // A quarantine an earlier host decided is still in force. A restart is not an operator looking.
+    const sticky = await readQuarantineMarker();
+    if (sticky.length > 0) {
+      quarantines.push(...sticky);
+      jobs = [];
+      retired = {};
+      return;
+    }
+    let raw: string | null = null;
     try { raw = await readFile(jobsPath, "utf8"); }
-    catch { jobs = []; retired = {}; return; } // absent is a first start, not a tamper
+    catch { raw = null; } // absent is a first start, or what an earlier quarantine left behind
     let fault: string | null = null;
     let rows: unknown[] = [];
     let stored: unknown;
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      const listed = Array.isArray(parsed) ? parsed : (parsed as { jobs?: unknown } | null)?.jobs;
-      if (!Array.isArray(listed)) fault = "jobs.json is not a list of jobs";
-      else rows = listed;
-      stored = (parsed as { retired?: unknown } | null)?.retired;
-    } catch { fault = "jobs.json is not JSON"; }
-    fault ??= recordSetFault(rows);
-    if (fault == null) {
-      const chain = await verifyAuditFile();
-      if (!chain.ok) fault = `the audit chain breaks at row ${chain.brokenAt ?? 0}`;
+    if (raw != null) {
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        const listed = Array.isArray(parsed) ? parsed : (parsed as { jobs?: unknown } | null)?.jobs;
+        if (!Array.isArray(listed)) fault = "jobs.json is not a list of jobs";
+        else rows = listed;
+        stored = (parsed as { retired?: unknown } | null)?.retired;
+      } catch { fault = "jobs.json is not JSON"; }
     }
+    // The chain is verified whether or not jobs.json is there. It used to be checked only on the
+    // path where jobs.json parsed, so "audit.jsonl and no jobs.json" -- a first start, and exactly
+    // what a quarantine leaves behind -- was the one shape nothing checked at all.
+    const lines = await auditLines();
+    const chain = verifyJobAuditChain(lines);
+    const chainFault = chain.ok ? null : `the audit chain breaks at row ${chain.brokenAt ?? 0}`;
+    fault ??= chainFault;
+    if (fault == null && raw != null) fault = recordSetFault(rows, stored, auditFacts(lines));
     if (fault != null) {
-      const record = await quarantineFile(jobsPath, fault);
+      if (chainFault != null) {
+        // The receipt for a broken chain must not extend it. Appending `store_quarantined` to the
+        // file that had just failed left a chain that could never verify again, so the bus flapped:
+        // every start that found a jobs.json quarantined it, every start that did not came up clean.
+        await quarantineFile(auditPath, chainFault);
+        auditLoaded = true;
+        auditSeq = 0;
+        auditPrev = "";
+        auditBytes = 0;
+      }
+      if (raw != null) await quarantineFile(jobsPath, fault);
       jobs = [];
       retired = {};
       await appendAudit({
-        at: record.at, event: "store_quarantined", jobId: "", type: "", submitter: "",
+        at: stamp(), event: "store_quarantined", jobId: "", type: "", submitter: "",
         submitter_id: "", client: "", idempotency_key: "", payload_sha256: "",
         policy_version: JOB_AUDIT_POLICY_VERSION, worker: null,
         unsupported_claims: [`store:${fault}`], ok: false, eventId: randomHex(8),
       }).catch(() => undefined);
+      await writeQuarantineMarker();
       return;
     }
     jobs = rows as JobRecord[];
@@ -494,9 +627,7 @@ export function createJobStore(deps: JobStoreDeps) {
 
   /** The whole file, chained. The load check and the gate's `verifyAudit` both read it this way. */
   async function verifyAuditFile(): Promise<{ ok: boolean; brokenAt: number | null; rows: number }> {
-    let lines: string[] = [];
-    try { lines = (await readFile(auditPath, "utf8")).split("\n").filter((line) => line.trim().length > 0); }
-    catch { lines = []; }
+    const lines = await auditLines();
     return { ...verifyJobAuditChain(lines), rows: lines.length };
   }
 
@@ -523,6 +654,8 @@ export function createJobStore(deps: JobStoreDeps) {
       client: "", idempotency_key: "", payload_sha256: "", policy_version: JOB_AUDIT_POLICY_VERSION,
       worker: null, unsupported_claims: [`store:${record.detail}`], ok: false, eventId: randomHex(8),
     });
+    // Mid-run too: "the bus stays off until an operator has looked" is not a promise a restart keeps.
+    await writeQuarantineMarker();
   }
 
   /** One row onto the end of the chain. Callers hold the tail, so this never runs twice at once. */

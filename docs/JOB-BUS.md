@@ -312,8 +312,12 @@ Sections 1 to 9 stand except where this section says otherwise. Where they confl
 - `running` (with `dispatch_nonce`, `started_at`, `worker`) is written atomically **before** the clone is created and the prompt sent. On host
   start a `running` job is re-attested if a result block exists after its baseline, otherwise `failed {error:"host restarted mid-job"}` and
   its clone is deleted. A `queued` job is never dispatched twice.
-- `queueTimeoutMin` (default 60): a job still `queued` that long → `failed {error:"queued too long"}`. `timeoutMin` (default 120) applies from
-  `started_at`. At most `maxOpen` (default 20) non-terminal jobs; beyond that `jobBusCreate` answers `429 {"error":"queue full"}`.
+- `queueTimeoutMin` (default 60): a job still `queued` that long → `failed {error:"queued too long"}`. That clock runs only while the bus is
+  ON, and it is measured from the later of `created_at` and the moment the bus came back on: a job the switch is refusing to dispatch has not
+  been queued too long, so an hour of maintenance neither fails jobs during it nor fails them the instant the switch goes back.
+  `timeoutMin` (default 120) applies from `started_at` and never stops, and neither does the `needs_human` clock, because a job
+  already in flight or already waiting on a person still owes an answer. At most `maxOpen` (default 20) non-terminal jobs; beyond that
+  `jobBusCreate` answers `429 {"error":"queue full"}`.
 - Terminal = `done | failed | cancelled`. `needs_human` is not terminal: it can be cancelled (→ `cancelled`) and it times out.
 - Idempotency keys of pruned jobs are kept in `jobs.json` under `retired` (`key → {id, status}`, capped at 5000) so a replay after the
   500-terminal cap still answers the same id.
@@ -383,16 +387,34 @@ nobody remembers.
   and not the bearer holder's: with it false a create carrying that flag answers `400 {"error":"attestation is required"}`. It is documented on
   the `jobBusSetSettings` command and drawn on the console card beside the arm switch.
 - **The quarantine.** The host keeps the authoritative job state in MEMORY for its lifetime and treats `jobs.json` and `settings.json` as its
-  own cache. On reload (host start) a `jobs.json` whose record set fails verification (not a job record, or a payload that no longer hashes to
-  its `payload_sha256`) or whose `audit.jsonl` chain does not verify is moved aside as `jobs.json.quarantined-<timestamp>`, the bus starts
-  disabled, and one `{event:"store_quarantined"}` row goes into the chain; `settings.json` is treated the same way and falls back to the
-  defaults, which is the bus off. An `audit.jsonl` whose byte length is not the one this host left behind is quarantined mid-run for the same
-  reason: the chain alone cannot see a file rewritten whole. A failed cache write is a failed transition plus a `{event:"store_unwritable"}`
-  row, never a silent success. The console card says which file, and `jobBusCreate` answers 503 until an operator has looked.
+  own cache. The `audit.jsonl` chain is verified on every host start, **whether or not `jobs.json` is there**: a box that has never run a job
+  and a box a quarantine has just emptied look identical on disk, and the second one must not come up green. A `jobs.json` whose record set
+  fails verification is moved aside as `jobs.json.quarantined-<timestamp>`, the bus starts disabled, and one `{event:"store_quarantined"}` row
+  goes into the chain; `settings.json` is treated the same way and falls back to the defaults, which is the bus off. A broken chain moves
+  `audit.jsonl` aside too and the receipt opens a FRESH chain, because a `store_quarantined` row appended to the file that just failed leaves a
+  chain that can never verify again. **The decision is sticky:** it is written to `<sand-data>/job-bus/quarantine.json`, re-read at start, and
+  cleared by an operator deleting that file. Without it one restart cleared the quarantine, and on the `TITAN_JOB_TOKEN` deploy path that same
+  restart re-armed the bus over the tampered volume.
+- **What `jobs.json` is checked against.** Not only itself. `payload_sha256` is recomputed, but a hash over the same file a tamperer writes is
+  a hash a tamperer can recompute, and the payload is not the field a tamperer wants: `status` is, because `result`, `error` and `needs_human`
+  ride on it and they are what CoS is told. So every record's `status`, `payload_sha256` and `type idempotency_key` must appear in the verified
+  audit chain for that job id, and a record with no row in the chain at all is a fault. The `retired` map is checked the same way, because a
+  forged entry there makes a create replay as a `done` job that never ran. A `jobs.json` BEHIND the chain is fine (that is the
+  `store_unwritable` case); one claiming a status the chain never recorded is not. An `audit.jsonl` whose byte length is not the one this host
+  left behind is quarantined mid-run: the chain alone cannot see a file rewritten whole. A failed cache write is a failed transition plus a
+  `{event:"store_unwritable"}` row, never a silent success. The console card says which file, and `jobBusCreate` answers 503 until an operator
+  has looked.
+- **The clone's connectors are not stripped, because there is nothing to strip.** `agentConnectorIds` reads both the credentialed channel list
+  and the clone's own `channels/` directory, but `cloneAgentDir` copies neither. It copies `store.db`, the sand profile and settings, workflow
+  enablement, avatars and automations. So the list is empty for every clone this tree can make, the strip loop does not run in production and
+  its fail-closed `cannot isolate the worker's connectors` branch is not reachable. Isolation rests on the clone carrying no channel directory
+  and no connector secret, not on the strip. The code stays for the day a clone does inherit one; it is not a defence that runs today.
 - **The arming paths.** The bus is armed by three: the console's token buttons (browser), the relay's own `/job-bus/token` and
   `/job-bus/token/generate` routes, and the relay's start when `TITAN_JOB_TOKEN` is set in the environment. That last one is the §8 deploy path
   and it re-arms on every relay restart, which is the honest reading of the variable: the deployment says the bus is on. An operator who wants
-  it off clears the variable, or turns the switch off after the restart. Each arm is one `jobBusSetSettings {enabled:true}` and is logged.
+  it off clears the variable, or turns the switch off after the restart. Each arm is one `jobBusSetSettings {enabled:true}` and is logged. It is
+  fired unawaited before the relay listens, so anything that writes `enabled` right after the relay answers must wait for it first; both
+  `tests/relay-job-bus.test.mjs` and `verify-job-bus.mjs` do, rather than racing it.
 - **The shared-user residual.** The host and the worker agent's shell run as the same user in the box, so a shell in the box can still edit
   `jobs.json`, `settings.json` and `audit.jsonl` BETWEEN reloads. Nothing here signs those files. What the quarantine closes is "the host
   believed a file it never checked" and "a rewritten log looked untouched to the host that wrote it"; it does not make the volume read-only,

@@ -182,9 +182,16 @@ export function buildCancelPrompt(job: JobRecord): string {
  *
  * `listAgentChannels` answers only the connections whose credential the connector-secret store still
  * has, and a clone's secrets are not copied with it -- so through that method alone a clone always
- * reads as having no connectors, the strip loop never ran in production, and its fail-closed branch
- * was unreachable. Isolation held by accident. This reads the clone's own channel directory as well,
- * so a connection the clone inherited is SEEN and stripped whether or not a credential came with it.
+ * reads as having no connectors. This reads the clone's own channel directory as well, so a
+ * connection the clone inherited is SEEN whether or not a credential came with it.
+ *
+ * Be plain about what that is worth today: `cloneAgentDir` copies store.db, the sand profile and
+ * settings, workflow enablement, avatars and automations, and NO channels directory, so
+ * `listPlatforms()` reads an absent directory and both halves answer empty. The strip loop still
+ * does not run in production and its fail-closed branch is still unreachable; isolation rests on the
+ * clone carrying neither a channel directory nor a connector secret. This is kept for the day a
+ * clone does carry one -- the check now looks at what the clone HAS rather than at what it has a
+ * credential for -- and the residual is written down in the contract rather than called closed.
  */
 export function agentConnectorIds(sessionStore: unknown, agentId: string): readonly string[] {
   const store = sessionStore as {
@@ -517,6 +524,13 @@ export function createJobWorker(deps: JobWorkerDeps) {
   // read the same `queued` job and dispatched it twice, each writing its own nonce and its own
   // clone. Section 10.9.
   let ticking = false;
+  /**
+   * The moment a pass last saw the bus switched OFF. The queue clock is measured from the later of
+   * this and the job's `created_at`, so the time the switch was refusing to dispatch does not count
+   * against a queued job -- neither while the bus is off nor in the instant after it comes back on.
+   * Section 10.9.
+   */
+  let queueClockFromMs = 0;
   /** Per job, how many times its worker agent was missing and when it is worth looking again. */
   const noWorkerSince = new Map<string, { tries: number; nextAtMs: number }>();
 
@@ -644,9 +658,13 @@ export function createJobWorker(deps: JobWorkerDeps) {
     try { await deps.sendPrompt(buildChapterPrompt(started.job), cloneId); }
     catch {
       // A prompt that never landed is a job that will never answer: say so now rather than let it
-      // sit running for two hours waiting for a reply nobody was asked for.
-      await store.transition(job.id, "failed", { note: "could not send the prompt", error: "could not send the prompt" });
-      await disposeClone(dispatched);
+      // sit running for two hours waiting for a reply nobody was asked for. The clone goes in a
+      // `finally` for the same reason it does in attest(): an unwritable cache must not leak it.
+      try {
+        await store.transition(job.id, "failed", { note: "could not send the prompt", error: "could not send the prompt" });
+      } finally {
+        await disposeClone(dispatched);
+      }
     }
   }
 
@@ -681,12 +699,22 @@ export function createJobWorker(deps: JobWorkerDeps) {
     }
   }
 
-  /** needs_human keeps its clone (section 10.2) and raises the console's needs-you signal. */
+  /**
+   * needs_human keeps its clone (section 10.2) and raises the console's needs-you signal.
+   *
+   * The signal is in a `finally` because a transition whose cache write fails throws a 503 AFTER the
+   * record has moved in memory: the job is blocked either way, and a job that is blocked with no
+   * needs-you badge is a job nobody is told about.
+   */
   async function needsHuman(job: JobRecord, agentId: string | null, reason: string, detail: string): Promise<void> {
-    await store.transition(job.id, "needs_human", { note: reason, needs_human: { reason, detail } });
-    if (agentId == null || agentId.length === 0) return;
-    deps.markUnread?.(agentId);
-    deps.raiseNeedsYou?.(agentId, detail.length > 0 ? detail : reason);
+    try {
+      await store.transition(job.id, "needs_human", { note: reason, needs_human: { reason, detail } });
+    } finally {
+      if (agentId != null && agentId.length > 0) {
+        deps.markUnread?.(agentId);
+        deps.raiseNeedsYou?.(agentId, detail.length > 0 ? detail : reason);
+      }
+    }
   }
 
   /** Reads this attempt's attestations, then GitHub, and answers done or failed. Never asks the model. */
@@ -742,20 +770,27 @@ export function createJobWorker(deps: JobWorkerDeps) {
     // who does is saying in the job body that this one is not being attested.
     const holds = unsupported.length === 0 || job.policy.require_attestation === false;
     // The result rides along on a failure too, so CoS can see exactly which claims went unsupported.
-    await store.transition(job.id, holds ? "done" : "failed", {
-      note: holds ? "attested" : "attestation did not hold",
-      result,
-      attemptId: reply.attemptId,
-      receipts: checked.receipts,
-      unsupported_claims: unsupported,
-      ...(holds ? {} : { error: "attestation did not hold" }),
-    });
-    await disposeClone(job.worker);
+    // The clone goes in a `finally`: a terminal transition whose cache write fails throws a 503
+    // after the record has already moved in memory, so the job is terminal, `store.running()` will
+    // never hand it back, and a `disposeClone` on the next line would never run. Section 10.2's
+    // promise is that the clone is deleted when the job ends, not when the volume co-operates.
+    try {
+      await store.transition(job.id, holds ? "done" : "failed", {
+        note: holds ? "attested" : "attestation did not hold",
+        result,
+        attemptId: reply.attemptId,
+        receipts: checked.receipts,
+        unsupported_claims: unsupported,
+        ...(holds ? {} : { error: "attestation did not hold" }),
+      });
+    } finally {
+      await disposeClone(job.worker);
+    }
   }
 
   async function failJob(job: JobRecord, error: string, note: string): Promise<void> {
-    await store.transition(job.id, "failed", { note, error });
-    await disposeClone(job.worker);
+    try { await store.transition(job.id, "failed", { note, error }); }
+    finally { await disposeClone(job.worker); }
   }
 
   /** One look at a running job: a result block, a blocked block, or the clock. */
@@ -813,14 +848,27 @@ export function createJobWorker(deps: JobWorkerDeps) {
     }
   }
 
-  /** Section 10.3's two clocks: one on the queue, one on the run, and needs_human runs out too. */
-  async function expire(): Promise<void> {
+  /**
+   * Section 10.3's two clocks: one on the queue, one on the run, and needs_human runs out too.
+   *
+   * The QUEUE clock only runs while the bus is on. A queued job that the switch is refusing to
+   * dispatch has not been queued too long, it has not been queued at all -- expiring it would mean
+   * an operator who turned the bus off for an hour of maintenance came back to every job CoS had
+   * submitted marked failed, having never had a chance to run. The RUN clock always runs: a job that
+   * is already in flight, or already waiting on a person, still owes an answer.
+   */
+  async function expire(options: { readonly queueClock: boolean }): Promise<void> {
     const settings = deps.readSettings();
     const nowMs = deps.now();
-    for (const job of [...await store.queued()]) {
-      const createdMs = Date.parse(job.created_at);
-      if (Number.isFinite(createdMs) && nowMs >= createdMs + settings.queueTimeoutMin * 60_000) {
-        await store.transition(job.id, "failed", { note: "queued too long", error: "queued too long" });
+    if (options.queueClock) {
+      for (const job of [...await store.queued()]) {
+        const createdMs = Date.parse(job.created_at);
+        // From the later of "when it was created" and "when the bus came back on", so an hour of
+        // maintenance does not fail an hour's worth of work the moment the switch is flipped back.
+        const fromMs = Math.max(createdMs, queueClockFromMs);
+        if (Number.isFinite(createdMs) && nowMs >= fromMs + settings.queueTimeoutMin * 60_000) {
+          await store.transition(job.id, "failed", { note: "queued too long", error: "queued too long" });
+        }
       }
     }
     for (const job of [...await store.needsHuman()]) {
@@ -841,11 +889,14 @@ export function createJobWorker(deps: JobWorkerDeps) {
 
   async function pass(): Promise<void> {
     // Turning the bus off must not strand the jobs that were already running: they still owe an
-    // answer, a timeout and a deleted clone. So a pass always finishes what is in flight, and it is
-    // only DISPATCH that the switch stops. Section 10.9.
+    // answer, a timeout and a deleted clone. So a pass always finishes what is in flight. What the
+    // switch stops is DISPATCH -- and, with it, the queue clock, because a job the switch would not
+    // let out of the queue has not been queued too long. Section 10.9.
+    const enabled = deps.readSettings().enabled;
+    if (!enabled) queueClockFromMs = deps.now();
     for (const job of [...await store.running()]) await advance(job);
-    await expire();
-    if (!deps.readSettings().enabled) return;
+    await expire({ queueClock: enabled });
+    if (!enabled) return;
     const busyAgents = new Set(
       (await store.running()).flatMap((job) => (job.worker == null ? [] : [job.worker.sourceAgentId])),
     );

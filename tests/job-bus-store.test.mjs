@@ -425,6 +425,7 @@ test("jobs.json keeps the newest 500 terminal jobs and never drops a live one", 
     seeded.push({ ...seeded[0], id: "job_live", status: "queued", idempotency_key: "live" });
     await mkdir(path.join(root, "job-bus"), { recursive: true });
     await writeFile(path.join(root, "job-bus", "jobs.json"), JSON.stringify({ jobs: seeded }));
+    await writeAudit(path.join(root, "job-bus"), auditRowsFor(seeded));
 
     const store = createJobStore({ rootDir: root, readSettings: () => ({ ...DEFAULT_JOB_BUS_SETTINGS, maxOpen: 100 }) });
     // Any write re-applies the cap.
@@ -576,6 +577,36 @@ function seededJob(patch = {}) {
   };
 }
 
+/**
+ * The audit rows a hand-seeded jobs.json has to be checkable against. Section 10.9 checks each
+ * record's status, payload hash and idempotency key against the chain now, not only against a
+ * payload hash the same writer could have recomputed, so a seeded store needs a seeded chain that
+ * agrees with it -- which is what a real store would have left behind anyway.
+ */
+function auditRowsFor(jobs) {
+  return jobs.flatMap((job) => {
+    const events = job.status === "queued" ? ["queued"] : ["queued", job.status];
+    return events.map((event) => ({
+      at: job.created_at, event, jobId: job.id, type: job.type, submitter: job.submitter ?? "cos",
+      submitter_id: "", client: "", idempotency_key: job.idempotency_key,
+      payload_sha256: job.payload_sha256, policy_version: "v1", worker: null,
+      ok: event !== "failed", eventId: `${job.id}-${event}`,
+    }));
+  });
+}
+
+/** Chains rows exactly the way the store does: `prev` is the sha256 of the previous line's bytes. */
+async function writeAudit(directory, rows) {
+  let prev = "";
+  const lines = rows.map((row, index) => {
+    const line = JSON.stringify({ seq: index + 1, prev, ...row });
+    prev = sha256(line);
+    return line;
+  });
+  await writeFile(path.join(directory, "audit.jsonl"), lines.length === 0 ? "" : `${lines.join("\n")}\n`);
+  return lines;
+}
+
 async function withSeededRoot(run) {
   const root = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-quarantine-"));
   const directory = path.join(root, "job-bus");
@@ -643,6 +674,104 @@ test("a broken audit chain quarantines the job store too, because the receipt is
   });
 });
 
+/** A valid chain for one seeded job with its second row's `prev` rewritten: broken at row 2. */
+async function writeBrokenChain(directory, job) {
+  const lines = await writeAudit(directory, auditRowsFor([job]));
+  const broken = [lines[0], JSON.stringify({ ...JSON.parse(lines[1]), prev: "0".repeat(64) })];
+  await writeFile(path.join(directory, "audit.jsonl"), `${broken.join("\n")}\n`);
+}
+
+test("a broken chain moves audit.jsonl aside and the receipt opens a fresh chain", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    await writeFile(path.join(directory, "jobs.json"), JSON.stringify({ jobs: [seededJob()] }));
+    await writeBrokenChain(directory, seededJob());
+    assert.equal((await openStore(root).integrity()).ok, false);
+    // The store_quarantined row used to be appended to the file that had just failed, which left a
+    // chain that could never verify again: the bus flapped, quarantining on every start that found
+    // a jobs.json and coming up clean on every start that did not.
+    assert.equal((await readdir(directory)).some((name) => name.startsWith("audit.jsonl.quarantined-")), true);
+    const rows = (await readFile(path.join(directory, "audit.jsonl"), "utf8")).trim().split("\n");
+    assert.equal(rows.length, 1, "the fresh chain holds only the receipt for the break");
+    assert.equal(JSON.parse(rows[0]).seq, 1);
+    assert.equal(JSON.parse(rows[0]).event, "store_quarantined");
+    assert.equal(verifyJobAuditChain(rows).ok, true);
+  });
+});
+
+test("the quarantine outlives the host that decided it", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    await writeFile(path.join(directory, "jobs.json"), JSON.stringify({ jobs: [seededJob()] }));
+    await writeBrokenChain(directory, seededJob());
+    assert.equal((await openStore(root).integrity()).ok, false);
+    // Start two, over exactly what start one left behind: no jobs.json (it was moved aside) and an
+    // audit.jsonl the host has never seen. That used to be the first-start path, so the bus came
+    // back green over the same volume -- and with TITAN_JOB_TOKEN set the relay re-armed it.
+    const second = await openStore(root).integrity();
+    assert.equal(second.ok, false, "a restart is not an operator looking");
+    assert.match(second.detail, /audit chain breaks at row 2/);
+    assert.equal(JSON.parse(await readFile(path.join(directory, "quarantine.json"), "utf8")).length >= 1, true);
+    // And it is the operator, not a restart, who clears it: the marker is the switch.
+    await rm(path.join(directory, "quarantine.json"));
+    assert.equal((await openStore(root).integrity()).ok, true);
+  });
+});
+
+test("an audit chain is verified even when there is no jobs.json to check it against", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    // The shape a quarantine leaves behind, and the shape a box that has never run a job would have
+    // if a shell forged an audit file on it. Nothing used to read this file at all.
+    await writeBrokenChain(directory, seededJob());
+    const integrity = await openStore(root).integrity();
+    assert.equal(integrity.ok, false);
+    assert.match(integrity.detail, /audit chain breaks at row 2/);
+  });
+});
+
+test("a jobs.json edited to turn a failed job into a done one is quarantined by the chain", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    const failed = seededJob({ status: "failed", error: "attestation did not hold" });
+    await writeAudit(directory, auditRowsFor([failed]));
+    // The payload and its hash are untouched, which is all the record check used to look at. The
+    // verdict is the field a tamperer wants, and it is the field the chain holds a copy of.
+    const forged = {
+      ...failed,
+      status: "done",
+      error: null,
+      result: { summary: "all done", commits: [], artifacts: [], attestation: { attempt_id: "x", receipts: [], unsupported_claims: [] } },
+    };
+    await writeFile(path.join(directory, "jobs.json"), JSON.stringify({ jobs: [forged] }));
+    const store = openStore(root);
+    const integrity = await store.integrity();
+    assert.equal(integrity.ok, false);
+    assert.match(integrity.detail, /the audit chain never recorded that/);
+    assert.equal(await store.get("job_seeded"), null, "the forged verdict is not served to anyone");
+  });
+  // The same store, unedited, loads: the check is against the chain, not against being terminal.
+  await withSeededRoot(async ({ root, directory }) => {
+    const failed = seededJob({ status: "failed", error: "attestation did not hold" });
+    await writeAudit(directory, auditRowsFor([failed]));
+    await writeFile(path.join(directory, "jobs.json"), JSON.stringify({ jobs: [failed] }));
+    const store = openStore(root);
+    assert.equal((await store.integrity()).ok, true);
+    assert.equal((await store.get("job_seeded")).status, "failed");
+  });
+});
+
+test("a forged retired entry is caught too, because a replay would answer done for work that never ran", async () => {
+  await withSeededRoot(async ({ root, directory }) => {
+    const real = seededJob({ id: "job_real", idempotency_key: "real" });
+    await writeAudit(directory, auditRowsFor([real]));
+    await writeFile(path.join(directory, "jobs.json"), JSON.stringify({
+      jobs: [],
+      retired: { "health.ping never-ran": { id: "job_ghost", status: "done", created_at: "2026-09-05T00:00:00.000Z" } },
+    }));
+    const store = openStore(root);
+    const integrity = await store.integrity();
+    assert.equal(integrity.ok, false);
+    assert.match(integrity.detail, /has no row in the audit chain/);
+  });
+});
+
 test("audit.jsonl rewritten under the host is caught by the length the host remembers", async () => {
   await withSeededRoot(async ({ root, directory }) => {
     const store = openStore(root);
@@ -696,6 +825,7 @@ test("a replay of a pruned key answers with the created_at the job really had", 
     }
     await mkdir(path.join(root, "job-bus"), { recursive: true });
     await writeFile(path.join(root, "job-bus", "jobs.json"), JSON.stringify({ jobs: seeded }));
+    await writeAudit(path.join(root, "job-bus"), auditRowsFor(seeded));
     const store = openStore(root);
     await store.create({ type: "health.ping", idempotency_key: "fresh", payload: {} });
     const replay = await store.create({ type: "health.ping", idempotency_key: "t0", payload: {} });

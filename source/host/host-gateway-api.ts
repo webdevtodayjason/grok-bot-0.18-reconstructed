@@ -208,12 +208,11 @@ export function createHostGatewayApi(
     deleteAgent: (agentId) => removeAgentCompletely(agentId),
     // A per-agent connector is a channel connection; stripping one is the same disconnect the
     // console's own Channels card does. `agentConnectorIds` reads the clone's channel directory as
-    // well as the credentialed list, because a clone carries no connector SECRETS -- so listing
-    // through `listAgentChannels` alone would have reported "no connectors" for every clone and the
-    // strip would never have run in production. Section 10.9. A clone today carries no channel
-    // directory either, so this is usually still an empty list -- what changes is that the check
-    // now looks at what the clone HAS rather than at what it has a credential for, so a clone that
-    // ever does inherit one is stripped and the fail-closed branch is reachable.
+    // well as the credentialed list, because a clone carries no connector SECRETS. Section 10.9 is
+    // honest about the rest: `cloneAgentDir` copies no channels directory either, so this list is
+    // EMPTY for every clone this tree can make, the strip loop does not run in production and its
+    // fail-closed branch is not reachable. Isolation rests on the clone having neither; this is the
+    // check for the day a clone does inherit a channel, not a defence that runs today.
     listAgentConnectors: (agentId) => agentConnectorIds((manager as any).sessionStore, agentId),
     disconnectAgentConnector: (agentId, connectorId) =>
       (manager as any).sessionStore?.disconnectChannel?.(agentId, connectorId),
