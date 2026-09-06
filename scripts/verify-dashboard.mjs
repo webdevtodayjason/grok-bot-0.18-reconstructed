@@ -1114,7 +1114,17 @@ try {
         // Wait for the card the operator would click, and say so when it never arrives.
         const copyCard = await until(() => page.evaluate((id) => !!document.querySelector(`[data-context-id="${id}"]`) || null, copyAgentId), 30_000, 1000);
         check(copyCard === true, "the copy appears in the roster the operator is looking at", copyCard ? "" : "no card for the copy inside 30s");
-        await page.click(`[data-context-id="${copyAgentId}"]`); await page.waitForTimeout(1500);
+        // That same re-render closes the open panel dialog, and a click landing inside it selects
+        // nothing: measured on this box with a scripted repro, the active card stayed on the
+        // previous agent, so #room-menu opened THAT agent's details and the copy's Delete button
+        // was never drawn -- 30 s of waiting for a button belonging to a panel that was not open.
+        // Click until the copy is the card the console is actually showing.
+        const selectedCopy = await until(async () => {
+          await page.click(`[data-context-id="${copyAgentId}"]`).catch(() => {});
+          await page.waitForTimeout(1200);
+          return page.evaluate((id) => (document.querySelector(".worker-card.is-active")?.getAttribute("data-context-id") === id ? true : null), copyAgentId);
+        }, 20_000, 800);
+        check(selectedCopy === true, "clicking the copy's roster card makes it the agent on screen", selectedCopy ? "" : "the copy never became the active card inside 20s");
         await page.click("#room-menu"); await page.waitForTimeout(1200);
         await page.click(`[data-delete-agent="${copyAgentId}"]`); await page.waitForTimeout(300);
         const armed = await page.evaluate((id) => document.querySelector(`[data-delete-agent="${id}"]`)?.textContent, copyAgentId);
