@@ -74,6 +74,33 @@
     }
   }
 
+  // JOBBUS-3: one POST to a relay job-bus route, answered as {accepted, message, token?}. The
+  // token comes back exactly once, from the generate route, and is handed straight to the caller
+  // so it is never held here and never reaches state, an event or a log.
+  async function jobBusWrite(route, body) {
+    const r = await relayFetch(route, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const answer = await r.json().catch(() => ({}));
+    if (!r.ok) return { accepted: false, message: answer?.error ?? `the relay answered ${r.status}` };
+    return { accepted: true, message: answer?.message ?? null, token: answer?.token ?? null };
+  }
+
+  // SAND_JOB_BUS_WORKERS out of whatever getHostSettings answered with. The host settings file is
+  // read as either a flat map or a nested one (source/host/sand-box-setting.ts readSettingsFile),
+  // so both are accepted here; an unparseable value is no mapping rather than a thrown card.
+  function jobBusWorkersOf(settings) {
+    const nested = settings?.settings;
+    const source = nested != null && typeof nested === "object" && !Array.isArray(nested) ? nested : settings;
+    const raw = source?.SAND_JOB_BUS_WORKERS;
+    if (raw == null) return {};
+    if (typeof raw === "object" && !Array.isArray(raw)) return raw;
+    try {
+      const parsed = JSON.parse(String(raw));
+      return parsed != null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch { return {}; }
+  }
+
   const AVATARS = [
     "assets/avatar-chief.svg", "assets/avatar-atera.svg", "assets/avatar-marketing.svg",
     "assets/avatar-clientsync.svg", "assets/avatar-coro.svg",
@@ -1631,7 +1658,19 @@
       // fine here because the heartbeat below calls the gateway every 15 seconds and relayFetch
       // bounces to /login the first time one of those comes back unauthenticated.
       const events = new global.EventSource("/events");
-      events.onmessage = () => {
+      events.onmessage = (message) => {
+        // JOBBUS-3: a job transition is not a conversation change, so it does not pay for a
+        // transcript re-read. It refreshes the Job bus card and nothing else. docs/JOB-BUS.md §5
+        // names the event `{type:"job-bus", jobId, status}`; every other envelope on this stream
+        // carries its name on `channel` with the body under `payload`, so both are read rather
+        // than betting the console on which one the host settled on.
+        let envelope = null;
+        try { envelope = JSON.parse(message?.data ?? "null"); } catch { /* a heartbeat or a partial frame */ }
+        if (envelope != null && (envelope.type === "job-bus" || envelope.channel === "job-bus")) {
+          const body = envelope.payload ?? envelope;
+          emit("job-bus:changed", { jobId: body.jobId ?? null, status: body.status ?? null });
+          return;
+        }
         if (pending) return;
         pending = global.setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, 900);
       };
@@ -2880,6 +2919,39 @@
         return call("setHostSettings", { autoReviewInstructions: next })
           .catch((error) => { failed(`Review policy could not be saved: ${error.message}`); throw error; });
       },
+
+      // ---- the Titan Job Bus (docs/JOB-BUS.md) ------------------------------------------------
+      // The token lives on the relay, so its four routes are console-session calls; the jobs and
+      // the worker mapping live on the gateway. The card reads both through here rather than
+      // fetching, so the offline demo can answer the same shapes with no network at all.
+      getJobBusStatus() {
+        return relayFetch("/job-bus/status").then(async (r) => {
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(body?.error ?? `the relay answered ${r.status}`);
+          return body;
+        });
+      },
+      // null, not [], when this box's gateway has no jobBusList: the card then says the host is
+      // older than the console instead of drawing an empty table as if no job had ever run.
+      listJobBusJobs() {
+        // The contract says {jobs:[...]}; a bare array is read too, because a host that answered
+        // one would otherwise paint "no jobs yet" over a bus that had run plenty.
+        return tryCall("jobBusList").then((answer) => (answer == null ? null : Array.isArray(answer) ? answer : answer.jobs ?? []));
+      },
+      generateJobBusToken() { return jobBusWrite("/job-bus/token/generate", {}); },
+      setJobBusToken(token) { return jobBusWrite("/job-bus/token", { token }); },
+      clearJobBusToken() { return jobBusWrite("/job-bus/token/clear", {}); },
+      getJobBusWorkers() {
+        return call("getHostSettings").then(jobBusWorkersOf).catch(() => ({}));
+      },
+      setJobBusWorkers(mapping) {
+        // One JSON string, because sand-host-settings.json is a flat map of strings and
+        // readSandBoxSetting only ever returns one (source/host/sand-box-setting.ts).
+        return call("setHostSettings", { SAND_JOB_BUS_WORKERS: JSON.stringify(mapping) })
+          .then(() => mapping)
+          .catch((error) => { failed(`The worker mapping was not saved: ${error.message}`); throw error; });
+      },
+
       startTeaching(workerId) {
         const id = workerId ?? state.activeContext?.id;
         const worker = state.workers.find((w) => w.id === id);

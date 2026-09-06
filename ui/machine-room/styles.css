@@ -3357,3 +3357,59 @@ body[data-composer-drop="1"] .composer {
   font-weight: 650;
   white-space: nowrap;
 }
+
+/* JOBBUS-3: Settings -> Job bus (docs/JOB-BUS.md §7). Two pills the rest of the console never
+   needed, and a card that has to hold a wide table inside a fixed-width dialog. Every part of it
+   is min-width 0 with the table scrolling in its own box, because a settings-list row is a grid
+   item and a grid item's default min-width is its content: one long result line, and the card
+   grows past the panel edge instead of clipping. That was the MR-27 bleed. */
+.status-pill.bad {
+  border-color: rgba(196, 76, 80, 0.32);
+  color: #f0a6a8;
+  background: rgba(196, 76, 80, 0.12);
+}
+
+.status-pill.muted {
+  color: var(--text-tertiary);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+[data-job-bus] { min-width: 0; }
+[data-job-bus] .setting-row { margin-top: 12px; }
+[data-job-bus] .form-actions { margin-top: 12px; }
+
+.job-bus-block { min-width: 0; margin-top: 16px; }
+.job-bus-block > strong { display: block; margin-bottom: 6px; font-size: 12px; }
+.job-bus-block > .field-hint { display: block; margin-bottom: 8px; }
+
+.job-bus-minted { margin-top: 12px; }
+.job-bus-minted label { display: block; margin-bottom: 6px; color: var(--text-secondary); font-size: 11px; }
+.job-bus-copy-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.job-bus-copy-row input { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono); font-size: 11px; }
+
+.job-bus-curl {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.job-bus-worker-row { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 8px; }
+.job-bus-worker-row input { flex: 1 1 0; min-width: 0; }
+.job-bus-arrow { flex: 0 0 auto; color: var(--text-tertiary); }
+
+.job-bus-table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid var(--glass-edge-soft); border-radius: var(--radius-lg); }
+.job-bus-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.job-bus-table th,
+.job-bus-table td { padding: 9px 11px; border-bottom: 1px solid var(--glass-edge-soft); font-size: 11px; text-align: left; white-space: nowrap; }
+.job-bus-table th { color: var(--text-tertiary); font-size: 9px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
+.job-bus-table tr:last-child td { border-bottom: 0; }
+.job-bus-table .status-pill { font-size: 9px; }
+.job-bus-id { font-family: var(--font-mono); color: var(--text-secondary); }
+.job-bus-line { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }

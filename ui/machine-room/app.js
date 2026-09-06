@@ -2064,7 +2064,7 @@
     const updates = typeof adapter.getHostStatus === "function"
       ? `<section class="settings-section" data-updates-panel><h3>Updates</h3><p>The host bundle this box runs, as getHostStatus reports it. The host itself is not updated from this page: updateHostNow would fetch a bundle from S3 over the locally patched one this box runs, so that command is left unwired here on purpose.</p><div class="setting-row"><div><strong>Host version</strong><small data-host-version>Reading from the host…</small></div><span class="status-pill" data-host-update>…</span></div>${boxAgent ? `<div class="setting-row"><div><strong>Update ${escapeHtml(boxAgent.name)}'s computer</strong><small>Moves the box to a fresh instance and keeps files and logins. Two clicks.</small></div><button class="ghost-button" type="button" data-update-box="${escapeHtml(boxAgent.id)}"${typeof adapter.updateBox === "function" ? "" : " disabled"}>Update</button></div><div class="setting-row"><div><strong>Reset ${escapeHtml(boxAgent.name)}'s computer</strong><small>Restores the box from its last snapshot. Recent unsynced work can be lost — prefer Update. Two clicks.</small></div><button class="danger-button" type="button" data-reset-box="${escapeHtml(boxAgent.id)}"${typeof adapter.resetBox === "function" ? "" : " disabled"}>Reset</button></div>` : ""}</section>`
       : "";
-    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Providers", "Providers", "Every endpoint this box could answer through, as the relay reports them. Adopting one stores its credential in the relay's 0600 store on this Mac; switching one is the endpoint row above.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${updates}</div>`;
+    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Providers", "Providers", "Every endpoint this box could answer through, as the relay reports them. Adopting one stores its credential in the relay's 0600 store on this Mac; switching one is the endpoint row above.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${jobBusSection()}${updates}</div>`;
   }
 
   function openSettingsPanel() {
@@ -2072,6 +2072,7 @@
     openPanel("Global router & policy", "Operator settings", settingsPanel());
     fillEndpoints();
     fillHostStatus();
+    fillJobBus();
   }
 
   // The Updates rows fill from getHostStatus after the panel opens, like the endpoint rows do.
@@ -2090,6 +2091,101 @@
         pill.className = `status-pill${status.hostUpdateAvailable === false ? " success" : ""}`;
       }
     }).catch((error) => { version.textContent = `Could not read the host version: ${error.message}`; });
+  }
+
+  // ---- JOBBUS-3: Settings -> Job bus (docs/JOB-BUS.md §7) ------------------------------------
+  // Every value on this card is read back from the relay and the host after the panel opens, the
+  // way the endpoint rows are. A click never paints its own outcome: the card refills from what
+  // answered, so it cannot say a token is configured because a button was pressed.
+  const JOB_STATUS_PILL = {
+    queued: "status-pill", running: "status-pill", needs_human: "status-pill attention",
+    done: "status-pill success", failed: "status-pill bad", cancelled: "status-pill muted",
+  };
+  // The full id is on the row's title; the table shows enough of it to match a CoS log line.
+  const shortJobId = (id) => (String(id).length > 15 ? `${String(id).slice(0, 15)}…` : String(id));
+  const jobWhen = (at) => {
+    const ms = Date.parse(String(at ?? ""));
+    return Number.isFinite(ms) ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(ms) : "";
+  };
+  // One line per job: what it produced, or what a person has to go and do.
+  function jobLine(job) {
+    if (job.status === "needs_human" && job.needs_human) return `${job.needs_human.reason ?? "blocked"}: ${job.needs_human.detail ?? ""}`;
+    if (job.status === "failed") return job.error ?? job.result?.summary ?? "the job failed";
+    if (job.result?.summary) return job.result.summary;
+    return "";
+  }
+
+  function jobBusWorkerRow(type, agent) {
+    return `<div class="job-bus-worker-row" data-job-bus-worker><input type="text" aria-label="Job type" placeholder="nextgen.chapter" data-job-bus-worker-type value="${escapeHtml(type)}" /><span class="job-bus-arrow" aria-hidden="true">&rarr;</span><input type="text" aria-label="Agent name" placeholder="Scribe" data-job-bus-worker-agent value="${escapeHtml(agent)}" /></div>`;
+  }
+
+  function jobBusSection() {
+    if (typeof adapter.getJobBusStatus !== "function") return "";
+    return `<section class="settings-section" data-job-bus><h3>Job bus</h3><p>An allowlisted job API for the Chief of Staff. It publishes no shell, no browser and no desktop: a caller posts a job of an allowed type and reads back a result the host checked against the receipts of the tools its worker actually ran. The contract is docs/JOB-BUS.md.</p>`
+      + `<div class="setting-row"><div><strong>Status</strong><small data-job-bus-state>Reading from the relay…</small></div><span class="status-pill" data-job-bus-pill>…</span></div>`
+      + `<div class="setting-row"><div><strong>Base URL</strong><small data-job-bus-base>…</small></div></div>`
+      + `<div class="setting-row"><div><strong>Token</strong><small>Generate one here, or paste the value you set on the deployment. It is compared in constant time and never written to a log, an audit row or a job body.</small></div><div class="field"><input id="job-bus-token" type="password" autocomplete="off" placeholder="At least 32 characters" data-job-bus-input /></div></div>`
+      + `<div class="form-actions"><button class="primary-button" type="button" data-job-bus-generate>Generate</button><button class="ghost-button" type="button" data-job-bus-set>Set</button><button class="danger-button" type="button" data-job-bus-clear>Clear</button></div>`
+      + `<div class="job-bus-minted" data-job-bus-minted hidden><label for="job-bus-minted-value">The new token</label><div class="job-bus-copy-row"><input id="job-bus-minted-value" type="text" readonly data-job-bus-minted-value /><button class="ghost-button" type="button" data-job-bus-copy>Copy</button></div><small class="field-hint">Copy it now. This is the only time it is shown, and nothing on this box can read it back.</small></div>`
+      + `<div class="job-bus-block"><strong>Try it</strong><pre class="job-bus-curl" data-job-bus-curl></pre></div>`
+      + `<div class="job-bus-block"><strong>Workers</strong><small class="field-hint">Which agent runs each job type, held in the host settings as SAND_JOB_BUS_WORKERS. A type with no agent on this box stops its jobs on needs_human rather than running them somewhere else.</small><div data-job-bus-workers></div><div class="form-actions"><button class="ghost-button" type="button" data-job-bus-worker-add>Add a type</button><button class="primary-button" type="button" data-job-bus-workers-save>Save workers</button></div></div>`
+      + `<div class="job-bus-block"><strong>Jobs</strong><div class="job-bus-table-wrap"><table class="job-bus-table"><thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Worker</th><th>Created</th><th>Result</th></tr></thead><tbody data-job-bus-rows><tr><td colspan="6">Reading from the host…</td></tr></tbody></table></div></div>`
+      + `</section>`;
+  }
+
+  function fillJobBus() {
+    const root = elements.panelContent.querySelector("[data-job-bus]");
+    if (!root || typeof adapter.getJobBusStatus !== "function") return;
+    const line = root.querySelector("[data-job-bus-state]");
+    const pill = root.querySelector("[data-job-bus-pill]");
+    const base = root.querySelector("[data-job-bus-base]");
+    const curl = root.querySelector("[data-job-bus-curl]");
+    adapter.getJobBusStatus().then((status) => {
+      const where = status.source === "env"
+        ? " from the TITAN_JOB_TOKEN environment variable on this deployment, which wins over anything written here"
+        : status.source === "file" ? " from the token file the console wrote beside the relay's profile" : "";
+      line.textContent = status.configured
+        ? `Configured${where}.`
+        : "No token, so every /v1 request is refused with 503. Generate one, or set TITAN_JOB_TOKEN on the deployment.";
+      pill.textContent = status.configured ? (status.source === "env" ? "env" : "configured") : "not configured";
+      pill.className = status.configured ? "status-pill success" : "status-pill attention";
+      const url = status.base_url ?? "";
+      base.textContent = url || "The relay did not report one.";
+      // A placeholder, never the real token: this page is a screen share away from anywhere.
+      curl.textContent = `curl -sS -H "Authorization: Bearer $TITAN_JOB_TOKEN" ${url}/health`;
+      // Clear is offered only against a token the console can actually remove.
+      const clear = root.querySelector("[data-job-bus-clear]");
+      if (clear) clear.disabled = !status.configured || status.source === "env";
+      const set = root.querySelector("[data-job-bus-set]");
+      const generate = root.querySelector("[data-job-bus-generate]");
+      if (set) set.disabled = status.source === "env";
+      if (generate) generate.disabled = status.source === "env";
+    }).catch((error) => {
+      line.textContent = `The relay did not answer for the job bus: ${error.message}`;
+      pill.textContent = "unknown";
+      pill.className = "status-pill";
+    });
+    if (typeof adapter.getJobBusWorkers === "function") {
+      const workers = root.querySelector("[data-job-bus-workers]");
+      adapter.getJobBusWorkers().then((mapping) => {
+        const rows = Object.entries(mapping ?? {});
+        workers.innerHTML = (rows.length ? rows : [["nextgen.chapter", "Scribe"]]).map(([type, agent]) => jobBusWorkerRow(type, String(agent ?? ""))).join("");
+      }).catch(() => { workers.innerHTML = jobBusWorkerRow("nextgen.chapter", "Scribe"); });
+    }
+    fillJobBusRows();
+  }
+
+  function fillJobBusRows() {
+    const body = elements.panelContent.querySelector("[data-job-bus-rows]");
+    if (!body || typeof adapter.listJobBusJobs !== "function") return;
+    adapter.listJobBusJobs().then((jobs) => {
+      if (jobs == null) { body.innerHTML = `<tr><td colspan="6">This box's host has no job bus yet. Ship a bundle that carries it.</td></tr>`; return; }
+      if (jobs.length === 0) { body.innerHTML = `<tr><td colspan="6">No jobs yet.</td></tr>`; return; }
+      body.innerHTML = jobs.map((job) => {
+        const summary = jobLine(job);
+        return `<tr data-job-bus-row="${escapeHtml(job.id)}"><td class="job-bus-id" title="${escapeHtml(job.id)}">${escapeHtml(shortJobId(job.id))}</td><td>${escapeHtml(job.type ?? "")}</td><td><span class="${JOB_STATUS_PILL[job.status] ?? "status-pill"}">${escapeHtml(String(job.status ?? "").replace("_", " "))}</span></td><td>${escapeHtml(job.worker?.agentName ?? "")}</td><td>${escapeHtml(jobWhen(job.created_at))}</td><td class="job-bus-line" title="${escapeHtml(summary)}">${escapeHtml(summary)}</td></tr>`;
+      }).join("");
+    }).catch((error) => { body.innerHTML = `<tr><td colspan="6">The host did not answer for the job list: ${escapeHtml(error.message)}</td></tr>`; });
   }
 
   function addPanel() {
@@ -3058,6 +3154,52 @@
         .catch((error) => showToast(`Policy not saved: ${error.message}`));
     } else if (target.id === "auto-review-toggle") {
       target.setAttribute("aria-pressed", target.getAttribute("aria-pressed") !== "true");
+    } else if (target.hasAttribute("data-job-bus-generate") || target.hasAttribute("data-job-bus-set") || target.hasAttribute("data-job-bus-clear")) {
+      const root = elements.panelContent.querySelector("[data-job-bus]");
+      const input = root.querySelector("[data-job-bus-input]");
+      const minted = root.querySelector("[data-job-bus-minted]");
+      const generating = target.hasAttribute("data-job-bus-generate");
+      const write = generating
+        ? adapter.generateJobBusToken()
+        : target.hasAttribute("data-job-bus-set") ? adapter.setJobBusToken(input.value) : adapter.clearJobBusToken();
+      target.disabled = true;
+      Promise.resolve(write).then((answer) => {
+        if (!answer.accepted) { showToast(answer.message ?? "The relay refused that."); return; }
+        input.value = "";
+        // The one place a token is on screen. It is put there only by the route that minted it,
+        // and it is gone from the page the moment anything else is done on this card.
+        if (generating && answer.token) {
+          minted.hidden = false;
+          minted.querySelector("[data-job-bus-minted-value]").value = answer.token;
+        } else {
+          minted.hidden = true;
+          minted.querySelector("[data-job-bus-minted-value]").value = "";
+        }
+        showToast(answer.message ?? "The relay stored it.");
+      }).catch((error) => showToast(`The job bus token was not changed: ${error.message}`))
+        .finally(() => { target.disabled = false; fillJobBus(); });
+    } else if (target.hasAttribute("data-job-bus-copy")) {
+      const value = elements.panelContent.querySelector("[data-job-bus-minted-value]");
+      const copy = navigator.clipboard?.writeText?.(value.value);
+      // Selecting it is the fallback when the clipboard is not ours to write, which is every
+      // page served over plain http to anything but localhost.
+      Promise.resolve(copy).then(() => showToast("Token copied."))
+        .catch(() => { value.focus(); value.select(); showToast("This browser would not let the page write the clipboard. It is selected, so copy it."); });
+    } else if (target.hasAttribute("data-job-bus-worker-add")) {
+      const rows = elements.panelContent.querySelector("[data-job-bus-workers]");
+      rows.insertAdjacentHTML("beforeend", jobBusWorkerRow("", ""));
+    } else if (target.hasAttribute("data-job-bus-workers-save")) {
+      const mapping = {};
+      for (const row of elements.panelContent.querySelectorAll("[data-job-bus-worker]")) {
+        const type = row.querySelector("[data-job-bus-worker-type]").value.trim();
+        const agent = row.querySelector("[data-job-bus-worker-agent]").value.trim();
+        if (type && agent) mapping[type] = agent;
+      }
+      target.disabled = true;
+      Promise.resolve(adapter.setJobBusWorkers(mapping))
+        .then(() => showToast(`Worker mapping saved on the host: ${Object.keys(mapping).length} type(s)`))
+        .catch((error) => showToast(`The worker mapping was not saved: ${error.message}`))
+        .finally(() => { target.disabled = false; fillJobBus(); });
     } else if (target.hasAttribute("data-open-context-browser")) {
       openDesktop("browser");
     } else if (target.dataset.saveRole) {
@@ -3352,6 +3494,13 @@
       renderAll(true, true);
       const entryId = event.detail?.entryId;
       requestAnimationFrame(() => { if (entryId && !flashEntry(entryId)) showToast("That message is not in the loaded part of the conversation."); });
+      return;
+    }
+    // JOBBUS-3: a job transition redraws the jobs table and nothing else. Repainting the whole
+    // page for it would throw away whatever the operator is typing into the token or worker
+    // fields on the very card the event is about.
+    if (event.type === "job-bus:changed") {
+      if (elements.panelDialog.open && openPluginSurface === "settings") fillJobBusRows();
       return;
     }
     renderAll(event.type === "worker:status" || event.type.startsWith("plugin:") || event.type.startsWith("settings:"));

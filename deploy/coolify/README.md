@@ -184,6 +184,19 @@ never be checked before being pasted.
    is plain `https://$DOMAIN`.
 5. Leave `titanbot-box` with no domain. It must not be reachable from outside.
 6. **Deploy**.
+7. The job bus token, if you want the Chief of Staff to reach this instance
+   (`docs/JOB-BUS.md` §8). Two ways, and only one of them is needed:
+   - **Environment Variables**: `TITAN_JOB_TOKEN` = a value you mint yourself
+     (`openssl rand -hex 24`). The compose passes it through as `${TITAN_JOB_TOKEN:-}`, so an
+     empty field deploys fine. Check the field's NAME after the first deploy: Coolify builds it
+     from everything between the braces and may create `TITAN_JOB_TOKEN:-`, which no shell will
+     export. If it did, use the console instead.
+   - **Settings → Job bus → Generate** in the console. The token is shown once, and it is written
+     to `job-bus.json` in the mounted profile directory at mode 0600. This is the way that needs
+     no Coolify field at all, and it is the one to use if the env field came out misnamed.
+
+   With neither, `/v1` answers `503 {"error":"job bus not configured"}` and nothing else on the
+   relay is reachable with a job bus bearer. The console card says which of the two is in force.
 
 Coolify will also list ten **Storages** entries for this resource, one per bind: seven on the box
 (the four data directories, `runtime`, `runtime/box-exec-daemon` and `credential`) and three on the
@@ -224,6 +237,15 @@ On the server, the one thing the gate does not read is the relay's opinion of it
 container is running the old `ui/server.mjs`: run `sync.sh --no-install` from section 2 and redeploy.
 If `cfip` reads `none`, the environment did not reach the container and the lockout is keyed on
 Cloudflare's edges rather than on visitors, which is the section 7 shared bucket.
+
+If you set a job bus token in step 4.7, add it to the gate and it checks the bus's door as well:
+
+    node scripts/verify-deploy.mjs --url https://$DOMAIN --job-token "$TITAN_JOB_TOKEN"
+
+Without the flag the gate still asserts that `/v1/health` is `401` or `503` and never `200`
+without a bearer, and reports the other half `INCONCLUSIVE` rather than skipping it. Then the
+smoke from `docs/JOB-BUS.md` §8 is the end-to-end proof: health, a `health.ping` job, and the read
+back of that job.
 
 ## 6. How updates ship afterwards
 

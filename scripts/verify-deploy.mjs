@@ -15,7 +15,9 @@
 //                 roster paints
 //   6. desktop    a probe agent's screen opens through the relay's own /vnc route, the frame is
 //                 noVNC, and its websocket reaches the box
-//   7. lockout    six wrong passwords in a row hit the rate limit
+//   7. job bus    /v1/health is 401 or 503 without a bearer and never 200, and 200 with the one
+//                 given as --job-token (docs/JOB-BUS.md §9)
+//   8. lockout    six wrong passwords in a row hit the rate limit
 //
 // With --url it runs against any base URL instead of the tailnet one, which is what the Coolify
 // deployment needs: https://tb.semfreak.dev goes through Cloudflare and Traefik, so the published
@@ -28,6 +30,7 @@
 //
 //   node scripts/verify-deploy.mjs --url https://tb.semfreak.dev
 //   node scripts/verify-deploy.mjs --url https://tb.semfreak.dev --origin 66.90.191.45
+//   node scripts/verify-deploy.mjs --url https://tb.semfreak.dev --job-token "$TITAN_JOB_TOKEN"
 //
 // This gate does not know the console password and no longer asks for one. Jason's password is
 // his; a file holding a copy of it beside the token was a second secret to keep in step, and it
@@ -42,7 +45,8 @@
 //
 // Env: TITANBOT_HOST (ssh destination, default dell-remote), TITANBOT_URL (default
 // http://100.110.83.82:7787), TITANBOT_ROOT, TITANBOT_ORIGIN (the address behind the proxy, default
-// 66.90.191.45), GROK_BOT_PLAYWRIGHT_DIR, GROK_BOT_CHROME.
+// 66.90.191.45), GROK_BOT_PLAYWRIGHT_DIR, GROK_BOT_CHROME, TITAN_JOB_TOKEN (the fallback for
+// --job-token).
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import https from "node:https";
@@ -56,6 +60,17 @@ const urlFlag = (() => {
   if (inline != null) return inline.slice("--url=".length);
   const at = process.argv.indexOf("--url");
   return at === -1 ? null : process.argv[at + 1];
+})();
+
+// --job-token <value>: the Titan Job Bus bearer, so the gate can prove the bus opens for the
+// right key as well as staying shut without one (docs/JOB-BUS.md §9). Without it the closed-door
+// half still runs and the open half is reported inconclusive, because a gate that quietly skips a
+// check is a gate that stops being read. Never printed, never written down.
+const JOB_TOKEN = (() => {
+  const inline = process.argv.find((arg) => arg.startsWith("--job-token="));
+  if (inline != null) return inline.slice("--job-token=".length);
+  const at = process.argv.indexOf("--job-token");
+  return at === -1 ? (process.env.TITAN_JOB_TOKEN?.trim() || null) : process.argv[at + 1];
 })();
 
 // The address the proxied name actually lands on, used only by the origin-bypass check below.
@@ -412,6 +427,24 @@ try {
       "deleting the probe left exactly one new tombstone, which is expected permanent residue",
       `deleted-agents.json holds ${tombstonesAfter.length} id(s), was ${tombstonesBefore.length}`);
   }
+}
+
+step("the job bus edge");
+// docs/JOB-BUS.md §9: the only two things a deploy gate can say about the bus from outside are
+// that its door is shut and that the right key opens it. Health is authenticated on the public
+// host, so a 200 without a bearer would be the whole bus standing open; 401 (configured) and 503
+// (no token on this deployment) are both correct and are the only correct answers.
+const jobHealth = await hit("/v1/health");
+check(jobHealth.status === 401 || jobHealth.status === 503,
+  "GET /v1/health with no bearer is 401 or 503, never 200", `HTTP ${jobHealth.status}`);
+if (JOB_TOKEN == null) {
+  unresolved("GET /v1/health with the job bus bearer is 200",
+    "no --job-token was given, so this gate cannot hold the bus's own credential");
+} else {
+  const opened = await hit("/v1/health", { headers: { authorization: `Bearer ${JOB_TOKEN}` } });
+  const body = await opened.json().catch(() => null);
+  check(opened.status === 200 && body?.ok === true,
+    "and 200 with the token from --job-token", `HTTP ${opened.status}, queue_depth ${body?.queue_depth ?? "absent"}`);
 }
 
 step("the Machine Room in a real browser");

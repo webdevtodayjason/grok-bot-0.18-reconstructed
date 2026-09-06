@@ -177,6 +177,17 @@ services:
       com.titanbot.role: relay
     environment:
       SAND_UI_PORT: "7777"
+      # The Titan Job Bus bearer (docs/JOB-BUS.md section 10.6). Optional on purpose: with no value
+      # here the relay falls back to the token file the console writes, and with neither every
+      # /v1 request answers 401. Setting it here WINS over the file, and the console then says so
+      # and refuses to write one.
+      #
+      # No `:-` default, deliberately, and section 10.6 fixes it that way: Coolify builds a
+      # variable's NAME from everything between the braces, so `${TITAN_JOB_TOKEN:-}` becomes an
+      # environment field literally named `TITAN_JOB_TOKEN:-` in its UI and the operator's value
+      # never reaches the relay. Unset, compose resolves this to the empty string with a warning,
+      # which is a working deployment: the console's Generate is the other way in.
+      TITAN_JOB_TOKEN: ${TITAN_JOB_TOKEN}
       # 0.0.0.0 inside the container, which is the container's own interface and not a server one.
       # The relay refuses to start on a reachable address with no ui/auth.json, so this line and
       # the password file in the mounted ui directory are a pair.
@@ -235,11 +246,6 @@ services:
       # failure direction if it goes stale: a visitor arriving through an unlisted new edge is
       # counted as that edge rather than as himself, so a group of visitors shares one lockout
       # bucket. That is an annoyance, not a way in.
-      # The job bus bearer the Chief of Staff presents on /v1 (docs/JOB-BUS.md section 2). Passed
-      # through rather than set here, so the value lives in Coolify's environment store and not in
-      # this file. Unset is a working deployment: /v1 answers 503 until the operator sets this or
-      # generates a token in Settings, which writes it to the mounted profile directory instead.
-      TITAN_JOB_TOKEN: ${TITAN_JOB_TOKEN:-}
       SAND_UI_CLOUDFLARE_RANGES: 173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32
     volumes:
       # Root-equivalent on this host, and not optional. ui/server.mjs reads and writes the box's

@@ -295,6 +295,68 @@ try {
     await page.click("#room-menu").catch(() => {}); await page.waitForTimeout(1200);
     check((await page.$$("[data-save-role]")).length === 0, "no Role Save button on an adapter with no setRole");
     check((await page.$$("[data-clear-memories]")).length === 0, "no Forget-all button on an adapter with no clearMemories");
+
+    // JOBBUS-3: the Job bus card in both of its states, with no relay and no gateway to answer.
+    // The offline adapter's bus starts with no token and therefore no jobs; generating one there
+    // mints a value that exists in the tab and nowhere else, so the card can be read in the
+    // configured state as well. What is being checked is the card, not the demo: the status line,
+    // the base URL, the once-shown token beside its warning, the curl example carrying a
+    // placeholder rather than a token, the worker mapping, and the two rows with the pill classes
+    // the contract fixes for done and needs_human.
+    await openSettingsPanel();
+    const jobBus = () => page.evaluate(() => {
+      const root = document.querySelector("[data-job-bus]");
+      if (!root) return null;
+      const text = (selector) => root.querySelector(selector)?.textContent?.trim() ?? "";
+      const rows = Array.from(root.querySelectorAll("[data-job-bus-row]")).map((tr) => ({
+        id: tr.getAttribute("data-job-bus-row"),
+        pill: tr.querySelector(".status-pill")?.className ?? "",
+        status: tr.querySelector(".status-pill")?.textContent?.trim() ?? "",
+        line: tr.querySelector(".job-bus-line")?.textContent?.trim() ?? "",
+      }));
+      return {
+        state: text("[data-job-bus-state]"), pill: text("[data-job-bus-pill]"),
+        base: text("[data-job-bus-base]"), curl: text("[data-job-bus-curl]"),
+        mintedHidden: root.querySelector("[data-job-bus-minted]")?.hidden !== false,
+        minted: root.querySelector("[data-job-bus-minted-value]")?.value ?? "",
+        warning: root.querySelector("[data-job-bus-minted] .field-hint")?.textContent?.trim() ?? "",
+        workers: Array.from(root.querySelectorAll("[data-job-bus-worker]")).map((row) => [
+          row.querySelector("[data-job-bus-worker-type]")?.value ?? "",
+          row.querySelector("[data-job-bus-worker-agent]")?.value ?? "",
+        ]),
+        rows,
+        // The card must not push the dialog wider than the dialog: this is the MR-27 bleed.
+        overflows: root.scrollWidth > root.clientWidth + 1,
+      };
+    });
+    const unconfigured = await jobBus();
+    check(unconfigured != null, "the Job bus card is on Settings");
+    check(/not configured/i.test(unconfigured?.pill ?? ""), "unconfigured, the pill says so", unconfigured?.pill ?? "");
+    check(/503/.test(unconfigured?.state ?? ""), "and the line says what a caller gets instead", (unconfigured?.state ?? "").slice(0, 110));
+    check((unconfigured?.base ?? "").endsWith("/v1"), "the base URL is the /v1 root", unconfigured?.base ?? "");
+    check(unconfigured?.mintedHidden === true, "no token field before one is minted");
+    check((unconfigured?.rows ?? []).length === 0, "and no jobs behind a bus nobody can call", `${(unconfigured?.rows ?? []).length} row(s)`);
+    check(unconfigured?.overflows === false, "the card fits its panel unconfigured");
+
+    await page.click("[data-job-bus-generate]"); await page.waitForTimeout(1200);
+    const configured = await jobBus();
+    check(/configured/i.test(configured?.pill ?? "") && !/not configured/i.test(configured?.pill ?? ""),
+      "after Generate the card reads configured", configured?.pill ?? "");
+    check(configured?.mintedHidden === false && /^[0-9a-f]{48}$/.test(configured?.minted ?? ""),
+      "the minted token is shown once in a copyable field", `${(configured?.minted ?? "").length} chars`);
+    check(/only time it is shown/i.test(configured?.warning ?? ""), "beside the one-line warning", (configured?.warning ?? "").slice(0, 80));
+    check(/\$TITAN_JOB_TOKEN/.test(configured?.curl ?? "") && !(configured?.curl ?? "").includes(configured?.minted ?? "x"),
+      "the curl example carries a placeholder, never the token", configured?.curl ?? "");
+    check((configured?.workers ?? []).some(([type, agent]) => type === "nextgen.chapter" && agent === "Scribe"),
+      "the worker mapping is drawn as editable type to agent rows", JSON.stringify(configured?.workers ?? []));
+    const done = (configured?.rows ?? []).find((row) => /done/.test(row.status));
+    const blocked = (configured?.rows ?? []).find((row) => /needs.human/.test(row.status));
+    check((configured?.rows ?? []).length === 2, "two jobs in the table", `${(configured?.rows ?? []).length} row(s)`);
+    check(done != null && /status-pill success/.test(done.pill) && done.line.length > 0,
+      "the done job is good and carries its one-line result", done ? `${done.pill} · ${done.line.slice(0, 60)}` : "absent");
+    check(blocked != null && /status-pill attention/.test(blocked.pill) && /github_auth/.test(blocked.line),
+      "the needs_human job is attention and carries what a person must do", blocked ? `${blocked.pill} · ${blocked.line.slice(0, 60)}` : "absent");
+    check(configured?.overflows === false, "and the card still fits its panel with the table on it");
   } else if (LEAKS) {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     const { storedSecrets } = await import(path.join(repoRoot, "ui", "subscriptions.mjs"));

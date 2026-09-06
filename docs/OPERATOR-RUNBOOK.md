@@ -107,6 +107,41 @@ and ships everything and runs the install over ssh; `enable-route.sh` on the ser
 takes it down; `scripts/verify-deploy.mjs` proves the instance from here. Until `ui/endpoints.json`
 exists on the server no agent can answer.
 
+## The job bus, if the Chief of Staff is going to call this instance
+
+The contract, top to bottom, is [docs/JOB-BUS.md](JOB-BUS.md). Three steps on your own instance:
+
+1. **A token.** Either set `TITAN_JOB_TOKEN` on the `titanbot` Coolify resource, or open
+   **Settings → Job bus** in the console and press **Generate**. The generated value is shown
+   once, in a field you copy, and the console writes it to `job-bus.json` beside the relay's
+   profile at mode 0600. The environment wins over the file, and when it is set the card says so
+   and refuses to write one. With neither, every `/v1` request answers
+   `503 {"error":"job bus not configured"}`.
+2. **A worker.** Make sure an agent named **Scribe** exists, or set the mapping in the same card
+   (it writes `SAND_JOB_BUS_WORKERS` in `sand-host-settings.json`). Give the box a GitHub
+   credential as well, through **Settings → Connectors → GitHub** and the `gh` shell tool, or the
+   worker will stop on `needs_human {reason: "github_auth"}` rather than pushing.
+3. **Smoke it from the CoS box.** Health first, then one `health.ping` job, then read that job
+   back:
+
+```sh
+export TITAN_JOB_BASE_URL=https://tb.semfreak.dev TITAN_JOB_TOKEN=…
+curl -sS -H "Authorization: Bearer $TITAN_JOB_TOKEN" "$TITAN_JOB_BASE_URL/v1/health"
+curl -sS -X POST "$TITAN_JOB_BASE_URL/v1/jobs" -H "Authorization: Bearer $TITAN_JOB_TOKEN" \
+  -H "Idempotency-Key: health-1" -H "Content-Type: application/json" \
+  -d '{"type":"health.ping","idempotency_key":"health-1","payload":{}}'
+curl -sS -H "Authorization: Bearer $TITAN_JOB_TOKEN" "$TITAN_JOB_BASE_URL/v1/jobs/<id>"
+```
+
+Health is authenticated too, on purpose: this is a public host. The jobs table on the same
+console card shows every job the bus has run, and it updates as the host reports transitions, so
+the smoke above should appear on screen without a reload.
+
+If the relay is only on the tailnet, an ACL letting the CoS box and you reach `tb:443` is enough;
+the bearer still applies. Nothing else on the relay is reachable with that bearer, and CDP, noVNC
+and the desktop stay on loopback (`scripts/verify-deploy.mjs` asserts the port bindings, and
+`--job-token` makes it assert the bus's door as well).
+
 ## Your own skills after you deploy
 
 The August 15 backup of the original install holds eleven global workflow skills written for
