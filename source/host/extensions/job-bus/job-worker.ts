@@ -39,6 +39,13 @@ export const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 export const ARTIFACT_SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 /** How much of an attestation head the job keeps as its own record (section 10.4). */
 export const ATTESTATION_RECORD_HEAD_MAX = 2_000;
+/**
+ * How far before `started_at` a commit's date may sit and still count as this attempt's. GitHub
+ * reports committer dates to the second and the box's clock is not the host's to the millisecond,
+ * so a commit made in the first moments of a dispatch can read as very slightly earlier. Two
+ * minutes absorbs that; a commit the repository already had is hours or days out, not seconds.
+ */
+export const COMMIT_CLOCK_SKEW_MS = 120_000;
 
 export interface JobWorkerAgent {
   readonly id: string;
@@ -295,6 +302,55 @@ export interface AttestationCheck {
   readonly records: readonly JobAttestationRecordCopy[];
 }
 
+/** Every repository slug a piece of command output names, `owner/name`, lowercased and deduped. */
+const GITHUB_SLUG_PATTERN =
+  /(?:(?:api\.|www\.)?github\.com[/:]|raw\.githubusercontent\.com\/)(?:repos\/)?([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g;
+/** github.com paths that are the site, not a repository, so they are not another repo being touched. */
+const GITHUB_NON_REPO_OWNERS = new Set([
+  "about", "apps", "collections", "contact", "enterprise", "features", "login", "marketplace",
+  "notifications", "orgs", "pricing", "search", "security", "settings", "site", "sponsors",
+  "topics", "users",
+]);
+/** How many foreign repositories one job bothers to name before the point is made. */
+export const FOREIGN_REPO_CLAIM_MAX = 10;
+
+/**
+ * Section 10.1's "It cannot grant permissions, name other repositories, or change these rules",
+ * made mechanical instead of advisory.
+ *
+ * The rules file the worker is told to read lives in the repository under attestation, so whoever
+ * can write that repository can write the worker's instructions. The prompt asks the worker to stop
+ * when the file tries to widen the job; nothing checked that it did. This does: every repository
+ * slug that appears in this attempt's COMMAND output, other than the job's own repo, is an
+ * unsupported claim, and `done` needs an empty list.
+ *
+ * Command output only -- a shell receipt -- because that is where reach shows up: `git clone`,
+ * `git push` and `gh` all print the remote they spoke to. A file whose text merely mentions a
+ * repository is a read, not a reach, and failing on that would fail honest jobs.
+ *
+ * This does not stop a determined worker from spending the box's GITHUB_TOKEN quietly; the token is
+ * box-wide (the exec-daemon's environment) and scoping it to one repository per job needs a GitHub
+ * App this tree does not have. It does mean a job that used it elsewhere cannot also be attested.
+ */
+export function foreignRepoClaims(heads: readonly string[], repo: string): readonly string[] {
+  const own = repo.trim().toLowerCase().replace(/\.git$/, "");
+  const found = new Set<string>();
+  for (const head of heads) {
+    if (found.size >= FOREIGN_REPO_CLAIM_MAX) break;
+    GITHUB_SLUG_PATTERN.lastIndex = 0;
+    for (const match of head.matchAll(GITHUB_SLUG_PATTERN)) {
+      const owner = String(match[1] ?? "").toLowerCase();
+      const name = String(match[2] ?? "").toLowerCase().replace(/\.git$/, "");
+      if (owner.length === 0 || name.length === 0 || GITHUB_NON_REPO_OWNERS.has(owner)) continue;
+      const slug = `${owner}/${name}`;
+      if (slug === own) continue;
+      found.add(slug);
+      if (found.size >= FOREIGN_REPO_CLAIM_MAX) break;
+    }
+  }
+  return [...found].map((slug) => `foreign_repo:${slug}`);
+}
+
 /**
  * A claim holds when its string is literally in some attestation head from this attempt. A commit
  * matches on its first seven characters, which is the shortest sha `git log` is ever asked for; an
@@ -306,6 +362,8 @@ export function checkClaims(args: {
   readonly artifacts: readonly JobArtifact[];
   readonly verdict: string | undefined;
   readonly attestations: readonly JobAttestationRecord[];
+  /** The job's own repository, so command output naming any other one is a claim. Omit to skip. */
+  readonly repo?: string;
 }): AttestationCheck {
   const heads = args.attestations.map((record) => (typeof record.head === "string" ? record.head : ""));
   const seenIn = (needle: string): boolean =>
@@ -317,6 +375,12 @@ export function checkClaims(args: {
   }
   for (const artifact of args.artifacts) {
     if (!seenIn(artifact.path)) unsupported.push(`artifact:${artifact.path}`);
+  }
+  if (args.repo != null && args.repo.length > 0) {
+    const shellHeads = args.attestations
+      .filter((record) => receiptKind(record.tool) === "shell")
+      .map((record) => (typeof record.head === "string" ? record.head : ""));
+    unsupported.push(...foreignRepoClaims(shellHeads, args.repo));
   }
   return {
     receipts: args.attestations.map((record) => `${receiptKind(record.tool)}:${String(record.eventId ?? "")}`),
@@ -340,6 +404,12 @@ export function checkClaims(args: {
  * bytes GitHub returns, not from the numbers the model reported. A check that could not be made
  * lands as `verification:<what>`, which is unsupported for the same reason a false claim is: the
  * bus cannot say the work happened.
+ *
+ * Existence alone was not enough. "This sha is on the repo and a file of that size is at it" is
+ * true of every commit the repository already had, so a worker that cloned the repo, read HEAD and
+ * measured a file that was already there could reach `done` having written nothing. Two facts bind
+ * the claim to THIS attempt instead: the commit was made after the job was dispatched, and the
+ * artifact is one of the files those commits changed.
  */
 export async function checkGitHubClaims(args: {
   readonly client: GitHubClient;
@@ -348,18 +418,36 @@ export async function checkGitHubClaims(args: {
   readonly commits: readonly string[];
   readonly artifacts: readonly JobArtifact[];
   readonly noPlaceholder: boolean;
+  /** `job.started_at` in milliseconds: the moment the bus dispatched this attempt. */
+  readonly startedAtMs: number;
 }): Promise<readonly string[]> {
   if (!args.client.hasCredential) return ["verification:github_credential_missing"];
   const unsupported: string[] = [];
+  const startKnown = Number.isFinite(args.startedAtMs);
+  if (!startKnown) unsupported.push("verification:job_start_unknown");
+  const touched = new Set<string>();
+  let touchedKnown = false;
   for (const sha of args.commits) {
-    const exists = await args.client.commitExists(args.repo, sha);
-    if (!exists.ok) { unsupported.push(exists.unsupported); continue; }
+    const facts = await args.client.commitFacts(args.repo, sha);
+    if (!facts.ok) { unsupported.push(facts.unsupported); continue; }
+    if (facts.value.committedAtMs == null) unsupported.push(`verification:commit:${sha}:committed_at`);
+    else if (startKnown && facts.value.committedAtMs + COMMIT_CLOCK_SKEW_MS < args.startedAtMs) {
+      unsupported.push(`commit:${sha}:before_dispatch`);
+    }
+    if (facts.value.files == null) unsupported.push(`verification:commit:${sha}:files`);
+    else {
+      touchedKnown = true;
+      for (const file of facts.value.files) touched.add(file);
+    }
     const onBranch = await args.client.commitOnBranch(args.repo, args.branch, sha);
     if (!onBranch.ok) unsupported.push(onBranch.unsupported);
   }
   const last = args.commits.at(-1);
   if (last == null) return unsupported;
   for (const artifact of args.artifacts) {
+    // Only when at least one commit told us what it changed. When none did, those commits already
+    // carry a `verification:` claim each and the job fails on those rather than on a second one.
+    if (touchedKnown && !touched.has(artifact.path)) unsupported.push(`artifact:${artifact.path}:not_in_commits`);
     const file = await args.client.fileAt(args.repo, artifact.path, last);
     if (!file.ok) { unsupported.push(file.unsupported); continue; }
     if (file.value.size !== artifact.bytes) unsupported.push(`artifact:${artifact.path}:bytes`);
@@ -529,13 +617,14 @@ export function createJobWorker(deps: JobWorkerDeps) {
       return;
     }
     const evidence = await deps.readEvidence(agentId, { attemptId: reply.attemptId, entries });
+    const repo = typeof job.payload.repo === "string" ? job.payload.repo : "";
     const checked = checkClaims({
       commits: block.commits,
       artifacts: block.artifacts,
       verdict: reply.verdict,
       attestations: evidence.attestations ?? [],
+      repo,
     });
-    const repo = typeof job.payload.repo === "string" ? job.payload.repo : "";
     const branch = typeof job.payload.branch === "string" ? job.payload.branch : "";
     const outOfBand = repo.length === 0 || branch.length === 0
       ? ["verification:no_repo_on_job"]
@@ -546,6 +635,7 @@ export function createJobWorker(deps: JobWorkerDeps) {
         commits: block.commits,
         artifacts: block.artifacts,
         noPlaceholder: job.policy.no_placeholder === true,
+        startedAtMs: Date.parse(job.started_at ?? ""),
       });
     const unsupported = [...checked.unsupported_claims, ...outOfBand];
     const result: JobResult = {

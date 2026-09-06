@@ -132,7 +132,7 @@ export interface JobAuditRow {
   readonly seq: number;
   readonly prev: string;
   readonly at: string;
-  readonly event: JobStatus | "auth_locked";
+  readonly event: JobStatus | "auth_locked" | "settings_diverged";
   readonly jobId: string;
   readonly type: JobType | "";
   readonly submitter: string;
@@ -649,13 +649,25 @@ export function createJobStore(deps: JobStoreDeps) {
      * the same chain, because "who was locked out and when" is exactly the question this file
      * exists to answer.
      */
-    async appendExternalAudit(row: { readonly event: "auth_locked"; readonly client?: unknown; readonly ok?: unknown }): Promise<{ readonly eventId: string }> {
+    async appendExternalAudit(row: {
+      readonly event: "auth_locked" | "settings_diverged";
+      readonly client?: unknown;
+      readonly ok?: unknown;
+      /** For `settings_diverged`: which guarded fields the settings file disagreed with. */
+      readonly fields?: readonly string[];
+    }): Promise<{ readonly eventId: string }> {
       const eventId = randomHex(8);
       await appendAudit({
-        at: stamp(), event: "auth_locked", jobId: "", type: "", submitter: "", submitter_id: "",
+        at: stamp(),
+        event: row.event === "settings_diverged" ? "settings_diverged" : "auth_locked",
+        jobId: "", type: "", submitter: "", submitter_id: "",
         client: typeof row.client === "string" ? row.client : "",
         idempotency_key: "", payload_sha256: "", policy_version: JOB_AUDIT_POLICY_VERSION,
-        worker: null, ok: row.ok === true, eventId,
+        worker: null,
+        // The field names ride in the row's own claims list: "these are the settings the file
+        // asserted and the host would not take", which is exactly what this column means.
+        ...(row.fields === undefined ? {} : { unsupported_claims: row.fields.map((field) => `settings:${field}`) }),
+        ok: row.ok === true, eventId,
       });
       return { eventId };
     },

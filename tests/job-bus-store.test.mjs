@@ -458,4 +458,57 @@ test("the bus is off until the operator turns it on, and the file is re-read eve
   }
 });
 
+test("the settings file can narrow what the bus may do, and can never widen it", async () => {
+  // Section 10.7's file lives on the box data volume, which is the filesystem the worker agent's
+  // own shell runs on. Nothing signs it, so the four fields that widen the bus -- enabled, repos,
+  // allowedConnectors and workers -- are the host's copy, moved only by jobBusSetSettings.
+  const root = await mkdtemp(path.join(os.tmpdir(), "grok-job-bus-tamper-"));
+  const diverged = [];
+  try {
+    const settings = createJobSettingsStore(root, { onDivergence: (fields) => diverged.push(fields) });
+    await settings.write({ enabled: true, repos: [REPO], allowedConnectors: ["github"] });
+    const file = path.join(root, "job-bus", "settings.json");
+    const tampered = {
+      enabled: true,
+      workers: { "nextgen.chapter": "Impostor" },
+      repos: [REPO, "attacker/exfil"],
+      allowedConnectors: ["github", "slack"],
+      timeoutMin: 30,
+      queueTimeoutMin: 15,
+      maxOpen: 99,
+    };
+    await writeFile(file, JSON.stringify(tampered));
+
+    const read = settings.read();
+    assert.deepEqual(read.repos, [REPO], "a repository the host never held is not in the allowlist");
+    assert.deepEqual(read.allowedConnectors, ["github"], "a connector the host never allowed is not allowed");
+    assert.deepEqual(read.workers, DEFAULT_JOB_BUS_SETTINGS.workers, "the bus is not repointed by the file");
+    // The two clocks and the queue cap are not reach, so section 10.7's re-read still owns them.
+    assert.equal(read.timeoutMin, 30);
+    assert.equal(read.queueTimeoutMin, 15);
+    assert.equal(read.maxOpen, 99);
+    assert.deepEqual(diverged, [["repos", "allowedConnectors", "workers"]]);
+    // Read again: the same divergence is not a second audit row.
+    settings.read();
+    assert.equal(diverged.length, 1);
+
+    // Off wins in the other direction: the file can stop a bus it cannot start.
+    await writeFile(file, JSON.stringify({ ...tampered, enabled: false }));
+    assert.equal(settings.read().enabled, false);
+    await settings.write({ enabled: false });
+    await writeFile(file, JSON.stringify(tampered));
+    const restarted = settings.read();
+    assert.equal(restarted.enabled, false, "the file cannot turn the bus back on");
+    assert.deepEqual(diverged.at(-1), ["enabled", "repos", "allowedConnectors", "workers"]);
+
+    // The console's own write is the sanctioned path, and it moves the host's copy.
+    const widened = await settings.write({ enabled: true, repos: [REPO, "webdevtodayjason/other"] });
+    assert.deepEqual(widened.repos, [REPO, "webdevtodayjason/other"]);
+    assert.equal(settings.read().enabled, true);
+    assert.deepEqual(settings.read().repos, [REPO, "webdevtodayjason/other"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test.after(async () => { await storeModule.dispose(); await settingsModule.dispose(); });

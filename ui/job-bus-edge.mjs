@@ -97,6 +97,12 @@ export function jobCreateArgs(raw, headerKey, { client = null, submitterId = nul
   if (key.length === 0) return { error: "missing idempotency key" };
   return {
     args: {
+      // The parsed body goes up WHOLE, unknown fields included. Reshaping it field by field is
+      // what let a body carrying `priority` or a future policy-like flag answer 201 with the flag
+      // silently dropped: section 10.1's "unknown field" refusal belongs to the gateway, and the
+      // gateway can only refuse a key it was given. The fields below still win over anything
+      // the body carried, so a caller cannot name its own submitter, client or audit id.
+      ...parsed,
       type,
       idempotency_key: key,
       payload: parsed.payload ?? {},

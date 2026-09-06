@@ -33,6 +33,17 @@ export interface GitHubFileFacts {
   readonly hasPlaceholder: boolean;
 }
 
+/**
+ * What a commit is, as GitHub tells it, rather than as the reply describes it. Both fields exist
+ * to bind a claimed sha to THIS attempt (section 10.4): `committedAtMs` says when the commit was
+ * made, and `files` says what it changed. `files` is null when GitHub did not send the list at all
+ * -- it omits it on very large diffs -- which is a check that could not be made, never a pass.
+ */
+export interface GitHubCommitFacts {
+  readonly committedAtMs: number | null;
+  readonly files: readonly string[] | null;
+}
+
 /** Either the answer, or the `verification:<what>` / claim string that says why there is none. */
 export type GitHubCheck<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly unsupported: string };
 
@@ -76,13 +87,31 @@ export function createGitHubClient(deps: GitHubClientDeps) {
   return {
     hasCredential: token != null,
 
-    /** The commit exists on the repository. A 404 is the claim being false, not a check failing. */
-    async commitExists(repo: string, sha: string): Promise<GitHubCheck<true>> {
+    /**
+     * The commit exists on the repository, with the two facts that tie it to a job: when it was
+     * committed and which files it touched. A 404 is the claim being false, not a check failing.
+     */
+    async commitFacts(repo: string, sha: string): Promise<GitHubCheck<GitHubCommitFacts>> {
       const answer = await get(`/repos/${repo}/commits/${sha}`, `commit:${sha}`);
       if (!answer.ok) return answer;
       if (answer.value.status === 404 || answer.value.status === 422) return { ok: false, unsupported: `commit:${sha}` };
       if (answer.value.status !== 200) return { ok: false, unsupported: `verification:commit:${sha}` };
-      return { ok: true, value: true };
+      let body: { commit?: { committer?: { date?: unknown }; author?: { date?: unknown } }; files?: unknown };
+      try { body = JSON.parse(answer.value.body) as typeof body; }
+      catch { return { ok: false, unsupported: `verification:commit:${sha}` }; }
+      // The committer date, not the author date: a rebased or cherry-picked commit keeps the
+      // author's original timestamp, and the question here is when this sha came into being.
+      const date = body.commit?.committer?.date ?? body.commit?.author?.date;
+      const committedAtMs = typeof date === "string" ? Date.parse(date) : Number.NaN;
+      const files = Array.isArray(body.files)
+        ? body.files
+          .map((entry) => (entry as { filename?: unknown } | null)?.filename)
+          .filter((name): name is string => typeof name === "string")
+        : null;
+      return {
+        ok: true,
+        value: { committedAtMs: Number.isFinite(committedAtMs) ? committedAtMs : null, files },
+      };
     },
 
     /**

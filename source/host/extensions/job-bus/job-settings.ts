@@ -85,12 +85,75 @@ export function normalizeJobBusSettings(raw: unknown): JobBusSettings {
   };
 }
 
-export function createJobSettingsStore(rootDir: string) {
+/** The fields that widen what the bus may do, so a file that widens them is not believed. */
+export const GUARDED_JOB_SETTING_KEYS = ["enabled", "workers", "repos", "allowedConnectors"] as const;
+
+export interface JobSettingsStoreOptions {
+  /**
+   * Called with the guarded field names whenever the file disagrees with what the host holds, and
+   * again only when the set of disagreeing fields changes -- the file is read on every tick, and an
+   * audit row every five seconds would bury the one that matters.
+   */
+  readonly onDivergence?: (fields: readonly string[]) => void;
+}
+
+export function createJobSettingsStore(rootDir: string, options: JobSettingsStoreOptions = {}) {
   const settingsPath = join(rootDir, JOB_BUS_DIRNAME, JOB_SETTINGS_FILENAME);
 
-  function read(): JobBusSettings {
+  function readFile(): JobBusSettings {
     try { return normalizeJobBusSettings(JSON.parse(readFileSync(settingsPath, "utf8"))); }
     catch { return DEFAULT_JOB_BUS_SETTINGS; }
+  }
+
+  /**
+   * The host's own copy of the guarded fields, taken at start and moved only by `write` -- which is
+   * `jobBusSetSettings`, the console's command.
+   *
+   * This file lives on the box data volume, which is the filesystem the worker agent's own shell
+   * runs on: the bus's policy is writable by the thing the policy constrains. Nothing signs it, so
+   * a shell in the box could turn the bus on, add a repository to the allowlist, point `workers` at
+   * an agent of its choosing or empty `allowedConnectors` and the next read would believe all four.
+   * The file still decides everything else on every read, as section 10.7 says; these four it can
+   * only NARROW. A widening is dropped and reported.
+   */
+  let trusted = readFile();
+  let reported = "";
+
+  /** Both directions of the guard: what the file may still do, and what it may not. */
+  function guard(fromFile: JobBusSettings): JobBusSettings {
+    const diverged: string[] = [];
+    // Off wins. The file can stop a running bus; it cannot start a stopped one.
+    const enabled = fromFile.enabled && trusted.enabled;
+    if (fromFile.enabled && !trusted.enabled) diverged.push("enabled");
+    // A repository or a connector the host never held is not in the list, however it got there.
+    const repos = fromFile.repos.filter((repo) => trusted.repos.includes(repo));
+    if (repos.length !== fromFile.repos.length) diverged.push("repos");
+    const allowedConnectors = fromFile.allowedConnectors.filter(
+      (connector) => trusted.allowedConnectors.includes(connector),
+    );
+    if (allowedConnectors.length !== fromFile.allowedConnectors.length) diverged.push("allowedConnectors");
+    // `workers` is neither wider nor narrower when it is remapped, it is just pointed somewhere
+    // else, so any disagreement at all is the host's copy.
+    const workersDiffer = JSON.stringify(fromFile.workers) !== JSON.stringify(trusted.workers);
+    if (workersDiffer) diverged.push("workers");
+    if (diverged.length > 0) {
+      const signature = diverged.join(",");
+      if (signature !== reported) {
+        reported = signature;
+        options.onDivergence?.(diverged);
+      }
+    } else reported = "";
+    return {
+      ...fromFile,
+      enabled,
+      repos,
+      allowedConnectors,
+      workers: workersDiffer ? trusted.workers : fromFile.workers,
+    };
+  }
+
+  function read(): JobBusSettings {
+    return guard(readFile());
   }
 
   /**
@@ -129,6 +192,9 @@ export function createJobSettingsStore(rootDir: string) {
       maxOpen: readCount(patch.maxOpen, current.maxOpen),
     };
     await writeFileAtomic(settingsPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    // The command is the only sanctioned writer, so this is the only place the host's copy moves.
+    trusted = next;
+    reported = "";
     return next;
   }
 

@@ -297,6 +297,37 @@ test("the create call carries type, key, policy and submitter, and the header ke
   } finally { relay.stop(); }
 });
 
+test("an unknown field reaches the gateway, which is the only thing that can refuse it", async () => {
+  // Section 10.1's "unknown field" refusal is the gateway's, and the gateway can only refuse a key
+  // it was given. The relay used to rebuild the body field by field, so a body carrying `priority`
+  // -- or any future policy-like flag -- was accepted 201 with the flag silently dropped, and the
+  // caller believed it applied.
+  const relay = await startRelay({ env: { TITAN_JOB_TOKEN: JOB_TOKEN } });
+  try {
+    relay.gateway.answerWith(() => ({
+      status: 400, body: { error: "invalid payload", detail: "unknown field priority" },
+    }));
+    const refused = await postJob(relay, {
+      type: "health.ping", idempotency_key: "k1", payload: {}, priority: 9,
+    });
+    const sent = relay.gateway.seen.at(-1);
+    assert.equal(sent.args.priority, 9, "the unknown field is forwarded, not dropped");
+    assert.equal(refused.status, 400);
+    assert.deepEqual(await refused.json(), { error: "invalid payload", detail: "unknown field priority" });
+
+    // Forwarding the body whole must not let it name its own audit row: the relay's own fields win.
+    relay.gateway.answerWith(() => ({ status: 200, body: { created: true, job: { id: "job_1", type: "health.ping", status: "queued", created_at: "2026-09-05T00:00:00.000Z" } } }));
+    await postJob(relay, {
+      type: "health.ping", idempotency_key: "k2", payload: {},
+      submitter: "jason", submitter_id: "deadbeef", client: "10.0.0.1",
+    });
+    const forged = relay.gateway.seen.at(-1);
+    assert.equal(forged.args.submitter, "cos");
+    assert.equal(forged.args.submitter_id, createHash("sha256").update(JOB_TOKEN, "utf8").digest("hex").slice(0, 8));
+    assert.match(forged.args.client, /^(::ffff:)?127\.0\.0\.1$|^::1$/);
+  } finally { relay.stop(); }
+});
+
 test("created picks 201, an idempotent replay picks 200, and neither is guessed from a timestamp", async () => {
   const relay = await startRelay({ env: { TITAN_JOB_TOKEN: JOB_TOKEN } });
   try {

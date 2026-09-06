@@ -143,7 +143,17 @@ export function createHostGatewayApi(
   // store owns `emit`, not the worker, so EVERY transition reaches the console's SSE stream by
   // construction, including a cancel that arrives through the gateway while the loop is asleep.
   // The loop starts here because this table is built exactly once, when the gateway comes up.
-  const jobSettings = createJobSettingsStore(getSandRootDir());
+  // The settings file sits on the box data volume, which is the filesystem the worker's own shell
+  // runs on, and nothing signs it. The store therefore holds the host's copy of the four fields
+  // that widen the bus and refuses a file that tries to widen them; a divergence is a row in the
+  // same hash chain as everything else, because "the policy file changed under us" is exactly the
+  // question that chain exists to answer. docs/JOB-BUS.md 10.5 and 10.7.
+  const jobSettings = createJobSettingsStore(getSandRootDir(), {
+    onDivergence: (fields) => {
+      void jobStore.appendExternalAudit({ event: "settings_diverged", fields, ok: false })
+        .catch(() => undefined);
+    },
+  });
   const jobStore = createJobStore({
     rootDir: getSandRootDir(),
     readSettings: () => jobSettings.read(),
