@@ -966,16 +966,18 @@ try {
         const reached = neighbour == null ? null : await until(async () => ((await rowsFor(neighbour.id)).some((w) => w.id === ownedRow.id) ? true : null), 12_000, 800);
         check(reached === true, "Make global puts the skill in every agent's library", neighbour ? `read back through ${neighbour.name}` : "no second agent");
       }
-      // Escape did not reach this dialog, and a Skills panel left open holds its backdrop over
-      // #room-menu: the click below then spent 30s timing out and every check after it -- the
-      // whole agent-details run, the marketplace section and the bleed sweep at the end of this
-      // file -- never executed. Close it by the button the operator would use, then call close()
-      // behind it so a missed click cannot leave the modal up, and fail here rather than in a
-      // click timeout if it stays open anyway.
-      await page.click("[data-close-dialog]", { timeout: 8000 }).catch(() => {});
+      // Escape does not cancel this dialog once the Make global click above has re-rendered the
+      // card out from under the focused button: focus leaves #panel-dialog and the key goes
+      // nowhere. The panel then holds its backdrop over #room-menu, so the click below spent 30s
+      // timing out and everything after it -- the whole agent-details run, QOL-LOGOS, the panels
+      // bleed sweep and the desktop-clipboard block at the end of this file -- never executed.
+      // Close it the way an operator does, through the dialog's own x, and prove it shut. The
+      // close() after the check is not part of the measurement: it keeps a failure here local
+      // rather than taking the thousand lines below down with it.
+      await page.click("#panel-dialog [data-close-dialog]", { timeout: 8000 }).catch(() => {});
+      const skillsPanelClosed = await until(() => page.evaluate(() => (document.getElementById("panel-dialog")?.open ? null : true)), 5_000, 200);
+      check(skillsPanelClosed === true, "the Skills panel closes on its own x button, leaving the room menu underneath it clickable");
       await page.evaluate(() => document.getElementById("panel-dialog")?.close());
-      const skillsPanelClosed = await page.waitForSelector("#panel-dialog[open]", { state: "detached", timeout: 5_000 }).then(() => true).catch(() => false);
-      check(skillsPanelClosed, "the Skills panel closes, leaving the room menu underneath it clickable");
       await page.waitForTimeout(500);
     }
 
