@@ -76,10 +76,19 @@ step "ship the relay"
 # nothing and would only make it look as though a filter were doing the work. If anyone ever
 # changes these arguments to ship "$REPO/ui/" wholesale, the excludes have to be added back at the
 # same time, and machine-room/ below is the reminder of what a directory copy looks like.
-rsync -a "$REPO/ui/server.mjs" "$REPO/ui/subscriptions.mjs" "$REPO/ui/auth.mjs" \
-  "$REPO/ui/set-password.mjs" "$REPO/ui/index.html" "$HOST:$ROOT/ui/"
+# SHIP-3: every module beside the relay, not a hand-kept list. The list above missed
+# vnc-bridge.mjs (qol/vnc-paste) and job-bus-edge.mjs (JOBBUS-2), both imported by server.mjs, and a
+# ship of server.mjs without them takes the relay down at import. The glob is .mjs only, so the
+# three do-not-ship .json files stay where they are.
+rsync -a "$REPO"/ui/*.mjs "$REPO/ui/index.html" "$HOST:$ROOT/ui/"
 rsync -a --delete "$REPO/ui/machine-room/" "$HOST:$ROOT/ui/machine-room/"
-say "ui/{server.mjs,subscriptions.mjs,auth.mjs,set-password.mjs,index.html,machine-room/}"
+say "ui/{$(cd "$REPO/ui" && ls *.mjs | tr '\n' ',')index.html,machine-room/}"
+# And prove the relay's own imports resolve on the server before anything restarts it: a missing
+# module is an outage, and this is the moment it is still cheap to know.
+for mod in $(grep -oE 'from "\./[A-Za-z0-9_-]+\.mjs"' "$REPO/ui/server.mjs" | grep -oE '[A-Za-z0-9_-]+\.mjs'); do
+  ssh "$HOST" "test -f '$ROOT/ui/$mod'" || die "ui/server.mjs imports ./$mod but $ROOT/ui/$mod is not on the server after the sync"
+done
+say "every module ui/server.mjs imports is on the server"
 # auth.json is the server's own password, set on the server by set-password.mjs and never held on
 # this Mac. It is on the same do-not-ship footing as the two files above, for the same reason.
 say "endpoints.json, subscriptions.json and auth.json are not shipped"
