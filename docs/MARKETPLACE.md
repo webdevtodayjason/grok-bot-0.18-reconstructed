@@ -103,7 +103,7 @@ telling you the entry is written and the box has not got a tool list back.
 
 **Two kinds of plugin behave slightly differently.**
 
-- A **shell tool** (CodeRabbit CLI, TinyFish CLI) is not an MCP server: it is a command-line program
+- A **shell tool** (CodeRabbit CLI, TinyFish CLI, GitHub CLI) is not an MCP server: it is a command-line program
   the agent runs itself, with a key in the box shell's environment. Its Add runs the catalog's
   install command inside the box as user `box`, capped at five minutes, and shows the tail of its
   output; its Accounts box writes to the `shell` section of the same 0600 store (`setShellSecret`),
@@ -112,7 +112,7 @@ telling you the entry is written and the box has not got a tool list back.
   `tools/list`. **Nothing records the install, so "installed" is asked of the box, not of a file.**
   The host runs inside the box and already spawns `/bin/sh -lc` there to run the installer, so the
   same shell answers `command -v <binary>` — `cr` for CodeRabbit, `cli-anything-tinyfish` for the
-  TinyFish CLI, named on each entry in `shell-tool-catalog.ts` — and that exit status is the install
+  TinyFish CLI, `gh` for the GitHub CLI, named on each entry in `shell-tool-catalog.ts` — and that exit status is the install
   state (`probeShellToolBinary`, beside `runShellToolInstall`). A **stored key is a different fact**
   and stays where it belongs, in the credential field's `isStored`: a key with no program is a
   command the agent would report as available and then fail to run, and a program with no key is a
@@ -243,7 +243,8 @@ If the console is later fed its `CONNECTOR_PRESETS` from `listMarketplace` at bo
 test should be deleted and replaced by that wiring.
 
 Seeded plugins: **GitHub**, **Slack**, **Linear**, **Google Workspace**, **TinyFish**, **Filesystem**
-(`localfiles`), **CodeRabbit CLI**, **TinyFish CLI**, and **Custom MCP server**. Categories:
+(`localfiles`), **CodeRabbit CLI**, **TinyFish CLI**, **GitHub CLI (gh)**, and **Custom MCP server**.
+Categories:
 Featured, Development, Communication, Project management, Documents & Files, Web & Search, Code
 review, Shell tools.
 

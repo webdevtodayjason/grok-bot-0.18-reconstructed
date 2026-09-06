@@ -135,9 +135,9 @@ test("CONNECT-5: process-control names are refused here too", () => {
   assert.deepEqual(shell.buildShellSecretEnvironmentUpdate(dir, ["PATH"]), { env: { GOOD_TOKEN: "kept" }, replace: false });
 });
 
-test("CONNECT-5: the catalog is the two tools, with the install and usage lines the reports name", () => {
-  assert.deepEqual(catalog.SHELL_TOOLS.map((tool) => tool.id), ["coderabbit", "tinyfish-cli"]);
-  assert.deepEqual([...catalog.SHELL_TOOL_FIELDS], ["CODERABBIT_API_KEY", "TINYFISH_API_KEY"]);
+test("CONNECT-5: the catalog is the three tools, with the install and usage lines the reports name", () => {
+  assert.deepEqual(catalog.SHELL_TOOLS.map((tool) => tool.id), ["coderabbit", "tinyfish-cli", "github-cli"]);
+  assert.deepEqual([...catalog.SHELL_TOOL_FIELDS], ["CODERABBIT_API_KEY", "TINYFISH_API_KEY", "GITHUB_TOKEN"]);
 
   const coderabbit = catalog.findShellTool("coderabbit");
   assert.equal(coderabbit.field, "CODERABBIT_API_KEY");
@@ -153,6 +153,37 @@ test("CONNECT-5: the catalog is the two tools, with the install and usage lines 
 
   assert.equal(catalog.findShellTool("nope"), undefined);
   assert.equal(catalog.findShellTool(undefined), undefined);
+});
+
+// QOL-GH. The GitHub CLI entry exists for git, not for gh's own subcommands: scribe committed in
+// the box and could not push, because git over https with no credential helper has nowhere to get a
+// username. So the two claims worth pinning are that the install follows GitHub's documented Linux
+// routes and that it ends by giving git a helper -- an install that stops at `gh --version` leaves
+// the bug exactly where it was.
+test("QOL-GH: the gh entry installs from GitHub's documented routes and ends by configuring git", () => {
+  const gh = catalog.findShellTool("github-cli");
+  assert.equal(gh.field, "GITHUB_TOKEN");
+  assert.equal(gh.binary, "gh");
+  // gh reads this name itself; nothing in the install passes it on a command line, where the box's
+  // own process table would carry it.
+  assert.equal(gh.install.includes("$GITHUB_TOKEN"), false, "the token must not appear in the install command");
+  assert.equal(gh.skillUrl, undefined);
+
+  // The apt route, from docs/install_linux.md: the keyring, the signed-by source line, apt install.
+  assert.match(gh.install, /cli\.github\.com\/packages\/githubcli-archive-keyring\.gpg/);
+  assert.match(gh.install, /signed-by=\/etc\/apt\/keyrings\/githubcli-archive-keyring\.gpg\] https:\/\/cli\.github\.com\/packages stable main/);
+  assert.match(gh.install, /apt-get install -y gh/);
+  // The fallback, for a box with no apt or no root: the precompiled tarball into ~/.local/bin,
+  // which is where the other two installers land their binary and where `sh -lc` finds it.
+  assert.match(gh.install, /github\.com\/cli\/cli\/releases\/download\//);
+  assert.match(gh.install, /\$HOME\/\.local\/bin/);
+
+  // The half the bug was about.
+  assert.match(gh.install, /gh auth setup-git --hostname github\.com/);
+  assert.match(gh.install, /credential\."https:\/\/github\.com"\.helper '!gh auth git-credential'/);
+  // And the install proves it landed rather than assuming it: `set -e` plus a read of the key.
+  assert.match(gh.install, /^set -e$/m);
+  assert.match(gh.install, /git config --global --get-regexp/);
 });
 
 test("CONNECT-5: installer output comes back as a tail, with any stored value struck out", () => {
