@@ -86,19 +86,15 @@
     return { accepted: true, message: answer?.message ?? null, token: answer?.token ?? null };
   }
 
-  // SAND_JOB_BUS_WORKERS out of whatever getHostSettings answered with. The host settings file is
-  // read as either a flat map or a nested one (source/host/sand-box-setting.ts readSettingsFile),
-  // so both are accepted here; an unparseable value is no mapping rather than a thrown card.
-  function jobBusWorkersOf(settings) {
-    const nested = settings?.settings;
-    const source = nested != null && typeof nested === "object" && !Array.isArray(nested) ? nested : settings;
-    const raw = source?.SAND_JOB_BUS_WORKERS;
-    if (raw == null) return {};
-    if (typeof raw === "object" && !Array.isArray(raw)) return raw;
-    try {
-      const parsed = JSON.parse(String(raw));
-      return parsed != null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-    } catch { return {}; }
+  // docs/JOB-BUS.md §10.7: the bus is off until the operator turns it on, and setting or
+  // generating a bearer IS turning it on -- nobody pastes a token at a bus they want shut. A host
+  // too old to carry jobBusSetSettings leaves the answer alone rather than failing a token write
+  // that did land.
+  async function armJobBusOnToken(answer) {
+    if (answer?.accepted === true) {
+      try { await tryCall("jobBusSetSettings", { enabled: true }); } catch { /* the token still landed */ }
+    }
+    return answer;
   }
 
   const AVATARS = [
@@ -2938,18 +2934,16 @@
         // one would otherwise paint "no jobs yet" over a bus that had run plenty.
         return tryCall("jobBusList").then((answer) => (answer == null ? null : Array.isArray(answer) ? answer : answer.jobs ?? []));
       },
-      generateJobBusToken() { return jobBusWrite("/job-bus/token/generate", {}); },
-      setJobBusToken(token) { return jobBusWrite("/job-bus/token", { token }); },
+      generateJobBusToken() { return jobBusWrite("/job-bus/token/generate", {}).then(armJobBusOnToken); },
+      setJobBusToken(token) { return jobBusWrite("/job-bus/token", { token }).then(armJobBusOnToken); },
       clearJobBusToken() { return jobBusWrite("/job-bus/token/clear", {}); },
-      getJobBusWorkers() {
-        return call("getHostSettings").then(jobBusWorkersOf).catch(() => ({}));
-      },
-      setJobBusWorkers(mapping) {
-        // One JSON string, because sand-host-settings.json is a flat map of strings and
-        // readSandBoxSetting only ever returns one (source/host/sand-box-setting.ts).
-        return call("setHostSettings", { SAND_JOB_BUS_WORKERS: JSON.stringify(mapping) })
-          .then(() => mapping)
-          .catch((error) => { failed(`The worker mapping was not saved: ${error.message}`); throw error; });
+      // §10.7's own settings file, read and written by two commands of its own. null, not {}, on a
+      // host that has neither: the card then says the bundle is older than the contract instead of
+      // drawing the defaults as though it had read them off this box.
+      getJobBusSettings() { return tryCall("jobBusGetSettings"); },
+      setJobBusSettings(partial) {
+        return call("jobBusSetSettings", partial)
+          .catch((error) => { failed(`The job bus settings were not saved: ${error.message}`); throw error; });
       },
 
       startTeaching(workerId) {

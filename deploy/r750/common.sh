@@ -82,8 +82,12 @@ relay_run() {
   # resolution order is env, then the token file the console writes, then closed, and an exported
   # empty string would be an env value that resolves to nothing while the console's own file sat
   # unread. Unset, /v1 answers 401 until a token is generated in Settings -> Job bus, which writes
-  # job-bus.json into the profile mount below. That is why the mount is no longer read-only; the
-  # gateway token beside it is still 0600 on the host and nothing in the console writes it.
+  # job-bus.json into the profile mount below -- section 10.6 fixes that answer at 401 whether the
+  # token is absent, missing from the request or wrong, so a caller cannot tell the three apart.
+  # That is why the mount is no longer read-only; the gateway token beside it is still 0600 on the
+  # host and nothing in the console writes it. A token alone does not open the bus: section 10.7
+  # keeps it disabled until the operator turns it on in Settings -> Job bus, and setting a token
+  # there does exactly that.
   local -a jobtoken=()
   if [ -n "${TITAN_JOB_TOKEN:-}" ]; then
     jobtoken=( --env "TITAN_JOB_TOKEN=$TITAN_JOB_TOKEN" )
