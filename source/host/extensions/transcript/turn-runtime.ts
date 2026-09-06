@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { isMessageAddress } from "../../../shared/message-reference.js";
+import {
+  OPERATOR_ASK_AWAITING_TAB_ID,
+  operatorAskFromTranscript,
+} from "../../../shared/awaiting-operator.js";
 import { sandDualSurfaceToolTelemetry } from "../../../shared/agents/agent-tool-names.js";
 import { SAND_REACTION_AGENT } from "../../../shared/transcript.js";
 import { UNKNOWN_CONNECTOR_TAG } from "../../../shared/observability/connector-auth-telemetry.js";
@@ -617,6 +621,7 @@ export class TurnRuntime {
         setTurnTraceAttributes(turnTrace, {
           "sand.outcome": resolveTurnTraceOutcome(settledResult),
         });
+        this.noteOperatorAsk(session, settledResult, epoch, turnTrace);
         await this.tm.roster.emitAgentUpdate(session.id);
         this.tm.automationRuntime.emitAutomations(session);
       } catch (error) {
@@ -674,6 +679,45 @@ export class TurnRuntime {
         turnTrace?.span.end();
       } catch {}
       this.tm.traceFlusher();
+    }
+  }
+
+  /**
+   * QOL-NEEDS-YOU. The turn is over: if the last thing the agent delivered was a question or a
+   * request aimed at the operator, raise `awaitingUserResponse` so the roster row, the console's
+   * amber "Waiting on you" and the existing notification decider all say so. Cleared by the
+   * operator's next message to this agent (send-acceptance.ts clears the badge on accept).
+   *
+   * Guards, in order: a turn that did not really end (aborted, quiesced for an upgrade, or parked
+   * on a user selection) is not waiting on an answer; a newer turn already started, so this one's
+   * closing message is stale; and a badge already on the row belongs to the box hand-off or an
+   * auto-review approval, which are structured facts and outrank a read of prose.
+   */
+  noteOperatorAsk(
+    session: LiveTranscriptSession,
+    result: TurnResult,
+    epoch: number,
+    turnTrace?: HostTrace,
+  ): void {
+    try {
+      if (
+        result.aborted ||
+        result.quiescedForUpgrade === true ||
+        result.awaitingUserSelection === true
+      )
+        return;
+      if (epoch !== this.tm.sendPipeline.currentTurnEpoch(session)) return;
+      if (session.db.getAwaitingUserResponse() != null) return;
+      const ask = operatorAskFromTranscript(session.db.getMainTranscriptEntries());
+      if (ask == null) return;
+      session.db.setAwaitingUserResponse({
+        tabId: OPERATOR_ASK_AWAITING_TAB_ID,
+        reason: ask.reason,
+        since: Date.now(),
+      });
+      setTurnTraceAttributes(turnTrace, { "sand.operator_ask": ask.kind });
+    } catch {
+      // Advisory, like every other awaiting badge: never fail a finished turn over it.
     }
   }
 

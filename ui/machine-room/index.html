@@ -68,6 +68,8 @@
             </div>
             <!-- countAgents, as the host reports it, against its 50-agent cap (GW-01). -->
             <span class="roster-count" data-agent-count hidden></span>
+            <!-- QOL-NEEDS-YOU: how many agents ended a turn asking you something. -->
+            <span class="roster-needs-you" data-needs-you-count hidden></span>
             <button class="quiet-button" id="hide-roster" type="button">Hide</button>
           </div>
           <div class="worker-stack" id="worker-stack" role="tabpanel" aria-labelledby="workers-tab"></div>
@@ -79,6 +81,9 @@
               <strong id="room-title">MSP Team</strong>
               <span id="room-subtitle">3 members · ready</span>
             </div>
+            <!-- QOL-NEEDS-YOU: the same amber pill the sidebar card carries, on the conversation
+                 you are actually looking at. -->
+            <span class="needs-you-pill" id="header-needs-you" hidden>Waiting on you</span>
             <div class="participant-cluster" id="participant-cluster" aria-label="Room participants"></div>
             <button class="icon-button compact" id="room-menu" type="button" aria-label="Conversation actions">•••</button>
           </header>

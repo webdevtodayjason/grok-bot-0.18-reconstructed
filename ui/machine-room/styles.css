@@ -3061,3 +3061,47 @@ dialog[open] {
 .marketplace-actions { flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .marketplace-actions .tag { display: inline-flex; align-items: center; gap: 6px; }
 .marketplace-card .plugin-icon, [data-marketplace-body] .plugin-hero .plugin-icon { color: var(--text-primary); font-weight: 600; }
+
+/* -- QOL-NEEDS-YOU: an agent waiting on the operator ------------------------------------
+   The amber vocabulary already exists (.status-dot.attention, .status-pill.attention, the
+   attention ring on the avatar). This adds the pill that names the state in words -- on the
+   sidebar card, on the conversation header -- and the count that sits beside the agent count,
+   so a blocked agent is countable from the roster heading without opening anything. */
+.needs-you-pill {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(231, 162, 60, 0.35);
+  border-radius: var(--radius-pill);
+  color: var(--amber-500);
+  background: rgba(231, 162, 60, 0.12);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* On the header capsule the pill is a sibling of the title block, not inside a flex line that
+   already pushes it right, so the auto margin there would shove the avatars off the end. */
+.room-capsule > .needs-you-pill {
+  margin-left: 0;
+  font-size: 10px;
+}
+
+/* The card's ring already goes amber at [data-status="attention"]; this makes the one blocked on
+   a person read differently from the one whose turn failed. */
+.worker-card:has(.needs-you-pill) {
+  border-color: rgba(231, 162, 60, 0.34);
+}
+
+.roster-needs-you {
+  margin-right: 8px;
+  padding: 2px 7px;
+  border: 1px solid rgba(231, 162, 60, 0.35);
+  border-radius: var(--radius-pill);
+  color: var(--amber-500);
+  background: rgba(231, 162, 60, 0.12);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}

@@ -17,6 +17,12 @@
 // tool's own closure -- one tool per step -- each step got a fresh suppressor that had never seen
 // the previous message, and all five went out.
 //
+// The default arm then runs a second phase on the same agent (QOL-NEEDS-YOU): the stub stops
+// looping and answers like a real model -- one SendMessage, then plain text -- so the turn settles
+// on a closing message. Closing on a question must raise awaitingUserResponse on the roster row
+// within one console heartbeat (the amber "Waiting on you"), the operator's next message must
+// clear it, and a turn that closes on a plain statement must not raise it at all.
+//
 // Usage: node scripts/verify-loop.mjs [--cap 5] [--send-cap] [--timeout-ms 60000] [--port 18777]
 import { execFile } from "node:child_process";
 import http from "node:http";
@@ -72,9 +78,23 @@ const relay = async (route, body) => {
 const docker = (args) => new Promise((resolve) => execFile("docker", args, { maxBuffer: 64 << 20 }, (error, out) => resolve(error && !out ? "" : String(out))));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// The console's heartbeat, from ui/machine-room/gateway-adapter.js: the roster is re-read every
+// 15s, so "within one heartbeat" is the honest deadline for anything the sidebar must show.
+const HEARTBEAT_MS = 15_000;
+
 // ---------------------------------------------------------------- the looping stub
 let toolRequests = 0;
 let plainRequests = 0;
+// QOL-NEEDS-YOU arm. Out of "loop" the stub stops looping and answers like a real turn: one
+// SendMessage, then plain text so the turn settles on a closing message. "ask" closes with a
+// question the host's classifier must catch; "quiet" closes with a statement it must leave alone.
+let stubMode = "loop";
+let phaseSends = 0;
+const setStubMode = (mode) => { stubMode = mode; phaseSends = 0; };
+const PHASE_MESSAGE = {
+  ask: "I pulled the report, but the vendor portal signed me out. Can you sign in on the box and tell me when you're through?",
+  quiet: "Thanks, I'm through and the report is filed. Nothing else is outstanding.",
+};
 const sse = (res, payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
 const chunk = (delta, finish = null) => ({
   id: "probe-loop", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: STUB_MODEL,
@@ -91,6 +111,21 @@ const stub = http.createServer((req, res) => {
     let parsed = {}; try { parsed = JSON.parse(body || "{}"); } catch {}
     const offersSendMessage = (parsed.tools ?? []).some((tool) => (tool?.function?.name ?? tool?.name) === "SendMessage");
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    if (stubMode !== "loop") {
+      const first = offersSendMessage && phaseSends === 0;
+      if (first) {
+        phaseSends += 1;
+        const args = JSON.stringify({ type: "text", content: PHASE_MESSAGE[stubMode] });
+        sse(res, chunk({ role: "assistant", tool_calls: [{ index: 0, id: `call_${stubMode}_${phaseSends}`, type: "function", function: { name: "SendMessage", arguments: args } }] }));
+        sse(res, { ...chunk({}, "tool_calls"), usage: { prompt_tokens: 12, completion_tokens: 6, total_tokens: 18 } });
+      } else {
+        plainRequests += 1;
+        sse(res, chunk({ role: "assistant", content: "done" }));
+        sse(res, { ...chunk({}, "stop"), usage: { prompt_tokens: 8, completion_tokens: 2, total_tokens: 10 } });
+      }
+      res.write("data: [DONE]\n\n");
+      return res.end();
+    }
     // A request with no SendMessage on offer is not the turn under test (a summarizer or a
     // classifier borrowing the same pinned endpoint): answer with plain text so it settles.
     if (!offersSendMessage || toolRequests >= STUB_LIMIT) {
@@ -197,6 +232,67 @@ try {
   if (DUPLICATE) {
     const sendCap = logAfter.split("\n").filter((line) => line.includes("[sand][send-cap]") && /duplicate/i.test(line));
     check(sendCap.length >= 1, "the host log names the send cap's duplicate suppressor", sendCap[0]?.trim().slice(0, 160) ?? "no [sand][send-cap] duplicate line");
+  }
+
+  // ------------------------------------------------ QOL-NEEDS-YOU: an agent waiting on the operator
+  // A turn that ends by asking the operator for something (here: a sign-in only a person can do)
+  // must raise awaitingUserResponse on the roster row, which is what the console draws as the
+  // amber "Waiting on you" pill and counts as "N need you". Before this the flag was raised only
+  // by a box hand-off or an auto-review approval, so a prose ask left the sidebar reading "Ready
+  // for the next task" while the agent was blocked. The operator's next message clears it, and a
+  // turn that closes on a plain statement must not raise it again.
+  if (!DUPLICATE) {
+    console.log("\n  ---- QOL-NEEDS-YOU: a turn that ends asking the operator ----");
+    const agentRow = async () => (await gw("listAgents").catch(() => []))?.find?.((a) => a.id === agentId) ?? null;
+    // One gateway read per tick answers both halves: lastMessagePreview says the closing message
+    // landed, awaitingUserResponse says the badge went up. The gap between them is the measurement.
+    const watch = async (windowMs, saw, done) => {
+      const until = Date.now() + windowMs;
+      const marks = { sawAt: 0, doneAt: 0, row: null };
+      while (Date.now() < until) {
+        const row = await agentRow();
+        marks.row = row;
+        if (row != null) {
+          if (marks.sawAt === 0 && saw(row)) marks.sawAt = Date.now();
+          if (marks.doneAt === 0 && done(row)) marks.doneAt = Date.now();
+        }
+        if (marks.doneAt !== 0 && marks.sawAt !== 0) break;
+        await sleep(1000);
+      }
+      return marks;
+    };
+
+    const startRow = await agentRow();
+    check(startRow != null && startRow.awaitingUserResponse == null, "the row starts with no awaiting badge", startRow == null ? "no roster row" : JSON.stringify(startRow.awaitingUserResponse));
+
+    setStubMode("ask");
+    // Shaped as a question on purpose: an imperative here would trip the host's work redrive and
+    // buy the turn extra model steps that have nothing to do with what is being measured.
+    await gw("sendPrompt", { agentId, prompt: "Is the vendor portal reachable from the box?" });
+    const raised = await watch(75_000, (row) => /sign in on the box/i.test(String(row.lastMessagePreview ?? "")), (row) => row.awaitingUserResponse != null);
+    const reason = String(raised.row?.awaitingUserResponse?.reason ?? "");
+    const lag = raised.doneAt !== 0 && raised.sawAt !== 0 ? raised.doneAt - raised.sawAt : null;
+    console.log(`  INFO  closing message seen at +${raised.sawAt ? raised.sawAt - startedAt : "never"}ms, badge at +${raised.doneAt ? raised.doneAt - startedAt : "never"}ms`);
+    check(raised.sawAt !== 0, "the agent delivered the closing ask", raised.sawAt !== 0 ? String(raised.row?.lastMessagePreview ?? "").slice(0, 120) : "no closing message in 75s");
+    check(raised.doneAt !== 0, "the roster row says the agent is waiting on the operator", raised.doneAt !== 0 ? `awaitingUserResponse.tabId=${raised.row?.awaitingUserResponse?.tabId}` : "awaitingUserResponse stayed null");
+    check(lag != null && lag <= HEARTBEAT_MS, "the badge is up within one console heartbeat of the message", lag == null ? "one of the two never happened" : `${lag}ms of ${HEARTBEAT_MS}ms`);
+    check(/sign in/i.test(reason), "the badge quotes the sentence that asked", reason.slice(0, 140) || "no reason");
+    // Not a box hand-off and not an auto-review approval: the tab id says the turn classifier is
+    // what raised it, which is the whole point of this arm.
+    check(raised.row?.awaitingUserResponse?.tabId === "turn-question", "the badge came from the closing-message classifier", String(raised.row?.awaitingUserResponse?.tabId ?? "none"));
+
+    // The clear. The stub stops asking first, so the turn this reply drives ends on a plain
+    // statement -- which both clears the badge and proves a quiet close does not raise it again.
+    setStubMode("quiet");
+    const repliedAt = Date.now();
+    await gw("sendPrompt", { agentId, prompt: "I'm signed in now." });
+    const cleared = await watch(75_000, (row) => /report is filed/i.test(String(row.lastMessagePreview ?? "")), (row) => row.awaitingUserResponse == null);
+    check(cleared.doneAt !== 0, "the operator's reply clears the badge", cleared.doneAt !== 0 ? `${cleared.doneAt - repliedAt}ms after the send` : "the badge never cleared");
+    check(cleared.doneAt !== 0 && cleared.doneAt - repliedAt <= HEARTBEAT_MS, "cleared within one console heartbeat of the reply", cleared.doneAt === 0 ? "never cleared" : `${cleared.doneAt - repliedAt}ms of ${HEARTBEAT_MS}ms`);
+    check(cleared.sawAt !== 0, "the follow-up turn delivered its closing statement", cleared.sawAt !== 0 ? String(cleared.row?.lastMessagePreview ?? "").slice(0, 120) : "no closing message in 75s");
+    const after = await agentRow();
+    check(after != null && after.awaitingUserResponse == null, "a turn that closes on a statement does not raise the badge", after == null ? "no roster row" : JSON.stringify(after.awaitingUserResponse));
+    setStubMode("loop");
   }
 } catch (error) {
   check(false, "self-talk cap", error.message);
