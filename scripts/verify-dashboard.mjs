@@ -2158,6 +2158,56 @@ try {
     const rebuilds = await page.evaluate(() => window.__rebuilds);
     check(rebuilds === 0, "an idle heartbeat redraws nothing (no flash)", `${rebuilds} transcript mutation(s) in 18s`);
   }
+  // -- qol/vnc-paste: the desktop pane's clipboard ---------------------------------------------
+  // Two questions. Does the vnc.html the relay serves for the pane carry the bridge -- once, with
+  // the assets beside it untouched -- and does a paste aimed at the open pane actually reach the
+  // frame. The second is read from inside the frame rather than inferred: a listener goes on the
+  // iframe's own window, a paste event is dispatched on the document the way a browser dispatches
+  // one, and what arrived on the other side is read back. Then the panel's own line is checked,
+  // because that line is this feature's receipt: the desktop dialog is modal, so an ordinary toast
+  // would be behind its backdrop.
+  if (!OFFLINE && !LEAKS && !TEACH) {
+    const vncPage = await fetch(`${GATEWAY}/vnc/1/vnc.html`).then((r) => (r.ok ? r.text() : "")).catch(() => "");
+    const markers = vncPage.split("titanbot-vnc-bridge").length - 1;
+    check(markers === 1, "VNCPASTE-1: the vnc.html the relay serves carries the clipboard bridge exactly once", `${markers} marker(s) in ${vncPage.length} bytes`);
+    check(vncPage.includes("clipboardPasteFrom") && vncPage.includes("titanbot-vnc-paste"), "and it is the paste half, not just the style");
+    check(/#noVNC_control_bar_anchor[^{]*\{[^}]*display: none/.test(vncPage), "and noVNC's own control bar is hidden inside the pane");
+    const vncAsset = await fetch(`${GATEWAY}/vnc/1/app/ui.js`).then((r) => (r.ok ? r.text() : "")).catch(() => "");
+    check(vncAsset.length > 0 && !vncAsset.includes("titanbot-vnc-bridge"), "VNCPASTE-2: the client's own assets come through the relay untouched", `${vncAsset.length} bytes of app/ui.js`);
+
+    await page.evaluate(() => document.querySelectorAll("dialog[open]").forEach((d) => d.close()));
+    await page.waitForTimeout(400);
+    await page.click("#open-desktop", { timeout: 10_000 }).catch(() => {});
+    const paneLive = await until(() => page.evaluate(() => {
+      const frame = document.querySelector("#desktop-window iframe[data-box-vnc]");
+      const root = frame?.contentDocument?.documentElement;
+      return root && root.classList.contains("noVNC_connected") ? true : null;
+    }), 60_000, 1500);
+    check(paneLive === true, "VNCPASTE-3: the desktop pane's frame connects to the box", paneLive === true ? "" : "no connected noVNC in 60s");
+    if (paneLive === true) {
+      const probe = await page.evaluate(async () => {
+        const frame = document.querySelector("#desktop-window iframe[data-box-vnc]");
+        const seen = [];
+        frame.contentWindow.addEventListener("message", (event) => {
+          if (event.data && event.data.type === "titanbot-vnc-paste") seen.push(event.data.text);
+        });
+        document.getElementById("desktop-window").dispatchEvent(new MouseEvent("mouseenter"));
+        const text = "gate paste probe";
+        const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+        Object.defineProperty(pasteEvent, "clipboardData", { value: { getData: () => text, items: [] } });
+        document.dispatchEvent(pasteEvent);
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        return { seen, prevented: pasteEvent.defaultPrevented, note: document.getElementById("desktop-paste-note")?.textContent ?? "" };
+      });
+      check(probe.seen.length === 1 && probe.seen[0] === "gate paste probe", "VNCPASTE-4: a paste on the open pane is posted into the frame", JSON.stringify(probe.seen));
+      check(probe.prevented === true, "and is taken off the page rather than pasted twice");
+      const said = await until(() => page.evaluate(() => {
+        const line = document.getElementById("desktop-paste-note")?.textContent ?? "";
+        return /Pasted \d+ characters into the box/.test(line) ? line : null;
+      }), 12_000, 500);
+      check(said != null, "VNCPASTE-5: and the pane says so on its own line, where a modal's backdrop cannot hide it", said ?? `line read: ${probe.note}`);
+    }
+  }
   check(errors.length === 0, "no page errors", errors.slice(0, 2).join(" | "));
 } catch (error) {
   check(false, "dashboard gate", error.message);

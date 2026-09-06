@@ -163,7 +163,7 @@ const PASSWORD = "a password these tests wrote themselves";
 async function startRelay(env, { pages = false } = {}) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const dir = mkdtempSync(path.join(tmpdir(), "relay-proxy-"));
-    for (const name of ["server.mjs", "auth.mjs", "subscriptions.mjs"]) {
+    for (const name of ["server.mjs", "auth.mjs", "subscriptions.mjs", "vnc-bridge.mjs"]) {
       copyFileSync(path.join(repoRoot, "ui", name), path.join(dir, name));
     }
     if (pages) {

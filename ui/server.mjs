@@ -23,6 +23,7 @@
 import { createServer } from "node:http";
 import net from "node:net";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
+import { rewriteVncAsset } from "./vnc-bridge.mjs";
 import {
   SESSION_LIFETIME_MS, clientAddress, createLoginThrottle, createSession, edgeAddress,
   isLoopbackHost, isSecureRequest, parseCookies, parseTrustedProxies, readAuthFile, readSession,
@@ -461,7 +462,9 @@ async function relayVnc(req, res, display, rest, search) {
   const upstream = await fetch(`http://${BOX_HOST}:${port}/${rest}${search}`,
     { headers: { accept: String(req.headers.accept ?? "*/*") } });
   if (!upstream.ok) return fail(res, upstream.status, `the box did not serve ${rest} (HTTP ${upstream.status})`);
-  const bytes = Buffer.from(await upstream.arrayBuffer());
+  // vnc.html, and nothing else, comes back with the clipboard bridge appended to its head; every
+  // asset is passed through byte for byte. See ui/vnc-bridge.mjs for what goes in and why.
+  const bytes = rewriteVncAsset(rest, Buffer.from(await upstream.arrayBuffer()));
   res.writeHead(200, {
     "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
     "content-length": bytes.byteLength,
