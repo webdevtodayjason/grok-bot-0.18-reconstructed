@@ -54,6 +54,7 @@ import "./workflow-frontmatter.test.mjs";
 import "./machine-room-teach.test.mjs";
 import "./window-assignments.test.mjs";
 import "./window-orphan-sweep.test.mjs";
+import "./forever-box-auto-update.test.mjs";
 import "./agent-delete-prompt-report.test.mjs";
 import "./relay-auth.test.mjs";
 import "./relay-login-guards.test.mjs";

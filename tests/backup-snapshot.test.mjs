@@ -53,8 +53,9 @@ for (const agent of agents) {
   const dir = path.join(volumes, "tb-data", "agents", agent);
   mkdirSync(dir, { recursive: true });
   // A real sqlite file, so the drill's integrity check is answering about a database rather than
-  // about a text file that happens to be named store.db.
-  execFileSync("python3", ["-c", `import sqlite3;db=sqlite3.connect(${JSON.stringify(path.join(dir, "store.db"))});db.execute("create table t(x)");db.execute("insert into t values (1)");db.commit()`]);
+  // about a text file that happens to be named store.db. Each store carries its own agent id, so
+  // two stores are never byte-identical and swapping them between directories is detectable.
+  execFileSync("python3", ["-c", `import sqlite3;db=sqlite3.connect(${JSON.stringify(path.join(dir, "store.db"))});db.execute("create table t(x)");db.execute('insert into t values (\\'${agent}\\')');db.commit()`]);
 }
 mkdirSync(path.join(relayRoot, "ui"), { recursive: true });
 mkdirSync(path.join(relayRoot, "profile"), { recursive: true });
@@ -164,4 +165,67 @@ test("the restore drill opens every store, and says so when one is damaged", () 
     assert.match(text, /not a restore point/);
     return true;
   });
+});
+
+test("a snapshot that lost stores is not a restore point, however clean the ones it kept are", () => {
+  // The drill used to count only what it found. snapshot.sh removes the live copy of a volume before
+  // retaking it under the pause, so a failure in that second copy takes both, and a snapshot could
+  // land holding one agent out of five. Every store it did keep opens and hashes fine, so the old
+  // verdict was green on a backup that had lost four agents.
+  const output = snapshot({ TITANBOT_BACKUP_REQUIRE_MOUNT: "0", TITANBOT_INSTANCE: "tb4" });
+  assert.match(output, /2 store\.db/);
+  const dir = path.join(dest, "tb4", execFileSync("ls", ["-1", path.join(dest, "tb4")], { encoding: "utf8" }).trim());
+  rmSync(path.join(dir, "volumes/data/agents", agents[1]), { recursive: true, force: true });
+  assert.throws(() => execFileSync("bash", [path.join(repoRoot, "deploy/backup/restore-drill.sh"), dir], { env, encoding: "utf8" }), (error) => {
+    const text = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    assert.match(text, /1 store\(s\) opened and passed, 0 did not/, "the store it kept is fine, which is exactly why the count is the only check that catches this");
+    assert.match(text, /the manifest names 2 store\.db and 1 were found/);
+    assert.match(text, /not a restore point/);
+    return true;
+  });
+});
+
+test("two stores swapped between agent directories both read DRIFTED", () => {
+  // The hash check used to ask whether a sha appeared anywhere in the manifest. Swap two stores and
+  // both shas are still present, so both read "sha ok" while every agent holds another agent's
+  // conversations. The hash has to be the one recorded for that path.
+  snapshot({ TITANBOT_BACKUP_REQUIRE_MOUNT: "0", TITANBOT_INSTANCE: "tb5" });
+  const dir = path.join(dest, "tb5", execFileSync("ls", ["-1", path.join(dest, "tb5")], { encoding: "utf8" }).trim());
+  const stores = agents.map((agent) => path.join(dir, "volumes/data/agents", agent, "store.db"));
+  const [first, second] = stores.map((store) => readFileSync(store));
+  assert.notDeepEqual(first, second, "the two stores differ, so a swap is something the check can see");
+  for (const store of stores) chmodSync(store, 0o644);
+  writeFileSync(stores[0], second);
+  writeFileSync(stores[1], first);
+  assert.throws(() => execFileSync("bash", [path.join(repoRoot, "deploy/backup/restore-drill.sh"), dir], { env, encoding: "utf8" }), (error) => {
+    const text = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    assert.match(text, /0 store\(s\) opened and passed, 2 did not/);
+    assert.equal((text.match(/sha DRIFTED/g) ?? []).length, 2);
+    return true;
+  });
+});
+
+test("retention never sweeps the newest consistent snapshot, however many degraded ones follow it", () => {
+  // The sweep evicted strictly by name, and a "live" snapshot (the pause did not hold) or a torn run
+  // with no manifest at all took a slot exactly like a good one. With KEEP=14 and a nightly timer,
+  // fourteen degraded runs in a row would delete the last restore point one night at a time.
+  const planted = [
+    ["2026-01-01-0100", '{"mode": "consistent"}\n'],
+    ["2026-01-02-0100", '{"mode": "live"}\n'],
+    ["2026-01-03-0100", '{"mode": "live"}\n'],
+    ["2026-01-04-0100", null], // a torn run: it never got as far as a manifest
+  ];
+  for (const [stamp, manifest] of planted) {
+    mkdirSync(path.join(dest, "tb6", stamp), { recursive: true });
+    if (manifest != null) writeFileSync(path.join(dest, "tb6", stamp, "manifest.json"), manifest);
+  }
+  // TITANBOT_BOX names a container the stub docker does not know, so this run cannot pause and is
+  // itself a "live" snapshot: the degraded run that would have evicted the good one.
+  const output = snapshot({ TITANBOT_BACKUP_REQUIRE_MOUNT: "0", TITANBOT_BACKUP_KEEP: "2", TITANBOT_INSTANCE: "tb6", TITANBOT_BOX: "absent-box" });
+  assert.match(output, /mode live/, "the run under test is itself degraded");
+  assert.match(output, /kept 2026-01-01-0100: the newest consistent snapshot/);
+  const kept = execFileSync("ls", ["-1", path.join(dest, "tb6")], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+  assert.ok(kept.includes("2026-01-01-0100"), `the last consistent snapshot survived: ${kept.join(" ")}`);
+  assert.ok(!kept.includes("2026-01-02-0100") && !kept.includes("2026-01-03-0100"), "the degraded older ones went");
+  assert.equal(kept.length, 3, kept.join(" "));
 });

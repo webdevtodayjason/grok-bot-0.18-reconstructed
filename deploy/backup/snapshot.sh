@@ -239,8 +239,22 @@ step "retention"
 # `ls | head` rather than an array: the dev box's /bin/bash is 3.2, which has no mapfile, and this
 # script must be runnable on the machine it is proved on.
 COUNT="$(ls -1d "$DEST_ROOT/$INSTANCE"/*/ 2>/dev/null | wc -l | tr -d ' ')"
+# The newest CONSISTENT snapshot is never swept, whatever its age. Retention used to evict strictly
+# by name, and every directory counted the same: a "live" snapshot (the pause did not hold, or a
+# volume did not copy cleanly) and a torn run that never got as far as a manifest both take a slot.
+# With KEEP=14 and a nightly timer, fourteen degraded runs in a row would delete the last snapshot
+# anyone could actually restore from, silently, one night at a time.
+KEEPER=""
+for dir in $(ls -1d "$DEST_ROOT/$INSTANCE"/*/ 2>/dev/null | sort); do
+  [ -f "$dir/manifest.json" ] || continue
+  grep -q '"mode"[[:space:]]*:[[:space:]]*"consistent"' "$dir/manifest.json" && KEEPER="$dir"
+done
 if [ "$COUNT" -gt "$KEEP" ]; then
   ls -1d "$DEST_ROOT/$INSTANCE"/*/ 2>/dev/null | sort | head -n "$(( COUNT - KEEP ))" | while IFS= read -r old; do
+    if [ -n "$KEEPER" ] && [ "$old" = "$KEEPER" ]; then
+      say "kept $(basename "$old"): the newest consistent snapshot, which retention never sweeps"
+      continue
+    fi
     rm -rf "$old" && say "removed $(basename "$old")"
   done
 fi

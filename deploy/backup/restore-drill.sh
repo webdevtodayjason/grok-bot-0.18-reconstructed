@@ -66,6 +66,24 @@ PY
 
 sha_of() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'; }
 
+# The hash recorded for ONE path, not "does this sha appear anywhere in the manifest". The loose
+# form passed two stores that had been swapped between agent directories: both hashes were present,
+# so both read "sha ok", while every agent was holding another agent's conversations. The relay
+# entries carry no sha256 and so cannot match this pattern.
+manifest_sha_for() {
+  local want="$1" entry entry_path
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    entry_path="$(printf '%s' "$entry" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')"
+    [ "$entry_path" = "$want" ] || continue
+    printf '%s' "$entry" | sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p'
+    return 0
+  done <<INNER
+$(grep -o '{"path":"[^"]*","bytes":[0-9]*,"sha256":"[^"]*"}' "$SNAP/manifest.json")
+INNER
+  return 1
+}
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/titanbot-restore-drill-XXXXXX")" || die "could not make a work directory"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
@@ -76,6 +94,12 @@ say "$SNAP"
 say "mode      $(sed -n 's/.*"mode"[^"]*"\([^"]*\)".*/\1/p' "$SNAP/manifest.json" | head -n 1)"
 say "taken     $(sed -n 's/.*"takenAt"[^"]*"\([^"]*\)".*/\1/p' "$SNAP/manifest.json" | head -n 1)"
 say "size      $(du -sk "$SNAP" | awk '{print $1}')K"
+# How many stores the snapshot SAYS it holds. The drill used to count only what it happened to find,
+# so a snapshot whose paused re-copy half-failed (snapshot.sh removes the live copy before retaking
+# it, so a failure there takes both) could land with one store out of five, open that one, and print
+# a green verdict on a backup that had lost four agents.
+EXPECTED="$(sed -n 's/.*"storeDbCount"[^0-9]*\([0-9][0-9]*\).*/\1/p' "$SNAP/manifest.json" | head -n 1)"
+say "stores    ${EXPECTED:-unstated} in the manifest"
 
 step "restore into $WORK"
 cp -R "$SNAP/." "$WORK/" || die "the snapshot did not copy into $WORK"
@@ -95,12 +119,16 @@ while IFS= read -r db; do
   # The manifest recorded the hash at the moment the copy was taken. A mismatch here is damage that
   # happened to the snapshot afterwards, which is a different fault from a torn copy and is worth
   # naming as one.
-  if grep -q "\"$sum\"" "$SNAP/manifest.json"; then hash_state="ok"; else hash_state="DRIFTED"; fi
+  rel="${db#"$WORK/"}"
+  expected="$(manifest_sha_for "$rel")"
+  if [ -z "$expected" ]; then hash_state="UNLISTED"
+  elif [ "$expected" = "$sum" ]; then hash_state="ok"
+  else hash_state="DRIFTED"; fi
   result="$(integrity_check "$db")"
   if [ "$result" = ok ] && [ "$hash_state" = ok ]; then OK=$(( OK + 1 )); else BAD=$(( BAD + 1 )); fi
   printf '  %-40s %12s %10s  %s\n' "$agent" "$bytes" "${sum:0:10}" "$result${hash_state:+ / sha $hash_state}"
 done <<EOF
-$(find "$WORK/volumes/data/agents" -name store.db -type f 2>/dev/null | sort)
+$(find "$WORK/volumes/data" -name store.db -type f 2>/dev/null | sort)
 EOF
 
 step "verdict"
@@ -108,4 +136,7 @@ say "$OK store(s) opened and passed, $BAD did not"
 say "relay side: $(find "$WORK/relay" -type f 2>/dev/null | wc -l | tr -d ' ') file(s) restored"
 [ "$BAD" -eq 0 ] || die "$BAD store(s) failed; this snapshot is not a restore point"
 [ "$OK" -gt 0 ] || die "no agent store was found in the snapshot at all"
+if [ -n "$EXPECTED" ] && [ "$(( OK + BAD ))" -ne "$EXPECTED" ]; then
+  die "the manifest names $EXPECTED store.db and $(( OK + BAD )) were found; this snapshot is missing stores and is not a restore point"
+fi
 printf '\n== OK\n'
