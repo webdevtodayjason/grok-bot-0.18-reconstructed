@@ -87,7 +87,27 @@ services:
       # same seats through start-window, and the duplicates crash-loop until its heartbeat stalls and
       # its wrapper kills its whole process group, host included. The host owns seats; this stays off.
       SAND_DESKTOP_SUPERVISION_DISABLED: "1"
-      SAND_BOX_AUTO_UPDATE: "0"
+      # SHIP-2. This one variable arms two different updaters and the host reads it twice.
+      # isHostBundleAutoUpdateEnabled() is true unless this is 0/false/no, and
+      # forever-box-service.ts:91,95 SKIP the image auto-update whenever the host-bundle one is on
+      # -- so "1" means: watch for a new HOST BUNDLE daily and swap it in place, and never recreate
+      # this container for a new image. The watch interval is left at upstream's 24 h with its
+      # random start offset, so the operator's ship (POST /api/updateHostNow) stays the explicit
+      # path and the watch is only the backstop.
+      SAND_BOX_AUTO_UPDATE: "1"
+      # PERSIST-1. The sync side has always been on; nothing restored it. The image's
+      # /usr/local/bin/start-sand-box runs `host-main.cjs --box-copy-in` at container start only
+      # when this is truthy AND /home/box/sand-host/host-main.cjs exists (which the entrypoint
+      # below guarantees, before the box starts). Without it a recreate came up with whatever the
+      # image ships: /home/box/cli-config -- the agents' CLI logins and git config -- is in the
+      # store but on no volume, so it was silently lost on every deploy.
+      SAND_BOX_STORE_COPY_IN: "1"
+      # SHIP-2. Upstream points this at Cursor's S3 bucket; here it points at the relay, which
+      # serves the same two-file layout out of the runtime directory a ship writes (ui/host-bundle.mjs).
+      # The token is a PATH segment because the fetch is the host's own `fetch(url)` inside the box
+      # and there is no hook for a header on it. It is the gateway bearer this service already
+      # holds, so it is not a second secret; the relay refuses the route on any other value.
+      SAND_HOST_BUNDLE_S3_BASE_URL: http://titanbot-relay:7777/runtime/${TITANBOT_GATEWAY_TOKEN}
       SAND_USE_EXISTING_BOX_EXEC_DAEMON: "1"
       SAND_TREE_SITTER_NODE_DEPS: /home/box/deps
       NODE_PATH: /home/box/deps
@@ -208,6 +228,10 @@ services:
       # `docker inspect` on this container, for nothing. The box service does need it as a
       # variable, because that is the only way the image takes it.
       SAND_PROFILE_DIRS: /profile
+      # SHIP-2. The directory deploy/r750/sync.sh writes host-main.cjs and
+      # sand-host-bundle-latest.version into, mounted read-only below. Unset, /runtime answers 503
+      # and the box simply never finds a bundle to update to, which is the safe direction.
+      SAND_HOST_RUNTIME_DIR: /runtime
       # Everything reaching this process now arrives from Traefik on the stack's docker network,
       # so without this line the login lockout would be ONE bucket shared by the whole internet
       # and a stranger's five typos would lock Jason out of his own console. Inside these ranges
@@ -274,6 +298,10 @@ services:
       # server writes it, and anyone who could make the relay write it already holds the gateway
       # token it contains.
       - /home/sem/titanbot/profile:/profile
+      # SHIP-2, read-only: the same runtime directory the box copies its bundle from, so the
+      # version the relay advertises and the bytes the box would boot on a recreate are one file
+      # pair that a ship writes together and nothing here can rewrite.
+      - /home/sem/titanbot/runtime:/runtime:ro
       # The two post-start box repairs, run from this container's own start. See the command below.
       - /home/sem/titanbot/deploy:/init:ro
     # install.sh does the box repairs inline after `docker run`, because it is a script and can

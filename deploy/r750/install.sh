@@ -45,6 +45,9 @@ command -v curl >/dev/null || die "curl is not on PATH (needed for the readiness
 
 # Fail on a missing artifact here rather than after a 5 GB pull.
 [ -f "$ROOT/runtime/host-main.cjs" ] || die "$ROOT/runtime/host-main.cjs is missing -- run deploy/r750/sync.sh from the Mac"
+# SHIP-2: the version file is what the relay advertises and the box compares itself against. A ship
+# writes it beside the bundle, so its absence means an old sync.sh put that bundle there.
+[ -f "$ROOT/runtime/sand-host-bundle-latest.version" ] || die "$ROOT/runtime/sand-host-bundle-latest.version is missing -- run deploy/r750/sync.sh from the Mac (it stages the version beside the bundle)"
 [ -f "$ROOT/runtime/box-exec-daemon/main.cjs" ] || die "$ROOT/runtime/box-exec-daemon/main.cjs is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/deploy/apply-start-window-fix.sh" ] || die "$ROOT/deploy/apply-start-window-fix.sh is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/ui/server.mjs" ] || die "$ROOT/ui/server.mjs is missing -- run deploy/r750/sync.sh from the Mac"
@@ -127,6 +130,16 @@ if docker inspect "$BOX" >/dev/null 2>&1; then
 else
   say "no previous $BOX"
 fi
+# SHIP-2. host-main.cjs is COPIED into the box at start rather than bind-mounted over.
+# A bind mount is a mount point, and the supervisor's bundle swap finishes with
+# renameSync(staged, /home/box/sand-host/host-main.cjs) -- which cannot rename over a mount and
+# fails the swap with EBUSY. Copying leaves an ordinary file the swap can replace, so a host-only
+# ship works; the copy runs before the image's own entrypoint, so the box never executes the
+# image's stock bundle even briefly, and a recreate puts the shipped bundle back. This is the same
+# two lines deploy/coolify/docker-compose.yml already uses, for the same reason it uses them.
+BOX_ENTRYPOINT='cp /opt/titanbot-runtime/host-main.cjs /home/box/sand-host/host-main.cjs || exit 1
+exec /usr/local/bin/start-sand-box'
+
 # No --platform: the remote manifest is a single amd64 image and this host is x86_64, so the flag
 # would be a no-op that only invites confusion.
 # The published ports are on the server's own loopback. Nothing needs them (the relay reaches the
@@ -137,7 +150,9 @@ docker run --detach --name "$BOX" \
   --restart unless-stopped \
   --label com.titanbot.role=box \
   --env SAND_SUPERVISOR_ENABLED=1 --env SAND_DESKTOP_SUPERVISION_DISABLED=1 \
-  --env SAND_BOX_AUTO_UPDATE=0 \
+  --env SAND_BOX_AUTO_UPDATE=1 \
+  --env SAND_BOX_STORE_COPY_IN=1 \
+  --env "SAND_HOST_BUNDLE_S3_BASE_URL=http://$RELAY:7777/runtime/$TOKEN" \
   --env SAND_USE_EXISTING_BOX_EXEC_DAEMON=1 \
   --env SAND_TREE_SITTER_NODE_DEPS=/home/box/deps \
   --env NODE_PATH=/home/box/deps \
@@ -158,10 +173,11 @@ docker run --detach --name "$BOX" \
   --volume titanbot-box-data:/home/box/sand-data \
   --volume titanbot-box-store:/var/lib/sand-box-store \
   --volume titanbot-box-chrome:/home/box/chrome-profile \
-  --mount "type=bind,src=$ROOT/runtime/host-main.cjs,dst=/home/box/sand-host/host-main.cjs,readonly" \
+  --mount "type=bind,src=$ROOT/runtime,dst=/opt/titanbot-runtime,readonly" \
   --mount "type=bind,src=$ROOT/runtime/box-exec-daemon,dst=/home/box/box-exec-daemon,readonly" \
   --mount "type=bind,src=$ROOT/credential,dst=/run/grok-bot,readonly" \
-  "$BOX_IMAGE" >/dev/null
+  --entrypoint /bin/sh \
+  "$BOX_IMAGE" -c "$BOX_ENTRYPOINT" >/dev/null
 say "started $BOX on network $NET, gateway ports on 127.0.0.1 only"
 
 step "box patches"
