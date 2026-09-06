@@ -77,10 +77,21 @@ relay_run() {
   # host. It is not optional: server.mjs reads and writes the box's secrets, connectors and window
   # surfaces exclusively through `docker exec`, because those files live in a volume with no host
   # path. README.md item 8 says this out loud so the decision is the operator's, not an accident.
+  # The Titan Job Bus bearer (docs/JOB-BUS.md §2), passed through only when the operator set it in
+  # this shell. An EMPTY variable is not the same as an absent one here: the relay's resolution
+  # order is env, then the token file the console writes, then 503, and an exported empty string
+  # would be an env value that resolves to nothing while the console's own file sat unread.
+  local -a jobtoken=()
+  if [ -n "${TITAN_JOB_TOKEN:-}" ]; then
+    jobtoken=( --env "TITAN_JOB_TOKEN=$TITAN_JOB_TOKEN" )
+    say "passing TITAN_JOB_TOKEN through to the relay (it wins over the console's token file)"
+  fi
+
   docker run --detach --name "$RELAY" \
     --network "$NET" \
     --restart unless-stopped \
     "${labels[@]}" \
+    ${jobtoken[@]+"${jobtoken[@]}"} \
     --publish "$RELAY_BIND:$RELAY_PORT:7777" \
     --env SAND_UI_PORT=7777 \
     --env SAND_UI_BIND_HOST=0.0.0.0 \

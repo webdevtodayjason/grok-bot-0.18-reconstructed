@@ -177,6 +177,20 @@ services:
       com.titanbot.role: relay
     environment:
       SAND_UI_PORT: "7777"
+      # The Titan Job Bus bearer (docs/JOB-BUS.md §2). Optional on purpose and empty by default:
+      # with no value here the relay falls back to the token file the console writes, and with
+      # neither every /v1 request answers 503. Unlike TITANBOT_GATEWAY_TOKEN above, the `:-`
+      # default is what makes that fallback reachable, because a deploy must not fail on a field
+      # nobody filled in. Setting it here WINS over the file, and the console then says so and
+      # refuses to write one.
+      #
+      # CHECK THIS AFTER THE FIRST DEPLOY, for the reason written above TITANBOT_GATEWAY_TOKEN:
+      # Coolify builds a variable's NAME from everything between the braces, so it may create the
+      # field as `TITAN_JOB_TOKEN:-` rather than `TITAN_JOB_TOKEN`. Compose still resolves this
+      # line to empty when unset, so the deploy is fine either way and the console's own Generate
+      # is unaffected -- but if the Coolify field turns out to carry the punctuation, generate the
+      # token in Settings -> Job bus instead of setting it here. README section 4 says the same.
+      TITAN_JOB_TOKEN: ${TITAN_JOB_TOKEN:-}
       # 0.0.0.0 inside the container, which is the container's own interface and not a server one.
       # The relay refuses to start on a reachable address with no ui/auth.json, so this line and
       # the password file in the mounted ui directory are a pair.

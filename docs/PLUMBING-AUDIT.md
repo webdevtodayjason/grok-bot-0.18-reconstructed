@@ -110,6 +110,25 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-05 late (the Titan Job Bus, console, gates, deploy and docs).** `docs/JOB-BUS.md` is
+  the contract and three pieces were built to it in parallel: the gateway's store, allowlist,
+  worker and audit; the relay's `/v1` edge and its token; and this piece, the console card and the
+  proof around it. Settings → Job bus reads `GET /job-bus/status` for the configured state and its
+  source, mints a token that is shown exactly once beside a warning that it is never shown again,
+  offers a curl example carrying `$TITAN_JOB_TOKEN` rather than a token, edits the worker mapping
+  through `getHostSettings`/`setHostSettings` as `SAND_JOB_BUS_WORKERS`, and draws the jobs table
+  from `jobBusList` with the contract's five status colours. The table redraws on the host's
+  `job-bus` event and on nothing else, so a transition cannot throw away what the operator is
+  typing into the card it is about. The adapter reads the SSE envelope by `type` and by `channel`,
+  because the contract names the first and every other event on that stream carries the second.
+  New gate `scripts/verify-job-bus.mjs` starts its own relay on 127.0.0.1:7791 with a random
+  bearer and drives the public surface end to end, including the exact growth of
+  `job-bus/audit.jsonl`; `verify-deploy.mjs` gained the two `/v1/health` checks (`401` or `503`
+  without a bearer and never `200`, `200` with `--job-token`); `verify-dashboard.mjs --offline`
+  renders the card in both states against the demo adapter, which grew a job bus of its own that
+  reaches no network. Measured in the worktree: the offline arm green, 22/22. Rows JOBBUS-1..4 in
+  `GAP-ANALYSIS.md` §0; JOBBUS-4 stays open until Jason smokes it from the CoS box.
+
 - **2026-09-04 evening (Wave U2, and the first hours of public use).** Routines fire on the box's
   own clock with the real schedule trigger and a slot-derived run id; the trigger editor says which
   listener each event kind would need; the five local-machine tools are withheld unless the bridge

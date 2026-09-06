@@ -117,6 +117,12 @@ prove the private grant.
 
 Full report: [docs/connectors/github.md](connectors/github.md).
 
+**If you are here because a job stopped on `github_auth`:** that is the Titan Job Bus saying its
+worker could not authenticate `git` or `gh` inside the sandbox, and it never asks the submitter
+for a token. The credential it needs is the one above, or the `gh` login on the box's shell tool.
+The contract is [docs/JOB-BUS.md](JOB-BUS.md) §5, and the blocked job is in the console at
+Settings → Job bus.
+
 ## Slack
 
 **Preset.** Click **Slack (user token)**. It fills:
