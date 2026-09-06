@@ -48,7 +48,10 @@
 //              daemon, so it stayed green while "Chief of staff" on display :4 read 0 characters
 //              from a variable setShellSecret had just reported applied. Both legs now open a
 //              probe agent with a window of its own and probe it with `agentId`, and (m2) also
-//              holds the submitted value out of the host log.
+//              holds the submitted value out of the host log. (m) then asks the question a second
+//              time with the STORE EMPTIED on disk: a windowed probe re-pushes the whole shell
+//              store on its way to the accessor (HostBox.ensureReady), so a probe run against a
+//              full store cannot tell the write's fan-out from its own bring-up push.
 //
 // SECRET-1 gives this gate GATE-8's three exit codes, for GATE-8's reason: (m2) asks a MODEL to
 // raise the inline credential card, and a model that does not raise it in time is neither a pass
@@ -1438,6 +1441,30 @@ try {
     }
     if (JSON.stringify(probedWindow).includes(SHELL_KEY)) fail("the windowed probe answered with the value");
     ok(`and the agent's OWN shell on display :${probedWindow.windowIndex} reports ${SHELL_FIELD} set as well`);
+
+    // GATE-11: the probe above does not isolate the write. probeShellSecret with an agentId goes
+    // through HostBox.ensureReady, which re-pushes the ENTIRE shell store into the primary and
+    // every open window before it hands back the accessor -- so "the agent's own shell has it"
+    // was true whether setShellSecret's fan-out reached display :N or the probe's own bring-up
+    // push did. Asked again with the store emptied on disk, the bring-up push carries nothing
+    // under this name (an empty update is not pushed at all) and the update is replace:false, so
+    // it removes nothing either: the only thing that can have put the value in that window's
+    // daemon is the write's own fan-out.
+    await restoreSecretStoreBase64(shellStoreSnapshot);
+    const isolatedWindow = await call("probeShellSecret", { field: SHELL_FIELD, agentId: shellWindowAgentId });
+    if (isolatedWindow?.state !== "set") {
+      fail(`with the store emptied, the windowed agent's shell reports ${SHELL_FIELD} ${isolatedWindow?.state}: the probe above was reading its own bring-up push, not setShellSecret's fan-out`);
+    }
+    const isolatedPrimary = await call("probeShellSecret", { field: SHELL_FIELD });
+    if (isolatedPrimary?.state !== "set") {
+      fail(`with the store emptied, the primary shell reports ${SHELL_FIELD} ${isolatedPrimary?.state}`);
+    }
+    ok(`with nothing left in the store to re-push, both shells still hold ${SHELL_FIELD} -- setShellSecret's own push is what put it there`);
+
+    // Put the store back the way the write left it, so the delete below has a field to remove and
+    // the byte-identical check at the end still measures this arm and not the isolation step.
+    const refilled = await call("setShellSecret", { field: SHELL_FIELD, value: SHELL_KEY });
+    if (refilled?.stored !== true) fail("the shell secret store could not be refilled after the isolation check");
 
     const shellControl = await callRaw("setShellSecret", { field: "NODE_OPTIONS", value: "cr-verify-control" });
     if (shellControl.ok) fail("setShellSecret accepted NODE_OPTIONS as a field name");

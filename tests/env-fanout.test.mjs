@@ -36,6 +36,9 @@ const { LoopbackSandBox } = await load("source/host/box/loopback-sand-box.ts", "
 const { SharedDesktopSandBox } = await load("source/host/box/shared-desktop-sand-box.ts", "shared-desktop");
 const { HostBox } = await load("source/host/extensions/forever-box/host-box.ts", "host-box");
 const widgets = await load("source/host/extensions/transcript/widget-responses.ts", "widget-responses");
+const ackBuilder = await load("source/host/runner/tools/sand-secret-request.ts", "sand-secret-request");
+const seedModule = await load("source/host/extensions/forever-box/window-seed.ts", "window-seed");
+const shellSecrets = await load("source/host/extensions/shell-tools/shell-secrets.ts", "shell-secrets");
 
 const ctx = {};
 const okShell = () => ({ result: { case: "success", value: { exitCode: 0, stdout: "", stderr: "" } } });
@@ -78,7 +81,7 @@ test("ENV-1: an environment push reaches the primary daemon and every open windo
 
   const result = await box.applyEnvironment(ctx, { env: { VERIFY_ENV_3: "value" }, replace: false });
 
-  assert.deepEqual(result, { applied: true, pendingWindows: [] });
+  assert.deepEqual(result, { applied: true, pendingWindows: [], pendingWindowIndexes: [] });
   assert.deepEqual(pushes.map((push) => push.display).sort(), ["4", "7", "primary"]);
   for (const push of pushes) assert.deepEqual(push.env, { VERIFY_ENV_3: "value" });
 });
@@ -94,7 +97,11 @@ test("ENV-1: a window that will not take the update is named, and applied is fal
   // Not swallowed, and not a thrown push either: the primary and the healthy window took it, and
   // the answer says which shell did not, because that is the shell an agent may be running in.
   assert.equal(result.applied, false);
-  assert.deepEqual(result.pendingWindows, ["agent-a#4"]);
+  // The DISPLAY index, not this box's map key: the key is `<box id>#<index>`, and on the shared
+  // desktop that box id is the shared box, never the agent. The layer that knows who holds the
+  // seat renames these (the shared-desktop case below).
+  assert.deepEqual(result.pendingWindows, ["display :4"]);
+  assert.deepEqual(result.pendingWindowIndexes, [4]);
   assert.deepEqual(pushes.map((push) => push.display).sort(), ["7", "primary"]);
 });
 
@@ -106,10 +113,10 @@ test("ENV-1: a window whose daemon has gone is reported and dropped, so the next
 
   const result = await box.applyEnvironment(ctx, { env: { VERIFY_ENV_3: "value" }, replace: false });
   assert.equal(result.applied, false);
-  assert.deepEqual(result.pendingWindows, ["agent-a#4"]);
+  assert.deepEqual(result.pendingWindows, ["display :4"]);
   // A second push does not keep reporting a window nobody holds any more.
   const again = await box.applyEnvironment(ctx, { env: { VERIFY_ENV_3: "value" }, replace: false });
-  assert.deepEqual(again, { applied: true, pendingWindows: [] });
+  assert.deepEqual(again, { applied: true, pendingWindows: [], pendingWindowIndexes: [] });
 });
 
 test("ENV-1: a new window is given the stored shell credentials before it is handed back", async () => {
@@ -134,6 +141,58 @@ test("ENV-1: with nothing stored, a new window is not pushed an empty environmen
   const { box, pushes } = fakeBox({ storedEnvironment: () => ({ env: {}, replace: false }) });
   await box.ensureWindow(ctx, "agent-a", 4);
   assert.deepEqual(pushes, []);
+});
+
+test("ENV-1: through the shared desktop, a missed window is named by the agent holding the seat", async () => {
+  // The shape the live box has, which the loopback-only cases above cannot produce: every window
+  // is opened under the SHARED box id, so the inner box's own key is `grok-bot-local-vm#2` for
+  // every agent on this desktop. This is the layer that holds index -> agent.
+  const { box: loopback } = fakeBox({ failWindow: "2" });
+  const shared = new SharedDesktopSandBox(loopback, { sharedBoxId: "grok-bot-local-vm" });
+  await shared.ensureReady(ctx, "agent-a");
+  assert.equal(shared.getAgentWindowIndex("agent-a"), 2);
+
+  const result = await shared.applyEnvironment(ctx, { env: { VERIFY_ENV_3: "value" }, replace: false });
+
+  assert.equal(result.applied, false);
+  assert.deepEqual(result.pendingWindows, ["agent-a (display :2)"]);
+  assert.deepEqual(result.pendingWindowIndexes, [2]);
+  // A seat nobody is assigned stays the bare display rather than borrowing someone else's name.
+  assert.equal(shared.describeWindowSeat(9), "display :9");
+});
+
+test("ENV-1: the seed a new window starts with carries BOTH stores, not just the shell one", () => {
+  // The half that was missing: the operator's box secrets go into the same daemons through the
+  // same applyEnvironment, so a window opened after one was stored started without it while every
+  // window already open had it.
+  const root = mkdtempSync(path.join(stage, "seed-"));
+  writeFileSync(path.join(root, "connector-env-secrets.json"), JSON.stringify({ shell: { CODERABBIT_API_KEY: "shell-value" } }), { mode: 0o600 });
+  writeFileSync(path.join(root, "box-secrets.json"), JSON.stringify({ version: 1, secrets: { OPERATOR_TOKEN: "box-value" } }), { mode: 0o600 });
+
+  const seed = seedModule.buildWindowSeedEnvironment(root);
+
+  assert.equal(seed.env.CODERABBIT_API_KEY, "shell-value");
+  assert.equal(seed.env.OPERATOR_TOKEN, "box-value");
+  // The redaction list rides with the box secrets, so the window daemon redacts them the way the
+  // primary does.
+  assert.equal(seed.env.CLOUD_AGENT_INJECTED_SECRET_NAMES, "OPERATOR_TOKEN");
+  // Never replace on this path: the daemon's replace mode deletes what the update does not carry.
+  assert.equal(seed.replace, false);
+});
+
+test("ENV-1: a store that is not there yet is no secrets, not an error", () => {
+  const root = mkdtempSync(path.join(stage, "seed-empty-"));
+  assert.deepEqual(seedModule.buildWindowSeedEnvironment(root), { env: {}, replace: false });
+});
+
+test("ENV-1: a replace push carries the shell store, so saving box secrets does not wipe it", () => {
+  const root = mkdtempSync(path.join(stage, "preserve-"));
+  writeFileSync(path.join(root, "connector-env-secrets.json"), JSON.stringify({ shell: { CODERABBIT_API_KEY: "shell-value" } }), { mode: 0o600 });
+
+  // What BoxSecretsApplier pushes: replace:true, which DELETES every variable it does not carry.
+  const merged = shellSecrets.withShellSecretsPreserved({ OPERATOR_TOKEN: "box-value" }, root);
+
+  assert.deepEqual(merged, { OPERATOR_TOKEN: "box-value", CODERABBIT_API_KEY: "shell-value" });
 });
 
 test("GATE-11: an agent's shell accessor is its own window's, not the primary's", async () => {
@@ -191,8 +250,19 @@ test("SECRET-2: a sink that did not store refuses in words too", async () => {
 });
 
 test("ENV-1: the windows a push missed ride out of routeSecret to the ack", async () => {
-  const routed = await shellHarness(async () => ({ field: "TITAN_JOB_TOKEN", stored: true, applied: false, pendingWindows: ["agent-a#4"] }))
+  const routed = await shellHarness(async () => ({ field: "TITAN_JOB_TOKEN", stored: true, applied: false, pendingWindows: ["agent-a (display :4)"] }))
     .routeSecret("agent1", { kind: "channel-credential", platform: "shell", field: "TITAN_JOB_TOKEN" }, "value");
   assert.equal(routed.applied, false);
-  assert.deepEqual(routed.pendingWindows, ["agent-a#4"]);
+  assert.deepEqual(routed.pendingWindows, ["agent-a (display :4)"]);
+});
+
+test("ENV-1: the ack names the agent whose shell missed the push, not a box id", () => {
+  const ack = ackBuilder.buildSecretProvidedAck(
+    { label: "CodeRabbit key", target: { kind: "shell" } },
+    { destination: "your shell's environment as $CODERABBIT_API_KEY", shellField: "CODERABBIT_API_KEY", applied: false, pendingWindows: ["agent-a (display :4)"] },
+  );
+  assert.match(ack, /agent-a \(display :4\)/);
+  // What it used to say -- `grok-bot-local-vm#4` -- named the shared box, which is the same string
+  // for every agent on this desktop and so resolved to nothing the model could act on.
+  assert.doesNotMatch(ack, /#\d/);
 });

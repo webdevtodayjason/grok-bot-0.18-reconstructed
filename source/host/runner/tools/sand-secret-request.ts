@@ -18,8 +18,10 @@ export function buildSecretProvidedAck(r:{label:string;target:{kind:string}},out
   const destination=outcome?.destination??r.target.kind;
   // ENV-1: the box runs one exec daemon per open desktop window, each with its own environment, so
   // "the live box took it" is a claim about several shells. A window that did not take the update
-  // is NAMED here, because the shell that missed it may be the very one this agent runs.
-  const pending=outcome?.pendingWindows==null||outcome.pendingWindows.length===0?"":` The desktop window(s) ${outcome.pendingWindows.join(", ")} did not take it, and your own shell may be one of them.`;
+  // is NAMED here by the AGENT holding that seat (shared-desktop-sand-box.ts maps display index to
+  // agent before the answer leaves the box), because a bare display index is a number this model
+  // has no way to look itself up in, and the shell that missed it may be the very one it runs.
+  const pending=outcome?.pendingWindows==null||outcome.pendingWindows.length===0?"":` The desktop shell(s) of ${outcome.pendingWindows.join(", ")} did not take it, and yours may be one of them.`;
   const tail=outcome?.shellField!=null
     ? `It is set in your shell's environment as $${outcome.shellField}; commands you run from now on see it (applied: ${outcome.applied===true?"yes":"no"}).${outcome.applied===true?" Confirm to the user that it is set, then continue.":`${pending} The store has it but the live box did not take the update everywhere, so tell the user it lands when the box next comes up; do not report it usable yet.`}`
     :outcome?.server!=null

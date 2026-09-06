@@ -132,6 +132,32 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
   legs (m) and (m2) now prove both shells against a probe agent with a window of its own, and (m2)
   also holds the submitted value out of `/tmp/sand-host.log`.
 
+  **The skeptic pass on this entry, same day.** Three things the fan-out claimed and did not hold.
+  (1) "the windows that missed it are NAMED" named the BOX. `sandBoxWindowKey` is
+  `<agentId>#<index>`, and on the shared desktop every window is opened under the shared box id, so
+  the ack read "The desktop window(s) grok-bot-local-vm#4 did not take it" -- a string the model
+  reading it cannot resolve to itself. The transport reports the display INDEX now, and
+  `SharedDesktopSandBox` -- the layer that actually holds index -> agent -- renames it to
+  `<agent id> (display :4)` on the way out. The unit case that pinned the old shape drove the fake
+  box directly and asserted a key production never emits, so there is a case now that runs the
+  fan-out through the shared desktop.
+  (2) The seed a new window starts with carried the shell-tool store ONLY, while the operator's box
+  secrets go into the same daemons through the same `applyEnvironment` -- so a desktop opened after
+  a box secret was stored ran without it while every already-open window had it. The seed merges
+  both stores now (`forever-box/window-seed.ts`). Worse in combination, and also fixed: the
+  box-secrets push is `replace: true`, and the daemon's replace mode DELETES every variable the
+  update does not carry, so saving box secrets wiped the shell credentials out of the primary shell
+  and, once the push fanned out, out of every open window too. Both writers merge the shell store in
+  now (`withShellSecretsPreserved`). Residual, stated rather than papered over: what `replace: true`
+  still drops -- PATH, HOME, DISPLAY -- the `/bin/sh -lc` login shell puts back from `/etc/profile`;
+  a credential has nothing that does that for it, which is why only the credential half is carried.
+  (3) The gate's windowed probe wrote the state it read. `probeShellSecret({agentId})` goes through
+  `HostBox.ensureReady`, which re-pushes the whole shell store before it hands back the accessor, so
+  (m) could not tell setShellSecret's fan-out from the probe's own bring-up push. (m) asks a second
+  time now with the store emptied on disk -- an empty update is not pushed at all, and the update is
+  `replace: false`, so nothing but the write itself can have put the value in that window's daemon --
+  then refills the store so the delete and the byte-identical check still measure the arm.
+
   SECRET-2, the same honesty rule twice more: `routeSecret`'s shell branch answered `null` when the
   sink was missing or did not store, which left the asking agent unresumed forever -- it now answers
   `{refused}`, which is the beat that resumes it; and a local stdio connector literally named

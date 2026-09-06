@@ -115,6 +115,21 @@ export function buildShellSecretEnvironmentUpdate(
 }
 
 /**
+ * ENV-1. The shell store, carried along by a push that is NOT this plane's.
+ *
+ * The operator's box secrets go into the same exec daemons through the same applyEnvironment, and
+ * that push is `replace: true` -- the daemon's replace mode DELETES every variable the update does
+ * not carry. So a box-secrets save used to clear $CODERABBIT_API_KEY out of the box shell, and now
+ * that the push fans out it would clear it out of every open desktop window too. Whoever pushes
+ * with replace merges the shell store in first, so saving one credential plane never wipes the
+ * other. (What replace still drops -- PATH, HOME, DISPLAY -- the `/bin/sh -lc` login shell puts
+ * back from /etc/profile; a credential has nothing that does that for it.)
+ */
+export function withShellSecretsPreserved(env: Readonly<Record<string, string>>, rootDir: string): Record<string, string> {
+  return { ...env, ...buildShellSecretEnvironmentUpdate(rootDir).env };
+}
+
+/**
  * ENV-1. What a push reached. `applied` is EVERY exec daemon on the box taking the update -- the
  * primary one and the per-window one behind each open desktop -- and `pendingWindows` names the
  * windows that did not, because an agent with its own window runs every shell through that
