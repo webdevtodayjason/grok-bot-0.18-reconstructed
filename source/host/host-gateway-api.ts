@@ -974,13 +974,26 @@ export function createHostGatewayApi(
     // Section 10.6: `version` is the JOB API's version and is a constant, `host_version` is this
     // bundle's. They were one field, which meant a CoS pinned to the API was reading the host's
     // release number and would have broken on an unrelated host upgrade.
-    jobBusHealth: async () => ({
-      ok: true,
-      queue_depth: await jobStore.queueDepth(),
-      version: JOB_BUS_API_VERSION,
-      host_version: hostPackageVersion(),
-      workers: jobSettings.read().workers,
-    }),
+    // Section 10.2 stores an agent ID in `workers`; section 3 renders this map with the worker's
+    // NAME ({"nextgen.chapter":"Scribe"}). Health resolves the stored value back through the roster
+    // so both hold: the id is this box's internal handle, and the name is what CoS was told to
+    // expect. A value that names no agent here is already a name and is passed through.
+    jobBusHealth: async () => {
+      const roster = method(manager, "listAgentsSync")();
+      const workers = Object.fromEntries(
+        Object.entries(jobSettings.read().workers).map(([type, worker]) => {
+          const agent = roster.find((candidate: any) => candidate?.id === worker);
+          return [type, typeof agent?.name === "string" && agent.name.length > 0 ? agent.name : worker];
+        }),
+      );
+      return {
+        ok: true,
+        queue_depth: await jobStore.queueDepth(),
+        version: JOB_BUS_API_VERSION,
+        host_version: hostPackageVersion(),
+        workers,
+      };
+    },
     // `created` says 201 or 200 to the relay; the job itself is the body either way. Every field is
     // forwarded verbatim, unknown ones included, because section 10.1's refusal of an unknown field
     // is the store's to make: dropping it here would answer 201 to a body the bus never read.
