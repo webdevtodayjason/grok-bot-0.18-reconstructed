@@ -30,6 +30,16 @@ import {
 } from "./extensions/shell-tools/shell-tools-service.js";
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
 import { evidenceRegistry, readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
+import { GatewayCommandError } from "./gateway-command-error.js";
+import { readSandBoxSetting } from "./sand-box-setting.js";
+import {
+  createJobStore,
+  hostPackageVersion,
+  isJobBusEnabled,
+  readJobBusWorkers,
+  type JobRecord,
+} from "./extensions/job-bus/job-store.js";
+import { createJobWorker } from "./extensions/job-bus/job-worker.js";
 import {
   parseCoordinatorAgentThreadRequest,
   parseCoordinatorTranscriptWindowRequest,
@@ -123,6 +133,40 @@ export function createHostGatewayApi(
   const sharing = deps.extensions.api("cross-user-sharing");
   const now = deps.now ?? Date.now;
   const createAgentMintsByNonce = new Map<string, Promise<any>>();
+
+  // JOBBUS. The Titan Job Bus (docs/JOB-BUS.md). Same root the connector and shell-tool stores use,
+  // so `<sand-data>/job-bus/` lands on the box data volume with the rest of the host's state. The
+  // store owns `emit`, not the worker, so EVERY transition reaches the console's SSE stream by
+  // construction, including a cancel that arrives through the gateway while the loop is asleep.
+  // The loop starts here because this table is built exactly once, when the gateway comes up.
+  const jobStore = createJobStore({
+    rootDir: getSandRootDir(),
+    now,
+    emit: (event) => { deps.hostEvents.emit(event); },
+  });
+  const jobWorker = createJobWorker({
+    store: jobStore,
+    listAgents: () => method(manager, "listAgentsSync")(),
+    sendPrompt: (prompt, agentId) => method(manager, "sendPrompt")(prompt, { agentId }),
+    readEntries: async (agentId) =>
+      await (manager as any).sessionStore?.getAgentTranscriptEntries?.(agentId) ?? [],
+    readEvidence: (agentId, options) => readAgentEvidence(agentId, options),
+    now,
+    sleep: (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); }),
+    readSetting: readSandBoxSetting,
+    markUnread: (agentId) => { method(manager, "setAgentUnread")(agentId, true, now()); },
+  });
+  jobWorker.start();
+  const requireJobBusEnabled = (): void => {
+    if (!isJobBusEnabled(readSandBoxSetting)) {
+      throw new GatewayCommandError(503, { error: "job bus is disabled" });
+    }
+  };
+  const requireJob = async (args: any): Promise<JobRecord> => {
+    const job = await jobStore.get(String(args?.id ?? ""));
+    if (job == null) throw new GatewayCommandError(404, { error: "job not found" });
+    return job;
+  };
 
   // CONNECT-5. The shell-tool plane. `getSandRootDir()` is the same root the connector store uses;
   // the box is read lazily because the forever-box extension starts after this table is built.
@@ -883,6 +927,55 @@ export function createHostGatewayApi(
       }
       throw new TypeError(`getMarketplaceItem needs kind "plugin" or "bot", not "${kind}"`);
     },
+
+    // --------------------------------------------------------------- JOBBUS, the Titan Job Bus
+    // The whole of the relay's /v1 surface (docs/JOB-BUS.md section 3). Every refusal is a
+    // GatewayCommandError carrying its own status and body, so the relay passes 400/404/409/503
+    // through with the shape the contract prints instead of flattening them into a 500.
+    jobBusHealth: async () => ({
+      ok: true,
+      queue_depth: await jobStore.queueDepth(),
+      version: hostPackageVersion(),
+      workers: readJobBusWorkers(readSandBoxSetting),
+    }),
+    // `created` says 201 or 200 to the relay; the job itself is the body either way.
+    jobBusCreate: async (args: any) => {
+      requireJobBusEnabled();
+      const created = await jobStore.create({
+        type: args?.type,
+        idempotency_key: args?.idempotency_key,
+        payload: args?.payload,
+        policy: args?.policy,
+        callback_url: args?.callback_url,
+        submitter: args?.submitter,
+      });
+      // A new job should not wait up to a poll interval to start moving.
+      if (created.created) void jobWorker.tick().catch(() => {});
+      return created;
+    },
+    jobBusGet: async (args: any) => await requireJob(args),
+    jobBusCancel: async (args: any) => {
+      await requireJob(args);
+      const job = await jobWorker.cancel(String(args?.id ?? ""));
+      return { id: job.id, status: job.status };
+    },
+    jobBusArtifacts: async (args: any) => {
+      const job = await requireJob(args);
+      if (job.status !== "done") {
+        throw new GatewayCommandError(409, { error: `job is ${job.status}, not done`, id: job.id, status: job.status });
+      }
+      const repo = typeof job.payload.repo === "string" ? job.payload.repo : null;
+      return {
+        id: job.id,
+        status: job.status,
+        pull_from: repo == null ? null : "github",
+        repo,
+        branch: typeof job.payload.branch === "string" ? job.payload.branch : null,
+        commits: job.result?.commits ?? [],
+        artifacts: job.result?.artifacts ?? [],
+      };
+    },
+    jobBusList: async (args: any) => ({ jobs: await jobStore.list(args?.limit) }),
 
     // ---------------------------------------------------------------- CONNECT-5, shell tools
     // A shell tool is a CLI the agent runs itself, with its credential in the environment.
