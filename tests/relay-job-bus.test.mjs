@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { copyFileSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -121,15 +122,56 @@ async function signIn(relay) {
   return cookie;
 }
 
-test("with no token anywhere every /v1 route is 503, not an open door", async () => {
+test("an unconfigured bus answers 401, the same answer a wrong token gets", async () => {
+  // The old 503 said "job bus not configured", which told an unauthenticated stranger both that
+  // this host runs a bus and that its token is unset right now. docs/JOB-BUS.md 10.6.
   const relay = await startRelay();
   try {
     for (const [method, route] of [["GET", "/v1/health"], ["POST", "/v1/jobs"], ["GET", "/v1/jobs/job_1"]]) {
       const response = await fetch(`${relay.base}${route}`, { method, headers: bearer(JOB_TOKEN) });
-      assert.equal(response.status, 503, `${method} ${route}`);
-      assert.deepEqual(await response.json(), { error: "job bus not configured" });
+      assert.equal(response.status, 401, `${method} ${route}`);
+      assert.equal(response.headers.get("www-authenticate"), 'Bearer realm="titan-job-bus"');
+      assert.deepEqual(await response.json(), { error: "unauthorized" });
     }
     assert.deepEqual(relay.gateway.seen, [], "an unconfigured bus must not reach the gateway");
+  } finally { relay.stop(); }
+});
+
+test("configured is visible on the console route and nowhere on /v1", async () => {
+  const relay = await startRelay();
+  try {
+    const cookie = await signIn(relay);
+    const unconfigured = await (await fetch(`${relay.base}/job-bus/status`, { headers: { cookie } })).json();
+    assert.deepEqual([unconfigured.configured, unconfigured.source], [false, null]);
+    writeFileSync(relay.tokenFile, JSON.stringify({ token: JOB_TOKEN }), { mode: 0o600 });
+    const configured = await (await fetch(`${relay.base}/job-bus/status`, { headers: { cookie } })).json();
+    assert.deepEqual([configured.configured, configured.source], [true, "file"]);
+  } finally { relay.stop(); }
+});
+
+test("five refused bearers lock the address out, and the lockout is audited once", async () => {
+  const relay = await startRelay({ env: { TITAN_JOB_TOKEN: JOB_TOKEN } });
+  try {
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const refused = await fetch(`${relay.base}/v1/health`, { headers: bearer("k".repeat(48)) });
+      assert.equal(refused.status, 401, `attempt ${attempt}`);
+    }
+    // The right token now, and still refused: the lockout is on the address, not on the guess.
+    const locked = await fetch(`${relay.base}/v1/health`, { headers: bearer(JOB_TOKEN) });
+    assert.equal(locked.status, 429);
+    assert.ok(Number(locked.headers.get("retry-after")) > 0);
+
+    // The audit row is fire and forget, so wait for it rather than assuming the order.
+    let rows = [];
+    for (let wait = 0; wait < 50 && rows.length === 0; wait += 1) {
+      rows = relay.gateway.seen.filter((call) => call.command === "jobBusAudit");
+      if (rows.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(rows.length, 1, "one row when the lockout begins, not one per refused request");
+    assert.equal(rows[0].args.event, "auth_locked");
+    assert.match(rows[0].args.client, /^(::ffff:)?127\.0\.0\.1$|^::1$/);
+    assert.deepEqual(relay.gateway.seen.filter((call) => call.command !== "jobBusAudit"), [],
+      "no refused request reaches a jobBus command");
   } finally { relay.stop(); }
 });
 
@@ -200,10 +242,34 @@ test("more than 120 requests a minute from one client is 429 with a retry-after"
   } finally { relay.stop(); }
 });
 
+test("600 requests a minute across every client is 429 too", async () => {
+  // The per-client bucket alone is 120 an address, so a caller with a range of them buys as much
+  // of the box as it has addresses. The global bucket is what bounds the sum. docs/JOB-BUS.md 10.6.
+  // /v1/nope is used on purpose: the buckets are counted before the route is resolved, so this
+  // spends the minute's allowance without 600 round trips to the gateway.
+  const relay = await startRelay({
+    env: { TITAN_JOB_TOKEN: JOB_TOKEN, SAND_UI_TRUSTED_PROXIES: "127.0.0.1/32" },
+  });
+  try {
+    const call = (index) => fetch(`${relay.base}/v1/nope`, {
+      headers: { ...bearer(JOB_TOKEN), "x-forwarded-for": `10.0.${Math.floor(index / 250)}.${index % 250}` },
+    });
+    for (let batch = 0; batch < 10; batch += 1) {
+      const answers = await Promise.all(Array.from({ length: 60 }, (_, i) => call(batch * 60 + i)));
+      for (const answer of answers) assert.equal(answer.status, 404, `batch ${batch}`);
+    }
+    // 600 distinct addresses, none of them near its own 120, and the 601st is still refused.
+    const limited = await call(600);
+    assert.equal(limited.status, 429);
+    assert.ok(Number(limited.headers.get("retry-after")) > 0);
+    assert.deepEqual(relay.gateway.seen, [], "none of this reaches the gateway");
+  } finally { relay.stop(); }
+});
+
 test("the create call carries type, key, policy and submitter, and the header key wins", async () => {
   const relay = await startRelay({ env: { TITAN_JOB_TOKEN: JOB_TOKEN } });
   try {
-    relay.gateway.answerWith((command, args) => ({ status: 200, body: { created: true, job: { id: "job_1", type: args.type, status: "queued", idempotency_key: args.idempotency_key } } }));
+    relay.gateway.answerWith((command, args) => ({ status: 200, body: { created: true, job: { id: "job_1", type: args.type, status: "queued", created_at: "2026-09-05T00:00:00.000Z", idempotency_key: args.idempotency_key, payload: args.payload, worker: { agentId: "a1" } } } }));
     const response = await postJob(relay, {
       type: "nextgen.chapter", idempotency_key: "from-body",
       payload: { course_slug: "c05", chapter: 2 }, policy: { require_attestation: true }, callback_url: null,
@@ -216,8 +282,14 @@ test("the create call carries type, key, policy and submitter, and the header ke
     assert.equal(sent.args.submitter, "cos");
     assert.deepEqual(sent.args.payload, { course_slug: "c05", chapter: 2 });
     assert.deepEqual(sent.args.policy, { require_attestation: true });
-    // The body CoS reads is the job, not the envelope the gateway answered with.
-    assert.deepEqual(await response.json(), { id: "job_1", type: "nextgen.chapter", status: "queued", idempotency_key: "from-header" });
+    // Who presented a token and from where, both read off the request. docs/JOB-BUS.md 10.5.
+    assert.match(sent.args.client, /^(::ffff:)?127\.0\.0\.1$|^::1$/);
+    assert.equal(sent.args.submitter_id, createHash("sha256").update(JOB_TOKEN, "utf8").digest("hex").slice(0, 8));
+    assert.match(sent.args.submitter_id, /^[0-9a-f]{8}$/);
+    // Four fields, and no more: the payload and the worker's agent ids are not echoed back to
+    // whoever posted the job. docs/JOB-BUS.md 10.6.
+    assert.deepEqual(await response.json(),
+      { id: "job_1", type: "nextgen.chapter", status: "queued", created_at: "2026-09-05T00:00:00.000Z" });
 
     // With no header the body's key is used.
     await postJob(relay, { type: "health.ping", idempotency_key: "from-body", payload: {} });
@@ -228,16 +300,18 @@ test("the create call carries type, key, policy and submitter, and the header ke
 test("created picks 201, an idempotent replay picks 200, and neither is guessed from a timestamp", async () => {
   const relay = await startRelay({ env: { TITAN_JOB_TOKEN: JOB_TOKEN } });
   try {
-    const job = { id: "job_1", type: "health.ping", status: "queued", created_at: "2026-09-05T00:00:00.000Z" };
+    const summary = { id: "job_1", type: "health.ping", status: "queued", created_at: "2026-09-05T00:00:00.000Z" };
+    const job = { ...summary, payload: { note: "not for the create answer" }, events: [{ at: summary.created_at, status: "queued" }] };
     relay.gateway.answerWith(() => ({ status: 200, body: { created: true, job } }));
     const first = await postJob(relay, { type: "health.ping", idempotency_key: "ping-1", payload: {} });
     assert.equal(first.status, 201);
+    assert.deepEqual(await first.json(), summary);
 
     // Same job, an hour old, and still a 200 rather than a 201: only `created` decides.
     relay.gateway.answerWith(() => ({ status: 200, body: { created: false, job } }));
     const replay = await postJob(relay, { type: "health.ping", idempotency_key: "ping-1", payload: {} });
     assert.equal(replay.status, 200);
-    assert.deepEqual(await replay.json(), job);
+    assert.deepEqual(await replay.json(), summary);
   } finally { relay.stop(); }
 });
 
@@ -267,10 +341,26 @@ test("a request the relay cannot shape is 400, and the gateway's own 400 passes 
     assert.equal(missing.status, 404);
     assert.equal(relay.gateway.seen.at(-1).command, "jobBusGet");
 
-    relay.gateway.answerWith(() => ({ status: 200, body: { id: "job_1", status: "done", artifacts: [] } }));
+    // The artifacts shape is the gateway's to build; the relay hands it back whole, github links
+    // and all, rather than reshaping a body it does not own. docs/JOB-BUS.md 10.6.
+    const shape = {
+      id: "job_1", status: "done", pull_from: "github", repo: "webdevtodayjason/nextgen-training",
+      branch: "main", commits: ["a".repeat(40)],
+      artifacts: [{
+        path: "notes/05/02-intro.md", bytes: 18000, sha256: "b".repeat(64),
+        html_url: "https://github.com/webdevtodayjason/nextgen-training/blob/aaa/notes/05/02-intro.md",
+        api_url: "https://api.github.com/repos/webdevtodayjason/nextgen-training/contents/notes/05/02-intro.md",
+      }],
+    };
+    relay.gateway.answerWith(() => ({ status: 200, body: shape }));
     const artifacts = await fetch(`${relay.base}/v1/jobs/job_1/artifacts`, { headers: bearer(JOB_TOKEN) });
     assert.equal(artifacts.status, 200);
+    assert.deepEqual(await artifacts.json(), shape);
     assert.equal(relay.gateway.seen.at(-1).command, "jobBusArtifacts");
+
+    relay.gateway.answerWith(() => ({ status: 409, body: { error: "not done" } }));
+    const early = await fetch(`${relay.base}/v1/jobs/job_1/artifacts`, { headers: bearer(JOB_TOKEN) });
+    assert.equal(early.status, 409);
   } finally { relay.stop(); }
 });
 
@@ -290,6 +380,11 @@ test("the job bearer opens nothing but /v1", async () => {
 
     const vnc = await fetch(`${relay.base}/vnc/1/vnc.html`, { headers: bearer(JOB_TOKEN) });
     assert.equal(vnc.status, 401);
+    assert.equal(vnc.headers.get("x-relay-auth"), "required");
+    // The desktop's own probe, which shells out on the box, refused the same way.
+    const surface = await fetch(`${relay.base}/box/surface?app=browser`, { headers: bearer(JOB_TOKEN) });
+    assert.equal(surface.status, 401);
+    assert.equal(surface.headers.get("x-relay-auth"), "required");
     const status = await fetch(`${relay.base}/job-bus/status`, { headers: bearer(JOB_TOKEN) });
     assert.equal(status.status, 401);
     assert.deepEqual(relay.gateway.seen, []);
@@ -355,7 +450,7 @@ test("the console generates, sets and clears the token, and the bus follows imme
 
     const cleared = await (await json("/job-bus/token/clear", { method: "POST" })).json();
     assert.equal(cleared.configured, false);
-    assert.equal((await fetch(`${relay.base}/v1/health`, { headers: bearer(pasted) })).status, 503);
+    assert.equal((await fetch(`${relay.base}/v1/health`, { headers: bearer(pasted) })).status, 401);
   } finally { relay.stop(); }
 });
 
