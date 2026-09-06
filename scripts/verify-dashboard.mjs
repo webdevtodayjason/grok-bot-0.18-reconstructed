@@ -378,7 +378,12 @@ try {
         };
       }, secretId);
       check(beforeSecret.type === "password", "the credential field is a masked password input", beforeSecret.type || "no input on the card");
-      check(beforeSecret.hint === "Stored securely, never shown to your agent.", "the hint under the field is the product's custody line", beforeSecret.hint || "no hint");
+      // SECRET-1: the seeded card is a `shell` request (platform "shell", field TITAN_JOB_TOKEN),
+      // and the custody line for that destination is NOT the connector one. The generic hint says
+      // "never shown to your agent" while this route's whole purpose is to put the value in the
+      // shell that agent runs commands in, so pinning the generic line here would pin the lie.
+      check(beforeSecret.hint === "Stored securely and never shown in this chat. It becomes $TITAN_JOB_TOKEN in this agent's shell, so commands it runs can read it.", "the hint under a shell-destination field says the value reaches that agent's shell", beforeSecret.hint || "no hint");
+      check(!/never shown to your agent/.test(beforeSecret.hint), "and does not carry the connector card's custody promise", beforeSecret.hint || "no hint");
       check(beforeSecret.button === "Save securely", "the button says Save securely", beforeSecret.button || "no button");
       check(/Never share it in chat/.test(beforeSecret.card) && /TITAN_JOB_TOKEN/.test(beforeSecret.card), "the card carries the request's own description line under its title", beforeSecret.card.slice(0, 160));
 

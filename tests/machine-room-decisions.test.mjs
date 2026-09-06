@@ -99,6 +99,32 @@ test("a credential request carries the entry id, field and connector the host as
   assert.match(card.detail, /never written into this conversation/i);
 });
 
+// SECRET-1: the host-authored fallback copy is what the operator reads whenever the model supplied
+// no description, and it used to end "never reaches the model" on every route. On the reserved
+// "shell" connector that is false by construction: routeSecret puts the value in the environment of
+// the shell the agent runs its commands in, so `echo $TITAN_JOB_TOKEN` hands it straight back. The
+// two routes get two sentences, and this pins both so neither drifts back into one.
+test("a shell credential request is not described as a value the agent cannot reach", () => {
+  const card = cardOf({
+    kind: "send-message", id: "entry-7s",
+    message: { type: "secret-request", secretRequest: { label: "Titan Job Bus token", target: { kind: "channel-credential", platform: "shell", field: "TITAN_JOB_TOKEN" } } },
+  });
+  assert.equal(card.platform, "shell");
+  assert.match(card.detail, /becomes \$TITAN_JOB_TOKEN in this agent's own box shell/);
+  assert.match(card.detail, /never written into this conversation/i);
+  assert.equal(/never reaches the model/.test(card.detail), false, "the shell route is exactly the route the model can read back");
+});
+
+// A description the model wrote still wins over both sentences: the fallback is only for the
+// requests that arrive without one.
+test("a model-written description still replaces the host's fallback custody copy", () => {
+  const card = cardOf({
+    kind: "send-message", id: "entry-7d",
+    message: { type: "secret-request", secretRequest: { label: "Titan Job Bus token", description: "Temporary bearer for the dry-run.", target: { kind: "channel-credential", platform: "shell", field: "TITAN_JOB_TOKEN" } } },
+  });
+  assert.equal(card.detail, "Temporary bearer for the dry-run.");
+});
+
 // The host's own stamp on the entry, not anything this page remembers: an answered request stops
 // offering the input on the next read, the same way an answered widget does.
 test("a credential request the host has already taken is not still asking", () => {

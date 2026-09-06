@@ -497,6 +497,27 @@ test("the secret request card renders a masked input instead of sending the oper
   assert.equal(/Answer this in the host app/.test(html), false);
 });
 
+// SECRET-1: the hint under the masked field is the custody promise the operator reads before
+// typing, so it has to be true for the destination this card names. It is for a connector or chat
+// credential. It is not for the reserved "shell" connector, whose whole purpose is to hand the
+// value to the shell the agent runs commands in.
+test("the custody hint under the masked field splits on the shell destination", async () => {
+  const { decisionMarkup } = await markupHelpers();
+  const card = (over) => decisionMarkup({
+    id: "entry-9", type: "decision",
+    card: { kind: "secret", entryId: "entry-9", status: "pending", title: "The agent asked for a credential", detail: "d", options: [], ...over },
+  });
+  const connector = card({ field: "apiKey", platform: "linear" });
+  assert.match(connector, /Stored securely, never shown to your agent\./);
+  const shell = card({ field: "TITAN_JOB_TOKEN", platform: "shell" });
+  assert.match(shell, /Stored securely and never shown in this chat\./);
+  assert.match(shell, /It becomes \$TITAN_JOB_TOKEN in this agent&#39;s shell, so commands it runs can read it\./);
+  assert.equal(/never shown to your agent/.test(shell), false, "the shell card must not promise a custody the shell route does not keep");
+  // The rule is the host's own (shell-secret-field.ts trims and lowercases before matching), so a
+  // card that arrives with the name cased differently gets the same honest line.
+  assert.match(card({ field: "TITAN_JOB_TOKEN", platform: " Shell " }), /in this agent&#39;s shell/);
+});
+
 test("a credential request the host already took shows what happened, not another input", async () => {
   const { decisionMarkup } = await markupHelpers();
   const html = decisionMarkup({ id: "entry-9", type: "decision", card: { kind: "secret", entryId: "entry-9", status: "provided", field: "apiKey", title: "The agent asked for a credential", options: [] } });

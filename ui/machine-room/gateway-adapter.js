@@ -152,6 +152,9 @@
       detail: "", rule: null,
       options: Array.isArray(m.widget.options) ? m.widget.options : [],
     };
+    // The host's reserved connector name (shell-secret-field.ts SHELL_SECRET_CONNECTOR), matched
+    // the way the host matches it, so the card's copy splits on the same rule routeSecret does.
+    const isShellSecretPlatform = (name) => typeof name === "string" && name.trim().toLowerCase() === "shell";
     // CP-10 item 2: the masked secret request. The host asks by entry id and resumes the agent
     // once submitSecret { entryId, value, agentId } has stored the value (widget-responses.ts
     // submitSecret -> routeSecret -> storeConnectorCredential, then resumeWithHiddenPrompt), so
@@ -167,10 +170,17 @@
         status: entry.secretProvided === true ? "provided" : "pending",
         field, platform,
         title: request.label ? `The agent asked for ${request.label}` : "The agent asked for a credential",
-        // Where the value goes, in the host's own terms. It never enters the transcript: the host
-        // stamps the entry and hands the model an acknowledgement, not the value.
+        // Where the value goes, in the host's own terms, and that is not one sentence for every
+        // destination. A connector or chat credential lands in somebody else's process and the model
+        // only ever learns that it landed. SECRET-1's reserved "shell" connector is the opposite by
+        // construction: the value becomes an environment variable of the shell this agent runs its
+        // commands in, so the agent CAN read it back. This fallback is the copy the operator sees
+        // whenever the model supplied no description of its own, so on the shell route it has to say
+        // that rather than promise a custody the host is not keeping.
         detail: request.description
-          || `The value goes straight to the host's credential store${platform ? ` for ${platform}` : ""} as ${field}. It is never written into this conversation and never reaches the model.`,
+          || (isShellSecretPlatform(platform)
+            ? `The value goes straight to the host's credential store and becomes $${field} in this agent's own box shell. It is never written into this conversation, and every command the agent runs from then on can read it.`
+            : `The value goes straight to the host's credential store${platform ? ` for ${platform}` : ""} as ${field}. It is never written into this conversation and never reaches the model.`),
         rule: null, options: [],
       };
     }

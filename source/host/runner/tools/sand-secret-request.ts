@@ -23,6 +23,14 @@ export function buildSecretProvidedAck(r:{label:string;target:{kind:string}},out
       ? `The "${outcome.server}" connector was restarted with it; its tools pick the value up on their next call, so check before reporting it live. Confirm to the user that it is set, then continue.`
       : `It is stored for the "${outcome.server}" connector, but the connector did not restart, so tell the user it may need a restart before its tools can use it.`
     : "Confirm to the user that it is set, then continue. For a connector credential, the connection links within a few seconds, so you can check and report its status.";
-  return[`[The user securely provided the requested secret: "${r.label}". It was written straight to its destination (${destination}); you never see the value and it is not in this conversation.]`,tail].join("\n");
+  // SECRET-1: the head has to take the outcome too. It used to end "you never see the value and it
+  // is not in this conversation" on every route, and on the shell route the second half is true and
+  // the first half is false: the value IS the agent's own environment from here on, so `echo $FIELD`
+  // returns it. A head that denies what the tail then grants is the confident wrong beat the model
+  // repeats to the user, so the shell head claims only what holds.
+  const head=outcome?.shellField!=null
+    ?`[The user securely provided the requested secret: "${r.label}". It was written straight to its destination (${destination}); it is not in this conversation, and the only place you can reach it is your own shell environment.]`
+    :`[The user securely provided the requested secret: "${r.label}". It was written straight to its destination (${destination}); you never see the value and it is not in this conversation.]`;
+  return[head,tail].join("\n");
 }
 

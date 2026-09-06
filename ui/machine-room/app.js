@@ -805,6 +805,19 @@
     "local-tool": [["allow-once", "✓ Allow once", true], ["always", "↗ Always allow", false], ["deny", "✕ Deny", false]],
   };
 
+  // SECRET-1: the custody line under the masked field is NOT one sentence for every destination.
+  // A connector or chat credential really does land somewhere the agent cannot read back, so
+  // "never shown to your agent" is true there. The reserved "shell" connector is the opposite by
+  // construction: the whole point is that the value becomes an environment variable of the shell
+  // the agent runs its commands in, so `echo $FIELD` returns it. Printing the same promise on that
+  // card is a custody claim the product cannot keep, so the shell card says where the value really
+  // ends up and stops at what IS true, that it never enters this chat.
+  const isShellSecretCard = (card) => typeof card.platform === "string" && card.platform.trim().toLowerCase() === "shell";
+  function secretCustodyHint(card) {
+    if (!isShellSecretCard(card)) return "Stored securely, never shown to your agent.";
+    return `Stored securely and never shown in this chat. It becomes $${String(card.field ?? "credential")} in this agent's shell, so commands it runs can read it.`;
+  }
+
   function decisionMarkup(message) {
     const card = message.card;
     if (card.status === "sending") {
@@ -849,7 +862,7 @@
           // hint that says where the value does NOT go, and "Save securely" on the button. The
           // hint is `aria-describedby` on the input so a screen reader reads the custody promise
           // with the field rather than after it.
-          ? `<div class="field"><label class="sr-only" for="secret-input-${escapeHtml(message.id)}">${escapeHtml(card.field ?? "credential")}</label><input id="secret-input-${escapeHtml(message.id)}" data-secret-input="${escapeHtml(message.id)}" type="password" autocomplete="off" aria-describedby="secret-hint-${escapeHtml(message.id)}" placeholder="${escapeHtml(card.field ?? "credential")}" /><small class="field-hint secret-hint" id="secret-hint-${escapeHtml(message.id)}">Stored securely, never shown to your agent.</small></div><button class="card-action primary" type="button" data-submit-secret="${escapeHtml(message.id)}">Save securely</button>`
+          ? `<div class="field"><label class="sr-only" for="secret-input-${escapeHtml(message.id)}">${escapeHtml(card.field ?? "credential")}</label><input id="secret-input-${escapeHtml(message.id)}" data-secret-input="${escapeHtml(message.id)}" type="password" autocomplete="off" aria-describedby="secret-hint-${escapeHtml(message.id)}" placeholder="${escapeHtml(card.field ?? "credential")}" /><small class="field-hint secret-hint" id="secret-hint-${escapeHtml(message.id)}">${escapeHtml(secretCustodyHint(card))}</small></div><button class="card-action primary" type="button" data-submit-secret="${escapeHtml(message.id)}">Save securely</button>`
           : `<span class="field-hint">Answer this in the host app. This page has no command to carry a credential to it.</span>`;
     return `<div class="inline-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span>${dismiss}</div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
   }

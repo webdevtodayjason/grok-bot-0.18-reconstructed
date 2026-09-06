@@ -133,7 +133,11 @@ test("SECRET-1: the ack the model reads names the variable and whether the box t
     destination: "your shell's environment as $TITAN_JOB_TOKEN", shellField: "TITAN_JOB_TOKEN", applied: true,
   });
   assert.match(applied, /It is set in your shell's environment as \$TITAN_JOB_TOKEN; commands you run from now on see it \(applied: yes\)\./);
-  assert.match(applied, /you never see the value and it is not in this conversation/);
+  // The head is per route too. It used to say "you never see the value" on this route while the
+  // tail granted the model a variable its own commands read, so the two halves contradicted each
+  // other and the model had a confident false line to repeat to the user.
+  assert.match(applied, /it is not in this conversation, and the only place you can reach it is your own shell environment/);
+  assert.doesNotMatch(applied, /you never see the value/);
 
   // "Stored" and "your next command sees it" are two claims, and the beat must not merge them.
   const pending = ack.buildSecretProvidedAck(request, {
@@ -148,6 +152,8 @@ test("SECRET-1: the ack the model reads names the variable and whether the box t
   });
   assert.match(connector, /"tinyfish" connector was restarted with it/);
   assert.doesNotMatch(connector, /shell's environment/);
+  // ...and it keeps the head every non-shell route can honestly make.
+  assert.match(connector, /you never see the value and it is not in this conversation/);
 });
 
 test("SECRET-1: the tool schema takes a shell request only with a variable name it can set", () => {

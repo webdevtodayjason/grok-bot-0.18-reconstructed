@@ -85,11 +85,20 @@ conversation itself: `SendMessage` with `type: "secret-request"` and
 ```
 
 The console draws that as a card with the label as its title, the description under it, a masked
-password field hinted **Stored securely, never shown to your agent.**, and a **Save securely**
-button. On a successful save the card collapses to **Saved securely and kept private.** with a green
-✓ Saved pill. The value goes from the input straight to `submitSecret` and into its store: it is
-never written into the page's markup, never into the transcript, and never into the model's context.
-The agent is resumed with an acknowledgement that says where the value landed and nothing else.
+password field, and a **Save securely** button. On a successful save the card collapses to **Saved
+securely and kept private.** with a green ✓ Saved pill. The value goes from the input straight to
+`submitSecret` and into its store: it is never written into the page's markup and never into the
+transcript.
+
+**The hint under the field is not the same line for every destination**, because the custody is not
+the same. A connector or chat credential lands in somebody else's process, so that card is hinted
+**Stored securely, never shown to your agent.** A `shell` request like the one above lands in the
+environment of the shell the agent runs its commands in, where `echo $TITAN_JOB_TOKEN` returns it,
+so that card is hinted **Stored securely and never shown in this chat. It becomes
+$TITAN_JOB_TOKEN in this agent's shell, so commands it runs can read it.** The agent's own
+acknowledgement splits the same way: every other route tells the model it never sees the value, and
+the shell route tells it the value is reachable only as that variable. Neither the card nor the ack
+promises a custody the `shell` route does not keep.
 
 **Where each `connector` name lands.** One namespace, three destinations, and the host picks in
 this order (`widget-responses.ts` `routeSecret`):
