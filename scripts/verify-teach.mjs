@@ -22,10 +22,23 @@
 // records and dispatches but leaves the work unclaimed has not closed the loop, and an exit code
 // that cannot tell those apart is not worth reading.
 //
+// Which is exactly why INCONCLUSIVE gets an exit code of its own. The ownership leg can close its
+// window with nothing written -- the provider was slow, not wrong -- and that is neither a pass nor
+// a failure. Left out of the exit status entirely, as it was, a supervising script reading only the
+// status could not tell a run that measured every leg from one that measured ten of eleven, and a
+// green teach gate stopped meaning the same thing twice. So:
+//
+//   0  every leg reached a verdict and every verdict was a pass
+//   1  a leg failed
+//   3  every leg that reached a verdict passed, and at least one reached none
+//
 // Integration check, not a unit test: needs the box up, a provider configured, and a real turn.
 //
-//   node scripts/verify-teach.mjs                 runs and puts SAND_TEACH back as it found it
-//   node scripts/verify-teach.mjs --keep-setting  leaves SAND_TEACH="1" on for this box
+//   node scripts/verify-teach.mjs                      runs and puts SAND_TEACH back as it found it
+//   node scripts/verify-teach.mjs --keep-setting       leaves SAND_TEACH="1" on for this box
+//   node scripts/verify-teach.mjs --require-ownership  an unmeasured ownership leg FAILS (exit 1)
+//                                                     rather than going inconclusive: for release
+//                                                     runs, where "not measured" is not good enough
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -36,6 +49,10 @@ const SETTINGS = "/home/box/sand-data/sand-host-settings.json";
 const SESSIONS = "/workspace/teach-sessions";
 const QUEUES = `${SESSIONS}/queues`;
 const KEEP_SETTING = process.argv.includes("--keep-setting");
+// Release runs pass this. It turns the one leg that is allowed to end unmeasured -- the ownership
+// leg, whose window can close on a slow provider with nothing written -- back into a hard failure,
+// so a release is never signed off on a run that did not actually measure ownership on the box.
+const REQUIRE_OWNERSHIP = process.argv.includes("--require-ownership");
 // Budgeted against the 450s ceiling these gates are run under, worst case, including the cleanup in
 // the finally: window 45 + expansion 45 + claim 120 + skill 180 + idle wait 25 leaves room for the
 // two real turns. Measured runs claim at ~73s and write at ~103s, so a green run lands near 220s;
@@ -95,7 +112,7 @@ const fail = (message) => { throw new VerificationFailed(message); };
 const pass = (message) => console.log(`PASS - ${message}`);
 // The third outcome, the one scripts/verify-deploy.mjs already prints: a leg that could not reach a
 // verdict this run. Calling it a PASS is how a gate starts lying and calling it a FAIL is how a gate
-// starts being ignored, so it is counted, said out loud, and left out of the exit code.
+// starts being ignored, so it is counted, said out loud, and carried out on exit code 3 of its own.
 let inconclusive = 0;
 const unresolved = (label, detail) => {
   inconclusive += 1;
@@ -415,9 +432,11 @@ try {
   const learned = await waitForSkill(SKILL_TIMEOUT_MS);
   if (learned == null) {
     // No skill is not a wrong owner. It means this provider wrote nothing inside the window, and
-    // the claim about ownership is unmeasured this run rather than refuted.
-    unresolved("the skill the agent writes is its own",
-      `no skill was written within ${SKILL_TIMEOUT_MS / 1000}s of the ask (${elapsed()}); on this provider that measures the model's speed, not who a skill written through update_state belongs to`);
+    // the claim about ownership is unmeasured this run rather than refuted. Under
+    // --require-ownership that distinction stops mattering: a release run has to measure it.
+    const detail = `no skill was written within ${SKILL_TIMEOUT_MS / 1000}s of the ask (${elapsed()}); on this provider that measures the model's speed, not who a skill written through update_state belongs to`;
+    if (REQUIRE_OWNERSHIP) fail(`ownership was not measured and --require-ownership was passed: ${detail}`);
+    unresolved("the skill the agent writes is its own", detail);
   } else {
     if (learned.ownerAgentId !== probe.id) {
       fail(`the skill "${learned.name}" (${learned.id}) came back owned by ${JSON.stringify(learned.ownerAgentId)}, not by the agent that wrote it (${probe.id}); update_state is not stamping ownership`);
@@ -483,4 +502,10 @@ try {
 // The elapsed() readings above stop at the claim; cleanup is the rest of the wall clock, and the
 // wall clock is what has to fit the warden's ceiling.
 console.log(`wall clock including cleanup: ${elapsed()}`);
-process.exit(failure == null ? 0 : 1);
+// 1 beats 3: a run that both failed a leg and left another unmeasured is a failure. 3 says every
+// verdict this run reached was a pass and at least one leg reached no verdict, which is the one
+// thing a reader of the exit status alone could not tell before. Said out loud as well, because a
+// human reading the log should not have to know the mapping to know what the run proved.
+const exitCode = failure != null ? 1 : inconclusive > 0 ? 3 : 0;
+console.log(`exit ${exitCode}: ${exitCode === 1 ? "a leg failed" : exitCode === 3 ? `every leg that reached a verdict passed, ${inconclusive} reached none` : "every leg reached a verdict and passed"}`);
+process.exit(exitCode);

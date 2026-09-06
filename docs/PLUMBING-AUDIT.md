@@ -154,7 +154,7 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
   recipe inlined whole (`WORKFLOW_INJECTED_BODY_LIMIT` 8000 to 16000, a noted divergence) with the
   teach queue scope; `[sand][workflow]` per invocation. Dashboard: modal only on the host's
   confirmation, refusal beside the button, cover-then-click screen, Discard and Finish through the
-  host, a status poll that closes on the cap. Gates `verify-teach.mjs` (8 checks) and
+  host, a status poll that closes on the cap. Gates `verify-teach.mjs` (ten asserting legs plus the ownership leg, which is allowed to go inconclusive; see GATE-8 for the exit codes) and
   `verify-dashboard.mjs --teach`. The wave's fixer hit DISPLAY-4 for real: polls of a deleted
   agent's desktop brought windows up for nobody and their teardown stopped live agents' displays,
   then a foreign-token seat wedged every new agent until a restart. Fixed at three layers (refuse
@@ -229,7 +229,23 @@ technique is §4.
 
 **2026-09-05, evening (measured on the Mac box, bundle 50557b52 on the R750 since 21:16).** The Marketplace: one catalog (`source/shared/marketplace/catalog.ts`, nine plugins, six bot templates) served by `listMarketplace` and `getMarketplaceItem`; the console's Global capabilities panel became the Marketplace with Plugins and Bots tabs in the original product's shape; providers and chat listeners moved to Settings; the agents' SearchPlugins, GetPlugin, InstallPlugin and UninstallPlugin resolve against the same catalog (they had pointed at Cursor's marketplace, unreachable from this box); Import Bot mints an agent whose description carries the template's persona and imports its skills. Gates: --plugin-tools 27 ok, dashboard 221/221 clean, deploy gate green. Filed: BOTS-2, BOTS-3.
 
-**2026-09-06 (measured on the Mac box, bundle b035b9fe).** `fix/desktop-dialog` merged to the trunk in c21ff0b: MR-33 (the desktop dialog's workspace grid), the evidence-verdict rule change, EVID-UX-1 (the verdict as a chip inside the reply's own row), and the browser gates finding playwright-core in `.cache/playwright` through `scripts/setup-gates.sh`. GATE-7 with it: five gate legs that measured something other than the product were repaired (machine-room's `networkidle` load, connector-plane's hardcoded shell-tool count, teach's ownership leg failing on the model's speed, and two in dashboard leg (d) and its withheld-output check). Gates on that bundle, each logged: gateway-reads 11 ok, dashboard 280/280, dashboard --offline 15 ok, dashboard --leaks 7 ok, machine-room --e2e 6 ok (green for the first time), connector-plane --shell-secrets 27 ok, teach exit 0 with the ownership leg INCONCLUSIVE (no skill written inside 180 s of the ask), windows 15 ok. The roster was four agents before the run and the same four after it.
+**2026-09-06 (measured on the Mac box, bundle b035b9fe: built, deployed and the copy running inside `grok-bot-local-vm` all hash to it, measured with `scripts/bundle-identity.sh`).** `fix/desktop-dialog` merged to the trunk in c21ff0b: MR-33 (the desktop dialog's workspace grid), the evidence-verdict rule change, EVID-UX-1 (the verdict as a chip inside the reply's own row), and the browser gates finding playwright-core in `.cache/playwright` through `scripts/setup-gates.sh`. GATE-7 with it: five gate legs that measured something other than the product were repaired (machine-room's `networkidle` load, connector-plane's hardcoded shell-tool count, teach's ownership leg failing on the model's speed, and two in dashboard leg (d) and its withheld-output check). Gates on that bundle, each logged: gateway-reads 11 ok, dashboard 280/280, dashboard --offline 15 ok, dashboard --leaks 7 ok, machine-room --e2e 6 ok (green for the first time), connector-plane --shell-secrets 27 ok, teach exit 0 with the ownership leg INCONCLUSIVE (no skill written inside 180 s of the ask), windows 15 ok. The roster was four agents before the run and the same four after it.
+
+**2026-09-06, later (same bundle b035b9fe, re-measured).** Two findings from the C1 skeptic closed.
+GATE-8: a green teach gate did not mean the same thing twice. The ownership leg had gained
+INCONCLUSIVE as a third outcome but the exit status still had only two, so `exit 0` no longer
+implied the on-box ownership claim had been measured and a supervising script reading the status
+alone could not tell the difference. `verify-teach.mjs` now exits **3** when every verdict it
+reached was a pass and at least one leg reached none, says so in the log, and takes
+`--require-ownership` for release runs, which makes an unmeasured ownership leg a failure. Measured:
+`c1fix-teach.log`, ten legs pass, the ownership leg inconclusive again on this provider, exit 3
+where the same run exited 0 before, 270 s wall, roster four agents before and four after. GATE-9:
+the short bundle sha every ledger line above carries was written from memory (`--deploy` prints a
+path and "restarted", never a hash), so an identity claim about the running box had no artifact
+behind it. `scripts/bundle-identity.sh` hashes all three copies and compares them; the first run,
+`c1fix-bundle-identity.log`, confirms b035b9fe for built, deployed and in-box alike, so the claim
+above was right and is now checkable. Filed with them: `verify-deploy.mjs` has the same blind spot
+(GATE-10).
 
 ## 4. Verification doctrine (earned, not theoretical)
 
@@ -1677,7 +1693,10 @@ wave's output; `npm test` still green; zero UI/feature diffs outside `docs/`.
   truncates its own recipe, and a diff against it will show 8000 on that line by design, not by
   transcription error. Gate: `scripts/verify-teach.mjs` (`--keep-setting` leaves `SAND_TEACH="1"`),
   which fails unless the two on-box copies of the recipe are the same text, unless
-  `inlinedChars === bodyChars`, and unless the agent claims the queue file.
+  `inlinedChars === bodyChars`, and unless the agent claims the queue file. Three exit codes, not
+  two: **0** every leg reached a verdict and passed, **1** a leg failed, **3** every verdict was a
+  pass and the ownership leg reached none, which on this provider is the common outcome. Release
+  runs pass `--require-ownership`, which turns that empty window back into a failure.
 - **Agent lifecycle facts (2026-09-03):** an agent is a directory under `agents/` with `store.db`;
   `deleted-agents.json` beside them is the tombstone list every reader consults; subagent ledgers
   live at `agents/sand-subagent-<id>/audit.jsonl` and are not agents; shared-desktop window
