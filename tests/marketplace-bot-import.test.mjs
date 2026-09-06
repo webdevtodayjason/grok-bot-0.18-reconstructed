@@ -190,10 +190,10 @@ function stubContainer() {
   };
 }
 
-async function renderedTab() {
+async function renderedTab(extraWindow = {}) {
   const source = await readFile(path.join(repoRoot, "ui/machine-room/marketplace-bots.js"), "utf8");
   const catalog = {
-    plugins: [{ id: "tinyfish", name: "TinyFish (API key)", tagline: "Web search and browser automation.", kind: "connector", install: { name: "tinyfish", command: "npx", args: [], env: { TINYFISH_API_KEY: "" } } }],
+    plugins: [{ id: "tinyfish", name: "TinyFish (API key)", tagline: "Web search and browser automation.", kind: "connector", connectorName: "tinyfish", install: { command: "npx", args: [], env: { TINYFISH_API_KEY: "" } } }],
     bots: [BOT, { id: "ops-watcher", name: "Ops watcher", creator: "Titanbot team", category: "Operations", description: "Watches a Slack channel.", instructions: "Watch.", skills: [], integrations: [], tile: { color: "#e7a23c", shape: "square" } }],
     categories: { bots: ["Featured", "Operations"] },
   };
@@ -203,15 +203,23 @@ async function renderedTab() {
     async fetch(url, init) {
       const route = String(url);
       if (route === "/connectors") return { ok: true, json: async () => ({ mcpServers: {} }) };
-      const body = route === "/api/listMarketplace" ? catalog : route === "/api/listShellTools" ? [] : {};
+      const args = init && init.body ? JSON.parse(init.body) : {};
+      const body = route === "/api/listMarketplace" ? catalog
+        : route === "/api/listShellTools" ? []
+          : route === "/api/listAgents" ? []
+            : route === "/api/createAgent" ? { agent: { id: "agent-new", name: args.name, description: args.description } }
+              : route === "/api/importAgentWorkflowText" ? { result: { imported: [args.name], skipped: [] } }
+                : route === "/api/getAgentWorkflows" ? BOT.skills.map((s) => ({ id: `wf-${s.name}`, name: s.name, source: "workflow" }))
+                  : {};
       return { ok: true, text: async () => JSON.stringify(body) };
     },
+    ...extraWindow,
   };
   const bots = new Function("window", `${source}\nreturn window.__marketplaceBots;`)(win);
   await bots.reload();
   const container = stubContainer();
   bots.render(container);
-  return { bots, container };
+  return { bots, container, win };
 }
 
 test("the Bots tab renders a card per template, and the bot page renders each of its three tabs", async () => {
@@ -239,4 +247,49 @@ test("the Bots tab renders a card per template, and the bot page renders each of
   container.click({ botsBack: "" });
   assert.match(container.innerHTML, /data-bot-id="research-desk"/);
   assert.ok(!container.innerHTML.includes("data-bot-page"));
+});
+
+// The card the whole tab exists to show. `adapter.refresh()` is a serial reload of the trays, the
+// roster, the live model and the transcript, and `refreshInstalled()` is another round trip to the
+// box; painting only after those two is what left the gate's 20 s poll with "no imported card on
+// screen". So the paint happens the moment the import returns, and this pins it by never letting
+// the refresh resolve.
+test("the imported agent is on screen before the refreshes behind it return", async () => {
+  let refreshStarted;
+  const refreshWasCalled = new Promise((resolve) => { refreshStarted = resolve; });
+  const { container } = await renderedTab({
+    __machineRoomAdapter: {
+      refresh() { refreshStarted(); return new Promise(() => {}); },
+    },
+  });
+
+  container.click({ botId: "research-desk" });
+  container.click({ importBot: "research-desk" });
+  await refreshWasCalled;
+
+  assert.match(container.innerHTML, /data-imported-agent="agent-new"/);
+  assert.ok(container.innerHTML.includes("Imported as"), container.innerHTML.slice(0, 200));
+  for (const skill of BOT.skills) assert.ok(container.innerHTML.includes(skill.name), skill.name);
+});
+
+// With the Integrations tab open, the tab's own rows are already above the imported card, so a
+// "Still needed" block there would draw each row -- and its Add button -- a second time.
+test("the imported card does not draw the integration rows a second time", async () => {
+  let refreshStarted;
+  const refreshWasCalled = new Promise((resolve) => { refreshStarted = resolve; });
+  const { container } = await renderedTab({
+    __machineRoomAdapter: {
+      refresh() { refreshStarted(); return new Promise(() => {}); },
+    },
+  });
+
+  container.click({ botId: "research-desk" });
+  container.click({ botTab: "integrations" });
+  container.click({ importBot: "research-desk" });
+  await refreshWasCalled;
+
+  assert.match(container.innerHTML, /data-imported-agent="agent-new"/);
+  const rows = container.innerHTML.match(/data-integration="tinyfish"/g) ?? [];
+  assert.equal(rows.length, 1, container.innerHTML.slice(-400));
+  assert.equal((container.innerHTML.match(/data-add-integration="tinyfish"/g) ?? []).length, 1);
 });

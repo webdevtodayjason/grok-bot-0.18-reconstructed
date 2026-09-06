@@ -172,10 +172,11 @@
 
   // ------------------------------------------------------------------ installed state
   // The contract's rule, read from the box rather than remembered: a plugin is installed when its
-  // connector name is a key in connectors.json; a shell tool when the box's own shell can find its
-  // program, which is what `listShellTools` answers in `installed`. Its `stored` is the other
-  // fact -- whether the host holds the key -- and a key is not an install.
-  const connectorNameOf = (plugin) => text(plugin?.install?.name) || text(plugin?.connector) || text(plugin?.id);
+  // connector name -- the catalog's own `connectorName` field -- is a key in connectors.json; a
+  // shell tool when the box's own shell can find its program, which is what `listShellTools`
+  // answers in `installed`. Its `stored` is the other fact -- whether the host holds the key --
+  // and a key is not an install.
+  const connectorNameOf = (plugin) => text(plugin?.connectorName) || text(plugin?.install?.name) || text(plugin?.connector) || text(plugin?.id);
   const shellToolIdOf = (plugin) => (typeof plugin?.install === "string" ? text(plugin.install) : text(plugin?.install?.id) || text(plugin?.id));
 
   async function readInstalledIds(gateway, plugins) {
@@ -359,8 +360,8 @@
       + `<span class="field-hint">Each is imported as its own SKILL.md through importAgentWorkflowText. The host's workflow library is shared across the box, so a skill imported here is offered to every agent on it.</span>`;
   }
 
-  function integrationsMarkup(bot) {
-    const need = listOf(bot.integrations).map(text).filter(Boolean);
+  function integrationsMarkup(bot, ids = null) {
+    const need = (ids ?? listOf(bot.integrations)).map(text).filter(Boolean);
     if (!need.length) return `<div class="empty-state">This template needs no plugins: it runs on the box's own built-in tools.</div>`;
     const rows = need.map((id) => {
       const plugin = pluginById(id);
@@ -395,9 +396,13 @@
     const skippedNote = skipped.length
       ? `<p style="margin-top:8px">Skipped by the host: ${escapeHtml(skipped.map((s) => `${s.source} (${s.reason})`).join("; "))}</p>`
       : "";
-    const missingRows = missing.length
-      ? `<div class="plugin-section-title" style="margin-top:14px"><span>Still needed</span></div>${integrationsMarkup(bot)}`
-      : `<p style="margin-top:8px">Every plugin this Bot needs is already installed on this box.</p>`;
+    // On the Integrations tab those very rows are already on the page above this card, so a
+    // "Still needed" block there would draw every row -- and its Add button -- a second time.
+    const missingRows = view.page === "integrations"
+      ? ""
+      : missing.length
+        ? `<div class="plugin-section-title" style="margin-top:14px"><span>Still needed</span></div>${integrationsMarkup(bot, missing)}`
+        : `<p style="margin-top:8px">Every plugin this Bot needs is already installed on this box.</p>`;
     return `<div class="panel-card" data-imported-agent="${escapeHtml(agent.id)}"><h3>Imported as “${escapeHtml(agent.name)}”</h3><p>${escapeHtml(oneLine(agent.description))}</p>${skillTags}${skippedNote}${open}</div>${missingRows}`;
   }
 
@@ -498,6 +503,9 @@
     try {
       const result = await importBot(relayGateway(), bot);
       imports.set(text(bot.id), { state: "done", ...result });
+      // On screen first: the adapter refresh and the connectors re-read below are both round trips
+      // to the box, and the imported agent must not wait behind them to be drawn.
+      paint();
       // The roster on the page behind the panel is stale until the adapter re-reads it, and an
       // agent the operator cannot see is what "the page shows the new agent" is there to prevent.
       const adapter = adapterOf();
