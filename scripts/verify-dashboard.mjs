@@ -938,8 +938,9 @@ try {
       // category -- because there is one catalog and it has to give one answer.
       const probe = String(catalogPlugins[0].name).slice(0, 4);
       await page.fill("#marketplace-search", probe); await page.waitForTimeout(700);
-      // Deduped: a featured plugin is drawn twice on purpose, once under Featured and once under
-      // its own category, the way the sectioned catalog this page is modelled on does it.
+      // Deduped defensively. QOL-LOGOS made Featured claim a card and the category sections skip
+      // what it drew, so each id is on the page once; the Set is what makes this line survive
+      // either rule rather than a claim about which one is in force.
       const found = [...new Set(await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard)))];
       const wanted = catalogPlugins
         .filter((plugin) => [plugin.name, plugin.tagline, plugin.category].some((field) => String(field ?? "").toLowerCase().includes(probe.toLowerCase())))
@@ -956,6 +957,87 @@ try {
     check(!inMarket.some((id) => id.startsWith("sub:")), "no provider card appears in the Marketplace", inMarket.join(", ") || "nothing installed on this box");
     check(inMarket.every((id) => id.startsWith("mcp:") || id.startsWith("shell:")), "and every card in it is a connector or a shell tool", inMarket.join(", "));
     check((await page.$$("[data-marketplace] [data-channel-state]")).length === 0, "and no chat listener either");
+
+    // -- QOL-LOGOS: one tile, one size, a real logo where the catalog names one, and a card that
+    // holds its own contents. The sizes are the contract: 40px on a card and in the installed
+    // strip, 64px on the plugin page, the image inside with 6px of padding and object-fit:
+    // contain. The image is a FILE in this repo under ui/machine-room/marketplace/logos/, served
+    // by the relay out of the console's own directory -- so naturalWidth > 0 also says the relay
+    // still serves it, which is the half of this that a unit test cannot reach.
+    if (catalogPlugins.length > 0) {
+      const withLogo = catalogPlugins.filter((plugin) => typeof plugin?.icon?.file === "string" && plugin.icon.file.length > 0);
+      const tiles = await page.evaluate(() => {
+        const rect = (el) => { const r = el.getBoundingClientRect(); return { w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100 }; };
+        const read = (selector, where) => [...document.querySelectorAll(selector)].map((el) => ({ where, id: el.closest("[data-marketplace-card]")?.dataset.marketplaceCard ?? el.dataset.pluginId ?? "", ...rect(el) }));
+        return [...read("[data-marketplace-card] .marketplace-tile", "card"), ...read("[data-marketplace-installed] .marketplace-tile", "strip")];
+      });
+      const offSize = tiles.filter((tile) => Math.abs(tile.w - 40) > 0.5 || Math.abs(tile.h - 40) > 0.5);
+      check(tiles.length > 0 && offSize.length === 0, `every marketplace tile is the standard 40px square (${tiles.length})`,
+        offSize.length ? offSize.map((tile) => `${tile.where}:${tile.id} ${tile.w}x${tile.h}`).join(", ") : "cards and installed strip");
+      // A logo that 404s, or one the catalog names with a path the console refuses, leaves the
+      // letter tile behind: naturalWidth is what tells those two apart from a drawn image. The
+      // logo lives in the CATALOG, which ships inside the host bundle, so a box still running a
+      // pre-QOL-LOGOS bundle names none -- that is an INFO about what is deployed, not a red row
+      // about the console, and the paths themselves are held by tests/marketplace-logos.test.mjs.
+      if (withLogo.length === 0) {
+        console.log("  INFO  the catalog on this box names no icon.file yet — rebuild and deploy the host bundle before reading the logo rows as green");
+      } else {
+        const logos = await page.evaluate(() => [...document.querySelectorAll("[data-marketplace-card] .marketplace-tile-img")]
+          .map((img) => ({ id: img.closest("[data-marketplace-card]")?.dataset.marketplaceCard ?? "", src: img.getAttribute("src"), natural: img.naturalWidth })));
+        const drawn = new Map(logos.map((logo) => [logo.id, logo]));
+        const badLogos = withLogo.map((plugin) => {
+          const logo = drawn.get(String(plugin.id));
+          if (logo == null) return `${plugin.id}: no <img> on the card`;
+          if (logo.src !== plugin.icon.file) return `${plugin.id}: card draws ${logo.src}, catalog says ${plugin.icon.file}`;
+          return logo.natural > 0 ? null : `${plugin.id}: ${logo.src} did not load`;
+        }).filter(Boolean);
+        check(badLogos.length === 0, `every plugin the catalog gives a logo draws it, loaded (${withLogo.length})`,
+          badLogos.length ? badLogos.join("; ") : withLogo.map((plugin) => plugin.id).join(", "));
+      }
+      // Nothing on a card may stick out of it: the "✓ Added" pill clipped at the right edge is
+      // exactly what this catches, and so is a tagline that grows the card instead of truncating.
+      const spills = await page.evaluate(() => [...document.querySelectorAll("[data-marketplace-card]")].flatMap((card) => {
+        const box = card.getBoundingClientRect();
+        return [...card.querySelectorAll("*")]
+          .filter((kid) => { const k = kid.getBoundingClientRect(); return k.width > 0 && (k.right > box.right + 0.5 || k.left < box.left - 0.5 || k.bottom > box.bottom + 0.5 || k.top < box.top - 0.5); })
+          .map((kid) => `${card.dataset.marketplaceCard}:${kid.className || kid.tagName}`);
+      }));
+      check(spills.length === 0, "and no card overflows its own bounds", spills.slice(0, 6).join(", ") || "every card contains its tile, copy and button");
+      const clipped = await page.evaluate(() => [...document.querySelectorAll("[data-marketplace-card] .marketplace-card-action")]
+        .filter((el) => el.scrollWidth > el.clientWidth).map((el) => `${el.closest("[data-marketplace-card]").dataset.marketplaceCard} "${el.textContent.trim()}"`));
+      check(clipped.length === 0, "the Add button and the ✓ Added pill are drawn whole, not clipped", clipped.join(", ") || "nothing shrunk to a clip");
+      // A card once on the page: Featured claims a featured plugin and the category sections skip
+      // what it drew. The category chip still lists it -- Featured is not drawn under a chip.
+      const drawnIds = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
+      const twice = drawnIds.filter((id, i) => drawnIds.indexOf(id) !== i);
+      check(twice.length === 0, "and a card is drawn once, not once under Featured and again under its category", [...new Set(twice)].join(", ") || `${drawnIds.length} cards, ${new Set(drawnIds).size} plugins`);
+      const featuredIds = catalogPlugins.filter((plugin) => plugin.featured === true).map((plugin) => String(plugin.id));
+      const withCategory = featuredIds.find((id) => catalogPlugins.some((plugin) => String(plugin.id) === id && String(plugin.category ?? "") !== "Featured")) ?? null;
+      if (withCategory) {
+        const category = String(catalogPlugins.find((plugin) => String(plugin.id) === withCategory).category);
+        await page.click(`[data-marketplace-category="${category}"]`); await page.waitForTimeout(600);
+        const inCategory = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
+        check(inCategory.includes(withCategory), `and the ${category} chip still lists ${withCategory}, which Featured drew under All`, inCategory.join(", "));
+        await page.click(`[data-marketplace-category="All"]`); await page.waitForTimeout(600);
+      }
+      // The plugin page's tile is the same tile at the page size. Opened and closed here rather
+      // than folded into the Add flow below, which uninstalls what it opens.
+      const heroId = withLogo.length ? String(withLogo[0].id) : String(catalogPlugins[0].id);
+      await page.click(`[data-marketplace-plugin="${heroId}"]`, { timeout: 12_000 }).catch(() => {});
+      await page.waitForTimeout(900);
+      const hero = await page.evaluate(() => {
+        const tile = document.querySelector(".plugin-hero .marketplace-tile");
+        if (tile == null) return null;
+        const r = tile.getBoundingClientRect();
+        const img = tile.querySelector(".marketplace-tile-img");
+        return { w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100, src: img?.getAttribute("src") ?? null, natural: img?.naturalWidth ?? 0 };
+      });
+      check(hero != null && Math.abs(hero.w - 64) <= 0.5 && Math.abs(hero.h - 64) <= 0.5,
+        `the ${heroId} plugin page draws the same tile at 64px`, hero ? `${hero.w}x${hero.h}` : "no tile on the plugin page");
+      if (withLogo.length > 0) check(hero != null && hero.natural > 0, "with its logo loaded on it", hero ? `${hero.src ?? "letter tile"} natural ${hero.natural}` : "no tile");
+      await page.click("[data-marketplace-back]").catch(() => {});
+      await page.waitForTimeout(700);
+    }
 
     // -- MR-02: the box's real server, its real tools and its real status, on its plugin page.
     await pickPlugin("mcp:localfiles");

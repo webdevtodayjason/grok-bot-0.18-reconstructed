@@ -1575,8 +1575,16 @@
   function marketplaceInstalledStripMarkup() {
     const cards = marketplaceCards();
     const connected = cards.filter((card) => card.status === "connected").length;
+    // QOL-LOGOS: the strip's tiles are the catalog's tiles, at the same 40px as a card's. A card
+    // the catalog does not carry (a custom MCP server, a gate's throwaway) keeps the character it
+    // has always had, on the default tile.
     const icons = cards
-      .map((card) => `<button class="plugin-icon" type="button" data-plugin-id="${escapeHtml(card.id)}" title="${escapeHtml(card.name)}" aria-label="${escapeHtml(card.name)}">${escapeHtml(card.icon)}</button>`)
+      .map((card) => {
+        const icon = marketplaceIconForCard(card);
+        const background = icon?.color ? ` style="background:${escapeHtml(marketplaceColor(icon.color))}"` : "";
+        const face = icon ? marketplaceTileFaceMarkup(icon, card.name) : escapeHtml(card.icon);
+        return `<button class="plugin-icon marketplace-tile" type="button" data-plugin-id="${escapeHtml(card.id)}" title="${escapeHtml(card.name)}" aria-label="${escapeHtml(card.name)}"${background}>${face}</button>`;
+      })
       .join("");
     return `<div class="marketplace-installed" data-marketplace-installed><span><strong>${cards.length} installed</strong> · ${connected} connected</span><div class="marketplace-installed-icons">${icons || `<small>Nothing is installed on this box yet.</small>`}</div></div>`;
   }
@@ -1604,6 +1612,62 @@
       ? text : "rgba(255, 255, 255, 0.08)";
   };
 
+  // -- QOL-LOGOS ------------------------------------------------------------------------------
+  // One tile, one size, everywhere. The catalog may name a logo FILE beside its letter and colour
+  // (`icon.file` on a plugin, `tile.file` on a bot, source/shared/marketplace/catalog.ts). It is a
+  // path relative to /machine-room/ -- a file the relay already serves out of ui/machine-room/,
+  // beside app.js -- and NEVER a URL: this console fetches nothing from the internet, so a box with
+  // no outbound network still paints the whole panel. The letter tile stays the fallback for a
+  // plugin the catalog gives no file, and for a file that does not load.
+  const MARKETPLACE_LOGO_PREFIX = "marketplace/logos/";
+  const marketplaceLogoSrc = (file) => {
+    const value = String(file ?? "").trim();
+    if (!value.startsWith(MARKETPLACE_LOGO_PREFIX)) return "";
+    if (value.split("/").includes("..")) return "";
+    return /^[\w./-]+\.(svg|png)$/i.test(value) ? value : "";
+  };
+
+  // The tile's face: the logo when the catalog names one, the letter otherwise. The letter rides
+  // along in data-marketplace-letter so a broken image can be turned back into the letter tile
+  // without a second read of the catalog.
+  function marketplaceTileFaceMarkup(icon, name) {
+    const letter = String(icon?.letter ?? String(name ?? "?").slice(0, 1)).toUpperCase();
+    const src = marketplaceLogoSrc(icon?.file);
+    if (!src) return escapeHtml(letter);
+    return `<img class="marketplace-tile-img" src="${escapeHtml(src)}" alt="" data-marketplace-logo="${escapeHtml(src)}" data-marketplace-letter="${escapeHtml(letter)}" />`;
+  }
+
+  // The whole tile, at one of the two standard sizes: 40px on a card and in the installed strip,
+  // 64px on the plugin page. The size is CSS, not markup, so nothing here can invent a third one.
+  function marketplaceTileMarkup(icon, name, large) {
+    const color = marketplaceColor(icon?.color);
+    return `<span class="plugin-icon marketplace-tile${large === true ? " is-large" : ""}" style="background:${escapeHtml(color)}">${marketplaceTileFaceMarkup(icon, name)}</span>`;
+  }
+
+  // An installed card's catalog icon, so the strip's tiles are the same tiles as the cards'. The
+  // strip is drawn from what the box actually runs (state.plugins), and marketplaceInstalls is the
+  // only thing that says which catalog row a card id belongs to.
+  function marketplaceIconForCard(card) {
+    const row = marketplaceInstalls.find((install) => String(install.cardId) === String(card?.id));
+    const item = row ? marketplaceItemById(row.id) : null;
+    return item?.icon ?? null;
+  }
+
+  // An image that does not load must not leave a broken-image glyph where a tile should be: the
+  // img is dropped and its letter written back, so the fallback is the letter tile the catalog
+  // always carried. `error` does not bubble, so this listens in the capture phase, once.
+  if (!window.__marketplaceLogoFallback) {
+    window.__marketplaceLogoFallback = true;
+    document.addEventListener("error", (event) => {
+      const img = event.target;
+      if (!(img instanceof HTMLImageElement) || !img.classList.contains("marketplace-tile-img")) return;
+      const tile = img.parentElement;
+      const letter = String(img.dataset.marketplaceLetter ?? "?");
+      img.remove();
+      if (tile) tile.textContent = letter;
+    }, true);
+  }
+
   // The same filter the catalog's own SearchPlugins tool applies: name, tagline, category.
   function marketplaceMatches(item) {
     const q = marketplaceQuery.trim().toLowerCase();
@@ -1613,12 +1677,12 @@
 
   function marketplaceCardMarkup(item) {
     const install = marketplaceInstallById(item.id);
-    const color = marketplaceColor(item?.icon?.color);
-    const letter = String(item?.icon?.letter ?? String(item?.name ?? "?").slice(0, 1)).toUpperCase();
     const action = install?.installed === true
-      ? `<span class="status-pill success" data-marketplace-added="${escapeHtml(item.id)}">✓ Added</span>`
-      : `<button class="primary-button" type="button" data-marketplace-add="${escapeHtml(item.id)}">Add</button>`;
-    return `<div class="plugin-card marketplace-card" data-marketplace-card="${escapeHtml(item.id)}"><button class="marketplace-card-open" type="button" data-marketplace-plugin="${escapeHtml(item.id)}"><span class="plugin-icon" style="background:${escapeHtml(color)}">${escapeHtml(letter)}</span><span class="marketplace-card-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.tagline ?? "")}</small></span></button>${action}</div>`;
+      ? `<span class="status-pill success marketplace-card-action" data-marketplace-added="${escapeHtml(item.id)}">✓ Added</span>`
+      : `<button class="primary-button marketplace-card-action" type="button" data-marketplace-add="${escapeHtml(item.id)}">Add</button>`;
+    // QOL-LOGOS: one tile at one size (the catalog's logo when it names one, its letter when not),
+    // and the action carries its own class so the "✓ Added" pill cannot be squeezed to a clip.
+    return `<div class="plugin-card marketplace-card" data-marketplace-card="${escapeHtml(item.id)}"><button class="marketplace-card-open" type="button" data-marketplace-plugin="${escapeHtml(item.id)}">${marketplaceTileMarkup(item?.icon, item?.name)}<span class="marketplace-card-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.tagline ?? "")}</small></span></button>${action}</div>`;
   }
 
   function marketplaceSectionsMarkup() {
@@ -1628,14 +1692,22 @@
         ? `<div class="empty-state">No plugin in this catalog matches “${escapeHtml(marketplaceQuery)}”.</div>`
         : `<div class="empty-state">There is no catalog to draw. The installed strip above is what this box is actually running.</div>`;
     }
+    // QOL-LOGOS: a card is drawn ONCE on the page. Featured is a flag, not a category, so a
+    // featured plugin used to be painted twice under All -- once in Featured and again in its own
+    // category -- which is what the operator's screenshot shows. Featured now claims it, and the
+    // category sections skip what Featured already drew. Press the category's own chip and the
+    // section still lists it: Featured is not drawn then, so nothing is being hidden.
+    const drawn = new Set();
     const sections = marketplaceCategories()
       .filter((category) => category !== MARKETPLACE_ALL)
       .filter((category) => marketplaceCategory === MARKETPLACE_ALL || category === marketplaceCategory)
       .map((category) => {
-        const members = category === "Featured"
+        const members = (category === "Featured"
           ? items.filter((item) => item.featured === true)
-          : items.filter((item) => String(item.category ?? "") === category);
+          : items.filter((item) => String(item.category ?? "") === category))
+          .filter((item) => !drawn.has(String(item.id)));
         if (!members.length) return "";
+        for (const item of members) drawn.add(String(item.id));
         return `<div class="plugin-group-title">${escapeHtml(category)}</div><div class="marketplace-grid">${members.map(marketplaceCardMarkup).join("")}</div>`;
       })
       .join("");
@@ -1671,8 +1743,11 @@
     if (!item && !card) return `${back}<div class="empty-state">That plugin is not in this host's catalog and nothing on this box matches it.</div>`;
     const lead = contextLead();
     const name = String(item?.name ?? card?.name ?? key);
-    const letter = String(item?.icon?.letter ?? card?.icon ?? name.slice(0, 1)).toUpperCase();
-    const color = item?.icon?.color ? `style="background:${escapeHtml(marketplaceColor(item.icon.color))}"` : "";
+    // QOL-LOGOS: the same tile as the card, at the page size. A card with no catalog row behind it
+    // keeps its own character and the console's default tile colour.
+    const hero = item?.icon
+      ? marketplaceTileMarkup(item.icon, name, true)
+      : `<span class="plugin-icon marketplace-tile is-large">${escapeHtml(String(card?.icon ?? name.slice(0, 1)).toUpperCase())}</span>`;
     const description = String(item?.description ?? card?.description ?? "");
     // A catalog row carries the contract's three states. A card with no catalog row keeps the
     // status pill it has always had rather than being forced into a vocabulary it never used.
@@ -1681,7 +1756,7 @@
     const source = item?.source?.url
       ? `<a class="ghost-button" href="${escapeHtml(String(item.source.url))}" target="_blank" rel="noreferrer noopener" data-marketplace-source>View source ↗</a>`
       : "";
-    return `${back}<section class="plugin-detail"><div class="plugin-hero"><span class="plugin-icon" ${color}>${escapeHtml(letter)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(name)}</h3><p>${escapeHtml(description)}</p></div><span class="status-pill${ready ? " success" : ""}">${escapeHtml(label)}</span></div><div class="form-actions marketplace-actions">${source}${marketplaceInstallControlMarkup(item, install, card)}</div><div class="plugin-sections">${marketplaceAccountsSectionMarkup(item, install, card, lead)}${card?.shellTool ? shellToolMarkup(card, lead) : ""}${marketplaceConnectorsSectionMarkup(item, card)}</div></section>`;
+    return `${back}<section class="plugin-detail"><div class="plugin-hero">${hero}<div class="plugin-hero-copy"><h3>${escapeHtml(name)}</h3><p>${escapeHtml(description)}</p></div><span class="status-pill${ready ? " success" : ""}">${escapeHtml(label)}</span></div><div class="form-actions marketplace-actions">${source}${marketplaceInstallControlMarkup(item, install, card)}</div><div class="plugin-sections">${marketplaceAccountsSectionMarkup(item, install, card, lead)}${card?.shellTool ? shellToolMarkup(card, lead) : ""}${marketplaceConnectorsSectionMarkup(item, card)}</div></section>`;
   }
 
   // Add, or Uninstall with the offer to clear what the host stores for it. The clear has to happen

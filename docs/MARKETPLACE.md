@@ -22,11 +22,23 @@ connectors & skills** are now one word: **Marketplace**. It opens on the **Plugi
 the second pill.
 
 **Plugins** is the box's own catalog of things it can install: a search field, a row of category
-chips, and a section per category of cards. A card is an icon tile (a letter on a colour — the
-catalog carries no external images, so a card cannot pull a logo off the internet), the plugin name,
-one line of tagline, and an **Add** button that becomes **✓ Added** once the plugin is installed.
-Clicking a card opens the **plugin page**: the icon and name, **View Source ↗**, **Uninstall**, the
-description, an **Accounts** box, and a **Connectors** box.
+chips that wraps rather than overflowing, and a section per category of cards. A card is an icon
+tile, the plugin name, one line of tagline that truncates with an ellipsis, and an **Add** button
+that becomes **✓ Added** once the plugin is installed. **A card is drawn once**: a featured plugin
+is claimed by the Featured section and skipped by its own category section underneath, and pressing
+that category's chip still lists it (Featured is not drawn then). Clicking a card opens the
+**plugin page**: the icon and name, **View Source ↗**, **Uninstall**, the description, an
+**Accounts** box, and a **Connectors** box.
+
+**The icon tile is one fixed size everywhere** — 40px on a card and in the installed strip, 64px on
+the plugin page — with the image inside it at 6px of padding, `object-fit: contain`, on a rounded
+tile painted the catalog's own colour. Where the catalog names a logo it draws the logo; where it
+does not, the same tile carries the letter. **Still nothing is fetched:** a logo is a FILE in this
+repo under `ui/machine-room/marketplace/logos/`, served by the relay out of the console's own
+directory, and the catalog names it by a path relative to `/machine-room/` — never a URL. Each file
+is credited in that directory's `NOTICE.md` with its source and its licence, and
+`tests/marketplace-logos.test.mjs` fails if the catalog names a path with no file behind it, or if
+a file there is not named in the NOTICE.
 
 **Bots** is a catalog of agent templates: featured cards (a coloured tile, the creator, the bot's
 name), a search field, category chips, and sections of rows underneath. Clicking one opens the **bot
@@ -196,7 +208,7 @@ and a rebuild, not a file dropped on the box.
 | `description` | the paragraph on the plugin page |
 | `category` | one of the declared plugin categories |
 | `featured` | `true` puts it under the **Featured** chip as well as its own |
-| `icon` | `{ letter, color }` — drawn, never fetched; the catalog carries no image URLs |
+| `icon` | `{ letter, color, file? }` — the letter and colour are drawn; `file` is an optional path to a logo in `ui/machine-room/marketplace/logos/`, relative to `/machine-room/`, **never a URL** |
 | `source` | `{ label, url }`, behind **View Source ↗** |
 | `kind` | `"connector"` or `"shell-tool"` |
 | `install` | for a connector, the exact `{ command, args, env }` entry; for a shell tool, the shell-tool id; `null` for Custom MCP server |
@@ -212,7 +224,7 @@ and a rebuild, not a file dropped on the box.
   description: "TinyFish's hosted MCP endpoint, bridged into the box over stdio. …",
   category: "Web & Search",
   featured: true,
-  icon: { letter: "T", color: "#0f766e" },
+  icon: { letter: "T", color: "#0f766e", file: "marketplace/logos/tinyfish.png" },
   source: { label: "agent.tinyfish.ai/mcp", url: "https://agent.tinyfish.ai/mcp" },
   kind: "connector",
   connectorName: "tinyfish",
@@ -256,7 +268,7 @@ review, Shell tools.
 | `creator` | `"Titanbot team"` for everything shipped in the box |
 | `category` | one of the declared bot categories |
 | `featured` | `true` puts it in the Featured strip |
-| `tile` | `{ color, shape }` — the card's face, drawn, not fetched |
+| `tile` | `{ color, shape, file? }` — the card's face; `file` is the same kind of local logo path a plugin's `icon.file` is |
 | `description` | the paragraph on the bot page |
 | `instructions` | the persona the imported agent runs with (§4 step 2) |
 | `skills` | `[{ name, description, body }]`, `body` being a `SKILL.md` text |
@@ -269,7 +281,7 @@ review, Shell tools.
   creator: "Titanbot team",
   category: "Operations",
   featured: true,
-  tile: { color: "#2f6f4f", shape: "circle" },
+  tile: { color: "#2f6f4f", shape: "circle", file: "marketplace/logos/bot-research-desk.png" },
   description: "Takes a research question to a sourced answer: searches, fetches the pages it cites, …",
   instructions: "You are a research desk. …",
   skills: [{ name: "Source a claim", description: "Search, fetch, quote, cite.", body: "# Source a claim\n…" }],
@@ -296,8 +308,12 @@ Featured because `featured` is true, and under From Titanbot team because `creat
    land the `{command,args,env}` entry so the entry and the report cannot drift.
 2. Add the object to the `PLUGINS` array in `source/shared/marketplace/catalog.ts` (the private const
    the file exports as `MARKETPLACE_PLUGINS`). `category` must be one of
-   the declared categories. `icon` is a letter and a colour — do not reach for a logo URL, the cards
-   are deliberately image-free. Write one `credentialHints` line per env key the entry leaves empty:
+   the declared categories. `icon` is a letter and a colour, and optionally an `icon.file`: commit
+   the image under `ui/machine-room/marketplace/logos/<plugin-id>.svg|png`, add its row to that
+   directory's `NOTICE.md` with the source it came from and the licence that allows it, and name it
+   by the path relative to `/machine-room/`. **Never a URL** — the console fetches no image, so a
+   logo that is not in the repo is a card that goes blank. No file is fine: the letter tile is the
+   fallback and always has been. Write one `credentialHints` line per env key the entry leaves empty:
    what the value is, where it is created, what it needs. **Never a key, a token or an example
    secret** — a catalog is source, it is in git, and it ships inside the bundle.
 3. Add the service's section to `docs/CONNECTORS.md` so the operator has a walk-through, and point
@@ -325,7 +341,10 @@ Two existing gates gain arms for it. Both are box gates — the integrator runs 
 box, through `bash scripts/on-box.sh`.
 
 - **`scripts/verify-dashboard.mjs`** — the Marketplace opens on Plugins with the catalog's cards,
-  category chips and a working search; no provider appears in the Marketplace and the Providers
+  category chips and a working search; every card tile is the standard 40px square and the plugin
+  page's is 64px, every plugin the catalog gives an `icon.file` draws an `<img>` that actually
+  loaded, no card overflows its own bounds and no Add button or **✓ Added** pill is clipped, and a
+  card is on the page once rather than under both Featured and its category; no provider appears in the Marketplace and the Providers
   section appears in Settings; **Add** on *TinyFish (API key)* writes the entry and opens a plugin
   page whose Accounts row says **Needs auth**; **Uninstall** removes it and `connectors.json` is
   byte-identical to before; the Bots tab lists the six templates; **Import** on *Research desk*

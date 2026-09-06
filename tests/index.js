@@ -60,3 +60,4 @@ import "./tinyfish-key-stub.test.mjs";
 import "./shell-tools.test.mjs";
 import "./marketplace-bot-import.test.mjs";
 import "./marketplace-catalog.test.mjs";
+import "./marketplace-logos.test.mjs";

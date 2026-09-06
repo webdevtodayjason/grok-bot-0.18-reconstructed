@@ -26,10 +26,27 @@
 
 export type MarketplacePluginKind = "connector" | "shell-tool";
 
-/** No external images: a letter on a colour is the whole icon, drawn by the console. */
+/**
+ * A letter on a colour, and optionally a logo file that sits on top of it.
+ *
+ * `file` is a path RELATIVE TO `/machine-room/` -- the console's own document root, which the relay
+ * serves out of `ui/machine-room/`. It is never a URL: the console fetches nothing from the
+ * internet, so every image it draws is a file in this repo under `ui/machine-room/marketplace/logos/`,
+ * named in that directory's NOTICE.md with its source and licence. `letter` and `color` stay
+ * REQUIRED and are the fallback: a plugin with no logo, or one whose image fails to load, is drawn
+ * as the letter tile it has always been.
+ */
 export interface MarketplaceIcon {
   readonly letter: string;
   readonly color: string;
+  readonly file?: string;
+}
+
+/** A bot template's face: the drawn tile, and optionally the same kind of local logo file. */
+export interface MarketplaceBotTile {
+  readonly color: string;
+  readonly shape: string;
+  readonly file?: string;
 }
 
 /** The connectors.json entry, exactly as it lands on the box. */
@@ -77,7 +94,7 @@ export interface MarketplaceBot {
   readonly creator: string;
   readonly category: string;
   readonly featured: boolean;
-  readonly tile: { readonly color: string; readonly shape: string };
+  readonly tile: MarketplaceBotTile;
   readonly description: string;
   /** The persona the imported agent runs with. */
   readonly instructions: string;
@@ -132,7 +149,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "GitHub's own hosted MCP server, bridged into this box's stdio interface by mcp-remote and authorized with a fine-grained personal access token. The entry filters the server down to repository, issue and pull-request reads plus the identity tool, and sets X-MCP-Readonly, so nothing it exposes can write to a repository.",
     category: "Development",
     featured: true,
-    icon: Object.freeze({ letter: "G", color: "#2d333b" }),
+    icon: Object.freeze({ letter: "G", color: "#2d333b", file: "marketplace/logos/github.svg" }),
     source: Object.freeze({ label: "github/github-mcp-server", url: "https://github.com/github/github-mcp-server" }),
     kind: "connector",
     connectorName: "github",
@@ -168,7 +185,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "A maintained stdio Slack server that takes a user OAuth token from the environment, so it acts as the installing user and search works. Posting stays off: that is the server's own default, not a header this entry sets. This is not the Slack chat listener — the listener binds inbound events to an agent, this connector is outbound tools inside the box.",
     category: "Communication",
     featured: true,
-    icon: Object.freeze({ letter: "S", color: "#4a154b" }),
+    icon: Object.freeze({ letter: "S", color: "#4a154b", file: "marketplace/logos/slack.png" }),
     source: Object.freeze({ label: "korotovsky/slack-mcp-server", url: "https://github.com/korotovsky/slack-mcp-server" }),
     kind: "connector",
     connectorName: "slack",
@@ -190,7 +207,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "Linear's hosted Streamable HTTP endpoint, bridged by mcp-remote with a personal API key as the bearer. The header matters: without it mcp-remote falls through to a browser OAuth flow, and this box has no browser that can finish one. A read-only key is what Linear's own MCP guidance recommends.",
     category: "Project management",
     featured: true,
-    icon: Object.freeze({ letter: "L", color: "#5e6ad2" }),
+    icon: Object.freeze({ letter: "L", color: "#5e6ad2", file: "marketplace/logos/linear.svg" }),
     source: Object.freeze({ label: "linear.app/docs/mcp", url: "https://linear.app/docs/mcp" }),
     kind: "connector",
     connectorName: "linear",
@@ -220,7 +237,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "One stdio process covering Gmail and Docs. It mints access tokens at runtime from an OAuth client pair plus a refresh token, so consent is done once in Google's OAuth Playground and nothing afterwards needs a browser inside the box. Three credential fields, not one.",
     category: "Documents & Files",
     featured: false,
-    icon: Object.freeze({ letter: "W", color: "#1a73e8" }),
+    icon: Object.freeze({ letter: "W", color: "#1a73e8", file: "marketplace/logos/google.svg" }),
     source: Object.freeze({ label: "EveryInc/google-workspace-mcp-server", url: "https://github.com/EveryInc/google-workspace-mcp-server" }),
     kind: "connector",
     connectorName: "google",
@@ -246,7 +263,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "TinyFish's hosted MCP endpoint, bridged by mcp-remote with the API key carried as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. mcp-remote expands ${TINYFISH_API_KEY} from its own environment at start, so the literal ${...} text is what lands in connectors.json and the key stays in the host's store.",
     category: "Web & Search",
     featured: true,
-    icon: Object.freeze({ letter: "T", color: "#0f766e" }),
+    icon: Object.freeze({ letter: "T", color: "#0f766e", file: "marketplace/logos/tinyfish.png" }),
     source: Object.freeze({ label: "agent.tinyfish.ai/mcp", url: "https://agent.tinyfish.ai/mcp" }),
     kind: "connector",
     connectorName: "tinyfish",
@@ -276,7 +293,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "The reference filesystem MCP server, scoped to /workspace inside the box. It needs no credential at all — the box's own filesystem is the whole permission model — so its card has no Accounts row to fill and it reads Ready as soon as the server connects.",
     category: "Documents & Files",
     featured: false,
-    icon: Object.freeze({ letter: "F", color: "#7c5cff" }),
+    icon: Object.freeze({ letter: "F", color: "#7c5cff", file: "marketplace/logos/localfiles.svg" }),
     source: Object.freeze({
       label: "modelcontextprotocol/servers · filesystem",
       url: "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
@@ -298,7 +315,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "There is no CodeRabbit MCP server: the official product is an MCP client, and the community servers are unmaintained or read GitHub comments rather than run reviews. The integration is the official CLI with an Agentic API key in the agent's shell environment, installed into the box and run as `cr review --agent`.",
     category: "Code review",
     featured: true,
-    icon: Object.freeze({ letter: "C", color: "#e05d38" }),
+    icon: Object.freeze({ letter: "C", color: "#e05d38", file: "marketplace/logos/coderabbit.svg" }),
     source: Object.freeze({ label: "docs.coderabbit.ai/cli", url: "https://docs.coderabbit.ai/cli/index.md" }),
     kind: "shell-tool",
     install: "coderabbit",
@@ -315,7 +332,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       "A pip package that reads TINYFISH_API_KEY out of the environment, with a published SKILL.md the host imports as an agent workflow so the agent learns the commands from their author. Its key lives in the shell section of the secret store, which is a different place from the tinyfish connector's process environment: storing one does not fill the other.",
     category: "Shell tools",
     featured: false,
-    icon: Object.freeze({ letter: "T", color: "#155e75" }),
+    icon: Object.freeze({ letter: "T", color: "#155e75", file: "marketplace/logos/tinyfish-cli.png" }),
     source: Object.freeze({
       label: "webdevtodayjason/cli-anything-tinyfish",
       url: "https://github.com/webdevtodayjason/cli-anything-tinyfish",
@@ -429,7 +446,7 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([
     creator: "Titanbot team",
     category: "Featured",
     featured: true,
-    tile: Object.freeze({ color: "#0f766e", shape: "circle" }),
+    tile: Object.freeze({ color: "#0f766e", shape: "circle", file: "marketplace/logos/bot-research-desk.png" }),
     description: "Answers a research question with sources, using TinyFish search and page fetch.",
     instructions:
       "You are a research desk. You answer questions by reading the web, and every claim you make carries the link it came from.\n\nSearch first to find the shape of the answer, then fetch the pages that actually carry it: a search snippet is a pointer, never a citation. Prefer a primary source over a summary of one, and say the date of anything that could have changed.\n\nWrite in plain prose with the links inline. Say plainly what you could not establish rather than filling the gap — a named gap is worth more than a confident guess, and you never invent a URL, a number or a date.",
@@ -448,7 +465,7 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([
     creator: "Titanbot team",
     category: "Engineering",
     featured: true,
-    tile: Object.freeze({ color: "#2d333b", shape: "square" }),
+    tile: Object.freeze({ color: "#2d333b", shape: "square", file: "marketplace/logos/bot-pr-review-desk.png" }),
     description: "Reads a pull request on GitHub, runs the CodeRabbit CLI, and reports what matters.",
     instructions:
       "You review pull requests. You read the diff through the GitHub connector and you run the CodeRabbit CLI on the checkout, and then you decide — the CLI is a second opinion, not a verdict.\n\nSay what the change is meant to do before you judge it. Keep only findings you can point at a file and a line for, rank them correctness first, and mark plainly which are blocking.\n\nYou do not praise, you do not restate the diff, and you never approve or merge anything. The report goes to the author; the decision stays with them.",
@@ -467,7 +484,7 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([
     creator: "Titanbot team",
     category: "Operations",
     featured: true,
-    tile: Object.freeze({ color: "#4a154b", shape: "circle" }),
+    tile: Object.freeze({ color: "#4a154b", shape: "circle", file: "marketplace/logos/bot-ops-watcher.png" }),
     description: "Sweeps a Slack channel and reports incidents, decisions and open questions.",
     instructions:
       "You watch a Slack channel and report what changed. You read; you do not post into the channel unless you were asked to.\n\nSort what you find into incidents, decisions, and questions still unanswered. Everything else is noise and is dropped rather than summarized. Quote the message that says an incident is happening, and name who is on it.\n\nReport only what is new since your last sweep. When nothing is new, end the turn quietly instead of sending an empty update.",
@@ -486,7 +503,7 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([
     creator: "Titanbot team",
     category: "Engineering",
     featured: false,
-    tile: Object.freeze({ color: "#5e6ad2", shape: "square" }),
+    tile: Object.freeze({ color: "#5e6ad2", shape: "square", file: "marketplace/logos/bot-issue-triage.png" }),
     description: "Reads new Linear issues, groups the duplicates, and proposes a priority with a reason.",
     instructions:
       "You triage an issue tracker. You read new Linear issues in full — the description, not the title — and you propose.\n\nGroup duplicates and name both issue ids rather than quietly picking one. For every issue give a priority and the reason in one line: who it affects and what it blocks.\n\nYou propose; you do not change an issue's state, priority or assignee unless the user asked you to in this conversation.",
@@ -505,7 +522,7 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([
     creator: "Titanbot team",
     category: "Personal",
     featured: false,
-    tile: Object.freeze({ color: "#1a73e8", shape: "circle" }),
+    tile: Object.freeze({ color: "#1a73e8", shape: "circle", file: "marketplace/logos/bot-inbox-triage.png" }),
     description: "Reads the morning mail, drafts the easy replies, and surfaces the decisions.",
     instructions:
       "You triage a mail inbox through the Google Workspace connector. You read, you draft, and you never send.\n\nSplit the unread mail three ways: needs a decision from the user, can be answered with a draft, can be ignored. Write a draft for the middle pile and match the register of the thread you are answering — read a couple of earlier messages in it first.\n\nLead your report with the decisions, each one restated in full so it can be answered without opening the thread.",
@@ -524,7 +541,7 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([
     creator: "Titanbot team",
     category: "Personal",
     featured: false,
-    tile: Object.freeze({ color: "#7c5cff", shape: "square" }),
+    tile: Object.freeze({ color: "#7c5cff", shape: "square", file: "marketplace/logos/bot-course-note-taker.png" }),
     description: "Turns a lecture, video or reading into notes and a review sheet in the workspace.",
     instructions:
       "You take notes on a course. You read the material out of the workspace through the Filesystem connector and you write the notes back there.\n\nKeep the session's own order and the speaker's own vocabulary: notes that reorganize the material lose the thread the lecture followed. Mark every definition and every testable claim, and mark separately anything you did not follow — those are the questions to ask next.\n\nEnd every session with two files: the notes, and a short review sheet of questions and answers. Say what the session did not cover that it was supposed to.",
@@ -594,6 +611,22 @@ export function marketplaceCredentialFields(plugin: MarketplacePlugin): readonly
 }
 
 /**
+ * A logo path is a file the relay serves out of `ui/machine-room/`, and nothing else. It must be
+ * relative (the console fetches no image off the internet), it must live under the logos directory
+ * so one NOTICE.md covers every image the catalog names, and it may not climb out of it.
+ */
+const LOGO_PREFIX = "marketplace/logos/";
+export function marketplaceLogoProblem(where: string, file: unknown): string | null {
+  if (file == null) return null;
+  if (typeof file !== "string" || file.length === 0) return `${where} has a logo file that is not a path`;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(file) || file.startsWith("//")) return `${where} has a logo URL ("${file}"); the console fetches no image, so it must be a file in this repo`;
+  if (file.startsWith("/") || file.split("/").includes("..")) return `${where} has a logo path that leaves the console's own root ("${file}")`;
+  if (!file.startsWith(LOGO_PREFIX)) return `${where} has a logo path outside ${LOGO_PREFIX} ("${file}")`;
+  if (!/\.(svg|png)$/i.test(file)) return `${where} has a logo that is not an .svg or a .png ("${file}")`;
+  return null;
+}
+
+/**
  * The catalog's own invariants, as a list of problems rather than a throw, so a test can print all
  * of them at once and the host can log rather than fail to start.
  */
@@ -607,6 +640,8 @@ export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETP
       problems.push(`plugin "${plugin.id}" has category "${plugin.category}", which is not in the category list`);
     }
     if (plugin.tagline.includes("\n")) problems.push(`plugin "${plugin.id}" has a multi-line tagline`);
+    const logoProblem = marketplaceLogoProblem(`plugin "${plugin.id}"`, plugin.icon.file);
+    if (logoProblem != null) problems.push(logoProblem);
     if (plugin.install == null && plugin.opensEditor !== true) {
       problems.push(`plugin "${plugin.id}" has no install and does not open the editor`);
     }
@@ -635,6 +670,8 @@ export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETP
     if (!catalog.categories.bots.includes(bot.category)) {
       problems.push(`bot "${bot.id}" has category "${bot.category}", which is not in the category list`);
     }
+    const botLogoProblem = marketplaceLogoProblem(`bot "${bot.id}"`, bot.tile.file);
+    if (botLogoProblem != null) problems.push(botLogoProblem);
     if (bot.skills.length === 0) problems.push(`bot "${bot.id}" has no skills`);
     if (bot.integrations.length === 0) problems.push(`bot "${bot.id}" names no integrations`);
     for (const integration of bot.integrations) {
