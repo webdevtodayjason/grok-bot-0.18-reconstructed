@@ -10,7 +10,7 @@ Type=oneshot
 # A snapshot pauses the box, so it must not run while a deploy is recreating it; the pause is
 # seconds and the whole run is minutes, and this ceiling only stops a wedged copy holding the box.
 TimeoutStartSec=30min
-Environment=TITANBOT_BACKUP_DEST=/mnt/rosa-storage/titanbot/backups
+Environment=TITANBOT_BACKUP_DEST=/mnt/rosa-storage/archives/titanbot/backups
 Environment=TITANBOT_INSTANCE=titanbot
 Environment=TITANBOT_ROOT=%h/titanbot
 ExecStart=/bin/bash %h/titanbot/deploy/backup/snapshot.sh

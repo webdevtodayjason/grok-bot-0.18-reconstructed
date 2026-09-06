@@ -9,7 +9,7 @@
 #   bash deploy/backup/snapshot.sh
 #
 # Env, all optional:
-#   TITANBOT_BACKUP_DEST     where snapshots go, default /mnt/rosa-storage/titanbot/backups
+#   TITANBOT_BACKUP_DEST     where snapshots go, default /mnt/rosa-storage/archives/titanbot/backups
 #   TITANBOT_INSTANCE        the subdirectory under it, default titanbot
 #   TITANBOT_BOX             box container, default titanbot-box
 #   TITANBOT_VOLUME_PREFIX   volume names, default titanbot-box (so titanbot-box-data etc.)
@@ -44,7 +44,7 @@
 # when the paused pass actually ran; every source also carries its own capturedWhile.
 set -uo pipefail
 
-DEST_ROOT="${TITANBOT_BACKUP_DEST:-/mnt/rosa-storage/titanbot/backups}"
+DEST_ROOT="${TITANBOT_BACKUP_DEST:-/mnt/rosa-storage/archives/titanbot/backups}"
 INSTANCE="${TITANBOT_INSTANCE:-titanbot}"
 BOX="${TITANBOT_BOX:-titanbot-box}"
 VOLUME_PREFIX="${TITANBOT_VOLUME_PREFIX:-titanbot-box}"

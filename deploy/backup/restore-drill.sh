@@ -15,11 +15,11 @@
 # was being written.
 #
 # Env, all optional:
-#   TITANBOT_BACKUP_DEST  where snapshots live, default /mnt/rosa-storage/titanbot/backups
+#   TITANBOT_BACKUP_DEST  where snapshots live, default /mnt/rosa-storage/archives/titanbot/backups
 #   TITANBOT_INSTANCE     which instance, default titanbot
 set -uo pipefail
 
-DEST_ROOT="${TITANBOT_BACKUP_DEST:-/mnt/rosa-storage/titanbot/backups}"
+DEST_ROOT="${TITANBOT_BACKUP_DEST:-/mnt/rosa-storage/archives/titanbot/backups}"
 INSTANCE="${TITANBOT_INSTANCE:-titanbot}"
 
 say() { printf '  %s\n' "$*"; }
