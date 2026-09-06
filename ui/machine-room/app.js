@@ -2243,15 +2243,31 @@
     }
   }
 
-  // The shortcut that brings noVNC's own control bar back inside the frame. The bridge listens for
-  // the same chord on its side; this one covers the half of the time the focus is out here.
+  // The one message that brings noVNC's own control bar -- and the clipboard panel in it -- back
+  // inside the frame. Two ways to send it, because the bar is this feature's fallback and a
+  // fallback reachable only by a keyboard chord is not one: a browser can swallow ⌘/Ctrl+Shift+B
+  // (Chrome reads it as Show Bookmarks Bar), and hiding the bar's anchor takes noVNC's own drag
+  // handle with it, so the client has no pointer route of its own left.
+  function showVncControlBar(frame) {
+    frame.contentWindow?.postMessage({ type: "titanbot-vnc-bar" }, window.location.origin);
+  }
+
+  // The chord. The bridge listens for the same one on its side; this covers the half of the time
+  // the focus is out here. Nothing is prevented when the pane is closed -- the browser keeps it.
   function handleDesktopChord(event) {
     if (!event.shiftKey || !(event.metaKey || event.ctrlKey)) return;
     if (String(event.key).toLowerCase() !== "b") return;
     const frame = desktopVncFrame();
     if (frame == null) return;
     event.preventDefault();
-    frame.contentWindow?.postMessage({ type: "titanbot-vnc-bar" }, window.location.origin);
+    showVncControlBar(frame);
+  }
+
+  // And the button in the pane's footer, which works with a mouse and on every platform.
+  function handleVncBarButton() {
+    const frame = desktopVncFrame();
+    if (frame == null) { sayInDesktopPanel("The box’s screen is not on this view — open Browser first."); return; }
+    showVncControlBar(frame);
   }
 
   // Cmd+V with the screen focused never reaches this page -- noVNC stops the keydown on its canvas
@@ -2296,6 +2312,7 @@
     elements.desktopWindow.addEventListener("mouseleave", () => { desktopPointerOver = false; });
     document.addEventListener("paste", handleDesktopPaste);
     document.addEventListener("keydown", handleDesktopChord);
+    document.getElementById("desktop-vnc-bar")?.addEventListener("click", handleVncBarButton);
     window.addEventListener("message", handleVncBridgeMessage);
   }
   // -- end qol/vnc-paste ------------------------------------------------------------------------

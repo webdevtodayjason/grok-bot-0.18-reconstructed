@@ -197,10 +197,14 @@
         </div>
         <footer class="desktop-footer">
           <span class="desktop-live"><span class="status-dot working"></span> Atera Triage is working</span>
-          <!-- qol/vnc-paste: the pane's clipboard, said once where the pane is. The second chord is
-               the way out: noVNC's own control bar is hidden inside this frame, and that shows it
-               again with its clipboard panel, for the day the bridge stops working on a box image. -->
-          <span class="desktop-paste-note" id="desktop-paste-note">⌘/Ctrl + V pastes into the box · ⌘/Ctrl + Shift + B shows noVNC’s own clipboard bar</span>
+          <!-- qol/vnc-paste: the pane's clipboard, said once where the pane is. "while this pane has
+               the keyboard" is the honest scope: once the box's screen is clicked the browser stops
+               delivering paste here at all, and only the frame's own Cmd+V chord (Mac) gets back.
+               The button beside it is the way out that needs no keyboard at all: noVNC's control bar
+               is hidden inside the frame, and hiding it takes noVNC's own drag handle with it, so
+               without this there is no pointer route to the clipboard panel underneath. -->
+          <span class="desktop-paste-note" id="desktop-paste-note">⌘/Ctrl + V pastes into the box while this pane has the keyboard · ⌘/Ctrl + Shift + B shows noVNC’s own clipboard bar</span>
+          <button class="secondary-button" id="desktop-vnc-bar" type="button">noVNC bar</button>
           <!-- Drawn only while the host reports a pending request_box_help hand-off for this agent. -->
           <span class="hand-back-note" id="hand-back-note" hidden></span>
           <button class="primary-button" id="hand-back" type="button" hidden>Hand the computer back</button>

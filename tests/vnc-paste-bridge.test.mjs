@@ -41,6 +41,12 @@ test("vnc.html comes back with the bridge appended to its head, exactly once", (
   assert.ok(out.includes("clipboardPasteFrom"), "and hands the text to the RFB clipboard call");
   assert.ok(out.includes("titanbot-vnc-clipboard"), "and sends what the box copies back the other way");
   assert.ok(out.includes('import UI from "./app/ui.js"'), "reaching UI the only way vnc.html exposes it, as a module");
+  // The bar is the fallback, so what the style hides is part of the contract. noVNC's own drag
+  // handle lives inside #noVNC_control_bar_anchor and goes with it; #noVNC_hint_anchor is the drag
+  // hint on the opposite edge, reveals nothing, and is left to the client.
+  assert.ok(/#noVNC_control_bar_anchor \{ display: none/.test(out), "the control bar anchor is the one thing hidden");
+  assert.ok(!out.includes("#noVNC_hint_anchor {"), "noVNC's own hint anchor is left alone");
+  assert.ok(out.includes('html.titanbot-vnc-bar #noVNC_control_bar_anchor { display: flex'), "and the restore puts back the anchor's own resting display");
 });
 
 test("a page that already carries the bridge is left alone", () => {
@@ -98,8 +104,12 @@ test("the console half is wired to the same message names", () => {
   assert.ok(app.includes('{ type: "titanbot-vnc-paste", text }'), "a paste is posted at the frame");
   assert.ok(app.includes('data.type === "titanbot-vnc-pasted"'), "and the frame's answer is what the panel reports");
   assert.ok(/Pasted \$\{chars\} character/.test(app), "reported as a count of characters");
-  assert.ok(app.includes('{ type: "titanbot-vnc-bar" }'), "the control-bar chord is forwarded to the frame");
+  assert.ok(app.includes('{ type: "titanbot-vnc-bar" }'), "the control-bar message is forwarded to the frame");
+  assert.ok(app.includes('document.getElementById("desktop-vnc-bar")?.addEventListener("click", handleVncBarButton)'),
+    "and the pane's button sends it too, so the fallback is not a keyboard chord alone");
   const html = readFileSync(path.join(repoRoot, "ui", "machine-room", "index.html"), "utf8");
   assert.ok(/id="desktop-paste-note"/.test(html), "the desktop panel carries the note element");
   assert.ok(/Shift \+ B/.test(html), "which names the way back to noVNC's own clipboard bar");
+  assert.ok(/while this pane has the keyboard/.test(html), "and scopes the paste claim to when the browser still delivers one");
+  assert.ok(/id="desktop-vnc-bar"/.test(html), "the pane carries the button that shows that bar");
 });

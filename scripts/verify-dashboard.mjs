@@ -955,7 +955,14 @@ try {
         const reached = neighbour == null ? null : await until(async () => ((await rowsFor(neighbour.id)).some((w) => w.id === ownedRow.id) ? true : null), 12_000, 800);
         check(reached === true, "Make global puts the skill in every agent's library", neighbour ? `read back through ${neighbour.name}` : "no second agent");
       }
-      await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+      // Escape did not reach this dialog, and a Skills panel left open holds its backdrop over
+      // #room-menu: the click below then spent 30s timing out and every check after it -- the
+      // whole agent-details run and the desktop-clipboard block at the end of this file -- never
+      // executed. Close it outright, and fail here rather than in a click timeout if it will not.
+      await page.evaluate(() => document.getElementById("panel-dialog")?.close());
+      const skillsPanelClosed = await page.waitForSelector("#panel-dialog[open]", { state: "detached", timeout: 5_000 }).then(() => true).catch(() => false);
+      check(skillsPanelClosed, "the Skills panel closes, leaving the room menu underneath it clickable");
+      await page.waitForTimeout(300);
     }
 
     // -- MR-01, MR-05, MR-08, GW-06: the room ••• menu opens the live agent surface.
@@ -2258,6 +2265,17 @@ try {
         return /Pasted \d+ characters into the box/.test(line) ? line : null;
       }), 12_000, 500);
       check(said != null, "VNCPASTE-5: and the pane says so on its own line, where a modal's backdrop cannot hide it", said ?? `line read: ${probe.note}`);
+      // The way out, taken the way an operator with no keyboard would take it. The chord is not
+      // enough on its own -- Chrome reads Cmd/Ctrl+Shift+B as Show Bookmarks Bar -- and hiding
+      // noVNC's control bar anchor takes the client's own drag handle with it, so this button is
+      // the only pointer route left to the clipboard panel underneath.
+      const barBack = await page.evaluate(async () => {
+        document.getElementById("desktop-vnc-bar")?.click();
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        const root = document.querySelector("#desktop-window iframe[data-box-vnc]")?.contentDocument?.documentElement;
+        return root == null ? null : root.classList.contains("titanbot-vnc-bar");
+      });
+      check(barBack === true, "VNCPASTE-6: the pane's own button brings noVNC's control bar back, with no keyboard", String(barBack));
     }
   }
   check(errors.length === 0, "no page errors", errors.slice(0, 2).join(" | "));
