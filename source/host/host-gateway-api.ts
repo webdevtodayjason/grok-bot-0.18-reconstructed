@@ -19,6 +19,7 @@ import {
   buildShellSecretEnvironmentUpdate,
   deleteShellEnvSecret,
   listShellEnvSecretFields,
+  readShellEnvSecrets,
   writeShellEnvSecret,
 } from "./extensions/shell-tools/shell-secrets.js";
 import {
@@ -31,14 +32,14 @@ import {
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
 import { evidenceRegistry, readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
 import { GatewayCommandError } from "./gateway-command-error.js";
-import { readSandBoxSetting } from "./sand-box-setting.js";
 import {
+  JOB_BUS_API_VERSION,
   createJobStore,
   hostPackageVersion,
-  isJobBusEnabled,
-  readJobBusWorkers,
   type JobRecord,
 } from "./extensions/job-bus/job-store.js";
+import { createJobSettingsStore } from "./extensions/job-bus/job-settings.js";
+import { createGitHubClient } from "./extensions/job-bus/github-client.js";
 import { createJobWorker } from "./extensions/job-bus/job-worker.js";
 import {
   parseCoordinatorAgentThreadRequest,
@@ -51,6 +52,9 @@ export const HOST_CAPABILITIES = [
 ] as const;
 export const CREATE_AGENT_NONCE_LEDGER_CAP = 64;
 export const DISABLE_SEND_ACCEPT_RETURN_ENV = "SAND_DISABLE_SEND_ACCEPT_RETURN";
+
+/** The awaiting-response tab the job bus owns; `box`, `auto-review` and `turn-question` are the others. */
+export const JOB_BUS_AWAITING_TAB_ID = "job-bus";
 
 const SAND_AGENT_PURPOSES = new Set(["disk-saver", "plugin-auth"]);
 const TEMPLATE_ID_PATTERN = /^[a-z0-9-]{1,64}$/;
@@ -139,11 +143,28 @@ export function createHostGatewayApi(
   // store owns `emit`, not the worker, so EVERY transition reaches the console's SSE stream by
   // construction, including a cancel that arrives through the gateway while the loop is asleep.
   // The loop starts here because this table is built exactly once, when the gateway comes up.
+  const jobSettings = createJobSettingsStore(getSandRootDir());
   const jobStore = createJobStore({
     rootDir: getSandRootDir(),
+    readSettings: () => jobSettings.read(),
     now,
     emit: (event) => { deps.hostEvents.emit(event); },
   });
+  /**
+   * Section 10.2's per-job clone has to be deleted the same way `deleteAgent` deletes one, or it
+   * leaves a box lease, a schedule and a local-tool permission behind on every job. This is that
+   * teardown, lifted out so the command and the bus cannot drift apart.
+   */
+  const removeAgentCompletely = async (agentId: string): Promise<unknown> => {
+    await method(sharing, "noteAgentDeleted")(agentId);
+    const result = await method(manager, "deleteAgent")(agentId);
+    method(deps.extensions.api("session"), "forgetHandoff")(agentId);
+    await method(automations, "deleteAgentSchedules")(agentId).catch(() => undefined);
+    await deps.releaseAgentBox(agentId);
+    deps.hostEvents.emit({ kind: "notification-agent-forgotten", agentId });
+    deps.forgetLocalToolPermission(agentId);
+    return result;
+  };
   const jobWorker = createJobWorker({
     store: jobStore,
     listAgents: () => method(manager, "listAgentsSync")(),
@@ -153,12 +174,44 @@ export function createHostGatewayApi(
     readEvidence: (agentId, options) => readAgentEvidence(agentId, options),
     now,
     sleep: (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); }),
-    readSetting: readSandBoxSetting,
+    readSettings: () => jobSettings.read(),
+    writeSettings: (partial) => jobSettings.write(partial),
+    cloneAgent: async (sourceAgentId) => {
+      const clone = await method(manager, "cloneAgent")(sourceAgentId);
+      return String(clone?.id ?? clone?.agent?.id ?? "");
+    },
+    renameAgent: async (agentId, name) => {
+      const summary = method(manager, "listAgentsSync")().find((agent: any) => agent?.id === agentId);
+      return await method(manager, "updateAgent")(agentId, {
+        name,
+        description: typeof summary?.description === "string" ? summary.description : "",
+      });
+    },
+    deleteAgent: (agentId) => removeAgentCompletely(agentId),
+    // A per-agent connector is a channel connection with a stored credential; stripping one is the
+    // same disconnect the console's own Channels card does.
+    listAgentConnectors: (agentId) =>
+      ((manager as any).sessionStore?.listAgentChannels?.(agentId) ?? [])
+        .map((connection: any) => String(connection?.platform ?? ""))
+        .filter((platform: string) => platform.length > 0),
+    disconnectAgentConnector: (agentId, connectorId) =>
+      (manager as any).sessionStore?.disconnectChannel?.(agentId, connectorId),
+    // Section 10.4: the box's own GitHub credential, read host-side, never handed to the worker.
+    github: () => createGitHubClient({ token: readShellEnvSecrets(getSandRootDir()).GITHUB_TOKEN ?? null }),
     markUnread: (agentId) => { method(manager, "setAgentUnread")(agentId, true, now()); },
+    // ATTN-1's needs-you signal, on its own awaiting tab so a box hand-off or an approval badge
+    // already on the row keeps it.
+    raiseNeedsYou: (agentId, reason) => {
+      void (manager as any).sessionStore?.setAwaitingUserResponseForTab?.(
+        agentId,
+        JOB_BUS_AWAITING_TAB_ID,
+        { tabId: JOB_BUS_AWAITING_TAB_ID, reason, since: now() },
+      );
+    },
   });
   jobWorker.start();
   const requireJobBusEnabled = (): void => {
-    if (!isJobBusEnabled(readSandBoxSetting)) {
+    if (!jobSettings.read().enabled) {
       throw new GatewayCommandError(503, { error: "job bus is disabled" });
     }
   };
@@ -445,21 +498,7 @@ export function createHostGatewayApi(
       method(manager, "setGroupMembers")(args.id, args.memberAgentIds),
     updateAgent: (args: any) =>
       method(manager, "updateAgent")(args.id, args.profile),
-    deleteAgent: async (args: any) => {
-      await method(sharing, "noteAgentDeleted")(args.id);
-      const result = await method(manager, "deleteAgent")(args.id);
-      method(deps.extensions.api("session"), "forgetHandoff")(args.id);
-      await method(automations, "deleteAgentSchedules")(args.id).catch(
-        () => undefined
-      );
-      await deps.releaseAgentBox(args.id);
-      deps.hostEvents.emit({
-        kind: "notification-agent-forgotten",
-        agentId: args.id
-      });
-      deps.forgetLocalToolPermission(args.id);
-      return result;
-    },
+    deleteAgent: async (args: any) => await removeAgentCompletely(args.id),
     deleteAgents: async (args: any) => {
       for (const id of args.ids) {
         await method(sharing, "noteAgentDeleted")(id);
@@ -932,23 +971,22 @@ export function createHostGatewayApi(
     // The whole of the relay's /v1 surface (docs/JOB-BUS.md section 3). Every refusal is a
     // GatewayCommandError carrying its own status and body, so the relay passes 400/404/409/503
     // through with the shape the contract prints instead of flattening them into a 500.
+    // Section 10.6: `version` is the JOB API's version and is a constant, `host_version` is this
+    // bundle's. They were one field, which meant a CoS pinned to the API was reading the host's
+    // release number and would have broken on an unrelated host upgrade.
     jobBusHealth: async () => ({
       ok: true,
       queue_depth: await jobStore.queueDepth(),
-      version: hostPackageVersion(),
-      workers: readJobBusWorkers(readSandBoxSetting),
+      version: JOB_BUS_API_VERSION,
+      host_version: hostPackageVersion(),
+      workers: jobSettings.read().workers,
     }),
-    // `created` says 201 or 200 to the relay; the job itself is the body either way.
+    // `created` says 201 or 200 to the relay; the job itself is the body either way. Every field is
+    // forwarded verbatim, unknown ones included, because section 10.1's refusal of an unknown field
+    // is the store's to make: dropping it here would answer 201 to a body the bus never read.
     jobBusCreate: async (args: any) => {
       requireJobBusEnabled();
-      const created = await jobStore.create({
-        type: args?.type,
-        idempotency_key: args?.idempotency_key,
-        payload: args?.payload,
-        policy: args?.policy,
-        callback_url: args?.callback_url,
-        submitter: args?.submitter,
-      });
+      const created = await jobStore.create({ ...(args ?? {}) });
       // A new job should not wait up to a poll interval to start moving.
       if (created.created) void jobWorker.tick().catch(() => {});
       return created;
@@ -965,17 +1003,46 @@ export function createHostGatewayApi(
         throw new GatewayCommandError(409, { error: `job is ${job.status}, not done`, id: job.id, status: job.status });
       }
       const repo = typeof job.payload.repo === "string" ? job.payload.repo : null;
+      const commits = job.result?.commits ?? [];
+      // Section 10.6: no signed URLs in v1. The two links are where the file IS, at the commit the
+      // job attested, so CoS pulls it with its own GitHub credential rather than one this bus mints.
+      const ref = commits[commits.length - 1] ?? null;
+      const link = (path: string, kind: "html" | "api"): string | null => {
+        if (repo == null || ref == null) return null;
+        const encoded = path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+        return kind === "html"
+          ? `https://github.com/${repo}/blob/${ref}/${encoded}`
+          : `https://api.github.com/repos/${repo}/contents/${encoded}?ref=${ref}`;
+      };
       return {
         id: job.id,
         status: job.status,
         pull_from: repo == null ? null : "github",
         repo,
         branch: typeof job.payload.branch === "string" ? job.payload.branch : null,
-        commits: job.result?.commits ?? [],
-        artifacts: job.result?.artifacts ?? [],
+        commits,
+        artifacts: (job.result?.artifacts ?? []).map((artifact) => ({
+          path: artifact.path,
+          bytes: artifact.bytes,
+          sha256: artifact.sha256,
+          html_url: link(artifact.path, "html"),
+          api_url: link(artifact.path, "api"),
+        })),
       };
     },
     jobBusList: async (args: any) => ({ jobs: await jobStore.list(args?.limit) }),
+    // Section 10.5. The relay's bearer lockout is not a job, but "who was locked out, from where,
+    // and when" belongs in the same hash chain as everything else this bus did.
+    jobBusAudit: async (args: any) => {
+      if (args?.event !== "auth_locked") {
+        throw new GatewayCommandError(400, { error: "jobBusAudit only writes auth_locked rows" });
+      }
+      return await jobStore.appendExternalAudit({ event: "auth_locked", client: args?.client, ok: args?.ok });
+    },
+    // Section 10.7. The bus reads its own settings file, not sand-host-settings.json, and the file
+    // is re-read on every use so an edit lands without a restart.
+    jobBusGetSettings: async () => jobSettings.read(),
+    jobBusSetSettings: async (args: any) => await jobSettings.write(args ?? {}),
 
     // ---------------------------------------------------------------- CONNECT-5, shell tools
     // A shell tool is a CLI the agent runs itself, with its credential in the environment.
