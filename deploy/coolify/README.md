@@ -184,6 +184,37 @@ never be checked before being pasted.
    is plain `https://$DOMAIN`.
 5. Leave `titanbot-box` with no domain. It must not be reachable from outside.
 6. **Deploy**.
+7. The job bus token, if you want the Chief of Staff to reach this instance
+   (`docs/JOB-BUS.md` §8). Two ways, and only one of them is needed:
+   - **Environment Variables**: `TITAN_JOB_TOKEN` = a value you mint yourself
+     (`openssl rand -hex 24`). The compose passes it through as `${TITAN_JOB_TOKEN}`, with no `:-`
+     default: Coolify builds a field's NAME from everything between the braces, so the defaulted
+     form comes out as a field literally named `TITAN_JOB_TOKEN:-` and your value never reaches the
+     relay. Leaving the field empty still deploys; compose resolves it to the empty string and says
+     so in the build log.
+   - **Settings → Job bus → Generate** in the console. The token is shown once, and it is written
+     to `job-bus.json` in the mounted profile directory at mode 0600. This is the way that needs
+     no Coolify field at all, and it is the one to use if the env field came out misnamed.
+
+   With neither, `/v1` answers `401` and nothing else on the relay is reachable with a job bus
+   bearer. §10.6 makes that answer the same whether no token is set, none was sent or the wrong one
+   was, so nobody can probe this deployment to learn whether you have configured it yet; the
+   console card is the only place that says which of the two sources is in force.
+8. **Turn the bus on, and point it at a worker.** A token is not an open bus: §10.7 keeps it
+   disabled until you say otherwise, and until then every create answers
+   `503 {"error":"job bus is disabled"}`. In **Settings → Job bus**:
+   - the **Enabled** switch. Generating or setting a token in step 7 already flips it, so this is
+     for the deployment that got its token from the Coolify field.
+   - **Workers**: pick the agent that runs `nextgen.chapter` off the roster. The bus stores its id,
+     clones it per job, strips every connector but the ones listed under **Connectors the clone
+     keeps** (default `github`), and deletes the clone when the job ends. A type pointing at no
+     agent on this box stops its jobs on `needs_human no_worker`, which is a stuck job rather than
+     work done somewhere nobody chose. Make sure that agent can push: **Settings → Connectors →
+     GitHub**, the `gh` shell tool.
+   - **Repositories**: the only repositories a job may name. Default
+     `webdevtodayjason/nextgen-training`. Anything else is `400` before a worker sees it.
+   - **Limits**: queue timeout, run timeout, max open jobs. A create beyond the last answers
+     `429 {"error":"queue full"}`.
 
 Coolify will also list ten **Storages** entries for this resource, one per bind: seven on the box
 (the four data directories, `runtime`, `runtime/box-exec-daemon` and `credential`) and three on the
@@ -224,6 +255,18 @@ On the server, the one thing the gate does not read is the relay's opinion of it
 container is running the old `ui/server.mjs`: run `sync.sh --no-install` from section 2 and redeploy.
 If `cfip` reads `none`, the environment did not reach the container and the lockout is keyed on
 Cloudflare's edges rather than on visitors, which is the section 7 shared bucket.
+
+If you set a job bus token in step 4.7, add it to the gate and it checks the bus's door as well:
+
+    node scripts/verify-deploy.mjs --url https://$DOMAIN --job-token "$TITAN_JOB_TOKEN"
+
+Without the flag the gate still asserts that `/v1/health` is `401` and never `200` without a
+bearer, and reports the other half `INCONCLUSIVE` rather than skipping it. With the flag it also
+checks that the bearer opens `/v1` and nothing else: `/api/listAgents`, `/`, `/vnc/1/` and
+`/box/surface` all refuse it. A `503` there is a relay from before §10.6 and is reported as a
+failure, not a pass. Then the smoke from `docs/JOB-BUS.md` §8 is the end-to-end proof: health, a
+`health.ping` job, and the read back of that job. If the ping sits on `503 job bus is disabled`,
+the switch in step 4.8 is still off.
 
 ## 6. How updates ship afterwards
 

@@ -345,6 +345,123 @@ try {
       check(!/\b(evidenced|unsupported|unverified|undecidable)\b/.test(panelText), "the panel behind the chip prints no raw verdict word", panelText.slice(0, 140));
       await page.keyboard.press("Escape"); await page.waitForTimeout(400);
     }
+
+    // JOBBUS-3: the Job bus card in both of its states, with no relay and no gateway to answer.
+    // The offline adapter's bus starts off, with no token and therefore no jobs; generating one
+    // there mints a value that exists in the tab and nowhere else and arms the switch, which is
+    // §10.7's rule, so the card can be read in the configured state as well. What is being
+    // checked is the card, not the demo: the enabled switch and its line, the token state, the
+    // base URL, the once-shown token beside its warning, the curl example carrying a placeholder
+    // rather than a token, the worker mapping as a type against an agent picked from the roster,
+    // the repos and connectors allowlists, the three limits, and the two rows with the pill
+    // classes the contract fixes for done and needs_human.
+    await openSettingsPanel();
+    const jobBus = () => page.evaluate(() => {
+      const root = document.querySelector("[data-job-bus]");
+      if (!root) return null;
+      const text = (selector) => root.querySelector(selector)?.textContent?.trim() ?? "";
+      const value = (selector) => root.querySelector(selector)?.value ?? "";
+      const rows = Array.from(root.querySelectorAll("[data-job-bus-row]")).map((tr) => ({
+        id: tr.getAttribute("data-job-bus-row"),
+        pill: tr.querySelector(".status-pill")?.className ?? "",
+        status: tr.querySelector(".status-pill")?.textContent?.trim() ?? "",
+        worker: tr.querySelector(".job-bus-worker")?.textContent?.trim() ?? "",
+        from: tr.querySelector(".job-bus-worker")?.getAttribute("title") ?? "",
+        line: tr.querySelector(".job-bus-line")?.textContent?.trim() ?? "",
+      }));
+      return {
+        state: text("[data-job-bus-state]"), pill: text("[data-job-bus-pill]"),
+        base: text("[data-job-bus-base]"), curl: text("[data-job-bus-curl]"),
+        enabled: root.querySelector("[data-job-bus-enabled]")?.getAttribute("aria-pressed") ?? "",
+        enabledNote: text("[data-job-bus-enabled-note]"),
+        mintedHidden: root.querySelector("[data-job-bus-minted]")?.hidden !== false,
+        minted: root.querySelector("[data-job-bus-minted-value]")?.value ?? "",
+        warning: root.querySelector("[data-job-bus-minted] .field-hint")?.textContent?.trim() ?? "",
+        // The agent half is a select now: its value is the id that gets saved, its label is the
+        // name the operator reads. Both are carried out so the gate can hold them apart.
+        workers: Array.from(root.querySelectorAll("[data-job-bus-worker]")).map((row) => {
+          const select = row.querySelector("[data-job-bus-worker-agent]");
+          return {
+            type: row.querySelector("[data-job-bus-worker-type]")?.value ?? "",
+            agentId: select?.value ?? "",
+            agentLabel: select?.selectedOptions?.[0]?.textContent?.trim() ?? "",
+            tag: (select?.tagName ?? "").toLowerCase(),
+            choices: Array.from(select?.options ?? []).length,
+          };
+        }),
+        repos: Array.from(root.querySelectorAll("[data-job-bus-repo-value]")).map((field) => field.value),
+        connectors: Array.from(root.querySelectorAll("[data-job-bus-connector-value]")).map((field) => field.value),
+        limits: {
+          queueTimeoutMin: value("[data-job-bus-queue-timeout]"),
+          timeoutMin: value("[data-job-bus-timeout]"),
+          maxOpen: value("[data-job-bus-max-open]"),
+        },
+        rows,
+        // The card must not push the dialog wider than the dialog: this is the MR-27 bleed.
+        overflows: root.scrollWidth > root.clientWidth + 1,
+      };
+    });
+    const unconfigured = await jobBus();
+    check(unconfigured != null, "the Job bus card is on Settings");
+    check(/not configured/i.test(unconfigured?.pill ?? ""), "unconfigured, the pill says so", unconfigured?.pill ?? "");
+    check(/401/.test(unconfigured?.state ?? ""), "and the line says what a caller gets instead", (unconfigured?.state ?? "").slice(0, 110));
+    // §10.7: the bus is off until somebody turns it on, and the card has to open on that.
+    check(unconfigured?.enabled === "false", "the Enabled switch is off before the operator arms it", unconfigured?.enabled ?? "absent");
+    check(/503/.test(unconfigured?.enabledNote ?? "") && /disabled/i.test(unconfigured?.enabledNote ?? ""),
+      "and its line says a create is refused with 503 while it is off", (unconfigured?.enabledNote ?? "").slice(0, 110));
+    check((unconfigured?.base ?? "").endsWith("/v1"), "the base URL is the /v1 root", unconfigured?.base ?? "");
+    check(unconfigured?.mintedHidden === true, "no token field before one is minted");
+    check((unconfigured?.rows ?? []).length === 0, "and no jobs behind a bus nobody can call", `${(unconfigured?.rows ?? []).length} row(s)`);
+    check(unconfigured?.overflows === false, "the card fits its panel unconfigured");
+
+    await page.click("[data-job-bus-generate]"); await page.waitForTimeout(1200);
+    const configured = await jobBus();
+    check(/configured/i.test(configured?.pill ?? "") && !/not configured/i.test(configured?.pill ?? ""),
+      "after Generate the card reads configured", configured?.pill ?? "");
+    check(configured?.enabled === "true", "and generating a token turned the bus on, which is §10.7's rule", configured?.enabled ?? "absent");
+    check(configured?.mintedHidden === false && /^[0-9a-f]{48}$/.test(configured?.minted ?? ""),
+      "the minted token is shown once in a copyable field", `${(configured?.minted ?? "").length} chars`);
+    check(/only time it is shown/i.test(configured?.warning ?? ""), "beside the one-line warning", (configured?.warning ?? "").slice(0, 80));
+    check(/\$TITAN_JOB_TOKEN/.test(configured?.curl ?? "") && !(configured?.curl ?? "").includes(configured?.minted ?? "x"),
+      "the curl example carries a placeholder, never the token", configured?.curl ?? "");
+    // §10.2: the mapping stores an agent id and the operator picks it off the roster by name.
+    const mapped = (configured?.workers ?? []).find((row) => row.type === "nextgen.chapter");
+    check(mapped != null && mapped.tag === "select" && mapped.choices > 1,
+      "the worker mapping picks its agent from the roster rather than taking a typed name",
+      mapped ? `${mapped.tag} with ${mapped.choices} choice(s)` : "no nextgen.chapter row");
+    check(mapped != null && mapped.agentId === "clientsync" && mapped.agentLabel === "ClientSync Tester",
+      "and it holds the agent id while showing the agent's name",
+      mapped ? `${mapped.agentId} shown as ${mapped.agentLabel}` : "absent");
+    check((configured?.repos ?? []).includes("webdevtodayjason/nextgen-training"),
+      "the repos allowlist is drawn as editable rows", JSON.stringify(configured?.repos ?? []));
+    check((configured?.connectors ?? []).includes("github"),
+      "so is the list of connectors the per-job clone keeps", JSON.stringify(configured?.connectors ?? []));
+    check(configured?.limits?.queueTimeoutMin === "60" && configured?.limits?.timeoutMin === "120" && configured?.limits?.maxOpen === "20",
+      "the two timeouts and maxOpen are numbers read off the settings", JSON.stringify(configured?.limits ?? {}));
+    const done = (configured?.rows ?? []).find((row) => /done/.test(row.status));
+    const blocked = (configured?.rows ?? []).find((row) => /needs.human/.test(row.status));
+    check((configured?.rows ?? []).length === 2, "two jobs in the table", `${(configured?.rows ?? []).length} row(s)`);
+    check(done != null && /status-pill success/.test(done.pill) && done.line.length > 0,
+      "the done job is good and carries its one-line result", done ? `${done.pill} · ${done.line.slice(0, 60)}` : "absent");
+    check(blocked != null && /status-pill attention/.test(blocked.pill) && /github_auth/.test(blocked.line),
+      "the needs_human job is attention and carries what a person must do", blocked ? `${blocked.pill} · ${blocked.line.slice(0, 60)}` : "absent");
+    // §10.2 again: the Worker column is the per-job clone, and the agent it came from is on the
+    // cell's title, because the clone is deleted the moment the job ends.
+    check(done != null && / · job /.test(done.worker) && /cloned from clientsync/.test(done.from),
+      "the Worker column names the per-job clone and says which agent it was cloned from",
+      done ? `${done.worker} (${done.from})` : "absent");
+
+    // Adding and removing a row is the whole point of an editable list, and the empty-list hint
+    // must not survive an add. Nothing is saved: the offline adapter is the only thing behind it.
+    await page.click("[data-job-bus-repo-add]"); await page.waitForTimeout(300);
+    const added = await jobBus();
+    check((added?.repos ?? []).length === (configured?.repos ?? []).length + 1,
+      "Add a repository appends an empty row", `${(configured?.repos ?? []).length} -> ${(added?.repos ?? []).length}`);
+    await page.click("[data-job-bus-repo] [data-job-bus-row-remove]"); await page.waitForTimeout(300);
+    const removed = await jobBus();
+    check((removed?.repos ?? []).length === (added?.repos ?? []).length - 1,
+      "and Remove takes one away", `${(added?.repos ?? []).length} -> ${(removed?.repos ?? []).length}`);
+    check(configured?.overflows === false, "and the card still fits its panel with the table on it");
   } else if (LEAKS) {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     const { storedSecrets } = await import(path.join(repoRoot, "ui", "subscriptions.mjs"));

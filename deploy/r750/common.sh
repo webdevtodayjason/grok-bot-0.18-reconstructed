@@ -77,10 +77,28 @@ relay_run() {
   # host. It is not optional: server.mjs reads and writes the box's secrets, connectors and window
   # surfaces exclusively through `docker exec`, because those files live in a volume with no host
   # path. README.md item 8 says this out loud so the decision is the operator's, not an accident.
+  # The Titan Job Bus bearer (docs/JOB-BUS.md section 2), passed through only when the operator set
+  # it in this shell. An EMPTY variable is not the same as an absent one here: the relay's
+  # resolution order is env, then the token file the console writes, then closed, and an exported
+  # empty string would be an env value that resolves to nothing while the console's own file sat
+  # unread. Unset, /v1 answers 401 until a token is generated in Settings -> Job bus, which writes
+  # job-bus.json into the profile mount below -- section 10.6 fixes that answer at 401 whether the
+  # token is absent, missing from the request or wrong, so a caller cannot tell the three apart.
+  # That is why the mount is no longer read-only; the gateway token beside it is still 0600 on the
+  # host and nothing in the console writes it. A token alone does not open the bus: section 10.7
+  # keeps it disabled until the operator turns it on in Settings -> Job bus, and setting a token
+  # there does exactly that.
+  local -a jobtoken=()
+  if [ -n "${TITAN_JOB_TOKEN:-}" ]; then
+    jobtoken=( --env "TITAN_JOB_TOKEN=$TITAN_JOB_TOKEN" )
+    say "passing TITAN_JOB_TOKEN through to the relay (it wins over the console's token file)"
+  fi
+
   docker run --detach --name "$RELAY" \
     --network "$NET" \
     --restart unless-stopped \
     "${labels[@]}" \
+    ${jobtoken[@]+"${jobtoken[@]}"} \
     --publish "$RELAY_BIND:$RELAY_PORT:7777" \
     --env SAND_UI_PORT=7777 \
     --env SAND_UI_BIND_HOST=0.0.0.0 \
@@ -89,7 +107,7 @@ relay_run() {
     --env SAND_PROFILE_DIRS=/profile \
     --volume /var/run/docker.sock:/var/run/docker.sock \
     --volume "$ROOT/ui:/app/ui" \
-    --volume "$ROOT/profile:/profile:ro" \
+    --volume "$ROOT/profile:/profile" \
     ${authmount[@]+"${authmount[@]}"} \
     "$RELAY_IMAGE" node /app/ui/server.mjs >/dev/null
 

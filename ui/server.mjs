@@ -20,6 +20,8 @@
 //                            forwarded header at all. See the block above TRUSTED_PROXIES.
 //   SAND_UI_CLOUDFLARE_RANGES  comma list of CIDRs; empty (the default) never reads
 //                            CF-Connecting-IP. See the block above CLOUDFLARE_RANGES.
+//   TITAN_JOB_TOKEN          the job bus bearer for /v1; unset falls back to the file the
+//                            console writes, and neither means /v1 answers 503. docs/JOB-BUS.md
 import { createServer } from "node:http";
 import net from "node:net";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
@@ -29,7 +31,11 @@ import {
   isLoopbackHost, isSecureRequest, parseCookies, parseTrustedProxies, readAuthFile, readSession,
   safeEqual, safeNextPath, serializeCookie, verifyPassword,
 } from "./auth.mjs";
-import { readFile, writeFile } from "node:fs/promises";
+import {
+  createRateLimiter, jobBusTokenFile, jobCreateArgs, jobSubmitterId, newJobToken, resolveJobToken,
+  routeJobBus,
+} from "./job-bus-edge.mjs";
+import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
@@ -440,6 +446,219 @@ async function relayAvatar(req, res, pathname) {
   res.end(bytes);
 }
 
+// ---- the job bus edge -----------------------------------------------------------------------
+// /v1 is the Chief of Staff's surface and nothing else. It carries its own bearer, it never
+// accepts a console session, and it reaches exactly the five jobBus* commands -- so the token CoS
+// holds buys no shell, no desktop and no /api. That is the whole point of a separate bearer, and
+// it is why this block sits above the console's login rather than inside it. docs/JOB-BUS.md §3.
+const JOB_BUS_BODY_LIMIT = 64 * 1024;
+const JOB_BUS_REALM = { "www-authenticate": 'Bearer realm="titan-job-bus"' };
+const jobBusLimiter = createRateLimiter({ limit: 120, windowMs: 60_000 });
+// One bucket for the whole bus, on top of the per-client one. Without it a caller with a range of
+// addresses gets 120 a minute per address and the box wears the sum. One fixed key, so the map
+// never grows. docs/JOB-BUS.md 10.6.
+const jobBusGlobalLimiter = createRateLimiter({ limit: 600, windowMs: 60_000, capacity: 1 });
+const JOB_BUS_GLOBAL = "bus";
+
+async function jobBusCall(command, args) {
+  const upstream = await fetch(`${GATEWAY}/api/${command}`, {
+    method: "POST",
+    headers: upstreamHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify(args ?? {}),
+  });
+  return {
+    status: upstream.status,
+    text: await upstream.text(),
+    type: upstream.headers.get("content-type") ?? "application/json",
+  };
+}
+
+// The gateway's own status and body go through -- 400, 404, 409 and 503 are its answers to give,
+// and CoS acts on their detail. Its 401 is the exception, the same one relayCommand makes: that is
+// this relay's bearer being stale, not the caller's, and passing it on would tell CoS to re-auth
+// against a fault no token of its own can fix.
+function answerUpstream(res, upstream, status = upstream.status, text = upstream.text) {
+  if (upstream.status === 401 || upstream.status === 403) {
+    return fail(res, 502, `the gateway refused this relay's token (HTTP ${upstream.status}): `
+      + `SAND_HOST_GATEWAY_TOKEN is stale or the box was recreated.`);
+  }
+  res.writeHead(status, { "content-type": upstream.type, "cache-control": "no-store" });
+  return res.end(text);
+}
+
+async function handleJobBus(req, res, url) {
+  const client = clientOf(req);
+
+  // The same lockout the login uses, keyed the same way, because a bearer is guessed exactly the
+  // way a password is and there is no reason the bus should be the cheaper of the two doors to
+  // knock on. Checked before the body and before the token compare: an address already locked out
+  // must not be able to make this process do work on its behalf.
+  const lockedMs = throttle.retryAfterMs(client);
+  if (lockedMs > 0) {
+    const seconds = Math.ceil(lockedMs / 1000);
+    return fail(res, 429, `too many attempts; wait ${seconds}s`, { "retry-after": String(seconds) });
+  }
+
+  const configured = resolveJobToken();
+  const header = String(req.headers.authorization ?? "");
+  const presented = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  // One answer for unconfigured, missing and wrong. The 503 that used to say "job bus not
+  // configured" told an unauthenticated stranger that this host runs a bus and that its token is
+  // currently unset, which is the one moment it is worth knowing. The console still says it, to a
+  // caller that already signed in. docs/JOB-BUS.md 10.6.
+  if (configured.token.length === 0 || presented.length === 0 || !safeEqual(presented, configured.token)) {
+    const lockoutMs = throttle.recordFailure(client);
+    // recordFailure only reports a wait on the attempt that trips the lock, and a locked client is
+    // turned away above, so this fires once per lockout rather than once per refused request.
+    if (lockoutMs > 0) {
+      console.log(`job bus bearer locked out for ${client}`);
+      jobBusCall("jobBusAudit", { event: "auth_locked", client })
+        .catch((error) => console.log(`job bus audit failed: ${error?.message ?? error}`));
+    }
+    return fail(res, 401, "unauthorized", JOB_BUS_REALM);
+  }
+  // A good bearer deliberately does NOT clear the count. The bucket is shared with the console
+  // login, and clearing it here would let anyone holding the bus token reset a password lockout on
+  // their address. A lockout expires on its own, which is all this needs to be.
+
+  // Per client, the same address the login lockout counts, so a proxy in front does not collapse
+  // every caller into one bucket; then the whole bus, so many addresses cannot outrun it together.
+  const wait = jobBusLimiter.retryAfterSeconds(client)
+    || jobBusGlobalLimiter.retryAfterSeconds(JOB_BUS_GLOBAL);
+  if (wait > 0) return fail(res, 429, `too many requests; wait ${wait}s`, { "retry-after": String(wait) });
+
+  const route = routeJobBus(url.pathname);
+  if (route == null) return fail(res, 404, `not found: ${url.pathname}`);
+  if (req.method !== route.method) return fail(res, 405, route.method, { allow: route.method });
+
+  if (route.command !== "jobBusCreate") return answerUpstream(res, await jobBusCall(route.command, route.args));
+
+  let raw;
+  try { raw = await readBody(req, JOB_BUS_BODY_LIMIT); }
+  catch (error) {
+    if (error?.code !== "BODY_TOO_LARGE") throw error;
+    // The caller is still uploading, so the answer has to take the connection with it.
+    return endAndClose(req, res, 413, { "content-type": "application/json" },
+      JSON.stringify({ error: "job body too large" }));
+  }
+  const shaped = jobCreateArgs(raw, req.headers["idempotency-key"],
+    { client, submitterId: jobSubmitterId(presented) });
+  if (shaped.error != null) return fail(res, 400, shaped.error);
+
+  const upstream = await jobBusCall("jobBusCreate", shaped.args);
+  if (upstream.status !== 200) return answerUpstream(res, upstream);
+  // jobBusCreate answers {created, job}. The status is the only place a REST client can see the
+  // difference between a job it just made and one its retry found, so it is `created` that picks
+  // 201 or 200, never a timestamp comparison.
+  let body;
+  try { body = JSON.parse(upstream.text); } catch { body = null; }
+  if (body?.job == null) return answerUpstream(res, upstream);
+  // Four fields, not the whole record. A create answer that echoed the job would hand back the
+  // payload and the worker's agent ids to whoever posted it; CoS reads the rest with GET
+  // /v1/jobs/{id} when it wants it. docs/JOB-BUS.md 10.6.
+  const { id, type, status, created_at } = body.job;
+  return answerUpstream(res, upstream, body.created === true ? 201 : 200,
+    JSON.stringify({ id, type, status, created_at }));
+}
+
+// ---- arming the bus ---------------------------------------------------------------------------
+// docs/JOB-BUS.md 10.7 says the bus is off until the operator turns it on, and that setting a
+// bearer IS turning it on. That was implemented only in the browser -- the console's own token
+// buttons -- so the env-var deploy path in section 8 armed nothing: an operator who set
+// TITAN_JOB_TOKEN on Coolify and never opened Settings got `503 job bus is disabled` on every
+// create, with a token that worked. So the relay does it too, from both ends: once at start when
+// the token comes from the environment, and on the console routes that write one.
+//
+// It is one jobBusSetSettings {enabled:true} call and it is logged, because "the deploy turned the
+// bus on" is exactly the kind of thing an operator must be able to read back out of a container
+// log. It runs on every relay start with the env token set, which is the honest reading of that
+// variable: the deployment says the bus is on. An operator who wants it off clears the variable.
+async function armJobBus(why) {
+  const answer = await jobBusCall("jobBusSetSettings", { enabled: true }).catch((error) => ({
+    status: 0, text: String(error?.message ?? error), type: "",
+  }));
+  if (answer.status === 200) console.log(`bus  armed the job bus (${why})`);
+  else console.log(`bus  could not arm the job bus (${why}): HTTP ${answer.status} ${answer.text.slice(0, 200)}`);
+  return answer.status === 200;
+}
+
+// ---- the job bus token, from the console --------------------------------------------------
+// Written where resolveJobToken reads it, at 0600, because it is a bearer for the whole bus.
+// Returns null on success and the reason on failure, because the two ways this fails -- no
+// profile directory, and a read-only mount -- are both operator faults with different fixes, and
+// a 502 saying "gateway unreachable" would send whoever meets them to the wrong place entirely.
+async function writeJobToken(token) {
+  const file = jobBusTokenFile();
+  if (file == null) return "no profile directory to write the token to: SAND_PROFILE_DIRS is unset";
+  try {
+    await writeFile(file, JSON.stringify({ token }), { mode: 0o600 });
+    // writeFile's mode only applies to a file it creates, and this one is rewritten every time
+    // the operator rotates the token.
+    await chmod(file, 0o600);
+    return null;
+  } catch (error) {
+    return `could not write ${file}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+async function handleJobBusConsole(req, res, url) {
+  const sendJson = (status, value) => {
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify(value));
+  };
+  const state = () => {
+    const current = resolveJobToken();
+    const host = String(req.headers.host ?? "");
+    return {
+      configured: current.token.length > 0,
+      source: current.source,
+      base_url: host.length > 0 ? `${secureOf(req) ? "https" : "http"}://${host}/v1` : null,
+    };
+  };
+
+  if (url.pathname === "/job-bus/status") {
+    if (req.method !== "GET") return fail(res, 405, "GET", { allow: "GET" });
+    return sendJson(200, state());
+  }
+  if (req.method !== "POST") return fail(res, 405, "POST", { allow: "POST" });
+  // The env wins wherever it is set, so writing the file would only produce a token that never
+  // works. Say so rather than accepting the write.
+  const envWins = resolveJobToken().source === "env";
+
+  if (url.pathname === "/job-bus/token/generate") {
+    if (envWins) return fail(res, 409, "TITAN_JOB_TOKEN is set in the environment; it would win over this file");
+    const token = newJobToken();
+    const failed = await writeJobToken(token);
+    if (failed != null) return fail(res, 503, failed);
+    // Nobody generates a bearer for a bus they want shut. The browser asks for this as well; doing
+    // it here means the bus is armed even when the console is not the caller.
+    await armJobBus("a token was generated in the console");
+    // Once. It is not readable back through any route on this server.
+    return sendJson(200, { token, ...state() });
+  }
+  if (url.pathname === "/job-bus/token/clear") {
+    const file = jobBusTokenFile();
+    // force skips a file that is not there, which is a successful clear; a read-only mount still
+    // throws, and that is worth saying rather than dressing up as a gateway fault.
+    if (file != null) {
+      try { await rm(file, { force: true }); }
+      catch (error) { return fail(res, 503, `could not remove ${file}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    return sendJson(200, state());
+  }
+  if (url.pathname === "/job-bus/token") {
+    if (envWins) return fail(res, 409, "TITAN_JOB_TOKEN is set in the environment; it would win over this file");
+    let token;
+    try { token = JSON.parse(await readBody(req, JOB_BUS_BODY_LIMIT))?.token; } catch { token = null; }
+    if (typeof token !== "string" || token.trim().length < 32) return fail(res, 400, "the token must be at least 32 characters");
+    const failed = await writeJobToken(token.trim());
+    if (failed != null) return fail(res, 503, failed);
+    await armJobBus("a token was set in the console");
+    return sendJson(200, state());
+  }
+  return fail(res, 404, `not found: ${url.pathname}`);
+}
+
 // ---- the desktop ----------------------------------------------------------------------------
 // The host answers ensureForeverBox with a vnc URL on ITS OWN loopback (127.0.0.1:6081), which is
 // the right address for exactly one browser: one running on the same machine as the box. Through
@@ -531,6 +750,10 @@ const server = createServer(async (req, res) => {
   // refusals. writeHead's own header object is merged over this rather than replacing it.
   if (secureOf(req)) res.setHeader("strict-transport-security", HSTS);
   try {
+    // Before the console's login, and never reaching it: /v1 is the job bus, authenticated with
+    // its own bearer. A console session must not open it and its bearer must not open anything
+    // else, so the two doors never see each other's credential.
+    if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return await handleJobBus(req, res, url);
     // Whether a password is configured is not a secret: the login page announces it to anyone who
     // asks for it. The console reads this to decide whether to draw a Log out control.
     if (req.method === "GET" && url.pathname === "/auth/state") {
@@ -894,6 +1117,11 @@ const server = createServer(async (req, res) => {
         source: fromEnv.model ? "container env" : fromFile.model ? "box-secrets.json" : "unset",
       }));
     }
+    // The console's half of the job bus: read the state, generate, set or clear the token. Behind
+    // the session like every other console route, and it never reads a token back out.
+    if (url.pathname === "/job-bus/status" || url.pathname.startsWith("/job-bus/token")) {
+      return await handleJobBusConsole(req, res, url);
+    }
     if (req.method === "GET" && url.pathname === "/health") {
       const upstream = await fetch(`${GATEWAY}/health`, { headers: upstreamHeaders() });
       const text = await upstream.text();
@@ -943,6 +1171,12 @@ if (AUTH == null && !isLoopbackHost(BIND)) {
   process.exit(1);
 }
 await resolveBoxContainer();
+// The env deploy path (docs/JOB-BUS.md 8): TITAN_JOB_TOKEN set on the deployment means the bus is
+// meant to be answering, so the relay arms it on its own start. Not awaited into the listen: a
+// gateway that is not up yet must not stop the console from coming up, and the call logs either way.
+if (String(process.env.TITAN_JOB_TOKEN ?? "").trim().length > 0) {
+  void armJobBus("TITAN_JOB_TOKEN is set in the environment");
+}
 server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${GATEWAY}${TOKEN.length > 0 ? " (bearer)" : " (no auth)"}`);

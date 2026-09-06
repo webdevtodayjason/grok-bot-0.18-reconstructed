@@ -110,6 +110,89 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-05 night (job bus §10: the console, the gates and the docs).** The console half of the
+  hardening pass. Settings → Job bus now reads and writes `jobBusGetSettings` / `jobBusSetSettings`,
+  the bus's own settings file, instead of `getHostSettings` and the retired `SAND_JOB_BUS_*` names:
+  a bus that read its policy out of the host settings map would be armed by anything that writes
+  that map. The card gained the Enabled switch (§10.7's default is off, and generating or setting a
+  token arms it through the adapter, which is the one place that rule can live without the card
+  claiming an outcome it did not read back), the worker mapping as a job type against an agent
+  picked off the roster and **stored by id** with the name only shown, the repos allowlist, the
+  connectors the per-job clone keeps, and the two timeouts and `maxOpen`. The jobs table's Worker
+  column is the clone, with the agent it came from on the cell's title, because the clone is deleted
+  the moment the job ends and its name alone stops meaning anything.
+
+  The switch writes on the click and everything else waits for Save, which is not an inconsistency:
+  a switch with a Save under it sits there lying about whether the bus is open. The toggle refills
+  only itself afterwards, so arming the bus cannot throw away a half-typed allowlist under it.
+
+  `verify-job-bus.mjs` grew every §10.8 check and now starts **two** relays: one with a bearer and
+  one with none, because the uniform `401` is only provable by showing that an unconfigured relay
+  and a wrong key answer with the same bytes. It also proves the bearer opens nothing but `/v1`
+  (`/api/listAgents`, `/`, `/vnc/1/`, `/box/surface`), that a create on a disabled bus is `503`, the
+  unknown-field and outside-the-allowlist refusals, `maxOpen` to `429`, the per-job clone appearing
+  and going away, and the audit file's field list and `prev` chain. It is self-cleaning by
+  construction: it snapshots the roster first and sweeps anything outside that snapshot at the end,
+  so a clone the bus failed to delete is both a FAIL and gone. `verify-deploy.mjs` now asserts `401`
+  rather than "401 or 503" and checks the bearer's scope; `verify-dashboard.mjs --offline` covers
+  the new card states.
+
+  §10.8's "a 41-char sha is never accepted" is deliberately not in the box gate: the public surface
+  cannot hand the worker a forged reply, only a model in the worker's conversation can, so a gate
+  that faked one would be proving something about itself. It belongs in `npm test`.
+
+  Measured in this worktree: 574 unit tests green, source typecheck clean, `verify-dashboard.mjs
+  --offline` 32/32 against a relay on 127.0.0.1:7799 (22 before this pass). The box gates were not
+  run here, and `verify-job-bus.mjs` in particular has never executed a line of its new checks; the
+  Mac box
+  belongs to another wave. `GAP-ANALYSIS.md` JOBBUS-1..3 now read "hardened per §10, sha pending
+  integration"; JOBBUS-5 was rewritten to own what §10 does NOT close: the out-of-band GitHub layer
+  has no run behind it, the door is one static shared bearer, the clone is isolated at the connector
+  level only and still holds shell and browser, and the audit chain sits on the volume the worker
+  can reach.
+
+- **2026-09-05 night (the job bus integrated, and the one seam that was not joined).** The three
+  Titan Job Bus branches merged onto one trunk. Three conflicts, all of them two pieces appending to
+  the same place: both deploy paths had grown their own way to pass `TITAN_JOB_TOKEN` (the compose
+  had it twice as a repeated YAML key), and the console's stylesheet had two independent appends at
+  the end of the file. `docs/JOB-BUS.md` gained section 10, the hardening pass, which is binding and
+  wins over 1 to 9.
+
+  The seam worth writing down: the store emits every transition as `{type:"job-bus", jobId, status}`
+  through `deps.hostEvents.emit`, and the console's card listens on the gateway's `/events` stream.
+  Those are two different buses. `hostEvents` is the push-notification fan-out and its only
+  subscriber switches on `event.kind`, so every job transition landed there and stopped; the SSE
+  stream is `SandHost.listeners`, reached through a `private emit` nothing outside the class can
+  call. Both halves were written correctly to the contract and nothing joined them, which is exactly
+  the shape of failure this document exists for. `wireEvents` now forwards a job-bus event onto the
+  stream in its `{channel, payload}` envelope, so a client filtering with `?channels=job-bus` sees it
+  and the console's `payload ?? envelope` reader gets the object the contract names either way.
+  `tests/job-bus-event-stream.test.mjs` drives the real class and fails when the forward is removed.
+
+  Measured in this worktree: 574 unit tests green, source typecheck clean, `verify-dashboard.mjs
+  --offline` 22/22 against a relay on 127.0.0.1:7799. The box gates (`verify-job-bus.mjs`,
+  `verify-deploy.mjs`) were not run here; the Mac box belongs to another wave. New row JOBBUS-5 in
+  `GAP-ANALYSIS.md` §0 owns section 10, none of which is built yet.
+
+- **2026-09-05 late (the Titan Job Bus, console, gates, deploy and docs).** `docs/JOB-BUS.md` is
+  the contract and three pieces were built to it in parallel: the gateway's store, allowlist,
+  worker and audit; the relay's `/v1` edge and its token; and this piece, the console card and the
+  proof around it. Settings → Job bus reads `GET /job-bus/status` for the configured state and its
+  source, mints a token that is shown exactly once beside a warning that it is never shown again,
+  offers a curl example carrying `$TITAN_JOB_TOKEN` rather than a token, edits the worker mapping
+  through `getHostSettings`/`setHostSettings` as `SAND_JOB_BUS_WORKERS`, and draws the jobs table
+  from `jobBusList` with the contract's five status colours. The table redraws on the host's
+  `job-bus` event and on nothing else, so a transition cannot throw away what the operator is
+  typing into the card it is about. The adapter reads the SSE envelope by `type` and by `channel`,
+  because the contract names the first and every other event on that stream carries the second.
+  New gate `scripts/verify-job-bus.mjs` starts its own relay on 127.0.0.1:7791 with a random
+  bearer and drives the public surface end to end, including the exact growth of
+  `job-bus/audit.jsonl`; `verify-deploy.mjs` gained the two `/v1/health` checks (`401` or `503`
+  without a bearer and never `200`, `200` with `--job-token`); `verify-dashboard.mjs --offline`
+  renders the card in both states against the demo adapter, which grew a job bus of its own that
+  reaches no network. Measured in the worktree: the offline arm green, 22/22. Rows JOBBUS-1..4 in
+  `GAP-ANALYSIS.md` §0; JOBBUS-4 stays open until Jason smokes it from the CoS box.
+
 - **2026-09-04 evening (Wave U2, and the first hours of public use).** Routines fire on the box's
   own clock with the real schedule trigger and a slot-derived run id; the trigger editor says which
   listener each event kind would need; the five local-machine tools are withheld unless the bridge

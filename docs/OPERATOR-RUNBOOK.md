@@ -107,6 +107,62 @@ and ships everything and runs the install over ssh; `enable-route.sh` on the ser
 takes it down; `scripts/verify-deploy.mjs` proves the instance from here. Until `ui/endpoints.json`
 exists on the server no agent can answer.
 
+## The job bus, if the Chief of Staff is going to call this instance
+
+The contract, top to bottom, is [docs/JOB-BUS.md](JOB-BUS.md). Section 10 is the binding one
+wherever it and the sections above it disagree. Four steps on your own instance:
+
+1. **A token.** Either set `TITAN_JOB_TOKEN` on the `titanbot` Coolify resource, or open
+   **Settings → Job bus** in the console and press **Generate**. The generated value is shown
+   once, in a field you copy, and the console writes it to `job-bus.json` beside the relay's
+   profile at mode 0600. The environment wins over the file, and when it is set the card says so
+   and refuses to write one. With neither, every `/v1` request answers `401`, the same answer a
+   wrong bearer gets, on purpose, so nobody can probe the host to find out whether you have set
+   one yet (§10.6).
+2. **Turn it on.** A token is not an open bus. §10.7 keeps the bus disabled until you say
+   otherwise, and until then every create answers `503 {"error":"job bus is disabled"}`. The
+   **Enabled** switch on the same card is the switch; generating or setting a token there already
+   flips it, so this step is for the instance whose token came from the Coolify field.
+3. **A worker, and what it is allowed to touch.** All of this is the same card, and all of it is
+   written to the bus's own settings file, not to `sand-host-settings.json`:
+   - **Workers**: pick the agent that runs `nextgen.chapter` off the roster. The bus stores its
+     **id**, and it never sends the prompt into that agent's own conversation: it clones the agent
+     per job (`<name> · job <last 6 of the id>`), strips every connector but the ones under
+     **Connectors the clone keeps** (default `github`), and deletes the clone when the job ends.
+     The jobs table's Worker column is that clone, and its tooltip names the agent it came from. A
+     type pointing at no agent on this box stops its jobs on `needs_human {reason: "no_worker"}`,
+     which is a stuck job rather than work done somewhere nobody chose.
+   - **Repositories**: the only repositories a job may name, default
+     `webdevtodayjason/nextgen-training`. Anything else is `400` before a worker sees it.
+   - **Limits**: queue timeout (default 60 min), run timeout (120 min), max open jobs (20). A
+     create beyond the last answers `429 {"error":"queue full"}`.
+   - Give the box a GitHub credential as well, through **Settings → Connectors → GitHub** and the
+     `gh` shell tool. Without it the worker stops on `needs_human {reason: "github_auth"}` rather
+     than pushing, and the bus's own out-of-band check of the commits and files a job claims
+     (§10.4) reports `verification:github_credential_missing` instead of confirming them.
+4. **Smoke it from the CoS box.** Health first, then one `health.ping` job, then read that job
+   back:
+
+```sh
+export TITAN_JOB_BASE_URL=https://tb.semfreak.dev TITAN_JOB_TOKEN=…
+curl -sS -H "Authorization: Bearer $TITAN_JOB_TOKEN" "$TITAN_JOB_BASE_URL/v1/health"
+curl -sS -X POST "$TITAN_JOB_BASE_URL/v1/jobs" -H "Authorization: Bearer $TITAN_JOB_TOKEN" \
+  -H "Idempotency-Key: health-1" -H "Content-Type: application/json" \
+  -d '{"type":"health.ping","idempotency_key":"health-1","payload":{}}'
+curl -sS -H "Authorization: Bearer $TITAN_JOB_TOKEN" "$TITAN_JOB_BASE_URL/v1/jobs/<id>"
+```
+
+Health is authenticated too, on purpose: this is a public host. A `401` on the first line means no
+token or the wrong one; a `503 job bus is disabled` on the second means step 2 is still undone.
+The jobs table on the same console card shows every job the bus has run, and it updates as the
+host reports transitions, so the smoke above should appear on screen without a reload.
+
+If the relay is only on the tailnet, an ACL letting the CoS box and you reach `tb:443` is enough;
+the bearer still applies. Nothing else on the relay is reachable with that bearer, and
+`--job-token` makes `scripts/verify-deploy.mjs` prove it on `/api/listAgents`, `/`, `/vnc/1/` and
+`/box/surface`. CDP, noVNC and the desktop stay on loopback: the same gate asserts the port
+bindings when it is run against the server, and says so when it is handed only a URL.
+
 ## Your own skills after you deploy
 
 The August 15 backup of the original install holds eleven global workflow skills written for

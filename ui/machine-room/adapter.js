@@ -41,6 +41,59 @@
     const listeners = new Set();
     const timers = new Set();
 
+    // JOBBUS-3: the Job bus card with no relay and no gateway behind it (docs/JOB-BUS.md §7,
+    // hardened by §10.7). A bus with no token has never been called, so it carries no jobs;
+    // generating one here mints a value that exists only in this tab and reaches no file, which
+    // is why the card's warning says so on this path. Generating also arms `enabled`, the same
+    // way the gateway adapter does, because §10.7 makes those one act.
+    //
+    // The settings are the shape §10.7 fixes, with `workers` holding an AGENT ID out of the demo
+    // roster rather than a name: the card resolves an id to the agent's name for the select, and
+    // a demo that stored a name would let that half of the card pass untested. The two jobs are
+    // the shapes the table has to draw: a done job with a result line, and one stopped on a
+    // human. Both name the per-job clone (§10.2) and the agent it was cloned from.
+    const jobBus = {
+      configured: false,
+      source: null,
+      base_url: `${(global.location && global.location.origin) || "https://your-console"}/v1`,
+      settings: {
+        enabled: false,
+        workers: { "nextgen.chapter": "clientsync" },
+        repos: ["webdevtodayjason/nextgen-training"],
+        allowedConnectors: ["github"],
+        timeoutMin: 120,
+        queueTimeoutMin: 60,
+        maxOpen: 20,
+        // 10.9: the operator switch behind policy.require_attestation, and what the host says about
+        // the files it read at start. Both are drawn by the card, so the offline gate sees them.
+        allowUnattested: false,
+        integrity: { ok: true, detail: "", quarantined: [] },
+      },
+      jobs: [
+        {
+          id: "job_m4k2x9q7a1b3c5d7e9f1",
+          type: "nextgen.chapter",
+          status: "needs_human",
+          idempotency_key: "c05-ch3-2026-09-05",
+          worker: { agentId: "clone-e9f1", sourceAgentId: "clientsync", agentName: "ClientSync Tester · job d7e9f1" },
+          created_at: "2026-09-05T22:41:00.000Z",
+          result: null,
+          needs_human: { reason: "github_auth", detail: "gh could not authenticate in the sandbox. Add a GitHub credential and re-submit." },
+        },
+        {
+          id: "job_m4k1p2r4t6v8w0y2z4a6",
+          type: "nextgen.chapter",
+          status: "done",
+          idempotency_key: "c05-ch2-2026-09-05",
+          worker: { agentId: "clone-z4a6", sourceAgentId: "clientsync", agentName: "ClientSync Tester · job y2z4a6" },
+          created_at: "2026-09-05T21:12:00.000Z",
+          result: { summary: "Course 05 Ch2 notes on main", commits: ["4f1c0b9d2e6a8c3b5d7f9a1c3e5b7d9f1a3c5e7b"], artifacts: [{ path: "notes/c05/02-intro.md", bytes: 18000, sha256: "0f2e" }] },
+          needs_human: null,
+        },
+      ],
+    };
+    const demoToken = () => Array.from({ length: 48 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("");
+
     function emit(type, detail) {
       const event = { type, detail: clone(detail || {}), snapshot: clone(state) };
       listeners.forEach((listener) => listener(event));
@@ -330,6 +383,44 @@
         const receipts = Array.from({ length: count }, (unused, index) => ({ type: "shell_command", command: `demo action ${index + 1}` }));
         const attestations = (stamp.attestations ?? []).map((eventId) => ({ eventId, tool: "shell", ok: true, bytes: 0, head: "" }));
         return Promise.resolve({ receipts, attestations });
+      },
+
+      // The same seven shapes the gateway adapter answers with, so the card is one piece of code.
+      getJobBusStatus() {
+        return Promise.resolve({ configured: jobBus.configured, source: jobBus.source, base_url: jobBus.base_url });
+      },
+      listJobBusJobs() {
+        return Promise.resolve(jobBus.configured ? clone(jobBus.jobs) : []);
+      },
+      generateJobBusToken() {
+        jobBus.configured = true;
+        jobBus.source = "file";
+        jobBus.settings.enabled = true;
+        return Promise.resolve({
+          accepted: true, token: demoToken(),
+          message: "Generated in this page only. With no relay behind it nothing was written, so this value opens nothing.",
+        });
+      },
+      setJobBusToken(token) {
+        if (typeof token !== "string" || token.trim().length < 32) {
+          return Promise.resolve({ accepted: false, message: "A job bus token is at least 32 characters." });
+        }
+        jobBus.configured = true;
+        jobBus.source = "file";
+        jobBus.settings.enabled = true;
+        return Promise.resolve({ accepted: true, message: "Held in this page only. With no relay behind it nothing was written." });
+      },
+      clearJobBusToken() {
+        jobBus.configured = false;
+        jobBus.source = null;
+        return Promise.resolve({ accepted: true, message: "Cleared in this page only." });
+      },
+      getJobBusSettings() { return Promise.resolve(clone(jobBus.settings)); },
+      setJobBusSettings(partial) {
+        // A partial merge, the way §10.7 writes it, so the switch can send {enabled} alone and the
+        // Save can send the lists without either of them clearing the other.
+        jobBus.settings = { ...jobBus.settings, ...clone(partial || {}) };
+        return Promise.resolve(clone(jobBus.settings));
       },
     };
   }

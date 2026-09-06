@@ -177,6 +177,17 @@ services:
       com.titanbot.role: relay
     environment:
       SAND_UI_PORT: "7777"
+      # The Titan Job Bus bearer (docs/JOB-BUS.md section 10.6). Optional on purpose: with no value
+      # here the relay falls back to the token file the console writes, and with neither every
+      # /v1 request answers 401. Setting it here WINS over the file, and the console then says so
+      # and refuses to write one.
+      #
+      # No `:-` default, deliberately, and section 10.6 fixes it that way: Coolify builds a
+      # variable's NAME from everything between the braces, so `${TITAN_JOB_TOKEN:-}` becomes an
+      # environment field literally named `TITAN_JOB_TOKEN:-` in its UI and the operator's value
+      # never reaches the relay. Unset, compose resolves this to the empty string with a warning,
+      # which is a working deployment: the console's Generate is the other way in.
+      TITAN_JOB_TOKEN: ${TITAN_JOB_TOKEN}
       # 0.0.0.0 inside the container, which is the container's own interface and not a server one.
       # The relay refuses to start on a reachable address with no ui/auth.json, so this line and
       # the password file in the mounted ui directory are a pair.
@@ -253,8 +264,16 @@ services:
       # writes it. deploy/r750/set-password.mjs is how it changes.
       - /home/sem/titanbot/ui:/app/ui
       # The token file the hand install wrote, and the relay's ONLY source for the gateway bearer:
-      # nothing in the environment above sets it. Read-only, and 0600 on the host.
-      - /home/sem/titanbot/profile:/profile:ro
+      # nothing in the environment above sets it. 0600 on the host, and the relay never writes it.
+      #
+      # No longer :ro, and only because of one file: Settings -> Job bus writes job-bus.json here
+      # when the operator generates a token, which is the path docs/JOB-BUS.md section 2 fixes. On
+      # a read-only mount that button can only ever fail, and the alternative is telling every
+      # operator to set TITAN_JOB_TOKEN by hand in Coolify. What the read-only flag was protecting
+      # is unchanged in substance: local-docker-vm.json is 0600 on the host and no route on this
+      # server writes it, and anyone who could make the relay write it already holds the gateway
+      # token it contains.
+      - /home/sem/titanbot/profile:/profile
       # The two post-start box repairs, run from this container's own start. See the command below.
       - /home/sem/titanbot/deploy:/init:ro
     # install.sh does the box repairs inline after `docker run`, because it is a script and can

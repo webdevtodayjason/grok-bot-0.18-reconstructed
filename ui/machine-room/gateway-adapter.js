@@ -74,6 +74,34 @@
     }
   }
 
+  // JOBBUS-3: one POST to a relay job-bus route, answered as {accepted, message, token?}. The
+  // token comes back exactly once, from the generate route, and is handed straight to the caller
+  // so it is never held here and never reaches state, an event or a log.
+  async function jobBusWrite(route, body) {
+    const r = await relayFetch(route, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const answer = await r.json().catch(() => ({}));
+    if (!r.ok) return { accepted: false, message: answer?.error ?? `the relay answered ${r.status}` };
+    return { accepted: true, message: answer?.message ?? null, token: answer?.token ?? null };
+  }
+
+  // docs/JOB-BUS.md §10.7: the bus is off until the operator turns it on, and setting or
+  // generating a bearer IS turning it on -- nobody pastes a token at a bus they want shut. A host
+  // too old to carry jobBusSetSettings leaves the answer alone rather than failing a token write
+  // that did land.
+  //
+  // §10.9: this is no longer the only place it happens. The relay arms the bus on the same two
+  // routes and on its own start when TITAN_JOB_TOKEN is in the environment, because arming that
+  // lived only here meant the env deploy path in §8 armed nothing at all. Doing it twice is one
+  // idempotent write.
+  async function armJobBusOnToken(answer) {
+    if (answer?.accepted === true) {
+      try { await tryCall("jobBusSetSettings", { enabled: true }); } catch { /* the token still landed */ }
+    }
+    return answer;
+  }
+
   const AVATARS = [
     "assets/avatar-chief.svg", "assets/avatar-atera.svg", "assets/avatar-marketing.svg",
     "assets/avatar-clientsync.svg", "assets/avatar-coro.svg",
@@ -1616,7 +1644,19 @@
       // fine here because the heartbeat below calls the gateway every 15 seconds and relayFetch
       // bounces to /login the first time one of those comes back unauthenticated.
       const events = new global.EventSource("/events");
-      events.onmessage = () => {
+      events.onmessage = (message) => {
+        // JOBBUS-3: a job transition is not a conversation change, so it does not pay for a
+        // transcript re-read. It refreshes the Job bus card and nothing else. docs/JOB-BUS.md §5
+        // names the event `{type:"job-bus", jobId, status}`; every other envelope on this stream
+        // carries its name on `channel` with the body under `payload`, so both are read rather
+        // than betting the console on which one the host settled on.
+        let envelope = null;
+        try { envelope = JSON.parse(message?.data ?? "null"); } catch { /* a heartbeat or a partial frame */ }
+        if (envelope != null && (envelope.type === "job-bus" || envelope.channel === "job-bus")) {
+          const body = envelope.payload ?? envelope;
+          emit("job-bus:changed", { jobId: body.jobId ?? null, status: body.status ?? null });
+          return;
+        }
         if (pending) return;
         pending = global.setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, 900);
       };
@@ -2865,6 +2905,37 @@
         return call("setHostSettings", { autoReviewInstructions: next })
           .catch((error) => { failed(`Review policy could not be saved: ${error.message}`); throw error; });
       },
+
+      // ---- the Titan Job Bus (docs/JOB-BUS.md) ------------------------------------------------
+      // The token lives on the relay, so its four routes are console-session calls; the jobs and
+      // the worker mapping live on the gateway. The card reads both through here rather than
+      // fetching, so the offline demo can answer the same shapes with no network at all.
+      getJobBusStatus() {
+        return relayFetch("/job-bus/status").then(async (r) => {
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(body?.error ?? `the relay answered ${r.status}`);
+          return body;
+        });
+      },
+      // null, not [], when this box's gateway has no jobBusList: the card then says the host is
+      // older than the console instead of drawing an empty table as if no job had ever run.
+      listJobBusJobs() {
+        // The contract says {jobs:[...]}; a bare array is read too, because a host that answered
+        // one would otherwise paint "no jobs yet" over a bus that had run plenty.
+        return tryCall("jobBusList").then((answer) => (answer == null ? null : Array.isArray(answer) ? answer : answer.jobs ?? []));
+      },
+      generateJobBusToken() { return jobBusWrite("/job-bus/token/generate", {}).then(armJobBusOnToken); },
+      setJobBusToken(token) { return jobBusWrite("/job-bus/token", { token }).then(armJobBusOnToken); },
+      clearJobBusToken() { return jobBusWrite("/job-bus/token/clear", {}); },
+      // §10.7's own settings file, read and written by two commands of its own. null, not {}, on a
+      // host that has neither: the card then says the bundle is older than the contract instead of
+      // drawing the defaults as though it had read them off this box.
+      getJobBusSettings() { return tryCall("jobBusGetSettings"); },
+      setJobBusSettings(partial) {
+        return call("jobBusSetSettings", partial)
+          .catch((error) => { failed(`The job bus settings were not saved: ${error.message}`); throw error; });
+      },
+
       startTeaching(workerId) {
         const id = workerId ?? state.activeContext?.id;
         const worker = state.workers.find((w) => w.id === id);

@@ -9,9 +9,9 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  clientAddress, createLoginThrottle, createSession, hashPassword, isLoopbackHost, isSecureRequest,
-  newAuthRecord, parseCookies, parseTrustedProxies, readAuthFile, readSession, safeNextPath,
-  serializeCookie, signSession, sourceAddress, verifyPassword, writeAuthFile,
+  clientAddress, comparableDigest, createLoginThrottle, createSession, hashPassword, isLoopbackHost,
+  isSecureRequest, newAuthRecord, parseCookies, parseTrustedProxies, readAuthFile, readSession,
+  safeEqual, safeNextPath, serializeCookie, signSession, sourceAddress, verifyPassword, writeAuthFile,
 } from "../ui/auth.mjs";
 
 // Cheap scrypt parameters: these tests derive keys dozens of times and the production cost factor
@@ -212,4 +212,25 @@ test("a broken auth file throws rather than reading as no password at all", () =
   assert.throws(() => readAuthFile(file), /no password or no cookieSecret/);
   writeFileSync(file, JSON.stringify({ version: 1, password: {}, cookieSecret: "" }));
   assert.throws(() => readAuthFile(file), /no password or no cookieSecret/);
+});
+
+test("safeEqual compares fixed-width digests, so the length of the secret is not timeable", () => {
+  // The old version returned false on a length mismatch before comparing anything. That is a fast
+  // path an attacker can time: probe /v1 with a one-character bearer, then two, and the length of
+  // the configured token falls out of the response times. What is compared now is a 32-byte digest
+  // of each side whatever went in, so every comparison is the same work.
+  assert.equal(comparableDigest("").length, 32);
+  assert.equal(comparableDigest("a").length, 32);
+  assert.equal(comparableDigest("a".repeat(100_000)).length, 32);
+  // Stable inside the process, and different for different values -- that is all safeEqual needs.
+  assert.deepEqual(comparableDigest("token"), comparableDigest("token"));
+  assert.notDeepEqual(comparableDigest("token"), comparableDigest("token "));
+
+  assert.equal(safeEqual("token", "token"), true);
+  assert.equal(safeEqual("token", "token "), false);
+  assert.equal(safeEqual("", ""), true);
+  assert.equal(safeEqual("a", "a".repeat(100_000)), false);
+  // Neither side is trusted to be a string: the bearer arrives off a header.
+  assert.equal(safeEqual(undefined, "token"), false);
+  assert.equal(safeEqual(null, undefined), false);
 });

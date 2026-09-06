@@ -22,6 +22,9 @@
 #   TITANBOT_ROOT         install tree, default /home/sem/titanbot
 #   TITANBOT_RELAY_BIND   host IP the relay publishes on, default 100.110.83.82 (the tailnet address)
 #   TITANBOT_RELAY_PORT   host port for the relay, default 7787
+#   TITAN_JOB_TOKEN       the Titan Job Bus bearer (docs/JOB-BUS.md §2). Set only if you want the
+#                         environment to hold it; unset is the normal case, and the console's
+#                         Settings -> Job bus writes the token file instead
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -9,6 +9,7 @@
 // in front of that. It does not make the relay safe to publish on the open internet; it makes
 // reaching the port stop being the same thing as holding the token.
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash } from "node:crypto";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 
 // N=16384 keeps the derivation around 40 ms on this hardware and stays under node's default
@@ -18,13 +19,23 @@ export const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1000;
 
 const utf8 = (value) => Buffer.from(String(value), "utf8");
 
-// Constant time for equal-length inputs; a length difference is not a secret worth hiding here,
-// and timingSafeEqual throws rather than returning false when the lengths differ.
+// A per-process key, so the digests below are not something an attacker can precompute against a
+// guessed token. It never leaves this module and never has to survive a restart.
+const EQUALITY_KEY = randomBytes(32);
+
+// What safeEqual actually compares: a fixed-width keyed digest of the value, never the value. The
+// width is why the comparison is constant time whatever the two inputs are.
+export function comparableDigest(value) {
+  return createHash("sha256").update(EQUALITY_KEY).update(utf8(value)).digest();
+}
+
+// Constant time, including in the LENGTH of the inputs. The old version returned false on a length
+// mismatch before comparing anything, which is a fast path an attacker can time: probe /v1 with a
+// 1-char bearer, then a 2-char one, and the length of the configured token falls out of the
+// response times. Hashing both sides first makes every comparison the same 32 bytes of work, so the
+// only thing the timing can say is "not equal", which the 401 already said.
 export function safeEqual(a, b) {
-  const left = utf8(a);
-  const right = utf8(b);
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
+  return timingSafeEqual(comparableDigest(a), comparableDigest(b));
 }
 
 export function hashPassword(password, salt = randomBytes(16).toString("hex"), params = SCRYPT_PARAMS) {
