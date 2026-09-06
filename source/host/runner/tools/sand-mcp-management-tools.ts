@@ -353,7 +353,7 @@ export function createMcpManagementTools(
       },
     }),
     defineCommunicateTool(management, {
-      id: "INSTALL_PLUGIN", name: "InstallPlugin", description: "Install a Marketplace plugin by its STABLE plugin id (from SearchPlugins) onto this box: it writes the connector's entry and reloads the MCP servers. Only call this after the user has agreed — confirm with a question widget first, since installing changes their configuration. Idempotent: re-installing an installed plugin is safe. You CANNOT set a credential — a key typed into a conversation ends up in the transcript, so the answer names the fields the user has to fill on the plugin's page in the Marketplace, and you tell them to go there. A shell tool is not installed from here; its install command runs in the box from that same page. New tools become available to you on your next message.", parameters: installPluginParameters,
+      id: "INSTALL_PLUGIN", name: "InstallPlugin", description: "Install a Marketplace plugin by its STABLE plugin id (from SearchPlugins) onto this box: for a connector it writes the entry and reloads the MCP servers. Only call this after the user has agreed — confirm with a question widget first, since installing changes their configuration. A plugin that is already installed is left exactly as it is: the answer says so and nothing is written, because the entry on the box may be one the user has since edited. You CANNOT set a credential — a key typed into a conversation ends up in the transcript, so the answer names the fields the user has to fill on the plugin's page in the Marketplace, and you tell them to go there. A shell-tool plugin installs from here too: its install command runs inside the box — the same one the plugin page's button runs — and it can take minutes. New tools become available to you on your next message.", parameters: installPluginParameters,
       execute: guardMutation(async (_ctx, args: z.infer<typeof installPluginParameters>, deps) => {
         const before = await deps.getPlugin(args.plugin_id);
         if (before == null) return `No plugin with id "${args.plugin_id}".`;
@@ -405,7 +405,12 @@ export function createMcpManagementTools(
         if (!detail.isInstalled) return `${detail.displayName} is not installed — nothing to uninstall.`;
         if (detail.installMode === "team-required") return `${detail.displayName} is required by the user's team and cannot be uninstalled.`;
         const result = await deps.uninstallPlugin(args.plugin_id);
-        return result.removed ? `Uninstalled ${detail.displayName} (plugin ${detail.pluginId}).` : `The uninstall request for ${detail.displayName} completed, but it still reads as installed.`;
+        if (result.removed) return `Uninstalled ${detail.displayName} (plugin ${detail.pluginId}).`;
+        // The reason is the whole answer for a shell tool: it has no uninstall door on this host,
+        // and "it still reads as installed" would leave the user waiting for a second attempt.
+        return result.reason == null || result.reason.length === 0
+          ? `The uninstall request for ${detail.displayName} completed, but it still reads as installed.`
+          : `${detail.displayName} was not uninstalled: ${result.reason}`;
       }),
     }),
     defineCommunicateTool(management, {

@@ -23,6 +23,7 @@ import {
 } from "./extensions/shell-tools/shell-secrets.js";
 import {
   fetchShellToolSkill,
+  probeShellToolBinary,
   readShellSecretProbe,
   runShellToolInstall,
   shellSecretProbeCommand,
@@ -879,9 +880,14 @@ export function createHostGatewayApi(
     // CodeRabbit has no MCP server to hang a credential on (docs/connectors/coderabbit.md) and the
     // operator's cli-anything-tinyfish is the same shape, so this is the connector credential card
     // one layer down: same 0600 store file, same env-name guard, a different destination.
-    listShellTools: () => {
+    // MARKET-1: `installed` and `stored` are two different facts and both are answered here.
+    // `installed` is `command -v <binary>` in the box's own shell -- nothing records a shell-tool
+    // install, so the shell is the only authority -- and `stored` is whether the 0600 store holds
+    // the key. A key with no program is a command that does not exist; a program with no key is a
+    // tool the operator would otherwise be told to install twice.
+    listShellTools: async () => {
       const stored = new Set(listShellEnvSecretFields(shellRoot()));
-      return SHELL_TOOLS.map((tool) => ({
+      return Promise.all(SHELL_TOOLS.map(async (tool) => ({
         id: tool.id,
         name: tool.name,
         field: tool.field,
@@ -889,8 +895,9 @@ export function createHostGatewayApi(
         usage: tool.usage,
         credentialNote: tool.credentialNote,
         ...(tool.skillUrl == null ? {} : { skillUrl: tool.skillUrl }),
+        installed: await probeShellToolBinary(tool),
         stored: stored.has(tool.field)
-      }));
+      })));
     },
     // Names only, from both lists, for the same reason listConnectorSecretFields answers two:
     // `fields` is what a value may be stored under, `stored` is what the 0600 store holds.

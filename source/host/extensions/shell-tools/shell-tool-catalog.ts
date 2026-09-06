@@ -24,6 +24,13 @@ export interface ShellToolEntry {
   readonly name: string;
   /** The one environment variable this tool reads. Stored in the shell secret store, never here. */
   readonly field: string;
+  /**
+   * The program the install puts on the box's PATH. `command -v <binary>` in the box's own shell is
+   * the only true "is it installed" signal this host has: nothing records a shell-tool install, and
+   * a stored key is a different fact entirely -- a key with no program is a command that does not
+   * exist, and a program with no key is installed but unusable.
+   */
+  readonly binary: string;
   /** Run inside the box as user `box`. Never run by the gate. */
   readonly install: string;
   /** What the agent is meant to type once the tool is installed and the key is stored. */
@@ -39,6 +46,7 @@ export const SHELL_TOOLS: readonly ShellToolEntry[] = Object.freeze([
     id: "coderabbit",
     name: "CodeRabbit CLI",
     field: "CODERABBIT_API_KEY",
+    binary: "cr",
     install: "CI=1 curl -fsSL https://cli.coderabbit.ai/install.sh | sh",
     usage: `cr review --agent --api-key "$CODERABBIT_API_KEY"`,
     credentialNote:
@@ -50,6 +58,7 @@ export const SHELL_TOOLS: readonly ShellToolEntry[] = Object.freeze([
     id: "tinyfish-cli",
     name: "TinyFish CLI",
     field: "TINYFISH_API_KEY",
+    binary: "cli-anything-tinyfish",
     install: "pip install cli-anything-tinyfish",
     usage: "TINYFISH_API_KEY is read from the environment; the imported skill documents the commands.",
     credentialNote:

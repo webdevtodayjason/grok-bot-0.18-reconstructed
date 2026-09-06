@@ -80,7 +80,7 @@ inference key is a bug — file it.
 
 | State | What it means | Read from |
 | --- | --- | --- |
-| not installed | the plugin's connector name is not in `connectors.json` (for a shell-tool plugin: the box holds no key for it — see below) | the connectors file / `listShellTools` |
+| not installed | the plugin's connector name is not in `connectors.json` (for a shell-tool plugin: `command -v <binary>` in the box finds no such program — see below) | the connectors file / the box's own shell |
 | Needs auth | installed, and at least one credential field has no stored value | `listConnectorSecretFields`: the field is in `fields` and not in `stored` |
 | Ready | installed, keyed, and the connector reports connected | the host's own connector status |
 
@@ -92,11 +92,15 @@ inference key is a bug — file it.
   output; its Accounts box writes to the `shell` section of the same 0600 store (`setShellSecret`),
   which is a *different environment* from a connector's — a key stored on the `tinyfish` connector
   does not reach the TinyFish CLI. Nothing about a shell tool appears in `connectors.json` or in
-  `tools/list`. **This box keeps no install record for a shell tool anywhere** — `runShellToolInstall`
-  spawns the command and remembers nothing — so the only true local signal for "installed", and the
-  one the Shell tools panel already shows, is whether the host holds its key (`listShellTools`
-  answers `stored`). An installed shell tool therefore never shows *Needs auth*, and it gets no
-  Uninstall control: `installShellTool` has no inverse on this host.
+  `tools/list`. **Nothing records the install, so "installed" is asked of the box, not of a file.**
+  The host runs inside the box and already spawns `/bin/sh -lc` there to run the installer, so the
+  same shell answers `command -v <binary>` — `cr` for CodeRabbit, `cli-anything-tinyfish` for the
+  TinyFish CLI, named on each entry in `shell-tool-catalog.ts` — and that exit status is the install
+  state (`probeShellToolBinary`, beside `runShellToolInstall`). A **stored key is a different fact**
+  and stays where it belongs, in the credential field's `isStored`: a key with no program is a
+  command the agent would report as available and then fail to run, and a program with no key is a
+  tool the operator would be told to install a second time. A shell tool gets no Uninstall control:
+  `installShellTool` has no inverse on this host.
 - **Custom MCP server** is the catalog entry for everything the catalog does not know. It is the one
   row with no entry to write, so it carries `install: null` and `opensEditor: true` instead: its Add
   opens the connector editor that already exists — name, command, arguments, environment variable
@@ -316,8 +320,8 @@ rather than Cursor's.
 | --- | --- |
 | `SearchPlugins` | lists the catalog's plugins; a query filters on name, tagline and category. Read-only. |
 | `GetPlugin` | one plugin, with its credential fields and whether the host already holds a value for each |
-| `InstallPlugin` | writes the entry through the same host path the relay uses, and answers with the fields the operator must fill on the plugin page |
-| `UninstallPlugin` | removes the entry |
+| `InstallPlugin` | for a connector, writes the entry through the same host path the relay uses; for a shell tool, runs the catalog's install command in the box through `runShellToolInstall` — the same door the plugin page's button uses — and re-probes rather than trusting its exit code. Either way it answers with the fields the operator must fill on the plugin page. A plugin already installed is left untouched: nothing is rewritten, because the entry on the box may be one the operator has edited since |
+| `UninstallPlugin` | removes the entry. A shell tool has no uninstall on this host, and the answer says so rather than reporting a removal that did not happen |
 
 **The split is the one the whole connector plane is built on: the agent installs, the operator
 keys.** `setConnectorSecret` is a console command and deliberately not an agent tool, because a key

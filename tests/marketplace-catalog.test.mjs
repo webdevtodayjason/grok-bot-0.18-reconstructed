@@ -14,7 +14,9 @@
 //     one of the three alone fails.
 //  4. The tools do what the contract says: SearchPlugins filters, InstallPlugin writes the entry
 //     through the host's own connectors.json door and answers with the fields still empty, and
-//     UninstallPlugin takes it out again -- leaving the file byte-identical to what it was.
+//     UninstallPlugin takes it out again -- leaving the file byte-identical to what it was. And the
+//     two facts a shell tool has stay apart: whether its PROGRAM is on the box (the shell's own
+//     `command -v`) is the install state, and whether its KEY is stored is the field's `isStored`.
 //
 // The install and uninstall run against a temp sand-data root. Nothing here touches the box, the
 // network, or a real credential; the only "value" written anywhere is the empty string.
@@ -51,7 +53,12 @@ const host = await bundle("source/host/extensions/mcp/marketplace-plugins.ts", "
 const tools = await bundle("source/host/runner/tools/sand-mcp-management-tools.ts", "mcp-management-tools.cjs");
 
 const CONNECTORS = path.join(root, "connectors.json");
-const reader = { rootDir: () => root };
+const SECRETS = path.join(root, "connector-env-secrets.json");
+// The probe is stubbed so the assertion is about the RULE, not about whether the machine running
+// the suite happens to have `cr` on its PATH. `probeShellToolBinary` itself is exercised below
+// against a real shell, with a name nothing could have installed.
+let shellBinaries = new Set();
+const reader = { rootDir: () => root, probeShellTool: async (entry) => shellBinaries.has(entry.binary) };
 
 // ---------------------------------------------------------------- 1. the catalog is internally true
 
@@ -170,8 +177,8 @@ test("every connector entry in the catalog is the console's preset entry, argume
 
 const summariesFor = () => host.listMarketplacePluginSummaries(reader);
 
-test("SearchPlugins filters on name, tagline and category", () => {
-  const all = summariesFor();
+test("SearchPlugins filters on name, tagline and category", async () => {
+  const all = await summariesFor();
   assert.equal(all.length, catalog.MARKETPLACE_PLUGINS.length);
   // By name.
   assert.deepEqual(tools.rankPluginsLexically(all, "linear").map((row) => row.pluginId), ["linear"]);
@@ -193,11 +200,11 @@ test("SearchPlugins filters on name, tagline and category", () => {
   assert.equal(catalog.searchMarketplacePlugins("").length, catalog.MARKETPLACE_PLUGINS.length);
 });
 
-test("InstallPlugin writes the entry through the host path and answers with the empty fields", () => {
+test("InstallPlugin writes the entry through the host path and answers with the empty fields", async () => {
   writeFileSync(CONNECTORS, JSON.stringify({ mcpServers: {} }, null, 2), { encoding: "utf8", mode: 0o600 });
 
-  assert.equal(host.marketplacePluginIsInstalled(reader, catalog.findMarketplacePlugin("tinyfish")), false);
-  const outcome = host.installMarketplacePlugin(reader, "tinyfish");
+  assert.equal(await host.marketplacePluginIsInstalled(reader, catalog.findMarketplacePlugin("tinyfish")), false);
+  const outcome = await host.installMarketplacePlugin(reader, "tinyfish");
   assert.equal(outcome.installed, true);
   assert.equal(outcome.refused, undefined);
 
@@ -210,33 +217,33 @@ test("InstallPlugin writes the entry through the host path and answers with the 
   assert.deepEqual(outcome.fields.map((field) => [field.key, field.isStored]), [["TINYFISH_API_KEY", false]]);
   assert.ok(outcome.fields[0].hint.length > 0, "the field carries the line that says where the key is minted");
 
-  const detail = host.getMarketplacePluginDetail(reader, "tinyfish", []);
+  const detail = await host.getMarketplacePluginDetail(reader, "tinyfish", []);
   assert.equal(detail.isInstalled, true);
   const described = tools.describePluginDetail(detail);
   assert.match(described, /TINYFISH_API_KEY \(required, not stored yet\)/);
   assert.ok(!described.includes("Setup fields (pass in InstallPlugin values)"), "the model is no longer told to pass values");
 });
 
-test("UninstallPlugin removes it and leaves connectors.json byte-identical", () => {
+test("UninstallPlugin removes it and leaves connectors.json byte-identical", async () => {
   writeFileSync(CONNECTORS, JSON.stringify({ mcpServers: {} }, null, 2), { encoding: "utf8", mode: 0o600 });
   const before = readFileSync(CONNECTORS, "utf8");
-  host.installMarketplacePlugin(reader, "tinyfish");
+  await host.installMarketplacePlugin(reader, "tinyfish");
   assert.notEqual(readFileSync(CONNECTORS, "utf8"), before);
 
   const outcome = host.uninstallMarketplacePlugin(reader, "tinyfish");
   assert.equal(outcome.removed, true);
   assert.equal(readFileSync(CONNECTORS, "utf8"), before, "the file is byte-identical after the undo");
-  assert.equal(host.marketplacePluginIsInstalled(reader, catalog.findMarketplacePlugin("tinyfish")), false);
+  assert.equal(await host.marketplacePluginIsInstalled(reader, catalog.findMarketplacePlugin("tinyfish")), false);
 
   // A second uninstall is not an error, it is a no-op that says so.
   assert.equal(host.uninstallMarketplacePlugin(reader, "tinyfish").removed, false);
 });
 
-test("an install beside another connector touches only its own key", () => {
+test("an install beside another connector touches only its own key", async () => {
   const neighbour = { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"], env: {} };
   writeFileSync(CONNECTORS, JSON.stringify({ mcpServers: { localfiles: neighbour } }, null, 2), { encoding: "utf8", mode: 0o600 });
   const before = readFileSync(CONNECTORS, "utf8");
-  host.installMarketplacePlugin(reader, "github");
+  await host.installMarketplacePlugin(reader, "github");
   const after = JSON.parse(readFileSync(CONNECTORS, "utf8")).mcpServers;
   assert.deepEqual(after.localfiles, neighbour);
   assert.ok(after.github != null);
@@ -244,19 +251,80 @@ test("an install beside another connector touches only its own key", () => {
   assert.equal(readFileSync(CONNECTORS, "utf8"), before);
 });
 
-test("a shell tool is not installed by writing connectors.json, and says so", () => {
+test("the Custom MCP server card writes nothing: it is the connector editor", async () => {
   writeFileSync(CONNECTORS, JSON.stringify({ mcpServers: {} }, null, 2), { encoding: "utf8", mode: 0o600 });
   const before = readFileSync(CONNECTORS, "utf8");
-  const outcome = host.installMarketplacePlugin(reader, "coderabbit");
-  assert.equal(outcome.installed, false);
-  assert.match(outcome.refused, /shell tool/);
-  assert.equal(readFileSync(CONNECTORS, "utf8"), before, "nothing was written");
-
-  // The Custom MCP server card is the connector editor, not an entry.
-  const editor = host.installMarketplacePlugin(reader, "custom-mcp");
+  const editor = await host.installMarketplacePlugin(reader, "custom-mcp");
   assert.equal(editor.installed, false);
   assert.match(editor.refused, /connector editor/);
   assert.equal(readFileSync(CONNECTORS, "utf8"), before);
+});
+
+// A stored key and an installed program are two different facts, and conflating them was the bug:
+// with TINYFISH_API_KEY in the store and `pip install cli-anything-tinyfish` never run, the tools
+// told the model the CLI was available and it would run a command that does not exist. The converse
+// was just as wrong -- a tool installed with no key read as "not installed", so the model told the
+// operator to install what they already had.
+test("a stored key alone is not an installed shell tool, and an install with no key still is one", async () => {
+  const coderabbit = catalog.findMarketplacePlugin("coderabbit");
+  writeFileSync(
+    SECRETS,
+    JSON.stringify({ shell: { CODERABBIT_API_KEY: "not-a-real-key" } }, null, 2),
+    { encoding: "utf8", mode: 0o600 },
+  );
+  shellBinaries = new Set();
+  assert.equal(await host.marketplacePluginIsInstalled(reader, coderabbit), false, "a key is not a program");
+  // The key's truth is still told, in the one place it answers a question: the field.
+  assert.deepEqual(
+    host.marketplacePluginFields(reader, coderabbit).map((field) => [field.key, field.isStored]),
+    [["CODERABBIT_API_KEY", true]],
+  );
+
+  // And the other way round: the program is there, the key is not.
+  rmSync(SECRETS, { force: true });
+  shellBinaries = new Set(["cr"]);
+  assert.equal(await host.marketplacePluginIsInstalled(reader, coderabbit), true, "a program with no key is installed");
+  assert.deepEqual(
+    host.marketplacePluginFields(reader, coderabbit).map((field) => [field.key, field.isStored]),
+    [["CODERABBIT_API_KEY", false]],
+  );
+  shellBinaries = new Set();
+});
+
+test("InstallPlugin runs a shell tool's installer instead of refusing it, and never rewrites an entry", async () => {
+  writeFileSync(CONNECTORS, JSON.stringify({ mcpServers: {} }, null, 2), { encoding: "utf8", mode: 0o600 });
+  const before = readFileSync(CONNECTORS, "utf8");
+
+  // Already installed: nothing is run, nothing is written, and the answer says which.
+  shellBinaries = new Set(["cr"]);
+  const already = await host.installMarketplacePlugin(reader, "coderabbit");
+  assert.equal(already.installed, true);
+  assert.match(already.refused, /already installed/);
+  assert.equal(readFileSync(CONNECTORS, "utf8"), before, "a shell tool never touches connectors.json");
+  shellBinaries = new Set();
+
+  // A connector entry that is already there is left exactly as the operator has it.
+  const edited = { command: "npx", args: ["-y", "@modelcontextprotocol/server-github", "--yolo"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "", EXTRA: "" } };
+  writeFileSync(CONNECTORS, JSON.stringify({ mcpServers: { github: edited } }, null, 2), { encoding: "utf8", mode: 0o600 });
+  const untouched = readFileSync(CONNECTORS, "utf8");
+  const second = await host.installMarketplacePlugin(reader, "github");
+  assert.equal(second.installed, true);
+  assert.match(second.refused, /already installed/);
+  assert.equal(readFileSync(CONNECTORS, "utf8"), untouched, "the operator's edited entry survives a re-install");
+
+  // Including one the operator has disabled, which the normalised read drops but a write must not.
+  writeFileSync(CONNECTORS, JSON.stringify({ mcpServers: { github: { ...edited, disabled: true } } }, null, 2), { encoding: "utf8", mode: 0o600 });
+  const disabled = readFileSync(CONNECTORS, "utf8");
+  assert.match((await host.installMarketplacePlugin(reader, "github")).refused, /already installed/);
+  assert.equal(readFileSync(CONNECTORS, "utf8"), disabled, "a disabled entry is still an entry");
+});
+
+test("the binary probe asks a real shell and answers false for a program nothing installed", async () => {
+  const service = await bundle("source/host/extensions/shell-tools/shell-tools-service.ts", "shell-tools-service.cjs");
+  assert.equal(await service.probeShellToolBinary({ binary: "sh" }), true);
+  assert.equal(await service.probeShellToolBinary({ binary: "no-such-program-4f2a9c" }), false);
+  // A name that is not a plain program name never reaches the shell.
+  assert.equal(await service.probeShellToolBinary({ binary: "sh; touch /tmp/pwned" }), false);
 });
 
 test("the four plugin tools describe the Marketplace, not Cursor's", () => {

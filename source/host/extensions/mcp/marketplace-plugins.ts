@@ -9,9 +9,11 @@
  * also reads, through `listMarketplace`.
  *
  * Installed state is read, never recorded: a connector plugin is installed when its name is in
- * connectors.json, and a credential field is "stored" when the 0600 secret store holds it. A shell
- * tool has no install record anywhere on this box, so the closest true signal is the same one the
- * console's Shell tools panel shows -- whether the host holds its key.
+ * connectors.json, and a shell-tool plugin when the box's own shell can find its program
+ * (`command -v <binary>`, the probe beside `runShellToolInstall`). A credential field is "stored"
+ * when the 0600 secret store holds it, and that is a SEPARATE question -- a stored key with no
+ * program installed is a command the agent would report as available and then fail to run, and a
+ * program installed with no key is a tool the operator would be told to install twice.
  *
  * No value from the secret store ever leaves this module. Only names, and only booleans about them.
  */
@@ -23,10 +25,12 @@ import {
   searchMarketplacePlugins,
   type MarketplacePlugin,
 } from "../../../shared/marketplace/catalog.js";
+import { findShellTool, type ShellToolEntry } from "../shell-tools/shell-tool-catalog.js";
 import { listShellEnvSecretFields } from "../shell-tools/shell-secrets.js";
+import { probeShellToolBinary, runShellToolInstall } from "../shell-tools/shell-tools-service.js";
 import { listConnectorEnvSecretFields } from "./connector-secrets.js";
 import {
-  readLocalConnectorFile,
+  hasLocalConnectorEntry,
   removeLocalConnectorEntry,
   writeLocalConnectorEntry,
 } from "./local-connectors.js";
@@ -62,12 +66,17 @@ export interface MarketplacePluginDetail extends MarketplacePluginSummary {
 export interface MarketplaceInstallReader {
   /** The sand data root: connectors.json and the 0600 secret store both live there. */
   rootDir(): string;
+  /**
+   * Ask the box's shell whether a tool's program is there. Defaults to the real probe; a test
+   * overrides it so a machine that happens to have `cr` on its PATH does not decide the assertion.
+   */
+  probeShellTool?(entry: ShellToolEntry): Promise<boolean>;
 }
 
 function connectorInstalled(reader: MarketplaceInstallReader, plugin: MarketplacePlugin): boolean {
   const name = plugin.connectorName;
   if (name == null) return false;
-  return Object.hasOwn(readLocalConnectorFile(reader.rootDir()), name);
+  return hasLocalConnectorEntry(reader.rootDir(), name);
 }
 
 function storedFieldsFor(reader: MarketplaceInstallReader, plugin: MarketplacePlugin): Set<string> {
@@ -77,12 +86,27 @@ function storedFieldsFor(reader: MarketplaceInstallReader, plugin: MarketplacePl
     : plugin.connectorName == null ? [] : listConnectorEnvSecretFields(root, plugin.connectorName));
 }
 
-export function marketplacePluginIsInstalled(reader: MarketplaceInstallReader, plugin: MarketplacePlugin): boolean {
+function shellToolEntryFor(plugin: MarketplacePlugin): ShellToolEntry | null {
+  const id = marketplaceShellToolId(plugin);
+  return id == null ? null : findShellTool(id) ?? null;
+}
+
+/**
+ * Whether the box can actually run this shell tool's program. NOT whether its key is stored: the
+ * key's truth stays in the field's `isStored`, where it answers the question it is about.
+ */
+async function shellToolInstalled(reader: MarketplaceInstallReader, plugin: MarketplacePlugin): Promise<boolean> {
+  const entry = shellToolEntryFor(plugin);
+  if (entry == null) return false;
+  return reader.probeShellTool == null ? probeShellToolBinary(entry) : reader.probeShellTool(entry);
+}
+
+export async function marketplacePluginIsInstalled(
+  reader: MarketplaceInstallReader,
+  plugin: MarketplacePlugin,
+): Promise<boolean> {
   if (plugin.opensEditor === true) return false;
-  if (plugin.kind === "shell-tool") {
-    const stored = storedFieldsFor(reader, plugin);
-    return marketplaceCredentialFields(plugin).some((field) => stored.has(field));
-  }
+  if (plugin.kind === "shell-tool") return shellToolInstalled(reader, plugin);
   return connectorInstalled(reader, plugin);
 }
 
@@ -103,11 +127,11 @@ export function marketplacePluginFields(
   }));
 }
 
-export function marketplacePluginSummary(
+export async function marketplacePluginSummary(
   reader: MarketplaceInstallReader,
   plugin: MarketplacePlugin,
-): MarketplacePluginSummary {
-  const isInstalled = marketplacePluginIsInstalled(reader, plugin);
+): Promise<MarketplacePluginSummary> {
+  const isInstalled = await marketplacePluginIsInstalled(reader, plugin);
   return {
     pluginId: plugin.id,
     name: plugin.id,
@@ -122,22 +146,24 @@ export function marketplacePluginSummary(
   };
 }
 
-export function listMarketplacePluginSummaries(reader: MarketplaceInstallReader): MarketplacePluginSummary[] {
-  return searchMarketplacePlugins("").map((plugin) => marketplacePluginSummary(reader, plugin));
+export async function listMarketplacePluginSummaries(
+  reader: MarketplaceInstallReader,
+): Promise<MarketplacePluginSummary[]> {
+  return Promise.all(searchMarketplacePlugins("").map((plugin) => marketplacePluginSummary(reader, plugin)));
 }
 
-export function getMarketplacePluginDetail(
+export async function getMarketplacePluginDetail(
   reader: MarketplaceInstallReader,
   pluginId: string,
   servers: readonly Record<string, unknown>[],
-): MarketplacePluginDetail | null {
+): Promise<MarketplacePluginDetail | null> {
   const plugin = findMarketplacePlugin(pluginId);
   if (plugin == null) return null;
   const attributed = plugin.connectorName == null
     ? []
     : servers.filter((server) => server.serverIdentifier === plugin.connectorName);
   return {
-    ...marketplacePluginSummary(reader, plugin),
+    ...await marketplacePluginSummary(reader, plugin),
     fields: marketplacePluginFields(reader, plugin),
     servers: attributed,
   };
@@ -149,7 +175,7 @@ export interface MarketplaceInstallOutcome {
   readonly installed: boolean;
   /** What the operator must still fill on the plugin page. The model cannot set a key. */
   readonly fields: readonly MarketplacePluginField[];
-  /** Set when nothing was written and why. */
+  /** Set when this call changed nothing on the box, and why. */
   readonly refused?: string;
 }
 
@@ -158,13 +184,19 @@ export interface MarketplaceInstallOutcome {
  * 0600 the console's `POST /connectors` produces -- and answers with the credential fields still
  * empty. The caller reloads the servers; writing the file does not start the process.
  *
- * A shell-tool plugin is NOT installed from here: its install runs a command inside the box and
- * belongs to `installShellTool`, so this answers with the field to fill and says so.
+ * A shell-tool plugin goes through `runShellToolInstall`, the SAME door the console's "Install in
+ * the box" button uses, rather than being refused: refusing meant two of the catalog's nine plugins
+ * could not be installed by the agent at all, which is not the credential exception -- a key is
+ * still the operator's to type, and that is what the fields in the answer are for.
+ *
+ * An entry already in connectors.json is never rewritten. The catalog is not the authority on an
+ * entry the operator has since edited (different arguments, extra env names, `disabled: true`), and
+ * a silent overwrite would revert those and orphan the secrets stored against the dropped names.
  */
-export function installMarketplacePlugin(
+export async function installMarketplacePlugin(
   reader: MarketplaceInstallReader,
   pluginId: string,
-): MarketplaceInstallOutcome | null {
+): Promise<MarketplaceInstallOutcome | null> {
   const plugin = findMarketplacePlugin(pluginId);
   if (plugin == null) return null;
   if (plugin.opensEditor === true) {
@@ -176,19 +208,20 @@ export function installMarketplacePlugin(
       refused: `"${plugin.name}" is the connector editor, not an entry: it has no command to install. Ask the operator for the server's command, arguments and environment variable names and use AddMcpServer.`,
     };
   }
-  const shellToolId = marketplaceShellToolId(plugin);
-  if (shellToolId != null) {
-    return {
-      pluginId: plugin.id,
-      kind: plugin.kind,
-      installed: marketplacePluginIsInstalled(reader, plugin),
-      fields: marketplacePluginFields(reader, plugin),
-      refused: `"${plugin.name}" is a shell tool: it is installed by running its install command inside the box (shell tool "${shellToolId}"), which the operator does from the Marketplace page. Nothing was written to connectors.json.`,
-    };
-  }
+  const shellEntry = shellToolEntryFor(plugin);
+  if (shellEntry != null) return installShellToolPlugin(reader, plugin, shellEntry);
   const entry = marketplaceConnectorEntry(plugin);
   const name = plugin.connectorName;
   if (entry == null || name == null) return null;
+  if (connectorInstalled(reader, plugin)) {
+    return {
+      pluginId: plugin.id,
+      kind: plugin.kind,
+      installed: true,
+      fields: marketplacePluginFields(reader, plugin),
+      refused: `"${plugin.name}" is already installed: "${name}" is in connectors.json and nothing was written. If its entry differs from the catalog's, that is the operator's edit and it is theirs to change in the connector editor (Marketplace \u2192 Plugins \u2192 ${plugin.name}).`,
+    };
+  }
   writeLocalConnectorEntry(reader.rootDir(), name, entry);
   return {
     pluginId: plugin.id,
@@ -196,6 +229,35 @@ export function installMarketplacePlugin(
     installed: true,
     fields: marketplacePluginFields(reader, plugin),
   };
+}
+
+/**
+ * Runs the shell tool's install command inside the box, capped by `runShellToolInstall`'s own
+ * timeout, and re-probes rather than trusting the exit code: an installer that exits 0 without
+ * putting its program on PATH has not installed anything. The installer's output tail rides in the
+ * refusal on failure -- it is already stripped of every stored value by `redactShellSecretValues`.
+ */
+async function installShellToolPlugin(
+  reader: MarketplaceInstallReader,
+  plugin: MarketplacePlugin,
+  entry: ShellToolEntry,
+): Promise<MarketplaceInstallOutcome> {
+  const answer = (installed: boolean, refused?: string): MarketplaceInstallOutcome => ({
+    pluginId: plugin.id,
+    kind: plugin.kind,
+    installed,
+    fields: marketplacePluginFields(reader, plugin),
+    ...(refused == null ? {} : { refused }),
+  });
+  if (await shellToolInstalled(reader, plugin)) {
+    return answer(true, `"${plugin.name}" is already installed: the box's shell finds \`${entry.binary}\`, so nothing was run.`);
+  }
+  const result = await runShellToolInstall(entry, { rootDir: reader.rootDir() });
+  if (await shellToolInstalled(reader, plugin)) return answer(true);
+  const why = result.timedOut
+    ? "it was still running after five minutes and was killed"
+    : `it exited ${result.exitCode == null ? "without a status" : String(result.exitCode)}`;
+  return answer(false, `"${plugin.name}" was not installed: \`${result.command}\` ran in the box and ${why}, and the shell still cannot find \`${entry.binary}\`. The tail of its output was:\n${result.output}`);
 }
 
 export interface MarketplaceUninstallOutcome {
@@ -215,10 +277,13 @@ export function uninstallMarketplacePlugin(
   if (plugin == null) return null;
   const name = plugin.connectorName;
   if (name == null) {
+    const shell = shellToolEntryFor(plugin);
     return {
       pluginId: plugin.id,
       removed: false,
-      reason: `"${plugin.name}" has no connectors.json entry to remove.`,
+      reason: shell == null
+        ? `"${plugin.name}" has no connectors.json entry to remove.`
+        : `"${plugin.name}" is a shell tool: it put \`${shell.binary}\` in the box and there is no uninstall for that on this host. Tell the operator to remove the program themselves; its stored key is cleared separately, on the plugin's page.`,
       storedFields: [...storedFieldsFor(reader, plugin)],
     };
   }

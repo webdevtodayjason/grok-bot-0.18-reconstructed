@@ -147,7 +147,7 @@ const seed = (over = {}) => ({
 // tinyfish: in connectors.json, no key in the store -> Needs auth.
 // localfiles: in connectors.json, no credential fields at all, box says connected -> Ready.
 // github: the host runs a server by that name but connectors.json has no entry -> Not installed.
-// coderabbit: a shell tool with no key stored -> Not installed.
+// coderabbit: a shell tool the box has neither installed nor keyed -> Not installed.
 const answers = (over = {}) => ({
   listMarketplace: CATALOG,
   listInstalledMcpServers: INSTALLED_SERVERS,
@@ -236,9 +236,23 @@ test("a shell tool resolves against the shell-tool catalog, not against connecto
   assert.equal(byId.coderabbit.kind, "shell-tool");
   assert.equal(byId.coderabbit.cardId, "shell:coderabbit");
   assert.equal(byId.coderabbit.installed, false);
-  const set = await statesFor({ listShellTools: [{ ...SHELL_CATALOG[0], stored: true }] });
+  // MARKET-1: the host answers `installed` from `command -v <binary>` in the box's own shell, and
+  // `stored` from its 0600 key store. They are two facts. A key with no program is not an install
+  // -- saying it was is how the model came to report a CLI it would then fail to run.
+  const keyed = await statesFor({ listShellTools: [{ ...SHELL_CATALOG[0], installed: false, stored: true }] });
+  assert.equal(keyed.byId.coderabbit.installed, false);
+  assert.equal(keyed.byId.coderabbit.label, "Not installed");
+  // A program with no key IS installed, and what it is missing is the key.
+  const bare = await statesFor({ listShellTools: [{ ...SHELL_CATALOG[0], installed: true, stored: false }] });
+  assert.equal(bare.byId.coderabbit.installed, true);
+  assert.equal(bare.byId.coderabbit.label, "Needs auth");
+  const set = await statesFor({ listShellTools: [{ ...SHELL_CATALOG[0], installed: true, stored: true }] });
   assert.equal(set.byId.coderabbit.installed, true);
   assert.equal(set.byId.coderabbit.label, "Ready");
+  // An older host answers no `installed` at all, and there the stored key is the only signal there
+  // is to read; the adapter says so rather than calling every shell tool uninstalled.
+  const older = await statesFor({ listShellTools: [{ ...SHELL_CATALOG[0], stored: true }] });
+  assert.equal(older.byId.coderabbit.installed, true);
 });
 
 test("a host with no marketplace commands yet leaves the catalog absent rather than empty", async () => {

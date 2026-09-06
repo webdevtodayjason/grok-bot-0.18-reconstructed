@@ -138,6 +138,16 @@ export function writeLocalConnectorEntry(
   writeLocalConnectorDocument(rootDir, servers);
 }
 
+/**
+ * Is there an entry under this name at all? Asked of the RAW document rather than of
+ * `readLocalConnectorFile` below, which drops a `disabled: true` entry -- a caller that could not
+ * see a disabled entry would answer "not installed" about one and then overwrite the operator's
+ * own edit, which is precisely what this question exists to prevent.
+ */
+export function hasLocalConnectorEntry(rootDir: string, name: string): boolean {
+  return Object.hasOwn(readLocalConnectorDocument(rootDir), name);
+}
+
 /** Removes one connector entry. Answers whether it was there; the secret store is untouched. */
 export function removeLocalConnectorEntry(rootDir: string, name: string): boolean {
   const servers = readLocalConnectorDocument(rootDir);

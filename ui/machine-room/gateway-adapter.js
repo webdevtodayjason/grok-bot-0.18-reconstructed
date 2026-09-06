@@ -812,11 +812,10 @@
         skills: [], skillsNote: null,
         shellTool: {
           id, field,
-          // MARKET-1: whether the CLI itself is in the box. listShellTools does not answer that
-          // today -- the host reports the catalog and whether it HOLDS the key -- so a host that
-          // grows an `installed` flag is believed, and until then the stored key is the only
-          // durable per-tool state there is to read. A tool with no key stored has not been set
-          // up, which is what the marketplace's "Added" is claiming when it says so.
+          // MARKET-1: whether the CLI itself is in the box. The host answers that with
+          // `command -v <binary>` in the box's own shell, which is the only true signal --
+          // nothing records a shell-tool install. `held` is the fallback for an older host, and
+          // it is a weaker claim: a stored key is not a program.
           installed: typeof tool?.installed === "boolean" ? tool.installed : held,
           install: String(tool?.install ?? ""),
           usage: String(tool?.usage ?? ""),

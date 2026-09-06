@@ -104,6 +104,46 @@ export async function runShellToolInstall(
   };
 }
 
+/** A probe must not outlive the question it answers; `command -v` is a builtin and returns at once. */
+export const SHELL_TOOL_PROBE_TIMEOUT_MS = 15_000;
+/** The catalog's binaries are literals in this repo; the guard keeps a future entry off the shell. */
+const SAFE_BINARY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * Is this tool's program actually on the box's PATH?
+ *
+ * The host runs INSIDE the box and already spawns `/bin/sh -lc` there to install these tools, so
+ * the same shell can be asked whether the install took -- and it is the only true answer. A stored
+ * key is a different fact: a key with no program means the agent reports a CLI it cannot run, and a
+ * program with no key means the operator is told to install what is already installed.
+ *
+ * `-lc` from the running user's home, exactly as `runShellToolInstall` spawns, because that is what
+ * puts `~/.local/bin` -- where both catalog installers land their binary -- on PATH. Only the exit
+ * status is read: `command -v` prints a path, and this module returns a boolean.
+ */
+export async function probeShellToolBinary(
+  entry: ShellToolEntry,
+  options: { readonly timeoutMs?: number } = {},
+): Promise<boolean> {
+  if (!SAFE_BINARY.test(entry.binary)) return false;
+  const child = spawn("/bin/sh", ["-lc", `command -v ${entry.binary}`], {
+    cwd: homedir(),
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } },
+    options.timeoutMs ?? SHELL_TOOL_PROBE_TIMEOUT_MS);
+  try {
+    return await new Promise<boolean>((resolve) => {
+      // A shell that could not be spawned at all is "not installed", not a rejection: this answers
+      // a question asked in the middle of describing a plugin, and it must not unwind that.
+      child.once("error", () => resolve(false));
+      child.once("close", (code) => resolve(code === 0));
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * The command the box shell answers "is this credential in my environment" with. It prints a
  * marker, never the value, and `${VAR:+}` is the test: an empty value is unset, which is what a

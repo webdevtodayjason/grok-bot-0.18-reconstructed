@@ -172,9 +172,9 @@
 
   // ------------------------------------------------------------------ installed state
   // The contract's rule, read from the box rather than remembered: a plugin is installed when its
-  // connector name is a key in connectors.json; a shell tool when the box holds its credential,
-  // which is the only signal this gateway has for one (listShellTools answers `stored`, and there
-  // is no "installed" boolean anywhere behind it).
+  // connector name is a key in connectors.json; a shell tool when the box's own shell can find its
+  // program, which is what `listShellTools` answers in `installed`. Its `stored` is the other
+  // fact -- whether the host holds the key -- and a key is not an install.
   const connectorNameOf = (plugin) => text(plugin?.install?.name) || text(plugin?.connector) || text(plugin?.id);
   const shellToolIdOf = (plugin) => (typeof plugin?.install === "string" ? text(plugin.install) : text(plugin?.install?.id) || text(plugin?.id));
 
@@ -187,10 +187,10 @@
     const config = await global.fetch("/connectors").then((r) => r.json()).catch(() => null);
     const servers = config && typeof config.mcpServers === "object" && config.mcpServers != null ? config.mcpServers : null;
     const shellRows = await gateway.call("listShellTools", {}).catch(() => null);
-    const shellStored = new Set(listOf(shellRows).filter((t) => t && t.stored === true).map((t) => text(t.id)));
+    const shellInstalled = new Set(listOf(shellRows).filter((t) => t && t.installed === true).map((t) => text(t.id)));
     for (const plugin of plugins) {
       if (plugin?.kind === "shell-tool") {
-        if (shellStored.has(shellToolIdOf(plugin))) installed.add(text(plugin.id));
+        if (shellInstalled.has(shellToolIdOf(plugin))) installed.add(text(plugin.id));
       } else if (servers != null && servers[connectorNameOf(plugin)] != null) {
         installed.add(text(plugin.id));
       }

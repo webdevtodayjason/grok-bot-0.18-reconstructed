@@ -19,7 +19,6 @@ import {
   createMcpToolsDiscovery,
   SandMcpExecutor,
 } from "../../../shared/node/mcp/tools-discovery.js";
-import { isEffectivePluginInstalled } from "../../../shared/mcp.js";
 import type { CapableBox } from "../../box/box-capabilities.js";
 import { createSandMcpStateExecutor } from "../../ports/mcp-state-executor.js";
 import { createBoxSandMcpExec } from "./box-mcp-exec.js";
@@ -55,13 +54,7 @@ export interface PluginSkillsPort { sync(trigger: string): Promise<unknown[]>; s
 
 export function toInstalledServer(summary: McpServerSummary): Record<string, unknown> { return { id: summary.id, name: summary.name, serverIdentifier: summary.serverIdentifier, accountKey: summary.accountKey, ...(summary.pluginId == null ? {} : { pluginId: summary.pluginId }), isTeamServer: summary.isTeamServer, status: summary.status, ...(summary.statusDetail == null ? {} : { statusDetail: summary.statusDetail }), transport: summary.transport, toolCount: summary.toolCount, ...(summary.disabledToolCount == null ? {} : { disabledToolCount: summary.disabledToolCount }), customInstructions: summary.customInstructions }; }
 export function toInstalledServers(state: ServerState): Record<string, unknown>[] { return state.servers.map(toInstalledServer); }
-export function toCatalogFields(fields?: readonly CatalogField[] | null): Array<Required<CatalogField>> { return (fields ?? []).map((field) => ({ key: field.key, label: field.label, hint: field.hint, isRequired: field.isRequired === true, isSecret: field.isSecret === true })); }
 export function toAuthResult(result: { status: string; serverName: string; authorizationUrl?: string; message?: string }): Record<string, unknown> { if (result.status === "started") return { kind: "started", authorizationUrl: result.authorizationUrl, serverName: result.serverName }; if (result.status === "already-authenticated") return { kind: "already-authenticated", serverName: result.serverName }; if (result.status === "not-configured") return { kind: "not-configured", serverName: result.serverName }; return { kind: result.status, message: result.message, serverName: result.serverName }; }
-export function toPluginSummary(view: CatalogPlugin, effectivePlugins: readonly EffectivePlugin[] | null, servers: readonly McpServerSummary[]): Record<string, unknown> {
-  const record = effectivePlugins?.find((plugin) => plugin.pluginId === view.id), effective = record != null && isEffectivePluginInstalled(record) ? record : undefined, attributed = servers.find((server) => server.pluginId === view.id), installed = effective != null || record == null && attributed != null;
-  return { pluginId: view.id, name: view.name, displayName: view.displayName, description: view.description, category: view.category, isInstalled: installed, ...(installed ? { installMode: effective?.installMode ?? "unknown" } : {}), connectorCount: view.connectors?.length ?? 1, skills: (view.skills ?? []).map(({ name, description }) => ({ name, description })) };
-}
-export function syncPluginSkillsInBackground(pluginSkills: PluginSkillsPort | undefined, trigger: string): void { void pluginSkills?.sync(trigger).catch(() => {}); }
 
 export interface CreateHostMcpOptions {
   accountConfigProvider?: () => Promise<unknown>;
@@ -73,8 +66,6 @@ export interface CreateHostMcpOptions {
   effectivePluginsProvider?: () => Promise<unknown>;
   boxMcpExec?: unknown;
   getMachineId: () => Promise<string>;
-  getAccessToken?: () => Promise<string | null>;
-  pluginSkills?: PluginSkillsPort;
   onServersMutated?: () => void;
   onServerAuthenticated?: (completion: unknown) => void;
   onDiscoveryFailed?: (event: Record<string, unknown>) => void;
@@ -276,9 +267,14 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
      * page instead.
      */
     install: async (args: { id: string; values?: Record<string, string> }) => {
-      const outcome = installMarketplacePlugin(marketplaceReader, args.id);
+      const outcome = await installMarketplacePlugin(marketplaceReader, args.id);
       if (outcome == null) throw new Error(`no marketplace plugin "${args.id}"`);
-      if (outcome.installed && outcome.refused == null) await mutate(() => manager.reloadServers());
+      // Only a connector install changes what the box should be running. A shell tool installs a
+      // program into the agent's shell and puts nothing in connectors.json, so reloading the MCP
+      // servers after one would be a restart nothing asked for.
+      if (outcome.kind === "connector" && outcome.installed && outcome.refused == null) {
+        await mutate(() => manager.reloadServers());
+      }
       return outcome;
     },
     add: async (args: { name: string; configJson: string }) => toInstalledServers(await mutate(() => manager.addServer(args))),
@@ -342,8 +338,6 @@ export class McpHostService {
       log: deps.log,
       onServerAuthenticated: (completion) => this.emitAuthCompletion(completion),
       onServersMutated: () => this.emitServersUpdated({ servers: [] }),
-      ...(deps.pluginSkills == null ? {} : { pluginSkills: deps.pluginSkills }),
-      getAccessToken: async () => { try { const token = await deps.auth.getAccessToken({ backendUrl: getSandInferenceBackendUrl() }); return token.length > 0 ? token : null; } catch { return null; } },
       getMachineId: deps.auth.getMachineId,
       // Connectors used to reach this host only through the Cursor account's server list, so every
       // connector depended on a Cursor login. Local stdio servers are merged over it here and stand
