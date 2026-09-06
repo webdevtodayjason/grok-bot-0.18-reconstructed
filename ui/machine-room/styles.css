@@ -3122,3 +3122,101 @@ dialog[open] {
 /* The chips wrap onto a second row rather than running past the panel. */
 .marketplace-chips { min-width: 0; row-gap: 6px; }
 .marketplace-chips .tag { max-width: 100%; white-space: nowrap; }
+
+/* qol/panels: no horizontal scroll or bleed in a panel.
+   The Agent details right column ran its Name, Description and Role controls 84px past the card
+   they sit in (measured, 1440x1000, headless Chrome): a setting row asked for a 200px label plus
+   a 220px control inside a 367px card, so the dialog body grew a sideways scrollbar and the
+   inputs hung over the card's edge. The fix is the chain rather than the row -- the panel body
+   and every card clip on x and may shrink below their content, a setting row wraps its control
+   under the label when there is no room beside it, a control inside a card is held to its own
+   column, ids and URLs with nothing to break on wrap, and preformatted output scrolls inside its
+   own frame. */
+
+/* The chain from the dialog body down to a card: every link may shrink past its content. */
+.dialog-body { overflow-x: hidden; }
+.dialog-body > *,
+.panel-intro,
+.panel-grid,
+.panel-grid > *,
+.plugin-sections,
+.plugin-sections > *,
+.plugin-detail,
+.evidence-view,
+.evidence-view > *,
+.exchange-view,
+.routine-list,
+.plugin-list { min-width: 0; }
+
+.panel-card,
+.settings-section,
+.routine-card,
+.plugin-card,
+.empty-state {
+  min-width: 0;
+  overflow-x: hidden;
+  /* An agent id, a URL or a shell command has nothing to break on; without this one line widens
+     the card it sits in rather than wrapping inside it. */
+  overflow-wrap: anywhere;
+}
+
+/* A setting row keeps the label column MR-30 gave it and drops the control to the next line
+   rather than pushing it out of the card. */
+.setting-row {
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.setting-row > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.setting-row > div:first-child { min-width: min(200px, 100%); }
+.setting-row > .field { flex: 1 1 220px; min-width: 0; max-width: 100%; }
+
+/* Every control inside a card fills its own column and never more than it. */
+.setting-row .field,
+.panel-card .field,
+.settings-section .field { min-width: 0; max-width: 100%; }
+
+.setting-row .field input,
+.setting-row .field textarea,
+.setting-row .field select,
+.panel-card .field input,
+.panel-card .field textarea,
+.panel-card .field select,
+.settings-section .field input,
+.settings-section .field textarea,
+.settings-section .field select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* A control that is not wrapped in a .field keeps whatever width it asked for, but cannot spill
+   past the row: with the row wrapping, it takes a line of its own instead. */
+.setting-row > input,
+.setting-row > textarea,
+.setting-row > select,
+.setting-row > button,
+.setting-row > span { max-width: 100%; }
+
+/* Preformatted output scrolls inside its own frame instead of widening the card. */
+#panel-content pre,
+#panel-content code,
+.skill-body,
+.evidence-head,
+.attachment-preview { max-width: 100%; }
+
+#panel-content pre { overflow: auto; }
+
+/* The desktop's Files app is the other surface the operator found scrolling sideways: a long file
+   name with nothing to break on widened its tile and the window scrolled to reach it. */
+.files-view,
+.file-grid,
+.file-tile { min-width: 0; }
+
+.file-tile,
+.browser-page-head { overflow-wrap: anywhere; }
