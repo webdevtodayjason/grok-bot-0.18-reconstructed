@@ -107,6 +107,132 @@ and ships everything and runs the install over ssh; `enable-route.sh` on the ser
 takes it down; `scripts/verify-deploy.mjs` proves the instance from here. Until `ui/endpoints.json`
 exists on the server no agent can answer.
 
+## Updating without restarting anyone (SHIP-2)
+
+A ship used to recreate both containers, which cut every turn in flight and wiped whatever the
+agents had installed inside the container. It does not have to: the host can be swapped on its own,
+in place, and the container never restarts.
+
+The pieces, once `sync.sh` has run:
+
+- `sync.sh` writes two files into `/home/sem/titanbot/runtime`: `host-main.cjs` and
+  `sand-host-bundle-latest.version`. The version is the tree's short git sha (a dirty tree gets the
+  bundle's own sha256 prefix instead, and the run says so).
+- The relay serves them back to the box at `/runtime/<gateway token>/…`. That route is mounted
+  read-only from the same directory and is answered before the console's login, because the caller
+  is the box's own `fetch` and can carry neither a cookie nor a header; the token is the path
+  segment. A wrong one gets `404`.
+- The box asks for the tarball, and the relay composes it inside the box from the box's own
+  `/home/box/sand-host`, replacing `host-main.cjs` and the version marker. That detour is not
+  optional: the in-box supervisor deletes every entry of that directory the archive did not carry,
+  and most of that directory comes from the box image rather than from this repo.
+
+To ship the host and nothing else:
+
+```sh
+bash deploy/r750/sync.sh --no-install                      # build, stage, copy
+curl -sS -X POST -H "authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' -d '{}' \
+     https://tb.semfreak.dev/api/updateHostNow             # fetch, stage, swap
+```
+
+`updateHostNow` answers `{"started":true,"version":"<sha>"}`. Thirty seconds later
+`getHostStatus` reports the new `hostVersion`, the host process has a new pid, and
+`docker inspect` shows the same container with the same `StartedAt`. Desktops stay up, shell
+secrets stay set, and turns in flight are resumed rather than cut.
+
+`{"started":false,"reason":"already-latest"}` naming a version that is NOT the one you just staged
+means the box is running a bundle from before 2026-09-06: those cache the version lookup for ten
+minutes. Wait it out once; the bundle you are installing fixes it.
+
+The host also watches for a new bundle on its own, once a day with a random offset
+(`SAND_BOX_AUTO_UPDATE=1`). That same flag is what stops the OTHER updater — the one that recreates
+the container for a new box image — from ever running.
+
+To verify the whole path on the dev box:
+
+```sh
+SAND_PROFILE_DIRS=... node scripts/verify-host-upgrade.mjs
+```
+
+It takes `/tmp/titanbot-box.lock` itself and swaps the host, so run it directly, never through
+`scripts/on-box.sh`. On this Mac the relay it talks to is the one the gate starts on
+`127.0.0.1:7787` for the length of the run, which is what the box's
+`SAND_HOST_BUNDLE_S3_BASE_URL` points at; between runs the daily watch simply finds nothing there.
+
+## Surviving a recreate (PERSIST-1)
+
+The four volumes survive a recreate by construction. The container's own filesystem does not, and
+that is where `/home/box/cli-config` lives: the agents' CLI logins, `~/.ssh`, `~/.aws`, git identity,
+and every `~/.config/<tool>` the image's `persist-cli-auth` mirrors there every 30 s. The box store
+has been copying all of it out on every sync cycle for as long as this deployment has existed;
+nothing ever copied it back, because the restore only runs when `SAND_BOX_STORE_COPY_IN` is set and
+no deploy path set it.
+
+It is set now, in `deploy/coolify/docker-compose.yml`, `deploy/r750/install.sh` and the dev box's
+recreate script. **The R750 owes one recreate for it to take effect** — the variable is read at
+container start. Afterwards `/tmp/sand-copy-in-status.json` inside the box records what was
+restored, e.g. `{"phase":"done","restored":1386,"total":1386,"bytes":251298815,"outcome":"hydrated"}`.
+
+To verify on the dev box (**this recreates the box**, takes the lock itself, run it directly):
+
+```sh
+SAND_PROFILE_DIRS=... node scripts/verify-persistence.mjs
+```
+
+What it does NOT cover: `~/.local`, `~/.cache` and the pip user site are in no store category, so a
+`pip install --user` still does not survive a recreate. `persist-cli-auth` sweeps `~/.config/*` and
+its own credential list, and nothing else.
+
+## Backups (BACKUP-1)
+
+`deploy/backup/snapshot.sh` copies all five places an instance lives — the four volumes and the
+relay side — into `<dest>/<instance>/<YYYY-MM-DD-HHMM>/` with a manifest, and keeps the last 14.
+`install.sh` installs it as a systemd **user** timer at 04:10 (the whole install runs as `sem` with
+no sudo), so after the next install:
+
+```sh
+systemctl --user list-timers titanbot-backup.timer
+loginctl enable-linger sem            # or the timer only fires while sem has a session
+```
+
+Two refusals to know about. It will not run when the destination is not a mount point — an
+unmounted `/mnt/rosa-storage` is an ordinary directory, and filling it would put the only copy of
+the data on the disk the copy exists to survive. And it will not run without room for twice the last
+snapshot. `TITANBOT_BACKUP_REQUIRE_MOUNT=0` is the deliberate override, and it is how the dev box
+runs it.
+
+The box is paused for about a second, not for the length of the copy: everything is copied live,
+then `sand-data` and `workspace` — the volumes holding the agents' sqlite stores — are retaken with
+the box frozen. Each source in the manifest says which it was (`capturedWhile`), and the snapshot as
+a whole is `"mode": "consistent"` only when that second pass ran.
+
+Restore drills are the point of having it:
+
+```sh
+bash deploy/backup/restore-drill.sh          # newest snapshot
+bash deploy/backup/restore-drill.sh <dir>    # a specific one
+```
+
+It restores into a throwaway directory, never touching the live instance, opens every
+`agents/<id>/store.db` and prints a table of size, hash and `PRAGMA integrity_check`. A store that
+does not open, or whose hash has drifted from the manifest, fails the run.
+
+On the dev box there is no array and no `mountpoint(1)`, so a run there looks like:
+
+```sh
+TITANBOT_BACKUP_DEST=/tmp/backups TITANBOT_INSTANCE=grok-bot-local-vm \
+TITANBOT_BOX=grok-bot-local-vm TITANBOT_VOLUME_PREFIX=grok-bot-local-vm \
+TITANBOT_ROOT=/tmp/relay-root TITANBOT_BACKUP_REQUIRE_MOUNT=0 \
+  bash scripts/on-box.sh bash deploy/backup/snapshot.sh
+```
+
+There is no launchd job for it and there should not be: the Mac is a dev box, its volumes are
+scratch, and a nightly pause of the box everybody is testing against would be a nuisance. Run it by
+hand when you want a restore point before something risky. On the Mac the volume directories are
+inside Docker Desktop's VM and cannot be reached from the host at all, so the script streams each
+volume out through the daemon instead of rsyncing it; the manifest records which method it used.
+
 ## The job bus, if the Chief of Staff is going to call this instance
 
 The contract, top to bottom, is [docs/JOB-BUS.md](JOB-BUS.md). Section 10 is the binding one

@@ -110,6 +110,43 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-06 (PERSIST-1, SHIP-2, BACKUP-1: an instance that survives its own updates).** Three
+  gaps in one wave, each proved on the Mac box `grok-bot-local-vm` before it was written down.
+  PERSIST-1 (`1f2f3eb`): the box store has mirrored `/home/box/cli-config` out on every sync cycle
+  since this deployment existed and nothing ever restored it, because the image's start script runs
+  the copy-in only when `SAND_BOX_STORE_COPY_IN` is truthy and no deploy path set it; set in all
+  three, a recreate now reports `{"phase":"done","restored":1386,"total":1386,"bytes":251298815,
+  "outcome":"hydrated"}` and markers in `cli-config`, `~/.config` and `sand-data` all read back with
+  the same four agents on the roster (`scripts/verify-persistence.mjs`). `~/.config` reaches the
+  store through the image's `persist-cli-auth` mirror, not through a store category: the box-home
+  category is gated on `SAND_STORE_BETTER_CLI` and `SAND_USER_NON_ROOT` and nothing sets either, so
+  `~/.local` and the pip user site are still lost on a recreate (PERSIST-2). SHIP-2 (`74bcc6a`): the
+  relay serves upstream's own bundle layout at `/runtime/<gateway token>/…` out of the ship's runtime
+  directory, the box points `SAND_HOST_BUNDLE_S3_BASE_URL` at it, and `POST /api/updateHostNow`
+  swaps the host process in place -- host pid 6892 → 20972 → 24292 across two consecutive green runs
+  of `scripts/verify-host-upgrade.mjs` while the container id and `StartedAt` never changed, Chief of
+  staff's desktop stayed the same Xvfb pid 5116, and a shell secret set before each swap was still
+  set after it. Two things were read out of `/usr/local/bin/sand-supervisor.mjs` rather than
+  designed: the swap PRUNES every entry of `/home/box/sand-host` the archive does not carry (so the
+  relay composes the archive inside the box from the box's own tree, and a ship still ships one
+  file), and it ends in `renameSync` onto the bundle path (so the bundle is copied in at container
+  start instead of bind-mounted -- a mount point cannot be renamed over). One host fix rode along:
+  the latest-version lookup is cached 10 minutes, which made a second explicit ship inside that
+  window a silent no-op; `updateHostNow` drops the cache, the daily watch keeps it. BACKUP-1
+  (`206d34f`): there was no backup job at all. `deploy/backup/snapshot.sh` copies the four volumes
+  and the relay side into `<dest>/<instance>/<stamp>/` with a manifest of sizes and store.db hashes,
+  keeps 14, and refuses a destination that is not a mount point or has less than twice the last
+  snapshot free; the box is paused for 1 s, not for the copy, because the live pass takes everything
+  and only `sand-data` and `workspace` are retaken frozen, with every source carrying its own
+  `capturedWhile`. Measured against the live volumes: 2.9 GB, mode consistent, 5 stores, and
+  `deploy/backup/restore-drill.sh` opened all five with `integrity_check ok` and every hash matching.
+  The drill's first run failed 4 of 5 and was right to be believed -- a WAL database opened read-only
+  with no `-shm` beside it cannot create one -- so it opens its throwaway copy read-write. Gates:
+  697 unit tests, both typechecks, `verify-persistence` 14/14, `verify-host-upgrade` 16/16 twice,
+  snapshot + drill on the box's own volumes. Owed on the R750 and not done here: one `install.sh`
+  (it recreates the box, which is what picks up copy-in, the new entrypoint and the base URL) and
+  `loginctl enable-linger sem` so the 04:10 timer fires with nobody logged in.
+
 - **2026-09-06 (ENV-1: the shell an agent actually runs in).** `setShellSecret` answered
   `{stored: true, applied: true}`, `probeShellSecret` agreed, and "Chief of staff" -- which has its
   own desktop window on display :4 -- ran `printenv VERIFY_ENV_3 | wc -c` through its shell tool and
