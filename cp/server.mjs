@@ -587,6 +587,36 @@ export function createApp(options = {}) {
         return noContent(response);
       }
 
+      // Removing somebody's sign-in. There was no way to do this at all, and the hole showed itself
+      // the first time a tenant was deleted: deleting a workspace leaves its accounts, so those
+      // people could still sign in, be given a session for a workspace that is gone, and meet "That
+      // workspace is not available right now." for ever, with nothing the operator could do about it
+      // short of editing the database by hand.
+      //
+      // Deleting the accounts along with the tenant would have been the other answer and it is the
+      // wrong one. Re-provisioning a workspace under the same slug is a supported thing to do (it is
+      // how the demo tenant was moved onto the one-console shape), and it restores those people's
+      // access exactly as it was. Cascading would have locked them out of their own workspace to
+      // tidy up a row.
+      if (segments.length === 3 && method === "DELETE") {
+        const account = store.getAccountById(segments[2]) ?? store.getAccountByEmail(segments[2]);
+        if (account == null) return json(response, 404, { error: "not_found" });
+        if (String(body.confirm ?? "") !== account.email) {
+          return json(response, 400, {
+            error: "confirm_required",
+            message: `To remove this account send {"confirm": "${account.email}"} in the body.`,
+          });
+        }
+        store.deleteAccount(account.id);
+        return json(response, 200, {
+          deleted: true,
+          email: account.email,
+          tenant: account.tenant,
+          // Said out loud because it is the question the operator is actually asking.
+          message: `${account.email} can no longer sign in. Nothing in that workspace was touched, and a session they already hold keeps working until it expires, which is at most 12 hours.`,
+        });
+      }
+
       return json(response, 404, { error: "not_found" });
     }
 
@@ -667,6 +697,12 @@ export function createApp(options = {}) {
           try { await client.deleteService(row.coolifyServiceUuid); }
           catch (error) { return json(response, 502, { error: "coolify_error", message: String(error?.message ?? error) }); }
         }
+        // Whose sign-ins are about to point at nothing. Read BEFORE the row goes, and reported
+        // rather than deleted: re-provisioning under the same slug gives these people their
+        // workspace back, and cascading would have locked them out to tidy a row. What was missing
+        // was any way to know, so an operator who really is finished with a customer had no idea
+        // there were doors left standing.
+        const orphaned = store.listAccountsForTenant(slug).map((account) => account.email);
         store.deleteTenant(slug);
         return json(response, 200, {
           deleted: true,
@@ -674,7 +710,11 @@ export function createApp(options = {}) {
           // Said here as well as in the docs, because this is the answer the operator is looking at
           // when they wonder whether they just lost a customer's work.
           dataKept: tenantDirectory(slug, config),
-          message: `The Coolify service is gone. Everything in ${tenantDirectory(slug, config)} was left alone, so nothing the customer made was deleted.`,
+          accountsLeft: orphaned,
+          message: `The Coolify service is gone. Everything in ${tenantDirectory(slug, config)} was left alone, so nothing the customer made was deleted.`
+            + (orphaned.length === 0
+              ? ""
+              : ` ${orphaned.length} sign-in${orphaned.length === 1 ? "" : "s"} still point${orphaned.length === 1 ? "s" : ""} at this workspace (${orphaned.join(", ")}). Build it again under the same name and they work; remove them with DELETE /v1/accounts/<email>. Until one or the other, those people are told the workspace is not available.`),
         });
       }
 

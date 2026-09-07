@@ -4,6 +4,7 @@
 //   node cp/cli.mjs signup add <email> <company> [--name "Jane Doe"]
 //   node cp/cli.mjs account add <email> <tenant> [--name "Jane Doe"]
 //   node cp/cli.mjs account list
+//   node cp/cli.mjs account remove <email>
 //   node cp/cli.mjs tenant add <slug> <name> [--dry-run]
 //   node cp/cli.mjs tenant list
 //   node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]
@@ -147,6 +148,17 @@ async function accountList() {
   for (const account of answer.accounts) out(`${pad(account.email, 34)}${pad(account.tenant, 20)}${account.name}`);
 }
 
+// Closing one person's door. The email is typed twice on purpose, the same way the tenant delete
+// asks for the slug: an account is somebody's way in and a typo here is a customer locked out of
+// their own workspace with nothing on screen to say why.
+async function accountRemove(args) {
+  const [email] = positional(args);
+  if (!email) die("usage: node cp/cli.mjs account remove <email>");
+  const answer = await api("DELETE", `/v1/accounts/${encodeURIComponent(email)}`, { confirm: email });
+  out(`removed ${answer.email} from workspace ${answer.tenant}`);
+  out(answer.message);
+}
+
 async function tenantAdd(args) {
   const [slug, ...rest] = positional(args);
   if (!slug) die("usage: node cp/cli.mjs tenant add <slug> <name> [--dry-run]");
@@ -238,6 +250,7 @@ const USAGE = [
   "node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"]",
   "node cp/cli.mjs account add <email> <tenant> [--name \"Jane Doe\"]",
   "node cp/cli.mjs account list",
+  "node cp/cli.mjs account remove <email>",
   "node cp/cli.mjs tenant add <slug> <name> [--dry-run]",
   "node cp/cli.mjs tenant list",
   "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]",
@@ -252,6 +265,7 @@ const commands = {
   "signup add": signupAdd,
   "account add": accountAdd,
   "account list": accountList,
+  "account remove": accountRemove,
   "tenant add": tenantAdd,
   "tenant list": tenantList,
   "tenant adopt": tenantAdopt,

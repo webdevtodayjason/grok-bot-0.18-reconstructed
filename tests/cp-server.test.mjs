@@ -641,3 +641,47 @@ test("a burst of sign-in attempts is capped rather than queued, so the service k
     assert.equal((await plane.request("GET", "/v1/health")).status, 200);
   });
 });
+
+test("a workspace that is deleted names the sign-ins it leaves standing, and they can be removed", async () => {
+  // The hole this closes was found by deleting a tenant on the live server. Deleting a workspace
+  // left its accounts, those people could still sign in, and the console told them the workspace
+  // was not available for ever, with nothing the operator could do about it short of editing the
+  // database by hand.
+  await withPlane(async (plane) => {
+    const built = await plane.admin("POST", "/v1/tenants", { slug: "leavers", name: "Leavers" });
+    assert.equal(built.status, 201, built.text.slice(0, 200));
+    for (const email of ["one@leavers.test", "two@leavers.test"]) {
+      const made = await plane.admin("POST", "/v1/accounts", { email, password: "a password of real length", tenant: "leavers" });
+      assert.equal(made.status, 201, `${email}: ${made.text.slice(0, 200)}`);
+    }
+
+    await plane.admin("POST", "/v1/tenants/leavers/stop", {});
+    const gone = await plane.admin("DELETE", "/v1/tenants/leavers", { confirm: "leavers" });
+    assert.equal(gone.status, 200, gone.text.slice(0, 200));
+    // Named, not deleted. Re-provisioning under the same slug is how a workspace is moved, and it
+    // gives these people their access back, so cascading would lock them out to tidy a row.
+    assert.deepEqual([...gone.body.accountsLeft].sort(), ["one@leavers.test", "two@leavers.test"]);
+    assert.match(gone.body.message, /2 sign-ins still point at this workspace/);
+    assert.equal((await plane.admin("GET", "/v1/accounts")).body.accounts.length, 2, "the accounts must survive the workspace");
+
+    // And now there is a way to close one.
+    const noConfirm = await plane.admin("DELETE", "/v1/accounts/one@leavers.test", {});
+    assert.equal(noConfirm.status, 400, "an account must not be removable without naming it");
+    assert.match(noConfirm.body.message, /one@leavers\.test/);
+
+    const removed = await plane.admin("DELETE", "/v1/accounts/one@leavers.test", { confirm: "one@leavers.test" });
+    assert.equal(removed.status, 200, removed.text.slice(0, 200));
+    assert.equal(removed.body.email, "one@leavers.test");
+    const left = (await plane.admin("GET", "/v1/accounts")).body.accounts.map((account) => account.email);
+    assert.deepEqual(left, ["two@leavers.test"], "the wrong account was removed, or none was");
+
+    // By id as well as by email, because the list route hands out ids.
+    const byId = (await plane.admin("GET", "/v1/accounts")).body.accounts[0];
+    assert.equal((await plane.admin("DELETE", `/v1/accounts/${byId.id}`, { confirm: byId.email })).status, 200);
+    assert.equal((await plane.admin("GET", "/v1/accounts")).body.accounts.length, 0);
+
+    // No bearer does not open this door, and a name nobody holds is a 404 rather than a 200.
+    assert.equal((await plane.request("DELETE", "/v1/accounts/anyone@nowhere.test", { body: {} })).status, 401);
+    assert.equal((await plane.admin("DELETE", "/v1/accounts/nobody@nowhere.test", { confirm: "nobody@nowhere.test" })).status, 404);
+  }, { withCoolify: true });
+});

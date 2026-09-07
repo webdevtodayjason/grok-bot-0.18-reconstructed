@@ -233,6 +233,8 @@ export function openStore(options = {}) {
   const selectAccountByEmail = statement("SELECT * FROM accounts WHERE email = ?");
   const selectAccountById = statement("SELECT * FROM accounts WHERE id = ?");
   const selectAccounts = statement("SELECT * FROM accounts ORDER BY created_at, email");
+  const selectAccountsByTenant = statement("SELECT * FROM accounts WHERE tenant = ? ORDER BY created_at, email");
+  const deleteAccountRow = statement("DELETE FROM accounts WHERE id = ?");
   const updateAccountPassword = statement("UPDATE accounts SET password_json = ?, updated_at = ? WHERE id = ?");
   const countAccountsRow = statement("SELECT COUNT(*) AS n FROM accounts");
 
@@ -297,7 +299,25 @@ export function openStore(options = {}) {
     getAccountByEmail(email) { return accountRow(selectAccountByEmail.get(normalizeEmail(email))); },
     getAccountById(id) { return accountRow(selectAccountById.get(String(id))); },
     listAccounts() { return selectAccounts.all().map(accountRow); },
+    listAccountsForTenant(slug) { return selectAccountsByTenant.all(String(slug)).map(accountRow); },
     countAccounts() { return Number(countAccountsRow.get()?.n ?? 0); },
+
+    // Removing a person's sign-in. It does NOT touch the tenant or anything in the tenant's data
+    // directory: an account is a door, and this closes one door. The rows it leaves behind on
+    // purpose are the login-failure rows, which are the lockout's memory and belong to the address
+    // rather than to the account; deleting them would hand a guesser a reset button.
+    //
+    // Sessions already minted stay valid until they expire, because a session is a signed token
+    // this service does not hold. revokeSession is the lever for one of those, and it needs the
+    // token's jti, which only its holder has. So this is the right shape for "this person has
+    // left" and not for "this person is hostile"; that one is a password change, then the token
+    // TTL, which is twelve hours.
+    deleteAccount(id) {
+      const row = accountRow(selectAccountById.get(String(id)));
+      if (row == null) return null;
+      deleteAccountRow.run(String(id));
+      return row;
+    },
 
     // The one place a hash is read, and it is read into a comparison and dropped. Nothing returns
     // it to a caller.
