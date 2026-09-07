@@ -8,7 +8,7 @@ Mail comes in through Resend. The relay in front of the box takes the message, w
 agent it belongs to, and hands it over as an ordinary prompt. Sending is the agent's own job: it
 posts to Resend from its shell with a key you gave it once.
 
-Nothing in the host bundle changed for any of this. The receiving side lives entirely in the relay
+The receiving side lives entirely in the relay; the host bundle changed by one seed skill (the email skill agents read), so agents on a box built before it need a host update to see it. The relay half works without one. The receiving side lives entirely in the relay
 (`ui/mail-edge.mjs`), the way the job bus edge does.
 
 ---

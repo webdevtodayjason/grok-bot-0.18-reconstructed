@@ -2561,7 +2561,7 @@
 
   function mailSection() {
     if (typeof adapter.getMailSettings !== "function") return "";
-    return `<section class="settings-section" data-mail><h3>Email</h3><p>Give every agent an email address at your own domain. Mail sent to one of them arrives in that agent's conversation, and the agent can write back from the same address. You set this up once in Resend and paste two values here.</p>`
+    return `<section class="settings-section" data-mail><h3>Email</h3><p>Give every agent an email address at your own domain. Mail sent to one of them arrives in that agent's conversation, and the agent can write back from the same address. You set this up once in Resend and paste two values here. Receiving only works once the domain is verified in Resend and its MX record is added at your DNS provider; the runbook lists the steps.</p>`
       + `<div class="setting-row"><div><strong>Receiving</strong><small data-mail-enabled-note>Reading from the relay…</small></div><button class="switch" type="button" data-mail-enabled aria-pressed="false"></button></div>`
       + `<div class="mail-grid"><label>Your domain<input type="text" placeholder="titanium.bot" data-mail-domain /></label><label>Sender name<input type="text" placeholder="Titanium Bot" data-mail-from-name /></label></div>`
       + `<div class="field"><label for="mail-catch-all">Who gets mail nobody else is named for</label><select id="mail-catch-all" data-mail-catch-all></select><small class="field-hint">An address that matches an agent's name always goes to that agent. Everything else comes here.</small></div>`

@@ -270,7 +270,8 @@ export const agentAddress = (name, domain) => {
  */
 export function mailAddresses(agents, domain) {
   if (!Array.isArray(agents) || String(domain ?? "").length === 0) return [];
-  const rows = agents.map((agent) => ({
+  // A group chat is on the roster too, and it is not an agent that can read mail.
+  const rows = agents.filter((agent) => !agent?.isGroup).map((agent) => ({
     agentId: String(agent?.id ?? ""),
     name: String(agent?.name ?? ""),
     address: agentAddress(agent?.name, domain),
@@ -313,7 +314,8 @@ export function routeMail({ addresses = [], agents = [], settings = MAIL_DEFAULT
   const to = chooseRecipient(addresses, settings.domain);
   if (to == null) return null;
   const localpart = localpartOf(to);
-  const roster = Array.isArray(agents) ? agents : [];
+  // A group chat is on the roster too, and it is not an agent that can read mail.
+  const roster = (Array.isArray(agents) ? agents : []).filter((agent) => !agent?.isGroup);
   const byId = (id) => roster.find((agent) => String(agent?.id ?? "") === String(id ?? ""));
   const named = roster.find((agent) => agentLocalpart(agent?.name) === agentLocalpart(localpart));
   // The operator's table is read as they wrote it and then by the same rule as a name, so a route
@@ -641,7 +643,9 @@ export function createMailEdge({
     const subject = asString(message.subject ?? data.subject);
     const messageId = asString(message.message_id ?? message.messageId ?? data.message_id);
     const createdAt = asString(message.created_at ?? message.createdAt ?? data.created_at);
-    const addresses = [...toAddressList(data.to), ...toAddressList(message.to)];
+    // received_for is the address the mail was actually delivered for (a BCC, a forwarding rule),
+    // so it is read before the To header, which a stranger writes.
+    const addresses = [...toAddressList(message.received_for), ...toAddressList(data.to), ...toAddressList(message.to)];
 
     // "The roster could not be read" is not "nobody was named for it", and the two must not answer
     // the same way. A 200 is a final answer, so Resend never sends the message again: a gateway

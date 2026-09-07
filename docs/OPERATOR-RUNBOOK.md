@@ -308,7 +308,9 @@ conversation. The whole thing, including the DNS records and the two values you 
    it will ask you for the key on a card, the same way every other shell secret is handed over.
 
 `node scripts/verify-mail.mjs --url <your console> --stub` measures the whole path against a stub
-Resend and puts your settings back afterwards. Without `--stub` it runs only the legs that change
+Resend, but it only runs against a scratch relay on the same machine that has no Resend key or
+signing secret saved (it clears both when it finishes, and a signing secret cannot be got back), so
+never point it at your working console with `--stub`. Without `--stub` it runs only the legs that change
 nothing, which is what you want against an instance already carrying mail.
 
 ## Your own skills after you deploy
