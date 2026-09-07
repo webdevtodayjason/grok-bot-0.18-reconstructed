@@ -328,6 +328,11 @@ async function main() {
       "  file, and the header of this script has the two ssh lines that do it.",
       "",
       "  COOLIFY_URL and COOLIFY_API_KEY are your own.",
+      "",
+      "  CP_RELAY_PEERS is the server's own outbound address, because every customer's sign-in",
+      "  reaches the control plane from it. On the server: curl -s https://api.ipify.org, then",
+      "  export CP_RELAY_PEERS=<that address>/32 here. Without it the login lockout counts every",
+      "  customer on every instance in one bucket.",
     ].join("\n"), 2);
   }
 

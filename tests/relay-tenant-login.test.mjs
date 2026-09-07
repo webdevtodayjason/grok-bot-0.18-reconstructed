@@ -95,6 +95,22 @@ test("a right password for this tenant comes back as a verified session", async 
   assert.ok(cp.calls[0].init.signal, `the call carries a timeout (${CP_TIMEOUT_MS} ms)`);
 });
 
+test("the sign-in tells the control plane who is actually signing in", async () => {
+  const now = 1_800_000_000_000;
+  const token = tokenFor(TENANT, KEY, { now });
+  const cp = fakeCp({ status: 200, body: { token } });
+  await accountSignIn({ config, email: "demo@titanium.bot", password: "hunter2hunter2", client: "203.0.113.44", ...cp, now: now + 1 });
+  // Without this the control plane counts its address lockout against this container, so every
+  // customer on every instance shares one bucket there: the fleet is locked out by one guesser.
+  assert.equal(cp.calls[0].init.headers["x-forwarded-for"], "203.0.113.44");
+
+  // And with no client to name, the header is absent rather than empty: an empty forwarded value is
+  // a hop that parses as nothing, which is worse than saying nothing at all.
+  const quiet = fakeCp({ status: 200, body: { token } });
+  await accountSignIn({ config, email: "demo@titanium.bot", password: "hunter2hunter2", ...quiet, now: now + 1 });
+  assert.equal("x-forwarded-for" in quiet.calls[0].init.headers, false);
+});
+
 test("a token this control plane signed for ANOTHER customer is not a session here", async () => {
   const now = 1_800_000_000_000;
   const token = tokenFor(OTHER, OTHER_KEY, { now });

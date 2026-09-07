@@ -390,11 +390,26 @@ export function openStore(options = {}) {
     // spray against one customer from anywhere, the address stops one machine working through a
     // list of addresses. retryAfter is when the oldest failure in the offending bucket ages out,
     // which is the earliest moment a further try can succeed.
-    loginLock({ email = "", ip = "", at = now() }) {
+    // countIp false leaves the address bucket out and keeps the email one.
+    //
+    // It is for a caller that is a RELAY rather than a person: every customer signing in through
+    // console.titanium.bot or any tenant's console arrives here from that one machine's egress
+    // address, so the address bucket is a single bucket shared by the whole fleet. Ten wrong
+    // passwords typed at any login page then refused POST /v1/sessions for every customer on every
+    // instance for ten minutes, and nobody could clear it: clearLoginFailures matches email AND ip,
+    // so failures against ten made-up addresses stay until they age out. Measured 2026-09-07: a
+    // failed sign-in through demo.titanium.bot and one through console.titanium.bot both landed in
+    // login_failures as the R750's own egress address.
+    //
+    // The email bucket still does the work it always did, and it is the one that is actually about
+    // a person. The relay in front of these callers has its own per-address lockout (ui/auth.mjs,
+    // five failures then thirty seconds) counted against the real visitor, which is the address
+    // this service cannot see.
+    loginLock({ email = "", ip = "", at = now(), countIp = true }) {
       const since = Number(at) - LOCKOUT_WINDOW_MS;
       const buckets = [
         countFailuresByEmail.get(normalizeEmail(email), since),
-        countFailuresByIp.get(String(ip ?? ""), since),
+        countIp ? countFailuresByIp.get(String(ip ?? ""), since) : null,
       ];
       let retryAfter = 0;
       for (const bucket of buckets) {

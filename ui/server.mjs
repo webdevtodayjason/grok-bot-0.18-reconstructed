@@ -571,7 +571,7 @@ function mintAccountSession(req, res, payload, location) {
 // The account door. Every answer here is a plain sentence a business owner can act on, because the
 // person meeting them owns a company and not this software.
 async function handleAccountLogin(req, res, { email, password, next, key, wantsHtml }) {
-  const verdict = await accountSignIn({ config: TENANT, email, password });
+  const verdict = await accountSignIn({ config: TENANT, email, password, client: key });
   const say = (status, page, json) => {
     if (!wantsHtml) return fail(res, status, json);
     return sendLoginPage(res, status, { error: page, next });

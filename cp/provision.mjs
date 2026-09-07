@@ -126,6 +126,10 @@ export function loadConfig(env = process.env) {
     // by the same code, because two implementations of one answer is how one of them goes stale.
     trustedProxies: text("CP_TRUSTED_PROXIES"),
     cloudflareRanges: text("CP_CLOUDFLARE_RANGES"),
+    // And which of those callers are a RELAY forwarding a customer rather than a customer. Every
+    // tenant console posts its sign-ins here from one machine's egress address, so the address half
+    // of the lockout is one bucket for the whole fleet unless this says so. See loginLock.
+    relayPeers: text("CP_RELAY_PEERS"),
   };
 }
 

@@ -91,6 +91,30 @@ services:
       # docker-compose.yml in this directory carries.
       CP_CLOUDFLARE_RANGES: 173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32
 
+      # Which callers are a RELAY forwarding a customer, rather than a customer.
+      #
+      # Every account sign-in on every instance is posted here BY that instance's relay, so what
+      # this service sees is one machine's egress address whoever typed the password. Measured
+      # 2026-09-07: a failed sign-in through demo.titanium.bot and one through console.titanium.bot
+      # both landed in login_failures as the same address, the R750's own egress. Counting the
+      # address half of the lockout against it meant ten wrong passwords typed at any one login page
+      # refused POST /v1/sessions for every customer on every instance for ten minutes, and nobody
+      # could clear it: a clear matches email AND address, so failures against made-up addresses
+      # stay until they age out.
+      #
+      # Sign-ins from an address named here are counted by EMAIL only, which is the bucket that is
+      # actually about a person. The relay in front of them has its own per-address lockout, counted
+      # against the real visitor, which is the address this service cannot see.
+      #
+      # The value is this server's own outbound address, because that is where its relays' requests
+      # come from. Read it on the server with:
+      #
+      #   curl -s https://api.ipify.org
+      #
+      # Empty is safe and is the old behaviour: the address half applies to everyone, including the
+      # relays, which is the shared bucket above. Set it.
+      CP_RELAY_PEERS: ${CP_RELAY_PEERS}
+
       # ---- building new customer instances -----------------------------------------------------
       # The condition this waited for has been met. It had to stay off until the relay read its
       # settings from each customer's own state directory, because a tenant relay mounts this

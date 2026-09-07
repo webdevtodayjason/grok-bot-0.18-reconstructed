@@ -571,6 +571,49 @@ test("the forwarded address is believed only from a proxy the operator named", a
   }, { env: { CP_TRUSTED_PROXIES: "127.0.0.1/32,::1/128" } });
 });
 
+test("a relay's sign-ins are counted by email, so one instance's guesser cannot lock the fleet out", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane);
+    // Every account sign-in on every instance is posted here BY that instance's relay, so what this
+    // service sees is one machine's egress address whoever typed the password. Measured 2026-09-07:
+    // a failed sign-in through demo.titanium.bot and one through console.titanium.bot both landed in
+    // login_failures as the same address. Counting the address bucket against it meant ten wrong
+    // passwords at any one login page refused POST /v1/sessions for every customer for ten minutes,
+    // and nothing could clear it: a clear matches email AND address, and none of these emails will
+    // ever sign in.
+    for (let attempt = 0; attempt < LOCKOUT_MAX_FAILURES + 4; attempt += 1) {
+      const answer = await plane.request("POST", "/v1/sessions", {
+        body: { email: `made-up-${attempt}@example.com`, password: "not-the-password" },
+      });
+      assert.equal(answer.status, 401, `attempt ${attempt + 1} answered ${answer.status}`);
+    }
+    // A different customer's sign-in still gets through, which is the whole point.
+    const other = await plane.request("POST", "/v1/sessions", {
+      body: { email: "owner@example.com", password: PASSWORD },
+    });
+    assert.notEqual(other.status, 429, "another customer was refused for somebody else's guesses");
+
+    // The email bucket is untouched: a real address being guessed at is still locked.
+    for (let attempt = 0; attempt < LOCKOUT_MAX_FAILURES; attempt += 1) {
+      await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: `guess-${attempt}` } });
+    }
+    const locked = await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: "guess-again" } });
+    assert.equal(locked.status, 429);
+    assert.equal(locked.body.error, "locked");
+  }, { env: { CP_RELAY_PEERS: "127.0.0.1/32,::1/128" } });
+});
+
+test("without CP_RELAY_PEERS the address bucket still applies, so the flag is a decision and not a default", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane);
+    for (let attempt = 0; attempt < LOCKOUT_MAX_FAILURES; attempt += 1) {
+      await plane.request("POST", "/v1/sessions", { body: { email: `made-up-${attempt}@example.com`, password: "no" } });
+    }
+    const locked = await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } });
+    assert.equal(locked.status, 429, "an unnamed caller is a person, and a person's address is counted");
+  });
+});
+
 test("a burst of sign-in attempts is capped rather than queued, so the service keeps answering", async () => {
   await withPlane(async (plane) => {
     await seedTenantAndAccount(plane);

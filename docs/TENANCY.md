@@ -114,6 +114,7 @@ Node 22 or newer, and no dependencies at all: the store is `node:sqlite`, the pa
 | `CP_ALLOW_NEW_TENANTS` | unset | when `1`, this service may build new customer instances. Off until the relay reads its settings from each customer's own state directory. |
 | `CP_TRUSTED_PROXIES` | none | the CIDRs whose `X-Forwarded-For` may say who the visitor is. Empty means the socket address is the visitor. |
 | `CP_CLOUDFLARE_RANGES` | none | which of those may hand over a `CF-Connecting-IP`. Empty means that header is never read. |
+| `CP_RELAY_PEERS` | none | the CIDRs whose sign-ins are a relay forwarding a customer, not a customer. Their failures are counted by email only. Empty means the address bucket applies to them too, which is one bucket for the whole fleet. |
 
 Two of those are required and the service says so and stops if either is missing. With no Coolify
 settings it still runs: tenants can be recorded and adopted, they just cannot be created.

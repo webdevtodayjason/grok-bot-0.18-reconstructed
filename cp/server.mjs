@@ -23,7 +23,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { clientAddress, parseTrustedProxies } from "../ui/auth.mjs";
+import { clientAddress, isTrustedProxy, parseTrustedProxies } from "../ui/auth.mjs";
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import {
@@ -151,6 +151,16 @@ export function createApp(options = {}) {
   const cloudflareRanges = parseTrustedProxies(config.cloudflareRanges);
   const clientOf = (request) => clientAddress(request, trustedProxies, cloudflareRanges);
 
+  // Which callers are a RELAY forwarding a customer, rather than a customer.
+  //
+  // Every account sign-in on every instance is posted here BY that instance's relay, so what this
+  // service sees is one machine's egress address whoever typed the password. Counting an address
+  // lockout against it locked POST /v1/sessions for the whole fleet on ten wrong passwords typed at
+  // any one login page, and nothing could clear it. CP_RELAY_PEERS names those addresses and their
+  // sign-ins are counted by email only. The address half still applies to everyone else, which is
+  // any request that did not come from one of Jason's own relays.
+  const relayPeers = parseTrustedProxies(config.relayPeers);
+
   // In-flight scrypt derivations. See MAX_CONCURRENT_DERIVATIONS.
   let derivations = 0;
 
@@ -184,9 +194,11 @@ export function createApp(options = {}) {
     if (email.length === 0 || password.length === 0) return json(response, 400, { error: "bad_request", message: "Send an email address and a password." });
 
     const ip = clientOf(request);
+    // A relay's address is not a person's, so the address bucket cannot mean anything for it.
+    const viaRelay = isTrustedProxy(ip, relayPeers);
     const at = now();
     store.pruneLoginFailures(at);
-    const lock = store.loginLock({ email, ip, at });
+    const lock = store.loginLock({ email, ip, at, countIp: !viaRelay });
     if (lock.locked) {
       return json(response, 429, { error: "locked", retryAfter: lock.retryAfter }, { "retry-after": String(lock.retryAfter) });
     }

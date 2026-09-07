@@ -93,13 +93,26 @@ export function hostOfUnverifiedToken(token) {
 //
 // fetchImpl is injectable for the tests: a fake control plane in the same process, with no port and
 // no timing. Production passes nothing and gets the global fetch.
-export async function accountSignIn({ config, email, password, fetchImpl = fetch, now = Date.now() } = {}) {
+export async function accountSignIn({ config, email, password, client = "", fetchImpl = fetch, now = Date.now() } = {}) {
   if (config == null) return { kind: "unreachable", detail: "this relay is not in tenant mode" };
   let response;
   try {
     response = await fetchImpl(`${config.cpUrl}/v1/sessions`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        // Who is actually signing in, so the control plane's own lockout can count a person rather
+        // than this container. Without it every customer on every instance shares one bucket there,
+        // because every sign-in in the fleet arrives from one machine's egress address.
+        //
+        // It is only believed where the control plane already trusts this peer to speak for a
+        // caller (CP_TRUSTED_PROXIES), which is a relay reaching it on a docker network. On the
+        // public path the request goes through Cloudflare and Traefik, and Traefik REWRITES this
+        // header from the connection it accepted, so the value below does not survive: there,
+        // CP_RELAY_PEERS is what stops one bucket from being the whole fleet.
+        ...(String(client ?? "").length > 0 ? { "x-forwarded-for": String(client) } : {}),
+      },
       // The password is in this body and nowhere else. It is not logged here, it is not put in a
       // URL, and it is not kept after this call returns.
       body: JSON.stringify({ email, password }),

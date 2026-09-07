@@ -199,6 +199,30 @@ test("the two buckets are separate: one address spraying many emails locks, and 
   });
 });
 
+test("countIp false drops the address bucket and keeps the email one", async () => {
+  await withStore(async (store) => {
+    const now = 1_780_000_000_000;
+    // What a relay's calls look like: ten failures against ten made-up addresses, all arriving from
+    // the one machine every tenant console posts its sign-ins from. With the address bucket counted,
+    // that armed a ten minute refusal for EVERY customer on EVERY instance, and nothing could clear
+    // it: a clear matches email AND address, and none of those emails will ever sign in.
+    for (let index = 0; index < LOCKOUT_MAX_FAILURES; index += 1) {
+      store.recordLoginFailure({ email: `made-up-${index}@example.com`, ip: "66.90.191.45", at: now + index });
+    }
+    assert.equal(store.loginLock({ email: "customer@example.com", ip: "66.90.191.45", at: now + 50 }).locked, true,
+      "the shared bucket is what this is about, so it has to still be there when it is counted");
+    assert.equal(store.loginLock({ email: "customer@example.com", ip: "66.90.191.45", at: now + 50, countIp: false }).locked, false);
+
+    // And the email bucket is untouched by the flag: a real person being guessed at is still locked,
+    // which is the half that is actually about a person.
+    for (let index = 0; index < LOCKOUT_MAX_FAILURES; index += 1) {
+      store.recordLoginFailure({ email: "customer@example.com", ip: "66.90.191.45", at: now + index });
+    }
+    assert.equal(store.loginLock({ email: "customer@example.com", ip: "66.90.191.45", at: now + 50, countIp: false }).locked, true);
+    assert.equal(store.loginLock({ email: "somebody-else@example.com", ip: "66.90.191.45", at: now + 50, countIp: false }).locked, false);
+  });
+});
+
 test("a successful sign-in clears the counters for that email and that address", async () => {
   await withStore(async (store) => {
     const now = 1_780_000_000_000;
