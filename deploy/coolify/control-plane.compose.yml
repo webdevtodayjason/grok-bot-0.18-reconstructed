@@ -229,5 +229,22 @@ services:
     # The relay needs one because it reaches into the box with `docker exec`. This service reaches
     # containers only through Coolify's api, which is an http call with a bearer. A socket here
     # would be root on the host next to the Coolify api key, for nothing.
+    # The shared network, for one reason: when this service builds a customer's box it waits for
+    # that box to answer before it calls the workspace ready, and the box answers on
+    # http://titanbot-box-<uuid>:1340, which is an address only titanbot-net has. Without it the
+    # wait falls back to asking Coolify whether the container is running, and a container that has
+    # started is not a gateway that answers. Coolify merges its own per-resource network in beside
+    # this one, so this service keeps the address it already had.
+    #
+    # No traefik.docker.network pin here, and none is needed: this service is not routed by
+    # Traefik through a second address. api.titanium.bot reaches it the way it always has.
+    networks:
+      - titanbot-net
 
-# No top-level volumes key, no networks key, no ports. See the header.
+# No top-level volumes key and no ports. See the header.
+networks:
+  # Created once by hand on the server (deploy/r750/one-console-migrate.sh step 1) and never by a
+  # deploy. external: true means docker attaches to what is there and creates nothing, so a deploy
+  # that runs before the network exists fails loudly instead of quietly making a second one.
+  titanbot-net:
+    external: true
