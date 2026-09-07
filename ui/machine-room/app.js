@@ -4821,6 +4821,11 @@
     return typeof value === "string" ? value.trim().length > 0 : value != null && value !== "";
   };
   const onboardingAnsweredCount = () => ONBOARDING_STEPS.filter((step) => onboardingAnswered(step.field)).length;
+  // Whether there is anything left to skip. Titan closes the dialog himself when he is done talking
+  // (finish_onboarding, which the box answers on the next poll), so this is only about the button:
+  // a person who has answered all five and clicks the way out has not skipped anything, and the
+  // label and the reason the box records both follow this one answer so they cannot disagree.
+  const onboardingFinished = () => onboardingAnsweredCount() === ONBOARDING_STEPS.length;
 
   // Titan is the crew's first face and the box's first agent, and mascot-crew.js settles who that
   // is the same way: the agent actually named Titan, else the oldest one on the box. Reading it
@@ -4868,7 +4873,7 @@
         <textarea id="onboarding-input" name="message" rows="1" autocomplete="off" placeholder="Answer Titan…"></textarea>
         <button class="send-button" type="submit"><span>➤</span> Send</button>
       </form>
-      <p class="onboarding-note">Nothing here leaves this box. You can close this and finish later.</p>`;
+      <p class="onboarding-note">Your answers stay in this workspace. Titan sends them to the model you set up, the same as any other message. You can close this and finish later.</p>`;
   }
 
   // The face is drawn by mascots.js, which also keeps every face on the page in step with its
@@ -4923,7 +4928,17 @@
       if (typeof window.__titanMascots?.afterRender === "function") window.__titanMascots.afterRender();
     }
     paintOnboardingFace();
+    paintOnboardingExit();
     paintOnboardingTranscript();
+  }
+
+  // The way out, in the person's own words. The button lives in index.html rather than in the body
+  // this file rebuilds, so it is painted here instead of in onboardingMarkup.
+  function paintOnboardingExit() {
+    const button = elements.onboardingDialog?.querySelector("[data-onboarding-skip]");
+    if (!button) return;
+    const label = onboardingFinished() ? "Done" : "Skip for now";
+    if (button.textContent !== label) button.textContent = label;
   }
 
   function sendOnboardingMessage(text) {
@@ -4994,17 +5009,26 @@
     if (elements.onboardingDialog?.open) elements.onboardingDialog.close();
   }
 
-  // Skip for now: the box is told setup is finished, and it keeps whatever Titan captured before
-  // the click. A host that refuses the write leaves the dialog open and says why, because closing
-  // it on a flag that did not move would bring it back on the next load.
-  function skipOnboarding(button) {
+  // The button, and Escape, which is the same act. The box is told setup is over and it keeps
+  // whatever Titan captured before the click. A host that refuses the write leaves the dialog open
+  // and says why, because closing it on a flag that did not move would bring it back on the next
+  // load.
+  //
+  // The ordinary ending is not this: Titan calls finish_onboarding when he has finished talking,
+  // the box answers done:true on the next poll, and refreshOnboardingState closes the dialog. This
+  // is the person's own way out, whether they are skipping or finishing ahead of him, and the box
+  // is told which of the two it was.
+  function closeOnboardingFromButton(button) {
+    const finished = onboardingFinished();
     if (typeof adapter.completeOnboarding !== "function") { closeOnboarding(); return; }
     if (button) button.disabled = true;
-    Promise.resolve(adapter.completeOnboarding(onboardingAnswers()))
+    Promise.resolve(adapter.completeOnboarding(onboardingAnswers(), { skipped: !finished }))
       .then((next) => {
         if (next && typeof next === "object") onboardingState = next;
         closeOnboarding();
-        showToast("Setup closed. Titan is on the roster whenever you want to finish it.");
+        showToast(finished
+          ? "Setup is done. Titan is on the roster and the chat carries on where you left it."
+          : "Setup closed. Titan is on the roster whenever you want to finish it.");
       })
       .catch((error) => {
         if (button) button.disabled = false;
@@ -5029,7 +5053,7 @@
 
   elements.onboardingDialog?.addEventListener("click", (event) => {
     const skip = event.target instanceof Element ? event.target.closest("[data-onboarding-skip]") : null;
-    if (skip) { skipOnboarding(skip); return; }
+    if (skip) { closeOnboardingFromButton(skip); return; }
   });
   elements.onboardingDialog?.addEventListener("submit", (event) => {
     if (!(event.target instanceof Element) || !event.target.hasAttribute("data-onboarding-composer")) return;
@@ -5053,7 +5077,7 @@
   // the next load with nothing recorded about why it was dismissed.
   elements.onboardingDialog?.addEventListener("cancel", (event) => {
     event.preventDefault();
-    skipOnboarding(elements.onboardingDialog.querySelector("[data-onboarding-skip]"));
+    closeOnboardingFromButton(elements.onboardingDialog.querySelector("[data-onboarding-skip]"));
   });
   // ===== end ONBOARD-1 =========================================================================
 

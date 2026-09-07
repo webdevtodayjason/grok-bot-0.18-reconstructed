@@ -3123,10 +3123,16 @@
       getOnboardingState() {
         return tryCall("getOnboardingState");
       },
-      // Skip for now, and the close at the end of the interview. Whatever Titan captured goes with
-      // it, so a person who skips halfway keeps the answers they already gave.
-      completeOnboarding(answers) {
-        return call("completeOnboarding", { answers: answers ?? {} });
+      // The person's own way out of the dialog: Skip for now, or Done once all five are in.
+      // Whatever Titan captured goes with it, so a person who skips halfway keeps the answers they
+      // already gave, and `skipped` is what tells the box which of the two it was rather than
+      // recording every close as a finish. The interview's ordinary ending does not come through
+      // here at all: Titan calls finish_onboarding and the box answers done:true on the next poll.
+      completeOnboarding(answers, options) {
+        return call("completeOnboarding", {
+          answers: answers ?? {},
+          ...(options?.skipped === true ? { skipped: true } : {}),
+        });
       },
       // Titan's opening line. The host owns it: startOnboarding puts the setup recipe on that
       // first turn as a workflow reference, so the words Titan says are the host's and this file

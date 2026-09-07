@@ -56,4 +56,8 @@ Now walk through it, in two or three short messages, not one wall of text. Tie i
 
 ## 5. Ask what is first
 
-Close by asking what they want handled first. Give them two or three concrete suggestions drawn from what they told you about their business, not generic ones. Then stop and wait — the setup window closes on its own and the rest happens in the normal chat.
+Close by asking what they want handled first. Give them two or three concrete suggestions drawn from what they told you about their business, not generic ones.
+
+Then call `finish_onboarding`, once, in that same turn. That is what closes the setup window on their screen, and it is the only thing that does. Do not announce it and do not ask permission. Everything after that happens in the normal chat, so keep going from whatever they answer.
+
+Call it even if they skipped questions, and call it even if the conversation wandered: setup is over once you have asked what is first. If you never call it they are left staring at a window whose only other way out says they gave up on setup.

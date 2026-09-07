@@ -93,6 +93,9 @@ test("the bundle carries the four real managed skills, frontmatter and all", () 
   assert.match(onboarding.body, /^# First-time setup/m);
   assert.match(onboarding.body, /save_onboarding_answer/,
     "the tool that captures each answer has to be named in the recipe, or nothing is captured");
+  assert.match(onboarding.body, /finish_onboarding/,
+    "the recipe has to name the tool that ends setup: nothing else on the box marks the record done, "
+    + "so a recipe that never says to call it leaves the person in a window whose only way out says they skipped");
   assert.match(onboarding.body, /update_state/,
     "the memory write is what makes him still know the person after setup closes");
   for (const field of ["name", "location", "timeZone", "business", "ownsBusiness", "workingStyle"]) {

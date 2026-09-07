@@ -250,25 +250,34 @@ test("the trace line says which room filter ran, and says nothing outside a room
   assert.equal(parsed[1].sharedRoomBoxTools, null);
 });
 
-// ONBOARD-1. `save_onboarding_answer` is the one tool Titan gets while he is running first-time
-// setup, and it exists for exactly as long as the box's onboarding record says done:false. A
-// finished box must not carry it: an extra tool in every toolset forever is a description the
-// model reads on every turn for a conversation that happened once.
-test("save_onboarding_answer is offered while the box is in first-time setup", () => {
+// ONBOARD-1. Two tools while Titan is running first-time setup, and they exist for exactly as long
+// as the box's onboarding record says done:false. A finished box must not carry them: an extra tool
+// in every toolset forever is a description the model reads on every turn for a conversation that
+// happened once.
+//
+// `finish_onboarding` is the interview's ending, and it has to be offered on the SAME condition as
+// the save. Nothing else on the box ever marks the record done, so a Titan handed the save without
+// the finish can start setup and never close it, which leaves the person in a window whose only
+// other way out says they skipped.
+const INTERVIEW_TOOLS = ["save_onboarding_answer", "finish_onboarding"];
+
+test("the interview tools are offered while the box is in first-time setup", () => {
   const names = namesOf(mod.buildTurnTools(
     hostFor({ isOnboardingActive: () => true }), turn, propsWithMcp,
   ));
-  assert.ok(names.includes("save_onboarding_answer"), `offered (got ${names.join(", ")})`);
+  for (const tool of INTERVIEW_TOOLS) {
+    assert.ok(names.includes(tool), `${tool} offered (got ${names.join(", ")})`);
+  }
 });
 
-test("a box that has finished setup never sees it", () => {
+test("a box that has finished setup never sees them", () => {
   const names = namesOf(mod.buildTurnTools(
     hostFor({ isOnboardingActive: () => false }), turn, propsWithMcp,
   ));
-  assert.ok(!names.includes("save_onboarding_answer"));
+  for (const tool of INTERVIEW_TOOLS) assert.ok(!names.includes(tool), tool);
 });
 
-test("a subagent is never handed the interview tool", () => {
+test("a subagent is never handed the interview tools", () => {
   // Setup is a conversation with the person. A subagent has no one to ask.
   const names = namesOf(mod.buildTurnTools(
     hostFor({
@@ -280,5 +289,5 @@ test("a subagent is never handed the interview tool", () => {
     { ...turn, subagentConfigs: [] },
     propsWithMcp,
   ));
-  assert.ok(!names.includes("save_onboarding_answer"));
+  for (const tool of INTERVIEW_TOOLS) assert.ok(!names.includes(tool), tool);
 });

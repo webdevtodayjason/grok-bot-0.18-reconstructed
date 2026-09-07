@@ -40,6 +40,7 @@ import { isSandBoxSettingEnabled, resolveSandMaxAgents } from "./sand-box-settin
 import { sandAgentLimitMessage } from "../shared/agents/agents.js";
 import { createOnboardingService } from "./extensions/onboarding/onboarding-service.js";
 import { createHostBoxUseProbe } from "./extensions/onboarding/onboarding-probe.js";
+import { isUserMessageEntry } from "./extensions/transcript/send-message-shaping.js";
 import { isValidIanaTimeZoneName } from "./extensions/onboarding/onboarding-box-store.js";
 import {
   SAND_ONBOARDING_START_PROMPT,
@@ -992,17 +993,34 @@ export function createHostGatewayApi(
     // ONBOARD-1. Three commands and a test hook.
     //  - getOnboardingState is the console's boot read. It applies the migration rule once, on a
     //    box that has no record yet, and answers done:true for anything already in use.
-    //  - startOnboarding dispatches Titan's first turn. The prompt's rich text is one
+    //  - startOnboarding dispatches Titan's first turn, once per box. The prompt's rich text is one
     //    workflow-reference node, so the seed skill's body is inlined into that turn and no
     //    system-prompt override is needed (an override would withhold update_state, which is how
     //    Titan remembers the person afterwards).
-    //  - completeOnboarding closes it, from either the finished interview or "Skip for now", and
+    //  - completeOnboarding closes it from the console's own button, Skip for now or Done, and
     //    re-applies the captured time zone through the settings service so its listeners fire.
+    // The interview's ordinary ending is not a command at all: Titan calls the `finish_onboarding`
+    // tool when he has finished talking, which writes the same record, and the console's poll of
+    // getOnboardingState sees done:true and closes the dialog.
     getOnboardingState: () => onboarding.getState(),
     startOnboarding: async (args: any) => {
       const agentId = (typeof args?.agentId === "string" && args.agentId.length > 0)
         ? args.agentId
         : method(manager, "getActiveAgentId")();
+      // Asked for once per box, not once per page load. The console fires this every time it opens
+      // the modal, and it opens the modal on every load while the record says done:false -- so
+      // somebody who closes the tab halfway through the interview would come back to a second
+      // "Let's get set up." dropped on top of the first, and Titan would start over. The
+      // conversation itself is the record of whether he has already been asked: the opening prompt
+      // IS a message from the person, so an agent carrying one needs no second opening. Same
+      // predicate the migration rule uses, so "has been talked to" means one thing on this box.
+      if (agentId != null) {
+        const entries = await (manager as any).sessionStore?.getAgentTranscriptEntries?.(agentId)
+          ?? [];
+        if (entries.some(isUserMessageEntry)) {
+          return { started: false, agentId, reason: "already-started" };
+        }
+      }
       await method(manager, "sendPrompt")(SAND_ONBOARDING_START_PROMPT, {
         ...(agentId == null ? {} : { agentId }),
         richText: onboardingPromptRichText(),

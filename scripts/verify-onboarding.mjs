@@ -16,9 +16,10 @@
 //   --live     Does the whole loop RUN on the box? The flag is put back to first-run through the
 //              test-only command, the box is pointed at a stub model on this Mac the way
 //              verify-loop.mjs points it, the console is opened headless, and then: the modal is
-//              there, the console sent Titan's opening message itself, an answer typed into the
-//              modal reaches save_onboarding_answer, the strip fills, Skip closes it, and the
-//              flag reads done with the answer still in it.
+//              there, the console sent Titan's opening message itself, the setup recipe's own
+//              words are in the user half of that turn, the model is handed
+//              save_onboarding_answer, an answer typed into the modal reaches it, the strip
+//              fills, Skip closes it, and the flag reads done with the answer still in it.
 //
 //   --cap      Is the 13-agent ceiling REAL? The roster is faked by moving the ceiling, not by
 //              minting twelve agents: SAND_MAX_AGENTS is set to the box's own non-group count, so
@@ -547,11 +548,19 @@ function startStubModel(port, state) {
     req.on("end", () => {
       let parsed = {}; try { parsed = JSON.parse(body || "{}"); } catch {}
       const tools = (parsed.tools ?? []).map((t) => t?.function?.name ?? t?.name).filter(Boolean);
-      const system = (parsed.messages ?? []).filter((m) => m?.role === "system")
+      const contentOf = (role) => (parsed.messages ?? []).filter((m) => m?.role === role)
         .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""))).join("\n");
+      const system = contentOf("system");
+      // The recipe does NOT arrive in the system prompt. `startOnboarding` sends a normal turn whose
+      // rich text is one workflow-reference node, and expandWorkflowReferences inlines the seed
+      // skill's body into the USER content of that turn. So the user half is the only place the
+      // interview's instructions can be measured, and it is kept here for the same reason `system`
+      // is: the first turn is the one under test and later turns pile more messages on top of it.
+      const user = contentOf("user");
       state.requests += 1;
       if (tools.includes("save_onboarding_answer")) state.sawTool = true;
       if (state.systemPrompt === "" && system.length > 0) state.systemPrompt = system;
+      if (state.userPrompt === "" && user.length > 0) state.userPrompt = user;
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       const shouldSave = tools.includes("save_onboarding_answer") && state.saved === 0;
       if (shouldSave) {
@@ -583,7 +592,7 @@ async function liveArm(landed) {
   if (chromium == null) { skip("every live check", "playwright-core is not installed"); return; }
 
   const STUB_ID = "probe-onboarding-stub";
-  const stubState = { requests: 0, saved: 0, sawTool: false, systemPrompt: "", answer: "Jason" };
+  const stubState = { requests: 0, saved: 0, sawTool: false, systemPrompt: "", userPrompt: "", answer: "Jason" };
   let hooksBefore;
   let hooksTouched = false;
   let stub = null;
@@ -694,7 +703,21 @@ async function liveArm(landed) {
     }
     check(stubState.requests > 0, "opening the modal starts Titan's first turn without anyone typing",
       `${stubState.requests} model call(s) in ${Math.round((Date.now() - opened) / 1000)}s, ${entries.length} transcript rows`);
-    check(stubState.sawTool, "the onboarding prompt is attached: the model is offered save_onboarding_answer",
+    // THE PROMPT, not the flag. `save_onboarding_answer` being on offer says only that the box's
+    // settings record reads done:false; it is true whether or not the recipe ever reached the
+    // model. The recipe reaches it through expandWorkflowReferences, which is a silent `continue`
+    // when the seed skill is not in that agent's workflow store -- the same branch that once
+    // swallowed learn-from-demonstration whole. A box in that state ships a Titan who gets
+    // "Let's get set up." and nothing else, so the interview's own words are what has to be read
+    // off the wire. Two lines of the recipe rather than one, so a stray match cannot carry it.
+    const RECIPE_MARKERS = ["# First-time setup", "Ask the five"];
+    const carried = RECIPE_MARKERS.filter((marker) => stubState.userPrompt.includes(marker));
+    check(carried.length === RECIPE_MARKERS.length,
+      "the onboarding recipe is on the turn: the setup skill's own body is inlined into the first prompt",
+      carried.length === RECIPE_MARKERS.length
+        ? `${stubState.userPrompt.length} characters of user content, carrying ${carried.map((m) => JSON.stringify(m)).join(" and ")}`
+        : `${stubState.userPrompt.length} characters of user content, missing ${RECIPE_MARKERS.filter((m) => !carried.includes(m)).map((m) => JSON.stringify(m)).join(" and ")}`);
+    check(stubState.sawTool, "and the interview tool is on offer: the model is handed save_onboarding_answer",
       stubState.sawTool ? "" : "the turn ran with no such tool on offer");
     if (stubState.systemPrompt.length > 0) info(`the system prompt on that turn was ${stubState.systemPrompt.length} characters`);
 

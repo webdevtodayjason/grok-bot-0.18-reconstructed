@@ -43,7 +43,7 @@ import {
 } from "../../sand-box-setting.js";
 import { fencedToolSet } from "./sand-spotlight-tools.js";
 import { isOnboardingActive } from "../../extensions/onboarding/onboarding-box-store.js";
-import { createSaveOnboardingAnswerTool } from "./onboarding-answer-tool.js";
+import { createFinishOnboardingTool, createSaveOnboardingAnswerTool } from "./onboarding-answer-tool.js";
 import {
   McpDescriptor,
   McpMetaToolOptions,
@@ -1432,7 +1432,8 @@ export interface TurnToolsetHost {
   spotlightEnabled(): boolean;
   /**
    * ONBOARD-1: whether this box is mid first-run setup, which is the only time
-   * `save_onboarding_answer` is offered. Undefined reads the box's own settings document.
+   * `save_onboarding_answer` and `finish_onboarding` are offered. Undefined reads the box's own
+   * settings document.
    */
   isOnboardingActive?(): boolean;
   isDynamicToolsEnabled?(): boolean;
@@ -1560,12 +1561,17 @@ export function buildTurnTools(
       const updateState = factories.updateState?.();
       if (updateState !== undefined) tools.push(updateState);
     }
-    // ONBOARD-1. Offered only while this box's first-run record says done:false, so it exists for
-    // the length of one interview and then stops being built at all. `host.isOnboardingActive`
+    // ONBOARD-1. Offered only while this box's first-run record says done:false, so they exist for
+    // the length of one interview and then stop being built at all. `host.isOnboardingActive`
     // lets a test pin the answer; the default reads the box's settings document, the same way the
     // trace switch a few lines down reads the operator's.
+    //
+    // Two tools, and the second one is the interview's ending: nothing else on the box ever marks
+    // the record done, so without `finish_onboarding` the only way out of the setup window was the
+    // button that says the person skipped it.
     if ((host.isOnboardingActive ?? isOnboardingActive)()) {
       tools.push(asTurnTool(createSaveOnboardingAnswerTool()));
+      tools.push(asTurnTool(createFinishOnboardingTool()));
     }
   }
 

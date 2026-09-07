@@ -177,7 +177,7 @@ async function loadOnboarding({
     requestAnimationFrame: () => {},
   };
   const exports = "return { ONBOARDING_STEPS, onboardingTitan, onboardingMarkup, onboardingMood,"
-    + " renderOnboarding, maybeOpenOnboarding, openOnboarding, closeOnboarding, skipOnboarding,"
+    + " renderOnboarding, maybeOpenOnboarding, openOnboarding, closeOnboarding, closeOnboardingFromButton,"
     + " sendOnboardingMessage, refreshOnboardingState };";
   const names = Object.keys(stubs);
   const block = new Function(...names, `${escaper}\n${body}\n${exports}`)(...names.map((name) => stubs[name]));
@@ -339,21 +339,52 @@ test("ONBOARD-1: Skip for now reaches the box and takes the answers with it", as
     workers: [seeded("Titan", 1)],
     adapter: {
       getOnboardingState: async () => ({ done: false, answers: { name: "Jason" } }),
-      completeOnboarding: async (answers) => { completed.push(answers); return { done: true, answers }; },
+      completeOnboarding: async (answers, options) => { completed.push({ answers, options }); return { done: true, answers }; },
     },
   });
   load.maybeOpenOnboarding();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(load.dialog.open, true);
   const button = load.dialog.nodes["[data-onboarding-skip]"];
-  load.skipOnboarding(button);
+  assert.equal(button.textContent, "Skip for now", "one answer in, so there is still something to skip");
+  load.closeOnboardingFromButton(button);
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   // Whatever Titan captured before the click goes with it: a person who skips halfway keeps what
-  // they already said.
-  assert.deepEqual(completed, [{ name: "Jason" }]);
+  // they already said. And the box is told it was a skip, so the record can tell the two apart.
+  assert.deepEqual(completed, [{ answers: { name: "Jason" }, options: { skipped: true } }]);
   assert.equal(load.dialog.open, false);
   assert.match(load.calls.toasts.join(" "), /Setup closed\./);
+});
+
+// The bug this pins: completeOnboarding used to be reachable ONLY from a button that says the
+// person skipped, so somebody who answered all five was told they had given up on setup, and
+// closing the tab instead reopened the whole first run on the next load. Titan closes it himself
+// now (finish_onboarding, which the box reports on the next poll); this is the other half, the way
+// out the person holds, and once there is nothing left to skip it stops claiming there is.
+test("ONBOARD-1: with all five answered the way out says Done, and the box is not told it was skipped", async () => {
+  const completed = [];
+  const answers = {
+    name: "Jason", location: "Fort Worth, Texas", business: "an MSP",
+    ownsBusiness: "yes", workingStyle: "hand it off",
+  };
+  const load = await loadOnboarding({
+    workers: [seeded("Titan", 1)],
+    adapter: {
+      getOnboardingState: async () => ({ done: false, answers }),
+      completeOnboarding: async (given, options) => { completed.push({ given, options }); return { done: true, answers: given }; },
+    },
+  });
+  load.maybeOpenOnboarding();
+  await new Promise((resolve) => setImmediate(resolve));
+  const button = load.dialog.nodes["[data-onboarding-skip]"];
+  assert.equal(button.textContent, "Done");
+  load.closeOnboardingFromButton(button);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(completed, [{ given: answers, options: { skipped: false } }]);
+  assert.equal(load.dialog.open, false);
+  assert.match(load.calls.toasts.join(" "), /Setup is done\./);
 });
 
 test("ONBOARD-1: a skip the box refused leaves the dialog open and says so", async () => {
@@ -367,7 +398,7 @@ test("ONBOARD-1: a skip the box refused leaves the dialog open and says so", asy
   load.maybeOpenOnboarding();
   await new Promise((resolve) => setImmediate(resolve));
   const button = load.dialog.nodes["[data-onboarding-skip]"];
-  load.skipOnboarding(button);
+  load.closeOnboardingFromButton(button);
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   // Closing on a flag that did not move brings the dialog back on the next load, which is the one

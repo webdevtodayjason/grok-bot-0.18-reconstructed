@@ -546,8 +546,9 @@
       getOnboardingState() {
         return Promise.resolve(clone(onboarding));
       },
-      completeOnboarding(answers) {
+      completeOnboarding(answers, options) {
         onboarding.done = true;
+        onboarding.doneReason = options?.skipped === true ? "skipped" : "completed";
         onboarding.answers = { ...onboarding.answers, ...clone(answers || {}) };
         return Promise.resolve(clone(onboarding));
       },

@@ -3,7 +3,7 @@
 **What this is.** The first thing a person sees when they sign in to their own instance, and the
 contract the two halves of it are built to. Titan introduces himself, asks five short questions,
 walks through what he can do, and asks what they want done first. Underneath it: one flag on the
-box, three gateway commands, one tool, one seed prompt, one dialog in the console, and a ceiling of
+box, three gateway commands, two tools, one seed prompt, one dialog in the console, and a ceiling of
 thirteen agents.
 
 **Status, 2026-09-07: built and measured.** This document is the contract,
@@ -28,11 +28,19 @@ are. When the questions are done he walks through what he can do (section 3) and
 what they want done first. The dialog closes and they are in the ordinary console with Titan
 selected.
 
-**Skip for now** is on the dialog from the first second. It closes the dialog and marks the box
-done, keeping whatever was answered before they pressed it. Nobody is held in this.
+**Titan is what closes it.** The last thing the recipe tells him to do is call `finish_onboarding`,
+which marks the box done; the console is asking the box every 2.5 seconds while the dialog is up, so
+it sees `done: true` and closes. Nothing else on the box ever marks the record done, which is why the
+tool exists: without it the only way out was the button, and a person who answered every question was
+told they had skipped setup.
+
+**Skip for now** is on the dialog from the first second, for the person who does not want to go
+through with it. It closes the dialog and marks the box done, keeping whatever was answered before
+they pressed it. Nobody is held in this. Once all five answers are in there is nothing left to skip,
+so the same button reads **Done**, and the box is told which of the two it was.
 
 **Titan speaks first, and the console is what makes him.** A fresh box's first agent is born in
-`createFallbackSession` (`source/host/extensions/session/session-materialization.ts:64`), which goes
+`createFallbackSession` (`source/host/extensions/session/session-materialization.ts:98`), which goes
 straight to `materializeSession` and never sets `introductionPending`. So `kickstartAgent`
 (`agent-lifecycle.ts:120`) returns false on it and the opening turn nothing else would start has to
 be started by the console when it opens the dialog. See section 6.
@@ -151,10 +159,19 @@ asks with `tryCall`, so a host too old to have it answers `unknown gateway metho
 remembers the miss, and no modal is drawn. An old host degrades to no first run, never to a broken
 console.
 
-### 5.2 `completeOnboarding { answers }`
+### 5.2 `completeOnboarding { answers, skipped }`
 
 Marks `done: true`, stamps `completedAt`, and merges any answers it is handed over the ones already
-saved. What **Skip for now** calls, and what the end of the conversation calls. Idempotent.
+saved. `skipped: true` records `doneReason: "skipped"`, anything else records `"completed"`.
+Idempotent. This is the console's button and nothing else: **Skip for now** sends `skipped: true`,
+**Done** sends no flag. The end of the conversation does not come through here at all, it comes
+through the `finish_onboarding` tool in 5.5.
+
+There is also `startOnboarding { agentId }`, which dispatches Titan's opening turn (section 7). It
+fires once per box, not once per page load: the console asks for it every time it opens the modal,
+so a host that dispatched blindly would drop a second "Let's get set up." on a half-finished
+interview whenever somebody reloaded the page. An agent that already carries a message from the
+person has already been asked, and the command answers `{ started: false, reason: "already-started" }`.
 
 ### 5.3 `resetOnboarding` (test only)
 
@@ -169,8 +186,8 @@ plain words. Two modes:
 
 ### 5.4 `save_onboarding_answer { field, value }`
 
-The tool the onboarding prompt gives Titan, and the only new tool this wave adds. `field` is one of
-the five in section 2. It writes the answer into the state, applies the time zone when the field is
+One of the two tools the onboarding prompt gives Titan, and offered only while the record says
+`done: false`. `field` is one of the five in section 2. It writes the answer into the state, applies the time zone when the field is
 `location` and a zone was worked out, and answers:
 
 ```
@@ -183,7 +200,21 @@ the five in section 2. It writes the answer into the state, applies the time zon
 successful call report `Cannot read properties of undefined (reading 'text')`, which is a bug this
 repo has already had once and fixed.
 
-### 5.5 The cap and the capability
+### 5.5 `finish_onboarding {}`
+
+The other one, and the interview's ending. No arguments: the record already holds every answer, and
+this only says the conversation is over. It writes the same record `completeOnboarding` writes, with
+`doneReason: "completed"`, and the console's poll closes the dialog on the `done: true` that comes
+back. The recipe tells Titan to call it once, in the same turn he asks what they want handled first
+(section 7 step 6).
+
+**It is the only thing on the box that ends a finished interview.** Before it existed the record was
+written by the console's button alone, so a person who answered all five questions could leave that
+window only through a control that said they were skipping, and closing the tab instead reopened the
+whole first run on the next load. Both tools disappear from the toolset the moment the record reads
+`done: true`, so a finished box carries neither.
+
+### 5.6 The cap and the capability
 
 `getHostStatus` gains `maxAgents` and lists `onboardingV1` among its `capabilities`, beside
 `sendAcceptanceV1`. The console reads that status at boot already, so the Add button gets the number
@@ -248,9 +279,14 @@ one with Titan selected.
 
 **While the dialog is up the console asks the box again every 2.5 seconds**, because Titan writes
 an answer the moment he gets it and nothing pushes that to the page. `done: true` coming back
-closes the dialog on its own, which is how the interview ends. Escape does what **Skip for now**
-does, and if the box refuses that write the dialog stays open and says why: closing on a flag that
-did not move would bring the dialog back, which is worse than not offering skip.
+closes the dialog on its own, which is how the interview ends: Titan's `finish_onboarding` (5.5) is
+what puts it there. Escape does what the button does, and if the box refuses that write the dialog
+stays open and says why: closing on a flag that did not move would bring the dialog back, which is
+worse than not offering skip.
+
+**The button's own label follows the strip.** `Skip for now` until all five answers are in, then
+`Done`, and `completeOnboarding` is sent `skipped` to match. It is a way out, not the ending, so it
+is the same control either way rather than a second one appearing beside it.
 
 **Reading the dialog with no host.** `?onboarding=1` on the console URL arms the offline demo
 adapter: it reports `done: false`, renames the first agent Titan and clears his conversation, so
@@ -270,10 +306,11 @@ runtime. It has to make Titan:
 3. call `save_onboarding_answer` the moment he has each answer, before asking the next
 4. walk through section 3
 5. close by asking what they want done first
-6. take **Skip for now** and a person who does not want to answer at their word, without pushing
+6. call `finish_onboarding` in that same turn, which is what closes the window on their screen
+7. take **Skip for now** and a person who does not want to answer at their word, without pushing
 
 **Do not use `HostRunnerOverrides.systemPrompt` for this.** It replaces the base prompt wholesale and
-sets `isSystemPromptOverridden`, and `turn-toolset.ts:1552` withholds `update_state` entirely when
+sets `isSystemPromptOverridden`, and `turn-toolset.ts:1560` withholds `update_state` entirely when
 that flag is set. Titan's memory writes below depend on `update_state`, so an override would quietly
 remove the tool the flow needs. The seed-skill route is additive and keeps the whole toolset.
 
@@ -294,7 +331,7 @@ overrides it; the default is 13. Groups do not count. The crew this console draw
 exactly Titan plus twelve companions (`mascot-crew.js:33-47`), so thirteen is the size the product
 was already drawn at.
 
-It is enforced at one place, `mintAgent` (`session-materialization.ts:56`), which both `createAgent`
+It is enforced at one place, `mintAgent` (`session-materialization.ts:81`), which both `createAgent`
 and `duplicateAgent` funnel through. The refusal a person sees is one sentence:
 
 > This workspace holds Titan and 12 more bots. Remove one to add another.
@@ -310,22 +347,27 @@ counting rooms against a cap that excludes them would put two numbers that disag
 The host's own count is on the tooltip. Both numbers follow the ceiling the host reports on
 `getOnboardingState`, and fall back to 13.
 
-**Two traps here.**
+**One trap left, and one that is closed.**
 
-The limit is written down twice and only one of them is enforced. `session-materialization.ts:14`
-holds `MAX_AGENTS_PER_USER = 50` and the `SandAgentLimitError` that is actually thrown;
-`source/shared/agents/agents.ts:54` holds a second `MAX_AGENTS_PER_USER = 50`, a second
-`SandAgentLimitError`, and `SAND_AGENT_LIMIT_MESSAGE = "50 is the maximum"`. Change one and not the
-other and the two disagree.
+The closed one, written down because it is what the shape of this code is explaining. The limit used
+to live in two files that were not wired to each other: `session-materialization.ts` held
+`MAX_AGENTS_PER_USER = 50` and its own `SandAgentLimitError`, `shared/agents/agents.ts` held a second
+constant, a second class of the same name, and `SAND_AGENT_LIMIT_MESSAGE = "50 is the maximum"`.
+There is one of each now. The ceiling is `SAND_DEFAULT_MAX_AGENTS = 13` (`agents.ts:64`), the class is
+declared once beside it (`agents.ts:74`) and re-exported from `session-materialization.ts:28` so the
+old import path still works, and no `MAX_AGENTS_PER_USER` is left anywhere under `source/` (the only
+mention now is the word list the gate uses to keep jargon out of the refusal a person reads).
 
-And `isSandAgentLimitError` (`agents.ts:64`) matches **on the message string**. Two callers catch a
-limit through it: `tryEnsureSession` (`session-runtime.ts:417`) and the post-delete fallback
-(`agent-lifecycle.ts:470`). **If the refusal sentence changes and that matcher does not, both of them
-stop recognising the limit they are there to handle.** The message and the matcher move together, or
-neither moves.
+The trap that is still live: `isSandAgentLimitError` (`agents.ts:89`) is what two callers use to
+catch a limit, `tryEnsureSession` (`session-runtime.ts:417`) and the post-delete fallback
+(`agent-lifecycle.ts:476`), and `statusForCommandError` (`gateway-server.ts:15`) is what turns it
+into the 409 the console reads. All three test the error's **name**, not its message, so the refusal
+sentence can be reworded freely. **What must not move is the name.** Rename the class, or throw a
+plain `Error` from `mintAgent`, and all three quietly stop recognising the one condition they exist
+to handle. The name and the matchers move together, or neither moves.
 
 One more thing about a fresh box: when the cap is already reached, `createFallbackSession`
-(`session-materialization.ts:64`) adopts an existing agent rather than minting, so the ceiling can
+(`session-materialization.ts:98`) adopts an existing agent rather than minting, so the ceiling can
 never leave a box with no agent at all.
 
 ## 9. Gates, and what is open
