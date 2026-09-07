@@ -1,0 +1,158 @@
+[
+  {
+    "name": "Titan",
+    "description": "The familiar face at the center of your control room.",
+    "colors": [
+      "#23DCEF",
+      "#00C8F0",
+      "#00AFE0"
+    ],
+    "eye": "round",
+    "power": 0,
+    "phase": 0
+  },
+  {
+    "name": "Scribe",
+    "description": "A soft violet silhouette with a thoughtful, half-open eye.",
+    "colors": [
+      "#D0B5FF",
+      "#A88CEB",
+      "#8968D2"
+    ],
+    "eye": "squint",
+    "power": 0.35,
+    "phase": 0.8
+  },
+  {
+    "name": "Orbit",
+    "description": "A bright blue explorer with an eye shaped for curiosity.",
+    "colors": [
+      "#9CCAFF",
+      "#6AABEF",
+      "#498BDC"
+    ],
+    "eye": "almond",
+    "power": -0.4,
+    "phase": 1.6
+  },
+  {
+    "name": "Flux",
+    "description": "A fluid mint companion that never quite sits still.",
+    "colors": [
+      "#89EBC7",
+      "#51CCAB",
+      "#2BAB9B"
+    ],
+    "eye": "tall",
+    "power": -0.6,
+    "phase": 2.4
+  },
+  {
+    "name": "Nova",
+    "description": "A warm coral spark with a wide, welcoming eye.",
+    "colors": [
+      "#FFB4A6",
+      "#F08E87",
+      "#D86C7E"
+    ],
+    "eye": "round",
+    "power": 0.65,
+    "phase": 3.2
+  },
+  {
+    "name": "Echo",
+    "description": "A lilac ripple with a gently tapered eye.",
+    "colors": [
+      "#E0BAF1",
+      "#C59BDC",
+      "#A179C6"
+    ],
+    "eye": "diamond",
+    "power": -0.25,
+    "phase": 4
+  },
+  {
+    "name": "Pip",
+    "description": "A sunny little presence with a tall, attentive eye.",
+    "colors": [
+      "#FBE19A",
+      "#EAC66E",
+      "#DCA651"
+    ],
+    "eye": "tall",
+    "power": 0.55,
+    "phase": 4.8
+  },
+  {
+    "name": "Ripple",
+    "description": "A cool aqua companion with a flowing outline.",
+    "colors": [
+      "#A0ECE6",
+      "#65CCC9",
+      "#36B1BC"
+    ],
+    "eye": "almond",
+    "power": -0.75,
+    "phase": 5.6
+  },
+  {
+    "name": "Moss",
+    "description": "An easygoing green companion with a relaxed gaze.",
+    "colors": [
+      "#C6DD9B",
+      "#A1BF77",
+      "#7EA65F"
+    ],
+    "eye": "squint",
+    "power": 0.8,
+    "phase": 6.4
+  },
+  {
+    "name": "Comet",
+    "description": "An orange glow with a playful, shifting silhouette.",
+    "colors": [
+      "#FFD199",
+      "#F5AD70",
+      "#E78B50"
+    ],
+    "eye": "diamond",
+    "power": -0.45,
+    "phase": 7.2
+  },
+  {
+    "name": "Wisp",
+    "description": "An airy periwinkle shape with a curious little gaze.",
+    "colors": [
+      "#C8D0FF",
+      "#A0AFE7",
+      "#8093CD"
+    ],
+    "eye": "round",
+    "power": -0.8,
+    "phase": 8
+  },
+  {
+    "name": "Lumen",
+    "description": "A clear sky-blue companion with an open, attentive eye.",
+    "colors": [
+      "#B0ECF4",
+      "#86D0E0",
+      "#5BB5CB"
+    ],
+    "eye": "tall",
+    "power": 0.3,
+    "phase": 8.8
+  },
+  {
+    "name": "Pixel",
+    "description": "A pink companion with a softly geometric personality.",
+    "colors": [
+      "#F6BEDB",
+      "#E496BE",
+      "#C979A4"
+    ],
+    "eye": "almond",
+    "power": 1.1,
+    "phase": 9.6
+  }
+]

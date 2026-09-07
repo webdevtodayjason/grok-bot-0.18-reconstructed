@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Meet Titan — Titanium Bot</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #090d14; color: #e6ebf2; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px 20px; }
+    main { max-width: 760px; margin: auto; }
+    .brand { color: #00c8f0; letter-spacing: .24em; font-size: 12px; font-weight: 700; }
+    h1 { margin: 12px 0 0; font-size: clamp(36px, 7vw, 56px); letter-spacing: -.04em; }
+    .controls { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+    button { cursor: pointer; color: #e6ebf2; background: #141c29; padding: 12px 19px; border: 1px solid #2b384c; border-radius: 12px; font: inherit; }
+    button[aria-pressed="true"] { color: #090d14; background: #00c8f0; border-color: #00c8f0; }
+    button:focus-visible { outline: 3px solid #e6ebf2; outline-offset: 4px; }
+    #state { color: #9caabd; text-align: center; margin: 18px 0 0; }
+    .footer { text-align: center; color: #00c8f0; margin-top: 36px; }
+  </style>
+  <script src="./titan-mascot.js" defer></script>
+</head>
+<body>
+  <main>
+    <div class="brand">TITANIUM BOT</div>
+    <h1>Meet Titan.</h1>
+    <titan-mascot id="titan" mood="calm"></titan-mascot>
+    <div class="controls" aria-label="Titan mood">
+      <button type="button" data-mood="calm" aria-pressed="true">Calm</button>
+      <button type="button" data-mood="curious" aria-pressed="false">Curious</button>
+      <button type="button" data-mood="excited" aria-pressed="false">Excited</button>
+      <button type="button" id="playback">Pause</button>
+    </div>
+    <p id="state" aria-live="polite">Move your pointer near Titan.</p>
+    <div class="footer">titanium.bot</div>
+  </main>
+  <script>
+    customElements.whenDefined('titan-mascot').then(() => {
+      const titan = document.getElementById('titan');
+      const playback = document.getElementById('playback');
+      const state = document.getElementById('state');
+      const labels = { calm: 'Slow, liquid motion.', curious: 'An attentive little alien.', excited: 'A happy ripple of energy.' };
+      function update() {
+        document.querySelectorAll('[data-mood]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mood === titan.mood)));
+        playback.textContent = titan.paused ? 'Play' : 'Pause';
+        state.textContent = titan.paused ? 'Motion paused. Press Play to animate.' : labels[titan.mood] + ' Move your pointer near Titan.';
+      }
+      document.querySelectorAll('[data-mood]').forEach(b => b.addEventListener('click', () => titan.setMood(b.dataset.mood)));
+      playback.addEventListener('click', () => titan.paused ? titan.play() : titan.pause());
+      titan.addEventListener('titan-statechange', update);
+      update();
+    });
+  </script>
+</body>
+</html>
