@@ -116,6 +116,14 @@ take `--dry-run` or `TITANBOT_DRY_RUN=1`, so read the plan before you run either
 signs in with your Titanium Bot account once its service carries `TENANT_ID`, `CP_URL` and its own
 derived `CP_SESSION_SECRET`, and its relay password keeps working either way.
 
+All of that is live as of 2026-09-07: the control plane answers at `https://api.titanium.bot`,
+`console.titanium.bot` is the tenant `titanium` and is in tenant mode with `verify-deploy` still
+passing 56 of 56, and there is a second real instance at `https://demo.titanium.bot` whose account
+is `demo@titanium.bot` with its password in `cp.env` as `DEMO_PASSWORD`. One thing to remember when
+you change a tenancy variable on a Coolify service: **an environment value the compose file does not
+name never reaches the container**, so push the current compose as well as setting the value, then
+restart. Give a box ninety seconds after a recreate before you believe a gate run against it.
+
 ## Updating without restarting anyone (SHIP-2)
 
 A ship used to recreate both containers, which cut every turn in flight and wiped whatever the
