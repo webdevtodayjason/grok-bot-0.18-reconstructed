@@ -153,6 +153,11 @@ if [ "$MODE" = verify ]; then
   if [ -n "$RELAY_ADDR" ]; then
     for from in "${BOX_LIST[@]}"; do
       from_name="${from%% *}"
+      if docker exec "$RELAY_NAME" node -e "fetch('http://$(address_of "$from_name"):1340/api/getHostStatus',{method:'POST',headers:{'content-type':'application/json'},body:'{}',signal:AbortSignal.timeout(4000)}).then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then
+        say "ok     the console reaches $from_name on 1340, so its owner's roster can load"
+      else
+        say "BROKEN the console cannot reach $from_name on 1340; its owner sees an empty console"; broken=$((broken+1))
+      fi
       if docker exec "$from_name" bash -c "timeout 3 bash -c 'exec 3<>/dev/tcp/$RELAY_ADDR/$RELAY_PORT'" 2>/dev/null; then
         say "ok     $from_name reaches the relay on $RELAY_PORT, which is where its host bundle comes from"
       else
@@ -185,6 +190,13 @@ SET="$(IFS=, ; printf '%s' "${BOX_ADDRS[*]:-}")"
       printf '    meta ibrname "%s" ip saddr { %s } ip daddr %s tcp dport %s accept comment "a box fetches its host bundle"\n' \
         "$BR" "$SET" "$RELAY_ADDR" "$RELAY_PORT"
     fi
+    # The bridge family has no connection tracking here, so a box's ANSWERS to the console and the
+    # control plane have to be let through by port: the gateway (1340) and the desktop bridges
+    # (6080, 6081) answer from those ports, and only to addresses that are not boxes. Found
+    # 2026-09-07 with Richard's workspace: without this the console's own connection to a customer
+    # box timed out, and every customer console was dead while the rule stood.
+    printf '    meta ibrname "%s" ip saddr { %s } ip daddr != { %s } tcp sport { 1340, 6080, 6081 } accept comment "a box answers the console and the control plane"\n' \
+      "$BR" "$SET" "$SET"
     printf '    meta ibrname "%s" ip saddr { %s } drop comment "one customer box reaches nothing else on this bridge"\n' \
       "$BR" "$SET"
   fi
