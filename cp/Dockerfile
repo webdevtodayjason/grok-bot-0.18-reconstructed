@@ -25,7 +25,7 @@ FROM node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa3
 
 WORKDIR /app
 
-# cp/ is the whole service: server.mjs, session.mjs, store.mjs, provision.mjs, cli.mjs.
+# cp/ is the whole service: server.mjs, session.mjs (a re-export), store.mjs, provision.mjs, cli.mjs.
 COPY cp/ /app/cp/
 
 # ui/auth.mjs is copied because the provisioner writes each tenant's own auth.json with the
@@ -40,6 +40,13 @@ COPY cp/ /app/cp/
 #   docker exec -it <cp container> node /app/ui/set-password.mjs /data/titanbot/<slug>/state/auth.json
 COPY ui/auth.mjs /app/ui/auth.mjs
 COPY ui/set-password.mjs /app/ui/set-password.mjs
+
+# ui/session-token.mjs is the mint and the verify. It is copied because cp/session.mjs is now a
+# re-export of it (`export * from "../ui/session-token.mjs"`), which is what keeps one verifier in
+# the tree instead of two: ui/ is the half that ships to every tenant relay, so the file has to live
+# there, and the control plane reads the same bytes rather than its own copy of them. Without this
+# line the image builds and then fails at import on the first sign-in.
+COPY ui/session-token.mjs /app/ui/session-token.mjs
 
 # The template every tenant's compose is rendered from. The renderer replaces the four data-volume
 # paths and the profile and credential paths with the tenant's own, keeps runtime, deploy and ui
@@ -65,27 +72,34 @@ ENV CP_PORT=7790 \
 EXPOSE 7790
 
 # ---- the user ---------------------------------------------------------------------------------
-# uid 1000, which the base image already carries as `node`.
+# Not root, and not the image's own `node` account either.
 #
-# Why 1000 and not root: this process creates and writes every tenant's directories under
-# CP_TENANT_ROOT, and those directories hold a tenant's gateway token and its relay password file.
-# Running as root would make them root-owned on the host, which means the release files (owned by
-# sem) and the tenant files (owned by root) end up in two ownership worlds on one disk, and a
-# backup or an rsync run as sem starts failing on files it cannot read.
+# Why not root: this process creates and writes every tenant's directories under CP_TENANT_ROOT, and
+# those directories hold a tenant's gateway token and its relay password file. Running as root would
+# make them root-owned on the host, which means the release files (owned by sem) and the tenant files
+# (owned by root) end up in two ownership worlds on one disk, and a backup or an rsync run as sem
+# starts failing on files it cannot read.
 #
-# Why 1000 specifically: it is the first login account on the R750, which is `sem`, the account
-# that owns /home/sem/titanbot and runs every other deploy step there. Same uid inside the
-# container and outside it means a file this service writes is a file Jason can read over ssh
-# without sudo.
+# Why an ARG rather than a number written in: the uid has to match the account that owns
+# /home/sem/titanbot and runs every other deploy step on the server, and that account is not the same
+# number everywhere. The image's `node` user is 1000, and this file used to say USER node believing
+# 1000 was sem. Measured on the R750 on 2026-09-07: `id -u sem` is 1001, so the old line would have
+# written every tenant directory as uid 1000, which on that box is somebody else entirely.
 #
-# The one thing to check before the first deploy, because it is the thing that would silently break
-# this: `id -u sem` on the R750 must be 1000. If it is not, set `user: "<uid>:<gid>"` on the service
-# in deploy/coolify/control-plane.compose.yml instead of changing this line, and the image stays
-# the same for everyone.
+# The default is 1001 because that is the R750. Build it for a server where sem is a different
+# number by passing the number:
 #
-# The tenant root has to exist and be writable before the first start. Once, on the server:
+#   docker build -t titanbot-cp:local -f cp/Dockerfile --build-arg UID=1001 .
 #
-#   sudo install -d -o 1000 -g 1000 -m 0750 /data/titanbot
-USER node
+# 1001 has no passwd entry in this image, which node does not need: it writes only CP_DATA_DIR and
+# the tenant root, both given by env and both bind mounts from the host.
+#
+# The tenant root has to exist and be writable before the first start, owned by the same uid. Once,
+# on the server (deploy/r750/control-plane-install.sh does this):
+#
+#   sudo install -d -o 1001 -g 1001 -m 0750 /data/titanbot
+ARG UID=1001
+ARG GID=1001
+USER ${UID}:${GID}
 
 CMD ["node", "/app/cp/server.mjs"]

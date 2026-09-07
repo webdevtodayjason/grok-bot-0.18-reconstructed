@@ -18,7 +18,8 @@ Files:
 | file | what it is |
 | --- | --- |
 | `cp/server.mjs` | the http api, and the only thing that listens |
-| `cp/session.mjs` | mint and verify a session token. The relay imports this same file |
+| `cp/session.mjs` | a re-export of `ui/session-token.mjs`, which is where mint and verify live |
+| `ui/session-token.mjs` | the token itself. It sits in `ui/` because that is the half that ships to every tenant relay, and both sides import the one file |
 | `cp/store.mjs` | the sqlite store: accounts, tenants, revoked sessions, provisioning steps, login failures |
 | `cp/provision.mjs` | the steps that turn a slug into a running instance on Coolify |
 | `cp/cli.mjs` | the operator's commands, over http, against a running server |

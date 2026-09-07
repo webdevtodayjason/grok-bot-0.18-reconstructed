@@ -18,10 +18,15 @@ import { promises as fs, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stateFile } from "./state-dir.mjs";
 
 const HOME = os.homedir();
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const STORE_FILE = process.env.GROK_BOT_SUBSCRIPTIONS_FILE ?? path.join(HERE, "subscriptions.json"); // override is for tests
+// The override is for tests; SAND_UI_STATE_DIR is for a tenant, whose ui/ is a release directory
+// shared with every other tenant and must not be where its settings land. ui/state-dir.mjs.
+// An empty value counts as unset: that is what a compose file produces for a variable declared and
+// never given one, and reading it as "the empty path" writes the store to a file called "".
+export const STORE_FILE = process.env.GROK_BOT_SUBSCRIPTIONS_FILE?.trim() || stateFile("subscriptions.json", HERE);
 export const ORIGINATOR = "grok-bot";
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"; // the Codex CLI's public OAuth client (OpenClaw 2.0, MIT)
 const MINIMAX_CLIENT_ID = "78257093-7e40-4613-99e0-527b14b39113"; // the MiniMax CLI's public client (OpenClaw 2.0, MIT)

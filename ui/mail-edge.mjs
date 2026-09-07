@@ -31,11 +31,17 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { appendFile, chmod, chown, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stateFile } from "./state-dir.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// The env overrides are for tests, the same way ui/subscriptions.mjs carries one.
-export const MAIL_SETTINGS_FILE = process.env.GROK_BOT_MAIL_FILE ?? path.join(HERE, "mail.json");
-export const MAIL_LEDGER_FILE = process.env.GROK_BOT_MAIL_LEDGER_FILE ?? path.join(HERE, "mail-inbox.jsonl");
+// The env overrides are for tests, the same way ui/subscriptions.mjs carries one. Under
+// SAND_UI_STATE_DIR both files move to the tenant's own state directory instead of the release
+// directory every tenant shares, which is the only reason one customer's mail settings are not
+// also the next customer's. ui/state-dir.mjs.
+// An empty value counts as unset, the same as everywhere else: a compose file writes one for a
+// variable that was declared and never given a value.
+export const MAIL_SETTINGS_FILE = process.env.GROK_BOT_MAIL_FILE?.trim() || stateFile("mail.json", HERE);
+export const MAIL_LEDGER_FILE = process.env.GROK_BOT_MAIL_LEDGER_FILE?.trim() || stateFile("mail-inbox.jsonl", HERE);
 
 export const RESEND_API_BASE = "https://api.resend.com";
 // A webhook body is an event envelope, not a message: Resend hands over ids and headers and the

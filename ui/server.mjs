@@ -25,6 +25,17 @@
 //   SAND_HOST_RUNTIME_DIR    the ship's runtime directory (host-main.cjs plus the version file
 //                            stage-host-bundle.mjs writes). Unset means /runtime answers 503 and
 //                            the box simply never finds a host bundle to update to. SHIP-2.
+//   SAND_UI_STATE_DIR        where this relay's writable files go: auth.json, endpoints.json,
+//                            subscriptions.json, mail.json, mail-inbox.jsonl. Unset means beside
+//                            this file, which is what every single-relay install has always done.
+//                            A tenant sets it because ui/ is shared with every other tenant there.
+//                            ui/state-dir.mjs. TENANT-2.
+//   SAND_UI_AUTH_FILE        auth.json, overriding the state directory. Older than the line above.
+//   SAND_UI_ENDPOINTS_FILE   endpoints.json, overriding the state directory. TENANT-2.
+//   TENANT_ID                this instance's tenant name on the control plane. With the two below,
+//   CP_URL                   the control plane's public URL, and
+//   CP_SESSION_SECRET        this tenant's own derived session key, the login page also takes a
+//                            Titanium Bot account. All three or none. ui/tenant-login.mjs. TENANT-2.
 import { createServer } from "node:http";
 import net from "node:net";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
@@ -43,8 +54,10 @@ import {
   routeJobBus,
 } from "./job-bus-edge.mjs";
 import { createMailEdge } from "./mail-edge.mjs";
+import { stateDir, stateFile } from "./state-dir.mjs";
+import { accountSignIn, ssoVerdict, tenantConfig } from "./tenant-login.mjs";
 import { chmod, chown, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 
@@ -55,7 +68,13 @@ import path from "node:path";
 // SAND_-prefixed names, which is why this writes the file directly instead of going through it.
 let BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const SECRETS_PATH = "/home/box/sand-data/box-secrets.json";
-const ENDPOINTS_FILE = path.join(path.dirname(new URL(import.meta.url).pathname), "endpoints.json");
+// This directory, which is where the relay's writable files went before there was more than one
+// relay on a machine. SAND_UI_STATE_DIR moves them; see ui/state-dir.mjs and STATE_DIR below.
+const HERE = path.dirname(new URL(import.meta.url).pathname);
+// The saved endpoint list. SAND_UI_ENDPOINTS_FILE wins, then the state directory, then here. It
+// had no variable of its own until now, which is why a tenant would have written this one into the
+// release directory every other tenant reads.
+const ENDPOINTS_FILE = process.env.SAND_UI_ENDPOINTS_FILE?.trim() || stateFile("endpoints.json", HERE);
 const PROVIDER_KEYS = ["SAND_OPENAI_COMPATIBLE_BASE_URL", "SAND_OPENAI_COMPATIBLE_MODEL",
   "SAND_OPENAI_COMPATIBLE_API_KEY"];
 
@@ -157,7 +176,22 @@ function tokenFromProfile() {
 }
 const TOKEN = process.env.SAND_HOST_GATEWAY_TOKEN?.trim() || tokenFromProfile();
 const PORT = Number.parseInt(process.env.SAND_UI_PORT ?? "7777", 10);
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+
+// ---- where this relay's own files live --------------------------------------------------------
+// Empty on Jason's instance and on every developer Mac, which is the whole compatibility story:
+// unset, every path below is the one it has always been. Set, the relay's writable files come out
+// of a directory that belongs to this instance rather than out of the release directory every
+// tenant on the server shares. ui/state-dir.mjs carries the rule and the ordering.
+//
+// Made once at boot rather than on the first write, because the first write is a person clicking
+// Save in the console and a missing directory there is an unexplained 500 rather than a log line.
+// A failure here is not fatal: the mount may already exist and be owned by somebody else, in which
+// case mkdir fails and every write still works.
+const STATE_DIR = stateDir();
+if (STATE_DIR.length > 0) {
+  try { mkdirSync(STATE_DIR, { recursive: true }); }
+  catch (error) { console.log(`state could not make ${STATE_DIR}: ${error?.message ?? error}`); }
+}
 
 const upstreamHeaders = (extra = {}) => ({ ...(TOKEN.length > 0 ? { authorization: `Bearer ${TOKEN}` } : {}), ...extra });
 
@@ -176,10 +210,20 @@ function fail(res, status, message, headers = {}) {
 // the leg could only ever have measured the missing lock. Setting this is no weaker than the
 // env that already carries the gateway token; the non-loopback refusal below still applies to
 // whatever file it resolves to.
-const AUTH_FILE = process.env.SAND_UI_AUTH_FILE ?? path.join(HERE, "auth.json");
+// Empty counts as unset, the same way SAND_UI_ENDPOINTS_FILE does. An empty value is what a compose
+// file produces when a variable is declared and never given one, and reading that as "the auth file
+// is the empty path" means a relay that comes up with no password at all.
+const AUTH_FILE = process.env.SAND_UI_AUTH_FILE?.trim() || stateFile("auth.json", HERE);
 const AUTH = readAuthFile(AUTH_FILE);
 const SESSION_COOKIE = "gb_session";
 const throttle = createLoginThrottle();
+
+// ---- the account door (TENANT-2) --------------------------------------------------------------
+// null on Jason's instance and on every developer Mac, and then this file behaves exactly as it did
+// before: one password, one field, no control plane anywhere in the request path. Non-null only
+// when TENANT_ID, CP_URL and CP_SESSION_SECRET are all set, which is what the control plane renders
+// into a tenant's compose. ui/tenant-login.mjs carries the rules and the reasons.
+const TENANT = tenantConfig();
 
 // Which peers may tell this process who its caller is. Empty by default, which is the loopback and
 // tailnet shape: no header is read and the socket address is the client. Inside Coolify the socket
@@ -260,10 +304,17 @@ function denyUnauthenticated(req, res, url) {
 const escapeHtml = (value) => String(value)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-// One field, one button, the error inline, and every byte of it in this response. Serving no
+// One form, one button, the error inline, and every byte of it in this response. Serving no
 // separate asset is not just tidiness: an asset path exempted from the session check would be a
 // hole in the thing this page exists to close.
-function loginPage({ error = "", next = "/" } = {}) {
+//
+// On a tenant instance the form grows an email field above the password, and that is the only
+// difference: still one form and still one button. Filling the email in means "this is my Titanium
+// Bot account"; leaving it empty means "this is the instance password", which is the door the
+// operator has always used and the one that still works when the control plane does not answer.
+// Two separate forms would have made the customer choose between two words for the same thing
+// before they had any way of knowing which one they hold.
+function loginPage({ error = "", next = "/", tenant = false } = {}) {
   return `<!doctype html>
 <html lang="en" data-theme="dusk">
 <head>
@@ -294,16 +345,21 @@ function loginPage({ error = "", next = "/" } = {}) {
   button:hover { background: #9a7cf0; }
   .error { margin-top: 14px; padding: 9px 11px; border-radius: 10px; font-size: 13px;
     background: rgba(255,111,114,0.14); border: 1px solid rgba(255,111,114,0.38); color: #ffb3b4; }
+  p.also { margin: 8px 0 0; font-size: 12px; color: rgba(233,239,239,0.46); }
+  label.second { margin-top: 14px; }
 </style>
 </head>
 <body>
 <form method="post" action="/login">
   <div class="lights" aria-hidden="true"><span></span><span></span><span></span></div>
   <h1>Machine Room</h1>
-  <p class="sub">This console drives the box. Sign in to reach it.</p>
+  <p class="sub">${tenant ? "Sign in with your Titanium Bot account" : "This console drives the box. Sign in to reach it."}</p>
   <input type="hidden" name="next" value="${escapeHtml(next)}" />
-  <label for="password">Password</label>
-  <input id="password" name="password" type="password" autocomplete="current-password" autofocus required />
+  ${tenant ? `<label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" autofocus />
+  <label class="second" for="password">Password</label>` : `<label for="password">Password</label>`}
+  <input id="password" name="password" type="password" autocomplete="current-password"${tenant ? "" : " autofocus"} required />
+  ${tenant ? `<p class="also">or the instance password</p>` : ""}
   <button type="submit">Sign in</button>
   ${error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : ""}
 </form>
@@ -312,9 +368,14 @@ function loginPage({ error = "", next = "/" } = {}) {
 `;
 }
 
+// Every render of the page goes through here, so which form this instance draws is decided in one
+// place. A page that offered the email field on one route and not on another would be a bug nobody
+// notices until a customer meets the wrong one after a mistyped password.
+const renderLoginPage = (options = {}) => loginPage({ tenant: TENANT != null, ...options });
+
 function sendLoginPage(res, status, options) {
   res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-  return res.end(loginPage(options));
+  return res.end(renderLoginPage(options));
 }
 
 // A password and a next path. Anything larger than this is not a login, and /login is the one
@@ -373,7 +434,7 @@ async function handleLogin(req, res, url) {
     const headers = { "retry-after": String(seconds) };
     if (!wantsHtml) return endAndClose(req, res, 429, { ...headers, "content-type": "application/json" }, JSON.stringify({ error: `too many attempts; wait ${seconds}s` }));
     return endAndClose(req, res, 429, { ...headers, "content-type": "text/html; charset=utf-8" },
-      loginPage({ error: `Too many attempts. Wait ${seconds} seconds and try again.`, next: stalled }));
+      renderLoginPage({ error: `Too many attempts. Wait ${seconds} seconds and try again.`, next: stalled }));
   }
 
   let body;
@@ -385,13 +446,20 @@ async function handleLogin(req, res, url) {
     throttle.recordFailure(key);
     if (!wantsHtml) return drainThenEnd(req, res, 413, { "content-type": "application/json" }, JSON.stringify({ error: "that is not a password" }));
     return drainThenEnd(req, res, 413, { "content-type": "text/html; charset=utf-8" },
-      loginPage({ error: "That request was too large to be a password." }));
+      renderLoginPage({ error: "That request was too large to be a password." }));
   }
   const isJson = String(req.headers["content-type"] ?? "").includes("application/json");
   let fields = {};
   if (isJson) { try { fields = JSON.parse(body || "{}") ?? {}; } catch { fields = {}; } }
   else { fields = Object.fromEntries(new URLSearchParams(body)); }
   const next = safeNextPath(fields.next ?? url.searchParams.get("next") ?? "/");
+
+  // An address in the email field means this is an account sign-in, so the control plane decides
+  // and the instance password is not consulted at all. Empty means the door that was always here.
+  const email = String(fields.email ?? "").trim();
+  if (TENANT != null && email.length > 0) {
+    return await handleAccountLogin(req, res, { email, password: String(fields.password ?? ""), next, key, wantsHtml });
+  }
 
   if (!verifyPassword(String(fields.password ?? ""), AUTH.password)) {
     throttle.recordFailure(key);
@@ -411,6 +479,90 @@ async function handleLogin(req, res, url) {
     { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: secureOf(req) });
   res.writeHead(302, { location: next, "set-cookie": cookie, "cache-control": "no-store" });
   return res.end();
+}
+
+// ---- an account sign-in, once the control plane has answered -----------------------------------
+//
+// Mints the relay's own ordinary session cookie from a verified control plane token. The cookie is
+// the same one the instance password mints, signed with the same cookie secret, and the console
+// cannot tell the two apart: that is the point, and it is why nothing else in this file had to
+// learn about accounts.
+//
+// The lifetime is the token's remaining life, capped at the relay's own twelve hours. Whichever
+// expires first should end the session, and taking the smaller of the two is how both of those are
+// true at once without a second clock to keep.
+function mintAccountSession(req, res, payload, location) {
+  const now = Date.now();
+  const lifetimeMs = Math.min(Math.max(0, Number(payload.exp) - now), SESSION_LIFETIME_MS);
+  const cookie = serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret, { nowMs: now, lifetimeMs }),
+    { maxAgeSeconds: lifetimeMs / 1000, secure: secureOf(req) });
+  res.writeHead(302, { location, "set-cookie": cookie, "cache-control": "no-store" });
+  return res.end();
+}
+
+// The account door. Every answer here is a plain sentence a business owner can act on, because the
+// person meeting them owns a company and not this software.
+async function handleAccountLogin(req, res, { email, password, next, key, wantsHtml }) {
+  const verdict = await accountSignIn({ config: TENANT, email, password });
+  const say = (status, page, json) => {
+    if (!wantsHtml) return fail(res, status, json);
+    return sendLoginPage(res, status, { error: page, next });
+  };
+
+  if (verdict.kind === "session") {
+    throttle.recordSuccess(key);
+    console.log(`login by account on ${TENANT.tenant} from ${key}`);
+    return mintAccountSession(req, res, verdict.payload, next);
+  }
+
+  // A working sign-in for somebody else's instance. Send them to their own front door with the
+  // token the control plane just minted for them; that relay verifies it with its own key.
+  if (verdict.kind === "elsewhere") {
+    throttle.recordSuccess(key);
+    console.log(`login for another instance (${verdict.host}) from ${key}, redirected`);
+    if (!wantsHtml) {
+      res.writeHead(302, { location: verdict.location, "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ signInAt: verdict.location }));
+    }
+    res.writeHead(302, { location: verdict.location, "cache-control": "no-store" });
+    return res.end();
+  }
+
+  if (verdict.kind === "refused") {
+    throttle.recordFailure(key);
+    // The address of the caller, never the address that was typed and never the password.
+    const edge = edgeOf(req);
+    console.log(`account login refused from ${key}${edge === key ? "" : ` (via ${edge})`}`);
+    return say(401, "That email or password is not right.", "that email or password is not right");
+  }
+
+  if (verdict.kind === "busy") {
+    return say(429, "Too many sign-in attempts. Wait a moment and try again.", "too many attempts");
+  }
+
+  // Something the control plane wanted said in its own words, which is where "your account is set
+  // up but its instance is not registered yet" comes from.
+  if (verdict.kind === "message") return say(409, verdict.text, verdict.text);
+
+  // No answer at all. Not a failed attempt, so it does not count toward the lockout: locking the
+  // operator out because a different service is down would take away the very door this sentence
+  // is pointing at.
+  console.log(`account login could not reach ${TENANT.cpUrl} (${verdict.detail ?? "no answer"})`);
+  return say(503, "Titanium Bot sign-in is not answering right now. The instance password still works.",
+    "titanium bot sign-in is not answering right now; the instance password still works");
+}
+
+// A sign-in link from another instance's login page: /login?sso=<token>. The token is verified with
+// this relay's own key, and its tenant claim is checked against this relay's own name, before
+// anything is minted. Nothing about the link is trusted, including that it came from us.
+function handleSso(req, res, token) {
+  const verdict = ssoVerdict({ config: TENANT, token });
+  if (verdict.kind === "session") {
+    console.log(`login by sign-in link on ${TENANT.tenant} from ${clientOf(req)}`);
+    return mintAccountSession(req, res, verdict.payload, "/");
+  }
+  console.log(`sign-in link refused from ${clientOf(req)} (${verdict.detail ?? "not valid"})`);
+  return sendLoginPage(res, 401, { error: "That sign-in link is not valid here." });
 }
 
 function handleLogout(req, res) {
@@ -909,7 +1061,13 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET" && url.pathname === "/login") { res.writeHead(302, { location: "/" }); return res.end(); }
     } else {
       if (url.pathname === "/login") {
-        if (req.method === "GET") return sendLoginPage(res, 200, { next: safeNextPath(url.searchParams.get("next")) });
+        if (req.method === "GET") {
+          // A sign-in link minted for this tenant, handed over by whichever relay the customer
+          // happened to type their address into. Verified here, never taken on trust. TENANT-2.
+          const sso = url.searchParams.get("sso");
+          if (TENANT != null && sso != null) return handleSso(req, res, sso);
+          return sendLoginPage(res, 200, { next: safeNextPath(url.searchParams.get("next")) });
+        }
         if (req.method === "POST") return await handleLogin(req, res, url);
         return fail(res, 405, "GET or POST");
       }
@@ -1339,6 +1497,14 @@ server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${GATEWAY}${TOKEN.length > 0 ? " (bearer)" : " (no auth)"}`);
   console.log(`auth ${AUTH == null ? "none (loopback, no ui/auth.json)" : "password login, 12 h sessions"}`);
+  // Which files this instance owns, said out loud. On a shared server the answer decides whether
+  // two tenants are writing over each other, and it is not visible from anywhere else.
+  console.log(`state ${STATE_DIR.length > 0 ? STATE_DIR : `${HERE} (beside the code, SAND_UI_STATE_DIR is unset)`}`);
+  // Two doors or one. Worth a line because the difference is a field on the login page, and an
+  // operator looking at a page with no email field needs somewhere to read why.
+  console.log(`tnnt ${TENANT == null
+    ? "not a tenant, the instance password is the only sign-in (TENANT_ID, CP_URL, CP_SESSION_SECRET)"
+    : `${TENANT.tenant}, accounts sign in through ${TENANT.cpUrl}`}`);
   console.log(`prox ${TRUSTED_PROXIES.any ? "any peer may forward a client address" : (TRUSTED_PROXIES.ranges.length === 0
     ? "none, so the socket address is the client and no forwarded header is read"
     : `${TRUSTED_PROXIES.ranges.length} trusted range(s) from SAND_UI_TRUSTED_PROXIES`)}`);
