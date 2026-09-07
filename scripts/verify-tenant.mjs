@@ -566,6 +566,28 @@ if (RUN_LOGIN) {
       if (res.status === 429) locked += 1;
     }
     check(locked > 0, "a run of wrong emails hits the same rate limit a run of wrong passwords does");
+
+    step("a sign-in for another instance is not a reset button");
+    // The hole this closes: the redirect branch used to clear the failure counter for the address,
+    // so anyone holding an account on any other instance could guess this relay's password four at
+    // a time forever. Measured live against a console before the fix: eight consecutive wrong
+    // passwords, zero lockouts.
+    //
+    // The instance password first, to zero the counter, so this leg measures itself and not what
+    // the legs above left behind.
+    await postForm(tenantRelay.base, "/login", { password: RELAY_PASSWORD });
+    let refused = 0;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const res = await postForm(tenantRelay.base, "/login", { password: `reset-probe-${attempt}` });
+      if (res.status === 401) refused += 1;
+    }
+    check(refused === 4, "four wrong instance passwords are refused one short of the lockout", `${refused} of 4 answered 401`);
+    const away = await postForm(tenantRelay.base, "/login", { email: OTHER_EMAIL, password: OTHER_PASSWORD });
+    check(away.status === 302, "a real account on another instance is still redirected", `status ${away.status}`);
+    const fifth = await postForm(tenantRelay.base, "/login", { password: "reset-probe-4" });
+    check(fifth.status === 401, "the fifth wrong password is still the fifth", `status ${fifth.status}`);
+    const sixth = await postForm(tenantRelay.base, "/login", { password: "reset-probe-5" });
+    check(sixth.status === 429, "and the sixth is locked out: the redirect cleared nothing", `status ${sixth.status}`);
   }
 }
 

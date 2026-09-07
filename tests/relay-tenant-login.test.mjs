@@ -441,3 +441,65 @@ test("a wrong account password counts toward the lockout the way a wrong instanc
     assert.equal(alsoLocked.status, 429);
   } finally { relay.stop(); await cp.stop(); }
 });
+
+test("a sign-in that belongs to another instance does not reset this relay's lockout", async () => {
+  // The hole this measures: the `elsewhere` branch used to call recordSuccess, which deletes the
+  // failure count for the address. Anyone holding an account on ANY other instance could therefore
+  // guess this relay's instance password four at a time, sign in with their own account to wipe the
+  // counter, and go again. Eight consecutive wrong passwords with no lockout was measured against a
+  // live console before the fix.
+  const cp = await startFakeControlPlane({
+    accounts: {
+      "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY, host: "demo.titanium.bot" },
+      "someone@acme.example": { password: "the acme account password", tenant: OTHER, secret: OTHER_KEY, host: "acme.titanium.bot" },
+    },
+  });
+  const relay = await startRelay({ TENANT_ID: TENANT, CP_URL: cp.url, CP_SESSION_SECRET: KEY });
+  try {
+    // Four wrong instance passwords: one short of the five that lock the address.
+    for (let i = 0; i < 4; i += 1) {
+      const attempt = await fetch(`${relay.base}/login`, form({ email: "", password: `guess ${i}` }));
+      assert.equal(attempt.status, 401, `attempt ${i} answered ${attempt.status}`);
+    }
+
+    // A real sign-in, for a real account, on somebody else's instance. It is a redirect and it is
+    // correct; what it must not be is a reset.
+    const away = await fetch(`${relay.base}/login`, form({ email: "someone@acme.example", password: "the acme account password" }));
+    assert.equal(away.status, 302);
+    assert.match(String(away.headers.get("location")), /^https:\/\/acme\.titanium\.bot\/login\?sso=/);
+    assert.equal(cookieOf(away), "");
+
+    // The fifth wrong password is still the fifth, so it trips the lockout, and the sixth is
+    // refused before the password is looked at.
+    const fifth = await fetch(`${relay.base}/login`, form({ email: "", password: "guess 4" }));
+    assert.equal(fifth.status, 401);
+    const sixth = await fetch(`${relay.base}/login`, form({ email: "", password: "guess 5" }));
+    assert.equal(sixth.status, 429, "an other-tenant sign-in cleared the lockout");
+    assert.ok(Number(sixth.headers.get("retry-after")) > 0);
+
+    // And the redirect itself is still refused while the address is locked, so the reset button
+    // cannot be pressed from the far side of the lockout either.
+    const lockedAway = await fetch(`${relay.base}/login`, form({ email: "someone@acme.example", password: "the acme account password" }));
+    assert.equal(lockedAway.status, 429);
+  } finally { relay.stop(); await cp.stop(); }
+});
+
+test("a sign-in on THIS instance still clears the lockout, which is the door that proves you belong here", async () => {
+  const cp = await startFakeControlPlane({
+    accounts: { "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY, host: "demo.titanium.bot" } },
+  });
+  const relay = await startRelay({ TENANT_ID: TENANT, CP_URL: cp.url, CP_SESSION_SECRET: KEY });
+  try {
+    for (let i = 0; i < 4; i += 1) {
+      assert.equal((await fetch(`${relay.base}/login`, form({ email: "", password: `guess ${i}` }))).status, 401);
+    }
+    const inHere = await fetch(`${relay.base}/login`, form({ email: "demo@titanium.bot", password: "the demo account password" }));
+    assert.equal(inHere.status, 302);
+    assert.ok(cookieOf(inHere).length > 0);
+    // Four more wrong ones after it, all answered rather than locked: the counter really did reset.
+    for (let i = 0; i < 4; i += 1) {
+      assert.equal((await fetch(`${relay.base}/login`, form({ email: "", password: `again ${i}` }))).status, 401,
+        "a sign-in on this instance is a success here and resets the counter");
+    }
+  } finally { relay.stop(); await cp.stop(); }
+});

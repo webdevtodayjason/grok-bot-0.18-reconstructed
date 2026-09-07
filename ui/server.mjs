@@ -537,8 +537,14 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
 
   // A working sign-in for somebody else's instance. Send them to their own front door with the
   // token the control plane just minted for them; that relay verifies it with its own key.
+  //
+  // The lockout counter is left exactly as it was, neither charged nor cleared, and that is the
+  // whole point of this comment. Clearing it here handed every account holder on every other
+  // instance a reset button for THIS relay's door: four wrong instance passwords, one sign-in with
+  // their own account, four more wrong passwords, forever, and the five-try lockout never fires.
+  // A credential that belongs somewhere else says nothing about whether the person knocking here
+  // is who they say they are, so it must not move this counter in either direction.
   if (verdict.kind === "elsewhere") {
-    throttle.recordSuccess(key);
     console.log(`login for another instance (${verdict.host}) from ${key}, redirected`);
     if (!wantsHtml) {
       res.writeHead(302, { location: verdict.location, "content-type": "application/json", "cache-control": "no-store" });
