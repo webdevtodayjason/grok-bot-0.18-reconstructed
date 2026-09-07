@@ -346,9 +346,10 @@ the Coolify service.
 
 Coolify's own delete takes four query flags, `delete_configurations`, `delete_volumes`,
 `docker_cleanup` and `delete_connected_networks`, and **every one of them defaults to true**. This
-route sends them explicitly rather than letting the defaults stand, because a tenant's data
-directories are bind mounts and Coolify keeps a storage record for each one. Sending nothing and
-trusting a default is how "the api never deletes data" would quietly stop being true.
+route sends all four explicitly, with `delete_volumes=false`, rather than letting the defaults
+stand, because a tenant's data directories are bind mounts and Coolify keeps a storage record for
+each one. Sending nothing and trusting a default is how "the api never deletes data" would quietly
+stop being true.
 
 **It does not delete the customer's data, and no route in this api ever will.**
 `/data/titanbot/acme` stays exactly where it is: the workspace, the agents, the transcripts, the

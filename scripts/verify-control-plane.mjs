@@ -323,6 +323,20 @@ try {
 
   // ---- an account ---------------------------------------------------------------------------
   step("an account");
+  // The tenant has to exist before an account can name it. cp/server.mjs refuses an account whose
+  // instance is not there, because that account would sign in and land nowhere, so the gate does
+  // what the operator does first (docs/TENANCY.md sections 6 and 7): adopt console.titanium.bot as
+  // tenant `titanium`, then add the person who signs into it. Adopt is used rather than create
+  // because create would reach Coolify, and this leg is about the account.
+  const homeTenant = await call("POST", "/v1/tenants/titanium/adopt", {
+    admin: true,
+    body: { coolifyServiceUuid: ADOPT_UUID, host: ADOPT_HOST },
+  });
+  check(
+    homeTenant.status === 200 || homeTenant.status === 201,
+    "the account's tenant is adopted first",
+    `status ${homeTenant.status} ${homeTenant.text.slice(0, 120)}`,
+  );
   const created = await call("POST", "/v1/accounts", {
     admin: true,
     body: { email: ACCOUNT_EMAIL, password: ACCOUNT_PASSWORD, name: ACCOUNT_NAME, tenant: "titanium" },
@@ -494,10 +508,21 @@ try {
   const listTenants = await call("GET", "/v1/tenants", { admin: true });
   const tenantRows = Array.isArray(listTenants.json) ? listTenants.json : listTenants.json?.tenants ?? [];
   const refusedNames = new Set([...reserved, ...malformed]);
+  // `titanium` is on the reserved list and is also the name this gate adopted, which is the
+  // documented exception: reserved means no CUSTOMER may claim the name through POST /v1/tenants,
+  // not that the operator may not adopt an instance that already carries it. So the check is that
+  // no refused name reached the ledger by any route other than the adopt this run made itself.
+  const adoptedHere = new Set(["titanium", ADOPT_SLUG]);
   check(
-    Array.isArray(tenantRows) && !tenantRows.some((t) => refusedNames.has(String(t?.slug))),
+    Array.isArray(tenantRows) && !tenantRows.some((t) => refusedNames.has(String(t?.slug)) && !adoptedHere.has(String(t?.slug))),
     "none of them is in the ledger",
     Array.isArray(tenantRows) ? tenantRows.map((t) => t?.slug).join(", ") : String(listTenants.status),
+  );
+  const titaniumRow = tenantRows.find((t) => String(t?.slug) === "titanium");
+  check(
+    titaniumRow?.status === "adopted",
+    "the one reserved name in the ledger is there because it was adopted",
+    String(titaniumRow?.status),
   );
 
   // ---- the counts moved ---------------------------------------------------------------------------

@@ -86,7 +86,7 @@ Operator only, `Authorization: Bearer $CP_ADMIN_TOKEN`:
 
 | route | answer |
 | --- | --- |
-| `POST /v1/accounts` | 201, or 409 if the email is already there |
+| `POST /v1/accounts` | 201, 409 if the email is already there, 400 if the tenant it names does not exist yet |
 | `GET /v1/accounts` | the list, without a hash and without a salt |
 | `POST /v1/accounts/{id}/password` | 204. An operator reset |
 | `POST /v1/tenants` | 201 and provisioning starts. `{"dryRun": true}` returns the plan and does nothing |
