@@ -3,7 +3,7 @@
 // Managed skills are fetched from Cursor's dashboard into the sand root's managed-skills cache.
 // With no login that fetch always throws, so the cache stayed empty and stop-with-save failed
 // with "learning workflow is unavailable" -- teach by demonstration could not complete at all.
-// The two real skills are now baked into the bundle (scripts/gen-seed-skills.mjs) and every cache
+// The three real skills are now baked into the bundle (scripts/gen-seed-skills.mjs) and every cache
 // write is the union of seeds and fetched. These cases pin the union's direction and the three
 // ways a seed could have been erased: an empty-but-successful fetch, a throwing fetch, and the
 // materializer's habit of deleting any skills/<id> the written list does not name.
@@ -65,6 +65,23 @@ test("the bundle carries the three real managed skills, frontmatter and all", ()
   assert.match(learn.body, /Teach recording queue scope/,
     "the skill is the thing that asks for the injected queue scope; a body without it is the wrong file");
   assert.ok(!learn.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
+
+  // MAIL-1. The email skill is the send half of agent email: the relay delivers a mail as a prompt,
+  // and this is the only thing that tells the agent how to answer it. Its description is folded the
+  // same way, so it is pinned the same way.
+  const email = unionWithSeedSkills([]).find((skill) => skill.id === "email");
+  assert.equal(email.name, "email", "the name comes from the file's frontmatter");
+  assert.equal(email.description,
+    "Send and reply to email from this agent's own address with Resend. Use when someone asks you to email a person, "
+    + "when you have to answer an email that arrived in this conversation, or when a task ends with something a person "
+    + "needs in their inbox.");
+  assert.match(email.body, /^# Email/m);
+  assert.match(email.body, /In-Reply-To/,
+    "a reply that does not thread is the failure this skill exists to prevent");
+  assert.match(email.body, /\$RESEND_API_KEY/,
+    "the key is read from the shell environment; a body naming no variable is the wrong file");
+  assert.ok(!email.body.includes("re_"), "the skill must carry no key-shaped literal");
+  assert.ok(!email.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
 });
 
 test("a fetched skill wins over the seed of the same id, and both are kept", () => {
