@@ -581,7 +581,10 @@ export function createHostGatewayApi(
      * bigger number than the ceiling ever refuses. `bots` is the number the cap actually reads.
      */
     getAgentCapacity: async () => {
-      const bots = await (manager as any).sessionStore?.countCapAgents?.() ?? 0;
+      // Asked of the store outright rather than through `?.() ?? 0`: a store that cannot count
+      // its bots has to say so. The optional form answered 0 on a box holding eight of them, and
+      // "0 of 12" beside a full roster is worse than an error.
+      const bots: number = await (manager as any).sessionStore.countCapAgents();
       const maxAgents = resolveSandMaxAgents();
       return {
         bots,

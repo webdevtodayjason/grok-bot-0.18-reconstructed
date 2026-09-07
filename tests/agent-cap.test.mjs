@@ -41,6 +41,7 @@ const load = async (entry, name) => {
 const agents = await load("source/shared/agents/agents.ts", "agents");
 const boxSetting = await load("source/host/sand-box-setting.ts", "sand-box-setting");
 const materialization = await load("source/host/extensions/session/session-materialization.ts", "session-materialization");
+const session = await load("source/host/extensions/session/agent-session.ts", "agent-session");
 
 // A settings root of this suite's own, pinned per case: the module reads SAND_DATA_ROOT on every
 // call, and another suite in the same process would otherwise win.
@@ -74,6 +75,19 @@ const storeFor = (root) => new materialization.SandSessionMaterialization({
   agentExists: () => true,
   getAgentDir: (agentId) => path.join(root, agentId),
   readActiveAgentId: () => null,
+});
+
+test("the store the gateway holds can count this box's bots", async () => {
+  // The bug: getAgentCapacity asked `sessionStore?.countCapAgents?.() ?? 0`, and that method
+  // lived only on the materialization inside the store, not on the store itself. So the optional
+  // call answered undefined, the `?? 0` turned that into a number, and a box holding eight bots
+  // reported nought -- "0 of 12" on the Add button beside a full roster.
+  const root = rosterRoot(8, 1);
+  const store = new session.SandAgentSessionStore(root, () => undefined, {
+    createMaterialization: () => storeFor(root),
+  });
+  assert.equal(typeof store.countCapAgents, "function", "the gateway reaches the count through this");
+  assert.equal(await store.countCapAgents(), 8, "the room on this box is not one of the bots");
 });
 
 test("the ceiling is Titan plus twelve", () => {

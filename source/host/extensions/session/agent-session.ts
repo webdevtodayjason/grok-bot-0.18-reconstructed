@@ -41,6 +41,7 @@ export interface MaterializationPort {
   closeWorkerPool?(): Promise<void>;
   listAgentRecordIds?(): Promise<string[]>;
   countOwnedAgents?(): Promise<number>;
+  countCapAgents?(): Promise<number>;
   mintAgent?(mint: (agentId: string) => Promise<OpenAgentSession>): Promise<OpenAgentSession>;
   createSession?(profile: Partial<SandAgentProfile>, origin: "user" | "dev", purpose?: string): Promise<OpenAgentSession>;
   createFallbackSession?(open: (agentId: string) => Promise<OpenAgentSession>): Promise<OpenAgentSession>;
@@ -93,6 +94,14 @@ export class SandAgentSessionStore {
   async closeWorkerPool(): Promise<void> { await this.materialization?.closeWorkerPool?.(); }
   async listAgentRecordIds(): Promise<string[]> { return this.materialization?.listAgentRecordIds?.() ?? this.listAgentIds(); }
   async countOwnedAgents(): Promise<number> { return this.materialization?.countOwnedAgents?.() ?? (await this.listAgentIds()).length; }
+  /**
+   * AGENTS-CAP-1. Bots on this box, rooms excluded -- the population the ceiling actually refuses
+   * against, and the number the console's "n of 12" is counting. It has to be reachable from the
+   * gateway, not only from inside the materialization: without it the Add button counted zero on
+   * a full box. Falls back to the owned count when nothing is materialized, which over-counts
+   * rooms rather than under-counting bots, and an over-count can only ever refuse too early.
+   */
+  async countCapAgents(): Promise<number> { return this.materialization?.countCapAgents?.() ?? this.countOwnedAgents(); }
 
   getAgentDir(agentId: string): string { return join(this.rootDir, agentId); }
   agentExists(agentId: string): boolean { return existsSync(getAgentDbPath(this.rootDir, agentId)); }
