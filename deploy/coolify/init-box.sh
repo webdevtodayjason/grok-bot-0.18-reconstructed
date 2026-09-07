@@ -19,6 +19,10 @@
 # own resource id, so `titanbot-box` may not be what the container is called; com.titanbot.role=box
 # is set by the compose file and survives the renaming.
 #
+# On an instance with NO socket -- every tenant -- this script says so in one sentence and exits 0.
+# Its two steps have somewhere else to happen: the box's own entrypoint installs sqlite3, and the
+# start-window repair needs the socket and is applied only where there is one.
+#
 #   sh init-box.sh            wait for the box, then repair it
 #   TITANBOT_DRY_RUN=1 ...    resolve and report only, change nothing
 set -eu
@@ -26,12 +30,29 @@ set -eu
 FIX="${TITANBOT_FIX:-/init/apply-start-window-fix.sh}"
 DEADLINE="${TITANBOT_INIT_TIMEOUT:-180}"
 DRY_RUN="${TITANBOT_DRY_RUN:-0}"
+# Overridable so the test can measure the no-socket path on a machine that has one.
+SOCK="${TITANBOT_DOCKER_SOCK:-/var/run/docker.sock}"
 
 say() { printf '  %s\n' "$*"; }
 die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
 
+# No socket is not a failure, it is a customer's instance.
+#
+# A tenant's compose is rendered without /var/run/docker.sock on purpose (cp/provision.mjs), and
+# this script runs from the relay's start command on every instance, tenant or not. Dying here put
+# a FAILED line at the top of every tenant's log, directly above the correct sentence saying the
+# console has no docker, which reads as a broken deploy and is not one. So it says what is true in
+# one plain sentence and stops with a zero.
+#
+# What a tenant's box gets instead: sqlite3 is installed by the box's own entrypoint, which needs no
+# socket, and the start-window repair is applied only where a socket exists. docs/TENANCY.md section
+# 15 has the table.
+if [ ! -S "$SOCK" ]; then
+  say "this instance runs its box repairs from its own container, not from here"
+  exit 0
+fi
+
 command -v docker >/dev/null || die "no docker CLI in this image; the init service needs one"
-[ -S /var/run/docker.sock ] || die "/var/run/docker.sock is not mounted into the init service"
 [ -f "$FIX" ] || die "$FIX is missing; deploy/r750/sync.sh ships it to /home/sem/titanbot/deploy"
 
 BOX=""

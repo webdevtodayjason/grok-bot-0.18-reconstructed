@@ -795,6 +795,62 @@ window, raising it and starting Chrome or a terminal are all `docker exec`. A pa
 screen with buttons that do nothing is the failure this whole item exists to stop, so the console
 puts the sentence in the pane instead of the frame.
 
+### The two box repairs, and where they happen now
+
+Two repairs used to run from OUTSIDE the box, from the relay's start command, through the socket
+(`deploy/coolify/init-box.sh`). On a tenant there is no socket, so neither happened, and the script
+died with a `FAILED:` line at the top of every customer's log, one line above the correct sentence
+saying this console has no docker. That reads as a broken deploy and is not one.
+
+| repair | where it happens | on a tenant |
+| --- | --- | --- |
+| sqlite3, which `learn-from-demonstration` needs to read Chrome's history database | the box's own entrypoint, in the background, swallowing its own failures | yes, since 2026-09-07 |
+| `apply-start-window-fix.sh`, which edits `/usr/local/bin/start-window` inside the box | `init-box.sh` and `deploy/r750/install.sh`, both of which need the socket | no |
+| `init-box.sh` itself, on an instance with no socket | one plain sentence, exit 0 | says "this instance runs its box repairs from its own container, not from here" |
+
+The sqlite3 loss was measured: on the R750, 2026-09-07, `command -v sqlite3` answered on the
+operator's box and reported MISSING on the demo tenant's. It moved into the box's entrypoint
+because that runs inside the container and needs no socket at all. It is backgrounded and every
+failure is swallowed into one line on stderr, because a box whose job is to boot must not be held
+up, or stopped, by a package that is a nice-to-have.
+
+The start-window repair is still socket-only, and on the same day it measured as a no-op on both
+boxes: `/usr/local/bin/start-window` was md5 `d69219afc86a297d16bee3d97b120095` on the demo tenant's
+box and on the operator's. So a tenant is not missing anything today. What it is missing is a
+mechanism, and the honest place for that is the box image rather than a patch applied from outside
+it. Until that lands, a tenant whose box needs the window repair has no way to get it.
+
+### Where a tenant may point a provider endpoint
+
+`POST /endpoints` saves a base URL, and the health probe behind `GET /endpoints` then fetches
+`<baseUrl>/models` with the API key saved beside it and hands back the status, the latency and the
+model list. On the operator's own instance that is a feature: it is his machine and the box next
+door is a legitimate endpoint. On a tenant it is a request generator inside the R750's private
+network, aimed by whoever holds that customer's session, with an `Authorization` header they chose.
+
+Measured from a signed-in tenant session, 2026-09-07, before the guard: `http://192.168.32.3:7777`
+answered HTTP 401 (the relay itself), `http://titanbot-box:1340` HTTP 404 (the box gateway),
+`http://192.168.32.1:8000` refused (the host) and `http://titanbot-cp:7790/v1` timed out
+(off-network). Four answers that far apart are a working port scan.
+
+So on a tenant, and only on a tenant, a base URL has to be `https://` and has to resolve to a public
+address. Every address a name resolves to is checked, not the first. The refusals are the sentences
+the console shows on the endpoint row:
+
+| what was sent | the sentence |
+| --- | --- |
+| an address inside this machine's networks, by literal or by name | That address is inside this server's own network, so it cannot be used here. |
+| `http://` | Endpoints on this instance have to start with https:// |
+| a host name nothing answers for | That host name could not be looked up, so nothing can be saved for it. |
+| not a URL at all | That is not a web address. It should start with https:// and then the host name. |
+
+The blocked set is wider than RFC1918: `100.64/10` (carrier NAT, and every tailnet address),
+`169.254/16` (link local, where cloud metadata services sit), `0.0.0.0/8`, `198.18/15`, multicast
+and the v6 unique-local and link-local ranges. `ui/auth.mjs`'s `isPrivateAddress` is the list. The
+one thing this does not close is a name whose DNS answer changes between the check and the fetch;
+closing that means pinning the resolved address into the connection, which node's `fetch` has no
+supported way to do.
+
 Everything else on a tenant is unchanged. The console loads, the gateway answers, and the job bus,
 mail and subscriptions all work: none of those goes through the socket.
 

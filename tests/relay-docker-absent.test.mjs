@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -217,4 +217,49 @@ test("the refusals are gated on the probe, not hardcoded: with docker answering,
     });
     assert.notEqual(use.status, 409);
   } finally { relay.stop(); }
+});
+
+// ---- the box repairs, on an instance with no socket ---------------------------------------------
+
+test("init-box.sh says what is true and exits 0 when there is no socket", async () => {
+  // It runs from the relay's start command on EVERY instance, tenant or not. Dying on the missing
+  // socket put a FAILED line at the top of every tenant's log, one line above the correct sentence
+  // saying this console has no docker, which reads as a broken deploy and is not one.
+  const script = path.join(repoRoot, "deploy", "coolify", "init-box.sh");
+  const run = (env) => new Promise((resolve) => {
+    const child = spawn("sh", [script], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (c) => { out += c; });
+    child.stderr.on("data", (c) => { err += c; });
+    child.on("exit", (code) => resolve({ code, out, err }));
+  });
+
+  const absent = await run({ TITANBOT_DOCKER_SOCK: path.join(repoRoot, "no-socket-here") });
+  assert.equal(absent.code, 0, "a tenant's relay start must not report a failure it did not have");
+  assert.equal(absent.err.includes("FAILED"), false, absent.err);
+  assert.match(absent.out, /runs its box repairs from its own container/);
+  // One plain sentence, no jargon and no path for a business owner to chase.
+  assert.equal(absent.out.includes("docker.sock"), false, absent.out);
+
+  // With a socket present it still refuses loudly on a real misconfiguration, so the exit above is
+  // an honest absence and not a blanket "never fail".
+  const misconfigured = await run({ TITANBOT_FIX: path.join(repoRoot, "no-such-fix.sh") });
+  assert.equal(misconfigured.code, 1);
+  assert.match(misconfigured.err, /FAILED/);
+});
+
+test("the box installs sqlite3 itself, so a tenant's box is not missing it", () => {
+  // The repair that was actually lost. init-box.sh installed sqlite3 from OUTSIDE, through the
+  // docker socket, so a customer's box never got it: measured on the R750 2026-09-07, present on
+  // the operator's box and missing on the demo tenant's. learn-from-demonstration reads Chrome's
+  // history database with it. The box's own entrypoint needs no socket, so that is where it moved.
+  const compose = readFileSync(path.join(repoRoot, "deploy", "coolify", "docker-compose.yml"), "utf8");
+  const entry = compose.slice(compose.indexOf("entrypoint:"));
+  assert.match(entry, /command -v sqlite3/);
+  assert.match(entry, /apt-get install -y -qq sqlite3/);
+  // In the background and swallowing its own failures: a box whose job is to boot must not be held
+  // up, or stopped, by a package that is a nice-to-have.
+  assert.match(entry, /\} &\n\s*exec \/usr\/local\/bin\/start-sand-box/);
+  assert.match(entry, /sqlite3 could not be installed here/);
 });

@@ -184,6 +184,20 @@ services:
           exit 1
         fi
         cp /opt/titanbot-runtime/host-main.cjs /home/box/sand-host/host-main.cjs || exit 1
+        # sqlite3, which the image does not ship and learn-from-demonstration needs to read
+        # Chrome's history database. It used to be installed from OUTSIDE, by init-box.sh through
+        # the docker socket, which meant a customer's box never got it: a tenant's compose has no
+        # socket. Measured 2026-09-07 on the R750: sqlite3 present on the operator's box, missing
+        # on the demo tenant's.
+        #
+        # In the BACKGROUND and swallowing every failure, on purpose. This is a nice-to-have on a
+        # box whose job is to boot: a slow mirror, no egress, or an image whose user cannot apt-get
+        # must cost one line in the log and never a box that will not start.
+        {
+          command -v sqlite3 >/dev/null 2>&1 \
+            || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq sqlite3; } >/dev/null 2>&1 \
+            || echo "sqlite3 could not be installed here; the learn-from-demonstration URL step will not work" >&2
+        } &
         exec /usr/local/bin/start-sand-box
 
   # ---- the console -----------------------------------------------------------------------------

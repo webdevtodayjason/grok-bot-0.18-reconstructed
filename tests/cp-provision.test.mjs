@@ -130,6 +130,13 @@ test("the rendered compose points at this tenant's own directories and nobody el
     assert.match(rendered, /GROK_BOT_MAIL_FILE: \/state\/mail\.json/);
     assert.match(rendered, /GROK_BOT_MAIL_LEDGER_FILE: \/state\/mail-inbox\.jsonl/);
     assert.match(rendered, /SAND_UI_ENDPOINTS_FILE: \/state\/endpoints\.json/);
+
+    // The box's own repairs travel with it. A tenant has no docker socket, so anything done to the
+    // box from outside never happens there; sqlite3 is installed by the box's entrypoint instead,
+    // and the render must not drop it. Measured on the R750 2026-09-07: sqlite3 present on the
+    // operator's box, missing on the demo tenant's, because the outside path was the only one.
+    assert.match(rendered, /command -v sqlite3/);
+    assert.match(rendered, /apt-get install -y -qq sqlite3/);
   });
 });
 
