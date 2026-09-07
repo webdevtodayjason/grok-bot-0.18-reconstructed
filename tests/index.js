@@ -75,3 +75,4 @@ import "./vnc-paste-bridge.test.mjs";
 import "./skill-ownership.test.mjs";
 import "./awaiting-operator.test.mjs";
 import "./env-fanout.test.mjs";
+import "./titan-crew.test.mjs";

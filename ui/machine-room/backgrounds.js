@@ -14,6 +14,10 @@
 
   const doc = global.document;
   const CHOICE_KEY = "machineRoom.background";
+  // What a browser with nothing stored opens on. Jason's nebula is the product brand's plate
+  // (2026-09-06); "original" is still in the picker one click away, so this is a default, not a
+  // removal.
+  const DEFAULT_CHOICE = "titan-nebula";
   const CUSTOM_KEY = "machineRoom.backgrounds.custom";
   const MAX_EDGE = 1920;
   const BUDGET_BYTES = 4_000_000; // localStorage is ~5MB; leave the app its share.
@@ -101,14 +105,14 @@
 
   function removeCustom(id, onDone) {
     write(CUSTOM_KEY, customs().filter((b) => b.id !== id));
-    if (read(CHOICE_KEY, "original") === id) choose("original");
+    if (read(CHOICE_KEY, DEFAULT_CHOICE) === id) choose(DEFAULT_CHOICE);
     onDone();
   }
 
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   function sectionMarkup() {
-    const current = read(CHOICE_KEY, "original");
+    const current = read(CHOICE_KEY, DEFAULT_CHOICE);
     const swatches = all().map((b) => `
       <button class="bg-swatch" type="button" data-bg-id="${esc(b.id)}" aria-pressed="${b.id === current}" title="${esc(b.name)}">
         <img src="${esc(b.thumb)}" alt="" loading="lazy" />
@@ -157,8 +161,14 @@
     });
   }
 
+  // The two constants above are the whole of what tests/titan-crew.test.mjs reads, and it loads
+  // this file with no document at all -- so they are published before the first line that needs a
+  // page, and the DOM half returns rather than throwing on a stub.
+  global.__machineRoomBackgrounds = { DEFAULT_CHOICE, BUILT_IN };
+  if (!doc) return;
+
   // Restore before first paint so the chosen plate is never seen swapping in.
-  apply(read(CHOICE_KEY, "original"));
+  apply(read(CHOICE_KEY, DEFAULT_CHOICE));
 
   // This file is appended after boot, so DOMContentLoaded has already fired and waiting for it
   // would mean waiting forever. Bind now if the document is ready, otherwise wait once.
