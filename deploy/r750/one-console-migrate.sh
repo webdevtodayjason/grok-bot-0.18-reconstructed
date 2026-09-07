@@ -112,12 +112,24 @@ command -v docker >/dev/null 2>&1 || die "docker is not on this PATH, so this is
 say "docker $(docker --version | awk '{print $3}' | tr -d ,)"
 say "$ROOT is here"
 
-# The container names, by role label, because Coolify renames containers after its own resource id
-# and a name written into a script goes stale the first time a service is recreated.
-by_role() { docker ps --filter "label=com.titanbot.role=$1" --format '{{.Names}}' | head -n 1; }
-RELAY_CONTAINER="$(by_role relay || true)"
-CP_CONTAINER="$(by_role control-plane || true)"
-[ -n "$RELAY_CONTAINER" ] || warn "no container carries com.titanbot.role=relay; is the console running?"
+# The container names. By ROLE LABEL AND SERVICE UUID, never by label alone.
+#
+# This is the same bug TENANT-5 deletes from the relay, and it bit here first: every tenant's relay
+# carries com.titanbot.role=relay and every tenant's box carries com.titanbot.role=box, so
+# `docker ps --filter label=... | head -1` on a host with customers on it answers an ARBITRARY
+# customer's container. Measured on the R750 2026-09-07, with the demo tenant running: this script
+# read demo's relay, and step 2 therefore printed demo's network as TITANBOT_PROXY_NETWORK. Pasting
+# that would have pinned Traefik to a network Jason's relay is not on, which is console.titanium.bot
+# answering 502 on every request -- caused by the one step whose whole purpose is to prevent that.
+#
+# Coolify names a service's containers <compose service>-<service uuid>, so the uuid is what tells
+# one customer's container from another's and the label only says what kind of thing it is.
+by_role_in_service() {
+  docker ps --filter "label=com.titanbot.role=$1" --format '{{.Names}}' | grep -- "-${2}\$" | head -n 1
+}
+RELAY_CONTAINER="$(by_role_in_service relay "$RELAY_SERVICE" || true)"
+CP_CONTAINER="$(by_role_in_service control-plane "$CP_SERVICE" || true)"
+[ -n "$RELAY_CONTAINER" ] || warn "no relay container belongs to $RELAY_SERVICE; is the console running?"
 say "relay container  ${RELAY_CONTAINER:-(none running)}"
 say "control plane    ${CP_CONTAINER:-(none running)}"
 
@@ -163,6 +175,8 @@ if [ -n "$RELAY_CONTAINER" ]; then
   PROXY_NET="$(docker inspect "$RELAY_CONTAINER" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
     | tr ' ' '\n' | grep -v "^$NET$" | grep -v '^$' | head -n 1 || true)"
   BOX_CONTAINER="$(printf '%s\n' $BOXES | grep -- "-${RELAY_SERVICE}\$" | head -n 1 || true)"
+  # A pin that names a network this container is not on is worse than no pin at all, so the value
+  # this script prints is read off the relay of THIS service and nowhere else.
 else
   PROXY_NET=""
   BOX_CONTAINER=""
@@ -185,8 +199,12 @@ say "   from this release, whole. It is the same file with three additions: both
 say "   $NET, the relay carries traefik.docker.network, and the relay's tenancy variables are now"
 say "   CP_URL and CP_RELAY_TOKEN (TENANT_ID and CP_SESSION_SECRET are gone)."
 printf '\n'
-say "c. Redeploy in a QUIET WINDOW. Check it is quiet first:"
-say "     \$S/ship-r750.sh quiet     must show 0 mid-turn and 0 open"
+say "c. Redeploy in a QUIET WINDOW. Check it is quiet first, against THIS service's own box by name,"
+say "   because every customer's box carries the same role label:"
+say "     docker exec ${BOX_CONTAINER:-<this service box>} sh -c 'curl -s -m 10 -X POST \\"
+say "       http://127.0.0.1:1340/api/listAgents -H \"authorization: Bearer \$SAND_GATEWAY_TOKEN\" \\"
+say "       -H \"content-type: application/json\" -d {}'"
+say "   Nobody mid-turn and no open job is what a quiet window is."
 say "   Copy-in is on (SAND_BOX_STORE_COPY_IN=1), so the box recreate restores the agents' CLI"
 say "   logins and git config on the way back up. Give the box 90 seconds before any gate."
 printf '\n'
