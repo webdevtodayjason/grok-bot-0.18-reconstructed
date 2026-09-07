@@ -324,6 +324,21 @@ try {
     check(brand.eyebrow === "Machine Room" && /Machine Room/.test(brand.title), "with Machine Room kept as the eyebrow and the page title", `"${brand.eyebrow}" / "${brand.title}"`);
     check(brand.favicon === "assets/favicon.svg", "and the tab icon is the product mark rather than the empty data: URI", brand.favicon || "none");
     check(brand.background === "titan-nebula", "a browser with nothing stored opens on Titan Nebula", brand.background || "the handoff's own plate");
+    // prefers-reduced-motion: the crew becomes stills, no canvas runs. Measured by asking the
+    // browser for the preference and loading the roster again, then putting it back.
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".worker-card", { timeout: 30000 }).catch(() => {});
+    const reduced = await page.evaluate(() => ({
+      canvases: document.querySelectorAll(".worker-card titan-mascot, .worker-card canvas").length,
+      stills: document.querySelectorAll(".worker-card img[src*='characters/']").length,
+      cards: document.querySelectorAll(".worker-card").length,
+    }));
+    check(reduced.cards > 0 && reduced.canvases === 0, "under prefers-reduced-motion no roster face runs a canvas", `${reduced.canvases} canvases on ${reduced.cards} cards`);
+    check(reduced.stills >= reduced.cards, "and every card shows its character as a still", `${reduced.stills} stills for ${reduced.cards} cards`);
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".worker-card", { timeout: 30000 }).catch(() => {});
     await openMarketplace();
     const ids = await page.$$eval("[data-plugin-id]", (els) => els.map((e) => e.dataset.pluginId));
     let hint = "";

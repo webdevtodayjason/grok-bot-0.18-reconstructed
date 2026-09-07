@@ -191,7 +191,10 @@
           const mascot = entry.target.querySelector("titan-mascot");
           if (!mascot || typeof mascot.pause !== "function") continue;
           if (!entry.isIntersecting) { mascot.pause(); parked.add(mascot); continue; }
-          if (parked.has(mascot) && !reducedMotion.matches) { mascot.play(); parked.delete(mascot); }
+          // Not play(): the kit's play() marks the element manually played for good, which would keep
+          // it moving if the viewer turns reduced motion on later. Dropping the attribute pause() set
+          // hands the decision back to the preference.
+          if (parked.has(mascot) && !reducedMotion.matches) { mascot.removeAttribute("paused"); parked.delete(mascot); }
         }
       }, { rootMargin: "40px" })
     : null;
