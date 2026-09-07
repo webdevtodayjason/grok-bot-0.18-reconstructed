@@ -20,35 +20,49 @@
 # the relay reaches the box, the control plane waits for a box, and neither is ever called by one.
 # So the rule is that shape: from a box, on this bridge, the relay's port 7777 and nothing else.
 #
-#   iptables -N TITANBOT-ISO
-#   -i br-<net> -o br-<net> -s <each box> -d <relay> -p tcp --dport 7777 -j RETURN
-#   -i br-<net> -o br-<net> -s <each box>                              -j DROP
-#   DOCKER-USER jumps to it, first, so an earlier RETURN cannot let something past.
+# IT HAS TO BE THE BRIDGE FAMILY, and the first attempt got that wrong. Two containers on one
+# docker network are in one subnet on one bridge, so their packets are SWITCHED at layer 2 and
+# never routed. Netfilter's ip hooks (which is where iptables, DOCKER-USER and docker's own
+# icc rules all live) see bridged frames only when br_netfilter is loaded, and on this host it is
+# not: /proc/sys/net/bridge does not exist. Measured 2026-09-07, an iptables DROP in DOCKER-USER
+# matching exactly this traffic counted zero packets while the scan above still answered OPEN.
 #
-# Both -i and -o name the shared bridge, so nothing here touches a box's route to the internet, to
-# its own Coolify network, or to the host. Traffic between DIFFERENT docker bridges is already
-# dropped by docker's own DOCKER-ISOLATION-STAGE chains; this is the same-bridge case docker does
-# not cover. Replies from the relay are not matched, because the source of a reply is the relay.
+# nftables' BRIDGE family hooks the bridge's own forward path, so it sees the frames without
+# br_netfilter and without touching any other bridge on the machine:
+#
+#   table bridge titanbot_isolation {
+#     chain boxes {
+#       type filter hook forward priority -300; policy accept;
+#       meta ibrname "br-<net>" ip saddr @boxes ip daddr <relay> tcp dport 7777 accept
+#       meta ibrname "br-<net>" ip saddr @boxes drop
+#     }
+#   }
+#
+# The bridge forward hook is container-to-container on that bridge and nothing else, so a box's
+# route to the internet, to its own Coolify network and to the host are all untouched: those leave
+# the bridge rather than crossing it. Replies from the relay are not matched, because the source of
+# a reply is the relay. ARP is not matched either (an ARP frame has no ip saddr), so a box still
+# resolves names and simply times out on the addresses it may not have.
 #
 #   sudo bash box-isolation.sh            apply, and print what it applied
 #   sudo bash box-isolation.sh --verify   scan every box from every other box and fail on any port
-#   bash box-isolation.sh --show          print the rules that are installed, no root needed
+#   bash box-isolation.sh --show          print the rules that are installed
 #
-# It is idempotent: the chain is flushed and rebuilt every run, so a box that appeared since the
-# last run is covered and a box that has gone leaves no rule behind. That is why it runs on a
-# timer (deploy/r750/titanbot-isolation.timer): a box created by the control plane at 03:00 has to
-# be covered without anybody being awake, and the control plane has no route to the host's
-# firewall.
+# It is idempotent: the whole table is replaced in one nft transaction every run, so a box that
+# appeared since the last run is covered and a box that has gone leaves no rule behind. That is why
+# it runs on a timer (deploy/r750/titanbot-isolation.timer): a box created by the control plane at
+# 03:00 has to be covered without anybody being awake, and the control plane has no route to the
+# host's firewall.
 #
 # Env, all optional:
 #   TITANBOT_NET     the shared network, default titanbot-net
 #   TITANBOT_RELAY   the relay container, default the one carrying com.titanbot.role=relay
-#   TITANBOT_CHAIN   the iptables chain, default TITANBOT-ISO
+#   TITANBOT_TABLE   the nft table, default titanbot_isolation
 #   TITANBOT_RELAY_PORT  default 7777
 set -uo pipefail
 
 NET="${TITANBOT_NET:-titanbot-net}"
-CHAIN="${TITANBOT_CHAIN:-TITANBOT-ISO}"
+TABLE="${TITANBOT_TABLE:-titanbot_isolation}"
 RELAY_PORT="${TITANBOT_RELAY_PORT:-7777}"
 MODE=apply
 case "${1:-}" in
@@ -63,10 +77,11 @@ step() { printf '\n== %s\n' "$*"; }
 die() { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
 
 command -v docker >/dev/null || die "docker is not on PATH"
+command -v nft >/dev/null || die "nft is not on PATH; this needs nftables (the bridge family is what sees bridged frames)"
 
 # sudo -n when this is not already root, so the timer's unit and a hand run read the same.
-IPT=(iptables)
-if [ "$(id -u)" != 0 ]; then IPT=(sudo -n iptables); fi
+NFT=(nft)
+if [ "$(id -u)" != 0 ]; then NFT=(sudo -n nft); fi
 
 # The bridge docker made for this network. Its name is br-<first 12 of the network id> unless the
 # operator named it, in which case docker records the name in the network's options.
@@ -106,7 +121,7 @@ fi
 
 if [ "$MODE" = show ]; then
   step "installed rules"
-  "${IPT[@]}" -S "$CHAIN" 2>/dev/null || say "the chain $CHAIN is not installed"
+  "${NFT[@]}" list table bridge "$TABLE" 2>/dev/null || say "the table bridge $TABLE is not installed"
   exit 0
 fi
 
@@ -115,10 +130,10 @@ if [ "$MODE" = verify ]; then
   # TCP connection to another box on any of these ports is the finding, not a warning: 6080 is the
   # shared VNC seat and it offers security type None.
   step "cross-box scan"
-  [ "${#BOX_LIST[@]}" -ge 2 ] || { say "only ${#BOX_LIST[@]} box on this network, so there is no pair to scan"; exit 0; }
+  [ "${#BOX_LIST[@]}" -ge 2 ] || { say "only ${#BOX_LIST[@]} box on this network, so there is no pair to scan"; printf '\nPASS  nothing to scan\n'; exit 0; }
   bad=0
   for from in "${BOX_LIST[@]}"; do
-    from_name="${from%% *}"; from_addr="${from##* }"
+    from_name="${from%% *}"
     for to in "${BOX_LIST[@]}"; do
       to_name="${to%% *}"; to_addr="${to##* }"
       [ "$from_name" = "$to_name" ] && continue
@@ -138,7 +153,7 @@ if [ "$MODE" = verify ]; then
   if [ -n "$RELAY_ADDR" ]; then
     for from in "${BOX_LIST[@]}"; do
       from_name="${from%% *}"
-      if docker exec "$from_name" bash -c "timeout 2 bash -c 'exec 3<>/dev/tcp/$RELAY_ADDR/$RELAY_PORT'" 2>/dev/null; then
+      if docker exec "$from_name" bash -c "timeout 3 bash -c 'exec 3<>/dev/tcp/$RELAY_ADDR/$RELAY_PORT'" 2>/dev/null; then
         say "ok     $from_name reaches the relay on $RELAY_PORT, which is where its host bundle comes from"
       else
         say "BROKEN $from_name cannot reach the relay on $RELAY_PORT; its host bundle will never update"
@@ -153,27 +168,38 @@ fi
 
 # ---- apply -------------------------------------------------------------------------------------
 step "rules"
-"${IPT[@]}" -n -L "$CHAIN" >/dev/null 2>&1 || "${IPT[@]}" -N "$CHAIN" || die "could not create the chain $CHAIN (root?)"
-"${IPT[@]}" -F "$CHAIN" || die "could not flush $CHAIN"
-
-if [ -n "$RELAY_ADDR" ]; then
-  for addr in "${BOX_ADDRS[@]}"; do
-    "${IPT[@]}" -A "$CHAIN" -i "$BR" -o "$BR" -s "$addr" -d "$RELAY_ADDR" -p tcp --dport "$RELAY_PORT" \
-      -m comment --comment "titanbot: a box fetches its host bundle" -j RETURN \
-      || die "could not add the relay exception for $addr"
-  done
-else
-  say "WARNING: no relay on this network, so no box will be able to fetch a host bundle"
+if [ "${#BOX_ADDRS[@]}" -eq 0 ]; then
+  say "no box on this network, so there is nothing to isolate"
 fi
-for addr in "${BOX_ADDRS[@]}"; do
-  "${IPT[@]}" -A "$CHAIN" -i "$BR" -o "$BR" -s "$addr" \
-    -m comment --comment "titanbot: one customer's box reaches nothing else on this bridge" -j DROP \
-    || die "could not add the drop for $addr"
-done
+SET="$(IFS=, ; printf '%s' "${BOX_ADDRS[*]:-}")"
+{
+  # The add-then-delete pair makes this work whether or not the table is already there, and nft
+  # applies the whole file as one transaction, so there is no moment with half a policy in place.
+  printf 'table bridge %s { }\n' "$TABLE"
+  printf 'delete table bridge %s\n' "$TABLE"
+  printf 'table bridge %s {\n' "$TABLE"
+  printf '  chain boxes {\n'
+  printf '    type filter hook forward priority -300; policy accept;\n'
+  if [ -n "$SET" ]; then
+    if [ -n "$RELAY_ADDR" ]; then
+      printf '    meta ibrname "%s" ip saddr { %s } ip daddr %s tcp dport %s accept comment "a box fetches its host bundle"\n' \
+        "$BR" "$SET" "$RELAY_ADDR" "$RELAY_PORT"
+    fi
+    printf '    meta ibrname "%s" ip saddr { %s } drop comment "one customer box reaches nothing else on this bridge"\n' \
+      "$BR" "$SET"
+  fi
+  printf '  }\n}\n'
+} | "${NFT[@]}" -f - || die "nft would not load the rules (root? nftables bridge support?)"
 
-# First in DOCKER-USER, so a RETURN somebody added earlier cannot carry box-to-box traffic past it.
-"${IPT[@]}" -C DOCKER-USER -j "$CHAIN" >/dev/null 2>&1 || "${IPT[@]}" -I DOCKER-USER 1 -j "$CHAIN" \
-  || die "could not hook $CHAIN into DOCKER-USER"
+# The first version of this script wrote an iptables chain, which counted zero packets because
+# bridged frames never reach the ip hooks on this host. Taken out here so a machine that ran it
+# once is not left carrying a chain that does nothing.
+if [ "$(id -u)" = 0 ]; then IPT=(iptables); else IPT=(sudo -n iptables); fi
+if "${IPT[@]}" -n -L TITANBOT-ISO >/dev/null 2>&1; then
+  "${IPT[@]}" -D DOCKER-USER -j TITANBOT-ISO >/dev/null 2>&1
+  "${IPT[@]}" -F TITANBOT-ISO >/dev/null 2>&1 && "${IPT[@]}" -X TITANBOT-ISO >/dev/null 2>&1 \
+    && say "removed the old iptables chain, which never saw a bridged frame"
+fi
 
-"${IPT[@]}" -S "$CHAIN" | sed 's/^/  /'
+"${NFT[@]}" list table bridge "$TABLE" | sed 's/^/  /'
 say "${#BOX_ADDRS[@]} box(es) isolated on $BR"

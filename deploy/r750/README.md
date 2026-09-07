@@ -367,7 +367,11 @@ Machine Room at `/` is the console; `/operator` is the older page kept beside it
    and the frame is on the page's own origin under `/vnc/` (not on the viewer's `127.0.0.1`),
    carries the box's own noVNC, draws a framebuffer, and a websocket to
    `/vnc/<display>/websockify` reaches open state. Sixty seconds, then the probe is deleted
-7. the lockout: wrong passwords refused until the fifth failure from this address (the login step
+7. that no customer's box can reach another customer's box on the shared network, which is the
+   scan `deploy/r750/box-isolation.sh --verify` runs from every box against every other box, plus
+   the one path a box does need (the relay's bundle port). One box on the network is a pass with
+   nothing to scan
+8. the lockout: wrong passwords refused until the fifth failure from this address (the login step
    above already spent two of the five, and only a successful login clears them, which this gate
    cannot do), then rate limited with a `Retry-After`, a
    request that answered `413` a moment earlier refused unread with a `429` while it holds (which

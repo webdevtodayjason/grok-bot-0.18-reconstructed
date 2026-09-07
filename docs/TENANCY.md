@@ -941,22 +941,49 @@ opposite of the sentence this whole wave rests on. The control plane was reachab
 never called by a box: the box fetches its bundle from `titanbot-relay:7777` and that is the only
 thing it has to say on that network.
 
-**What closed it: `deploy/r750/box-isolation.sh`.** One chain, hooked first into `DOCKER-USER`,
-rebuilt from what is running:
+**What closed it: `deploy/r750/box-isolation.sh`.** A box has one thing to say on that network, its
+host bundle fetch from `titanbot-relay:7777`, so the rule is that shape: from a box, on this bridge,
+the relay's bundle port and nothing else.
 
-    -i br-<net> -o br-<net> -s <each box> -d <relay> -p tcp --dport 7777 -j RETURN
-    -i br-<net> -o br-<net> -s <each box>                              -j DROP
+**It has to be the bridge family, and the first attempt got that wrong.** Two containers on one
+docker network are in one subnet on one bridge, so their packets are *switched* at layer 2 and never
+routed. Netfilter's ip hooks -- where iptables, `DOCKER-USER` and docker's own `icc` rules all live
+-- see bridged frames only when `br_netfilter` is loaded, and on this host it is not:
+`/proc/sys/net/bridge` does not exist. Measured 2026-09-07, an iptables `DROP` in `DOCKER-USER`
+matching exactly this traffic counted **zero packets** while the scan above still answered OPEN.
+Loading `br_netfilter` would have put every other bridge on the machine through a `FORWARD` chain
+whose policy is `DROP`, which is a large blast radius for a two-line rule.
 
-Both `-i` and `-o` name the shared bridge, so nothing here touches a box's route to the internet, to
-its own Coolify network, or to the host. Traffic between *different* docker bridges is already
-dropped by docker's own `DOCKER-ISOLATION-STAGE` chains; the same-bridge case is the one docker does
-not cover, and it is the one TENANT-5 created. Replies from the relay are not matched, because the
-source of a reply is the relay.
+nftables' **bridge** family hooks the bridge's own forward path, so it sees the frames without
+`br_netfilter` and touches no other bridge:
 
-`titanbot-isolation.timer` reapplies it every minute and at boot, because docker rebuilds its chains
-on start and because a box the control plane builds at three in the morning has to be covered
-without anybody being awake. The control plane has no route to the host's firewall, which is why
-this is a timer and not a provisioning step.
+    table bridge titanbot_isolation {
+      chain boxes {
+        type filter hook forward priority -300; policy accept;
+        meta ibrname "br-<net>" ip saddr @boxes ip daddr <relay> tcp dport 7777 accept
+        meta ibrname "br-<net>" ip saddr @boxes drop
+      }
+    }
+
+The bridge forward hook is container-to-container on that bridge and nothing else, so a box's route
+to the internet, to its own Coolify network and to the host are all untouched: those leave the
+bridge rather than crossing it. Replies from the relay are not matched, because the source of a
+reply is the relay. ARP is not matched either (an ARP frame has no `ip saddr`), so a box still
+resolves names and simply times out on the addresses it may not have. Traffic between *different*
+docker bridges was already dropped by docker's own `DOCKER-ISOLATION-STAGE` chains, because that
+traffic is routed and does reach the ip hooks; the same-bridge case is the one docker does not
+cover, and it is the one TENANT-5 created.
+
+Measured after applying it, 2026-09-07: from demo's box, the operator's box answered on nothing
+(1340, 6080, 6081 all closed), the control plane closed, `coolify-proxy` closed, the relay's 7777
+still open, and `https://api.resend.com/` still `200` so egress is untouched. Symmetric from the
+operator's box.
+
+`titanbot-isolation.timer` reapplies it every minute and at boot, because a box the control plane
+builds at three in the morning has to be covered without anybody being awake. The control plane has
+no route to the host's firewall, which is why this is a timer and not a provisioning step. The whole
+table is replaced in one `nft` transaction each run, so there is never a moment with half a policy
+in place, a box that has appeared is covered and a box that has gone leaves no rule behind.
 
 The gate is `bash deploy/r750/box-isolation.sh --verify`, which runs the scan above from every box
 against every other box, and `scripts/verify-deploy.mjs` carries it as a leg so a green deploy means
@@ -987,7 +1014,9 @@ Coolify setting rather than a firewall.
 gateway address terminates on the host, so it goes through `INPUT` and **not** through `FORWARD`,
 which means `DOCKER-USER` (a FORWARD chain) does not see it and a rule written there does nothing.
 The rule belongs in `INPUT`: `-i br-<id> -d <that bridge's gateway> -j DROP`, one per bridge,
-including `titanbot-net`'s, re-applied when Coolify creates a network. Docker's embedded resolver
+including `titanbot-net`'s, re-applied when Coolify creates a network. Unlike 19.1 this one really
+is an ip-family rule: a packet to the bridge's own address is delivered locally rather than bridged
+across it, so it reaches `INPUT` whether or not `br_netfilter` is loaded. Docker's embedded resolver
 runs in the daemon's namespace, so DNS needs no exception, and container-to-container traffic on the
 same bridge is untouched.
 
