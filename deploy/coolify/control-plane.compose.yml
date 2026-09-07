@@ -1,76 +1,115 @@
-# The control plane as a Coolify resource. Paste this whole file into New Resource ->
-# Docker Compose Empty, fill in the environment fields below, set the domain on titanbot-cp to
-# https://api.titanium.bot:7790, deploy. docs/TENANCY.md is the operator's walk-through.
+# The control plane as a Coolify resource: one service, one bind mount, no port.
 #
-# It follows the same rules docker-compose.yml in this directory explains at length, for the same
-# measured reasons, so they are only summarised here:
+# This is the thing that knows who the customers are. It holds the account list, the scrypt
+# password hashes, the session secret every tenant relay trusts, and the Coolify api key that can
+# create and delete services on this server. Nothing else in this repo holds all four, so the whole
+# shape of this file is about keeping that set small and reachable from one place only.
 #
-#   no named volumes   Coolify renames every one to "{service-uuid}_{slug}" and creates it fresh and
-#                      empty. The two mounts below are host paths.
-#   no bind of a file  Coolify turns every bind that is not the docker socket or /tmp into a storage
-#                      record and assumes it is a directory. A single-file bind of the sqlite
-#                      database would put the customers' password hashes into Coolify's own
-#                      database. Only directories here.
-#   no ports           Coolify's Traefik reaches this container over the network it makes for the
-#                      stack. A ports: line would put the control plane on a server interface with
-#                      no proxy in front of it.
-#   no networks        Coolify makes one and attaches its proxy. A second network makes Traefik pick
-#                      an address non-deterministically.
-#   no traefik labels  Coolify writes the router, the certificate and the redirect from the Domains
-#                      field.
-#   plain ${VAR}       Coolify builds an environment field's NAME out of everything between the
-#                      braces, so ${VAR:?} produces a field literally named "VAR:?" that no UI can
-#                      set. The service refuses to start on a missing secret instead, and says which
-#                      one.
+# It is deployed ONCE, next to the tenants it creates, in the same Coolify project (Titanium
+# Computing) and environment (production) as console.titanium.bot. Paste it into New Resource ->
+# Docker Compose Empty, set the six environment fields, set Domains on titanbot-cp to
+# https://api.titanium.bot:7790, deploy. docs/TENANCY.md walks the whole first-run flow with the
+# adopt and the first account.
 #
-# Build the image on the server once, the same way the relay image is built:
+# The same two Coolify rewrites that shape docker-compose.yml in this directory shape this file,
+# and the reasoning there is not repeated here. In short:
+#
+#   no named volumes    Coolify renames every named volume to "{service-uuid}_{slug}" and creates
+#                       it fresh and empty, so the store would come back empty on a redeploy with
+#                       every account in it gone. The one mount below is a host PATH.
+#   no ports            Nothing is published on a server interface. Coolify's Traefik reaches this
+#                       container on the stack's own network from the Domains field, and the :7790
+#                       in that field is the CONTAINER port, not a published one.
+#   no networks         Coolify makes the network and attaches its proxy. A second network makes
+#                       Traefik pick an address non-deterministically.
+#   no traefik labels   Coolify writes the router, the certificate resolver and the redirect from
+#                       the Domains field.
+#   no container_name   Coolify overwrites it with "<service>-<resource uuid>". The role label
+#                       below is how anything finds this container.
+#
+# And one rewrite that matters here in particular: a bind mount becomes a Coolify storage record,
+# and the parser assumes a short-syntax bind is a DIRECTORY. /data/titanbot is a directory, so the
+# assumption is harmless (saving the record runs mkdir -p on a directory that already exists). Do
+# not add a bind to a single FILE here, ever: for a file that same code path reads the file into
+# Coolify's database, and the file this service owns is the one with the password hashes in it.
+#
+# The image is built ONCE on the server, by hand, from the repo tree that sync.sh puts there:
 #
 #   docker build -t titanbot-cp:local -f /home/sem/titanbot/cp/Dockerfile /home/sem/titanbot
 #
-# pull_policy: never is what keeps Coolify's pull step from failing on an image that exists only on
-# this host.
+# `pull_policy: never` is what keeps Coolify's pull step from going looking for that tag in a
+# registry it does not exist in.
 
 services:
   titanbot-cp:
     image: titanbot-cp:local
     pull_policy: never
     restart: unless-stopped
+    # Everything that has to find this container finds it by this label, for the same reason the
+    # box and the relay do: Coolify renames the container and the name in a script goes stale.
     labels:
       com.titanbot.role: control-plane
     environment:
+      # ---- the service itself ------------------------------------------------------------------
       CP_PORT: "7790"
-      CP_DATA_DIR: /data/cp
-      # The tenant directories, and the same path inside and out so nothing has to translate between
-      # what this service writes and what a tenant's compose mounts.
+      # The sqlite file lives here. It is UNDER the tenant root on purpose, so one bind mount and
+      # one backup cover both, and the name cannot ever collide with a tenant: a slug is 3 to 32
+      # characters of [a-z0-9-], so no slug can begin with an underscore.
+      CP_DATA_DIR: /data/titanbot/_control-plane
+      # The host directory that holds one directory per tenant, bind-mounted below. Each tenant
+      # gets profile/, credential/, state/ and volumes/{workspace,data,store,chrome} under here.
       CP_TENANT_ROOT: /data/titanbot
-      # The shared release: runtime, deploy and ui, one copy for every tenant on this server. Not
-      # mounted into this container, only named: the control plane writes tenant compose files that
-      # refer to it, it never reads it.
+      # The shared release files on the SERVER: runtime, deploy and ui. This service does not open
+      # them, it writes them into each tenant's rendered compose as host paths, so there is nothing
+      # to mount. If a later step ever needs to read them, mount them read-only rather than
+      # widening this one.
       CP_RELEASE_ROOT: /home/sem/titanbot
+      # Every tenant is https://<slug>.titanium.bot. The proxied wildcard *.titanium.bot already
+      # points at this server, so a new tenant needs no DNS work at all.
       CP_BASE_DOMAIN: titanium.bot
       CP_PUBLIC_URL: https://api.titanium.bot
-      # The shared secret every tenant relay verifies sessions with. 32 bytes or more, generated
-      # once: `openssl rand -hex 32`. The control plane refuses to start without it, and changing it
-      # signs every customer out of every instance at once.
+      COOLIFY_ENVIRONMENT_NAME: production
+
+      # ---- the four secrets and the two uuids ---------------------------------------------------
+      # Plain ${VAR}, deliberately not ${VAR:?} and not ${VAR:-}. Coolify builds an environment
+      # field's NAME from everything between the braces, so ${CP_SESSION_SECRET:?} produces a field
+      # literally named "CP_SESSION_SECRET:?", which is not a legal shell name: the line is dropped
+      # and the deploy fails on a required variable that no field in the UI can set. This is the
+      # same trap docker-compose.yml documents at TITANBOT_GATEWAY_TOKEN and TITAN_JOB_TOKEN.
+      # cp/server.mjs refuses to start on a missing or short secret instead, which fails in the
+      # same direction with a message that says what to do.
+      #
+      # The signing key for every session token, shared with every tenant relay so the relay can
+      # verify a session it did not mint. 32 bytes or more. Generate it once:
+      #   node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+      # Rotating it signs every customer out of every tenant at once, and every tenant relay has to
+      # be given the new value in the same pass.
       CP_SESSION_SECRET: ${CP_SESSION_SECRET}
-      # The operator bearer for the routes that add accounts and tenants. `openssl rand -hex 24`.
+      # The bearer for the admin routes: adding accounts, adding tenants, adopting, stop and start.
+      # It is not a customer credential and it never leaves the operator's hands.
       CP_ADMIN_TOKEN: ${CP_ADMIN_TOKEN}
-      # Coolify's own API, which is how a tenant gets created. The URL is this Coolify's address and
-      # the key is an API token from Keys & Tokens with write access to the project below. With
-      # neither set the service still runs: tenants can be recorded and adopted, just not created.
+      # Coolify's own api, which this service calls to create, start, stop and delete a tenant's
+      # service. The key is the one from Keys & Tokens; it can create and delete resources on this
+      # server, so it lives here and in Coolify's own store and nowhere else.
       COOLIFY_URL: ${COOLIFY_URL}
       COOLIFY_API_KEY: ${COOLIFY_API_KEY}
+      # The project and server every tenant service is created in. Both are on the resource page of
+      # console.titanium.bot, or from GET /projects and GET /servers.
       COOLIFY_PROJECT_UUID: ${COOLIFY_PROJECT_UUID}
       COOLIFY_SERVER_UUID: ${COOLIFY_SERVER_UUID}
-      COOLIFY_ENVIRONMENT_NAME: production
     volumes:
-      # The sqlite database. It holds every customer's scrypt password hash, so it is its own
-      # directory at 0700 on the host owned by uid 10001 (cp/Dockerfile says why that uid):
+      # The tenant root and the store, in one bind. Owned by uid 1000 on the host, which is `sem`,
+      # which is the uid this image runs as (cp/Dockerfile says why). Once, before the first
+      # deploy:
       #
-      #   sudo mkdir -p /data/titanbot-cp /data/titanbot
-      #   sudo chown -R 10001:10001 /data/titanbot-cp /data/titanbot
-      #   sudo chmod 700 /data/titanbot-cp
-      - /data/titanbot-cp:/data/cp
-      # Every tenant's tree. The control plane creates each customer's profile, credential, state and
-      # volumes directories in here, and their compose mounts those same paths straight off the host.
+      #   sudo install -d -o 1000 -g 1000 -m 0750 /data/titanbot
+      #
+      # /data is this host's docker data-root and the disk with room on it, which is why the
+      # tenants live there rather than under /home/sem.
       - /data/titanbot:/data/titanbot
+    # No docker socket, on purpose, and this is the difference between this service and the relay.
+    # The relay needs one because it reaches into the box with `docker exec`. This service reaches
+    # containers only through Coolify's api, which is an http call with a bearer. A socket here
+    # would be root on the host next to the Coolify api key, for nothing.
+
+# No top-level volumes key, no networks key, no ports. See the header.
