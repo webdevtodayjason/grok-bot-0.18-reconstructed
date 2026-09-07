@@ -599,7 +599,13 @@ export function createApp(options = {}) {
       // access exactly as it was. Cascading would have locked them out of their own workspace to
       // tidy up a row.
       if (segments.length === 3 && method === "DELETE") {
-        const account = store.getAccountById(segments[2]) ?? store.getAccountByEmail(segments[2]);
+        // Decoded, because an email in a path is percent-encoded by anything that builds URLs
+        // properly and the @ becomes %40. The CLI does exactly that, and the first live run of this
+        // route answered 404 for an account that was sitting right there in the list. A malformed
+        // escape is not a reason to throw: it is simply not an id anybody holds.
+        let named = segments[2];
+        try { named = decodeURIComponent(segments[2]); } catch { named = segments[2]; }
+        const account = store.getAccountById(named) ?? store.getAccountByEmail(named);
         if (account == null) return json(response, 404, { error: "not_found" });
         if (String(body.confirm ?? "") !== account.email) {
           return json(response, 400, {

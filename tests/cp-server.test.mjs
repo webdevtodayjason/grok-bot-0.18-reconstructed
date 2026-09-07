@@ -669,7 +669,10 @@ test("a workspace that is deleted names the sign-ins it leaves standing, and the
     assert.equal(noConfirm.status, 400, "an account must not be removable without naming it");
     assert.match(noConfirm.body.message, /one@leavers\.test/);
 
-    const removed = await plane.admin("DELETE", "/v1/accounts/one@leavers.test", { confirm: "one@leavers.test" });
+    // Percent-encoded, which is what anything that builds a URL properly sends and is what the CLI
+    // sends. The first live run of this route answered 404 for an account that was in the list,
+    // because the path segment was never decoded and the test above had typed a raw @.
+    const removed = await plane.admin("DELETE", `/v1/accounts/${encodeURIComponent("one@leavers.test")}`, { confirm: "one@leavers.test" });
     assert.equal(removed.status, 200, removed.text.slice(0, 200));
     assert.equal(removed.body.email, "one@leavers.test");
     const left = (await plane.admin("GET", "/v1/accounts")).body.accounts.map((account) => account.email);
@@ -681,7 +684,9 @@ test("a workspace that is deleted names the sign-ins it leaves standing, and the
     assert.equal((await plane.admin("GET", "/v1/accounts")).body.accounts.length, 0);
 
     // No bearer does not open this door, and a name nobody holds is a 404 rather than a 200.
-    assert.equal((await plane.request("DELETE", "/v1/accounts/anyone@nowhere.test", { body: {} })).status, 401);
+    assert.equal((await plane.request("DELETE", `/v1/accounts/${encodeURIComponent("anyone@nowhere.test")}`, { body: {} })).status, 401);
+    // A malformed escape is a name nobody holds, not a crash.
+    assert.equal((await plane.admin("DELETE", "/v1/accounts/%E0%A4%A", { confirm: "whatever" })).status, 404);
     assert.equal((await plane.admin("DELETE", "/v1/accounts/nobody@nowhere.test", { confirm: "nobody@nowhere.test" })).status, 404);
   }, { withCoolify: true });
 });
