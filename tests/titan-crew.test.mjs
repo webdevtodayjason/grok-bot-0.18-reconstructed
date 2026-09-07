@@ -129,6 +129,11 @@ test("an agent the host reports without a createdAt falls back to a stable hash,
   // With nothing but createdAt-less agents, the first one still has to be somebody's Titan.
   const none = crew.assignCrew([agent("only", undefined)]);
   assert.equal(none.get("only").character, "Titan");
+  // Two ids can hash to the same companion. A roster with the same face twice is the one thing
+  // this must not produce, so the hash is a starting point and the walk steps past what is taken.
+  const many = Array.from({ length: 12 }, (_, i) => agent(`legacy${i}`, undefined));
+  const faces = [...crew.assignCrew(many).values()].map((f) => f.character);
+  assert.equal(new Set(faces).size, 12, `every face on a twelve-agent legacy roster is different: ${faces.join(", ")}`);
 });
 
 test("mood follows the status the roster already paints", () => {

@@ -22,7 +22,7 @@
  * WITH NO CHOICE STORED, nobody is left facing a blank. The crew is derived from the roster the
  * host already answers: the oldest agent is Titan, and the rest take companions in the order they
  * were created. An agent the host reports without a createdAt -- an older bundle -- falls back to
- * a companion picked from a hash of its id, which is stable for that agent forever.
+ * a companion picked from a hash of its id, stepping past any companion already spoken for.
  */
 (function attachTitanCrew(global) {
   "use strict";
@@ -152,7 +152,13 @@
     for (const agent of unordered) {
       if (out.has(agent.id)) continue;
       if (agent.id === titanId) { give(agent, 0, "first"); continue; }
-      give(agent, hashIndex(agent.id), "hash");
+      // The hash is where the walk starts, not where it stops. Two ids can hash to the same
+      // companion, and a roster with the same face twice is worse than one whose faces depend on
+      // who else is on it -- which is true of the creation-order walk above as well.
+      let index = hashIndex(agent.id);
+      let guard = 0;
+      while (taken.has(index) && guard < CREW.length - 1) { index = step(index); guard += 1; }
+      give(agent, index, "hash");
     }
     return out;
   }

@@ -202,7 +202,10 @@
       : face.source === "hash" ? "This host reports no creation date for this agent, so the character is picked from its id and stays the same."
       : "Worked out from the order the agents on this box were created. Pick one and the host holds it instead.";
     const blurb = face && !face.opt && face.index >= 0 ? `${crew.CREW[face.index].blurb} ` : "";
-    return `<div class="setting-row" data-titan-character-row><div><strong>Character</strong><small data-titan-character-note>${esc(blurb + note)}</small></div><div class="field" style="margin:0"><label class="sr-only" for="agent-character">Character</label><select id="agent-character" data-character-for="${esc(worker.id)}">${options}</select></div></div>`;
+    // The row is rebuilt when this key moves: a new choice, or an avatar arriving on the host,
+    // which is what makes "the picture uploaded to the host" an option at all.
+    const key = `${worker.id}:${worker.avatarVersion ?? ""}:${face ? face.opt ?? face.character : ""}`;
+    return `<div class="setting-row" data-titan-character-row data-titan-row-key="${esc(key)}"><div><strong>Character</strong><small data-titan-character-note>${esc(blurb + note)}</small></div><div class="field" style="margin:0"><label class="sr-only" for="agent-character">Character</label><select id="agent-character" data-character-for="${esc(worker.id)}">${options}</select></div></div>`;
   }
 
   function syncPanel() {
@@ -212,12 +215,20 @@
     panel.querySelectorAll(".titan-avatar > titan-mascot[tracking]").forEach((m) => m.removeAttribute("tracking"));
     if (!crew || !adapter || typeof adapter.setCharacter !== "function") return;
     const upload = panel.querySelector("[data-avatar-for]");
-    if (!upload || panel.querySelector("[data-titan-character-row]")) return;
+    if (!upload) return;
     const worker = recordById(upload.dataset.avatarFor);
     if (!worker) return;
+    const face = ensureAssignment(worker);
+    const existing = panel.querySelector("[data-titan-character-row]");
+    const markup = characterRowMarkup(worker, face);
+    const key = /data-titan-row-key="([^"]*)"/.exec(markup)[1];
+    if (existing) {
+      if (existing.dataset.titanRowKey === key) return;
+      existing.remove();
+    }
     const row = upload.closest(".setting-row");
     if (!row) return;
-    row.insertAdjacentHTML("afterend", characterRowMarkup(worker, assignment.get(worker.id)));
+    row.insertAdjacentHTML("afterend", markup);
     const select = panel.querySelector("[data-character-for]");
     const note = panel.querySelector("[data-titan-character-note]");
     select.addEventListener("change", () => {
@@ -233,8 +244,21 @@
             : `The host is holding the ${saved === crew.UPLOADED ? "uploaded picture" : "classic mark"} for this agent.`;
         })
         .catch((error) => { if (note) note.textContent = `The host did not take it: ${error.message}`; })
-        .finally(() => { select.disabled = false; });
+        .finally(() => { select.disabled = false; repaintPanelFace(worker.id); });
     });
+  }
+
+  /**
+   * The panel is drawn once, on the click that opened it, so the face in its header does not
+   * follow a character chosen underneath it. One element, replaced in place.
+   */
+  function repaintPanelFace(agentId) {
+    const frame = doc.querySelector("#panel-content .context-profile-avatar");
+    const worker = recordById(agentId);
+    if (!frame || !worker) return;
+    const drawn = global.titanAvatarMarkup(worker, "context-profile-avatar", worker.name);
+    frame.outerHTML = drawn || `<img class="context-profile-avatar" src="${esc(worker.avatar)}" alt="${esc(worker.name)}" />`;
+    afterRender();
   }
 
   // ---- wiring --------------------------------------------------------------------------------

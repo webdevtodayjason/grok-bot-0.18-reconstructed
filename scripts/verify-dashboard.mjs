@@ -291,6 +291,28 @@ try {
     for (const route of ["**/api/**", "**/connectors", "**/subscriptions", "**/endpoints", "**/model", "**/events"]) await page.route(route, (r) => r.abort());
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(3500);
     check(await page.evaluate(() => window.__machineRoomLive === false), "the page falls back to the offline demo adapter when the gateway is unreachable");
+
+    // -- AVATAR-1 and the brand, with no host at all. The crew is drawn from the roster the demo
+    // factory holds, so none of this depends on the box being reachable.
+    const brand = await page.evaluate(() => ({
+      cards: Array.from(document.querySelectorAll(".worker-card:not(.room-card)")).map((el) => ({
+        name: el.querySelector(".worker-name")?.textContent?.trim() ?? "",
+        character: el.querySelector("[data-titan-character]")?.dataset.titanCharacter ?? null,
+        face: Boolean(el.querySelector("titan-mascot")) || Boolean(el.querySelector(".titan-avatar img")),
+      })),
+      lockup: document.querySelector(".window-identity .window-lockup")?.getAttribute("src") ?? null,
+      lockupBox: (() => { const el = document.querySelector(".window-lockup"); return el ? Math.round(el.getBoundingClientRect().height) : 0; })(),
+      eyebrow: document.querySelector(".window-identity .window-eyebrow")?.textContent?.trim() ?? "",
+      favicon: document.querySelector("link[rel=icon]")?.getAttribute("href") ?? "",
+      title: document.title,
+      background: document.documentElement.dataset.bg ?? "",
+    }));
+    check(brand.cards.length > 0 && brand.cards.every((c) => c.character && c.face), "every roster card holds a crew member, canvas or still, with no gateway", brand.cards.map((c) => `${c.name}:${c.character ?? "none"}`).join(", "));
+    check(brand.cards[0]?.character === "Titan", "and the first agent of the instance is Titan", brand.cards[0]?.character ?? "no card");
+    check(brand.lockup === "assets/titanium-bot-logo.svg" && brand.lockupBox > 12, "the window bar carries the Titanium Bot lockup at the bar's own height", `${brand.lockup ?? "no mark"} at ${brand.lockupBox}px`);
+    check(brand.eyebrow === "Machine Room" && /Machine Room/.test(brand.title), "with Machine Room kept as the eyebrow and the page title", `"${brand.eyebrow}" / "${brand.title}"`);
+    check(brand.favicon === "assets/favicon.svg", "and the tab icon is the product mark rather than the empty data: URI", brand.favicon || "none");
+    check(brand.background === "titan-nebula", "a browser with nothing stored opens on Titan Nebula", brand.background || "the handoff's own plate");
     await openMarketplace();
     const ids = await page.$$eval("[data-plugin-id]", (els) => els.map((e) => e.dataset.pluginId));
     let hint = "";
@@ -873,6 +895,58 @@ try {
           })));
           const ringOk = (r) => Boolean(r.accent) && (r.status === "attention" ? r.animation === "none" : r.animation !== "none" && Boolean(r.animation));
           check(rings.length > 0 && rings.every(ringOk), "every avatar carries its agent's accent, and breathes unless the agent wants a human", JSON.stringify(rings.filter((r) => !ringOk(r)).slice(0, 3)) + ` of ${rings.length}, ${rings.filter((r) => r.status === "attention").length} in attention`);
+
+          // -- AVATAR-1: the faces are the Titan crew, on live canvases, and they move.
+          const crewCards = await page.evaluate(() => Array.from(document.querySelectorAll(".worker-card:not(.room-card)")).map((el) => ({
+            name: el.querySelector(".worker-name")?.textContent?.trim() ?? "",
+            character: el.querySelector("[data-titan-character]")?.dataset.titanCharacter ?? null,
+            canvas: Boolean(el.querySelector("titan-mascot")),
+            mood: el.querySelector("[data-titan-mood]")?.dataset.titanMood ?? "",
+            status: el.getAttribute("data-status") ?? "",
+          })));
+          const facesOk = crewCards.length > 0 && crewCards.every((c) => c.character && c.canvas);
+          check(facesOk, "every roster card draws its agent as a Titan crew member on a live canvas", crewCards.map((c) => `${c.name}:${c.character ?? "none"}`).join(", "));
+          // Titan is the first agent of an instance, and no companion is handed out twice while
+          // there are companions left. Both are mascot-crew.js's contract, read off the page.
+          check(crewCards.some((c) => c.character === "Titan"), "and one of them is Titan, who is always the first agent on an instance");
+          const companions = crewCards.map((c) => c.character).filter((c) => c && c !== "Titan");
+          check(companions.length > 12 || new Set(companions).size === companions.length, "no companion is drawn twice while there are unused ones", companions.join(", "));
+          // The mood is the status the roster already paints, not a second opinion about it.
+          const moodOk = crewCards.every((c) => (c.status === "working" ? c.mood === "curious" : ["calm", "excited", "curious"].includes(c.mood)));
+          check(moodOk, "a card that says Working now carries the curious mood", crewCards.map((c) => `${c.name}:${c.status}/${c.mood}`).join(", "));
+          // Actually moving: the same canvases, 500ms apart, must not be the same picture. The
+          // element's own IntersectionObserver stops the ones the collapsed Hidden group holds, so
+          // only the cards on screen are compared.
+          const frameOf = () => page.evaluate(() => Array.from(document.querySelectorAll(".worker-card:not([data-roster-hidden] *) titan-mascot")).map((m) => m.snapshot().slice(-160)));
+          const frameA = await frameOf();
+          await page.waitForTimeout(500);
+          const frameB = await frameOf();
+          const moved = frameA.filter((x, i) => x !== frameB[i]).length;
+          check(frameA.length > 0 && moved === frameA.length, "and each one is a different picture 500ms later", `${moved} of ${frameA.length} canvases moved`);
+          // A canvas nobody can see must not cost anything. The Hidden group is collapsed here.
+          const parkedFrames = async () => page.evaluate(() => Array.from(document.querySelectorAll("[data-roster-hidden] titan-mascot")).map((m) => m.snapshot().slice(-160)));
+          const parkedA = await parkedFrames();
+          if (parkedA.length === 0) notReached("this box has no agent hidden from the sidebar", "a canvas inside the collapsed Hidden group is paused");
+          else {
+            await page.waitForTimeout(500);
+            const parkedB = await parkedFrames();
+            const stillParked = parkedA.filter((x, i) => x === parkedB[i]).length;
+            check(stillParked === parkedA.length, "a canvas inside the collapsed Hidden group is paused", `${stillParked} of ${parkedA.length} paused`);
+          }
+          // The budget: main-thread work over ten seconds with every canvas on this roster running.
+          // Chrome's own TaskDuration against wall clock, plus any long task the page produced.
+          const perf = await page.context().newCDPSession(page);
+          await perf.send("Performance.enable");
+          const metricsOf = async () => Object.fromEntries((await perf.send("Performance.getMetrics")).metrics.map((m) => [m.name, m.value]));
+          const longTasks = await page.evaluate(() => { window.__gateLongTasks = []; try { const o = new PerformanceObserver((l) => { for (const e of l.getEntries()) window.__gateLongTasks.push(Math.round(e.duration)); }); o.observe({ entryTypes: ["longtask"] }); window.__gateLongTaskObserver = o; return true; } catch { return false; } });
+          const perfBefore = await metricsOf();
+          await page.waitForTimeout(10_000);
+          const perfAfter = await metricsOf();
+          const tasks = longTasks ? await page.evaluate(() => { window.__gateLongTaskObserver?.disconnect(); return window.__gateLongTasks; }) : [];
+          const wallSeconds = perfAfter.Timestamp - perfBefore.Timestamp;
+          const busySeconds = perfAfter.TaskDuration - perfBefore.TaskDuration;
+          const share = wallSeconds > 0 ? busySeconds / wallSeconds : 1;
+          check(share < 0.3, "with every canvas running, the main thread stays under 30% of a second per second", `${(share * 100).toFixed(1)}% over ${wallSeconds.toFixed(1)}s (${frameA.length} canvas(es) on screen), ${tasks.length} long task(s)${tasks.length ? ` of ${Math.max(...tasks)}ms` : ""}`);
         } finally {
           await gw("deleteAgents", { ids: [liveId] }).catch((e) => console.log(`  INFO  roster probe NOT deleted: ${e.message}`));
         }
@@ -1264,8 +1338,17 @@ try {
       const served = await until(async () => { const r = await fetch(`${GATEWAY}/avatars/${probeAgentId}`); return r.status === 200 ? r.headers.get("content-type") : null; }, 10_000, 800);
       check(avatarBefore === 404 && served != null && callsTo("setAgentAvatarBytes") === 1, "(b) a 1×1 PNG through the avatar control makes GET /avatars/<id> answer 200", `before ${avatarBefore}, after ${served ?? "not served"}, ${callsTo("setAgentAvatarBytes")} write(s)`);
       const hostVersion = (await gw("getAgentAvatar", { id: probeAgentId }).catch(() => null))?.version ?? null;
+      // AVATAR-1 changed what a roster card draws by default: a Titan crew member, not a picture
+      // file. So an uploaded avatar is a choice on the record now, and the Character row in this
+      // same panel is where it is made. The row rebuilds itself once the host holds an avatar,
+      // because that is what puts "the picture uploaded to the host" in the list at all.
+      const uploadedOption = await until(() => page.evaluate((id) => (document.querySelector(`[data-character-for="${id}"] option[value="uploaded"]`) ? true : null), probeAgentId), 15_000, 800);
+      check(uploadedOption === true, "the Character row offers the uploaded picture once the host is holding one");
+      await page.selectOption(`[data-character-for="${probeAgentId}"]`, "uploaded").catch(() => {});
       const rosterSrc = await until(() => page.evaluate((id) => { const src = document.querySelector(`[data-context-id="${id}"] img`)?.getAttribute("src") ?? ""; return /\/avatars\/.+\?v=/.test(src) ? src : null; }, probeAgentId), 20_000, 1000);
-      check(hostVersion != null && rosterSrc != null && rosterSrc.includes(`?v=${encodeURIComponent(hostVersion)}`), "and the roster image src carries the host's avatar version", `${rosterSrc ?? "placeholder"} vs getAgentAvatar ${hostVersion}`);
+      check(hostVersion != null && rosterSrc != null && rosterSrc.includes(`?v=${encodeURIComponent(hostVersion)}`), "and choosing it puts the host's avatar version on the roster card", `${rosterSrc ?? "placeholder"} vs getAgentAvatar ${hostVersion}`);
+      const characterOnHost = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.id === probeAgentId)?.avatarShape ?? null;
+      check(characterOnHost === "titan:uploaded", "and the choice is on the host's profile, not in this browser", String(characterOnHost));
       // (c) notifications and hide-from-sidebar, then the hidden agent reached from the roster's
       // hidden group.
       await page.click(`[data-toggle-notify="${probeAgentId}"]`);
