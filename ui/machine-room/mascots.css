@@ -77,3 +77,27 @@
   border-radius: 50%;
   flex: 0 0 auto;
 }
+
+/* Needs you: two counterclockwise turns, a rest, and again. The bounce (excited) is kept for a landed
+   reply; a person's attention is asked for with a turn, and the face never leaves its ring for it. */
+.titan-avatar[data-titan-attention] > titan-mascot,
+.titan-avatar[data-titan-attention] > img {
+  transform-origin: 50% 46%;
+  animation: titan-attention 3.5s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+}
+/* The turn is written into the same transform as the centering translate: applied right to left, the
+   face turns about its own middle (the origin below) and is then moved to the ring's centre. A
+   separate rotate property would compose around the frame's corner and orbit instead. */
+@keyframes titan-attention {
+  0% { transform: translate(-50%, -46%) rotate(0deg); }
+  20% { transform: translate(-50%, -46%) rotate(-360deg); }
+  40% { transform: translate(-50%, -46%) rotate(-720deg); }
+  100% { transform: translate(-50%, -46%) rotate(-720deg); }
+}
+/* Excited bobs eleven canvas pixels, so it is drawn a little smaller and the head stays inside. */
+.titan-avatar > titan-mascot { transition: width 0.5s ease; }
+.titan-avatar[data-titan-mood="excited"] > titan-mascot { width: calc(100% * var(--titan-fill, 1.7) * 0.8); }
+@media (prefers-reduced-motion: reduce) {
+  .titan-avatar[data-titan-attention] > titan-mascot,
+  .titan-avatar[data-titan-attention] > img { animation: none; }
+}

@@ -140,11 +140,20 @@ test("mood follows the status the roster already paints", () => {
   const now = 1_000_000;
   assert.equal(crew.moodFor({ status: "ready" }, { now }), "calm");
   assert.equal(crew.moodFor({ status: "working" }, { now }), "curious");
-  assert.equal(crew.moodFor({ status: "attention", needsYou: true }, { now }), "excited");
+  // Waiting on a person is attentive, not a bounce: the ask is a turn of the face (attentionFor).
+  assert.equal(crew.moodFor({ status: "attention", needsYou: true }, { now }), "curious");
   // A failed turn is "attention" without needsYou. That is not a celebration and not a question.
   assert.equal(crew.moodFor({ status: "attention", needsYou: false }, { now }), "calm");
   // needsYou outranks a turn still running, because the person is the one being waited on.
-  assert.equal(crew.moodFor({ status: "working", needsYou: true }, { now }), "excited");
+  assert.equal(crew.moodFor({ status: "working", needsYou: true }, { now }), "curious");
+});
+
+test("only a record that needs a person asks for attention", () => {
+  assert.equal(crew.attentionFor({ status: "attention", needsYou: true }), true);
+  assert.equal(crew.attentionFor({ status: "working", needsYou: true }), true);
+  assert.equal(crew.attentionFor({ status: "attention", needsYou: false }), false);
+  assert.equal(crew.attentionFor({ status: "ready" }), false);
+  assert.equal(crew.attentionFor(null), false);
 });
 
 test("a delivered reply is excited for six seconds and then calm again", () => {

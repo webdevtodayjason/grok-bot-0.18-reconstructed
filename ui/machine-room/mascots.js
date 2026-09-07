@@ -113,6 +113,8 @@
     doc.querySelectorAll("[data-titan-agent]").forEach((frame) => {
       const record = roster.get(frame.dataset.titanAgent);
       if (!record) return;
+      if (crew.attentionFor(record)) frame.dataset.titanAttention = "1";
+      else delete frame.dataset.titanAttention;
       const mood = moodOf(record);
       if (frame.dataset.titanMood === mood) return;
       frame.dataset.titanMood = mood;
@@ -169,7 +171,7 @@
     const name = title || worker.name || "Agent";
     const mood = moodOf(worker);
     const label = `${name}, drawn as ${crew.CREW[face.index].name}`;
-    const frame = `class="${esc(className)} titan-avatar" data-titan-agent="${esc(worker.id)}" data-titan-character="${esc(crew.CREW[face.index].name)}" data-titan-mood="${esc(mood)}" role="img" aria-label="${esc(label)}"`;
+    const frame = `class="${esc(className)} titan-avatar" data-titan-agent="${esc(worker.id)}" data-titan-character="${esc(crew.CREW[face.index].name)}" data-titan-mood="${esc(mood)}"${crew.attentionFor(worker) ? ' data-titan-attention="1"' : ""} role="img" aria-label="${esc(label)}"`;
     if (!canAnimate()) {
       return `<span ${frame}><img src="${esc(crew.stillFor(face.index, mood))}" alt="" /></span>`;
     }

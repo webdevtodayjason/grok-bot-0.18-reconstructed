@@ -164,14 +164,16 @@
   }
 
   /**
-   * The mood one roster record is in. Calm idle, curious mid-turn, excited when the agent wants a
-   * person -- and excited for a few seconds after a turn lands, which is the only one that needs a
-   * clock: `celebratingUntil` is the timestamp the caller got from `celebrationUntil` below.
+   * The mood one roster record is in. Calm idle, curious mid-turn and curious while the agent waits
+   * on a person (the waiting itself is shown by attentionFor, a turn of the face, not a bounce), and
+   * excited for a few seconds after a turn lands, which is the only one that needs a clock:
+   * `celebratingUntil` is the timestamp the caller got from `celebrationUntil` below.
    */
   function moodFor(record, options) {
     const now = options && Number.isFinite(options.now) ? options.now : Date.now();
     const until = options && Number.isFinite(options.celebratingUntil) ? options.celebratingUntil : 0;
-    if (record && record.needsYou === true) return "excited";
+    // A person is wanted: attentive, not bouncing. The turn that asks for them is attentionFor.
+    if (record && record.needsYou === true) return "curious";
     if (record && record.status === "working") return "curious";
     if (until > now) return "excited";
     return "calm";
@@ -182,6 +184,14 @@
    * did not deliver anything (it failed, or it is waiting on a person, which moodFor already reads
    * as excited), so it earns no celebration. Returns 0 when there is nothing to celebrate.
    */
+  /**
+   * Whether the face should ask for a person: two counterclockwise turns, a rest, and again (Jason,
+   * 2026-09-07). Only a record that needs someone earns it; a bounce never leaves the ring for it.
+   */
+  function attentionFor(record) {
+    return Boolean(record && record.needsYou === true);
+  }
+
   function celebrationUntil(previousStatus, record, now, ms) {
     if (previousStatus !== "working") return 0;
     if (!record || record.status !== "ready") return 0;
@@ -195,5 +205,5 @@
     return `assets/characters/${slugOf(CREW[safe].name)}-${state}.png`;
   }
 
-  global.TitanCrew = { CREW, CLASSIC, UPLOADED, OPTIONS, SHAPE_PREFIX, CELEBRATION_MS, indexOfCharacter, shapeValueFor, storedChoice, hashIndex, assignCrew, moodFor, celebrationUntil, stillFor };
+  global.TitanCrew = { attentionFor, CREW, CLASSIC, UPLOADED, OPTIONS, SHAPE_PREFIX, CELEBRATION_MS, indexOfCharacter, shapeValueFor, storedChoice, hashIndex, assignCrew, moodFor, celebrationUntil, stillFor };
 })(typeof window !== "undefined" ? window : globalThis);
