@@ -24,7 +24,8 @@
 //             the same 401 invalid_login; the token's payload and HMAC are re-derived here
 //   current   the token opens /v1/sessions/current, a tampered payload does not, no bearer does not
 //   revoke    DELETE /v1/sessions/current, and the same token is then refused
-//   dry run   a tenant plan carries the create, the envs, the urls PATCH and the start; no call
+//   dry run   a tenant plan carries the create, the envs, the start and the readiness wait, and no
+//             public address for the tenant, because there is one console for everybody; no call
 //             reached the fake Coolify; no directory was created under CP_TENANT_ROOT; and the
 //             plan does not carry the session secret in clear
 //   adopt     an existing service becomes a tenant, and the tenant reads back adopted with its
@@ -463,14 +464,20 @@ try {
   const envAt = stepAt((s) => s?.method === "POST" && /\/envs\/?$/.test(String(s?.path ?? "")));
   const urlAt = stepAt((s) => s?.method === "PATCH" && /\/services\/[^/]+\/?$/.test(String(s?.path ?? "")));
   const startAt = stepAt((s) => s?.method === "POST" && /\/start\/?$/.test(String(s?.path ?? "")));
+  const readyAt = stepAt((s) => s?.name === "ready");
   check(createAt >= 0, "it plans POST /services", `index ${createAt}`);
   check(envAt >= 0, "it plans POST /services/{uuid}/envs", `index ${envAt}`);
-  check(urlAt >= 0, "it plans the urls PATCH on the service", `index ${urlAt}`);
+  // TENANT-5 took the urls PATCH out and it must stay out. It gave a tenant a hostname of its own,
+  // which is a certificate, a DNS record and a second front door per customer. There is one console
+  // now and a tenant is one box container behind it, so a plan that asked Coolify for a public
+  // address again would be the old shape growing back where nobody was looking.
+  check(urlAt < 0, "it plans no public address for the tenant", urlAt < 0 ? "no urls PATCH" : `a urls PATCH at index ${urlAt}`);
   check(startAt >= 0, "it plans POST /services/{uuid}/start", `index ${startAt}`);
+  check(readyAt > startAt, "and then waits for the box to answer", `start ${startAt}, ready ${readyAt}`);
   check(
-    createAt >= 0 && envAt > createAt && urlAt > envAt && startAt > urlAt,
-    "they are in the order create, envs, urls, start",
-    `${createAt}, ${envAt}, ${urlAt}, ${startAt}`,
+    createAt >= 0 && envAt > createAt && startAt > envAt,
+    "they are in the order create, envs, start",
+    `${createAt}, ${envAt}, ${startAt}`,
   );
   check(coolifyCalls.length === callsBefore, "no call reached Coolify", `${coolifyCalls.length - callsBefore} calls: ${coolifyCalls.slice(callsBefore).map((c) => `${c.method} ${c.path}`).join(", ")}`);
   const rootAfter = readdirSync(tenantRoot).sort();

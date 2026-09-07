@@ -789,11 +789,14 @@ Exit 0 no leg failed, 1 a leg failed, 2 nothing could be measured, which is not 
 state before the migration and passes. Two networks and no label fails with the sentence that says
 what to set.
 
-`scripts/verify-tenant.mjs` is the TENANT-2 gate and it measures a relay in tenant mode, which is a
-mode that no longer exists. Its docker suite is still worth running, because the refusals in section
-18 are still the refusals; its login suite asserts an email field that appears **because**
-`TENANT_ID` is set, and that is the assertion the relay wave makes false. Rewriting or retiring it is
-part of that wave, not this one, and until then it is the one gate here whose red is expected.
+`scripts/verify-tenant.mjs` is gone. It was the TENANT-2 gate and it measured a relay in tenant
+mode, which is a mode that no longer exists: it expected one relay per customer, each on its own
+hostname, and a sign-in for another customer redirected to that customer's host. Every leg of it
+that is still true is measured somewhere else now, so nothing was dropped on the floor. Its login
+suite is replaced by `scripts/verify-one-console.mjs`. Its docker suite, the plain-word refusals a
+relay with no docker gives, is `tests/relay-docker-absent.test.mjs` (10 tests, in `npm test`). Its
+runtime-bundle legs are in `tests/relay-one-console.test.mjs`, per workspace, and its endpoint guard
+is in `tests/relay-tenant-endpoints.test.mjs`.
 
 **Run the gates one at a time, a minute apart.** The relay's login throttle is five failures per
 address per 30 seconds, the account door and the password door share it, and every gate here fills
