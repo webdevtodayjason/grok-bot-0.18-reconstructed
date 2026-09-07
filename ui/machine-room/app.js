@@ -2638,8 +2638,8 @@
 
   function fillMail() {
     const root = elements.panelContent.querySelector("[data-mail]");
-    if (!root || typeof adapter.getMailSettings !== "function") return;
-    Promise.resolve(adapter.getMailSettings())
+    if (!root || typeof adapter.getMailSettings !== "function") return null;
+    return Promise.resolve(adapter.getMailSettings())
       .then((settings) => paintMail(root, settings ?? {}))
       .catch((error) => {
         const note = root.querySelector("[data-mail-enabled-note]");
@@ -2651,11 +2651,56 @@
   function saveMail(target, patch, said) {
     const root = elements.panelContent.querySelector("[data-mail]");
     target.disabled = true;
-    Promise.resolve(adapter.setMailSettings(patch))
+    // The chain is returned so a caller can wait for it; nothing on the page does, but a test that
+    // could not wait would be measuring the click instead of what the relay answered.
+    return Promise.resolve(adapter.setMailSettings(patch))
       .then((settings) => { paintMail(root, settings ?? {}); showToast(said); })
       .catch((error) => showToast(`Email settings were not saved: ${error.message}`))
       .finally(() => { target.disabled = false; });
   }
+
+  // Every control on the card, in one place, so the click chain carries two lines and the card's
+  // own behaviour can be driven in a test rather than only in a browser.
+  const MAIL_CONTROLS = [
+    "data-mail-enabled", "data-mail-save", "data-mail-key-set", "data-mail-secret-set",
+    "data-mail-key-clear", "data-mail-secret-clear", "data-mail-copy",
+  ];
+  const isMailControl = (target) => MAIL_CONTROLS.some((name) => target.hasAttribute(name));
+
+  function mailClick(target) {
+    const root = elements.panelContent.querySelector("[data-mail]");
+    if (target.hasAttribute("data-mail-enabled")) {
+      // Written on the click and repainted from the relay's answer, the way the job bus switch is:
+      // a switch with a Save under it would sit there saying mail is coming in when it is not.
+      const turningOn = target.getAttribute("aria-pressed") !== "true";
+      return saveMail(target, { enabled: turningOn }, turningOn ? "Receiving is on." : "Receiving is off.");
+    }
+    if (target.hasAttribute("data-mail-save")) {
+      return saveMail(target, mailSettingsFromCard(root), "Email settings saved.");
+    }
+    if (target.hasAttribute("data-mail-key-set") || target.hasAttribute("data-mail-secret-set")) {
+      const isKey = target.hasAttribute("data-mail-key-set");
+      const input = root.querySelector(isKey ? "[data-mail-key]" : "[data-mail-secret]");
+      const value = input.value.trim();
+      // Nothing typed is not a save. Writing an empty string here would clear a working key, which
+      // is what the Clear button is for and is never what an empty field meant.
+      if (value.length === 0) return showToast(isKey ? "Type the key first." : "Type the signing secret first.");
+      // Emptied before the write, not after it: the value is on its way to the relay and this page
+      // is not the place it lives.
+      input.value = "";
+      return saveMail(target, isKey ? { apiKey: value } : { webhookSecret: value },
+        isKey ? "The Resend key is saved on the relay." : "The signing secret is saved on the relay.");
+    }
+    if (target.hasAttribute("data-mail-key-clear") || target.hasAttribute("data-mail-secret-clear")) {
+      const isKey = target.hasAttribute("data-mail-key-clear");
+      return saveMail(target, isKey ? { apiKey: null } : { webhookSecret: null },
+        isKey ? "The Resend key is cleared." : "The signing secret is cleared, so nothing will be accepted.");
+    }
+    const field = root.querySelector("[data-mail-webhook-url]");
+    return Promise.resolve(navigator.clipboard?.writeText?.(field.value)).then(() => showToast("Address copied."))
+      .catch(() => { field.focus(); field.select(); showToast("This browser would not let the page write the clipboard. It is selected, so copy it."); });
+  }
+  // ---- end the Email card ------------------------------------------------------------------------
 
   function fillJobBusRows() {
     const body = elements.panelContent.querySelector("[data-job-bus-rows]");
@@ -3732,31 +3777,8 @@
         .then(() => showToast(`Job bus settings saved: ${Object.keys(settings.workers).length} type(s), ${settings.repos.length} repo(s)`))
         .catch((error) => showToast(`The job bus settings were not saved: ${error.message}`))
         .finally(() => { target.disabled = false; fillJobBus(); });
-    } else if (target.hasAttribute("data-mail-enabled")) {
-      // Written on the click and repainted from the relay's answer, the way the job bus switch is:
-      // a switch with a Save under it would sit there saying mail is coming in when it is not.
-      saveMail(target, { enabled: target.getAttribute("aria-pressed") !== "true" },
-        target.getAttribute("aria-pressed") !== "true" ? "Receiving is on." : "Receiving is off.");
-    } else if (target.hasAttribute("data-mail-save")) {
-      const root = elements.panelContent.querySelector("[data-mail]");
-      saveMail(target, mailSettingsFromCard(root), "Email settings saved.");
-    } else if (target.hasAttribute("data-mail-key-set") || target.hasAttribute("data-mail-secret-set")) {
-      const root = elements.panelContent.querySelector("[data-mail]");
-      const isKey = target.hasAttribute("data-mail-key-set");
-      const input = root.querySelector(isKey ? "[data-mail-key]" : "[data-mail-secret]");
-      const value = input.value.trim();
-      if (value.length === 0) { showToast(isKey ? "Type the key first." : "Type the signing secret first."); return; }
-      input.value = "";
-      saveMail(target, isKey ? { apiKey: value } : { webhookSecret: value },
-        isKey ? "The Resend key is saved on the relay." : "The signing secret is saved on the relay.");
-    } else if (target.hasAttribute("data-mail-key-clear") || target.hasAttribute("data-mail-secret-clear")) {
-      const isKey = target.hasAttribute("data-mail-key-clear");
-      saveMail(target, isKey ? { apiKey: null } : { webhookSecret: null },
-        isKey ? "The Resend key is cleared." : "The signing secret is cleared, so nothing will be accepted.");
-    } else if (target.hasAttribute("data-mail-copy")) {
-      const value = elements.panelContent.querySelector("[data-mail-webhook-url]");
-      Promise.resolve(navigator.clipboard?.writeText?.(value.value)).then(() => showToast("Address copied."))
-        .catch(() => { value.focus(); value.select(); showToast("This browser would not let the page write the clipboard. It is selected, so copy it."); });
+    } else if (isMailControl(target)) {
+      mailClick(target);
     } else if (target.hasAttribute("data-open-context-browser")) {
       openDesktop("browser");
     } else if (target.dataset.saveRole) {

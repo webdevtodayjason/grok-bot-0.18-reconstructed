@@ -150,6 +150,18 @@
 
   // ---- the hook app.js calls ---------------------------------------------------------------
   global.titanAvatarMarkup = function titanAvatarMarkup(worker, className, title) {
+    try {
+      return crewFaceMarkup(worker, className, title);
+    } catch (error) {
+      // This runs inside app.js's own render, and every face on the page goes through it. A throw
+      // here would take the roster, the transcript and the panel with it, so the answer to a bug
+      // in this file is the mark app.js was drawing before, not a blank console.
+      console.warn("[titan] the crew face was not drawn:", error);
+      return "";
+    }
+  };
+
+  function crewFaceMarkup(worker, className, title) {
     if (!crew || !worker || !worker.id) return "";
     ensureAdapter();
     const face = ensureAssignment(worker);
@@ -165,7 +177,7 @@
     // once reads as a room of staring eyes, not as company. Agent details turns it back on --
     // syncPanel() below -- because that is one face, at 64px, being looked at deliberately.
     return `<span ${frame}><titan-mascot variant="${face.index}" mood="${esc(mood)}" tracking="off"></titan-mascot></span>`;
-  };
+  }
 
   // ---- pausing what nobody is looking at ----------------------------------------------------
   // The mascot element runs its own IntersectionObserver, which covers scrolling. It cannot see
