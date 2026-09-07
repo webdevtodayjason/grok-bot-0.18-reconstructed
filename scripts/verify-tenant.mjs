@@ -497,14 +497,19 @@ if (RUN_LOGIN) {
 
     // Expired, and for the wrong tenant: both are valid signatures under a key this relay holds or
     // could hold, so they are the forgeries that a signature check alone would let through.
+    //
+    // 401 with the login page in the body, which is what the relay answers to a wrong password on
+    // the same route. The page is what the person sees either way; the status is what tells a
+    // script the sign-in did not happen. No WWW-Authenticate header goes with it, so no browser
+    // pops its own password box over the page.
     const stale = mint({ email: ACCOUNT_EMAIL, tenant: TENANT, host: "gate.titanium.bot", iat: Date.now() - 2000, exp: Date.now() - 1000 }, RELAY_KEY);
     const staleRes = await get(RELAY, `/login?sso=${encodeURIComponent(stale.token)}`);
-    check(staleRes.status === 200 && staleRes.text.includes(COPY.badLink), "an expired link is refused", `status ${staleRes.status}`);
+    check(staleRes.status === 401 && staleRes.text.includes(COPY.badLink), "an expired link is refused", `status ${staleRes.status}`);
     check(sessionCookie(staleRes).length === 0, "and mints nothing");
 
     const foreign = mint({ email: OTHER_EMAIL, tenant: OTHER_TENANT, host: OTHER_HOST }, tenantKey(MASTER, OTHER_TENANT));
     const foreignRes = await get(RELAY, `/login?sso=${encodeURIComponent(foreign.token)}`);
-    check(foreignRes.status === 200 && foreignRes.text.includes(COPY.badLink), "another tenant's link is refused here", `status ${foreignRes.status}`);
+    check(foreignRes.status === 401 && foreignRes.text.includes(COPY.badLink), "another tenant's link is refused here", `status ${foreignRes.status}`);
     check(sessionCookie(foreignRes).length === 0, "and mints nothing");
   }
   {
@@ -515,7 +520,7 @@ if (RUN_LOGIN) {
     }));
     const forged = `v1.${part}.${b64url(createHmac("sha256", "not the key").update(part, "utf8").digest())}`;
     const res = await get(RELAY, `/login?sso=${encodeURIComponent(forged)}`);
-    check(res.status === 200, "a forged sso token gets the login page, not a session", `status ${res.status}`);
+    check(res.status === 401, "a forged sso token gets the login page, not a session", `status ${res.status}`);
     check(res.text.includes(COPY.badLink), `it says "${COPY.badLink}"`);
     check(sessionCookie(res).length === 0, "and mints nothing");
   }
