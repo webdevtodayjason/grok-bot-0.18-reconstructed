@@ -241,7 +241,11 @@ export function filterAttempts(rows, { since = null, outcome = "", limit = 200 }
     if (wanted.length > 0 && String(row.outcome ?? "") !== wanted) continue;
     kept.push(row);
   }
-  kept.sort((a, b) => Date.parse(String(b.at ?? "")) - Date.parse(String(a.at ?? "")));
+  // A row whose timestamp does not parse sorts to the bottom rather than to an arbitrary place: a
+  // NaN in a comparator makes the whole order undefined, and "the newest first" is the one promise
+  // this list makes.
+  const stamp = (row) => { const at = Date.parse(String(row?.at ?? "")); return Number.isFinite(at) ? at : 0; };
+  kept.sort((a, b) => stamp(b) - stamp(a));
   const cap = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.min(Number(limit), 5000) : 200;
   return kept.slice(0, cap);
 }
