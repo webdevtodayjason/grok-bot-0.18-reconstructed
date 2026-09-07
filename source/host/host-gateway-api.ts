@@ -36,7 +36,7 @@ import {
 } from "./extensions/shell-tools/shell-tools-service.js";
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
 import { isSandGroupDir } from "./groups/group-store.js";
-import { resolveSandMaxAgents } from "./sand-box-setting.js";
+import { isSandBoxSettingEnabled, resolveSandMaxAgents } from "./sand-box-setting.js";
 import { sandAgentLimitMessage } from "../shared/agents/agents.js";
 import { createOnboardingService } from "./extensions/onboarding/onboarding-service.js";
 import { createHostBoxUseProbe } from "./extensions/onboarding/onboarding-probe.js";
@@ -1013,7 +1013,11 @@ export function createHostGatewayApi(
     // Guarded, not shipped-open: the live arm of scripts/verify-onboarding.mjs needs a scratch box
     // to look fresh again, and nothing on a real box should be able to reopen a person's first run.
     resetOnboarding: (args: any) => {
-      if (process.env.SAND_TEST_HOOKS !== "1") {
+      // Read the way every other box switch is read: the environment first, then
+      // sand-host-settings.json. An operator with no shell inside the container can only set it
+      // in the file, and that is where the gate sets it, so an env-only guard would have made
+      // this hook unreachable outside a recreate.
+      if (!isSandBoxSettingEnabled("SAND_TEST_HOOKS")) {
         throw new GatewayCommandError(403, { error: "resetOnboarding needs SAND_TEST_HOOKS=1" });
       }
       return onboarding.reset(args ?? {});

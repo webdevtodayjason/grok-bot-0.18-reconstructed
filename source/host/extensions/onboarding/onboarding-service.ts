@@ -146,7 +146,7 @@ export class OnboardingService {
 
   /**
    * Test hook. The live arm of scripts/verify-onboarding.mjs needs a scratch box to look fresh
-   * again; the gateway only routes this when SAND_TEST_HOOKS=1, so a shipped box has no command
+   * again; the gateway only routes this when the box's SAND_TEST_HOOKS switch is on, so a shipped box has no command
    * that can reopen somebody's first run.
    *
    * `{ clear: true }` removes the record instead of resetting it, so the NEXT read runs the
