@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // cp/cli.mjs -- the operator's side of the control plane.
 //
+//   node cp/cli.mjs signup add <email> <company> [--name "Jane Doe"]
 //   node cp/cli.mjs account add <email> <tenant> [--name "Jane Doe"]
 //   node cp/cli.mjs account list
 //   node cp/cli.mjs tenant add <slug> <name> [--dry-run]
 //   node cp/cli.mjs tenant list
-//   node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host>
+//   node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]
 //   node cp/cli.mjs session verify <token>
+//
+// `signup add` is the whole of adding a customer in one line: it makes the account, works the
+// workspace name out of the company name, and builds the box. `account add` is the older two-step
+// way, for adding a second person to a workspace that already exists.
 //
 // It talks to the running service over HTTP. Two things it needs from the environment:
 //
@@ -32,10 +37,14 @@ function flag(args, name) {
   return args[at + 1] ?? "";
 }
 const hasFlag = (args, name) => args.includes(name);
+// Flags that take a value, so their value is not mistaken for a positional argument. A company
+// called "Acme Roofing" is two positionals joined back together by the caller; a --name that was
+// not skipped here would silently become part of it.
+const VALUED_FLAGS = new Set(["--name", "--box", "--state", "--profile"]);
 const positional = (args) => {
   const values = [];
   for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === "--name") { index += 1; continue; }
+    if (VALUED_FLAGS.has(args[index])) { index += 1; continue; }
     if (args[index].startsWith("--")) continue;
     values.push(args[index]);
   }
@@ -103,6 +112,24 @@ async function api(method, pathname, body) {
 
 const pad = (value, width) => String(value ?? "").padEnd(width);
 
+// One line adds a customer: the account, the workspace name from the company name, and the box.
+//
+// The company name is every positional after the email joined back up, so quoting it is optional:
+// `signup add jane@acme.com Acme Roofing` and `signup add jane@acme.com "Acme Roofing"` are the
+// same command. The password is prompted, never an argument, for the reason at the top of this
+// file.
+async function signupAdd(args) {
+  const [email, ...rest] = positional(args);
+  const company = rest.join(" ").trim();
+  if (!email || company.length === 0) die("usage: node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"]");
+  const name = flag(args, "--name") ?? "";
+  const password = await readPassword();
+  const answer = await api("POST", "/v1/signups", { email, password, company, name });
+  out(`added ${answer.account.email} on workspace ${answer.tenant.slug}`);
+  out(`they sign in at ${answer.signIn}`);
+  out(answer.message);
+}
+
 async function accountAdd(args) {
   const [email, tenant] = positional(args);
   if (!email || !tenant) die("usage: node cp/cli.mjs account add <email> <tenant> [--name \"Jane Doe\"]");
@@ -136,28 +163,40 @@ async function tenantAdd(args) {
   }
   out(`created ${answer.tenant.slug}, status ${answer.tenant.status}`);
   out(`console https://${answer.tenant.host}`);
-  if (answer.relayPassword) {
-    out("");
-    out(`relay password: ${answer.relayPassword}`);
-    out(answer.relayPasswordNote);
-  }
+  out(`box ${answer.tenant.boxContainer ?? "not created"}`);
+  out(answer.message);
 }
 
 async function tenantList() {
   const answer = await api("GET", "/v1/tenants");
   if (answer.tenants.length === 0) return out("no tenants yet");
-  out(`${pad("SLUG", 20)}${pad("HOST", 34)}${pad("STATUS", 14)}${pad("LIVE", 14)}SERVICE`);
+  out(`${pad("SLUG", 20)}${pad("BOX", 34)}${pad("STATUS", 14)}${pad("LIVE", 14)}SERVICE`);
   for (const tenant of answer.tenants) {
-    out(`${pad(tenant.slug, 20)}${pad(tenant.host, 34)}${pad(tenant.status, 14)}${pad(tenant.coolify?.status ?? "unknown", 14)}${tenant.coolifyServiceUuid ?? ""}`);
+    out(`${pad(tenant.slug, 20)}${pad(tenant.boxContainer ?? "(none)", 34)}${pad(tenant.status, 14)}${pad(tenant.coolify?.status ?? "unknown", 14)}${tenant.coolifyServiceUuid ?? ""}`);
     if (tenant.lastError) out(`  last error: ${tenant.lastError}`);
   }
+  out("");
+  out(`everybody signs in at https://${answer.tenants[0].host}`);
 }
 
+// Claims an instance that already exists, and tells the registry where its box and its files are so
+// the one relay can serve it. The three optional flags are for an instance that was not built from
+// this repo's compose; the defaults are what Coolify and deploy/r750 already produce.
 async function tenantAdopt(args) {
   const [slug, uuid, host] = positional(args);
-  if (!slug || !uuid || !host) die("usage: node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host>");
-  const answer = await api("POST", `/v1/tenants/${encodeURIComponent(slug)}/adopt`, { coolifyServiceUuid: uuid, host });
+  if (!slug || !uuid || !host) die("usage: node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]");
+  const body = { coolifyServiceUuid: uuid, host };
+  const box = flag(args, "--box");
+  const stateDir = flag(args, "--state");
+  const profileDir = flag(args, "--profile");
+  if (box) body.boxContainer = box;
+  if (stateDir) body.stateDir = stateDir;
+  if (profileDir) body.profileDir = profileDir;
+  const answer = await api("POST", `/v1/tenants/${encodeURIComponent(slug)}/adopt`, body);
   out(`${answer.tenant.slug} now points at Coolify service ${answer.tenant.coolifyServiceUuid} on ${answer.tenant.host}`);
+  out(`box ${answer.boxContainer}`);
+  out(`state ${answer.stateDir}`);
+  out(`profile ${answer.profileDir}, which is where its gateway token is read from`);
   out("nothing on that service was changed");
 }
 
@@ -196,18 +235,21 @@ async function sessionVerify(args) {
 }
 
 const USAGE = [
+  "node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"]",
   "node cp/cli.mjs account add <email> <tenant> [--name \"Jane Doe\"]",
   "node cp/cli.mjs account list",
   "node cp/cli.mjs tenant add <slug> <name> [--dry-run]",
   "node cp/cli.mjs tenant list",
-  "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host>",
+  "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]",
   "node cp/cli.mjs session verify <token>",
   "",
+  "signup add is the one line that adds a customer: account, workspace and box.",
   "CP_ADMIN_TOKEN and CP_PUBLIC_URL come from the environment.",
 ].join("\n");
 
 const [group, action, ...rest] = process.argv.slice(2);
 const commands = {
+  "signup add": signupAdd,
   "account add": accountAdd,
   "account list": accountList,
   "tenant add": tenantAdd,

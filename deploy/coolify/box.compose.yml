@@ -1,0 +1,179 @@
+# A customer's whole instance: one container.
+#
+# TENANT-5. Before this file a tenant was two containers, a box and a relay of its own, on a
+# hostname of its own. Jason's words for why that stopped: "Every time we add somebody new, we're
+# basically duplicating everything. That sounds crazy." So there is now one relay and one console
+# for everybody at console.titanium.bot, and what a customer gets is this: the sandbox their agents
+# live in, plus a directory of their own on the disk. Nothing here is public and nothing here has a
+# hostname.
+#
+# The control plane renders this file per tenant (cp/provision.mjs, renderBoxCompose) and creates it
+# as a Coolify service. Do not hand-edit a rendered copy: the next provisioning run renders it
+# again from this one and the edit goes with it. Edit this file instead.
+#
+# The two Coolify rewrites that shape deploy/coolify/docker-compose.yml shape this file too, and the
+# reasoning is written out in full at the top of that file rather than repeated here. In short:
+# named volumes are renamed and recreated empty, so the data mounts are host PATHS; a bind to a
+# single FILE is read into Coolify's database, so there is not one file bind here; container_name is
+# overwritten with "<service>-<resource uuid>", so nothing may look this container up by a name it
+# chose itself.
+#
+# What IS new here, and it is the whole point of the file:
+#
+#   the shared network   Coolify puts every service on a network of its own, named after that
+#                        service's uuid. One relay serving every customer has to reach every
+#                        customer's box, so every box joins one extra network as well. It is
+#                        declared external and is made once on the server, by hand or by
+#                        deploy/r750/shared-network.sh:
+#
+#                          docker network create titanbot-net
+#
+#                        Jason's own box and the relay join it through their own compose. Measured
+#                        on the R750 2026-09-07: Coolify's parser keeps a service's declared
+#                        networks and merges its own uuid network in beside them, and it leaves a
+#                        top-level network entry alone when the compose already declares it, so
+#                        `external: true` is read as written.
+#
+#   the alias            The relay finds a box by its container name, titanbot-box-<service uuid>,
+#                        which the control plane records in its ledger when it creates the service.
+#                        The alias below is the same box under a name that does not move when a
+#                        service is rebuilt, so a relay holding a stale uuid still lands on the
+#                        right customer rather than on nobody.
+#
+#   no relay, no urls    A tenant has no console of its own, so this file has no relay service and
+#                        the control plane's provisioning has no step that sets a hostname. Every
+#                        customer signs in at console.titanium.bot with their own account, and the
+#                        relay decides which box that session belongs to.
+
+services:
+  # ---- the box ---------------------------------------------------------------------------------
+  # Pinned by digest, not by tag: the :sand-box-latest tag has moved once already, and an image that
+  # quietly differs from the host bundle it is mounted with is a debugging nightmare nobody would
+  # think to look for. pull_policy: missing keeps a redeploy from re-fetching 5.2 GB.
+  titanbot-box:
+    image: public.ecr.aws/k0i0n2g5/cursorenvironments/universal@sha256:d0bb69285340df19d73f106492c7aabb723e8a950809b9f53a884888e2b4c709
+    pull_policy: missing
+    restart: unless-stopped
+    labels:
+      com.titanbot.role: box
+    networks:
+      titanbot-net:
+        aliases:
+          - titanbot-box-TENANT_SLUG
+    environment:
+      # Which customer this box belongs to. Nothing in the image reads it; it is here so a
+      # `docker inspect` on a server with twenty boxes on it answers the question directly.
+      TENANT_ID: TENANT_SLUG
+      SAND_SUPERVISOR_ENABLED: "1"
+      # BOX-4: the box supervisor also "supervises" desktop seats from a registry in /tmp. After any
+      # restart it finds every registered pid dead, respawns all of them while the host rebuilds the
+      # same seats through start-window, and the duplicates crash-loop until its heartbeat stalls
+      # and its wrapper kills its whole process group, host included. The host owns seats; off.
+      SAND_DESKTOP_SUPERVISION_DISABLED: "1"
+      # SHIP-2. One variable arms two updaters and the host reads it twice.
+      # isHostBundleAutoUpdateEnabled() is true unless this is 0/false/no, and forever-box-service
+      # SKIPS the image auto-update whenever the host-bundle one is on, so "1" means: watch for a
+      # new HOST BUNDLE daily and swap it in place, and never recreate this container for a new
+      # image.
+      SAND_BOX_AUTO_UPDATE: "1"
+      # PERSIST-1. The image's /usr/local/bin/start-sand-box runs `host-main.cjs --box-copy-in` at
+      # container start only when this is truthy AND /home/box/sand-host/host-main.cjs exists, which
+      # the entrypoint below guarantees. Without it a recreate comes up with whatever the image
+      # ships and /home/box/cli-config, the agents' CLI logins and git config, is silently lost.
+      SAND_BOX_STORE_COPY_IN: "1"
+      # SHIP-2. Upstream points this at Cursor's S3 bucket; here it points at the one relay, which
+      # serves the same two-file layout out of the runtime directory a ship writes. The token is a
+      # PATH segment because the fetch is the host's own `fetch(url)` inside the box and there is no
+      # hook for a header on it. It is the gateway bearer this box already holds, so it is not a
+      # second secret, and the relay refuses the route on any other value.
+      #
+      # titanbot-relay is the relay's alias on the shared network above. The control plane writes
+      # whatever CP_RELAY_HOST says here, so an install that calls its relay something else says so
+      # once rather than editing this file.
+      SAND_HOST_BUNDLE_S3_BASE_URL: http://titanbot-relay:7777/runtime/${TITANBOT_GATEWAY_TOKEN}
+      SAND_USE_EXISTING_BOX_EXEC_DAEMON: "1"
+      SAND_TREE_SITTER_NODE_DEPS: /home/box/deps
+      NODE_PATH: /home/box/deps
+      SAND_GATEWAY_BIND_HOST: 0.0.0.0
+      SAND_HOST_PORT: "1340"
+      # This customer's own 64-hex gateway token, generated once by the control plane and kept in a
+      # 0600 file in their profile directory. It is a Coolify environment value on this resource, so
+      # it is not in this text and not in the ledger.
+      #
+      # Plain ${VAR}, deliberately not ${VAR:?}. Coolify builds an environment field's NAME from
+      # everything between the braces, so with :? the name would be "TITANBOT_GATEWAY_TOKEN:?",
+      # which is not a legal shell name: the line is dropped and the deploy fails on a required
+      # variable no field in the UI can set. The entrypoint below refuses to start on an empty
+      # token instead, which fails in the same direction with a message that says what to do.
+      SAND_GATEWAY_TOKEN: ${TITANBOT_GATEWAY_TOKEN}
+      SAND_BOX_STORE_SYNC: "1"
+      SAND_BOX_STORE_LOCAL_DIR: /var/lib/sand-box-store
+      SAND_DEV_INFERENCE_TOKEN_FILE: /run/grok-bot/inference.json
+      SAND_BACKEND_URL: https://api2.cursor.sh/
+    volumes:
+      # ---- the four data mounts ----------------------------------------------------------------
+      # On Jason's own instance these four are the docker volumes titanbot-box-{workspace,data,
+      # store,chrome}, addressed by the directory the local driver keeps them in because a NAME
+      # would be renamed by Coolify's parser and a rename means an empty box. A tenant has no such
+      # volumes and never should: the control plane rewrites all four to plain directories under
+      # that customer's own tree, which is what makes one customer's agents unreachable from
+      # another's.
+      - /data/docker/volumes/titanbot-box-workspace/_data:/workspace
+      - /data/docker/volumes/titanbot-box-data/_data:/home/box/sand-data
+      - /data/docker/volumes/titanbot-box-store/_data:/var/lib/sand-box-store
+      - /data/docker/volumes/titanbot-box-chrome/_data:/home/box/chrome-profile
+      # The host bundle and the exec daemon, shared by every customer: one copy of the release on
+      # the server, which is what makes an update one ship rather than one ship per customer.
+      # host-main.cjs is a single file and a single-file bind is the Coolify storage trap, so the
+      # whole runtime directory is mounted somewhere harmless and the entrypoint copies the one file
+      # into place before the box starts.
+      - /home/sem/titanbot/runtime:/opt/titanbot-runtime:ro
+      - /home/sem/titanbot/runtime/box-exec-daemon:/home/box/box-exec-daemon:ro
+      # A placeholder credential, not a real one. box-store-sync throws on the way in when neither
+      # inference file is set; the model that actually answers comes from the endpoint picker.
+      - /home/sem/titanbot/credential:/run/grok-bot:ro
+    # Two lines of shell in front of the image's own entrypoint, /usr/local/bin/start-sand-box.
+    #
+    # The copy is how the shipped host bundle reaches /home/box/sand-host/host-main.cjs without a
+    # single-file bind mount. It runs before the supervisor starts, so the box never executes the
+    # image's stock bundle even briefly.
+    #
+    # The token guard is here because ${TITANBOT_GATEWAY_TOKEN} above cannot be marked required. An
+    # empty token starts a box that answers 401 to the relay and to every gate, which looks like a
+    # networking problem for an hour. This says so in one line and stops.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -z "$$SAND_GATEWAY_TOKEN" ]; then
+          echo "SAND_GATEWAY_TOKEN is empty. Set TITANBOT_GATEWAY_TOKEN on this resource to this" >&2
+          echo "customer's 64-hex token and redeploy." >&2
+          exit 1
+        fi
+        cp /opt/titanbot-runtime/host-main.cjs /home/box/sand-host/host-main.cjs || exit 1
+        # sqlite3, which the image does not ship and learn-from-demonstration needs to read Chrome's
+        # history database. It used to be installed from OUTSIDE, through the docker socket, which
+        # meant a customer's box never got it: a tenant's service has no socket. In the BACKGROUND
+        # and swallowing every failure, on purpose. This is a nice-to-have on a box whose job is to
+        # boot: a slow mirror, no egress, or an image whose user cannot apt-get must cost one line
+        # in the log and never a box that will not start.
+        {
+          command -v sqlite3 >/dev/null 2>&1 \
+            || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq sqlite3; } >/dev/null 2>&1 \
+            || echo "sqlite3 could not be installed here; the learn-from-demonstration URL step will not work" >&2
+        } &
+        exec /usr/local/bin/start-sand-box
+
+# The one network every box and the one relay share, made once on the server and never by a deploy.
+# external: true is what says "this already exists, do not create it and do not rename it": a
+# network Coolify made for this stack would be this customer's alone, and the relay would not be on
+# it. Coolify still attaches its own per-service network beside this one, which is fine and is where
+# its proxy would look if this service ever had a hostname. It does not.
+networks:
+  titanbot-net:
+    external: true
+    name: titanbot-net
+
+# No top-level volumes key and no ports. Anything named under volumes would be renamed to
+# "{service-uuid}_{name}" and created empty; a published port would put a customer's box on a server
+# interface with nothing in front of it.

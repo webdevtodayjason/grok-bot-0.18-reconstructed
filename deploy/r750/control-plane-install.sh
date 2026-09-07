@@ -2,7 +2,7 @@
 # control-plane-install.sh -- the part of the control plane deploy that has to happen ON THE R750.
 #
 # Two things live on the server and nowhere else: the directory every tenant is written into, and
-# the image Coolify starts. This script makes both, generates the two secrets once, and then stops.
+# the image Coolify starts. This script makes both, generates the three secrets once, and then stops.
 # It creates no Coolify object at all. deploy/r750/control-plane-coolify.mjs does that half, from
 # the Mac, and docs/TENANCY.md section 5 runs the two in order.
 #
@@ -72,9 +72,9 @@ fi
 command -v sudo >/dev/null || die "sudo is not on PATH (needed once, to make $TENANT_ROOT)"
 command -v openssl >/dev/null || die "openssl is not on PATH (needed to generate the two secrets)"
 
-# The build context is $ROOT and the Dockerfile copies four things out of it. Fail here, by name,
+# The build context is $ROOT and the Dockerfile copies several things out of it. Fail here, by name,
 # rather than after a build that ends in a COPY error nobody can read.
-for needed in cp/Dockerfile cp/server.mjs ui/auth.mjs ui/set-password.mjs deploy/coolify/docker-compose.yml; do
+for needed in cp/Dockerfile cp/server.mjs ui/auth.mjs ui/set-password.mjs deploy/coolify/docker-compose.yml deploy/coolify/box.compose.yml; do
   [ -f "$ROOT/$needed" ] || die "$ROOT/$needed is missing -- run deploy/r750/sync.sh from the Mac"
 done
 say "build context $ROOT has cp/, ui/auth.mjs, ui/set-password.mjs and the tenant compose template"
@@ -99,7 +99,7 @@ run docker build -t "$IMAGE" -f "$ROOT/cp/Dockerfile" \
   --build-arg "UID=$UID_WANT" --build-arg "GID=$GID_WANT" "$ROOT"
 say "built $IMAGE running as $UID_WANT:$GID_WANT"
 
-step "the two secrets"
+step "the three secrets"
 # Generated once, here, and read back by control-plane-coolify.mjs over ssh. They are never printed
 # by this script and never leave this file except into Coolify's own environment store.
 #
@@ -108,18 +108,22 @@ step "the two secrets"
 #                      given a new derived key in the same pass, so it is generated once and left
 #                      alone.
 #   CP_ADMIN_TOKEN     the operator bearer for the admin routes. Not a customer credential.
+#   CP_RELAY_TOKEN     the console relay's own bearer, and the only thing that opens
+#                      GET /v1/relay/tenants. That route hands the relay every customer's gateway
+#                      token, so this is not the admin token and the admin token does not open it.
+#                      The same value goes on the relay: one value, two places.
 if [ "$DRY" = 1 ]; then
   if [ -f "$CP_ENV" ]; then
     say "would keep the existing $CP_ENV and add only the keys it is missing"
   else
-    say "would create $CP_ENV at mode 0600 with CP_SESSION_SECRET and CP_ADMIN_TOKEN"
+    say "would create $CP_ENV at mode 0600 with CP_SESSION_SECRET, CP_ADMIN_TOKEN and CP_RELAY_TOKEN"
   fi
 else
   # umask before the file exists, so it is never readable by anyone else for even an instant.
   ( umask 077; : >> "$CP_ENV" )
   chmod 600 "$CP_ENV"
   added=""
-  for pair in "CP_SESSION_SECRET:32" "CP_ADMIN_TOKEN:24"; do
+  for pair in "CP_SESSION_SECRET:32" "CP_ADMIN_TOKEN:24" "CP_RELAY_TOKEN:32"; do
     key="${pair%%:*}"
     bytes="${pair##*:}"
     if grep -q "^$key=" "$CP_ENV"; then
@@ -141,7 +145,7 @@ say "secrets      $CP_ENV (mode 0600, values not printed anywhere)"
 printf '\nNext, from the Mac, in this order:\n\n'
 cat <<'NEXT'
   1. Create or update the Coolify service, set its environment, give it its address and start it.
-     It reads the two secrets out of cp.env over ssh and the Coolify pair out of your own shell:
+     It reads the secrets out of cp.env over ssh and the Coolify pair out of your own shell:
 
        node deploy/r750/control-plane-coolify.mjs --dry-run     # read the plan first
        node deploy/r750/control-plane-coolify.mjs

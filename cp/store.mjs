@@ -130,6 +130,14 @@ CREATE TABLE IF NOT EXISTS tenants (
   coolify_service_uuid  TEXT,
   owner_email           TEXT,
   last_error            TEXT,
+  -- TENANT-5. The container the relay talks to for this customer, and whether it has ever
+  -- answered. Coolify names a service's containers "<compose service>-<resource uuid>", so the
+  -- name is knowable the moment the service exists, but it is WRITTEN DOWN rather than rebuilt at
+  -- read time: a re-provision mints a new uuid, and a relay resolving a box by rebuilding a name
+  -- from a stale row would land on a container that is not this customer's. box_ready is set when
+  -- provisioning saw the box answer, so a console can say "still starting" instead of "broken".
+  box_container         TEXT,
+  box_ready             INTEGER NOT NULL DEFAULT 0,
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL
 );
@@ -173,9 +181,22 @@ const tenantRow = (row) => (row == null ? null : {
   coolifyServiceUuid: row.coolify_service_uuid ?? null,
   ownerEmail: row.owner_email ?? null,
   lastError: row.last_error ?? null,
+  boxContainer: row.box_container ?? null,
+  boxReady: Number(row.box_ready ?? 0) === 1,
   createdAt: Number(row.created_at),
   updatedAt: Number(row.updated_at),
 });
+
+// The columns added after the first release, applied to a database that already exists.
+//
+// CREATE TABLE IF NOT EXISTS does nothing at all to a table that is already there, so a schema
+// change lands on a fresh install and nowhere else, and the symptom on the R750 would be every
+// tenant answering with no box. Each one is tried on its own and a duplicate-column error is the
+// expected answer on the second boot, not a failure worth stopping for.
+const TENANT_MIGRATIONS = [
+  "ALTER TABLE tenants ADD COLUMN box_container TEXT",
+  "ALTER TABLE tenants ADD COLUMN box_ready INTEGER NOT NULL DEFAULT 0",
+];
 
 export function openStore(options = {}) {
   const dataDir = options.dataDir ?? ".";
@@ -189,6 +210,14 @@ export function openStore(options = {}) {
   if (file !== ":memory:") { try { db.exec("PRAGMA journal_mode = WAL"); } catch { /* memory databases stay in their own mode */ } }
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(SCHEMA);
+  for (const migration of TENANT_MIGRATIONS) {
+    try { db.exec(migration); }
+    catch (error) {
+      // "duplicate column name" is this migration having already run, which is every boot after
+      // the first. Anything else is a real problem and is worth the throw.
+      if (!/duplicate column name/i.test(String(error?.message ?? ""))) throw error;
+    }
+  }
   if (file !== ":memory:") {
     // writeFileSync-style modes only apply on create, and sqlite creates the file itself, so this
     // is the line that makes the mode true after an upgrade of a file that was once 0644. The two
@@ -207,7 +236,7 @@ export function openStore(options = {}) {
   const updateAccountPassword = statement("UPDATE accounts SET password_json = ?, updated_at = ? WHERE id = ?");
   const countAccountsRow = statement("SELECT COUNT(*) AS n FROM accounts");
 
-  const insertTenant = statement("INSERT INTO tenants (slug, name, host, status, coolify_service_uuid, owner_email, last_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const insertTenant = statement("INSERT INTO tenants (slug, name, host, status, coolify_service_uuid, owner_email, last_error, box_container, box_ready, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)");
   const selectTenant = statement("SELECT * FROM tenants WHERE slug = ?");
   const selectTenants = statement("SELECT * FROM tenants ORDER BY created_at, slug");
   const deleteTenantRow = statement("DELETE FROM tenants WHERE slug = ?");
@@ -303,10 +332,10 @@ export function openStore(options = {}) {
 
     // ---- tenants -----------------------------------------------------------------------------
 
-    createTenant({ slug, name = "", host = "", status = "provisioning", ownerEmail = null, coolifyServiceUuid = null }) {
+    createTenant({ slug, name = "", host = "", status = "provisioning", ownerEmail = null, coolifyServiceUuid = null, boxContainer = null }) {
       const at = now();
       try {
-        insertTenant.run(String(slug), String(name ?? ""), String(host ?? ""), String(status), coolifyServiceUuid, ownerEmail, null, at, at);
+        insertTenant.run(String(slug), String(name ?? ""), String(host ?? ""), String(status), coolifyServiceUuid, ownerEmail, null, boxContainer, at, at);
       } catch (error) {
         if (String(error?.message ?? "").includes("UNIQUE") || String(error?.message ?? "").includes("PRIMARY KEY")) {
           const conflict = new Error("that tenant already exists");
@@ -330,6 +359,7 @@ export function openStore(options = {}) {
       const columns = {
         name: "name", host: "host", status: "status",
         coolifyServiceUuid: "coolify_service_uuid", ownerEmail: "owner_email", lastError: "last_error",
+        boxContainer: "box_container",
       };
       const sets = [];
       const values = [];
@@ -338,6 +368,8 @@ export function openStore(options = {}) {
         sets.push(`${column} = ?`);
         values.push(patch[key] === null || patch[key] === undefined ? null : String(patch[key]));
       }
+      // A boolean, so it goes in as 0 or 1 rather than through the String() the text columns take.
+      if (Object.hasOwn(patch, "boxReady")) { sets.push("box_ready = ?"); values.push(patch.boxReady ? 1 : 0); }
       sets.push("updated_at = ?");
       values.push(now());
       values.push(String(slug));

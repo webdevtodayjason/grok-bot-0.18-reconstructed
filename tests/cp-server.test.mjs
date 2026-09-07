@@ -6,7 +6,6 @@ import test from "node:test";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { readAuthFile } from "../ui/auth.mjs";
 import { tenantPaths } from "../cp/provision.mjs";
 import { CP_VERSION } from "../cp/server.mjs";
 import { LOCKOUT_MAX_FAILURES } from "../cp/store.mjs";
@@ -301,28 +300,36 @@ test("a dry run over the API answers with the plan and leaves no tenant behind",
     const answer = await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme Roofing", dryRun: true });
     assert.equal(answer.status, 200);
     assert.equal(answer.body.dryRun, true);
-    assert.equal(answer.body.host, "acme.titanium.bot");
-    assert.deepEqual(answer.body.plan.steps.map((step) => step.name), ["directories", "secrets", "compose", "service", "envs", "urls", "start"]);
+    // The one console everybody signs in at, not a hostname of this tenant's own.
+    assert.equal(answer.body.host, "console.titanium.bot");
+    assert.deepEqual(answer.body.plan.steps.map((step) => step.name), ["directories", "secrets", "compose", "service", "envs", "start", "ready"]);
     assert.deepEqual(coolify.routes(), []);
     assert.equal(plane.store.countTenants(), 0, "a rehearsal that left half a tenant would be the opposite of a rehearsal");
     assert.equal((await plane.admin("GET", "/v1/tenants/acme")).status, 404);
   }, { withCoolify: true });
 });
 
-test("creating a tenant provisions it and hands the relay password back once", async () => {
+test("creating a tenant builds one box and hands back no password at all", async () => {
   await withPlane(async (plane, coolify) => {
     const answer = await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme Roofing", ownerEmail: "owner@example.com" });
     assert.equal(answer.status, 201, answer.text);
     assert.equal(answer.body.tenant.slug, "acme");
-    assert.equal(answer.body.tenant.host, "acme.titanium.bot");
+    // The one console. No tenant is given a hostname of its own any more.
+    assert.equal(answer.body.tenant.host, "console.titanium.bot");
     assert.match(answer.body.tenant.coolifyServiceUuid, /^svc-/);
-    assert.ok(answer.body.relayPassword.length >= 32);
-    assert.match(answer.body.relayPasswordNote, /Write this down now/);
+    assert.equal(answer.body.tenant.boxContainer, `titanbot-box-${answer.body.tenant.coolifyServiceUuid}`);
+    assert.equal(answer.body.tenant.boxReady, true);
+    assert.match(answer.body.message, /up and answering/);
+    // There used to be a generated relay password in this answer, for a login page each tenant had
+    // of its own. There is one console, so that password opened nothing, and a credential that
+    // opens nothing is worse than none.
+    assert.equal(answer.text.toLowerCase().includes("password"), false);
     assert.deepEqual(coolify.routes(), [
-      // The two PATCHes are Coolify's 409 on a field it made itself from the compose's ${VAR}.
+      // The PATCH is Coolify's 409 on a field it made itself from the compose's ${VAR}. One env,
+      // no urls PATCH, and the two reads at the end are the wait for the box.
       "POST /services", "POST /services/{uuid}/envs", "PATCH /services/{uuid}/envs",
-      "POST /services/{uuid}/envs", "PATCH /services/{uuid}/envs",
-      "PATCH /services/{uuid}", "POST /services/{uuid}/start",
+      "POST /services/{uuid}/start",
+      "GET /services/{uuid}", "GET /services/{uuid}/applications",
     ]);
 
     // And the read-back carries the live Coolify state alongside the ledger row.
@@ -330,9 +337,9 @@ test("creating a tenant provisions it and hands the relay password back once", a
     assert.equal(read.status, 200);
     assert.equal(read.body.tenant.coolify.reachable, true);
     assert.equal(read.body.tenant.coolify.status, "running");
-    // The live read corrects the ledger, which was left at "provisioning" because Coolify queues
-    // the start rather than doing it.
     assert.equal(read.body.tenant.status, "running");
+    // One container, because that is what a tenant is.
+    assert.deepEqual(read.body.tenant.coolify.containers.map((row) => row.name), ["titanbot-box"]);
   }, { withCoolify: true });
 });
 
@@ -404,19 +411,14 @@ test("no route on this service ever answers with a hash, the session secret or t
     // The secrets, read straight out of the store rather than assumed.
     const hashes = plane.store.db.prepare("SELECT password_json FROM accounts").all()
       .flatMap((row) => { const record = JSON.parse(row.password_json); return [record.hash, record.salt, row.password_json]; });
-    // The tenant's real gateway token, read off the disk rather than assumed, plus the relay
-    // password hash and cookie secret that were written beside it.
+    // The tenant's real gateway token, read off the disk rather than assumed.
     const paths = tenantPaths("roofing", plane.config);
     const gatewayToken = JSON.parse(readFileSync(paths.profileTokenFile, "utf8")).token;
-    const relayAuth = readAuthFile(paths.authFile);
     const ledger = JSON.stringify(plane.store.listSteps("roofing").concat(plane.store.listSteps("acme")));
-    for (const secret of [gatewayToken, relayAuth.password.hash, relayAuth.cookieSecret]) {
-      assert.equal(ledger.includes(secret), false, "the provisioning ledger holds no secret");
-    }
+    assert.equal(ledger.includes(gatewayToken), false, "the provisioning ledger holds no secret");
 
     const forbidden = [
-      ...hashes, plane.config.sessionSecret, plane.config.adminToken, coolify.apiKey,
-      gatewayToken, relayAuth.password.hash, relayAuth.cookieSecret,
+      ...hashes, plane.config.sessionSecret, plane.config.adminToken, coolify.apiKey, gatewayToken,
     ];
 
     const sweep = [
@@ -433,6 +435,11 @@ test("no route on this service ever answers with a hash, the session secret or t
       await plane.request("GET", "/v1/nope"),
       await plane.request("POST", "/v1/accounts", { body: {}, token: "wrong-token" }),
       await plane.admin("POST", `/v1/accounts/${account.id}/password`, { password: "another-good-password" }),
+      // TENANT-5 added one route that DOES hand out per-tenant secrets, so it is swept with the
+      // wrong credential and with none. Both answer 401 and neither answers with anything.
+      await plane.request("GET", "/v1/relay/tenants"),
+      await plane.admin("GET", "/v1/relay/tenants"),
+      await plane.request("POST", "/v1/signups", { body: { email: "someone@example.com", password: "a-good-password", company: "Someone" } }),
     ];
 
     for (const answer of sweep) {
@@ -446,28 +453,28 @@ test("no route on this service ever answers with a hash, the session secret or t
 
 test("the retry route re-runs provisioning from the step that failed", async () => {
   await withPlane(async (plane, coolify) => {
-    coolify.failOnce("PATCH /services/{uuid}", 500, "the proxy is busy");
+    coolify.failOnce("POST /services/{uuid}/start", 500, "the proxy is busy");
     const failed = await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme" });
     assert.equal(failed.status, 502);
-    assert.equal(failed.body.step, "urls");
+    assert.equal(failed.body.step, "start");
     assert.equal(failed.body.tenant.status, "failed");
     assert.match(failed.body.tenant.lastError, /the proxy is busy/);
 
     const retried = await plane.admin("POST", "/v1/tenants/acme/provision");
     assert.equal(retried.status, 200, retried.text);
-    assert.deepEqual(retried.body.ran, ["urls", "start"]);
+    assert.deepEqual(retried.body.ran, ["start", "ready"]);
     assert.equal(coolify.callsTo("POST /services").length, 1);
-    assert.equal(retried.body.relayPassword, null);
-    assert.match(retried.body.relayPasswordNote, /set on an earlier run/);
+    assert.equal(retried.body.boxReady, true);
+    assert.match(retried.body.message, /up and answering/);
   }, { withCoolify: true });
 });
 
-test("building a new customer instance is refused while the shared console files are still readable", async () => {
+test("building a new customer workspace is refused when the operator has not turned it on", async () => {
   await withPlane(async (plane, coolify) => {
     const answer = await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme Roofing" });
     assert.equal(answer.status, 409);
     assert.equal(answer.body.error, "new_tenants_off");
-    assert.match(answer.body.message, /provider API keys/);
+    assert.match(answer.body.message, /CP_ALLOW_NEW_TENANTS=1/);
     assert.doesNotMatch(answer.body.message, /—/);
     assert.deepEqual(coolify.routes(), [], "nothing reached Coolify");
     assert.equal(plane.store.countTenants(), 0, "and no half tenant was left in the ledger");

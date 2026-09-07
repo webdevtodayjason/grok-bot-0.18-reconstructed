@@ -11,15 +11,33 @@
 //              nobody else. cp/session.mjs, tenantSessionSecret, is where that lives.
 //   the operator  every route that adds an account, adds a tenant or touches Coolify, behind
 //              CP_ADMIN_TOKEN and a constant-time compare.
+//   the relay  one route, GET /v1/relay/tenants, behind CP_RELAY_TOKEN. See below.
 //
 // Node's http, node:sqlite and node:crypto. No npm dependency, because this thing sits in front of
 // every customer's console and the smallest supply chain is the one with nothing in it.
 //
 // What this service will never do: return a password hash, return CP_SESSION_SECRET, return
 // CP_ADMIN_TOKEN, or print any of the three. There is a test that walks every route and asserts it.
+//
+// TENANT-5 AMENDS THAT RULE, deliberately and in exactly one place, and it is written here rather
+// than buried in the route because a reader has to be able to find it.
+//
+// There is now one relay and one console for every customer, so that relay has to be able to reach
+// every customer's box and verify every customer's session. GET /v1/relay/tenants hands it, per
+// tenant: that tenant's gateway token, and that tenant's DERIVED session key. Both are per tenant
+// and neither is the master. CP_SESSION_SECRET itself still never leaves this process, and holding
+// one tenant's derived key does not walk back to the master or sideways to another tenant's key
+// (ui/session-token.mjs says why: it is an HMAC). The route answers only to CP_RELAY_TOKEN. The
+// admin token does not open it and the relay token opens nothing else, which is the same two-door
+// rule /v1/sessions and /v1/accounts already live by.
+//
+// The route-walking test names this: it asserts 401 with no bearer, 401 with CP_ADMIN_TOKEN, 200
+// with CP_RELAY_TOKEN, and that the master's bytes appear nowhere in the body. Amending a rule with
+// a test that names it is the difference between a decision and a fleet-wide key leak.
 
 import http from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -28,13 +46,17 @@ import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifyS
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import {
   NEW_TENANTS_BLOCKED,
+  boxContainerName,
   configProblems,
+  consoleHost,
   createCoolifyClient,
+  deriveSlug,
   loadConfig,
   provisionTenant,
   readCoolifyState,
-  tenantHost,
+  readGatewayToken,
   tenantDirectory,
+  tenantPaths,
   validateSlug,
 } from "./provision.mjs";
 
@@ -127,6 +149,10 @@ const publicTenant = (tenant) => (tenant == null ? null : {
   status: tenant.status,
   coolifyServiceUuid: tenant.coolifyServiceUuid,
   ownerEmail: tenant.ownerEmail,
+  // The container the one relay talks to for this customer, and whether it has answered. Not a
+  // secret: it is a name on a docker network nobody outside this server can reach.
+  boxContainer: tenant.boxContainer,
+  boxReady: tenant.boxReady,
   createdAt: new Date(tenant.createdAt).toISOString(),
   lastError: tenant.lastError,
 });
@@ -135,6 +161,10 @@ export function createApp(options = {}) {
   const config = options.config ?? loadConfig();
   const store = options.store ?? openStore({ dataDir: config.dataDir });
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  // What talks to a customer's BOX, as opposed to what talks to Coolify. The same fetch in
+  // production; separate here so a test can drive the Coolify half honestly without a docker
+  // network to resolve a box name on. See waitForBox in cp/provision.mjs.
+  const probeImpl = options.probeImpl ?? fetchImpl;
   const now = options.now ?? (() => Date.now());
   const client = createCoolifyClient({ config, fetchImpl });
 
@@ -174,6 +204,92 @@ export function createApp(options = {}) {
     json(response, 401, { error: "unauthorized" });
     return false;
   };
+
+  // The console relay's own door, and the only thing behind it is the registry.
+  //
+  // A twin of requireAdmin on purpose, down to the same constant-time compare, and separate from it
+  // on purpose too: the admin token adds accounts and deletes services, and the relay token reads
+  // every customer's gateway token. Neither should ever be able to do the other's job, so neither
+  // one opens the other's routes. An unset CP_RELAY_TOKEN matches nothing (secretsMatch refuses an
+  // empty expected value), so an install with no relay to feed answers 401 to everybody.
+  const requireRelay = (request, response) => {
+    if (secretsMatch(bearer(request), config.relayToken)) return true;
+    json(response, 401, { error: "unauthorized" });
+    return false;
+  };
+
+  // What the one relay needs to serve one customer's request, per tenant.
+  //
+  // A row is left OUT rather than half answered, and every omission is named in `skipped`, because
+  // a relay that gets a tenant with no token would answer that customer 401 forever with nothing in
+  // any log to say why. What is skipped: a tenant Coolify has not built yet (no service uuid), one
+  // whose token file is not on the disk, and one that is `failed`.
+  //
+  // The operator's own instance is not in here. The relay seeds that entry from its own environment
+  // at boot, which is what keeps Jason's console working when this service is down or absent, and
+  // an adoption row holds neither a token nor directories to seed it from anyway. An adopted row IS
+  // returned when the adoption was given the box container name and the directories to read, which
+  // is what `tenant adopt --box` writes.
+  function relayRegistry() {
+    const tenants = [];
+    const skipped = [];
+    for (const row of store.listTenants()) {
+      const adoption = adoptionDetail(row.slug);
+      const paths = tenantPaths(row.slug, config);
+      const stateDir = adoption.stateDir || paths.state;
+      const profileDir = adoption.profileDir || paths.profile;
+      const box = row.boxContainer || (row.coolifyServiceUuid ? boxContainerName(row.coolifyServiceUuid) : "");
+      if (row.status === "failed") { skipped.push({ slug: row.slug, why: "this workspace did not finish being built" }); continue; }
+      if (!box) { skipped.push({ slug: row.slug, why: "this workspace has no container yet" }); continue; }
+      const token = adoption.profileDir
+        ? readTokenFromDirectory(adoption.profileDir)
+        : readGatewayToken(row.slug, config);
+      if (!token) { skipped.push({ slug: row.slug, why: "this workspace has no gateway token on this server" }); continue; }
+      tenants.push({
+        slug: row.slug,
+        name: row.name,
+        status: row.status,
+        box,
+        gateway: `http://${box}:1340`,
+        token,
+        // This tenant's own derived key, never the master. Holding it signs for this tenant and for
+        // nobody else, and it does not walk back to the master.
+        sessionKey: tenantSessionSecret(config.sessionSecret, row.slug),
+        stateDir,
+        profileDir,
+        boxReady: row.boxReady,
+      });
+    }
+    return { tenants, skipped };
+  }
+
+  // The extra facts an adoption was given, read back out of the ledger step it wrote. An adopted
+  // instance was not built here, so its directories are wherever the operator already had them and
+  // there is nothing in the tenant row that would know.
+  function adoptionDetail(slug) {
+    for (const step of store.listSteps(slug).reverse()) {
+      if (step.step !== "adopt" || step.status !== "ok") continue;
+      try {
+        const parsed = JSON.parse(step.detail || "{}");
+        return {
+          stateDir: typeof parsed.stateDir === "string" ? parsed.stateDir : "",
+          profileDir: typeof parsed.profileDir === "string" ? parsed.profileDir : "",
+        };
+      } catch { return { stateDir: "", profileDir: "" }; }
+    }
+    return { stateDir: "", profileDir: "" };
+  }
+
+  // The same 0600 file cp/provision.mjs writes, read from a directory an adoption named rather than
+  // from this service's own tenant root. Nothing else reads a path a request supplied: the path
+  // here came from the operator through the admin door, not from a customer.
+  function readTokenFromDirectory(directory) {
+    try {
+      const parsed = JSON.parse(readFileSync(path.join(directory, "local-docker-vm.json"), "utf8"));
+      const token = String(parsed?.token ?? "");
+      return token.length > 0 ? token : null;
+    } catch { return null; }
+  }
 
   // A tenant row plus the live Coolify state when we can get it. The ledger is what this service
   // knows; the live read is what the server says right now, and when they disagree about a tenant
@@ -238,7 +354,7 @@ export function createApp(options = {}) {
 
     store.clearLoginFailures({ email, ip });
     store.pruneRevocations(at);
-    const host = tenant.host || tenantHost(tenant.slug, config);
+    const host = tenant.host || consoleHost(config);
     const { token, payload } = mintSessionToken({
       sub: attempt.account.id,
       email: attempt.account.email,
@@ -255,6 +371,97 @@ export function createApp(options = {}) {
       expiresAt: new Date(payload.exp).toISOString(),
       account: { id: attempt.account.id, email: attempt.account.email, name: attempt.account.name },
       tenant: { slug: tenant.slug, host, status: tenant.status },
+    });
+  }
+
+  // TENANT-5, item 5. One request turns a company into a customer: an account, a workspace name
+  // derived from the company name, and the box being built.
+  //
+  // Two doors, and it is the same shape as everything else here. The operator bearer always opens
+  // it, which is how Jason adds somebody from the CLI. Without the operator bearer it is open only
+  // when CP_ALLOW_SIGNUP=1, and then the lockout applies: every attempt from an address that is not
+  // one of our own relays is counted, so a stranger cannot sit there making workspaces. Ten in ten
+  // minutes and that address waits, which is the same counter a wrong password fills.
+  //
+  // The order matters. The account is created first and the workspace is built after, so a build
+  // that fails leaves somebody who can sign in and be told their workspace is still coming, rather
+  // than a workspace nobody owns. Provisioning is idempotent, so finishing it is one retry.
+  async function handleSignup(request, response, body) {
+    const isOperator = secretsMatch(bearer(request), config.adminToken);
+    if (!isOperator && !config.allowSignup) {
+      return json(response, 403, {
+        error: "signup_closed",
+        message: "Sign up is not open on this server. Ask your Titanium Bot contact to add you.",
+      });
+    }
+
+    const email = normalizeEmail(body.email);
+    const password = typeof body.password === "string" ? body.password : "";
+    const company = String(body.company ?? "").trim();
+    if (!email.includes("@") || email.length < 3) return json(response, 400, { error: "bad_request", message: "Send a real email address." });
+    if (password.length < MIN_PASSWORD_LENGTH) return json(response, 400, { error: "bad_request", message: `The password has to be at least ${MIN_PASSWORD_LENGTH} characters.` });
+    if (company.length === 0) return json(response, 400, { error: "bad_request", message: "Send the name of your company." });
+
+    const ip = clientOf(request);
+    const at = now();
+    if (!isOperator) {
+      const viaRelay = isTrustedProxy(ip, relayPeers);
+      store.pruneLoginFailures(at);
+      const lock = store.loginLock({ email, ip, at, countIp: !viaRelay });
+      if (lock.locked) {
+        return json(response, 429, { error: "locked", retryAfter: lock.retryAfter }, { "retry-after": String(lock.retryAfter) });
+      }
+      // Counted whether or not this one works. The counter exists to cap how many workspaces one
+      // address can start, and a successful one costs this server far more than a failed one.
+      store.recordLoginFailure({ email, ip, at });
+    }
+
+    if (store.getAccountByEmail(email) != null) {
+      return json(response, 409, { error: "duplicate_email", message: "That email address already has an account. Sign in instead." });
+    }
+
+    const slug = deriveSlug(company, (candidate) => store.getTenant(candidate) != null);
+    if (slug == null) {
+      return json(response, 400, { error: "bad_company", message: "That company name has no letters or numbers in it, so there is nothing to name the workspace after. Send a different one." });
+    }
+
+    if (!config.allowNewTenants) return json(response, 409, { error: "new_tenants_off", message: NEW_TENANTS_BLOCKED });
+
+    const host = consoleHost(config);
+    store.createTenant({ slug, name: company, host, status: "provisioning", ownerEmail: email });
+    let account;
+    try {
+      account = store.createAccount({ email, password, name: String(body.name ?? ""), tenant: slug });
+    } catch (error) {
+      // The workspace row was written a line ago and nobody owns it, so it comes back out rather
+      // than sitting in the ledger as a name a later customer cannot have.
+      store.deleteTenant(slug);
+      if (error?.code === "duplicate_email") return json(response, 409, { error: "duplicate_email", message: "That email address already has an account. Sign in instead." });
+      throw error;
+    }
+
+    const result = await provisionTenant({ store, config, slug, name: company, fetchImpl, probeImpl });
+    if (!result.ok) {
+      // The account stays. They can sign in, and the operator finishes the build with one retry.
+      return json(response, 502, {
+        error: "provisioning_failed",
+        step: result.step,
+        // No promise this service cannot keep: it sends no mail. What it can honestly say is that
+        // the account works and the workspace is not finished, and that signing in again later is
+        // the way to find out.
+        message: "Your account is set up and your workspace is not finished yet. You can sign in, and your workspace will be there once it comes up.",
+        detail: result.error,
+        account: publicAccount(account),
+        tenant: publicTenant(store.getTenant(slug)),
+      });
+    }
+
+    return json(response, 201, {
+      account: publicAccount(account),
+      tenant: publicTenant(result.tenant),
+      signIn: `https://${host}`,
+      boxReady: result.boxReady,
+      message: result.boxNote,
     });
   }
 
@@ -299,6 +506,22 @@ export function createApp(options = {}) {
     // ---- sessions ----------------------------------------------------------------------------
     if (segments[1] === "sessions" && segments.length === 2 && method === "POST") {
       return handleSessionCreate(request, response, body);
+    }
+
+    // ---- sign up -----------------------------------------------------------------------------
+    if (segments[1] === "signups" && segments.length === 2 && method === "POST") {
+      return handleSignup(request, response, body);
+    }
+
+    // ---- the console relay's registry ----------------------------------------------------------
+    // Before the operator block below, so requireAdmin never sees it and the admin token never
+    // opens it. See the amendment at the top of this file: this is the one route that answers with
+    // per-tenant gateway tokens and per-tenant derived session keys, and it answers to one
+    // credential that opens nothing else.
+    if (segments[1] === "relay" && segments[2] === "tenants" && segments.length === 3) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      return json(response, 200, relayRegistry());
     }
 
     if (segments[1] === "sessions" && segments[2] === "current" && segments.length === 3) {
@@ -349,7 +572,7 @@ export function createApp(options = {}) {
           // The tenant's real hostname, not one rebuilt from the name. An adopted tenant answers
           // somewhere else entirely: tenant "titanium" is console.titanium.bot, and telling the
           // operator to send their customer to titanium.titanium.bot would be a broken link.
-          return json(response, 201, { account: publicAccount(account), tenant: { slug: row.slug, host: row.host || tenantHost(row.slug, config) } });
+          return json(response, 201, { account: publicAccount(account), tenant: { slug: row.slug, host: row.host || consoleHost(config) } });
         } catch (error) {
           if (error?.code === "duplicate_email") return json(response, 409, { error: "duplicate_email", message: "That email address already has an account." });
           throw error;
@@ -397,20 +620,20 @@ export function createApp(options = {}) {
           // The plan itself is recorded, which is what makes it reviewable afterwards.
           const result = await provisionTenant({ store, config, slug, name, dryRun: true, fetchImpl });
           if (!result.ok) return json(response, 500, { error: "render_failed", message: result.error, plan: result.plan });
-          return json(response, 200, { dryRun: true, slug, host: tenantHost(slug, config), plan: result.plan, composeSha256: result.composeSha256 });
+          return json(response, 200, { dryRun: true, slug, host: consoleHost(config), plan: result.plan, composeSha256: result.composeSha256 });
         }
 
         if (!config.allowNewTenants) return json(response, 409, { error: "new_tenants_off", message: NEW_TENANTS_BLOCKED });
 
-        store.createTenant({ slug, name, host: tenantHost(slug, config), status: "provisioning", ownerEmail });
-        const result = await provisionTenant({ store, config, slug, name, fetchImpl });
+        store.createTenant({ slug, name, host: consoleHost(config), status: "provisioning", ownerEmail });
+        const result = await provisionTenant({ store, config, slug, name, fetchImpl, probeImpl });
         if (!result.ok) {
           return json(response, 502, { error: "provisioning_failed", step: result.step, message: result.error, tenant: publicTenant(store.getTenant(slug)) });
         }
         return json(response, 201, {
           tenant: publicTenant(result.tenant),
-          relayPassword: result.relayPassword,
-          relayPasswordNote: result.relayPasswordNote,
+          boxReady: result.boxReady,
+          message: result.boxNote,
         });
       }
 
@@ -466,12 +689,30 @@ export function createApp(options = {}) {
         if (!/^[a-z0-9-]{3,32}$/.test(value) || value.startsWith("-") || value.endsWith("-")) {
           return json(response, 400, { error: "bad_slug", message: "A tenant name is 3 to 32 lowercase letters, numbers and dashes, and cannot start or end with a dash." });
         }
+        // TENANT-5. What an adoption is FOR now, beyond recording that the instance exists: it is
+        // how tenant "titanium", Jason's own instance, gets into the relay's registry without
+        // anything being typed twice.
+        //
+        // The box container name defaults to the one Coolify gives it, which is the compose service
+        // name and the resource uuid. That is right for an instance built from this repo's own
+        // compose and can be overridden for one that is not. The two directories default to the
+        // release root, which is where an operator's own state and profile already are; the token
+        // is read out of profileDir/local-docker-vm.json when the registry is asked for, never
+        // copied into the ledger.
+        //
+        // The relay does not depend on any of this to serve Jason: it seeds its own entry from its
+        // own environment at boot, so a control plane that is down cannot take his console with it.
+        // This is what makes the row consistent with the rest of the fleet, and what would serve a
+        // second adopted instance.
+        const boxContainer = String(body.boxContainer ?? "").trim() || boxContainerName(uuid);
+        const stateDir = String(body.stateDir ?? "").trim() || path.join(config.releaseRoot, "state");
+        const profileDir = String(body.profileDir ?? "").trim() || path.join(config.releaseRoot, "profile");
         const existing = store.getTenant(value);
         const tenant = existing == null
-          ? store.createTenant({ slug: value, name: String(body.name ?? value), host, status: "adopted", coolifyServiceUuid: uuid })
-          : store.updateTenant(value, { host, status: "adopted", coolifyServiceUuid: uuid, lastError: null });
-        store.recordStep({ slug: value, step: "adopt", status: "ok", detail: JSON.stringify({ uuid, host }) });
-        return json(response, 200, { tenant: publicTenant(tenant) });
+          ? store.createTenant({ slug: value, name: String(body.name ?? value), host, status: "adopted", coolifyServiceUuid: uuid, boxContainer })
+          : store.updateTenant(value, { host, status: "adopted", coolifyServiceUuid: uuid, boxContainer, lastError: null });
+        store.recordStep({ slug: value, step: "adopt", status: "ok", detail: JSON.stringify({ uuid, host, boxContainer, stateDir, profileDir }) });
+        return json(response, 200, { tenant: publicTenant(tenant), boxContainer, stateDir, profileDir });
       }
 
       if (segments.length === 4 && segments[3] === "provision" && method === "POST") {
@@ -495,13 +736,13 @@ export function createApp(options = {}) {
         if (!dryRun && !config.allowNewTenants && !row.coolifyServiceUuid) {
           return json(response, 409, { error: "new_tenants_off", message: NEW_TENANTS_BLOCKED });
         }
-        const result = await provisionTenant({ store, config, slug, name: row.name, dryRun, fetchImpl });
+        const result = await provisionTenant({ store, config, slug, name: row.name, dryRun, fetchImpl, probeImpl });
         if (!result.ok) {
           const status = dryRun ? 500 : 502;
           return json(response, status, { error: dryRun ? "render_failed" : "provisioning_failed", step: result.step, message: result.error, plan: result.plan });
         }
         if (dryRun) return json(response, 200, { dryRun: true, slug, plan: result.plan, composeSha256: result.composeSha256 });
-        return json(response, 200, { tenant: publicTenant(result.tenant), ran: result.ran, relayPassword: result.relayPassword, relayPasswordNote: result.relayPasswordNote });
+        return json(response, 200, { tenant: publicTenant(result.tenant), ran: result.ran, boxReady: result.boxReady, message: result.boxNote });
       }
 
       if (segments.length === 4 && ["stop", "start", "restart"].includes(segments[3]) && method === "POST") {

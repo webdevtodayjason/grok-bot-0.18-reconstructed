@@ -14,10 +14,24 @@ import { createApp, createHttpServer } from "../cp/server.mjs";
 import { loadConfig } from "../cp/provision.mjs";
 import { openStore } from "../cp/store.mjs";
 
-// The uuid Coolify hands back for a created service, and the two container rows it reports under
-// /services/{uuid}/applications. Their names are the compose service names, which is what the
-// openapi says sub_service_name matches.
+// The container rows Coolify reports under /services/{uuid}/applications when it cannot work them
+// out from a compose. Their names are the compose service names, which is what the openapi says
+// sub_service_name matches. A service made from a real compose reports the services THAT compose
+// declares instead, read below, because a tenant is one container now and a fake that always
+// answered two would hide it.
 const CONTAINER_NAMES = ["titanbot-box", "titanbot-relay"];
+
+// The service names in a compose, read the way a reader would: the keys one indent inside
+// `services:`, stopping at the next top-level key.
+function composeServiceNames(text) {
+  const decoded = /^[A-Za-z0-9+/=\s]+$/.test(String(text ?? "")) && !String(text).includes(":")
+    ? Buffer.from(String(text), "base64").toString("utf8")
+    : String(text ?? "");
+  const after = decoded.split(/^services:$/m)[1];
+  if (after === undefined) return [];
+  const block = after.split(/^\S/m)[0];
+  return [...block.matchAll(/^ {2}(\S+):$/gm)].map((match) => match[1]);
+}
 
 function normalizePath(pathname) {
   return pathname
@@ -96,7 +110,9 @@ export async function startFakeCoolify(options = {}) {
       }
       if (route === "GET /services/{uuid}/applications") {
         const status = service.started ? "running (healthy)" : "exited (0)";
-        return send(200, CONTAINER_NAMES.map((name) => ({ uuid: `${service.uuid}-${name}`, name, status, fqdn: service.urls[0]?.url ?? null })));
+        const names = composeServiceNames(service.docker_compose_raw);
+        const rows = names.length > 0 ? names : CONTAINER_NAMES;
+        return send(200, rows.map((name) => ({ uuid: `${service.uuid}-${name}`, name, status, fqdn: service.urls[0]?.url ?? null })));
       }
       if (route === "POST /services/{uuid}/envs") {
         // Coolify's own words and status for a key that is already there.
@@ -117,7 +133,10 @@ export async function startFakeCoolify(options = {}) {
         if (typeof body?.docker_compose_raw === "string") service.docker_compose_raw = body.docker_compose_raw;
         return send(200, { uuid: service.uuid, domains: service.urls.map((entry) => entry.url) });
       }
-      if (route === "POST /services/{uuid}/start") { service.started = true; return send(200, { message: "Service starting request queued." }); }
+      // stayStopped is a server whose containers do not come up: Coolify queues the start and
+      // answers exactly the same, and the containers are still exited a minute later because the
+      // image is 5.2 GB and this host has never pulled it. It is what the readiness wait is for.
+      if (route === "POST /services/{uuid}/start") { service.started = !api.stayStopped; return send(200, { message: "Service starting request queued." }); }
       if (route === "POST /services/{uuid}/stop") { service.started = false; return send(200, { message: "Service stopping request queued." }); }
       // Coolify's own spelling, kept so a reader of this fake is not surprised by the real one.
       if (route === "POST /services/{uuid}/restart") { service.started = true; return send(200, { message: "Service restaring request queued." }); }
@@ -130,11 +149,13 @@ export async function startFakeCoolify(options = {}) {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
 
-  return {
+  const api = {
     apiKey,
     url: `http://127.0.0.1:${port}`,
     calls,
     services,
+    // Set to true and a start leaves the containers where they were. See the start route.
+    stayStopped: false,
     routes: () => calls.map((call) => call.route),
     callsTo: (route) => calls.filter((call) => call.route === route),
     failOnce(route, status = 500, message = "Coolify said no") {
@@ -144,6 +165,7 @@ export async function startFakeCoolify(options = {}) {
     },
     async close() { await new Promise((resolve) => server.close(resolve)); },
   };
+  return api;
 }
 
 // A control plane on a temporary everything. Returns the base url, the app (so a test can reach the
@@ -168,11 +190,18 @@ export async function startControlPlane(options = {}) {
     // off (deploy/coolify/control-plane.compose.yml says why), and the test that covers the
     // refusal passes CP_ALLOW_NEW_TENANTS: "0" through options.env.
     CP_ALLOW_NEW_TENANTS: "1",
+    // The wait for a new box, short. A real run waits 90 seconds for an image the server may not
+    // have yet; a test that did would be a test nobody runs.
+    CP_BOX_READY_TIMEOUT_MS: "40",
+    CP_BOX_READY_INTERVAL_MS: "10",
     ...(options.env ?? {}),
   };
   const config = loadConfig(env);
   const store = openStore({ dataDir: config.dataDir });
-  const app = createApp({ config, store });
+  // The box probe always refuses, so the only thing that can answer "is it up" is the fake
+  // Coolify's container status. There is no docker network in a test process, so a real probe of
+  // titanbot-box-svc-1:1340 would be a name lookup that means nothing.
+  const app = createApp({ config, store, probeImpl: () => { throw new Error("there is no docker network in a test"); } });
   const server = createHttpServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;

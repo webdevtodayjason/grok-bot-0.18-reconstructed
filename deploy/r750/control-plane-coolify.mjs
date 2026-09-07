@@ -17,10 +17,11 @@
 //
 // ---- what it needs in the environment ----------------------------------------------------------
 //
-// The two secrets, read off the server into your shell rather than into a file:
+// The three secrets, read off the server into your shell rather than into a file:
 //
 //   export CP_SESSION_SECRET="$(ssh dell-remote "grep '^CP_SESSION_SECRET=' /home/sem/titanbot/cp.env | cut -d= -f2-")"
 //   export CP_ADMIN_TOKEN="$(ssh dell-remote "grep '^CP_ADMIN_TOKEN=' /home/sem/titanbot/cp.env | cut -d= -f2-")"
+//   export CP_RELAY_TOKEN="$(ssh dell-remote "grep '^CP_RELAY_TOKEN=' /home/sem/titanbot/cp.env | cut -d= -f2-")"
 //
 // And the Coolify pair, from wherever you keep them:
 //
@@ -84,8 +85,9 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
     "  node deploy/r750/control-plane-coolify.mjs --dry-run     print the plan, call nothing",
     "  node deploy/r750/control-plane-coolify.mjs               do it",
     "",
-    "Needs in the environment: COOLIFY_URL, COOLIFY_API_KEY, CP_SESSION_SECRET, CP_ADMIN_TOKEN.",
-    "The two secrets are in /home/sem/titanbot/cp.env on the R750, put there by",
+    "Needs in the environment: COOLIFY_URL, COOLIFY_API_KEY, CP_SESSION_SECRET, CP_ADMIN_TOKEN,",
+    "CP_RELAY_TOKEN.",
+    "The three CP_ secrets are in /home/sem/titanbot/cp.env on the R750, put there by",
     "deploy/r750/control-plane-install.sh. The header of this file has the two ssh lines that read",
     "them into your shell without writing them to a file here.",
     "",
@@ -186,7 +188,7 @@ export function resolveEnvironment(entries, env, supplied = {}) {
 
 // Which of them must never reach the terminal. Everything else is a path, a domain, a port or a
 // list of networks, and printing those is how an operator checks the plan before it runs.
-const SECRET_KEYS = new Set(["CP_SESSION_SECRET", "CP_ADMIN_TOKEN", "COOLIFY_API_KEY", "COOLIFY_URL", "CP_COOLIFY_URL"]);
+const SECRET_KEYS = new Set(["CP_SESSION_SECRET", "CP_ADMIN_TOKEN", "CP_RELAY_TOKEN", "COOLIFY_API_KEY", "COOLIFY_URL", "CP_COOLIFY_URL"]);
 
 // ---- talking to Coolify ------------------------------------------------------------------------
 // The same shape as cp/provision.mjs's client, deliberately: same base handling, same bearer in the
