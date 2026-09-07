@@ -52,6 +52,7 @@ import "./managed-seed-skills.test.mjs";
 import "./workflow-injected-body.test.mjs";
 import "./workflow-frontmatter.test.mjs";
 import "./machine-room-teach.test.mjs";
+import "./machine-room-mail.test.mjs";
 import "./window-assignments.test.mjs";
 import "./window-orphan-sweep.test.mjs";
 import "./forever-box-auto-update.test.mjs";

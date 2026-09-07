@@ -102,6 +102,24 @@
     return answer;
   }
 
+  // MAIL-1: the mail settings live on the relay, beside the job bus token, because the relay is
+  // what Resend calls. One helper for both directions so the read and the write cannot drift.
+  // `credentials: "include"` is written out rather than left to fetch's same-origin default: this
+  // pair carries the two secrets, and a request that lost its session has to come back as the
+  // relay's own 401 (which bounces to the login) rather than land anywhere without one.
+  //
+  // Secrets travel one way only. A string sets one, null clears it, and the answer carries
+  // apiKeySet / webhookSecretSet -- never a value -- so nothing here can hold one after the write.
+  async function mailSettingsCall(method, body) {
+    const init = body === undefined
+      ? { method, credentials: "include" }
+      : { method, credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+    const r = await relayFetch("/mail/settings", init);
+    const answer = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(answer?.error ?? `the relay answered ${r.status}`);
+    return answer;
+  }
+
   const AVATARS = [
     "assets/avatar-chief.svg", "assets/avatar-atera.svg", "assets/avatar-marketing.svg",
     "assets/avatar-clientsync.svg", "assets/avatar-coro.svg",
@@ -3076,6 +3094,19 @@
       setJobBusSettings(partial) {
         return call("jobBusSetSettings", partial)
           .catch((error) => { failed(`The job bus settings were not saved: ${error.message}`); throw error; });
+      },
+
+      // ---- MAIL-1: email for the agents (docs/MAIL.md) ----------------------------------------
+      // Relay-local, not a gateway command: the relay is the edge Resend calls, and it holds the
+      // key and the signing secret in its own 0600 file. The card reads everything it draws back
+      // through here, so a value on screen is always the relay's answer and never a click.
+      getMailSettings() { return mailSettingsCall("GET"); },
+      // A partial: only the keys sent are changed. The switch sends `enabled` alone, the Save
+      // sends the three plain settings, and each secret button sends its own key -- a string to
+      // set it, null to clear it -- so no control can overwrite what another one owns.
+      setMailSettings(partial) {
+        return mailSettingsCall("POST", partial)
+          .catch((error) => { failed(`The email settings were not saved: ${error.message}`); throw error; });
       },
 
       startTeaching(workerId) {

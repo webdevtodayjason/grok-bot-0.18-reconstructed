@@ -2261,7 +2261,7 @@
     const updates = typeof adapter.getHostStatus === "function"
       ? `<section class="settings-section" data-updates-panel><h3>Updates</h3><p>The host bundle this box runs, as getHostStatus reports it. The host itself is not updated from this page: updateHostNow would fetch a bundle from S3 over the locally patched one this box runs, so that command is left unwired here on purpose.</p><div class="setting-row"><div><strong>Host version</strong><small data-host-version>Reading from the host…</small></div><span class="status-pill" data-host-update>…</span></div>${boxAgent ? `<div class="setting-row"><div><strong>Update ${escapeHtml(boxAgent.name)}'s computer</strong><small>Moves the box to a fresh instance and keeps files and logins. Two clicks.</small></div><button class="ghost-button" type="button" data-update-box="${escapeHtml(boxAgent.id)}"${typeof adapter.updateBox === "function" ? "" : " disabled"}>Update</button></div><div class="setting-row"><div><strong>Reset ${escapeHtml(boxAgent.name)}'s computer</strong><small>Restores the box from its last snapshot. Recent unsynced work can be lost — prefer Update. Two clicks.</small></div><button class="danger-button" type="button" data-reset-box="${escapeHtml(boxAgent.id)}"${typeof adapter.resetBox === "function" ? "" : " disabled"}>Reset</button></div>` : ""}</section>`
       : "";
-    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Providers", "Providers", "Every endpoint this box could answer through, as the relay reports them. Adopting one stores its credential in the relay's 0600 store on this Mac; switching one is the endpoint row above.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${jobBusSection()}${updates}</div>`;
+    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Providers", "Providers", "Every endpoint this box could answer through, as the relay reports them. Adopting one stores its credential in the relay's 0600 store on this Mac; switching one is the endpoint row above.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${jobBusSection()}${mailSection()}${updates}</div>`;
   }
 
   function openSettingsPanel() {
@@ -2270,6 +2270,7 @@
     fillEndpoints();
     fillHostStatus();
     fillJobBus();
+    fillMail();
   }
 
   // The Updates rows fill from getHostStatus after the panel opens, like the endpoint rows do.
@@ -2549,6 +2550,255 @@
       }).join("");
     }).catch((error) => { body.innerHTML = `<tr><td colspan="6">The host did not answer for the job list: ${escapeHtml(error.message)}</td></tr>`; });
   }
+
+  // ---- MAIL-1: Settings -> Email (docs/MAIL.md) -----------------------------------------------
+  // Every agent gets an address at the operator's own domain, and mail sent to one of those
+  // addresses lands in that agent's conversation. The relay owns the receive side, so this card
+  // reads and writes /mail/settings on the relay with the console session, the way the job bus
+  // card reads its token, and not through a gateway command.
+  //
+  // Two rules, both learned on the job bus card:
+  //   - nothing is painted from a click. Every value on screen is read back from the relay, so
+  //     this card cannot say a key is stored because a button was pressed.
+  //   - the two secrets are write-only. The relay answers apiKeySet and webhookSecretSet and never
+  //     the values themselves, so there is nothing here to leak onto a screen share.
+  const MAIL_SECRETS = {
+    apiKey: {
+      title: "Resend API key",
+      hint: "Your agents send mail with this key, and the relay reads an incoming message with it. Paste it once. It is stored on this machine and never shown again.",
+      placeholder: "re_…",
+    },
+    webhookSecret: {
+      title: "Webhook signing secret",
+      hint: "Resend shows this once, when you create the webhook. It is how this machine knows a message really came from Resend and not from a stranger.",
+      placeholder: "whsec_…",
+    },
+  };
+
+  const mailWhen = (at) => {
+    const ms = Date.parse(String(at ?? ""));
+    return Number.isFinite(ms) ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(ms) : "";
+  };
+
+  // What the switch says. null is a relay that did not answer at all, which is not the same as off.
+  function mailEnabledNote(settings) {
+    if (settings == null) return "The relay did not answer for email, so nothing here is known.";
+    return settings.enabled === true
+      ? "On. Mail sent to one of the addresses below is handed to that agent."
+      : "Off. Mail that arrives is not handed to anyone.";
+  }
+
+  // The two words the operator reads on a secret nobody can read back, and the colour that goes
+  // with each. A pill is painted from the relay's own answer, never from a click.
+  const mailSecretPill = (stored) => (stored
+    ? { text: "set", className: "status-pill success" }
+    : { text: "not set", className: "status-pill attention" });
+
+  // The roster as the relay sees it, so the picker cannot offer an agent the mail side does not
+  // know about. An agent deleted since this was set stays on screen and stays on save: repointing
+  // everyone's mail at whoever happens to be first in the list is not a decision this card makes.
+  function mailAgentOptions(addresses, selected) {
+    const rows = Array.isArray(addresses) ? addresses : [];
+    const chosen = Boolean(selected) && rows.some((row) => row.agentId === selected);
+    const options = rows.map((row) =>
+      `<option value="${escapeHtml(String(row.agentId ?? ""))}"${row.agentId === selected ? " selected" : ""}>${escapeHtml(String(row.name ?? ""))}</option>`);
+    if (selected && !chosen) {
+      options.unshift(`<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} (not an agent on this box)</option>`);
+    }
+    options.unshift(`<option value=""${selected ? "" : " selected"}>No one chosen</option>`);
+    return options.join("");
+  }
+
+  // One row per agent, plus any extra address the operator set by hand in the relay's file. The
+  // extra ones are shown and never edited here, so saving this card cannot drop them.
+  function mailAddressRows(settings) {
+    const rows = Array.isArray(settings?.addresses) ? settings.addresses : [];
+    const named = new Map(rows.map((row) => [row.agentId, row.name]));
+    const domain = String(settings?.domain ?? "").trim();
+    const extra = Object.entries(settings?.routes ?? {});
+    const cells = rows.map((row) => [row.name, row.address])
+      .concat(extra.map(([localpart, agentId]) => [named.get(agentId) ?? agentId, domain ? `${localpart}@${domain}` : localpart]));
+    if (cells.length === 0) return `<tr><td colspan="2">There are no agents on this box yet, so there are no addresses.</td></tr>`;
+    return cells.map(([name, address]) =>
+      `<tr data-mail-address-row><td>${escapeHtml(String(name ?? ""))}</td><td class="mail-address">${escapeHtml(String(address ?? ""))}</td></tr>`).join("");
+  }
+
+  // Where a message went, in the words of somebody who is looking for their email rather than for
+  // a status code. A row the relay could not deliver says so instead of leaving the cell blank.
+  function mailWentTo(row) {
+    if (row?.agentName) return String(row.agentName);
+    const outcome = String(row?.outcome ?? "");
+    if (outcome === "duplicate") return "nobody, it had already arrived once";
+    if (outcome === "no_route") return "nobody, no agent matched that address";
+    if (outcome === "fetch_failed") return "nobody, the message could not be read from Resend";
+    if (outcome === "delivered") return "an agent";
+    return outcome ? outcome.replace(/_/g, " ") : "";
+  }
+
+  function mailRecentRows(recent) {
+    const rows = Array.isArray(recent) ? recent : [];
+    if (rows.length === 0) return `<tr><td colspan="4">No mail has arrived yet.</td></tr>`;
+    return rows.map((row) => {
+      const from = String(row?.from ?? "");
+      const subject = String(row?.subject ?? "").trim() || "(no subject)";
+      return `<tr data-mail-recent-row><td>${escapeHtml(mailWhen(row?.at))}</td><td class="mail-line" title="${escapeHtml(from)}">${escapeHtml(from)}</td>`
+        + `<td class="mail-line" title="${escapeHtml(subject)}">${escapeHtml(subject)}</td><td>${escapeHtml(mailWentTo(row))}</td></tr>`;
+    }).join("");
+  }
+
+  function mailSecretBlock(kind) {
+    const secret = MAIL_SECRETS[kind];
+    return `<div class="mail-block" data-mail-secret="${kind}"><strong>${secret.title} <span class="status-pill" data-mail-secret-pill>…</span></strong>`
+      + `<small class="field-hint">${secret.hint}</small>`
+      + `<div class="mail-copy-row"><input type="password" autocomplete="off" aria-label="${secret.title}" placeholder="${secret.placeholder}" data-mail-secret-input />`
+      + `<button class="ghost-button" type="button" data-mail-action="secret-set">Save</button>`
+      + `<button class="danger-button" type="button" data-mail-action="secret-clear">Clear</button></div></div>`;
+  }
+
+  function mailSection() {
+    if (typeof adapter.getMailSettings !== "function") return "";
+    return `<section class="settings-section" data-mail><h3>Email</h3><p>Give every agent an email address at your own domain. Mail sent to one of those addresses arrives in that agent's conversation, and the agent can write back from the same address. Sending and receiving both run through Resend.</p>`
+      + `<div class="setting-row"><div><strong>Email for your agents</strong><small data-mail-enabled-note>Reading from the relay…</small></div><button class="switch" type="button" data-mail-action="enabled" data-mail-enabled aria-pressed="false"></button></div>`
+      + `<div class="field"><label for="mail-domain">Your domain</label><input id="mail-domain" type="text" autocomplete="off" placeholder="titanium.bot" data-mail-domain /><small class="field-hint">The domain you verified in Resend. Every agent address is built from it.</small></div>`
+      + `<div class="field"><label for="mail-from-name">Sender name</label><input id="mail-from-name" type="text" autocomplete="off" placeholder="Titanium Bot" data-mail-from-name /><small class="field-hint">The name people see on mail your agents send.</small></div>`
+      + `<div class="setting-row"><div><strong>When no agent matches</strong><small>Mail for an address that is not one of the addresses below goes to this agent. Leave it empty and that mail goes to the agent named Titan, or is turned away if you have no agent by that name.</small></div><select aria-label="The agent that gets mail matching no address" data-mail-catch-all><option value="">Reading from the relay…</option></select></div>`
+      + `<div class="form-actions"><button class="primary-button" type="button" data-mail-action="save">Save email settings</button></div>`
+      + `<div class="mail-block"><strong>Where email to your agents arrives</strong><small class="field-hint">Paste this into Resend when you add the webhook for received email. Resend calls it every time a message comes in.</small><div class="mail-copy-row"><input type="text" readonly aria-label="The address Resend sends received mail to" data-mail-webhook-url /><button class="ghost-button" type="button" data-mail-action="copy">Copy</button></div></div>`
+      + mailSecretBlock("apiKey")
+      + mailSecretBlock("webhookSecret")
+      + `<div class="mail-block"><strong>Your agents' addresses</strong><small class="field-hint">One address per agent, built from its name and your domain. Mail to one of these goes straight into that agent's conversation.</small><div class="mail-table-wrap"><table class="mail-table"><thead><tr><th>Agent</th><th>Address</th></tr></thead><tbody data-mail-addresses><tr><td colspan="2">Reading from the relay…</td></tr></tbody></table></div></div>`
+      + `<div class="mail-block"><strong>Mail that arrived</strong><small class="field-hint">The last twenty messages the relay took in. Who sent them and what the subject was, never the message itself.</small><div class="mail-table-wrap"><table class="mail-table"><thead><tr><th>When</th><th>From</th><th>Subject</th><th>Went to</th></tr></thead><tbody data-mail-recent><tr><td colspan="4">Reading from the relay…</td></tr></tbody></table></div></div>`
+      + `</section>`;
+  }
+
+  // Only the switch and its line, so turning email on does not throw away a domain somebody is
+  // part way through typing underneath it.
+  function paintMailEnabled(root, settings) {
+    const note = root.querySelector("[data-mail-enabled-note]");
+    const toggle = root.querySelector("[data-mail-enabled]");
+    if (!note || !toggle) return;
+    toggle.setAttribute("aria-pressed", String(settings?.enabled === true));
+    toggle.disabled = settings == null;
+    note.textContent = mailEnabledNote(settings);
+  }
+
+  function paintMail(root, settings) {
+    paintMailEnabled(root, settings);
+    // A relay that answered nothing is not the same as a box with nothing set up. The fields are
+    // left alone rather than blanked, and the two tables say they are not known instead of
+    // claiming there are no agents and no mail.
+    if (settings == null) {
+      const unknown = (selector, columns) => {
+        const body = root.querySelector(selector);
+        if (body) body.innerHTML = `<tr><td colspan="${columns}">The relay did not answer, so this is not known.</td></tr>`;
+      };
+      unknown("[data-mail-addresses]", 2);
+      unknown("[data-mail-recent]", 4);
+      return;
+    }
+    const field = (selector, value) => { const node = root.querySelector(selector); if (node) node.value = value; };
+    field("[data-mail-domain]", String(settings?.domain ?? ""));
+    field("[data-mail-from-name]", String(settings?.fromName ?? ""));
+    field("[data-mail-webhook-url]", String(settings?.webhookUrl ?? ""));
+    const catchAll = root.querySelector("[data-mail-catch-all]");
+    if (catchAll) catchAll.innerHTML = mailAgentOptions(settings?.addresses, String(settings?.catchAllAgentId ?? ""));
+    for (const kind of Object.keys(MAIL_SECRETS)) {
+      const block = root.querySelector(`[data-mail-secret="${kind}"]`);
+      if (!block) continue;
+      // The relay answers whether it holds one, never what it holds. "set" here is its word.
+      const stored = settings?.[`${kind}Set`] === true;
+      const pill = block.querySelector("[data-mail-secret-pill]");
+      if (pill) { const painted = mailSecretPill(stored); pill.textContent = painted.text; pill.className = painted.className; }
+      const clear = block.querySelector('[data-mail-action="secret-clear"]');
+      if (clear) clear.disabled = !stored;
+    }
+    const addresses = root.querySelector("[data-mail-addresses]");
+    if (addresses) addresses.innerHTML = mailAddressRows(settings);
+    const recent = root.querySelector("[data-mail-recent]");
+    if (recent) recent.innerHTML = mailRecentRows(settings?.recent);
+  }
+
+  function fillMail() {
+    const root = elements.panelContent.querySelector("[data-mail]");
+    if (!root || typeof adapter.getMailSettings !== "function") return;
+    Promise.resolve(adapter.getMailSettings())
+      .then((settings) => paintMail(root, settings))
+      .catch((error) => {
+        const note = root.querySelector("[data-mail-enabled-note]");
+        if (note) note.textContent = `The relay did not answer for email: ${error.message}`;
+      });
+  }
+
+  // The three plain settings, read out of the DOM in one place. The switch, the two secrets and
+  // any extra address the relay holds are all left out on purpose: each is written by its own
+  // control, so pressing Save cannot turn email on or drop a route nobody touched.
+  function mailSettingsFromCard(root) {
+    const value = (selector) => String(root.querySelector(selector)?.value ?? "").trim();
+    return {
+      domain: value("[data-mail-domain]"),
+      fromName: value("[data-mail-from-name]"),
+      catchAllAgentId: value("[data-mail-catch-all]"),
+    };
+  }
+
+  function mailClick(target) {
+    const root = elements.panelContent.querySelector("[data-mail]");
+    if (!root) return;
+    const action = target.getAttribute("data-mail-action");
+    if (action === "copy") {
+      const value = root.querySelector("[data-mail-webhook-url]");
+      const copy = navigator.clipboard?.writeText?.(value.value);
+      Promise.resolve(copy).then(() => showToast("Copied. Paste it into Resend as the webhook address."))
+        .catch(() => { value.focus(); value.select(); showToast("This browser would not let the page write the clipboard. The address is selected, so copy it."); });
+      return;
+    }
+    if (action === "enabled") {
+      // Written on the click, like the job bus switch: a switch with a Save underneath it would
+      // sit there saying something about the mail that is not true yet. What lands on screen
+      // afterwards is the relay's answer read back, not the position it was dragged to.
+      const enabled = target.getAttribute("aria-pressed") !== "true";
+      target.disabled = true;
+      Promise.resolve(adapter.setMailSettings({ enabled }))
+        .then(() => showToast(enabled ? "Email is on." : "Email is off. Mail that arrives is not handed to anyone."))
+        .catch((error) => showToast(`The switch did not move: ${error.message}`))
+        .finally(() => {
+          target.disabled = false;
+          Promise.resolve(adapter.getMailSettings()).then((settings) => paintMailEnabled(root, settings)).catch(() => {});
+        });
+      return;
+    }
+    if (action === "save") {
+      const settings = mailSettingsFromCard(root);
+      target.disabled = true;
+      Promise.resolve(adapter.setMailSettings(settings))
+        .then(() => showToast(settings.domain
+          ? `Email settings saved. Your agents' addresses end in @${settings.domain}.`
+          : "Email settings saved. Fill in your domain to give the agents addresses."))
+        .catch((error) => showToast(`The email settings were not saved: ${error.message}`))
+        .finally(() => { target.disabled = false; fillMail(); });
+      return;
+    }
+    if (action === "secret-set" || action === "secret-clear") {
+      const block = target.closest("[data-mail-secret]");
+      const kind = block?.getAttribute("data-mail-secret");
+      if (!kind || !MAIL_SECRETS[kind]) return;
+      const input = block.querySelector("[data-mail-secret-input]");
+      const clearing = action === "secret-clear";
+      const value = String(input?.value ?? "").trim();
+      if (!clearing && value.length === 0) { showToast(`Paste the ${MAIL_SECRETS[kind].title.toLowerCase()} first, then press Save.`); return; }
+      target.disabled = true;
+      // null clears it on the relay, a string sets it. The value goes straight from the field to
+      // the write and is wiped from the field afterwards; nothing here keeps a copy.
+      Promise.resolve(adapter.setMailSettings({ [kind]: clearing ? null : value }))
+        .then(() => {
+          if (input) input.value = "";
+          showToast(clearing ? `${MAIL_SECRETS[kind].title} cleared.` : `${MAIL_SECRETS[kind].title} saved on this machine.`);
+        })
+        .catch((error) => showToast(`The ${MAIL_SECRETS[kind].title.toLowerCase()} was not saved: ${error.message}`))
+        .finally(() => { target.disabled = false; fillMail(); });
+    }
+  }
+  // ---- end MAIL-1 -----------------------------------------------------------------------------
 
   function addPanel() {
     const options = state.workers.map((worker) => `<option value="${escapeHtml(worker.id)}">${escapeHtml(worker.name)}</option>`).join("");
@@ -3607,6 +3857,8 @@
         .then(() => showToast(`Job bus settings saved: ${Object.keys(settings.workers).length} type(s), ${settings.repos.length} repo(s)`))
         .catch((error) => showToast(`The job bus settings were not saved: ${error.message}`))
         .finally(() => { target.disabled = false; fillJobBus(); });
+    } else if (target.hasAttribute("data-mail-action")) {
+      mailClick(target);
     } else if (target.hasAttribute("data-open-context-browser")) {
       openDesktop("browser");
     } else if (target.dataset.saveRole) {
