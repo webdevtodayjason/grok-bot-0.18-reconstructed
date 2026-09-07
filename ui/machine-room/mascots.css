@@ -80,8 +80,11 @@
 
 /* Needs you: two counterclockwise turns, a rest, and again. The bounce (excited) is kept for a landed
    reply; a person's attention is asked for with a turn, and the face never leaves its ring for it. */
-.titan-avatar[data-titan-attention] > titan-mascot,
-.titan-avatar[data-titan-attention] > img {
+/* Only the roster card turns. The same face sits in the chat header, Agent details, the composer chip
+   and the Now island, and five faces turning at once pulls the eye everywhere instead of to the one
+   place that lists who needs you (Jason, 2026-09-07 04:43). */
+.worker-avatar.titan-avatar[data-titan-attention] > titan-mascot,
+.worker-avatar.titan-avatar[data-titan-attention] > img {
   transform-origin: 50% 46%;
   animation: titan-attention 3.5s cubic-bezier(0.45, 0, 0.2, 1) infinite;
 }
@@ -98,6 +101,6 @@
 .titan-avatar > titan-mascot { transition: width 0.5s ease; }
 .titan-avatar[data-titan-mood="excited"] > titan-mascot { width: calc(100% * var(--titan-fill, 1.7) * 0.8); }
 @media (prefers-reduced-motion: reduce) {
-  .titan-avatar[data-titan-attention] > titan-mascot,
-  .titan-avatar[data-titan-attention] > img { animation: none; }
+  .worker-avatar.titan-avatar[data-titan-attention] > titan-mascot,
+  .worker-avatar.titan-avatar[data-titan-attention] > img { animation: none; }
 }
