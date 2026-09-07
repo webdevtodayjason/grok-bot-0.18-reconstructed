@@ -9,7 +9,7 @@ thirteen agents.
 **Status, 2026-09-07: built and measured.** This document is the contract,
 `scripts/verify-onboarding.mjs` is the gate written to it, and the gate now runs against the
 product rather than against a stand-in. On this Mac, box `grok-bot-local-vm`, host bundle built
-from the gb tip: **50 passed, 0 failed, 1 not measured** across all three arms, and `npm test` 1042
+from the gb tip: **51 passed, 0 failed, 1 not measured** across all three arms, and `npm test` 1072
 passed, 0 failed. What it was before, measured here the day it was written, is worth keeping beside
 that: the box answered `unknown gateway method: getOnboardingState`, held 8 agents and 1 group,
 had no agent named Titan, carried no `userTimeZone` at all, and enforced a limit of 50. Section 9
@@ -390,9 +390,17 @@ answers, and **no modal at all** on a box reporting `done: true`.
 **The box arm** measures the migration rule first, then puts the flag back to first run through
 `resetOnboarding`, checks that the same command is refused with `SAND_TEST_HOOKS` unset, points the
 box at a stub model on the Mac the way `verify-loop.mjs` does, opens the console headless, and walks
-the loop: the modal opens by itself, the console starts Titan's turn with nobody typing, the model is
-offered `save_onboarding_answer`, the typed name lights up the strip and lands in the box's own
-state, **Skip for now** closes the dialog, and the flag reads done with the answer kept.
+the loop: the modal opens by itself, the console starts Titan's turn with nobody typing, **the setup
+recipe's own lines are in the user half of that turn**, the model is offered
+`save_onboarding_answer`, the typed name lights up the strip and lands in the box's own state,
+**Skip for now** closes the dialog, and the flag reads done with the answer kept.
+
+The recipe leg and the tool leg are two legs, under two labels, because they answer two questions.
+The tool is on offer whenever the box's record reads `done: false`, which is true whether or not the
+recipe ever reached the model; the recipe reaches it through `expandWorkflowReferences`, which is a
+silent `continue` when the seed skill is not in that agent's workflow store. A box in that state
+would ship a Titan who is handed "Let's get set up." and nothing else, so the stub keeps the user
+content of the first turn and the gate reads the recipe's own lines out of it.
 
 **The ceiling arm** fakes the roster by moving `SAND_MAX_AGENTS` down to the box's own count rather
 than minting twelve agents. It reads the refusal, counts the number in the sentence against the
@@ -411,14 +419,14 @@ built from the gb tip by `node scripts/build-host.mjs --deploy`:**
 
 | What | What it answered |
 |---|---|
-| `verify-onboarding` all three arms | **50 passed, 0 failed, 1 not measured** |
+| `verify-onboarding` all three arms | **51 passed, 0 failed, 1 not measured** |
 | the fixture arm against the real console | passes. The dialog opens below the top bar at the width of the stage, the chat behind it is dimmed, Titan's face is live at 131px and curious, the five questions are on the strip with none ticked, **Skip for now** is there, and a state reporting `done:true` opens straight into the console with no modal |
-| the box arm | passes. The flag went back to first run through `resetOnboarding`, the modal opened by itself, the console started Titan's turn with nobody typing (2 model calls in 2s), the turn was offered `save_onboarding_answer`, an answer typed in the dialog reached the box's own state, the strip read 1 of 5, **Skip for now** closed it, and the box read `done:true` with the answer kept |
-| the migration rule on a used box | passes. 9 agents on this Mac and it answered `done:true`, `doneReason:"existing-box"`, at the first read. No agent was renamed and no modal opened |
-| the ceiling arm | passes. Default 13 with nothing set; a room does not spend one of the thirteen (bots 10 → 10 while `countAgents` went 10 → 11); at the ceiling `createAgent` and `duplicateAgent` both answer HTTP 409 with "This workspace holds Titan and 9 more bots. Remove one to add another."; neither refusal left a half-made agent; one place under the ceiling the same create goes through; the console shows the same sentence as a toast |
+| the box arm | passes. The flag went back to first run through `resetOnboarding`, the modal opened by itself, the console started Titan's turn with nobody typing (1 model call in 2s), that turn carried 5777 characters of user content holding the recipe's own `# First-time setup` and `Ask the five`, the turn was offered `save_onboarding_answer`, an answer typed in the dialog reached the box's own state, the strip read 1 of 5, **Skip for now** closed it, and the box read `done:true` with `doneReason:"skipped"` and the answer kept |
+| the migration rule on a used box | passes. 8 agents on this Mac and it answered `done:true`, `doneReason:"existing-box"`, at the first read. No agent was renamed and no modal opened |
+| the ceiling arm | passes. Default 13 with nothing set; a room does not spend one of the thirteen (bots 9 → 9 while `countAgents` went 9 → 10); at the ceiling `createAgent` and `duplicateAgent` both answer HTTP 409 with "This workspace holds Titan and 8 more bots. Remove one to add another."; neither refusal left a half-made agent; one place under the ceiling the same create goes through; the console shows the same sentence as a toast |
 | the location answer setting the box's time zone | **still not measured by any arm.** The box arm answers the name only, on purpose, because measuring the zone writes a real setting the scheduler on this Mac reads. The write itself is exercised by the unit tests; whoever wants it proved end to end has to say on which box |
 | the gate itself | **`--self-test` 15 passed, 0 failed.** Kept, because it is what makes the fixture arm's selectors falsifiable |
-| unit tests | `npm test` 1042 passed, 0 failed, including the state, the migration table, the first-agent rule and the cap |
+| unit tests | `npm test` 1072 passed, 0 failed, including the state, the migration table, the first-agent rule, the cap, the two interview tools and the button that stops saying skip |
 
 **Shipped, 2026-09-07, commit `345d601`.** Relay files and the host bundle by sync, then a docker restart of
 Jason's relay container and `updateHostNow` inside his box. No Coolify recreate: a recreate runs the box store's
