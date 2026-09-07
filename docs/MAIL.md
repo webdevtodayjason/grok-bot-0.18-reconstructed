@@ -263,10 +263,13 @@ has neither secret saved, and it was started with `GROK_BOT_MAIL_API_BASE` point
 address, which is the port the stub then listens on. Without `--stub` only the non-mutating legs
 run, so a working relay is never touched.
 
-Last measured 2026-09-07 on this Mac, against a second relay on 127.0.0.1:7799 pointed at the same
-box as the running one: 35 PASS 0 FAIL with `--stub`, 16 PASS 0 FAIL without it. **That run predates
-the refusal rules and the fixed Resend address above**, so the stub legs now need the scratch relay
-started with the environment variable; the numbers will move when it is run again.
+Last measured 2026-09-07 00:30 CDT on this Mac, on the tree with the review fixes in (e477bce): a scratch relay on
+127.0.0.1:7799 started with `GROK_BOT_MAIL_API_BASE=http://127.0.0.1:7809` and its own mail files, pointed at the same
+box as the running relay, answered 35 PASS 1 FAIL with `--stub`. The one failure was the scratch relay itself, not the
+product: it ran on loopback with no password file, so "behind the console login without a credential" saw a 200 where
+a relay with a password answers 401 (the earlier run with a generated password file passed that leg). Every mail leg
+passed: 503 unconfigured, delivered to the first address with its ledger row, forged and stale signatures refused,
+the replay a duplicate, the disabled switch honoured, no secret in the GET, settings restored.
 
 The off-box half is `tests/mail-edge.test.mjs` in `npm test`: the signature and its timestamp
 window, the routing order, the prompt text and the boundary around the part a stranger wrote, the
