@@ -284,9 +284,18 @@ export function parseTrustedProxies(spec) {
 // container name into the address that container reaches us from. A set that could not be
 // refreshed keeps its last value rather than emptying, for the same reason the box-name sweep does.
 export function createBoxPeers({ lookup = null, log = () => {} } = {}) {
+  // Compared as ADDRESSES, never as strings. A dual stack listener reports an IPv4 peer as
+  // "::ffff:192.168.48.6" while docker's resolver answers "192.168.48.6", and a set keyed on the
+  // text would miss on exactly the deployment this exists for. parseAddress already folds the two
+  // spellings onto the same bytes, which is why the trusted ranges match under both.
+  const key = (value) => {
+    const parsed = parseAddress(value);
+    if (parsed == null) return `raw:${String(value ?? "").trim().toLowerCase()}`;
+    return `${parsed.bits}:${Array.from(parsed.bytes).join(".")}`;
+  };
   let peers = new Set();
   return {
-    has(address) { return peers.has(String(address ?? "")); },
+    has(address) { return peers.has(key(address)); },
     size() { return peers.size; },
     all() { return [...peers]; },
     /** names: the container names to resolve. Returns the number of addresses now held. */
@@ -302,8 +311,7 @@ export function createBoxPeers({ lookup = null, log = () => {} } = {}) {
         if (addresses == null) continue;
         asked += 1;
         for (const address of addresses) {
-          const parsed = String(address ?? "").trim().toLowerCase();
-          if (parsed.length > 0) found.add(parsed);
+          if (String(address ?? "").trim().length > 0) found.add(key(address));
         }
       }
       // Nothing resolved at all is "the resolver could not be asked", not "there are no boxes".

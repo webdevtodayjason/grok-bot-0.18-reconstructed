@@ -417,6 +417,10 @@ test("a box address is held untrusted however wide the ranges are", async () => 
   assert.equal(peers.has("192.168.48.6"), true);
   assert.equal(peers.has("fd00::3"), true);
   assert.equal(peers.has("192.168.48.4"), false, "the relay's own address is not a box");
+  // What a dual stack listener reports for the same peer. Compared as text this would miss, and
+  // the box would be trusted as a forwarder on exactly the deployment this set exists for.
+  assert.equal(peers.has("::ffff:192.168.48.6"), true);
+  assert.equal(peers.has("::ffff:192.168.48.4"), false);
 
   // The ranges say yes and the box set says no, which is the decision the relay makes.
   const trusted = parseTrustedProxies("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fd00::/8");
