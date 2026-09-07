@@ -35,6 +35,10 @@
     // Jason's nebula for the product brand (2026-09-06): teal and violet on near-black, the console's own
     // teal reads as part of the picture.
     { id: "titan-nebula", name: "Titan Nebula" },
+    // The Habitat series (Jason, 2026-09-07): alien terrain under the console's own blues and violets.
+    // A `series` groups tiles under one heading in the picker; seasonal sets come the same way, one
+    // line each, with the season in the series name.
+    { id: "habitat-1", name: "Habitat I", series: "Habitat" },
   ].map((b) => ({
     ...b,
     full: b.full ?? `assets/backgrounds/${b.id}.webp`,
@@ -113,12 +117,19 @@
 
   function sectionMarkup() {
     const current = read(CHOICE_KEY, DEFAULT_CHOICE);
-    const swatches = all().map((b) => `
+    const swatch = (b) => `
       <button class="bg-swatch" type="button" data-bg-id="${esc(b.id)}" aria-pressed="${b.id === current}" title="${esc(b.name)}">
         <img src="${esc(b.thumb)}" alt="" loading="lazy" />
         <span>${esc(b.name)}</span>
         ${b.custom ? `<span class="bg-remove" role="button" tabindex="0" data-bg-remove="${esc(b.id)}" title="Remove">×</span>` : ""}
-      </button>`).join("");
+      </button>`;
+    // Tiles with a series sit under their own small heading, after the plain ones and before the
+    // operator's uploads, so a set reads as a set.
+    const plain = all().filter((b) => !b.series);
+    const bySeries = new Map();
+    for (const b of all()) if (b.series) bySeries.set(b.series, [...(bySeries.get(b.series) ?? []), b]);
+    const swatches = plain.map(swatch).join("")
+      + [...bySeries].map(([name, tiles]) => `<p class="field-hint bg-series" style="flex-basis:100%;margin:10px 0 2px">${esc(name)}</p>${tiles.map(swatch).join("")}`).join("");
     return `
       <section class="settings-section" id="bg-section">
         <h3>Background</h3>

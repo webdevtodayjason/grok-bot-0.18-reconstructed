@@ -22,3 +22,6 @@ The prototype does not crop interface elements from the design board. Every cont
   window bar at the header's own height. `favicon.svg` is the same mark as the tab icon.
 - The crew roster itself (names, colours, eye shapes) lives in `docs/design/titan-mascot-kit/agents.json`
   and is mirrored in `ui/machine-room/mascot-crew.js`, which is the file the console reads.
+- `backgrounds/habitat-1.webp` (+ thumb) is Jason's Habitat I (2026-09-07, from `~/Downloads/Habitat-1.png`, 1672x941),
+  the first of the Habitat series; `cwebp -q 84 -resize 1920 0` and `-q 70 -resize 320 0` for the thumb.
+  A series is one field on the entry in `backgrounds.js`; seasonal sets ship the same way.

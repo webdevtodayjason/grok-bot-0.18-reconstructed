@@ -391,7 +391,10 @@ select:focus-visible {
   max-height: calc(100vh - 330px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: 2px;
+  /* The chosen card slides 7px right (and 4px on hover) to say it is the one open. A scrolling box
+     clips at its own edge, so the stack keeps that much room on the right or the card's edge is cut
+     off (Jason, 2026-09-07 08:12). */
+  padding-right: 12px;
 }
 
 .worker-card {
