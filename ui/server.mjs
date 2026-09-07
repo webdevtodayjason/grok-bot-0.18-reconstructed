@@ -43,6 +43,7 @@ import {
   routeJobBus,
 } from "./job-bus-edge.mjs";
 import { createMailEdge } from "./mail-edge.mjs";
+import { NOT_AVAILABLE, createDockerProbe, notAvailable } from "./docker-edge.mjs";
 import { chmod, chown, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
@@ -62,6 +63,18 @@ const PROVIDER_KEYS = ["SAND_OPENAI_COMPATIBLE_BASE_URL", "SAND_OPENAI_COMPATIBL
 const dockerOut = (args) => new Promise((resolve) =>
   execFile("docker", args, { maxBuffer: 8 << 20 }, (err, out) => resolve(err != null && !out ? null : out)));
 
+// TENANT-2. A customer's instance is rendered without /var/run/docker.sock, so every `docker exec`
+// below reaches nothing. One probe decides, asked once at boot and remembered, and the routes that
+// need it say so in plain words instead of answering 200 with a null in every field. See
+// ui/docker-edge.mjs for why an honest refusal beats the silent version.
+const dockerAvailable = createDockerProbe({ execFile });
+// The one refusal shape. 409 rather than 503: nothing is temporarily down, this instance simply
+// does not carry the feature, and a retry will not change that.
+const refuseWithoutDocker = (res, detail) => {
+  res.writeHead(409, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify(notAvailable(detail)));
+};
+
 // Under a compose orchestrator the container is not necessarily called what the compose file calls
 // it: Coolify names a service's container after its own resource id. Every `docker exec` below
 // would then find nothing, and the failure is invisible -- the console loads and the model picker
@@ -69,6 +82,13 @@ const dockerOut = (args) => new Promise((resolve) =>
 // fall back to whatever is running with our own role label. The gateway URL never needs this: a
 // compose network answers the SERVICE name whatever the container is called.
 async function resolveBoxContainer() {
+  // No docker here at all, which is a tenant instance rather than a fault. Say it once in the log
+  // and skip the two lookups, so the boot does not spend two failed spawns proving what the probe
+  // already answered.
+  if (!await dockerAvailable()) {
+    console.log("box  no docker on this relay, so the model picker, the connectors editor and the desktop view say so rather than failing");
+    return;
+  }
   // docker inspect prints "[]" on stdout for a missing container and exits 1, so a non-null
   // answer is not proof the name exists: on the R750 that read the Mac's container name as
   // found and every docker-backed route aimed at nothing (the desktop verdict, the endpoint
@@ -790,6 +810,13 @@ async function handleRuntimeBundle(req, res, url) {
   // version would be composed from, so serving "any sha" would mean serving the same bytes under a
   // name that lies about them.
   if (asked.version !== latest) return fail(res, 404, "not the staged host bundle version");
+  // The version file above is read straight off the mounted runtime directory and needs nothing
+  // else, so it answers on every instance. The tarball genuinely cannot be built here without
+  // docker: the archive's base tree is copied from the box's own /home/box/sand-host so the
+  // supervisor's prune does not delete the parts of the bundle that come from the image (see
+  // ui/host-bundle.mjs). An honest refusal, so the host retries later instead of unpacking a
+  // truncated download. TENANT-2 item 4, and docs/TENANCY.md says the same.
+  if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.hostBundle);
   const mine = bundleCompose.then(() => serveHostBundleTarball(res, latest));
   bundleCompose = mine.catch(() => {});
   try {
@@ -954,6 +981,9 @@ const server = createServer(async (req, res) => {
       const CLASSES = { browser: "box-chrome", terminal: "Xfce4-terminal" };
       const cls = CLASSES[url.searchParams.get("app")];
       if (!cls) return fail(res, 400, "unknown app");
+      // Without docker this answered 200 with present:false and windows:0, which an operator reads
+      // as "the box has no desktop" rather than "this instance has no desktop view". TENANT-2.
+      if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.desktop);
       const surfaceDisplay = /^[1-9][0-9]?$/.test(String(url.searchParams.get("display") ?? ""))
         ? `:${url.searchParams.get("display")}` : ":1";
       const script = `for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${cls}"' && echo present && break; done`;
@@ -1000,6 +1030,10 @@ const server = createServer(async (req, res) => {
       try { app = JSON.parse(await readBody(req))?.app; } catch { app = null; }
       const spec = APPS[app];
       if (!spec) return fail(res, 400, `unknown app: ${app}`);
+      // The launch is detached and cannot report, so with no docker this answered 200 {launched}
+      // for a window that was never going to appear. The console reads this refusal and puts the
+      // sentence in the pane instead of an empty grey frame. TENANT-2.
+      if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.desktop);
       // The display is interpolated into a shell command, so it is validated as a small integer
       // and nothing else. :1 is the shared seat; the host allocates forks from :2 upward.
       const display = /^[1-9][0-9]?$/.test(String(url.searchParams.get("display") ?? ""))
@@ -1069,6 +1103,11 @@ const server = createServer(async (req, res) => {
       } catch { return fail(res, 404, `not found: ${url.pathname}`); }
     }
     if (url.pathname === "/connectors") {
+      // connectors.json lives in the box's sand-data volume, which there is no host path for: the
+      // only way in is `docker exec`. Without docker the GET used to answer 503 "the box could not
+      // be read" on every console load, which reads as an outage. TENANT-2. The POST is refused
+      // below instead of here, after its body is read, so the caller is not left uploading.
+      if (req.method === "GET" && !await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.connectors);
       const sendJson = (value) => {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify(value));
@@ -1077,6 +1116,7 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST") {
         let parsed;
         try { parsed = JSON.parse(await readBody(req)); } catch { return fail(res, 400, "body must be JSON"); }
+        if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.connectors);
         const servers = parsed?.mcpServers;
         if (servers == null || typeof servers !== "object" || Array.isArray(servers)) {
           return fail(res, 400, "expected { mcpServers: { ... } }");
@@ -1156,9 +1196,15 @@ const server = createServer(async (req, res) => {
       return res.end(JSON.stringify({ forgot: id }));
     }
     if (req.method === "GET" && url.pathname === "/endpoints") {
+      // The catalog is a file on this side of the wall and answers everywhere. Which endpoint is
+      // LIVE is only readable through the box, so on an instance with no docker the two docker
+      // legs are skipped and the answer carries a sentence saying the live row is unknown, rather
+      // than a null that reads as "no model is configured". TENANT-2.
+      const hasDocker = await dockerAvailable();
       const [catalog, secrets, envOut] = await Promise.all([
-        readCatalog(), readSecrets(),
-        dockerOut(["inspect", BOX, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]),
+        readCatalog(),
+        hasDocker ? readSecrets() : {},
+        hasDocker ? dockerOut(["inspect", BOX, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]) : null,
       ]);
       const envOf = (key) => (envOut ?? "").split("\n")
         .find((l) => l.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
@@ -1180,7 +1226,9 @@ const server = createServer(async (req, res) => {
       }));
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ endpoints, live, pinned,
-        pinnedBy: pinned ? "container env; recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin" : null }));
+        pinnedBy: pinned ? "container env; recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin" : null,
+        // Present only when it is true, so nothing has to read it on Jason's instance.
+        ...(hasDocker ? {} : { liveNote: NOT_AVAILABLE.liveModel, switchable: false }) }));
     }
     // Save the catalog the operator edits in the browser.
     if (req.method === "POST" && url.pathname === "/endpoints") {
@@ -1199,6 +1247,11 @@ const server = createServer(async (req, res) => {
     // Point the host at one of them. Takes effect on the next message.
     if (req.method === "POST" && url.pathname === "/endpoints/use") {
       const { id } = JSON.parse(await readBody(req) || "{}");
+      // Pointing the host at an endpoint means writing box-secrets.json inside the box, and the
+      // only door to that file is `docker exec`. Refused before anything is chosen or resolved, so
+      // nothing is half done, but after the body is read so the caller is not left uploading into
+      // a closed answer. TENANT-2.
+      if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.endpointsUse);
       const catalog = await readCatalog();
       const chosen = (catalog.endpoints ?? []).find((e) => e.id === id);
       if (chosen == null) return fail(res, 404, `no endpoint named ${id}`);
@@ -1237,6 +1290,13 @@ const server = createServer(async (req, res) => {
       // the same way or it reports on a different machine than the one answering. Since the box
       // was recreated to unpin the endpoint, the env vars are gone and every answer lives in the
       // file -- so reading env alone returned nulls, and every worker was labelled "default".
+      // Both sources are inside the box, so with no docker there is no honest answer here at all.
+      // 200 with nulls and a sentence, not a 409: the console asks for this on every load and a
+      // refusal in that position would be an error badge on a page that is working fine. TENANT-2.
+      if (!await dockerAvailable()) {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        return res.end(JSON.stringify({ model: null, endpoint: null, source: "unknown", note: NOT_AVAILABLE.liveModel }));
+      }
       const fromEnv = await new Promise((resolve) => {
         execFile("docker", ["inspect", BOX, "--format",
           "{{range .Config.Env}}{{println .}}{{end}}"], (err, out) => {

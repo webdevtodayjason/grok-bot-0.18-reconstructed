@@ -1490,7 +1490,13 @@
       if (current) current.textContent = "Switching…";
       fetch("/endpoints/use", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) })
         .then((r) => r.json())
-        .then((answer) => { showToast(`Now answering through ${answer.using ?? id}`); fillEndpoints(); })
+        // A relay that cannot switch models answers {error, detail}. Show the sentence, not the
+        // machine word, and never claim a switch that did not happen. TENANT-2.
+        .then((answer) => {
+          if (answer?.error) { showToast(answer.detail ?? `Could not switch endpoint: ${answer.error}`); fillEndpoints(); return; }
+          showToast(`Now answering through ${answer.using ?? id}`);
+          fillEndpoints();
+        })
         .catch((error) => showToast(`Could not switch endpoint: ${error.message}`));
     };
   }
@@ -2763,8 +2769,17 @@
         elements.desktopWindow.innerHTML = `<div class="desktop-browser" style="display:flex;flex-direction:column;height:100%"><div class="browser-toolbar" style="flex:0 0 auto"><div class="browser-address" data-box-caption>${line}</div></div><div style="flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:#0b0f13"><iframe data-box-vnc src="${escapeHtml(frameUrl)}" title="Live view of the box" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe></div></div>`;
       }
       // Put the app on THAT display, not on the shared one.
+      // TENANT-2: an instance with no docker of its own cannot open a desktop at all, and the
+      // relay says so with a 409 not_available instead of a 200 for a window that was never
+      // coming. Put its sentence in the pane rather than leaving an empty grey frame.
       fetch(`/box/launch?display=${encodeURIComponent(display)}`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ app }),
+      }).then(async (res) => {
+        if (res.status !== 409) return;
+        const body = await res.json().catch(() => null);
+        if (body?.error !== "not_available") return;
+        mountedDesktop = null;
+        elements.desktopWindow.innerHTML = `<div class="empty-state">${escapeHtml(body.detail ?? "The desktop view is not available on this instance yet.")}</div>`;
       }).catch(() => {});
       window.setTimeout(async () => {
         try {

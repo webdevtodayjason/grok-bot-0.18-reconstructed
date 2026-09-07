@@ -569,7 +569,15 @@
   // carries the host's numeric id can be keyed; what it may still be missing is the write itself.
   const CONNECTOR_TOOLS_NO_COMMAND = "Read-only here: this host has no toggleMcpToolDisabled command yet, so a switch would have nowhere to write.";
   const CONNECTOR_CONFIG_NOTE = "Configured on the box in connectors.json. The box runs the process and the host discovers its tools; this page holds no credential in that file and does not show the ones it may carry.";
-  const connectorConfig = () => relayFetch("/connectors").then((r) => r.json()).catch(() => null);
+  // TENANT-2: an instance rendered without the docker socket cannot reach connectors.json at all
+  // and answers 409 {error: "not_available", detail}. Keep the detail so the card says the sentence
+  // written for an owner instead of the generic "could not be read from the box".
+  let connectorsNote = null;
+  const connectorConfig = () => relayFetch("/connectors").then(async (r) => {
+    const body = await r.json();
+    connectorsNote = r.ok ? null : (typeof body?.detail === "string" ? body.detail : null);
+    return r.ok ? body : null;
+  }).catch(() => null);
 
   // CONNECT-4's rule in one place: an env key whose value in the entry is the EMPTY string is a
   // credential the host is waiting for; one that carries a value is configuration and is never
@@ -2886,7 +2894,7 @@
         const envNames = (Array.isArray(spec?.envNames) ? spec.envNames : []).map((n) => String(n).trim()).filter(Boolean);
         // Never a map derived from a read that may have failed: this POST REPLACES the file.
         const held = await readableConnectorServers();
-        if (held == null) return { accepted: false, message: CONNECTORS_UNREADABLE };
+        if (held == null) return { accepted: false, message: connectorsNote ?? CONNECTORS_UNREADABLE };
         const servers = { ...held };
         // A duplicate name is still refused for anything typed by hand. `replace` is set only by a
         // preset that owns its name (the TinyFish one), where refusing would leave the OAuth entry
@@ -2901,7 +2909,7 @@
       },
       async removeConnector(name) {
         const held = await readableConnectorServers();
-        if (held == null) return { accepted: false, message: CONNECTORS_UNREADABLE };
+        if (held == null) return { accepted: false, message: connectorsNote ?? CONNECTORS_UNREADABLE };
         const servers = { ...held };
         if (!servers[name]) return { accepted: false, message: `${name} is not in connectors.json.` };
         delete servers[name];
@@ -2911,8 +2919,11 @@
         const res = await relayFetch("/connectors", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mcpServers: servers }) });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
-          failed(`connectors.json was not written: ${body?.error ?? res.status}`);
-          return { accepted: false, message: `connectors.json was not written: ${body?.error ?? res.status}` };
+          // TENANT-2: an instance with no docker of its own answers {error: "not_available",
+          // detail}. Show the sentence rather than the machine word.
+          const message = body?.detail ?? `connectors.json was not written: ${body?.error ?? res.status}`;
+          failed(message);
+          return { accepted: false, message };
         }
         // The host re-reads connectors.json and relaunches its stdio servers on refreshMcp
         // (host-gateway-api.ts routes a bare call to the mcp extension's management.restart), so
@@ -3027,7 +3038,9 @@
         relayFetch("/endpoints/use", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: modelId }) })
           .then(async (res) => {
             const body = await res.json().catch(() => ({}));
-            if (!res.ok) { failed(`Switching to ${chosen.name} failed: ${body?.error ?? res.status}`); return; }
+            // A relay that cannot reach its box answers {error: "not_available", detail}. The
+            // detail is the sentence written for an owner; the error word is for us. TENANT-2.
+            if (!res.ok) { failed(body?.detail ?? `Switching to ${chosen.name} failed: ${body?.error ?? res.status}`); return; }
             await refreshSubscriptions();
           })
           .catch((error) => failed(`Switching to ${chosen.name} failed: ${error.message}`));
