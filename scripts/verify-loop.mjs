@@ -322,11 +322,22 @@ try {
     // Not a box hand-off and not an auto-review approval: the tab id says the turn classifier is
     // what raised it, which is the whole point of this arm.
     check(raised.row?.awaitingUserResponse?.tabId === "turn-question", "the badge came from the closing-message classifier", String(raised.row?.awaitingUserResponse?.tabId ?? "none"));
-    // AVATAR-1: needs-you drives excited on the roster card.
-    const excitedAt = Date.now();
-    const excited = await moodOf("excited", 40_000);
-    if (excited == null) console.log("  SKIP  a waiting agent's crew member is excited on the roster card — not reached: no browser this run");
-    else check(excited === "excited", "a waiting agent's crew member is excited on the roster card", `${excited || "no face on the card"} after ${Date.now() - excitedAt}ms`);
+    // AVATAR-1: needs-you turns the face on the roster card (two counterclockwise turns and a rest),
+    // and the mood is curious, not excited: the bounce is for a landed reply and never leaves the ring.
+    const askedAt = Date.now();
+    const asked = await (async () => {
+      if (!moodPage) return null;
+      const until = Date.now() + 40_000;
+      let seen = { mood: "", attention: false };
+      while (Date.now() < until) {
+        seen = await moodPage.evaluate((id) => { const f = document.querySelector(`.worker-card[data-context-id="${id}"] [data-titan-mood]`); return { mood: f?.dataset.titanMood ?? "", attention: f?.dataset.titanAttention === "1" }; }, agentId).catch(() => seen);
+        if (seen.attention && seen.mood === "curious") return seen;
+        await sleep(1000);
+      }
+      return seen;
+    })();
+    if (asked == null) console.log("  SKIP  a waiting agent's crew member asks for you on the roster card — not reached: no browser this run");
+    else check(asked.attention && asked.mood === "curious", "a waiting agent's crew member asks for you on the roster card (a turn, mood curious)", `attention=${asked.attention} mood=${asked.mood || "no face on the card"} after ${Date.now() - askedAt}ms`);
 
     // The clear. The stub stops asking first, so the turn this reply drives ends on a plain
     // statement -- which both clears the badge and proves a quiet close does not raise it again.
