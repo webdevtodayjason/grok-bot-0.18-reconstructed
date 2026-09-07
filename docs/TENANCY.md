@@ -1,78 +1,64 @@
-# One instance per customer
+# One console, one container per customer
 
-**Status:** live on the R750 since 2026-09-07. TENANT-1 built the control plane. TENANT-2 built the
-relay side of it and put both on the machine: a customer signs in with an email address and a
-password, a tenant writes its own settings files instead of the operator's, and a tenant relay no
-longer gets the docker socket. The control plane answers at `https://api.titanium.bot`, Jason's own
-instance is the tenant `titanium` and is in tenant mode, and there is a real second instance at
-`https://demo.titanium.bot` that a browser has signed in to. Section 12 is what that wave changed
-and section 18 is the demo instance it was proved on.
+**Status:** the shape is decided and the code is landing. TENANT-1 built the control plane and
+TENANT-2 built one relay per customer on one hostname per customer. Jason read that shape back on
+2026-09-07 and said no, in these words:
 
-A relay is in tenant mode only when `TENANT_ID`, `CP_URL` and `CP_SESSION_SECRET` are all set. An
-instance without them, which is any instance nobody has migrated, keeps the single password box it
-always had.
+> The tenant console, if somebody's logged in to the console, is the same no matter what. Depending
+> on their login, they get a specific set of agents in their own sandbox Docker container. Each
+> tenant should have an agent set with its own sandbox Docker container that the agents live in.
+> That's it. In my mind there should only be one extra Docker container per tenant. Every time we
+> add somebody new, we're basically duplicating everything. That sounds crazy.
 
-The decision this implements (Jason, 2026-09-06): every customer gets their own instance and their
-own sandbox. Not one console with accounts in it. Their own box, their own relay, their own
-workspace, their own agents, on their own hostname.
+So TENANT-5 is that. One relay, one console, one login page, and a customer is one box container
+plus one directory. Section 15 is what changed from TENANT-2 and why, and section 22 is the
+migration as it was run.
 
     titanium.bot                 the marketing site
-    console.titanium.bot         Jason's own instance
+    console.titanium.bot         THE console. Everybody signs in here, Jason included.
     api.titanium.bot             the control plane, this document
-    <slug>.titanium.bot          one customer
+    <slug>.titanium.bot          retired. No tenant has a hostname of its own any more.
 
-A customer signs in with an email address and a password and lands on their own console. The
-separation is two containers and a directory tree, not a `WHERE tenant_id = ?`.
+A customer signs in with an email address and a password at `console.titanium.bot` and lands on
+their own agents. Which customer they are is decided by their session, and everything the request
+touches after that is resolved from it: which box, which gateway token, which directory. The
+separation is a container and a directory tree per customer, not a `WHERE tenant_id = ?` and not a
+second copy of the console.
 
-Two things are shared, and neither is a hole any more. Section 12 is the detail of how each stopped
-being one:
-
-- **the release `ui` directory.** Every tenant relay mounts the operator's own
-  `/home/sem/titanbot/ui`, read-only, and that is now only the code. `endpoints.json` in that
-  directory holds the provider API keys, and TENANT-2 gave the relay `SAND_UI_ENDPOINTS_FILE` so a
-  tenant reads and writes its own copy under `/state` instead. That was the condition
-  `CP_ALLOW_NEW_TENANTS` was waiting on, and it is why building a second instance is on now.
-- **the host.** The tenants are containers on one server. A tenant relay no longer gets the docker
-  socket, which is what used to make that a hole rather than a boundary. Section 15 is what a relay
-  cannot do without it, and what it says instead of failing.
-
-```
-                     api.titanium.bot          accounts, tenants, sessions
-                            |
-   a customer  ----------->  signs in with an email and a password
-                            |  gets back a signed session that names their instance
-                            v
-   acme.titanium.bot   -->  their relay  -->  their box     their agents, their files
-   roofing.titanium.bot --> their relay  -->  their box     nobody else can see either
-   console.titanium.bot --> Jason's relay --> Jason's box
-```
+    console.titanium.bot  ->  the one relay  ->  Acme's box       Acme's agents and files
+                                            ->  Bolt's box       Bolt's agents and files
+                                            ->  Jason's box      Titan and Scribe
 
 Three words used throughout:
 
 - **account** a person. An email address, a password and the tenant they belong to.
-- **tenant** a customer's instance. A short name, a web address, a Coolify service and a directory
-  on the server that holds everything the instance writes.
+- **tenant** a customer. A short name, a box container, a directory on the server, and a row in the
+  control plane. Not a hostname and not a console.
 - **session** the twelve hour proof that a person signed in, signed by the control plane and
-  checked by that customer's own relay.
+  checked by the relay with that tenant's own key.
 
-## 1. The three parts
+---
+
+## 1. The four parts
 
 | part | how many | where |
 | --- | --- | --- |
 | the control plane | one | `cp/` in this repo, a Coolify service at `api.titanium.bot` |
-| a tenant instance | one per customer | the box and the relay from `deploy/coolify/docker-compose.yml`, a Coolify service each |
-| the shared release files | one copy | `/home/sem/titanbot/{runtime,deploy,ui}` on the R750, mounted into every tenant |
+| the console | **one, for everybody** | the relay from `deploy/coolify/docker-compose.yml`, Coolify service `p927bfqm83ioloibamlvyd7g`, `console.titanium.bot` |
+| a tenant | one box container per customer | rendered by the control plane, a Coolify service each |
+| the shared release files | one copy | `/home/sem/titanbot/{runtime,deploy,ui}` on the R750 |
 
-The control plane holds the accounts, mints the sessions and asks Coolify for instances. It is the
-only piece that knows the customer list. `cp/README.md` is how to run it and what its routes are.
+The control plane holds the accounts, mints the sessions, asks Coolify for boxes, and tells the
+relay which customer has which box. `cp/README.md` is how to run it and what its routes are.
 
-A tenant instance is the stack that is already running as `console.titanium.bot`, with its paths
-pointed somewhere else. Same image, same entrypoint, same relay, same labels.
+The console is Jason's existing relay. It was not rebuilt or duplicated; it grew a per-request
+tenant. That is the whole of the change on the relay side and it is why there is nothing new to
+deploy on a machine with one box on it.
 
-The release files are shared on purpose. A ship is an rsync and a restart, once, and every tenant
+The release files are shared on purpose. A ship is an rsync and a restart, once, and every customer
 gets it. Per-tenant copies of a 19 MB host bundle would mean a ship that is done for some customers
-and not others, which is the failure nobody would notice until one of them reports a bug that was
-fixed a week ago.
+and not others, which is the failure nobody notices until one of them reports a bug that was fixed a
+week ago.
 
 ### The control plane's own files
 
@@ -82,91 +68,338 @@ fixed a week ago.
 | `ui/session-token.mjs` | the session token itself: mint, verify, and each tenant's derived key. Node builtins only, so both sides can import it |
 | `cp/session.mjs` | a re-export of the file above, so the control plane's imports read as its own |
 | `cp/store.mjs` | the sqlite store and the password hashing |
-| `cp/provision.mjs` | turning a name into a running instance |
+| `cp/provision.mjs` | turning a name into a running box |
 | `cp/cli.mjs` | the operator's commands |
 | `cp/Dockerfile` | the image |
 | `deploy/coolify/control-plane.compose.yml` | the Coolify resource |
 | `scripts/verify-control-plane.mjs` | the gate |
 
-Node 22 or newer, and no dependencies at all: the store is `node:sqlite`, the passwords are
+Node 22 or newer and no dependencies at all: the store is `node:sqlite`, the passwords are
 `node:crypto` scrypt, the API is `node:http`. There is no `package.json` in the image and no
 `node_modules`, which is the point.
 
-### What it reads from the environment
+### What the control plane reads from the environment
 
 | name | default | what it is |
 | --- | --- | --- |
 | `CP_PORT` | `7790` | the port it listens on |
-| `CP_DATA_DIR` | `/data/titanbot/_control-plane` in the image | the directory holding the sqlite file |
-| `CP_SESSION_SECRET` | none | 32 bytes or more, the master key. Never handed to a tenant: each relay gets its own key derived from this one. Required. |
+| `CP_DATA_DIR` | `/data/titanbot/_control-plane` | the directory holding the sqlite file |
+| `CP_SESSION_SECRET` | none | 32 bytes or more, the master key. Never handed to a tenant and never handed to a browser. Required. |
 | `CP_ADMIN_TOKEN` | none | the operator bearer for the account and tenant routes. Required. |
-| `CP_BASE_DOMAIN` | `titanium.bot` | what a customer's address is built from |
-| `CP_COOLIFY_URL` | none | this Coolify's api address. **Not** `COOLIFY_URL`: Coolify puts one of its own into every service container, holding that container's public address, and it wins. `COOLIFY_URL` is still read when this is unset. |
+| `CP_RELAY_TOKEN` | none | **new in TENANT-5.** The bearer for `GET /v1/relay/tenants` and nothing else. The admin token does not open that route and this one opens no other. 32 characters or more. |
+| `CP_BASE_DOMAIN` | `titanium.bot` | kept for the console's own address; no tenant hostname is built from it any more |
+| `CP_COOLIFY_URL` | none | this Coolify's api address. **Not** `COOLIFY_URL`: Coolify puts one of its own into every service container and it wins |
 | `COOLIFY_API_KEY` | none | an API token with write access to the project |
 | `COOLIFY_PROJECT_UUID` | none | the project new tenants are created in |
 | `COOLIFY_SERVER_UUID` | none | the server they run on |
 | `COOLIFY_ENVIRONMENT_NAME` | `production` | the environment inside that project |
-| `COOLIFY_ENVIRONMENT_UUID` | none | sent alongside the name only when it is set, because the openapi lists it as required while its own description says either will do |
+| `COOLIFY_ENVIRONMENT_UUID` | none | sent alongside the name only when set |
 | `CP_TENANT_ROOT` | `/data/titanbot` | the directory holding every tenant's own tree |
 | `CP_RELEASE_ROOT` | `/home/sem/titanbot` | the shared release: runtime, deploy, ui |
 | `CP_PUBLIC_URL` | `https://api.titanium.bot` | where this service answers |
 | `CP_DRY_RUN` | unset | when `1`, every tenant create is a rehearsal |
-| `CP_ALLOW_NEW_TENANTS` | unset | when `1`, this service may build new customer instances. Off until the relay reads its settings from each customer's own state directory. |
-| `CP_TRUSTED_PROXIES` | none | the CIDRs whose `X-Forwarded-For` may say who the visitor is. Empty means the socket address is the visitor. |
-| `CP_CLOUDFLARE_RANGES` | none | which of those may hand over a `CF-Connecting-IP`. Empty means that header is never read. |
-| `CP_RELAY_PEERS` | none | the CIDRs whose sign-ins are a relay forwarding a customer, not a customer. Their failures are counted by email only. Empty means the address bucket applies to them too, which is one bucket for the whole fleet. |
+| `CP_ALLOW_NEW_TENANTS` | unset | when `1`, this service may build new customer boxes |
+| `CP_ALLOW_SIGNUP` | unset | when `1`, `POST /v1/signups` is open without the admin token, behind the same lockout |
+| `CP_TRUSTED_PROXIES` | none | the CIDRs whose `X-Forwarded-For` may say who the visitor is |
+| `CP_CLOUDFLARE_RANGES` | none | which of those may hand over a `CF-Connecting-IP` |
+| `CP_RELAY_PEERS` | none | the CIDRs whose sign-ins are the relay forwarding a customer. Their failures are counted by email only |
 
-Two of those are required and the service says so and stops if either is missing. With no Coolify
-settings it still runs: tenants can be recorded and adopted, they just cannot be created.
+`CP_SESSION_SECRET` and `CP_ADMIN_TOKEN` are required and the service says so and stops if either is
+missing. With no Coolify settings it still runs: tenants can be recorded and adopted, they just
+cannot be built.
+
+### What the relay reads, now that there is one of it
+
+| name | what it is |
+| --- | --- |
+| `CP_URL` | the control plane. Empty means no control plane at all, which is the single-box console |
+| `CP_RELAY_TOKEN` | the credential for the registry route. The same value as on the control plane |
+| `SAND_BOX_CONTAINER` | **required now.** The operator's own box container, for `docker exec` |
+| `SAND_HOST_GATEWAY_URL` | the operator's own box gateway, `http://titanbot-box:1340` |
+| `SAND_UI_STATE_DIR` | the operator's own writable files |
+| `SAND_PROFILE_DIRS` | where the operator's own gateway token file is |
+
+`TENANT_ID` and `CP_SESSION_SECRET` are **gone from the relay**. `TENANT_ID` said "this whole
+process belongs to one customer", which is the sentence that stopped being true.
+`CP_SESSION_SECRET` was one tenant's derived key; the relay now receives every tenant's derived key
+on the registry route.
+
+`SAND_BOX_CONTAINER` used to be deliberately unset, with the relay falling back to
+`docker ps --filter label=com.titanbot.role=box` and taking the first name back. On a host with one
+box that is a convenience. On a host with twenty it is an arbitrary customer's container, and the
+operator's model picker, connector editor and desktop buttons would have been reaching into it. The
+fallback is deleted. A box name that is not a container on this host is never guessed at: that
+customer's requests answer the sentence in section 6.
+
+---
 
 ## 2. What a tenant is, exactly
 
-On Coolify: one service named `titanbot-<slug>`, in the project Titanium Computing, environment
-production, on the R750, with two containers in it. Coolify renames the containers to
-`<service>-<uuid>`, which is why nothing anywhere looks a container up by name and everything uses
-the `com.titanbot.role` label instead.
+**One container and one directory.** That is the whole definition and it is the thing Jason asked
+for.
+
+On Coolify: one service named `titanbot-<slug>` in the project Titanium Computing, environment
+production, on the R750, with **one** container in it, the box. No relay, no hostname, no domain,
+no certificate. Coolify names that container `titanbot-box-<service uuid>`, which is measured, not
+assumed: both live boxes on the R750 are exactly that shape.
 
 On the disk, under `CP_TENANT_ROOT` (`/data/titanbot` on the R750):
 
     /data/titanbot/<slug>/
       profile/local-docker-vm.json     the tenant's gateway token, 0600
       credential/                      the inference placeholder the box needs to start
-      state/auth.json                  their relay password as a scrypt hash, 0600
-      state/                           the rest of the relay's writable files: subscriptions, job bus, mail
+      state/                           this tenant's own settings: endpoints, mail, the job bus token
       volumes/workspace/               the agents' files
       volumes/data/                    agents, transcripts, memory
       volumes/store/                   the box store, which is what survives a recreate
       volumes/chrome/                  the browser profile
 
-Everything an instance *runs* lives under `CP_RELEASE_ROOT` and is shared by every customer on the
-server: `runtime` (the host bundle and the exec daemon), `deploy` (the box repairs) and `ui` (the
-relay). One copy, so an update is one ship rather than one ship per customer.
+`state/auth.json` is gone. It held a per-tenant relay password, and under TENANT-5 there is no
+per-tenant relay for it to open: one console, one operator password file. Provisioning stopped
+writing it and the CLI stopped printing one. A customer must never be handed a password that opens
+nothing.
 
-On DNS: nothing per tenant. `*.titanium.bot` is a proxied wildcard A record to the R750, so
-`acme.titanium.bot` resolves the day the tenant is created and Coolify's Traefik gets a certificate
-for it on the first request.
+On DNS: nothing at all. The proxied wildcard `*.titanium.bot` can stay where it is; no tenant
+depends on it and no tenant is reachable from outside the host.
 
 The control plane's own sqlite store lives at `/data/titanbot/_control-plane`, under the same root
-so one backup covers both. No tenant can ever collide with it: a slug is 3 to 32 characters of
+so one backup covers both. No tenant can collide with it: a slug is 3 to 32 characters of
 `[a-z0-9-]` that cannot begin or end with a dash, so nothing can start with an underscore.
 
-That backup is `deploy/backup/snapshot.sh`, and it did not cover this root until 2026-09-07: the
-newest snapshot on the array held the relay side and the operator's own four volumes and nothing
-under `/data/titanbot`, so every account and every customer's instance was unprotected. It copies
-the whole root now, live, and retakes the control plane's own directory with that container paused,
-because a sqlite file copied mid-write restores without complaint and is still wrong.
-`deploy/backup/restore-drill.sh` opens it. docs/OPERATOR-RUNBOOK.md has the sizing note.
+That backup is `deploy/backup/snapshot.sh`. It copies the whole root live, and retakes the control
+plane's own directory with that container paused, because a sqlite file copied mid-write restores
+without complaint and is still wrong. `deploy/backup/restore-drill.sh` opens it.
 
-## 3. The routes
+---
+
+## 3. The shared network
+
+One relay serving every customer has to reach every customer's box, and Coolify puts every resource
+on a network of its own. So there is one external network, created once on the host and never by a
+deploy:
+
+    docker network create titanbot-net
+
+The relay, the control plane and every box join it. Both compose files declare it `external: true`,
+which means docker attaches to what is already there and creates nothing; if the network is missing
+the deploy fails loudly, which is the right direction. Coolify's parser leaves a top-level network
+entry alone when the compose already declares it, and it merges its own per-resource network in
+beside whatever a service declares, so both networks end up attached.
+
+The relay reaches a customer's box at `http://<that customer's box container>:1340` with that
+customer's own gateway token.
+
+### The trap, and the label that closes it
+
+**This is the one thing in TENANT-5 that can take Jason's console down, so it is written out in
+full.** Measured on the R750, 2026-09-07: `coolify-proxy` is `traefik:v3.6` started with
+`--providers.docker=true` and **no** `--providers.docker.network`, and the relay container carried
+no `traefik.docker.network` label of its own.
+
+For a container on more than one network, Traefik with no default network takes the first entry of
+the container's network map. Go randomises map iteration order, so which address it routes to is
+redecided on every provider refresh. The symptom is `console.titanium.bot` answering 502 at random,
+hours after a deploy that looked fine, and it is not reproducible and not attributable to the change
+that caused it.
+
+The fix is one label on the relay, pinning the network Coolify made for that resource:
+
+    traefik.docker.network: ${TITANBOT_PROXY_NETWORK}
+
+Set `TITANBOT_PROXY_NETWORK` on the resource to the relay's Coolify network, which on this server is
+the resource's own uuid. The control plane carries the same label for the same reason, because it
+answers on `api.titanium.bot`.
+
+**And the label is gated, not trusted.** Coolify does not deploy the compose it is given: it parses
+it, rewrites parts of it and deploys the result. Custom labels are believed to survive that rewrite
+(`com.titanbot.role` does), but that is one sample of one label. So `scripts/verify-deploy.mjs`
+reads the label back off the running container after every restart and fails loudly when the relay
+is on more than one network without a pin, or with a pin naming a network it is not on. A stripped
+label is caught by a gate, not by the console going down on a Tuesday.
+
+### Plan B, if the relay cannot be multi-homed here
+
+Leave the relay single-homed on its own Coolify network and put every tenant's box on **that**
+network instead of on a new shared one: the control plane renders `CP_SHARED_NETWORK` into each
+tenant's compose and the value is the relay resource's own network name. Same reachability, no
+second network on the relay, and therefore no Traefik ambiguity at all.
+
+It costs one thing, which is why it is plan B: the boxes then live on a network Coolify created for
+a resource it can delete, so deleting the relay resource takes the customers' network with it.
+
+---
+
+## 4. The registry: how the relay knows which box is whose
+
+The control plane is the source of truth. The relay reads it once a minute and holds it in memory.
+
+    GET https://api.titanium.bot/v1/relay/tenants
+    authorization: Bearer <CP_RELAY_TOKEN>
+
+    200 {
+      "tenants": [
+        { "slug": "acme", "name": "Acme Roofing", "status": "running",
+          "box": "titanbot-box-<uuid>", "gateway": "http://titanbot-box-<uuid>:1340",
+          "token": "<that tenant's gateway token>",
+          "sessionKey": "<that tenant's derived session key>",
+          "stateDir": "/data/titanbot/acme/state",
+          "profileDir": "/data/titanbot/acme/profile" }
+      ],
+      "skipped": [ { "slug": "halfbuilt", "why": "no gateway token on disk yet" } ]
+    }
+
+`box` is computed as `titanbot-box-<coolify service uuid>`, which is measured on this host rather
+than assumed, so no schema change was needed to carry it. `token` is read off that tenant's own
+`profile/local-docker-vm.json`, the file `ensureSecrets` already writes at 0600. `sessionKey` is
+`tenantSessionSecret(master, slug)`.
+
+A row with no Coolify service uuid, no token file, or status `failed` is left out of `tenants` and
+named in `skipped`, so the relay can log **why** a customer is missing rather than answering them a
+bare 404.
+
+### Two doors, and neither holds the other's key
+
+`CP_RELAY_TOKEN` opens this route and nothing else. `CP_ADMIN_TOKEN`, which can create and delete
+customers, does **not** open this route. That is deliberate: this is the one place in the control
+plane where a gateway token or a session key leaves the service, so it has a credential of its own.
+
+**This amends a rule.** The header of `cp/server.mjs` says this service never returns
+`CP_SESSION_SECRET` and that a test walks every route asserting it. That sentence is still true and
+it gains one clause: this route returns per-tenant **derived** keys and per-tenant gateway tokens,
+to the relay credential and to nothing else. The master never leaves. Amending it deliberately, with
+a gate that names it, is the difference between a design decision and a fleet-wide key leak, so
+`scripts/verify-one-console.mjs` asserts all four cases end to end: 401 with no bearer, 401 with the
+admin token, 200 with the relay token, and the master's own bytes appearing nowhere in the body.
+
+### The operator's own entry never comes from here
+
+Tenant `titanium` is not one of the rows. The relay seeds it at boot from the environment it already
+has: `SAND_BOX_CONTAINER`, `SAND_HOST_GATEWAY_URL`, its gateway token, `SAND_UI_STATE_DIR` and the
+first `SAND_PROFILE_DIRS` entry.
+
+That is the whole compatibility story, and it is load bearing three times over:
+
+- With no `CP_URL` the registry holds exactly **one** entry, every seam resolves to it, and the
+  relay behaves on a developer Mac and on a single-box install precisely as it did before TENANT-5.
+- A control plane that is down, or slow, or being redeployed, cannot take Jason's console with it.
+  That is rule 3 of `ui/tenant-login.mjs` restated: the control plane is allowed to be down.
+- A refresh never overwrites it. If the control plane ever returns a `titanium` row it is dropped
+  with one line in the log.
+
+### Cache, refresh and box verification
+
+A refresh is a 10 second GET. On success the map is rebuilt, always re-inserting the env-seeded
+operator entry. On failure the last good map is kept and one line is logged per failure streak, so
+a control plane outage is a log line rather than an outage:
+
+    reg  could not reach the control plane (timed out); serving the 3 tenants last read at 09:41
+
+Every 60 seconds, plus a refresh on a miss, rate limited to one per 10 seconds so a stranger with an
+old signed cookie naming a made-up slug cannot pump the control plane.
+
+Each refresh runs **one** `docker ps` for the whole fleet and builds a name set. A registry entry
+whose box is not in that set is marked unreachable and its requests answer the sentence in section
+6. A name is never guessed at, and because Coolify names by uuid a name can never be reused across
+customers.
+
+`SAND_UI_TENANTS_FILE` reads a JSON file in place of the control plane, the same kind of documented
+override as `SAND_UI_AUTH_FILE`. It is what makes the registry, including the unknown-tenant answer,
+testable with no control plane and no network.
+
+---
+
+## 5. One request, one tenant
+
+The session cookie carries the tenant slug, and every request resolves exactly one tenant from it,
+once, at the top of the handler.
+
+| how somebody arrives | which tenant |
+| --- | --- |
+| an account sign-in | the `tenant` claim on the verified control plane token |
+| the instance password | `titanium`, the operator |
+| the gateway bearer | `titanium`, the operator |
+| `GET /login?sso=<token>` | the tenant the token claims, after its signature verifies under that tenant's key |
+| a cookie with no tenant claim | `titanium`, the operator. This is what keeps Jason signed in across the deploy |
+
+From that one slug the request gets its gateway URL, its gateway token, its box container name, its
+state directory and its profile directory. Everything downstream takes them as parameters rather
+than reading a module-level constant:
+
+| surface | what it resolves per tenant |
+| --- | --- |
+| `POST /api/<command>` | that tenant's gateway, that tenant's token |
+| `GET /events` | the same |
+| the VNC and desktop bridge | that tenant's box container, by name, over `docker exec` |
+| `/endpoints`, `/endpoints/use` | that tenant's `endpoints.json`, that tenant's box |
+| `/v1`, the job bus | that tenant's `profile/job-bus.json` |
+| mail | that tenant's `mail.json` and `mail-inbox.jsonl` |
+| the runtime bundle route | that tenant's box |
+| the login lockout | shared, keyed by address, exactly as before |
+| subscriptions | **operator only.** See below |
+
+**Subscriptions are operator only.** `/subscriptions`, `/subscriptions/adopt` and
+`/subscriptions/forget` scan the operator's own machine credentials, the Codex and Claude logins on
+the host. A customer gets an empty list and the two POSTs answer the ordinary not-available refusal.
+That is both safer and a smaller change than threading a file through a module that has one store.
+
+**The relay keeps the docker socket, and that is the point.** It is ours, it is not a customer's
+container, and it is the one process that reaches into every box. A customer never gets a socket
+because a customer never gets a relay.
+
+### Mail, and the one thing that was refused
+
+`/hooks/resend` carries no session, so the tenant has to come from the message. The scheme first
+proposed was a shared domain with a unique agent name per tenant, and it is **refused as unsound**:
+agent names are not unique across customers, and the moment two of them each have a Titan,
+`titan@titanium.bot` is ambiguous, which is the wrong kind of ambiguity to have in a mail router.
+
+What is sound and costs one lookup is routing by **domain**. `mail.json` already lives per state
+directory and already carries the domain. The webhook reads the recipient domain out of the
+unverified body, picks the tenant whose `mail.json` names that domain, and **that tenant's own
+webhook secret then verifies the signature before anything else is read**. Choosing a key from an
+unverified claim and then verifying under it is the pattern `ui/session-token.mjs` already blesses:
+a liar picks a key the message was not signed under and the check fails. A domain is verified inside
+exactly one Resend account, so a tie is impossible. No tenant owning the domain answers
+`200 {"ignored":"no_tenant"}`, never a retry over a decision.
+
+**If that proves flaky in the gate, mail stays operator only and `docs/MAIL.md` says so.** That is
+the documented fallback and it is not a failure: mail is the one surface where an ambiguous route is
+worse than no route.
+
+---
+
+## 6. What a customer sees when their workspace is not there
+
+A session naming a tenant the registry does not know gets the login page, 503, and one sentence:
+
+> That workspace is not available right now.
+
+**The cookie is deliberately not cleared.** A tenant is unknown while its box is being built, while
+Coolify is recreating it, and while the control plane is restarting. Signing a customer out over a
+transient state is worse than the sentence, and a person who comes back in two minutes should find
+themselves still signed in.
+
+Not a 500, not a stack trace, not somebody else's console, and not a bare 404.
+
+---
+
+## 7. The routes
 
 Open to anybody:
 
 | route | what it does |
 | --- | --- |
-| `GET /v1/health` | `{ok, version, tenants, accounts}`. Counts only. |
+| `GET /v1/health` | `{ok, version, tenants, accounts}`. Counts only |
 | `POST /v1/sessions` | `{email, password}` in, a session out |
 | `GET /v1/sessions/current` | who this session is, with the session as the bearer |
 | `DELETE /v1/sessions/current` | sign out, which revokes this session here |
+| `POST /v1/signups` | `{email, password, company}`, open only when `CP_ALLOW_SIGNUP=1` |
+
+Behind `CP_RELAY_TOKEN`:
+
+| route | what it does |
+| --- | --- |
+| `GET /v1/relay/tenants` | the registry. Section 4 |
 
 Behind `CP_ADMIN_TOKEN`:
 
@@ -175,94 +408,85 @@ Behind `CP_ADMIN_TOKEN`:
 | `POST /v1/accounts` | add a person: `{email, password, name, tenant}` |
 | `GET /v1/accounts` | list them, never with a hash |
 | `POST /v1/accounts/{id}/password` | an operator reset |
-| `POST /v1/tenants` | add a customer and start building their instance |
+| `POST /v1/signups` | the same route, with the admin token instead of the open flag |
+| `POST /v1/tenants` | add a customer and start building their box |
 | `GET /v1/tenants`, `GET /v1/tenants/{slug}` | the record, plus what Coolify says right now |
-| `POST /v1/tenants/{slug}/adopt` | claim an instance that already exists |
+| `POST /v1/tenants/{slug}/adopt` | claim a box that already exists |
 | `POST /v1/tenants/{slug}/provision` | run the build again, from wherever it stopped |
 | `POST /v1/tenants/{slug}/stop`, `/start`, `/restart` | pass it on to Coolify |
-| `DELETE /v1/tenants/{slug}` | remove the Coolify service. The data is kept. |
+| `DELETE /v1/tenants/{slug}` | remove the Coolify service. The data directory is kept |
 
-### Signing in
+### Signing up
 
-    POST https://api.titanium.bot/v1/sessions
-    {"email": "owner@acme.example", "password": "..."}
+    POST https://api.titanium.bot/v1/signups
+    {"email": "owner@acme.example", "password": "...", "company": "Acme Roofing"}
 
-    200 {"token": "v1.<payload>.<signature>", "expiresAt": "...",
-         "account": {...}, "tenant": {"slug": "acme", "host": "acme.titanium.bot", "status": "running"}}
+One call creates the account and the tenant and starts building the box. The slug is derived from
+the company name, made unique, and checked against the reserved list. Open without the admin token
+only when `CP_ALLOW_SIGNUP=1`, and behind the same lockout that protects sign-in.
 
-A wrong password and an email nobody has get the same answer, in the same shape:
-`401 {"error":"invalid_login"}`, and they take the same time, because an address that has no
-account still costs a full password derivation. Neither can be used to find out who has an account
-here. Ten failures in ten minutes, counted per email address and per network address, get
-`429 {"error":"locked","retryAfter":...}` instead, with the seconds until it is worth trying again;
-a successful sign-in clears the rows for that
-address and that email together, and nobody else's. What a person reads is "That email address and password
-do not match" and "Too many tries. Wait a few minutes and try again", in plain words, with nothing
-in either that says whether the address is a customer.
+From the operator's side it is one command, and the password is prompted rather than typed on the
+command line, because an argument is in the shell history and in `ps` output:
+
+    node cp/cli.mjs signup add owner@acmeroofing.com "Acme Roofing"
 
 ### The session
 
     v1.<the claims, base64url>.<HMAC-SHA256 of that text with that tenant's own key, base64url>
 
-The claims are the account id, the email, the tenant name, the host that tenant answers on, when it
-was issued, when it expires and a unique id for this session. It lasts twelve hours.
+The claims are the account id, the email, the tenant name, the host, when it was issued, when it
+expires and a unique id for this session. It lasts twelve hours.
 
-**One key per tenant.** `CP_SESSION_SECRET` on the control plane is a master and it never leaves
-that container. Each tenant relay is given only `HMAC-SHA256(master, its own name)`, which is what
-the control plane signs that tenant's sessions with, and it is what is written into that tenant's
-Coolify environment. That matters because a key in a container's environment is readable by anything
-running in that container: with one shared key, any customer could sign a token claiming any tenant
-they liked, `console.titanium.bot` included, and the relay's check of the `tenant` claim would be no
-defence, because they would simply write the claim it wants. With a derived key they can sign for
-themselves and for nothing else.
+**One key per tenant, and the master never leaves the control plane.** Each tenant's key is
+`HMAC-SHA256(master, "titanbot-tenant-session-v1:<slug>")`. Under TENANT-2 that key was written into
+each tenant's Coolify environment, where anything running in that container could read it, and the
+derivation is what stopped one customer signing a token claiming another. Under TENANT-5 no customer
+has a container that holds a key at all: the keys go to the relay, over the relay credential, and
+the relay is ours.
 
-Rotating the master changes every tenant's key at once, so it signs everybody out of everything and
-every relay has to be given its new value in the same pass.
+Rotating the master signs everybody out of everything at once and the relay picks up the new keys on
+its next refresh.
 
-Two sides check it, and they check different amounts:
+Two sides check a token, and they check different amounts:
 
-- **the control plane** verifies the signature, the expiry, and the `jti` against its revocation
+- **the control plane** verifies the signature, the expiry and the `jti` against its revocation
   table, because it has the store in front of it.
-- **the tenant relay** verifies the signature and the expiry only. It has no database and it is not
-  going to call home on every request. So a signed-out session can still open a relay for up to
-  twelve hours, and the way to end one sooner is to rotate `CP_SESSION_SECRET`, which signs
-  everybody out of everything at once.
+- **the relay** verifies the signature and the expiry only. It has no database and it is not going
+  to call home on every request. So a signed-out session can still open the console for up to twelve
+  hours, and the way to end one sooner is to rotate `CP_SESSION_SECRET`.
 
-Both use the same code. `ui/session-token.mjs` exports `verifySessionToken(token, secret, now)` and
-`tenantSessionSecret(master, slug)`, and `cp/session.mjs` re-exports it, so there is one file and not
-two. It lives under `ui/` because that is the half `deploy/r750/sync.sh` already ships to every
-relay, and it imports nothing but node builtins so the control plane's image can copy it beside
-`ui/auth.mjs`. Two implementations of one signature is how a customer ends up locked out of their
+Both use the same code: `ui/session-token.mjs`, re-exported by `cp/session.mjs`, so there is one
+file and not two. Two implementations of one signature is how a customer ends up locked out of their
 own console on a Sunday.
 
-`node cp/cli.mjs session verify <token>` prints the claims and says whether it is still good, which
-is the same check a relay makes.
+    node cp/cli.mjs session verify <token>
 
-## 4. Passwords
+---
+
+## 8. Passwords
 
 A customer's password is stored as scrypt with a salt of its own: N 32768, r 8, p 1, and a 64 byte
 key. The hash is written by the store and read by the store, and no route on this service returns
 it. There is a test that walks every route and asserts that.
 
-That is the control plane's password. A tenant's relay has a second one, its own relay password,
-written into `<tenant>/state/auth.json` in exactly the format `ui/set-password.mjs` writes, by
-importing the relay's own routine (`ui/auth.mjs`) so the two cannot drift. The relay's file is
-written at the relay's own scrypt parameters, N 16384, because `ui/server.mjs` is what has to read
-it. Once TENANT-2 lands a customer signs in with the first and never sees the second; until then
-the relay password is how they get in, which is why it is printed once when the tenant is created.
+The console has exactly one other password, the operator's own, in the relay's `auth.json`. It is
+the way in when the control plane is not answering and the way in from the tailnet. It is not
+something a customer is ever given, and under TENANT-5 there is no second one to give: the
+per-tenant `state/auth.json` is gone (section 2).
 
-## 5. Deploy the control plane, once
+---
 
-Two scripts, in this order. Everything below used to be a dozen clicks in the Coolify UI and two
-commands typed into a live server, which is a deploy nobody can repeat and nobody can review. Both
-scripts are idempotent, so re-running either one is the normal way to fix a half-finished run.
+## 9. Deploy the control plane, once
+
+Two scripts, in this order. Both are idempotent, so re-running either one is the normal way to fix a
+half-finished run.
 
 **Step 1, on the Mac.** Put the files on the server:
 
     bash deploy/r750/sync.sh --no-install
 
-**Step 2, on the server.** This makes the tenant root, builds the image and generates the two
-secrets. Run it as `sem`, not with sudo. It calls sudo itself for the one step that needs it.
+**Step 2, on the server.** This makes the tenant root, builds the image and generates the secrets.
+Run it as `sem`, not with sudo. It calls sudo itself for the one step that needs it.
 
     ssh dell-remote
     TITANBOT_DRY_RUN=1 bash /home/sem/titanbot/deploy/control-plane-install.sh   # read it first
@@ -270,59 +494,51 @@ secrets. Run it as `sem`, not with sudo. It calls sudo itself for the one step t
 
 What it does:
 
-- `/data/titanbot` and `/data/titanbot/_control-plane`, owned by `sem` at mode 0750. `/data` is
-  this host's docker data root and the disk with room on it, which is why the tenants live there
-  rather than under `/home/sem`.
+- `/data/titanbot` and `/data/titanbot/_control-plane`, owned by `sem` at mode 0750. `/data` is this
+  host's docker data root and the disk with room on it, which is why the tenants live there rather
+  than under `/home/sem`.
 - `docker build -t titanbot-cp:local` from `/home/sem/titanbot`, with `--build-arg UID` and
-  `--build-arg GID` set to the same uid it just gave those directories. Coolify cannot do this
-  build itself: a Docker Compose Empty resource has no build context.
+  `--build-arg GID` set to the same uid it just gave those directories. Coolify cannot do this build
+  itself: a Docker Compose Empty resource has no build context.
 - `CP_SESSION_SECRET` and `CP_ADMIN_TOKEN` into `/home/sem/titanbot/cp.env` at mode 0600, once.
-  Neither is ever printed. An existing value is kept and never rewritten, because every tenant
-  relay is already holding a key derived from the first master, and a second master signs sessions
-  none of them will accept.
+  Neither is ever printed. An existing value is kept and never rewritten, because a second master
+  signs sessions nobody will accept.
 
-The uid matters more than it looks. `id -u sem` on the R750 answers **1001**, not the 1000 that a
-first login account usually is and that `node` happens to be inside the base image. The image and
-the tenant root have to agree on that number or the control plane cannot write the directories it
-just made, so one script does both and passes the same pair to each.
+The uid matters more than it looks. `id -u sem` on the R750 answers **1001**, not the 1000 a first
+login account usually is and that `node` happens to be inside the base image. The image and the
+tenant root have to agree on that number, so one script does both and passes the same pair to each.
 
-**Step 3, on the Mac.** This makes the Coolify service. It reads the two secrets off the server
-into your shell rather than into a file, and it needs the Coolify pair from wherever you keep
-yours. No uuid has to be in your shell: the server is a constant in the script, the project is
-found by its name, and the environment is found inside the project.
+**Step 3, on the Mac.** This makes the Coolify service. It reads the secrets off the server into
+your shell rather than into a file, and it needs the Coolify pair from wherever you keep yours.
 
     export CP_SESSION_SECRET="$(ssh dell-remote "grep '^CP_SESSION_SECRET=' /home/sem/titanbot/cp.env | cut -d= -f2-")"
     export CP_ADMIN_TOKEN="$(ssh dell-remote "grep '^CP_ADMIN_TOKEN=' /home/sem/titanbot/cp.env | cut -d= -f2-")"
-    export COOLIFY_URL=... COOLIFY_API_KEY=...    # your own shell's names; the tool writes
-                                                 # CP_COOLIFY_URL onto the service
+    export CP_RELAY_TOKEN=...                      # section 4. The same value goes on the console
+    export CP_RELAY_PEERS=...                      # the server's own outbound address, /32
+    export TITANBOT_PROXY_NETWORK=...              # section 3. The pin, or api.titanium.bot 502s
+    export COOLIFY_URL=... COOLIFY_API_KEY=...     # your own shell's names; the tool writes
+                                                   # CP_COOLIFY_URL onto the service
 
     node deploy/r750/control-plane-coolify.mjs --dry-run     # the plan, calling nothing
     node deploy/r750/control-plane-coolify.mjs
 
-It creates or updates one service named `titanbot-cp` in the project Titanium Computing,
-environment production, on server `zl2ti5llrtpx83918j8arb9f`, from
-`deploy/coolify/control-plane.compose.yml` sent as base64 in `docker_compose_raw`. Then it sets the
-environment, sets the address to `https://api.titanium.bot:7790` and starts it.
+It creates or updates one service named `titanbot-cp` in the project Titanium Computing, environment
+production, on server `zl2ti5llrtpx83918j8arb9f`, from `deploy/coolify/control-plane.compose.yml`
+sent as base64 in `docker_compose_raw`. Then it sets the environment, sets the address to
+`https://api.titanium.bot:7790` and starts it.
 
 The environment it sets is read out of that compose file rather than listed in the script, so the
-file an operator reviews is the file that ships. Sixteen keys come from it, plus
-`COOLIFY_ENVIRONMENT_UUID`, which the compose does not carry. A value written `${NAME}` comes from
-your shell or, for the three uuids, from the lookups above. Two values deliberately differ from the
-file:
+file an operator reviews is the file that ships. A value written `${NAME}` comes from your shell or,
+for the three uuids, from the lookups the tool does. Two values deliberately differ from the file:
 
 | key | in the file | what the script sets | why |
 | --- | --- | --- | --- |
-| `CP_ALLOW_NEW_TENANTS` | `0` | `1` | The file is the safe default for anyone pasting it by hand. The script is run by the operator standing the service up, after the relay reads its settings out of each tenant's own state directory. Set `CP_ALLOW_NEW_TENANTS=0` in your shell to keep it off. |
+| `CP_ALLOW_NEW_TENANTS` | `0` | `1` | The file is the safe default for anyone pasting it by hand. Set `CP_ALLOW_NEW_TENANTS=0` in your shell to keep it off. |
 | `COOLIFY_ENVIRONMENT_UUID` | not there | looked up | Coolify's openapi lists it in the required set for `POST /services` while its own description says the name will do, so both are sent. |
 
-Nothing it prints carries a secret. `CP_SESSION_SECRET`, `CP_ADMIN_TOKEN`, `COOLIFY_API_KEY` and
-`CP_COOLIFY_URL` print as `(set, N characters, not printed)`, and every line goes through a redactor
-first, so a value cannot reach the terminal inside an error quoted back from Coolify either. A dry
-run is safe to paste into a ticket.
-
-The address is set as a `urls` PATCH on the service, naming the compose's service name. The `:7790`
-in it is the **container** port for the proxy, not a published one. The public url is plain
-`https://api.titanium.bot`.
+Nothing it prints carries a secret. Every secret prints as `(set, N characters, not printed)` and
+every line goes through a redactor first, so a value cannot reach the terminal inside an error
+quoted back from Coolify either. A dry run is safe to paste into a ticket.
 
 **Step 4.** Coolify queues a start rather than doing one, so give it a minute, then check it before
 trusting it:
@@ -333,204 +549,105 @@ trusting it:
 Health needs no bearer and returns counts only. If it answers with anything more than those four
 fields, stop and read the code: that route is the one place a mistake is public.
 
-**Measured on the R750, 2026-09-07.** The install script made `/data/titanbot` and
-`/data/titanbot/_control-plane` owned by `sem` (1001:1001, mode 0750), built `titanbot-cp:local` at
-165 MB running as 1001:1001, and wrote `cp.env` at mode 0600 with the two secrets. A second run
-rebuilt the image and kept both secrets, printing `is already in cp.env, kept` for each. The Coolify
-tool created service **`hnhzi0ongkw0gsg9k4flcv7d`** in project `Titanium Computing`
-(`c24e2ulqhmgn4d0c5lx43i63`), environment `production` (`fvp4fn26eqc1kfzg63yjvvzv`), set 17
-environment values and gave it `https://api.titanium.bot:7790`. Health answered on the first poll,
-about ten seconds after the start was queued, with no wait for a certificate:
-`{"ok":true,"version":"1.0.0","tenants":0,"accounts":0}`.
+**Measured on the R750, 2026-09-07.** The install script made both directories owned by `sem`
+(1001:1001, mode 0750), built `titanbot-cp:local` at 165 MB running as 1001:1001, and wrote `cp.env`
+at mode 0600. A second run rebuilt the image and kept both secrets. The Coolify tool created service
+**`hnhzi0ongkw0gsg9k4flcv7d`** in project `Titanium Computing` (`c24e2ulqhmgn4d0c5lx43i63`),
+environment `production` (`fvp4fn26eqc1kfzg63yjvvzv`), and health answered on the first poll about
+ten seconds after the start was queued, with no wait for a certificate.
 
-Two things the first real run found, both now fixed in the files above, both worth knowing because
-they are the shape of mistake this pair of scripts exists to stop:
+Two things the first real run found, both fixed in the files above, both worth knowing because they
+are the shape of mistake this pair of scripts exists to stop:
 
-- **`COOLIFY_URL` is a name Coolify has already taken.** It puts its own `COOLIFY_URL` into every
-  service container, holding that container's public address, and its value beats an environment
-  record set with the same name. The control plane was handed the Coolify api's address and read
-  back `https://api.titanium.bot`, its own front door, so every `POST /services` answered 404. The
-  setting is `CP_COOLIFY_URL` now. `COOLIFY_URL` is still read when that is unset.
+- **`COOLIFY_URL` is a name Coolify has already taken.** It puts its own into every service
+  container, holding that container's public address, and its value beats an environment record set
+  with the same name. The setting is `CP_COOLIFY_URL` now.
 - **A running service takes a restart, not a start.** Coolify answers `400 Service is already
   running.` to a second start, and a service that is already up keeps running the compose and the
-  environment it started with. The tool restarts a running service, which is also the call that
-  makes what it just wrote the thing that is running.
+  environment it started with.
 
-## 6. Adopt Jason's instance as tenant `titanium`
+---
+
+## 10. Adopt Jason's instance as tenant `titanium`
 
 `console.titanium.bot` already exists, has been running for weeks, and has all of his agents in it.
-It must not be created, rendered, restarted or touched. Adopt is the route that writes a ledger row
-for an instance that is already there:
+It must not be created, rendered or rebuilt. Adopt writes a ledger row for an instance that is
+already there:
 
-    curl -s -X POST https://api.titanium.bot/v1/tenants/titanium/adopt \
-      -H "authorization: Bearer $CP_ADMIN_TOKEN" -H 'content-type: application/json' \
-      -d '{"coolifyServiceUuid":"p927bfqm83ioloibamlvyd7g","host":"console.titanium.bot"}'
+    node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot
 
-Or `node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot`.
-
-The row comes back with status `adopted`, which is its own status and not `running`, so a reader
-can always tell which instances this service built and which it inherited. Nothing is created on
-Coolify, no directory is made, and that instance keeps its own relay password until the relay wave
-teaches it to accept a session.
+The row comes back with status `adopted`, which is its own status and not `running`, so a reader can
+always tell which instances this service built and which it inherited. Nothing is created on
+Coolify and no directory is made.
 
 `titanium` is on the reserved list, so no customer can ever claim that name. Adopt does not consult
 that list, because the whole point of the route is the operator taking a reserved name for the
 instance that already exists.
 
-### Putting that instance in tenant mode
+**The adoption is a ledger row and nothing more.** It holds a uuid and a host. It carries no gateway
+token and no directories, which is why the relay cannot get its own registry entry from it and seeds
+that entry from its own environment instead (section 4). Under TENANT-2 this section also set three
+tenancy variables on that service; under TENANT-5 there is nothing to set, because the relay is no
+longer one customer's.
 
-An adopted instance is not rendered by the control plane, so nothing set the three variables that
-turn the account sign-in on. They go on once, on Coolify service `p927bfqm83ioloibamlvyd7g`:
+---
 
-| key | value |
-| --- | --- |
-| `TENANT_ID` | `titanium` |
-| `CP_URL` | `https://api.titanium.bot` |
-| `CP_SESSION_SECRET` | the key derived for `titanium`, not the master |
+## 11. Adding a customer
 
-That third one is the whole design in one line. Each tenant is given a key derived from the master
-and its own name, so whoever can read that container's environment can sign a session for that
-tenant and for nothing else. Derive it on the R750, where the master already is, and read it
-straight into the Coolify field:
+    export CP_PUBLIC_URL=https://api.titanium.bot
+    export CP_ADMIN_TOKEN=...        # from cp.env on the R750
+
+    # rehearse it: this reads and renders everything and creates nothing
+    node cp/cli.mjs signup add owner@acmeroofing.com "Acme Roofing" --dry-run
+    node cp/cli.mjs signup add owner@acmeroofing.com "Acme Roofing"
+
+Then hand the customer two things: `https://console.titanium.bot` and their email address. They set
+nothing up, they install nothing, they never hear the word tenant, and there is no per-customer
+address to get wrong.
+
+Adding more people to the same customer is the account command with the same slug:
+
+    node cp/cli.mjs account add somebody@acmeroofing.com acme --name "Somebody Else"
+
+It asks for the password on the terminal, twice, with the echo off, and never takes one as an
+argument.
+
+### Your own account
+
+Jason's instance is the tenant `titanium`, adopted rather than built. Run this **on the R750** so
+the password is typed on the machine that stores its hash:
 
     ssh dell-remote
     cd /home/sem/titanbot
-    node -e 'import("./ui/session-token.mjs").then(m => console.log(m.tenantSessionSecret(process.env.M, "titanium")))' \
-      M="$(grep '^CP_SESSION_SECRET=' cp.env | cut -d= -f2-)"
+    export CP_ADMIN_TOKEN="$(grep '^CP_ADMIN_TOKEN=' cp.env | cut -d= -f2-)"
+    node cp/cli.mjs account add jason@webdevtoday.com titanium --name "Jason Brashear"
 
-Set the three through the Coolify environment api (`POST /services/{uuid}/envs`, and `PATCH` on the
-409 if a key is already there), then **push the compose as well**. That second half is not optional
-and it is the part that is easy to miss:
+The console password on that instance keeps working, and that is deliberate.
 
-> **An environment value a compose file does not name never reaches the container.** Coolify writes
-> a resource's environment values into the `.env` it reads the compose with. A compose service gets
-> what its own `environment:` block lists and nothing else. `deploy/coolify/docker-compose.yml`
-> names all three as `${VAR}` for exactly this reason, so setting the values in Coolify is enough
-> **once the stored compose is the current one**. Measured here on 2026-09-07: setting the three
-> values alone changed nothing at all, and the relay came up saying `tnnt not a tenant`.
+---
 
-Then restart the service. Two things about that restart, both of which have bitten this stack
-before:
+## 12. What the customer sees
 
-- **Wait for a quiet window.** A restart recreates both containers. Do not do it while an agent is
-  mid-turn. `ship-r750.sh quiet` is the check.
-- **Copy-in makes the recreate safe**, and the box takes a minute to finish it. Poll the
-  containers' `StartedAt` and give it 60 seconds before running any gate against the instance.
+They go to `https://console.titanium.bot`, they get a sign-in page, they type the email address and
+password you gave them, and they are in their own console with their own agents. The page is the
+same page Jason signs in on. Their agents are not.
 
-His relay password keeps working through all of it, and the tenant gate is what proves that rather
-than a hope.
+While a box is still coming up, signing in works and the console says the machine is starting. That
+is the honest answer and it is better than a login that hangs.
 
-**Measured on the R750, 2026-09-07.** Adopt answered
-`titanium now points at Coolify service p927bfqm83ioloibamlvyd7g on console.titanium.bot` and
-`nothing on that service was changed`, and the row read `adopted`. The three environment values were
-created (201 each), the compose was pushed, and the restart recreated both containers inside one
-second of each other. The relay's boot line then read:
+One thing to know before showing it to anybody: **the agent on a brand new box is called "New
+Bot"**, not Titan. That is `SAND_DEFAULT_AGENT_NAME` in `source/shared/agents/agents.ts` and it is
+upstream's name for an agent nobody has named yet. Titan is the name Jason gave his own.
 
-    tnnt titanium, accounts sign in through https://api.titanium.bot
-    state /app/ui (beside the code, SAND_UI_STATE_DIR is unset)
+---
 
-That second line is the one to check on his instance. `SAND_UI_STATE_DIR` is deliberately **not**
-set there: his `auth.json` lives beside the code, and moving the default without moving the file
-would bring the relay up with no password at all.
-
-`node scripts/verify-deploy.mjs --url https://console.titanium.bot` then passed **56 of 56**, with
-the password door among them, so tenant mode cost him nothing. It failed twice on the first attempt
-after the restart, both on the roster, because the box had not finished loading its agents yet;
-ninety seconds later it was clean. Wait for the box, not just the container.
-
-## 7. Add an account
-
-    node cp/cli.mjs account add owner@acme.example acme --name "A Business Owner"
-
-It asks for the password on the terminal, twice, with the echo off. It does not take one as an
-argument, because an argument is in the shell history and in `ps`. The tenant has to exist first,
-or the answer says so in a sentence: an account whose instance does not exist is an account that
-signs in and lands nowhere.
-
-To reset one later: `POST /v1/accounts/{id}/password`. There is no self-service reset yet, and no
-email is sent by this service at all.
-
-## 8. Add a tenant
-
-Building a new instance is on, and `deploy/r750/control-plane-coolify.mjs` sets
-`CP_ALLOW_NEW_TENANTS=1` when it stands the service up. It was off through TENANT-1 because a
-customer's console would have read the operator's `endpoints.json` out of the shared `ui`
-directory, which is where the provider API keys are. TENANT-2 gave every tenant its own settings
-directory, which is the condition that gate was about. Section 12 has the detail.
-
-To turn it off again, set `CP_ALLOW_NEW_TENANTS=0` on the control plane resource. The answer while
-it is off says so:
-
-    409 {"error":"new_tenants_off","message":"New customer instances are turned off. ..."}
-
-A rehearsal (`--dry-run`) and an adopt both work either way, and so does finishing a build that had
-already started.
-
-Read the plan first. This does every read and every render and creates nothing, on Coolify or on
-disk, and does not write a tenant row either:
-
-    node cp/cli.mjs tenant add acme "Acme Roofing" --dry-run
-
-What comes back is the list of calls it would make, in order, with a preview of each body, and the
-plan is written to the ledger as JSON so it can be read back later. There are no values in a plan,
-only the names of the keys, so a dry run is safe to paste into a ticket. Read the rendered compose
-in the create step: the four data paths should be under `/data/titanbot/acme/volumes/`, the profile
-and credential paths should be Acme's, and `runtime`, `deploy` and `ui` should still be the shared
-`/home/sem/titanbot` ones.
-
-Then, without `--dry-run`, the real thing. Provisioning is seven steps. Every one is idempotent and
-every one is recorded in the ledger with the answer Coolify gave, so a failure stops on a named step
-and `POST /v1/tenants/acme/provision` picks up from there rather than starting over.
-
-1. **directories** `profile`, `credential`, `state` and the four `volumes` under `/data/titanbot/acme`.
-2. **secrets** a gateway token, 32 random bytes as hex, written to `profile/local-docker-vm.json` in
-   the shape the relay reads (`{"token": "..."}`, the file `tokenFromProfile` in `ui/server.mjs`
-   opens). And a relay password, 24 url-safe bytes, written to `state/auth.json` through
-   `ui/auth.mjs` at mode 0600. **The relay password is in the answer to this call and nowhere
-   else.** It is not in the ledger. If it is lost, reset it rather than looking for it. On a retry
-   an existing gateway token is read back off disk, never minted again: a second token leaves the
-   box authenticating with the first and the relay presenting the second, and the symptom is a
-   console that answers 401 to everything with nothing in any log to say why.
-3. **compose** `deploy/coolify/docker-compose.yml`, re-pointed at that tree, with `TENANT_ID=acme`.
-4. **service** `POST /services` with the compose base64 in `docker_compose_raw`, name
-   `titanbot-acme`, the project, the environment and the server, and `instant_deploy: false`.
-5. **envs** `TITANBOT_GATEWAY_TOKEN` and `CP_SESSION_SECRET`, which live in Coolify's environment
-   store rather than in the compose text. The `CP_SESSION_SECRET` written here is **this tenant's
-   own derived key**, never the master. It is a `POST` that falls back to a `PATCH` on a 409:
-   Coolify reads the compose when it creates a service and makes an empty field for every `${VAR}`
-   in it, so both of these fields already exist and only a `PATCH` fills them. Measured 2026-09-07,
-   and it is what failed the first real tenant build:
-   `409 Environment variable already exists. Use PATCH request to update it.`
-6. **urls** `PATCH /services/{uuid}` with
-   `urls: [{"name":"titanbot-relay","url":"https://acme.titanium.bot:7777"}]`, which is what puts
-   the address on the relay.
-7. **start** `POST /services/{uuid}/start`.
-
-One thing to watch on the very first real create: the openapi lists `environment_uuid` in the
-required set for `POST /services` alongside `server_uuid`, `project_uuid` and `environment_name`,
-while its own description says either the name or the uuid will do. Set
-`COOLIFY_ENVIRONMENT_UUID` and both are sent. If a create comes back 422 naming a missing field,
-that is the field, and `GET /projects/{uuid}/environments` is where the uuid is.
-
-Start is asynchronous. Coolify answers "Service starting request queued." straight away, so the
-status in the ledger is `provisioning` until the containers report running. `GET /v1/tenants/acme`
-is the ledger row plus whatever Coolify says right now. One thing to know about that, measured on
-the R750's Coolify 4.0.0 on 2026-09-07: `GET /services/{uuid}/applications`, which the openapi
-documents as the place a container status lives, answers `404 {"message":"Not found."}` on that
-build, the same way the per-component PATCH did in DOMAIN-1. What it does return is a service
-object richer than the documented one: a service-level `status` like `running:unknown`, a
-`server_status` boolean, and an inline `applications` array of `{uuid, name, fqdn, status}` per
-container. So the service object is read first and the sub-route is only asked when that object
-carries nothing, and an answer in a shape nobody recognises is reported as unknown rather than as
-stopped.
-
-## 9. Stop, start, restart, delete
+## 13. Stop, start, restart, delete
 
     POST /v1/tenants/{slug}/stop        POST /v1/tenants/{slug}/start
     POST /v1/tenants/{slug}/restart
 
 All three are passed through to Coolify and all three are queued, not immediate. A restart recreates
-both containers, which is fine and is what the copy-in on the box start is for.
+the box, which is fine and is what the copy-in on the box start is for.
 
     DELETE /v1/tenants/{slug}
     {"confirm": "acme"}
@@ -541,19 +658,15 @@ the Coolify service.
 **Not on an adopted instance.** A tenant this service did not build is not this service's to delete
 or to rebuild, so `DELETE /v1/tenants/{slug}` and `POST /v1/tenants/{slug}/provision` both answer
 `409 {"error":"adopted"}` on one. On `titanium` those two calls would have been the live
-`console.titanium.bot`: the delete would have handed its Coolify service to Coolify's own delete,
-and the provision would have built a second stack beside it, with a second container carrying the
-`com.titanbot.role=box` label the relay resolves its box by, and rewritten the hostname to
-`titanium.titanium.bot`, which does not exist. Stopping it first is not a way around either one: an
-adopted row keeps saying `adopted` through a stop, because that is how it got here and not a
-container state. Remove it in Coolify if that is really what you want.
+`console.titanium.bot`. Stopping it first is not a way around either one: an adopted row keeps saying
+`adopted` through a stop, because that is how it got here and not a container state.
 
 Coolify's own delete takes four query flags, `delete_configurations`, `delete_volumes`,
 `docker_cleanup` and `delete_connected_networks`, and **every one of them defaults to true**. This
-route sends all four explicitly, with `delete_volumes=false`, rather than letting the defaults
-stand, because a tenant's data directories are bind mounts and Coolify keeps a storage record for
-each one. Sending nothing and trusting a default is how "the api never deletes data" would quietly
-stop being true.
+route sends all four explicitly, with `delete_volumes=false`, rather than letting the defaults stand,
+because a tenant's data directories are bind mounts and Coolify keeps a storage record for each one.
+`delete_connected_networks=false` matters more under TENANT-5 than it did: `titanbot-net` is shared
+by the whole fleet, and a delete that took it would take every customer's box off the relay at once.
 
 **It does not delete the customer's data, and no route in this api ever will.**
 `/data/titanbot/acme` stays exactly where it is: the workspace, the agents, the transcripts, the
@@ -561,249 +674,166 @@ store. Deleting a customer's files is a decision a person makes on the server, o
 `rm -rf` and their own eyes on the path, with a backup taken first. It is not a thing an api call
 can do by accident at two in the morning.
 
-## 10. The operator's first hour, in order
+---
 
-```sh
-# On the Mac, then on the R750, then on the Mac again. Section 5 is these three with the reasoning.
-bash deploy/r750/sync.sh --no-install
-ssh dell-remote bash /home/sem/titanbot/deploy/control-plane-install.sh
-node deploy/r750/control-plane-coolify.mjs --dry-run && node deploy/r750/control-plane-coolify.mjs
-curl -s https://api.titanium.bot/v1/health
+## 14. Provisioning
 
-export CP_PUBLIC_URL=https://api.titanium.bot
-export CP_ADMIN_TOKEN="$(ssh dell-remote "grep '^CP_ADMIN_TOKEN=' /home/sem/titanbot/cp.env | cut -d= -f2-")"
+Seven idempotent steps, written to a ledger, with a retry that starts at the step that failed rather
+than building a second instance beside the first or minting a second gateway token. TENANT-5 changes
+what is built, not how:
 
-# 1. claim Jason's own instance, without touching it
-node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot
-
-# 2. an account on it. Run this ON the R750 so the password is typed on the machine that keeps its
-#    hash. It asks twice and echoes neither. Section 17.
-ssh dell-remote      # then: cd /home/sem/titanbot && node cp/cli.mjs account add ... titanium
-
-# 3. put that instance in tenant mode: TENANT_ID=titanium, CP_URL and its own derived
-#    CP_SESSION_SECRET on Coolify service p927bfqm83ioloibamlvyd7g, AND push the current compose
-#    (an environment value the compose does not name never reaches the container), then a restart
-#    in a quiet window. His relay password keeps working through it. Section 6.
-
-# 4. rehearse a customer
-node cp/cli.mjs tenant add acme "Acme Roofing" --dry-run
-
-# 5. build them. It prints the relay password once. Write it down.
-node cp/cli.mjs tenant add acme "Acme Roofing"
-
-# 6. their people
-node cp/cli.mjs account add owner@acmeroofing.com acme --name "The Owner"
-
-node cp/cli.mjs tenant list
-node cp/cli.mjs account list
-```
-
-## 11. What the customer sees
-
-They go to `https://acme.titanium.bot`, they get a sign-in page, they type the email address and
-password you gave them, and they are in their own console with their own agents. No relay password,
-no tailnet, no shared login. They never see the control plane and they never see a tenant name.
-
-While an instance is still coming up, signing in works and their console says the machine is
-starting. That is the honest answer and it is better than a login that hangs.
-
-The relay password still exists on every instance and still works. It is the operator's way in when
-the control plane is down, not something a customer is ever given.
-
-## 12. What TENANT-2 changed, on the relay side
-
-TENANT-1 built the control plane and defined the token. TENANT-2 is the relay learning to accept
-it, plus the two things that had to be true first: a tenant writes its own files, and a tenant is
-not root on the host.
-
-Nothing in sections 1 to 11 changed. The token this service mints is the token the relay verifies.
-
-### The sign-in page
-
-A relay is in **tenant mode** when all three of `TENANT_ID`, `CP_URL` and `CP_SESSION_SECRET` are
-set. The control plane renders those into every tenant's compose. Jason's instance was given them
-by hand, once, because it was adopted rather than built.
-
-Without tenant mode the page is exactly what it was: one password box.
-
-In tenant mode the page gains an email field above it. One form, one button:
-
-    Sign in with your Titanium Bot account
-      [ email ]
-      [ password ]
-    or the instance password
-      [ password ]
-
-With an email filled in, the relay posts `{email, password}` to `CP_URL/v1/sessions` with a 15
-second timeout, and never logs the password. What comes back decides:
-
-| answer | what the relay does |
+| step | what changed |
 | --- | --- |
-| 200, token names **this** tenant | verify it with this relay's own `CP_SESSION_SECRET`, mint the session cookie, in you go. The cookie lives as long as the token's `exp`, or the relay's own limit, whichever is shorter |
-| 200, token names **another** tenant | 302 to `https://<that tenant's host>/login?sso=<token>`. That is a person who typed the wrong address, and sending them to their own console is more useful than refusing them |
-| 401 | "That email or password is not right." |
-| the control plane cannot be reached | "Titanium Bot sign-in is not answering right now. The instance password still works." |
+| directories | `state/auth.json` is no longer written. The rest is unchanged |
+| secrets | the gateway token, still 0600, still never in compose text. No relay password |
+| compose | renders `deploy/coolify/box.compose.yml`, **one service**, joining `titanbot-net` |
+| service | created through Coolify as before |
+| envs | the gateway token, as a Coolify environment value |
+| urls | **gone.** A tenant has no hostname |
+| start | waits for that box's gateway to answer on the shared network |
 
-`GET /login?sso=<token>` is the other end of that redirect. The relay checks the signature, the
-expiry and that the `tenant` claim is its own, mints the session and sends you to `/`. A token that
-fails any of those three shows the sign-in page with "That sign-in link is not valid here."
+The box container name is `titanbot-box-<service uuid>`, computed and then verified against
+`docker ps` rather than trusted. The ledger stores it.
 
-Three things it deliberately does not do. It never stores the control plane's token, only its own
-cookie. It never calls the control plane for anything but a sign-in. And the console header shows
-nothing new: signing in with an account looks the same as signing in with the password, which is
-the point.
+`--dry-run` does every read and every render and creates nothing.
 
-The lockout counts email attempts the same way it counts password attempts, keyed on the visitor's
-address, so the account door is not a way around the door beside it.
+---
 
-Logging out works as it always did.
+## 15. What changed from TENANT-2, and why
 
-### Where a tenant's files go
+TENANT-2 shipped one relay per customer on one hostname per customer, and it worked: a customer
+signed in at `demo.titanium.bot` and saw their own agents. It is superseded because of what it cost,
+which is exactly what Jason named. Every new customer meant a second container, a second hostname, a
+second certificate, a second copy of the console's environment, a second `auth.json` with a password
+somebody had to be given, and a second thing to redeploy on every ship.
 
-`SAND_UI_STATE_DIR` is the one setting that moves all of them. When it is set, every file the relay
-writes defaults under it, and each of the older, single-file settings still wins if it is set:
-
-| file | its own setting, which still wins |
+| TENANT-2 | TENANT-5 |
 | --- | --- |
-| `auth.json` | `SAND_UI_AUTH_FILE` |
-| `endpoints.json` | `SAND_UI_ENDPOINTS_FILE` (new in this wave) |
-| `subscriptions.json` | `GROK_BOT_SUBSCRIPTIONS_FILE` |
-| `mail.json` | `GROK_BOT_MAIL_FILE` |
-| `mail-inbox.jsonl` | `GROK_BOT_MAIL_LEDGER_FILE` |
+| a relay and a box per customer | a box per customer |
+| `<slug>.titanium.bot` per customer | `console.titanium.bot` for everybody |
+| `TENANT_ID` says which customer this process is | the session says which customer this request is |
+| each tenant's derived key in that tenant's container | every tenant's derived key in the relay, over the relay credential |
+| a per-tenant relay password in `state/auth.json` | one operator password. The per-tenant file is deleted |
+| a tenant relay has no docker socket, so four features are absent there | the one relay has the socket and does `docker exec` per tenant, so nothing is absent |
+| the sso redirect sends a customer to their own host | there is one host, so there is nothing to redirect to |
+| endpoints must be public because a tenant relay could scan the private network | still true, and now it is decided per request rather than per process |
 
-Files written there are given the owner of the directory they land in, the same way the relay
-already does for the files it writes beside its own code. That habit exists because the relay runs
-as root in its container, and a root-owned settings file breaks the operator's own backup.
+What did **not** change: the token, the derivation, the store, the scrypt parameters, the lockout,
+the account routes, the shared release directory, the backup, and the plain-word copy a customer
+reads on every refusal.
 
-### The operator's own files go there too
+The endpoint guard is worth a sentence because it moved rather than went away. `POST /endpoints`
+saves a base URL and the health probe behind `GET /endpoints` fetches `<baseUrl>/models` with the
+key saved beside it. On the operator's own request that is a feature: it is his machine and the box
+next door is a legitimate endpoint. On a customer's request it is a request generator inside the
+R750's private network aimed by whoever holds that session. The guard used to key off "is this
+process a tenant"; it now keys off "is this request the operator's", which is the correct reading of
+it either way. The refusals are unchanged:
 
-This is not only a tenant setting, and leaving it unset on the operator's own instance was a hole.
-Every tenant's relay mounts `/home/sem/titanbot/ui`, and the operator's `auth.json`,
-`endpoints.json` and `subscriptions.json` sat in that directory beside the code. The mount is
-read-only, which stops a customer writing them and does nothing at all about reading them. Measured
-inside the demo tenant's relay on the R750, 2026-09-07, running as root: `/app/ui/auth.json` (the
-console password hash and the cookie secret that signs every `console.titanium.bot` session),
-`/app/ui/endpoints.json` (the provider API keys) and `/app/ui/subscriptions.json` (the adopted
-provider tokens) were all readable. No console route serves those paths (`GET /auth.json` and
-`GET /machine-room/../auth.json` both answer 404), so it was one file-read bug away rather than open.
-
-The answer is that `ui/` holds nothing but code. `deploy/coolify/docker-compose.yml` now sets
-`SAND_UI_STATE_DIR: /state` on the operator's own relay and mounts `/home/sem/titanbot/state` there,
-and `deploy/r750/move-relay-state.sh` moves the files. It is two stages so that the console works at
-every point in between:
-
-    ssh dell-remote bash /home/sem/titanbot/deploy/move-relay-state.sh
-    # paste deploy/coolify/docker-compose.yml into the Coolify resource, redeploy
-    # sign in, check the model picker still lists the endpoints
-    ssh dell-remote bash /home/sem/titanbot/deploy/move-relay-state.sh clean
-
-`copy` removes nothing and changes nothing that is running. `clean` removes an original only when
-the copy in `state/` has identical bytes, so it cannot be the step that loses a password, and it
-refuses outright when the relay has been writing to one of the pair since the copy was made. A
-rollback of the compose is free until `clean` is run. `deploy/backup/snapshot.sh` backs up both
-places, so a half-migrated instance is covered either way.
-
-Unset, nothing changes. Jason's instance kept writing exactly where it was writing.
-
-This is the change that unblocks building a second instance. The old blocker was that every tenant
-relay mounted the operator's shared `ui` directory and read `endpoints.json` out of it, and that
-file holds the provider API keys. Now a tenant reads its own.
-
-### What a tenant does not have, because it has no docker socket
-
-The control plane renders a tenant's compose **without** `/var/run/docker.sock`. A socket in that
-container is root on the R750, which is every other customer's files, the account store and the
-Coolify api key. Jason's own stack still has one, because it was not rendered by the control plane
-and because the model picker and the desktop buttons on his instance reach the box with
-`docker exec`.
-
-So a tenant relay has to come up and stay useful with no docker at all. One helper,
-`dockerAvailable()`, probes once and remembers, and every surface that used to shell out answers in
-plain words instead of hanging or returning a 500 with nothing in it:
-
-| surface | on a tenant |
+| what was sent | the sentence |
 | --- | --- |
-| `POST /endpoints/use` | `409 {"error":"not_available","detail":"This instance cannot switch models from the console yet."}` |
-| the desktop frame | "The desktop view is not available on this instance yet." |
-| the runtime bundle at `/runtime/<token>` | served from the mounted runtime directory, so the host can still upgrade itself |
-| everything else | a quiet absence rather than an error |
+| an address inside this machine's networks, by literal or by name | That address is inside this server's own network, so it cannot be used here. |
+| `http://` | Endpoints on this instance have to start with https:// |
+| a host name nothing answers for | That host name could not be looked up, so nothing can be saved for it. |
+| not a URL at all | That is not a web address. It should start with https:// and then the host name. |
 
-The offline dashboard gate still passes, which is the check that this did not change the console
-for Jason.
+---
 
-**To be measured** by the integrator: the exact list of surfaces that came back as a refusal versus
-a quiet absence, and whether the runtime bundle route needed docker after all.
-
-## 13. The gate
+## 16. The gates
 
     node scripts/verify-control-plane.mjs
-
-It starts the control plane itself on a free port, with a throwaway store, a throwaway tenant root
-and a fake Coolify that records every call and answers the way the openapi says. Then it walks
-health, the admin door, adding an account, minting a session and re-deriving its signature
-independently, reading the session back, a tampered token, revoking, a tenant dry run that must
-reach neither Coolify nor the disk, an adopt, the two refusals that protect an adopted instance, the
-refusal to build a new one while `CP_ALLOW_NEW_TENANTS` is unset, and the reserved and malformed
-slugs. The signature leg re-derives the tenant's own key from the master and the tenant name, so a
-service that went back to signing under the master fails here rather than in production. The last
-leg searches every answer it saw for the session secret, the admin token and the password.
-
-No box, no docker, no network. Exit 0 every leg passed, 1 a leg failed, 2 the server never started,
-which is not a pass.
-
-The relay side has its own:
-
-    node scripts/verify-tenant.mjs --url <relay> [--cp <url>]
-
-Without `--cp` it starts a fake control plane of its own, so it needs nothing running. It measures
-the sign-in page carrying the email field in tenant mode and not carrying it otherwise, a wrong
-email answering in plain words, a right email for this tenant minting a session that opens `/`, a
-right email for another tenant answering 302 to that tenant's host with `?sso=`, a valid `?sso=`
-signing in, a forged one refused, the instance password still working, and a relay with no docker
-answering 409 on `/endpoints/use` while `/` still answers 200. PASS and FAIL lines like the other
-gates, and a non-zero exit on any FAIL.
-
-Against the live instances, both of these have to pass and neither is allowed to cost Jason his
-own console:
-
+    node scripts/verify-one-console.mjs
     node scripts/verify-deploy.mjs --url https://console.titanium.bot
-    node scripts/verify-tenant.mjs --url https://demo.titanium.bot --cp https://api.titanium.bot
 
-## 14. What counts as a secret here
+`verify-control-plane` starts the control plane itself on a free port with a throwaway store, a
+throwaway tenant root and a fake Coolify that records every call. Unchanged by TENANT-5 except for
+the new route.
+
+`verify-one-console` is the TENANT-5 gate. With no `--url` it starts a fake control plane serving the
+registry route, two fake gateways standing in for two customers' boxes, a stub `docker` on `PATH`
+that answers the box-name lookup, and two relay copies of its own. No network, no docker, no box and
+no control plane. It mints and forges its own session tokens with `node:crypto` from the contract's
+description, never by importing the module under test, so a signature that verifies inside the
+process and not on the wire fails here rather than on the day a customer signs in.
+
+Four suites, and `--only <suite>` runs one:
+
+- **registry** the four cases of section 4: no bearer is 401, the **admin** token is 401, the relay
+  token is 200, every row carries a box and a gateway and a token and a session key, a skipped list
+  exists, the operator is not one of the rows, each row's key is that tenant's own derived key, and
+  the master's own bytes are nowhere in the body.
+- **rosters** two customers sign in at the **same** address in two cookie jars; each one's
+  `POST /api/listAgents` answers with their own agents; neither roster carries one name from the
+  other; each customer's own box was the container asked; each was asked with that customer's own
+  gateway token; and neither token was ever presented to the other customer's box. That last pair is
+  the difference between a relay that routes and a relay that filters, and a filter is what leaks
+  the day it has an edge case.
+- **unknown** a session naming a tenant the registry does not know gets the sentence, no roster, and
+  no sign-out.
+- **operator** the instance password still works and reaches the operator's own box with no
+  customer's agent on it; and a copy with **no** control plane at all comes up with the login page it
+  always had, signs in on the password and serves its roster. Plus: the relay called the control
+  plane for the registry and for sign-in and nothing else, and no gateway token, relay credential,
+  master or password is anywhere in its log.
+
+Against the live console the legs that need a credential run only when one is given, in the
+environment rather than on the command line: `ONE_CONSOLE_RELAY_TOKEN`, `ONE_CONSOLE_ADMIN_TOKEN`,
+`ONE_CONSOLE_EMAIL_A`, `ONE_CONSOLE_PASSWORD_A`, `ONE_CONSOLE_EMAIL_B`, `ONE_CONSOLE_PASSWORD_B`,
+`ONE_CONSOLE_INSTANCE_PASSWORD`. A leg with no credential prints `SKIP` with its own name and the
+reason, and the run says how many were not measured. A gate that quietly shrinks is a gate nobody
+reads.
+
+Exit 0 no leg failed, 1 a leg failed, 2 nothing could be measured, which is not a pass.
+
+`verify-deploy` gained one leg: the relay's network pin (section 3). One network and no label is the
+state before the migration and passes. Two networks and no label fails with the sentence that says
+what to set.
+
+`scripts/verify-tenant.mjs` is the TENANT-2 gate and it measures a relay in tenant mode, which is a
+mode that no longer exists. Its docker suite is still worth running, because the refusals in section
+18 are still the refusals; its login suite asserts an email field that appears **because**
+`TENANT_ID` is set, and that is the assertion the relay wave makes false. Rewriting or retiring it is
+part of that wave, not this one, and until then it is the one gate here whose red is expected.
+
+**Run the gates one at a time, a minute apart.** The relay's login throttle is five failures per
+address per 30 seconds, the account door and the password door share it, and every gate here fills
+it on purpose. Run them back to back from one Mac and the next one is measuring its own lockout.
+They share one box besides, and a gate run has a 300 second ceiling.
+
+---
+
+## 17. What counts as a secret here
 
 | secret | where it lives | who sees it |
 | --- | --- | --- |
 | a customer's password | nowhere. Only the scrypt hash and salt, in the store | nobody |
 | `CP_SESSION_SECRET`, the master | the control plane's environment only | operator only |
-| a tenant's session key | that tenant's Coolify environment and its relay | that tenant's containers |
+| a tenant's derived session key | the control plane, and the relay's memory | the relay |
 | `CP_ADMIN_TOKEN` | the control plane's environment | operator only |
+| `CP_RELAY_TOKEN` | the control plane's and the relay's environment | those two containers |
 | `COOLIFY_API_KEY` | the control plane's environment, and Coolify | operator only |
-| a tenant's gateway token | that tenant's `profile/local-docker-vm.json` at 0600, and Coolify's env store | that tenant's containers |
-| a tenant's relay password | that tenant's `state/auth.json` as a scrypt hash | shown once, at creation |
+| a tenant's gateway token | that tenant's `profile/local-docker-vm.json` at 0600, Coolify's env store, and the relay's memory | that tenant's box, and the relay |
+| the operator's console password | `state/auth.json` as a scrypt hash | operator only |
 
 None of them is ever a query parameter, ever in a log line, or ever in an answer. The last leg of
-the gate is there to keep that true after the next route is added.
+the control plane gate and the log leg of `verify-one-console` are there to keep that true after the
+next route is added.
 
-## 15. An instance without the docker socket
+Two of those rows moved in TENANT-5 and both moved toward the relay and away from customers. A
+derived session key used to sit in a customer's container where anything running in it could read
+it; a gateway token still does, but only that customer's own. Neither ever reaches a browser.
 
-TENANT-2 item 4. A tenant's compose is rendered without `/var/run/docker.sock`, so its relay has no
-docker at all. Four console features reach the box with `docker exec` and therefore cannot work
-there. They are absent on purpose, and they say so.
+---
 
-One probe decides, `dockerAvailable()` in `ui/docker-edge.mjs`. It runs `docker version --format
-{{.Server.Version}}` once, on the relay's own boot, and remembers the answer, so a cold start with
-twenty requests on it shells out once rather than twenty times. It asks for the SERVER version
-because plenty of machines carry the client and cannot reach a daemon, and "the binary is
-installed" is not the question. A relay that answers no prints one line in its log:
+## 18. What one relay with a socket does and does not change
 
-    box  no docker on this relay, so the model picker, the connectors editor and the desktop view
-         say so rather than failing
+Under TENANT-2 a tenant's relay had no docker socket, and four console features were honestly absent
+there. Under TENANT-5 a customer has no relay at all, and the one relay is ours and keeps the
+socket, so those four features work for every customer. `dockerAvailable()` still decides, and it
+still answers no on a developer Mac with no docker, which is the case that keeps the refusal copy
+alive.
 
-What each route does when the answer is no. Every refusal is the same body, `{"error":
-"not_available", "detail": "<a sentence>"}`, and 409 rather than 503, because nothing is
-temporarily down: the instance does not carry the feature and a retry will not change that.
-
-| route | answer | the sentence the console shows |
+| route | with no docker on the relay | the sentence |
 | --- | --- | --- |
 | `POST /endpoints/use` | 409 | This instance cannot switch models from the console yet. |
 | `GET /box/surface`, `POST /box/launch` | 409 | The desktop view is not available on this instance yet. |
@@ -813,259 +843,195 @@ temporarily down: the instance does not carry the feature and a retry will not c
 | `GET /model` | 200 with nulls, plus `note` | the same sentence |
 
 The last two answer rather than refuse on purpose. The console asks for both on every page load, and
-a refusal in that position is an error badge on a page that is working perfectly well. What they
-must not do is present an unknown live row as a configured one, which is what a bare null did.
+a refusal in that position is an error badge on a page that is working perfectly well.
 
-The host bundle is the one place where the split is not obvious. The version file at
-`/runtime/<token>/sand-host-bundle-latest.version` is read straight off the mounted runtime
-directory and answers on every instance. The tarball genuinely needs docker: the archive is composed
-INSIDE the box from the box's own `/home/box/sand-host`, because the in-box supervisor prunes every
-entry the archive did not carry, and a tarball built anywhere else would delete the parts of the
-bundle that come from the image. So a tenant's box does not self-upgrade its host; it gets the host
-its image was deployed with. Read `ui/host-bundle.mjs` for the layout rules behind that.
+### The two box repairs
 
-The desktop pane deserves a word, because half of it would technically still work. `/vnc/<display>/`
-proxies the box's own noVNC over the compose network and needs no socket at all, so the picture
-would come through. What does not come through is putting anything ON that picture: finding a
-window, raising it and starting Chrome or a terminal are all `docker exec`. A pane showing an empty
-screen with buttons that do nothing is the failure this whole item exists to stop, so the console
-puts the sentence in the pane instead of the frame.
-
-### The two box repairs, and where they happen now
-
-Two repairs used to run from OUTSIDE the box, from the relay's start command, through the socket
-(`deploy/coolify/init-box.sh`). On a tenant there is no socket, so neither happened, and the script
-died with a `FAILED:` line at the top of every customer's log, one line above the correct sentence
-saying this console has no docker. That reads as a broken deploy and is not one.
-
-| repair | where it happens | on a tenant |
+| repair | where it happens | on a customer's box |
 | --- | --- | --- |
-| sqlite3, which `learn-from-demonstration` needs to read Chrome's history database | the box's own entrypoint, in the background, swallowing its own failures | yes, since 2026-09-07 |
-| `apply-start-window-fix.sh`, which edits `/usr/local/bin/start-window` inside the box | `init-box.sh` and `deploy/r750/install.sh`, both of which need the socket | no |
-| `init-box.sh` itself, on an instance with no socket | one plain sentence, exit 0 | says "this instance runs its box repairs from its own container, not from here" |
+| sqlite3, which `learn-from-demonstration` needs to read Chrome's history | the box's own entrypoint, in the background, swallowing its own failures | yes |
+| `apply-start-window-fix.sh`, which edits `/usr/local/bin/start-window` inside the box | applied from outside, through the socket | **no. This is TENANT-4** |
 
 The sqlite3 loss was measured: on the R750, 2026-09-07, `command -v sqlite3` answered on the
-operator's box and reported MISSING on the demo tenant's. It moved into the box's entrypoint
-because that runs inside the container and needs no socket at all. It is backgrounded and every
-failure is swallowed into one line on stderr, because a box whose job is to boot must not be held
-up, or stopped, by a package that is a nice-to-have.
+operator's box and reported MISSING on the demo tenant's. It moved into the box's entrypoint because
+that runs inside the container and needs no socket at all.
 
-The start-window repair is still socket-only, and it does real work: on the operator's own box,
-2026-09-07, it reported `patched`, `orphan branch patched`, `stop-window patched`, `live-seat rule
-patched` and `adopt rule patched`, which is a box that had been recreated since the last deploy. A
-tenant's box gets none of that and there is no path to it today, because the repair is applied from
-outside the container. The honest place for it is the box image; until that lands, a forked agent on
-a tenant's box can meet the black screen DISPLAY-2 is about. This is the one line of section 15 that
-is a gap rather than a decision.
+The start-window repair does real work: on the operator's own box, 2026-09-07, it reported `patched`,
+`orphan branch patched`, `stop-window patched`, `live-seat rule patched` and `adopt rule patched`.
+TENANT-5 makes it *reachable* again, because the one relay has the socket and knows every box's
+name, but reachable is not the same as done: it is a 159-line script with eight `docker exec` call
+sites and it has to run on every box start, because a Coolify redeploy recreates. That is TENANT-4
+and it is unchanged by this wave.
 
-### Where a tenant may point a provider endpoint
+---
 
-`POST /endpoints` saves a base URL, and the health probe behind `GET /endpoints` then fetches
-`<baseUrl>/models` with the API key saved beside it and hands back the status, the latency and the
-model list. On the operator's own instance that is a feature: it is his machine and the box next
-door is a legitimate endpoint. On a tenant it is a request generator inside the R750's private
-network, aimed by whoever holds that customer's session, with an `Authorization` header they chose.
+## 19. What the shared network did not close
 
-Measured from a signed-in tenant session, 2026-09-07, before the guard: `http://192.168.32.3:7777`
-answered HTTP 401 (the relay itself), `http://titanbot-box:1340` HTTP 404 (the box gateway),
-`http://192.168.32.1:8000` refused (the host) and `http://titanbot-cp:7790/v1` timed out
-(off-network). Four answers that far apart are a working port scan.
+A customer's box is not privileged, has no added capabilities and holds no docker socket. What is
+left is the network, and TENANT-5 changed its shape: the box is now deliberately on a network with
+the relay and the control plane on it. That is by design. The relay has to reach the box, and the
+control plane has to wait for a box it just built.
 
-So on a tenant, and only on a tenant, a base URL has to be `https://` and has to resolve to a public
-address. Every address a name resolves to is checked, not the first. The refusals are the sentences
-the console shows on the endpoint row:
+What the box must not reach is the **host**. Measured inside the demo tenant's box on the R750,
+2026-09-07: the default gateway is `192.168.32.1`, a TCP connect succeeds on 22, 80, 443 and 8000
+and is refused on 2375, 5432 and 6379, and `http://192.168.32.1:8000/` answers a 302 to its own
+`/login` while `/api/v1/servers` answers `401 {"message":"Unauthenticated."}`. That is Coolify, which
+creates and deletes every resource on this machine, and `COOLIFY_API_KEY` is in the control plane's
+environment on the same host. So between a customer's agent and the machine every other customer
+runs on there is nothing but sshd's login and Coolify's.
 
-| what was sent | the sentence |
-| --- | --- |
-| an address inside this machine's networks, by literal or by name | That address is inside this server's own network, so it cannot be used here. |
-| `http://` | Endpoints on this instance have to start with https:// |
-| a host name nothing answers for | That host name could not be looked up, so nothing can be saved for it. |
-| not a URL at all | That is not a web address. It should start with https:// and then the host name. |
+That is `TENANT-3`, and TENANT-5 does not change it, does not worsen it and does not fix it. The
+gateway address a box reaches the host on is the same one; adding `titanbot-net` adds a second
+bridge with a second gateway address on the same host, so the rule has to cover both bridges, which
+is the one thing about it that TENANT-5 does change.
 
-The blocked set is wider than RFC1918: `100.64/10` (carrier NAT, and every tailnet address),
-`169.254/16` (link local, where cloud metadata services sit), `0.0.0.0/8`, `198.18/15`, multicast
-and the v6 unique-local and link-local ranges. `ui/auth.mjs`'s `isPrivateAddress` is the list. The
-one thing this does not close is a name whose DNS answer changes between the check and the fetch;
-closing that means pinning the resolved address into the connection, which node's `fetch` has no
-supported way to do.
+The two candidate fixes are unchanged, and (a) is where to start:
 
-### What removing the socket did not close
+**(a) Bind Coolify off `0.0.0.0`.** It listens on `0.0.0.0:8000`; on the tailnet address or on
+loopback it is not on any container bridge at all. Smallest change, no packet filtering, and it is a
+Coolify setting rather than a firewall.
 
-The socket is gone from a tenant's relay and its box is not privileged, has no added capabilities
-and holds no socket either. What is left is the network. Measured inside the demo tenant's box on
-the R750, 2026-09-07: the default gateway is `192.168.32.1`, a TCP connect succeeds on 22, 80, 443
-and 8000 and is refused on 2375, 5432 and 6379, and `http://192.168.32.1:8000/` answers a 302 to its
-own `/login` while `/api/v1/servers` answers `401 {"message":"Unauthenticated."}`. That is Coolify,
-which creates and deletes every resource on this machine, and `COOLIFY_API_KEY` is in the control
-plane's environment on the same host. So between a customer's agent and the machine every other
-customer runs on there is nothing but sshd's login and Coolify's.
+**(b) Drop container-to-host traffic per bridge.** Note the trap: traffic from a container to its own
+gateway address terminates on the host, so it goes through `INPUT` and **not** through `FORWARD`,
+which means `DOCKER-USER` (a FORWARD chain) does not see it and a rule written there does nothing.
+The rule belongs in `INPUT`: `-i br-<id> -d <that bridge's gateway> -j DROP`, one per bridge,
+including `titanbot-net`'s, re-applied when Coolify creates a network. Docker's embedded resolver
+runs in the daemon's namespace, so DNS needs no exception, and container-to-container traffic on the
+same bridge is untouched.
 
-This is open today. It is `TENANT-3` in docs/GAP-ANALYSIS.md, with the two candidate fixes and the
-one trap worth knowing before writing a rule: traffic from a container to its own gateway address
-terminates on the host, so it goes through `INPUT` and not through `FORWARD`, which means a
-`DOCKER-USER` rule does not see it at all. Binding Coolify off `0.0.0.0` is the smaller change and
-is where to start.
+Everything else on a customer's box is unchanged. The gateway answers, and the job bus, mail and
+subscriptions all work the way section 5 routes them.
 
-Everything else on a tenant is unchanged. The console loads, the gateway answers, and the job bus,
-mail and subscriptions all work: none of those goes through the socket.
+---
 
-## 16. The tenant gate
+## 20. Reading the relay's own answers
 
-    node scripts/verify-tenant.mjs
-    node scripts/verify-tenant.mjs --url https://demo.titanium.bot --cp https://api.titanium.bot
+Two lines worth recognising in the console's log, because both are normal and one looks alarming:
 
-With no `--url` it needs nothing at all: it starts a FAKE control plane, then three relay copies of
-its own, each with an empty directory as its `PATH` so `docker` is genuinely not findable. One copy
-is in tenant mode against the fake plane, one has no tenant environment (the control that proves the
-email field appears BECAUSE of tenant mode rather than always), and one is in tenant mode pointed at
-a dead port (the control plane that is not answering). It mints and forges its own session tokens
-with `node:crypto` from the contract's description, never by importing the module under test, so a
-signature that verifies inside the process and not on the wire fails here rather than on the day a
-customer signs in.
+    reg  could not reach the control plane (timed out); serving the 3 tenants last read at 09:41
 
-Two suites, and `--only login` or `--only docker` runs one:
+The control plane is down or restarting. Nobody is signed out, the operator's console is unaffected,
+and customers whose entries were already read keep working. This is the designed behaviour, not a
+fault.
 
-- **login**: the page carries an email field in tenant mode and not otherwise; a wrong email gets
-  the plain sentence; the right email for this tenant mints a session that opens the console; the
-  right email for ANOTHER tenant is a 302 to that tenant's own host with `?sso=`, signed with THAT
-  tenant's key; the link signs in; an expired one, another tenant's one and a forged one are all
-  refused; the instance password still works; a control plane that is not answering says so and the
-  instance password still gets in; the relay called the plane for sign-in and nothing else; neither
-  password is anywhere in the relay's log; and a run of wrong emails hits the same lockout a run of
-  wrong passwords does.
-- **docker**: the table in section 15, leg by leg, plus the console answering 200 underneath the
-  refusals and the version file being served while the tarball is refused.
+    reg  the control plane returned a row for titanium; dropped
 
-Against a live instance, the legs that need a credential run only when one is given, in the
-environment rather than on the command line: `TENANT_GATE_EMAIL`, `TENANT_GATE_PASSWORD`,
-`TENANT_GATE_OTHER_EMAIL`, `TENANT_GATE_OTHER_PASSWORD`, `TENANT_GATE_RELAY_PASSWORD`. A leg with no
-credential prints `SKIP` with its own name and the reason, and the run says how many were not
-measured. A gate that quietly shrinks is a gate nobody reads.
+Somebody adopted the operator's own instance into the tenant list. The relay's own environment wins
+and always will. Worth looking at, not worth waking up for.
 
-Exit 0 no leg failed, 1 a leg failed, 2 nothing could be measured, which is not a pass.
-## 17. Adding a customer, and adding yourself
+---
 
-A customer is two things: an instance, and a person who can sign in to it. In that order, because
-an account whose instance does not exist signs in and lands nowhere, and the control plane refuses
-that on purpose.
+## 21. The demo tenant
 
-    export CP_PUBLIC_URL=https://api.titanium.bot
-    export CP_ADMIN_TOKEN=...        # from cp.env on the R750
-
-    # 1. the instance. Rehearse it first: this reads and renders everything and creates nothing.
-    node cp/cli.mjs tenant add acme "Acme Roofing" --dry-run
-    node cp/cli.mjs tenant add acme "Acme Roofing"
-
-    # 2. the person. It asks for the password on the terminal, twice, with the echo off.
-    node cp/cli.mjs account add owner@acmeroofing.com acme --name "The Owner"
-
-Step 1 prints the relay password once and nothing can print it again. Write it down or throw it
-away on purpose: it is the back door for that instance, not the customer's credential. The customer
-never needs it.
-
-Step 2 does not take a password as an argument, ever. An argument is in the shell history and in
-`ps` output and in the scrollback of whoever is watching.
-
-Then hand the customer two things: `https://acme.titanium.bot` and their email address. They set
-nothing up, they install nothing, and they never hear the word tenant.
-
-Adding more people to the same instance is step 2 again with a different address.
-
-### Your own account
-
-Jason's instance is the tenant `titanium`, adopted rather than built. Give yourself an account on
-it the same way, and run it **on the R750** so the password is typed on the machine that stores its
-hash and is seen by nobody in between:
-
-    ssh dell-remote
-    cd /home/sem/titanbot
-    export CP_ADMIN_TOKEN="$(grep '^CP_ADMIN_TOKEN=' cp.env | cut -d= -f2-)"
-    node cp/cli.mjs account add jason@webdevtoday.com titanium --name "Jason Brashear"
-
-It prompts for the password twice and echoes neither. From then on `https://console.titanium.bot`
-takes that email and password.
-
-The relay password on that instance keeps working too, and that is deliberate: it is the way in
-when the control plane is down, and it is the way in from the tailnet.
-
-## 18. The demo tenant
-
-There is a real customer instance on the R750 that belongs to nobody, called `demo`. It exists so
-that the thing being described here can be shown rather than explained, and so the first real
-customer is not the first time any of it ran.
+There is a real customer on the R750 that belongs to nobody, called `demo`. It exists so the thing
+being described here can be shown rather than explained, and so the first real customer is not the
+first time any of it ran.
 
     slug            demo
-    console         https://demo.titanium.bot
-    coolify service g9n30z67ddxks4a22o9e152z
+    console         https://console.titanium.bot   (the same one Jason uses)
     account         demo@titanium.bot
     password        DEMO_PASSWORD in /home/sem/titanbot/cp.env, mode 0600
+    data            /data/titanbot/demo/
 
-The password is generated and written straight to that file so nobody has to read it out in a chat
-window. To use it:
+To read the password without it going through a chat window:
 
     ssh dell-remote "grep '^DEMO_PASSWORD=' /home/sem/titanbot/cp.env | cut -d= -f2-"
 
-It is a real instance with a real box, not a mock, so treat it the way you would treat a customer's:
-do not put anything in it you would not put in theirs.
+It is a real box, not a mock, so treat it the way you would treat a customer's: do not put anything
+in it you would not put in theirs.
 
-**Measured on the R750, 2026-09-07.** From the provisioning call to both containers reporting
-running: **61 seconds**, polled every 20 seconds. The box image was already on the machine, so that
-number is a start and not a pull; the first tenant on a fresh server will be slower by whatever the
-pull costs. `https://demo.titanium.bot/login` answered 200 on the first request after that, with no
-wait for a certificate, because the wildcard `*.titanium.bot` was already in place.
+Its old Coolify service (`sy74dau8ilh1g4u7a9eaw8f8`, box **and** relay, `demo.titanium.bot`) is
+retired by the migration in section 22. Its data directory is untouched by that: the new box mounts
+the same directories the old one did.
 
-The three things the browser proved, from this Mac (Darwin 25.5.0) with playwright-core 1.62.1
-driving the real Chrome headless, 14 checks, 0 failing. It is a script rather than a session, so it
-can be run again:
+---
 
-    DEMO_PASSWORD="$(ssh dell-remote "grep '^DEMO_PASSWORD=' /home/sem/titanbot/cp.env | cut -d= -f2-")" \
-      node scripts/verify-tenant-browser.mjs
+## 22. The migration, as run
 
-It exists beside `scripts/verify-tenant.mjs` and not inside it because the HTTP gate is the right
-tool for status codes, headers and copy, and cannot tell you a person can sign in: a form posting
-the wrong field name, a button that is not a submit and a redirect a browser will not follow all
-answer 200 to curl.
+Six steps, in this order, each one measured before the next begins. **The order is not negotiable.**
+The network attach and the code ship are two separate restarts with a check between them, because
+two changes in one restart means a 502 cannot be attributed to either, and the one thing that can
+502 here is the console Jason works in.
 
-**Run the gates one at a time, a minute apart.** The relay's login throttle is five failures per
-address per 30 seconds, the account door and the password door share it, and `verify-deploy`,
-`verify-tenant` and this script all fill it on purpose. Run them back to back from one Mac and the
-next one is measuring its own lockout. Every gate here says so by name when it hits that, rather
-than failing as though the product were broken, but the cure is to wait.
+`deploy/r750/one-console-migrate.sh` is the script. It is idempotent, every check is read-only, and
+it **prints rather than clicks**: Coolify owns the compose and a compose it did not store is one it
+overwrites on the next deploy. `TITANBOT_DRY_RUN=1` changes nothing at all.
 
-1. `https://demo.titanium.bot/login` shows the email field and the sentence above it.
-2. Signing in as `demo@titanium.bot` lands on `/` with a session cookie of that instance's own, and
-   the roster draws a card from that instance's own box.
-3. Signing in as `demo@titanium.bot` at `https://console.titanium.bot/login` redirects to
-   `demo.titanium.bot` and lands signed in there, which is the wrong-address case from section 12.
-   A wrong password gets `That email or password is not right.`, no status code, no session.
+    bash deploy/r750/one-console-migrate.sh
 
-One thing to know before showing it to anybody: **the agent on a brand new instance is called
-"New Bot"**, not Titan. That is `SAND_DEFAULT_AGENT_NAME` in `source/shared/agents/agents.ts` and it
-is upstream's name for an agent nobody has named yet. Titan is the name Jason gave his own. A
-customer's first screen therefore says "New Bot", which is a copy decision nobody has made rather
-than anything tenancy did.
+| step | what it is | measured |
+| --- | --- | --- |
+| a | `docker network create titanbot-net`. No restart, safe at any hour | *to be measured* |
+| b | paste the new compose, set `TITANBOT_PROXY_NETWORK` and `TITANBOT_BOX_CONTAINER`, ONE quiet-window restart, then check `console.titanium.bot` answers | *to be measured* |
+| c | ship the relay and control plane source, rebuild both local images, redeploy | *to be measured* |
+| d | `CP_RELAY_TOKEN` on both resources; restart the control plane; `GET /v1/relay/tenants` answers the relay and refuses the admin token | *to be measured* |
+| e | re-provision demo as one box on the shared network; stop and delete the old two-container service, keeping its data directory | *to be measured* |
+| f | the browser proof (two customers, two rosters, two contexts), then `verify-deploy`, `verify-one-console`, `verify-mail` | *to be measured* |
 
-And the gates afterwards, because none of this is allowed to cost Jason his own instance:
+**The network goes on before the code, which reverses the order this was first planned in.** The
+reason is attribution. Step b changes the container's networks and nothing else: the relay image, the
+relay's code and its behaviour are all the ones already running. So a 502 after step b is the
+Traefik question and nothing else, and the rollback below fixes it in three lines. Do it the other
+way round and a 502 has two candidates and no way to tell them apart, at the one moment when the
+thing that is down is the console Jason works in.
 
-    node scripts/verify-deploy.mjs --url https://console.titanium.bot
-    # 56 PASS / 0 FAIL / 2 inconclusive, with his instance in tenant mode
+Step **b** is the one with a rollback, and it is three lines:
 
-    node scripts/verify-tenant.mjs --url https://demo.titanium.bot --cp https://api.titanium.bot
-    # 26 PASS / 0 FAIL / 7 SKIP, each skip named
+1. remove the two `networks:` lines from `titanbot-relay` in the compose
+2. remove the `traefik.docker.network` label from `titanbot-relay`
+3. redeploy the service
 
-    node scripts/verify-mail.mjs --url https://demo.titanium.bot
-    # 16 PASS / 0 FAIL, read-only, with the demo bearer from its own profile directory
-    # (SAND_HOST_GATEWAY_TOKEN, read over ssh from /data/titanbot/demo/profile/local-docker-vm.json)
+The relay is then single-homed on Coolify's own network exactly as it was, and
+`console.titanium.bot` routes the way it did yesterday. Nothing else has changed at that point,
+because step **c** has not run.
 
-    node scripts/verify-tenant-browser.mjs
-    # 14 PASS / 0 FAIL, the three customer journeys in a real browser
+Before any restart of Jason's service, check it is quiet:
 
-The seven skips are the legs that need something this run did not have: a relay the gate starts
-itself (three of them), a second tenant's account, this tenant's relay password, and the fake
-control plane's own recorder. Each prints its own name and reason. A gate that quietly shrinks is a
-gate nobody reads.
+    $S/ship-r750.sh quiet     # must show 0 mid-turn and 0 open
 
-The deploy gate failed twice on the first run after the restart, both times on the roster
-(`no .worker-card[data-context-id] after 30 s`). That was the box still coming up: the gateway had
-loaded no agents yet. Ninety seconds later the same gate passed 56 of 56. **Wait for the box, not
-just the container**, before believing a gate run after a recreate.
+Copy-in is on (`SAND_BOX_STORE_COPY_IN=1`), so the box recreate restores the agents' CLI logins and
+git config on the way back up. **Wait 90 seconds or more for the box before any gate.** A deploy gate
+run too early fails on the roster with `no .worker-card[data-context-id] after 30 s`, which is the
+box still loading agents and not a fault.
+
+### The browser proof, in words, because this is the thing that matters
+
+Two browser contexts side by side, because two sessions in one cookie jar prove nothing:
+
+1. `demo@titanium.bot` signs in at `console.titanium.bot` and sees demo's agents.
+2. Sign out. Jason's console password signs in at the same address and sees Titan and Scribe.
+3. Neither roster carries one name from the other.
+
+`scripts/verify-one-console.mjs` does the same three over HTTP, plus the registry route's four auth
+cases and the unknown-tenant answer, and it can be run again. The browser run is what proves a
+person can do it; the HTTP run is what proves the status codes and the copy.
+
+---
+
+## 23. The first hour, in order
+
+```bash
+# On the Mac, then on the R750, then on the Mac again.
+
+# 1. the shared network and the relay's place on it. Section 22, steps a and b.
+bash deploy/r750/one-console-migrate.sh          # on the R750; prints what to paste
+
+# 2. the relay credential, one value on two resources. Section 22, step d.
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+
+# 3. claim Jason's own instance, if it is not already claimed
+node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot
+
+# 4. an account on it. Run this ON the R750 so the password is typed on the machine that keeps its
+#    hash. It asks twice and echoes neither. Section 11.
+ssh dell-remote      # then: cd /home/sem/titanbot && node cp/cli.mjs account add ... titanium
+
+# 5. rehearse a customer, then build them
+node cp/cli.mjs signup add owner@acmeroofing.com "Acme Roofing" --dry-run
+node cp/cli.mjs signup add owner@acmeroofing.com "Acme Roofing"
+
+node cp/cli.mjs tenant list
+node cp/cli.mjs account list
+```
+
+Hand the customer `https://console.titanium.bot` and their email address. That is the whole handover.

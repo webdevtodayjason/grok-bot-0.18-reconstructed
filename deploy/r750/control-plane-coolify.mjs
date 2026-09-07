@@ -4,7 +4,7 @@
 // deploy/r750/control-plane-install.sh makes the tenant root, builds the image and generates the
 // two secrets on the R750. This makes the Coolify object that starts that image: one service named
 // titanbot-cp, its environment, its address, and a start. Together they replace the twelve manual
-// clicks docs/TENANCY.md section 5 used to describe, which is the point: a step done by hand on a
+// clicks docs/TENANCY.md section 9 used to describe, which is the point: a step done by hand on a
 // live server is a step nobody can repeat or review.
 //
 //   node deploy/r750/control-plane-coolify.mjs --dry-run     # prints the plan, calls nothing

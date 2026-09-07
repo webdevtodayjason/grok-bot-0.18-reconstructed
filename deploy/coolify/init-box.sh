@@ -46,7 +46,7 @@ die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
 #
 # What a tenant's box gets instead: sqlite3 is installed by the box's own entrypoint, which needs no
 # socket, and the start-window repair is applied only where a socket exists. docs/TENANCY.md section
-# 15 has the table.
+# 18 has the table.
 if [ ! -S "$SOCK" ]; then
   say "this instance runs its box repairs from its own container, not from here"
   exit 0

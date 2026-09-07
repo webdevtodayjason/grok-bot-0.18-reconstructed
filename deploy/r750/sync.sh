@@ -132,7 +132,7 @@ rsync -a --delete "$REPO/deploy/backup/" "$HOST:$ROOT/deploy/backup/"
 say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,control-plane-install.sh,apply-start-window-fix.sh,init-box.sh,backup/}"
 
 step "ship the control plane"
-# TENANT-1. docs/TENANCY.md section 5 tells the operator to run this script and then build the
+# TENANT-1. docs/TENANCY.md section 9 tells the operator to run this script and then build the
 # control plane image on the server with `-f $ROOT/cp/Dockerfile $ROOT`. Nothing here shipped cp/
 # or the two compose files, so that build could not run at all: the first documented step of the
 # deploy had nothing to build from.
