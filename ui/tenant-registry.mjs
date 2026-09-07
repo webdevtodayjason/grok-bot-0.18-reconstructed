@@ -187,8 +187,15 @@ export function createTenantRegistry({
     if (!Array.isArray(body?.tenants)) return { failed: "the answer carried no tenant list" };
     // The control plane names the rows it left out and why; a customer missing from the console is
     // worth a line in the log rather than a bare 404 for whoever tries to sign in.
+    //
+    // Except the operator's own row, which this relay builds from its own environment and never
+    // from the control plane. The control plane has no token or directories for an adopted
+    // instance, so it correctly leaves that row out and correctly says why, and printing it here
+    // read as a fault every sixty seconds for a console that was working perfectly. A line that
+    // says something is wrong when nothing is is worse than no line at all.
     for (const row of Array.isArray(body.skipped) ? body.skipped : []) {
       const slug = str(row?.slug);
+      if (slug === OPERATOR_SLUG) continue;
       if (slug.length > 0) log(`reg  ${slug} is not on this console: ${str(row?.why) || "the control plane did not say"}`);
     }
     return body.tenants;

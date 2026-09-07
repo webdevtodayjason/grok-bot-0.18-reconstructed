@@ -296,3 +296,30 @@ test("the sentence a person sees is one sentence, in plain words", () => {
   assert.equal(NOT_AVAILABLE_SENTENCE, "That workspace is not available right now.");
   assert.equal(NOT_AVAILABLE_SENTENCE.includes("--"), false, "no em dashes in copy a business owner reads");
 });
+
+test("the operator's own row being skipped by the control plane is not reported as a fault", async () => {
+  // The control plane cannot serve the operator's row: an adoption holds a uuid and a host and no
+  // token or directories, so it leaves that row out and says why. The relay builds that entry from
+  // its own environment instead, so the skip is the arrangement working. Printing it made a healthy
+  // console say something was wrong with itself every sixty seconds.
+  const lines = [];
+  const registry = createTenantRegistry({
+    operator: operatorEntry({ env: { SAND_BOX_CONTAINER: "titanbot-box-operator" }, gateway: "http://box:1340", token: "t" }),
+    cpUrl: "http://control-plane.invalid",
+    relayToken: "a relay credential of at least thirty two characters",
+    dockerNames: async () => null,
+    log: (line) => lines.push(String(line)),
+    fetchImpl: async () => new Response(JSON.stringify({
+      tenants: [],
+      skipped: [
+        { slug: OPERATOR_SLUG, why: "this workspace has no gateway token on this server" },
+        { slug: "halfway", why: "this workspace has no container yet" },
+      ],
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  await registry.refresh();
+  assert.equal(lines.some((line) => line.includes(OPERATOR_SLUG)), false, `the operator's own skip was reported: ${lines.join(" | ")}`);
+  assert.equal(lines.some((line) => line.includes("halfway")), true, "a real customer's skip must still be named");
+  // And the operator is still served, which is the whole reason the skip is expected.
+  assert.equal(registry.get(OPERATOR_SLUG)?.box, "titanbot-box-operator");
+});
