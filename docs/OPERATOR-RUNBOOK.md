@@ -92,12 +92,21 @@ thing to check before trusting anything on screen.
 node scripts/verify-machine-room.mjs --all
 SAND_PROFILE_DIRS=... node scripts/verify-local-turn.mjs --rounds 5
 node scripts/verify-agent-identity.mjs
+node scripts/verify-onboarding.mjs
 node --test tests/
 ```
 
 `verify-agent-identity` is worth re-running after any model switch: on the frontier model both
 agents name themselves correctly; on Nemotron they do not answer the question at all, which is
 the "agents think they are Grok" report and is a model-quality problem, not a prompt bug.
+
+`verify-onboarding` measures the first run a new customer gets, and the ceiling of thirteen agents
+per box. **Neither is on the box yet**, so today it exits 2 and says which half is missing rather
+than reporting the product broken; `--self-test` is the one arm that passes now, and it measures the
+gate rather than the box. It moves `SAND_MAX_AGENTS` and `SAND_TEST_HOOKS` in
+`sand-host-settings.json` while it runs and puts both back, and its box arm points the box at a stub
+model on this Mac for one turn and repins the endpoint it found. Run it on its own, not alongside
+another gate. The whole design is [docs/ONBOARDING.md](ONBOARDING.md).
 
 ## Your own instance on the R750
 
