@@ -1191,13 +1191,27 @@
     });
   }
 
+  // Which panel is on screen, counted rather than named. Four host actions close the panel when
+  // they answer -- duplicate, delete, add a bot, add a room -- and the host can take seconds over
+  // any of them. In that gap the person can open something else, and the close then takes away
+  // whatever they are looking at NOW: a delete that landed shut the Marketplace out from under a
+  // gate run, with no way to tell from the page that anything had happened. An action closes the
+  // panel it was started from, or it closes nothing.
+  let panelGeneration = 0;
+
   function openPanel(eyebrow, title, content) {
     closeOpenDialogs(elements.panelDialog);
+    panelGeneration += 1;
     elements.panelEyebrow.textContent = eyebrow;
     elements.panelTitle.textContent = title;
     elements.panelContent.innerHTML = content;
     if (!elements.panelDialog.open) elements.panelDialog.showModal();
   }
+
+  /** Closes the panel only if it is still the one this action was started from. */
+  const closePanelFrom = (generation) => {
+    if (panelGeneration === generation && elements.panelDialog.open) elements.panelDialog.close();
+  };
 
   function routineScopeLabel(routine) {
     const record = contextRecord(routine.scope);
@@ -3876,8 +3890,9 @@
         .catch((error) => showToast(`Not ${wanted ? "hidden" : "unhidden"}: ${error.message}`));
     } else if (target.dataset.duplicateAgent) {
       target.disabled = true;
+      const from = panelGeneration;
       adapter.duplicateAgent(target.dataset.duplicateAgent)
-        .then((copy) => { elements.panelDialog.close(); rosterMode = "workers"; showToast(`${copy.name} created on the host`); })
+        .then((copy) => { closePanelFrom(from); rosterMode = "workers"; showToast(`${copy.name} created on the host`); })
         .catch((error) => { target.disabled = false; showToast(`Not duplicated: ${error.message}`); });
     } else if (target.dataset.deleteAgent) {
       const agentId = target.dataset.deleteAgent;
@@ -3895,8 +3910,9 @@
       }
       armedDeleteAgentId = null;
       target.disabled = true;
+      const from = panelGeneration;
       adapter.deleteAgent(agentId)
-        .then((name) => { elements.panelDialog.close(); showToast(`${name} deleted on the host`); })
+        .then((name) => { closePanelFrom(from); showToast(`${name} deleted on the host`); })
         .catch((error) => { target.disabled = false; target.textContent = "Delete"; showToast(`Not deleted: ${error.message}`); });
     } else if (target.dataset.readAudit || target.dataset.moreAudit) {
       const agentId = target.dataset.readAudit || target.dataset.moreAudit;
@@ -4118,14 +4134,16 @@
         .catch((error) => { submit.disabled = false; showToast(`Could not import that skill: ${error.message}`); });
     } else if (form.hasAttribute("data-add-worker")) {
       const data = new FormData(form);
+      const from = panelGeneration;
       Promise.resolve(adapter.addWorker({ name: data.get("name"), role: data.get("role") }))
-        .then((worker) => { rosterMode = "workers"; elements.panelDialog.close(); showToast(`${worker.name} created with a direct conversation`); })
+        .then((worker) => { rosterMode = "workers"; closePanelFrom(from); showToast(`${worker.name} created with a direct conversation`); })
         .catch((error) => showToast(agentCapRefusal(error) || `Could not create that agent: ${error.message}`));
     } else if (form.hasAttribute("data-add-room")) {
       const data = new FormData(form);
       const memberId = data.get("memberId");
+      const from = panelGeneration;
       Promise.resolve(adapter.addRoom({ name: data.get("name"), memberIds: memberId ? [memberId] : [] }))
-        .then((room) => { rosterMode = "rooms"; elements.panelDialog.close(); showToast(`${room.name} room created`); })
+        .then((room) => { rosterMode = "rooms"; closePanelFrom(from); showToast(`${room.name} room created`); })
         .catch((error) => showToast(`Could not create that room: ${error.message}`));
     }
 

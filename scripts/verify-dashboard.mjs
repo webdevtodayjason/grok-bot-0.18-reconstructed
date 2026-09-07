@@ -196,7 +196,28 @@ const openHiddenGroup = async () => {
 // surface it means rather than clicking a word that appears on both.
 const openMarketplace = async () => {
   await page.keyboard.press("Escape"); await page.waitForTimeout(300);
+  const before = await page.evaluate(() => ({
+    open: document.getElementById("panel-dialog")?.open === true,
+    title: document.getElementById("panel-title")?.textContent?.trim() ?? "",
+    buttons: document.querySelectorAll('[data-capability="marketplace"]').length,
+  }));
   await page.click('[data-capability="marketplace"]'); await page.waitForTimeout(1400);
+  // The panel's markup survives its own close, so every read below this line answers whether or
+  // not the dialog is on screen and only a CLICK notices. That turned a panel that did not open
+  // into a thirty-second timeout on whichever control was clicked first, reported against that
+  // control. Wait for the dialog itself, and say so in its own words when it never came up.
+  const opened = await until(() => page.evaluate(() =>
+    (document.getElementById("panel-dialog")?.open === true ? true : null)), 20_000, 250);
+  if (!opened) {
+    const after = await page.evaluate(() => ({
+      title: document.getElementById("panel-title")?.textContent?.trim() ?? "",
+      tabs: document.querySelectorAll("[data-marketplace-tabs]").length,
+      dialogs: [...document.querySelectorAll("dialog")].filter((d) => d.open).map((d) => d.id || d.className),
+    }));
+    throw new Error(`the Marketplace panel did not open: #panel-dialog is closed. Before the click it was `
+      + `${before.open ? `open on "${before.title}"` : "closed"} with ${before.buttons} marketplace button(s); `
+      + `after it holds "${after.title}" (${after.tabs} tab strip) and the open dialogs are ${JSON.stringify(after.dialogs)}`);
+  }
   // The panel reads the catalog through the gateway when it opens and says so while it is reading
   // (MR-37). The fixed wait above was a latency measurement of the box: on a loaded one the
   // coverage checks read the panel mid-read and reported every card in the catalog missing. Wait
