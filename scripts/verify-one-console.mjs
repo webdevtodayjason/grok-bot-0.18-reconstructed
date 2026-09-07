@@ -27,6 +27,11 @@
 //              cross-check, which is the leg that actually matters: neither roster contains one
 //              name from the other, and each fake gateway was asked only by its own session.
 //
+//              Live, with one customer and no second, ONE_CONSOLE_GATEWAY_TOKEN makes the OPERATOR
+//              the second party: a customer's roster and Jason's, from the one console, cross-checked
+//              on agent IDS. That is the arrangement a real server is usually in, and it is the proof
+//              the contract asks for in those words.
+//
 //   unknown    A session that names a tenant the registry does not know gets the login page and the
 //              sentence "That workspace is not available right now." -- not a 500, not somebody
 //              else's console, and not a sign-out, because a tenant is unknown while it is being
@@ -85,6 +90,11 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
     "  ONE_CONSOLE_EMAIL_B         a DIFFERENT customer's account, and its password",
     "  ONE_CONSOLE_PASSWORD_B",
     "  ONE_CONSOLE_INSTANCE_PASSWORD   the operator's own console password",
+    "  ONE_CONSOLE_GATEWAY_TOKEN   the operator's box gateway bearer. With customer A and no",
+    "                              customer B, this makes the OPERATOR the second party in the",
+    "                              cross-check, which is a server with one customer on it and is",
+    "                              the proof the contract actually asks for. Read it off the box:",
+    "                                docker exec <the operator box> printenv SAND_GATEWAY_TOKEN",
     "",
     "Exit 0 no leg failed, 1 a leg failed, 2 nothing was measured.",
   ].join("\n"));
@@ -557,6 +567,12 @@ const CRED = {
   emailB: LIVE ? (process.env.ONE_CONSOLE_EMAIL_B?.trim() || null) : B.email,
   passwordB: LIVE ? (process.env.ONE_CONSOLE_PASSWORD_B ?? null) : B.password,
   instance: LIVE ? (process.env.ONE_CONSOLE_INSTANCE_PASSWORD ?? null) : INSTANCE_PASSWORD,
+  // The operator's OTHER door, live only. The bearer resolves to the same workspace the instance
+  // password does, and unlike the password it is readable off the box by anyone who can already
+  // reach the box, so it is the credential a gate can be given. It exists here because Jason's
+  // console password is not written down anywhere a script should read, and without it the live
+  // cross-check has only one party.
+  gatewayToken: LIVE ? (process.env.ONE_CONSOLE_GATEWAY_TOKEN?.trim() || null) : null,
 };
 
 // ================================================================================================
@@ -644,9 +660,48 @@ if (RUN("rosters")) {
     "and it names no per-customer hostname",
     (page.text.replace(/console\.titanium\.bot/g, "").match(/\b[a-z0-9-]+\.titanium\.bot/) ?? ["none"])[0]);
 
-  if (CRED.emailA == null || CRED.passwordA == null || CRED.emailB == null || CRED.passwordB == null) {
+  // Live with ONE customer and the operator's bearer: that is the contract's own proof, a customer
+  // and Jason, and it is the arrangement a real server is usually in. A second real customer exists
+  // only when somebody has signed one up.
+  const operatorIsTheSecondParty = LIVE
+    && CRED.emailA != null && CRED.passwordA != null
+    && (CRED.emailB == null || CRED.passwordB == null)
+    && CRED.gatewayToken != null;
+
+  if (operatorIsTheSecondParty) {
+    const inA = await postForm(CONSOLE, "/login", { email: CRED.emailA, password: CRED.passwordA });
+    check(inA.status === 302 && inA.headers.get("location") === "/", "the customer signs in and lands on the console", `status ${inA.status}`);
+    cookieA = sessionCookie(inA);
+    check(cookieA.length > 0, "with a session cookie");
+    skip("customer B signs in at the same address", "no second customer; the operator is the other party");
+
+    step("a customer's roster and the operator's, from the one console");
+    const rosterA = await apiCall(CONSOLE, "listAgents", cookieA);
+    check(rosterA.status === 200, "the customer's console answers listAgents", `status ${rosterA.status}`);
+    const asOperator = await fetch(`${CONSOLE}/api/listAgents`, {
+      method: "POST", redirect: "manual",
+      headers: { "content-type": "application/json", authorization: `Bearer ${CRED.gatewayToken}` },
+      body: "{}",
+    });
+    const operatorText = await asOperator.text();
+    check(asOperator.status === 200, "the operator's bearer answers listAgents", `status ${asOperator.status}`);
+
+    // Ids, not names. Every fresh box calls its first agent "New Bot", so a customer and the
+    // operator can have rosters that share a NAME and share no agent at all. The id is per box, so
+    // an id on both lists is one box answering for two workspaces, which is the whole failure.
+    const idsOf = (text) => [...String(text).matchAll(/"id"\s*:\s*"([^"]+)"/g)].map((hit) => hit[1]);
+    const idsA = idsOf(rosterA.text);
+    const idsOperator = idsOf(operatorText);
+    check(idsA.length > 0 && idsOperator.length > 0, "both rosters have agents on them",
+      `customer ${idsA.length}, operator ${idsOperator.length}`);
+    const shared = idsA.filter((id) => idsOperator.includes(id));
+    check(shared.length === 0, "no agent is on both the customer's roster and the operator's",
+      shared.length === 0 ? "none in common" : `both carry ${shared.join(", ")}`);
+    check(rosterA.text !== operatorText, "and the two answers are not the same bytes");
+  } else if (CRED.emailA == null || CRED.passwordA == null || CRED.emailB == null || CRED.passwordB == null) {
     skip("customer A signs in", "no ONE_CONSOLE_EMAIL_A / ONE_CONSOLE_PASSWORD_A");
-    skip("customer B signs in at the same address", "no ONE_CONSOLE_EMAIL_B / ONE_CONSOLE_PASSWORD_B");
+    skip("customer B signs in at the same address",
+      LIVE && CRED.emailA != null ? "no second customer, and no ONE_CONSOLE_GATEWAY_TOKEN to use the operator instead" : "no ONE_CONSOLE_EMAIL_B / ONE_CONSOLE_PASSWORD_B");
     skip("each roster is that customer's own", "no account credentials");
     skip("neither roster carries one name from the other", "no account credentials");
   } else {

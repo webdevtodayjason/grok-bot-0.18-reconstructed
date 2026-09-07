@@ -128,7 +128,7 @@ take `--dry-run` or `TITANBOT_DRY_RUN=1`, so read the plan before you run either
 All of that is live as of 2026-09-07. The server runs four containers: your relay (the one console),
 your box, the control plane, and demo's box. The demo account is `demo@titanium.bot` with its
 password in `cp.env` as `DEMO_PASSWORD`, and it signs in at `console.titanium.bot` like any customer.
-`verify-deploy` passes 56 of 56 there, `scripts/verify-one-console.mjs` proves two customers get two
+`verify-deploy` passes 58 legs with none failing there, `scripts/verify-one-console.mjs` proves two customers get two
 rosters, and `scripts/verify-one-console-browser.mjs` proves it in a real browser in two contexts.
 
 Three things to remember when you change something on a Coolify service. **An environment value the

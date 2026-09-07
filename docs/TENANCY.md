@@ -995,11 +995,11 @@ overwrites on the next deploy. `TITANBOT_DRY_RUN=1` changes nothing at all.
 | step | what it is | measured |
 | --- | --- | --- |
 | a | `docker network create titanbot-net`. No restart, safe at any hour | created, subnet `192.168.48.0/20`, nothing attached yet. The script found Jason's relay only after it was fixed to match on the service uuid: with demo running it had read **demo's** relay and printed demo's network as the pin, which is the one value that would have taken the console down |
-| b | paste the new compose, set `TITANBOT_BOX_CONTAINER`, ONE quiet-window restart, then check `console.titanium.bot` answers | quiet first (Titan and Scribe, 0 mid-turn, 0 open jobs). Console back to 200 within **50 seconds**. Took **two** restarts, not one, and why is section 3: the first paste's pin was a variable and Coolify escapes it inside a labels block, so the label arrived as the literal text `${TITANBOT_PROXY_NETWORK}`. Second paste, literal `titanbot-net`, read back off the running container: networks `p927bfqm83ioloibamlvyd7g titanbot-net`, pin `titanbot-net`, `coolify-proxy` attached to `titanbot-net`. `verify-deploy` **56 PASS 0 FAIL** |
+| b | paste the new compose, set `TITANBOT_BOX_CONTAINER`, ONE quiet-window restart, then check `console.titanium.bot` answers | quiet first (Titan and Scribe, 0 mid-turn, 0 open jobs). Console back to 200 within **50 seconds**. Took **two** restarts, not one, and why is section 3: the first paste's pin was a variable and Coolify escapes it inside a labels block, so the label arrived as the literal text `${TITANBOT_PROXY_NETWORK}`. Second paste, literal `titanbot-net`, read back off the running container: networks `p927bfqm83ioloibamlvyd7g titanbot-net`, pin `titanbot-net`, `coolify-proxy` attached to `titanbot-net`. `verify-deploy` green |
 | c | ship the relay and control plane source, rebuild both local images, redeploy | `deploy/r750/sync.sh`, host bundle sha256 `054d26c6bd2e4d31…`, then a plain `docker restart` of the relay container, because `ui/` is a bind mount and its code does not live in the image. Relay boot: `box container titanbot-box-p927bfqm83ioloibamlvyd7g`, `work 1: titanium`, and `reg could not reach the control plane (HTTP 404)`, which is right: the control plane was still on the old image. Console 200 throughout |
 | d | `CP_RELAY_TOKEN` on both resources; restart the control plane; `GET /v1/relay/tenants` answers the relay and refuses the admin token | generated on the server with `openssl rand -hex 32` into `/home/sem/titanbot/cp.env`, set on both Coolify resources, control plane image rebuilt on the server and redeployed. Health `{"ok":true,"version":"1.0.0","tenants":2,"accounts":1}`. The route: **401** with no bearer, **401** with the admin token, **200** with the relay credential. Relay after its restart: `work 2: demo, titanium` |
 | e | re-provision demo as one box on the shared network; stop and delete the old two-container service, keeping its data directory | stopped (45 s to reconcile), deleted with `{"confirm":"demo"}`, `/data/titanbot/demo` kept (41 MB, `credential profile state volumes`). Provisioned again: **23 seconds** from the call to `status running, boxReady true`. One container, `titanbot-box-atonqjq7zx593jsacaccpfau`, on `atonqjq7zx593jsacaccpfau` and `titanbot-net`. The dry run first, which planned `directories, secrets, compose, service, envs, start, ready` and **no urls step** |
-| f | the browser proof (two customers, two rosters, two contexts), then `verify-deploy`, `verify-one-console`, `verify-mail` | a second customer was signed up to have two: `POST /v1/signups` with `owner@northbay.test` and company `North Bay Roofing` made the account, derived the slug `north-bay-roofing` and built the box in **16 seconds**. Browser, headless Chrome, two contexts: **17 PASS 0 FAIL**, no agent id on both rosters (`c63fdce4…` and `d7df78a5…`). `verify-one-console` live **18 PASS 0 FAIL 8 SKIP**. `verify-deploy` **56 PASS 0 FAIL**. `verify-mail` read-only **16 PASS 0 FAIL**. Over HTTP, three rosters from one console: demo `New Bot c63fdce4…`, north-bay `New Bot d7df78a5…`, the operator over the gateway bearer `Titan 96a720b6…, Scribe f97bfb2e…`. The proof customer was then stopped and deleted; its data directory stays |
+| f | the browser proof (two customers, two rosters, two contexts), then `verify-deploy`, `verify-one-console`, `verify-mail` | a second customer was signed up to have two: `POST /v1/signups` with `owner@northbay.test` and company `North Bay Roofing` made the account, derived the slug `north-bay-roofing` and built the box in **16 seconds**. Browser, headless Chrome, two contexts: **17 PASS 0 FAIL**, no agent id on both rosters (`c63fdce4…` and `d7df78a5…`). `verify-one-console` live, with both customers, **18 PASS 0 FAIL 8 SKIP**, and after the proof customer was retired, **17 PASS 0 FAIL 9 SKIP** with the operator standing in as the second party. `verify-deploy` **58 PASS 0 FAIL 2 inconclusive** (the two inconclusive ones want the job bus bearer, which the gate was not given; and 58 rather than the 56 this gate used to report, because the relay is on two networks now and both network-pin legs apply). `verify-mail` read-only **16 PASS 0 FAIL**. Over HTTP, three rosters from one console: demo `New Bot c63fdce4…`, north-bay `New Bot d7df78a5…`, the operator over the gateway bearer `Titan 96a720b6…, Scribe f97bfb2e…`. The proof customer was then stopped and deleted; its data directory stays |
 
 ### What the server looks like now
 
@@ -1020,10 +1020,21 @@ the box to answer before it reports the workspace ready, so the gap is the relay
 the build. It closes itself.
 
 **The instance-password legs of `verify-one-console` were not measured**, because Jason's own
-console password is not written down anywhere a script can read and should not be. The operator's
-door was measured over the gateway bearer instead, which resolves to the same workspace: `Titan` and
-`Scribe`, and neither customer's agent on that roster. Set `ONE_CONSOLE_INSTANCE_PASSWORD` to
-measure the password half.
+console password is not written down anywhere a script can read and should not be. Set
+`ONE_CONSOLE_INSTANCE_PASSWORD` to measure that half.
+
+The gate does not need it for the cross-check, though, and this is worth knowing because a real
+server usually has one customer on it and not two. Give it `ONE_CONSOLE_GATEWAY_TOKEN` and the
+OPERATOR becomes the second party: a customer's roster and Jason's, from the one console, compared
+on agent **ids**. That is the proof the contract asks for in its own words, and it is what was
+measured here:
+
+    ONE_CONSOLE_EMAIL_A=demo@titanium.bot ONE_CONSOLE_PASSWORD_A=... \
+    ONE_CONSOLE_RELAY_TOKEN=... ONE_CONSOLE_ADMIN_TOKEN=... \
+    ONE_CONSOLE_GATEWAY_TOKEN="$(ssh dell-remote 'docker exec titanbot-box-<uuid> printenv SAND_GATEWAY_TOKEN')" \
+      node scripts/verify-one-console.mjs --url https://console.titanium.bot --cp https://api.titanium.bot
+
+The customer's roster had 1 agent, the operator's had 2, and none in common.
 
 **The network goes on before the code, which reverses the order this was first planned in.** The
 reason is attribution. Step b changes the container's networks and nothing else: the relay image, the
