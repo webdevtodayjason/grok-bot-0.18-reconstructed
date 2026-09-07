@@ -12,7 +12,8 @@
 //
 // It is idempotent. A second run finds the service by name, updates its compose, adds only the
 // environment keys that are missing, corrects only the ones whose value changed, re-sets the same
-// address and starts it again. Nothing here deletes anything, ever.
+// address, and starts it, or restarts it when it is already up so the settings it just wrote are
+// the ones running. Nothing here deletes anything, ever.
 //
 // ---- what it needs in the environment ----------------------------------------------------------
 //
@@ -185,7 +186,7 @@ export function resolveEnvironment(entries, env, supplied = {}) {
 
 // Which of them must never reach the terminal. Everything else is a path, a domain, a port or a
 // list of networks, and printing those is how an operator checks the plan before it runs.
-const SECRET_KEYS = new Set(["CP_SESSION_SECRET", "CP_ADMIN_TOKEN", "COOLIFY_API_KEY", "COOLIFY_URL"]);
+const SECRET_KEYS = new Set(["CP_SESSION_SECRET", "CP_ADMIN_TOKEN", "COOLIFY_API_KEY", "COOLIFY_URL", "CP_COOLIFY_URL"]);
 
 // ---- talking to Coolify ------------------------------------------------------------------------
 // The same shape as cp/provision.mjs's client, deliberately: same base handling, same bearer in the
@@ -356,6 +357,8 @@ async function main() {
     say("envs     +1                                     COOLIFY_ENVIRONMENT_UUID, once it is known");
     say(`urls     PATCH  /services/{uuid}                urls[{name: ${serviceName}, url: ${url}}]`);
     say("start    POST   /services/{uuid}/start          queued by Coolify, not immediate");
+    say("     or, when it is already up");
+    say("restart  POST   /services/{uuid}/restart        so the settings above are the ones running");
     out("\nnothing was called. Run it again without --dry-run.");
     return 0;
   }
@@ -423,8 +426,21 @@ async function main() {
   say(`${serviceName} -> ${url}`);
 
   step("start");
-  const started = await client.call("POST", `/services/${serviceUuid}/start`);
-  say(String(started?.message ?? "queued"));
+  // A start and a restart are different calls, and Coolify answers 400 "Service is already
+  // running." to the first one rather than treating it as a no-op. That matters more than a tidy
+  // exit code: the compose and the environment were both just written, and a service that is
+  // already up is still running the old ones until something recreates its containers. So a
+  // running service gets a restart, which is the call that picks the new settings up.
+  let started;
+  try {
+    started = await client.call("POST", `/services/${serviceUuid}/start`);
+    say(String(started?.message ?? "queued"));
+  } catch (error) {
+    if (!/already running/i.test(String(error?.message ?? ""))) throw error;
+    say("already running, so restarting it instead to pick up the compose and the environment");
+    started = await client.call("POST", `/services/${serviceUuid}/restart`);
+    say(String(started?.message ?? "queued"));
+  }
 
   out("\n== done");
   say(`service ${serviceUuid}`);

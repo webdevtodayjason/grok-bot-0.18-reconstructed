@@ -92,14 +92,21 @@ services:
       CP_CLOUDFLARE_RANGES: 173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32
 
       # ---- building new customer instances -----------------------------------------------------
-      # Off, and it has to stay off until the relay reads its settings from each customer's own
-      # state directory. A tenant relay mounts this server's shared ui directory, which holds
-      # endpoints.json, and that file is where the provider API keys are. The rendered compose
-      # mounts it read-only, so a customer cannot overwrite it, and sets SAND_UI_ENDPOINTS_FILE for
-      # the day the relay reads it; until that day a customer's console could still read it.
+      # The condition this waited for has been met. It had to stay off until the relay read its
+      # settings from each customer's own state directory, because a tenant relay mounts this
+      # server's shared ui directory and endpoints.json in there is where the provider API keys
+      # are. TENANT-2 shipped that: SAND_UI_ENDPOINTS_FILE now decides where a relay reads and
+      # writes its endpoint list, the rendered compose sets it to the tenant's own /state, and the
+      # shared directory is mounted read-only on top of that.
+      #
+      # A ${VAR} rather than a number written in, because this is the one setting an operator turns
+      # off in a hurry, and a value in the Coolify environment can be changed without editing a
+      # file that also has to be re-uploaded. deploy/r750/control-plane-coolify.mjs sets it to 1.
+      # Unset reads as off (cp/provision.mjs wants 1, true or yes), so a hand-pasted copy of this
+      # file with no environment behind it still builds nothing by surprise.
       #
       # Adopting an instance that already exists is not affected by this and works either way.
-      CP_ALLOW_NEW_TENANTS: "0"
+      CP_ALLOW_NEW_TENANTS: ${CP_ALLOW_NEW_TENANTS}
 
       # ---- the four secrets and the two uuids ---------------------------------------------------
       # Plain ${VAR}, deliberately not ${VAR:?} and not ${VAR:-}. Coolify builds an environment
@@ -122,7 +129,14 @@ services:
       # Coolify's own api, which this service calls to create, start, stop and delete a tenant's
       # service. The key is the one from Keys & Tokens; it can create and delete resources on this
       # server, so it lives here and in Coolify's own store and nowhere else.
-      COOLIFY_URL: ${COOLIFY_URL}
+      #
+      # CP_COOLIFY_URL and not COOLIFY_URL, which is a name Coolify has already taken. Coolify puts
+      # its own COOLIFY_URL into every service container, holding that service's public address,
+      # and it wins over a record an operator sets with the same name. Setting COOLIFY_URL here
+      # therefore gave this service its own front door as the api to call, so every request to
+      # create a tenant answered 404. Measured on the R750, 2026-09-07. The value in the braces is
+      # still the operator's own COOLIFY_URL, because that is what their shell has.
+      CP_COOLIFY_URL: ${COOLIFY_URL}
       COOLIFY_API_KEY: ${COOLIFY_API_KEY}
       # The project and server every tenant service is created in. Both are on the resource page of
       # console.titanium.bot, or from GET /projects and GET /servers.

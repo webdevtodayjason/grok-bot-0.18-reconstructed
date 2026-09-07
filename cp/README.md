@@ -41,7 +41,7 @@ the spot, and a Coolify url that points at nothing.
     export CP_BASE_DOMAIN=titanium.bot
     export CP_PUBLIC_URL="http://127.0.0.1:$CP_PORT"
     export CP_RELEASE_ROOT=/home/sem/titanbot
-    export COOLIFY_URL=http://127.0.0.1:9   # nothing is listening there, and that is the point
+    export CP_COOLIFY_URL=http://127.0.0.1:9   # nothing is listening there, and that is the point
     export COOLIFY_API_KEY=not-a-real-key
     export COOLIFY_PROJECT_UUID=local-project
     export COOLIFY_SERVER_UUID=local-server
@@ -50,10 +50,14 @@ the spot, and a Coolify url that points at nothing.
 
     node cp/server.mjs
 
-**Point a local run at the real Coolify only if you mean it.** With `COOLIFY_URL` and
+**Point a local run at the real Coolify only if you mean it.** With `CP_COOLIFY_URL` and
 `COOLIFY_API_KEY` set to the live values, a tenant create is a real service on the R750 and a
 tenant delete is a real deletion. The url above goes to a closed port, so a local run can only ever
 do dry runs, which is what you want while you are reading the output.
+
+The name is `CP_COOLIFY_URL`, not `COOLIFY_URL`: Coolify puts a `COOLIFY_URL` of its own into every
+service container, holding that container's public address, and it wins over one an operator sets.
+`COOLIFY_URL` is still read when `CP_COOLIFY_URL` is unset, so an older install keeps working.
 
 Then, in a second terminal:
 

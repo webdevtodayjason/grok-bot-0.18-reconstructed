@@ -99,7 +99,14 @@ export function loadConfig(env = process.env) {
     sessionSecret: text("CP_SESSION_SECRET"),
     adminToken: text("CP_ADMIN_TOKEN"),
     baseDomain: text("CP_BASE_DOMAIN", CONFIG_DEFAULTS.baseDomain),
-    coolifyUrl: text("COOLIFY_URL").replace(/\/+$/, ""),
+    // CP_COOLIFY_URL first, because COOLIFY_URL is a name Coolify owns. Coolify injects its own
+    // COOLIFY_URL into every service container, set to that service's public address, and its
+    // value wins over the environment record an operator sets with the same name. Measured on the
+    // R750 on 2026-09-07: this service was given the Coolify api's address and read back
+    // https://api.titanium.bot, its own front door, so every POST /services it made answered 404
+    // and the demo tenant came out `failed`. COOLIFY_URL is still read second so an install that
+    // predates this line keeps working, and so does a plain `docker run` where nothing shadows it.
+    coolifyUrl: (text("CP_COOLIFY_URL") || text("COOLIFY_URL")).replace(/\/+$/, ""),
     coolifyApiKey: text("COOLIFY_API_KEY"),
     coolifyProjectUuid: text("COOLIFY_PROJECT_UUID"),
     coolifyServerUuid: text("COOLIFY_SERVER_UUID"),
@@ -370,7 +377,7 @@ export function createCoolifyClient({ config, fetchImpl = globalThis.fetch }) {
 
   async function call(method, pathname, options = {}) {
     if (!config.coolifyUrl || !config.coolifyApiKey) {
-      const error = new Error("Coolify is not configured. Set COOLIFY_URL and COOLIFY_API_KEY on the control plane.");
+      const error = new Error("Coolify is not configured. Set CP_COOLIFY_URL and COOLIFY_API_KEY on the control plane.");
       error.code = "coolify_unconfigured";
       throw error;
     }

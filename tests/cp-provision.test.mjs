@@ -417,7 +417,7 @@ test("with no Coolify configured the run fails on the service step and says what
     const result = await provisionTenant({ store, config, slug: "acme", name: "Acme" });
     assert.equal(result.ok, false);
     assert.equal(result.step, "service");
-    assert.match(result.error, /COOLIFY_URL and COOLIFY_API_KEY/);
+    assert.match(result.error, /CP_COOLIFY_URL and COOLIFY_API_KEY/);
   });
 });
 
