@@ -41,7 +41,7 @@ export const PROVIDERS = {
   },
   minimax: {
     name: "MiniMax", route: "endpoint", endpointId: "sub-minimax",
-    baseUrl: "https://api.minimax.io/v1", transport: "chat", defaultModel: "MiniMax-M2", contextWindow: 200_000,
+    baseUrl: "https://api.minimax.io/v1", transport: "chat", defaultModel: "MiniMax-M3", contextWindow: 1_000_000,
     posture: "The MiniMax CLI stores this token for reuse. Adopted, refreshed through MiniMax's own token endpoint, never written back.",
   },
   zai: {
@@ -61,7 +61,7 @@ export const PROVIDERS = {
   },
   "minimax-key": {
     name: "MiniMax (API key)", route: "key", endpointId: "sub-minimax-key", env: "MINIMAX_API_KEY",
-    baseUrl: "https://api.minimax.io/v1", transport: "chat", defaultModel: "MiniMax-M2", contextWindow: 200_000,
+    baseUrl: "https://api.minimax.io/v1", transport: "chat", defaultModel: "MiniMax-M3", contextWindow: 1_000_000,
     posture: "A MiniMax platform API key, pasted once; the alternative to a MiniMax CLI login.",
   },
   claude: {
