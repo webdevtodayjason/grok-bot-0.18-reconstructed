@@ -822,11 +822,13 @@ because that runs inside the container and needs no socket at all. It is backgro
 failure is swallowed into one line on stderr, because a box whose job is to boot must not be held
 up, or stopped, by a package that is a nice-to-have.
 
-The start-window repair is still socket-only, and on the same day it measured as a no-op on both
-boxes: `/usr/local/bin/start-window` was md5 `d69219afc86a297d16bee3d97b120095` on the demo tenant's
-box and on the operator's. So a tenant is not missing anything today. What it is missing is a
-mechanism, and the honest place for that is the box image rather than a patch applied from outside
-it. Until that lands, a tenant whose box needs the window repair has no way to get it.
+The start-window repair is still socket-only, and it does real work: on the operator's own box,
+2026-09-07, it reported `patched`, `orphan branch patched`, `stop-window patched`, `live-seat rule
+patched` and `adopt rule patched`, which is a box that had been recreated since the last deploy. A
+tenant's box gets none of that and there is no path to it today, because the repair is applied from
+outside the container. The honest place for it is the box image; until that lands, a forked agent on
+a tenant's box can meet the black screen DISPLAY-2 is about. This is the one line of section 15 that
+is a gap rather than a decision.
 
 ### Where a tenant may point a provider endpoint
 
