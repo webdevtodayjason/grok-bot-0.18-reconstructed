@@ -55,9 +55,10 @@ import {
   composeHostBundleScript, formatLatestVersionFile, parseLatestVersionFile, parseRuntimeRequest,
 } from "./host-bundle.mjs";
 import {
-  SESSION_LIFETIME_MS, clientAddress, createLoginThrottle, createSession, edgeAddress,
+  SESSION_LIFETIME_MS, clientAddress, containerAddressLookup, createBoxPeers, createLoginThrottle,
+  createSession, edgeAddress,
   isLoopbackHost, isPrivateAddress, isSecureRequest, parseCookies, parseTrustedProxies, readAuthFile,
-  readSession, safeEqual, safeNextPath, serializeCookie, verifyPassword,
+  readSession, safeEqual, safeNextPath, serializeCookie, sourceAddress, verifyPassword,
 } from "./auth.mjs";
 import {
   createRateLimiter, jobBusProfileDir, jobBusTokenFile, jobCreateArgs, jobSubmitterId, jobTokenInDir,
@@ -65,7 +66,7 @@ import {
 } from "./job-bus-edge.mjs";
 import {
   MAIL_BODY_LIMIT, MAIL_LEDGER_FILE, MAIL_SETTINGS_FILE, createMailEdge, domainOf, readMailSettings,
-  toAddressList,
+  svixHeaders, toAddressList, verifySvixSignature,
 } from "./mail-edge.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
 import { accountSignIn, relayConfig, ssoVerdict } from "./tenant-login.mjs";
@@ -279,6 +280,13 @@ if (STATE_DIR.length > 0) {
 // single-box install behaves precisely as it did before. That is the whole compatibility story, and
 // it is also why a control plane that is down cannot take the operator's own console with it.
 const RELAY = relayConfig();
+// Which addresses on this host belong to a customer's box. Refreshed on the registry's own cycle
+// from the box container names it already carries, and consulted before any forwarded header is
+// read: see createBoxPeers in ui/auth.mjs for the measurement that made this necessary.
+const BOX_PEERS = createBoxPeers({
+  lookup: containerAddressLookup({ lookup }),
+  log: (line) => console.log(line),
+});
 const registry = createTenantRegistry({
   operator: operatorEntry({
     gateway: OPERATOR_GATEWAY,
@@ -290,6 +298,7 @@ const registry = createTenantRegistry({
   relayToken: RELAY?.relayToken ?? "",
   tenantsFile: process.env.SAND_UI_TENANTS_FILE?.trim() || "",
   dockerNames: dockerNameReader(execFile),
+  boxPeers: BOX_PEERS,
   log: (line) => console.log(line),
 });
 
@@ -401,9 +410,15 @@ const TRUSTED_PROXIES = parseTrustedProxies(process.env.SAND_UI_TRUSTED_PROXIES)
 // Cloudflare's published ranges here is what separates the two: header believed on the path
 // Cloudflare owns, ignored on the path anyone can reach. Empty, the default, never reads it.
 const CLOUDFLARE_RANGES = parseTrustedProxies(process.env.SAND_UI_CLOUDFLARE_RANGES);
-const clientOf = (req) => clientAddress(req, TRUSTED_PROXIES, CLOUDFLARE_RANGES);
-const edgeOf = (req) => edgeAddress(req, TRUSTED_PROXIES);
-const secureOf = (req) => isSecureRequest(req, TRUSTED_PROXIES);
+// A customer's box shares a network with this relay, so its address is inside the ranges above.
+// It is still not a proxy: nothing it writes in X-Forwarded-For or X-Forwarded-Proto is read, and
+// the address it is counted as is the socket's. Without this, one customer's agents could mint a
+// fresh lockout bucket per password guess, or spend the operator's five and hold him out of his
+// own console and the job bus.
+const peerIsBox = (req) => BOX_PEERS.has(sourceAddress(req));
+const clientOf = (req) => (peerIsBox(req) ? sourceAddress(req) : clientAddress(req, TRUSTED_PROXIES, CLOUDFLARE_RANGES));
+const edgeOf = (req) => (peerIsBox(req) ? sourceAddress(req) : edgeAddress(req, TRUSTED_PROXIES));
+const secureOf = (req) => (peerIsBox(req) ? req?.socket?.encrypted === true : isSecureRequest(req, TRUSTED_PROXIES));
 // One year, and only ever on a response that really did arrive over TLS. A browser that sees this
 // refuses plain HTTP to the name for that long, which is the point on a public domain and is also
 // why secureOf ignores a forwarded scheme from an untrusted peer: the header would otherwise be a
@@ -1089,6 +1104,20 @@ function mailEdgeFor(t) {
     settingsFile: t.mailSettingsFile,
     ledgerFile: t.mailLedgerFile,
     limiter: mailLimiter,
+    // Which OTHER workspace on this console already holds that domain. One file read per tenant,
+    // and only on a save that actually changes the domain.
+    domainClaimedElsewhere: async (domain) => {
+      const want = String(domain ?? "").toLowerCase();
+      if (want.length === 0) return null;
+      for (const entry of registry.all()) {
+        if (entry.slug === t.slug) continue;
+        const other = contextOf(entry.slug);
+        if (other == null) continue;
+        const settings = await readMailSettings(other.mailSettingsFile).catch(() => null);
+        if (String(settings?.domain ?? "").toLowerCase() === want) return other.name || other.slug;
+      }
+      return null;
+    },
     log: (line) => console.log(line),
   });
   mailEdges.set(t.slug, { settingsFile: t.mailSettingsFile, edge });
@@ -1104,11 +1133,26 @@ function mailEdgeFor(t) {
 // ambiguous and one customer's mail lands in the other's box.
 //
 // What is sound and costs one file read per tenant: route by DOMAIN. A tenant's mail domain is
-// already a per-state-directory setting (MAIL-3), a domain is verified inside exactly one Resend
-// account so a tie is impossible, and the recipient is in the webhook body which is already read
-// without a fetch. Choosing a KEY from an unverified claim is the pattern ui/session-token.mjs
-// already blesses: the claim picks the secret, the secret then has to check out, and a liar picks a
-// secret that does not verify their signature.
+// already a per-state-directory setting (MAIL-3), and the recipient is in the webhook body which is
+// already read without a fetch. Choosing a KEY from an unverified claim is the pattern
+// ui/session-token.mjs already blesses: the claim picks the secret, the secret then has to check
+// out, and a liar picks a secret that does not verify their signature.
+//
+// THE CLAIM IS NOT THE ANSWER, and the first version of this loop treated it as one. mail.json's
+// domain is a free string any signed-in customer types into their own console (ui/mail-edge.mjs
+// mergeMailSettings takes it as written), tenants sort before the operator in the registry, and
+// this loop returned on the FIRST entry claiming the recipient's domain. So a customer who typed
+// the operator's domain into their own settings won the loop, their edge failed the Svix check
+// against their own secret, and the answer was a 401 Resend retries for hours while the real
+// owner's mail never arrived. "A domain is verified inside exactly one Resend account so a tie is
+// impossible" is a fact about Resend and not about a file the claimant writes.
+//
+// So a claim only nominates a candidate. When more than one tenant claims the domain, the one
+// whose signing secret actually verifies THIS body is the one that gets it, which is the same
+// "the claim picks the key, the key has to check out" rule the paragraph above states. An
+// impostor has no secret that verifies Resend's signature, so an impostor cannot take the mail
+// and cannot black-hole it either. One claimant is dispatched unverified exactly as before, so
+// the edge keeps answering 503 not_configured and 401 invalid_signature in its own words.
 //
 // No tenant owns the domain: 200 and a reason. A webhook that answers anything else is a webhook
 // Resend retries for hours over a decision we made on purpose.
@@ -1144,13 +1188,31 @@ async function handleMailWebhook(req, res) {
   }
 
   const domains = recipientDomains(raw);
+  const claimants = [];
   for (const entry of serving) {
     const t = contextOf(entry.slug);
     if (t == null) continue;
     const settings = await readMailSettings(t.mailSettingsFile).catch(() => null);
     const domain = String(settings?.domain ?? "").toLowerCase();
     if (domain.length === 0 || !domains.includes(domain)) continue;
-    return await mailEdgeFor(t).handleWebhook(req, res, { raw });
+    claimants.push({ t, settings });
+  }
+  if (claimants.length === 1) return await mailEdgeFor(claimants[0].t).handleWebhook(req, res, { raw });
+  if (claimants.length > 1) {
+    const headers = svixHeaders(req.headers);
+    for (const { t, settings } of claimants) {
+      const secret = String(settings?.webhookSecret ?? "");
+      if (secret.length === 0 || headers == null) continue;
+      if (!verifySvixSignature(secret, headers, raw, Date.now()).ok) continue;
+      console.log(`mail  ${claimants.length} workspaces claim that domain; ${t.slug} holds the signing secret`);
+      return await mailEdgeFor(t).handleWebhook(req, res, { raw });
+    }
+    // Every claimant is a claimant and none of them can prove it. Nobody is handed the message and
+    // nobody is told which of them was lying; 200 so Resend stops rather than retrying a decision
+    // that will not change.
+    console.log(`mail  ${claimants.length} workspaces claim that domain and none of their signing secrets verified this webhook`);
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ ignored: "no_verified_tenant" }));
   }
   res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
   return res.end(JSON.stringify({ ignored: "no_tenant" }));
@@ -1901,4 +1963,6 @@ server.listen(PORT, BIND, () => {
   if (CLOUDFLARE_RANGES.ignored?.length > 0) {
     console.log(`cfip IGNORED, not an address or prefix: ${CLOUDFLARE_RANGES.ignored.join(" ")}`);
   }
+  console.log(`peer ${BOX_PEERS.size()} box address(es) held untrusted as forwarders`
+    + " (refreshed with the tenant registry; a box is never read as a proxy)");
 });

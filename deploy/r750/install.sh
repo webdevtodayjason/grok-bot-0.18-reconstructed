@@ -294,6 +294,33 @@ else
   say "         the connector editor will silently return nothing."
 fi
 
+step "box isolation"
+# TENANT-5 put every customer's box on one shared docker network, and containers on one bridge talk
+# to each other freely: measured on the R750 2026-09-07, one customer's box reached another's VNC
+# seat on 6080, which offers no password at all. deploy/r750/box-isolation.sh is the rule that a box
+# reaches the relay's bundle route and nothing else on that bridge, and the timer reapplies it,
+# because a box built by the control plane at three in the morning has to be covered too.
+ISO_UNITS="$HOME/.config/systemd/user"
+if [ -f "$ROOT/deploy/box-isolation.sh" ]; then
+  mkdir -p "$ISO_UNITS"
+  cp "$ROOT/deploy/titanbot-isolation.service" "$ROOT/deploy/titanbot-isolation.timer" "$ISO_UNITS/"
+  if bash "$ROOT/deploy/box-isolation.sh" >/dev/null 2>&1; then
+    say "box isolation applied to the shared network"
+  else
+    say "WARNING: could not apply the box isolation rules. Run it and read the reason:"
+    say "    bash $ROOT/deploy/box-isolation.sh"
+  fi
+  if systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now titanbot-isolation.timer 2>/dev/null; then
+    say "titanbot-isolation.timer on: the rules are rebuilt every minute"
+  else
+    say "WARNING: could not enable titanbot-isolation.timer; run: systemctl --user enable --now titanbot-isolation.timer"
+  fi
+  say "check it:  bash $ROOT/deploy/box-isolation.sh --verify"
+else
+  say "WARNING: $ROOT/deploy/box-isolation.sh is missing, so one customer's box can reach another's."
+  say "         Run deploy/r750/sync.sh from the Mac; it ships the script."
+fi
+
 step "nightly snapshot"
 # BACKUP-1. There was no backup job of any kind on this server: a lost volume was a lost instance.
 # USER units, because this whole install runs as sem with no sudo. The timer needs linger to fire
@@ -303,6 +330,15 @@ BACKUP_UNITS="$HOME/.config/systemd/user"
 if [ -f "$ROOT/deploy/backup/snapshot.sh" ]; then
   mkdir -p "$BACKUP_UNITS"
   cp "$ROOT/deploy/backup/titanbot-backup.service" "$ROOT/deploy/backup/titanbot-backup.timer" "$BACKUP_UNITS/"
+  # WHICH box the snapshot pauses. On a server with customers on it the role label matches every
+  # customer's box as well as the operator's, and the snapshot now refuses rather than pausing an
+  # arbitrary one. TITANBOT_SERVICE is the operator's own Coolify service uuid; set it in the
+  # environment of this install and the unit carries it. Left unset on a hand-installed box, where
+  # the container really is called titanbot-box and there is nothing to disambiguate.
+  if [ -n "${TITANBOT_SERVICE:-}" ]; then
+    printf 'Environment=TITANBOT_SERVICE=%s\n' "$TITANBOT_SERVICE" >> "$BACKUP_UNITS/titanbot-backup.service"
+    say "the snapshot will pause the box of service $TITANBOT_SERVICE and no other"
+  fi
   say "installed titanbot-backup.{service,timer} into $BACKUP_UNITS"
   if systemctl --user daemon-reload 2>/dev/null; then
     if systemctl --user enable --now titanbot-backup.timer 2>/dev/null; then

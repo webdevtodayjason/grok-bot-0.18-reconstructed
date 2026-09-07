@@ -162,6 +162,20 @@ CREATE TABLE IF NOT EXISTS login_failures (
   at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS login_failures_at ON login_failures (at);
+-- A workspace name that has been removed while sign-ins still pointed at it.
+--
+-- Deleting a tenant deliberately leaves its accounts alone: the operator may be rebuilding, and
+-- cascading would lock those people out to tidy a row. But sign-up derives a name from the company
+-- and checked only the tenants that exist RIGHT NOW, so a name freed that way could be handed to a
+-- DIFFERENT company, and the previous customer's sign-ins would then resolve to the new customer's
+-- box with full access to it. This table is what keeps a name out of circulation while somebody
+-- can still sign in with it. Creating a tenant under the name again clears it, which is the
+-- operator rebuilding on purpose, and removing the last account pointing at it clears it too.
+CREATE TABLE IF NOT EXISTS retired_slugs (
+  slug       TEXT PRIMARY KEY,
+  retired_at INTEGER NOT NULL,
+  accounts   INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 const accountRow = (row) => (row == null ? null : {
@@ -252,6 +266,11 @@ export function openStore(options = {}) {
   const selectSteps = statement("SELECT * FROM provisioning_steps WHERE slug = ? ORDER BY id");
   const deleteSteps = statement("DELETE FROM provisioning_steps WHERE slug = ?");
 
+  const insertRetired = statement("INSERT OR REPLACE INTO retired_slugs (slug, retired_at, accounts) VALUES (?, ?, ?)");
+  const selectRetired = statement("SELECT slug FROM retired_slugs WHERE slug = ?");
+  const selectRetiredAll = statement("SELECT * FROM retired_slugs ORDER BY retired_at, slug");
+  const deleteRetired = statement("DELETE FROM retired_slugs WHERE slug = ?");
+
   const insertFailure = statement("INSERT INTO login_failures (email, ip, at) VALUES (?, ?, ?)");
   const countFailuresByEmail = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM login_failures WHERE email = ? AND at >= ?");
   const countFailuresByIp = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM login_failures WHERE ip = ? AND at >= ?");
@@ -316,6 +335,12 @@ export function openStore(options = {}) {
       const row = accountRow(selectAccountById.get(String(id)));
       if (row == null) return null;
       deleteAccountRow.run(String(id));
+      // The last door into a removed workspace just closed, so its name goes back into circulation.
+      // Held any longer it would be a name no future customer could have, for nobody's benefit.
+      if (selectTenant.get(String(row.tenant)) == null
+        && selectAccountsByTenant.all(String(row.tenant)).length === 0) {
+        deleteRetired.run(String(row.tenant));
+      }
       return row;
     },
 
@@ -364,6 +389,9 @@ export function openStore(options = {}) {
         }
         throw error;
       }
+      // Built again under a name that was retired: that is the operator rebuilding on purpose, and
+      // the orphaned sign-ins this table was protecting now belong to this workspace again.
+      deleteRetired.run(String(slug));
       return tenantRow(selectTenant.get(String(slug)));
     },
 
@@ -401,8 +429,21 @@ export function openStore(options = {}) {
       const row = tenantRow(selectTenant.get(String(slug)));
       deleteTenantRow.run(String(slug));
       deleteSteps.run(String(slug));
+      // Only when somebody can still sign in with it. A sign-up that failed half way through
+      // deletes the row it just wrote, and that name has never been anybody's, so it stays free.
+      const left = selectAccountsByTenant.all(String(slug)).length;
+      if (left > 0) insertRetired.run(String(slug), now(), left);
       return row;
     },
+
+    // ---- retired workspace names ---------------------------------------------------------------
+    isSlugRetired(slug) { return selectRetired.get(String(slug)) != null; },
+    listRetiredSlugs() {
+      return selectRetiredAll.all().map((row) => ({
+        slug: row.slug, retiredAt: Number(row.retired_at), accounts: Number(row.accounts ?? 0),
+      }));
+    },
+    releaseSlug(slug) { deleteRetired.run(String(slug)); },
 
     // ---- revoked sessions --------------------------------------------------------------------
 

@@ -234,6 +234,32 @@ check(wideOpen.length === 0, "no titanbot port is published on 0.0.0.0", wideOpe
   }
 }
 
+// ---- one customer's box cannot reach another customer's box (TENANT-5) ------------------------
+// The shared network is what makes one relay able to serve everybody, and containers on one bridge
+// talk to each other freely. Measured on the R750 2026-09-07, before this leg existed: from inside
+// the demo tenant's box, a scan of the operator's box answered OPEN on 1340, 6080 and 6081, and
+// 6080's websockify offered VNC security type 1, None -- one customer holding another customer's
+// screen and keyboard with no credential at all. Symmetric in both directions.
+//
+// deploy/r750/box-isolation.sh installs the rule (from a box, on that bridge, the relay's bundle
+// port and nothing else) and its --verify runs the scan itself, from every box against every other
+// box. This leg is that scan, so the gate measures the boundary rather than the rule.
+{
+  const LABEL = "no customer's box can reach another customer's box on the shared network";
+  const out = await ssh(`bash ${ROOT}/deploy/box-isolation.sh --verify 2>&1 || true`).catch((error) => String(error?.message ?? error));
+  const lines = String(out).split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  const open = lines.filter((line) => line.startsWith("OPEN ") || line.startsWith("BROKEN "));
+  if (/there is no pair to scan/.test(out)) {
+    check(true, LABEL, "one box on this network, so there is no second customer to reach");
+  } else if (/^PASS\b/m.test(out)) {
+    check(true, LABEL, lines.filter((line) => line.startsWith("closed ") || line.startsWith("ok ")).join("; ").slice(0, 300));
+  } else if (/No such file|not found/.test(out)) {
+    unresolved(LABEL, `${ROOT}/deploy/box-isolation.sh is not on the server; run deploy/r750/sync.sh, which ships it`);
+  } else {
+    check(false, LABEL, open.length > 0 ? open.join("; ") : String(out).slice(0, 300));
+  }
+}
+
 // ---- the four data mounts, which is the one thing that fails silently ------------------------
 // Every agent, transcript and workspace on this box lives in four docker volumes. The hand install
 // mounts them by name; the Coolify stack cannot, because Coolify's compose parser renames a named

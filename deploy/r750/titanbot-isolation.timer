@@ -1,0 +1,13 @@
+[Unit]
+Description=Reapply the box isolation rules every minute
+
+[Timer]
+# At boot, because docker rebuilds its chains on start and takes ours with them, and then every
+# minute, because a new customer's box is one deploy away and a minute is how long it may be
+# reachable from another customer's box.
+OnBootSec=30s
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

@@ -41,7 +41,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { clientAddress, isTrustedProxy, parseTrustedProxies } from "../ui/auth.mjs";
+import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, parseTrustedProxies, sourceAddress } from "../ui/auth.mjs";
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import {
@@ -179,7 +179,18 @@ export function createApp(options = {}) {
   // caller gave a fresh bucket per guess and the address half of the lockout never fired.
   const trustedProxies = parseTrustedProxies(config.trustedProxies);
   const cloudflareRanges = parseTrustedProxies(config.cloudflareRanges);
-  const clientOf = (request) => clientAddress(request, trustedProxies, cloudflareRanges);
+  // A customer's BOX is on the shared network with this service and is therefore inside those
+  // ranges, and it is not a proxy. Nothing it writes in a forwarded header is read: the address it
+  // is counted as is the socket's. See createBoxPeers in ui/auth.mjs. With no lookup the set is
+  // empty and this is exactly the old behaviour, which is what every test and every install
+  // without a shared network gets.
+  const boxPeers = options.boxPeers ?? createBoxPeers({});
+  const peerIsBox = (request) => boxPeers.has(sourceAddress(request));
+  const clientOf = (request) => (peerIsBox(request)
+    ? sourceAddress(request)
+    : clientAddress(request, trustedProxies, cloudflareRanges));
+  // The container names in the ledger, resolved on a schedule by whoever owns the timer.
+  const refreshBoxPeers = () => boxPeers.refresh(store.listTenants().map((row) => row.boxContainer ?? ""));
 
   // Which callers are a RELAY forwarding a customer, rather than a customer.
   //
@@ -420,7 +431,11 @@ export function createApp(options = {}) {
       return json(response, 409, { error: "duplicate_email", message: "That email address already has an account. Sign in instead." });
     }
 
-    const slug = deriveSlug(company, (candidate) => store.getTenant(candidate) != null);
+    // Taken means taken NOW or still spoken for. A workspace that was removed while sign-ins still
+    // pointed at it keeps its name out of circulation (cp/store.mjs retired_slugs): handing that
+    // name to a different company would make the previous customer's sign-ins resolve to the new
+    // company's box, with full access to it.
+    const slug = deriveSlug(company, (candidate) => store.getTenant(candidate) != null || store.isSlugRetired(candidate));
     if (slug == null) {
       return json(response, 400, { error: "bad_company", message: "That company name has no letters or numbers in it, so there is nothing to name the workspace after. Send a different one." });
     }
@@ -720,7 +735,7 @@ export function createApp(options = {}) {
           message: `The Coolify service is gone. Everything in ${tenantDirectory(slug, config)} was left alone, so nothing the customer made was deleted.`
             + (orphaned.length === 0
               ? ""
-              : ` ${orphaned.length} sign-in${orphaned.length === 1 ? "" : "s"} still point${orphaned.length === 1 ? "s" : ""} at this workspace (${orphaned.join(", ")}). Build it again under the same name and they work; remove them with DELETE /v1/accounts/<email>. Until one or the other, those people are told the workspace is not available.`),
+              : ` ${orphaned.length} sign-in${orphaned.length === 1 ? "" : "s"} still point${orphaned.length === 1 ? "s" : ""} at this workspace (${orphaned.join(", ")}). Build it again under the same name and they work; remove them with DELETE /v1/accounts/<email>. Until one or the other, those people are told the workspace is not available, and the name ${slug} is held back so no new customer can be given it.`),
         });
       }
 
@@ -831,7 +846,7 @@ export function createApp(options = {}) {
     }
   }
 
-  return { config, store, client, handle: guarded };
+  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers };
 }
 
 export function createHttpServer(app) {
@@ -845,7 +860,18 @@ async function main() {
     for (const problem of problems) process.stderr.write(`control plane: ${problem}\n`);
     process.exit(1);
   }
-  const app = createApp({ config });
+  const app = createApp({
+    config,
+    boxPeers: createBoxPeers({
+      lookup: containerAddressLookup(await import("node:dns/promises")),
+      log: (line) => process.stdout.write(`${line}\n`),
+    }),
+  });
+  // Every minute, and once at boot. A box that appears between two runs is trusted as a forwarder
+  // for at most that long, and the set keeps its last value when the resolver cannot be asked.
+  void app.refreshBoxPeers().catch(() => {});
+  const peerTimer = setInterval(() => { void app.refreshBoxPeers().catch(() => {}); }, 60_000);
+  peerTimer.unref?.();
   const server = createHttpServer(app);
   server.listen(config.port, "0.0.0.0", () => {
     process.stdout.write(`control plane listening on ${config.port}, tenants under ${config.tenantRoot}, release ${config.releaseRoot}\n`);

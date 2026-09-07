@@ -17,6 +17,13 @@ Environment=TITANBOT_ROOT=%h/titanbot
 # The control plane's account store and one directory per customer. Written out rather than left to
 # the script's default, so what this job covers is readable in the job.
 Environment=TITANBOT_TENANT_ROOT=/data/titanbot
+# WHICH box gets paused. Nothing here names one, on purpose: the role label matches every
+# customer's box as well as the operator's, and a run that cannot tell them apart now refuses
+# instead of freezing a customer's instance while it copies the operator's volumes. On a server
+# with customers, deploy/r750/install.sh appends the operator's own Coolify service uuid here as
+#   Environment=TITANBOT_SERVICE=<uuid>
+# when TITANBOT_SERVICE is set in the environment of the install. TITANBOT_BOX names the container
+# outright and wins over both.
 ExecStart=/bin/bash %h/titanbot/deploy/backup/snapshot.sh
 Nice=10
 IOSchedulingClass=idle

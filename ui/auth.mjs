@@ -261,6 +261,71 @@ export function parseTrustedProxies(spec) {
   return { any: false, ranges, ignored };
 }
 
+// ---- a customer's box is never a proxy --------------------------------------------------------
+//
+// SAND_UI_TRUSTED_PROXIES and CP_TRUSTED_PROXIES name the docker private ranges, because Coolify
+// allocates a fresh network per resource and its address is not knowable in advance. Under
+// TENANT-2 the only peers in those ranges were Traefik and the operator's own box, which is what
+// that reasoning rests on. TENANT-5 put EVERY customer's box on a network with the relay and the
+// control plane, so every customer's agents are now inside a trusted range and can write their own
+// X-Forwarded-For: the login lockout is keyed on that value, so it stops bounding guessing from
+// inside a box, and it can be aimed at the operator's own address to hold him out of the console
+// and the job bus. Measured from a tenant's box on the R750, 2026-09-07: a request to the relay
+// carrying X-Forwarded-Proto: https came back with HSTS, and two wrong-password POSTs with forged
+// X-Forwarded-For values were logged and counted against the addresses the box chose.
+//
+// Narrowing the ranges cannot fix it: the relay's own Traefik pin is titanbot-net (see
+// deploy/coolify/docker-compose.yml), so the proxy reaches the relay from the same subnet the
+// boxes are on, and a subnet that keeps the proxy keeps the boxes.
+//
+// So the rule is written where it is actually true: an address that belongs to a BOX is never a
+// proxy, whatever the ranges say. The names are already known -- the registry carries one per
+// tenant and the control plane's ledger carries box_container -- and docker's own resolver turns a
+// container name into the address that container reaches us from. A set that could not be
+// refreshed keeps its last value rather than emptying, for the same reason the box-name sweep does.
+export function createBoxPeers({ lookup = null, log = () => {} } = {}) {
+  let peers = new Set();
+  return {
+    has(address) { return peers.has(String(address ?? "")); },
+    size() { return peers.size; },
+    all() { return [...peers]; },
+    /** names: the container names to resolve. Returns the number of addresses now held. */
+    async refresh(names) {
+      if (typeof lookup !== "function") return peers.size;
+      const wanted = [...new Set([...names].map((name) => String(name ?? "")).filter((name) => name.length > 0))];
+      if (wanted.length === 0) { peers = new Set(); return 0; }
+      const found = new Set();
+      let asked = 0;
+      for (const name of wanted) {
+        let addresses = null;
+        try { addresses = await lookup(name); } catch { addresses = null; }
+        if (addresses == null) continue;
+        asked += 1;
+        for (const address of addresses) {
+          const parsed = String(address ?? "").trim().toLowerCase();
+          if (parsed.length > 0) found.add(parsed);
+        }
+      }
+      // Nothing resolved at all is "the resolver could not be asked", not "there are no boxes".
+      if (asked === 0) return peers.size;
+      if (found.size !== peers.size || [...found].some((one) => !peers.has(one))) {
+        log(`peer ${found.size} box address(es) are held untrusted as forwarders`);
+      }
+      peers = found;
+      return peers.size;
+    },
+  };
+}
+
+// Every address docker's resolver gives for a container name. Injected as `lookup` above so the
+// set can be tested with no docker and no network.
+export function containerAddressLookup(dns) {
+  return async (name) => {
+    const answers = await dns.lookup(name, { all: true, family: 0 });
+    return answers.map((answer) => String(answer.address ?? "")).filter((address) => address.length > 0);
+  };
+}
+
 export function isTrustedProxy(address, trusted) {
   if (trusted == null) return false;
   if (trusted.any === true) return true;

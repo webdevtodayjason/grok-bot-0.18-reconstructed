@@ -529,6 +529,10 @@ export function createMailEdge({
   settingsFile = MAIL_SETTINGS_FILE,
   ledgerFile = MAIL_LEDGER_FILE,
   limiter = null,
+  // On a console with more than one workspace on it: which OTHER workspace already holds this
+  // domain, by name, or null. A domain belongs to one workspace, and the console is where that is
+  // said, because the webhook route on the far side cannot un-say a claim that is already on disk.
+  domainClaimedElsewhere = null,
   now = () => Date.now(),
   log = (line) => console.log(line),
 } = {}) {
@@ -713,7 +717,19 @@ export function createMailEdge({
       }
       return fail(res, 400, "the body must be JSON");
     }
-    const next = mergeMailSettings(await readMailSettings(settingsFile), patch);
+    const current = await readMailSettings(settingsFile);
+    const next = mergeMailSettings(current, patch);
+    // A domain is not a free string on a shared console. Left unchecked, any customer could type
+    // the operator's domain (or another customer's) into their own card and become a claimant for
+    // that domain's webhooks. The route on the far side settles a tie by which signing secret
+    // verifies the body, so nothing is stolen either way, but a claim that can never be honoured
+    // is not a setting worth saving and this is where the person who typed it can be told.
+    if (next.domain.length > 0 && next.domain !== current.domain && typeof domainClaimedElsewhere === "function") {
+      const held = await domainClaimedElsewhere(next.domain).catch(() => null);
+      if (held != null) {
+        return fail(res, 409, `${next.domain} is already the mail domain of ${held}. A domain belongs to one workspace on this console.`);
+      }
+    }
     try { await writeMailSettings(next, files); }
     catch (error) { return fail(res, 503, `could not write ${settingsFile}: ${error instanceof Error ? error.message : String(error)}`); }
     return sendJson(res, 200, await state(req, next));

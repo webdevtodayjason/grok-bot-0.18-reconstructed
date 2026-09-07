@@ -25,6 +25,8 @@
 #   TITANBOT_BACKUP_DEST     where snapshots go, default /mnt/rosa-storage/archives/titanbot/backups
 #   TITANBOT_INSTANCE        the subdirectory under it, default titanbot
 #   TITANBOT_BOX             box container, default titanbot-box
+#   TITANBOT_SERVICE         the operator's Coolify service uuid, used to pick the right box out of
+#                            the boxes on a server that has customers on it
 #   TITANBOT_VOLUME_PREFIX   volume names, default titanbot-box (so titanbot-box-data etc.)
 #   TITANBOT_ROOT            the relay side, default /home/sem/titanbot
 #   TITANBOT_TENANT_ROOT     the control plane store and every tenant, default /data/titanbot
@@ -65,12 +67,7 @@ set -uo pipefail
 DEST_ROOT="${TITANBOT_BACKUP_DEST:-/mnt/rosa-storage/archives/titanbot/backups}"
 INSTANCE="${TITANBOT_INSTANCE:-titanbot}"
 BOX="${TITANBOT_BOX:-titanbot-box}"
-# Coolify names the box container titanbot-box-<service uuid>, so the default name is right only on
-# a hand-installed box. When the name does not exist, the label every install carries finds it.
-if ! docker inspect "$BOX" >/dev/null 2>&1; then
-  by_label="$(docker ps --filter label=com.titanbot.role=box --format '{{.Names}}' 2>/dev/null | head -n 1)"
-  [ -n "$by_label" ] && BOX="$by_label"
-fi
+SERVICE="${TITANBOT_SERVICE:-}"
 VOLUME_PREFIX="${TITANBOT_VOLUME_PREFIX:-titanbot-box}"
 ROOT="${TITANBOT_ROOT:-/home/sem/titanbot}"
 # The control plane's sqlite store and one directory per customer. Absent on a single-instance
@@ -85,6 +82,38 @@ die() { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
 
 command -v docker >/dev/null || die "docker is not on PATH"
 command -v rsync >/dev/null || die "rsync is not on PATH"
+
+# WHICH box this run is about, and it has to be the OPERATOR'S own.
+#
+# Coolify names the box container titanbot-box-<service uuid>, so the default name is right only on
+# a hand-installed box. The old fallback took the FIRST container carrying the role label, and on a
+# server with customers on it that is somebody else's box: measured on the R750 2026-09-07,
+# `docker inspect titanbot-box` did not exist, the first label match was a customer's box, and the
+# nightly run paused that customer's instance for the length of the paused pass while it re-copied
+# the operator's volumes and then wrote "paused" against them in the manifest. So the copy was torn
+# and a customer was frozen, for nothing.
+#
+# The label alone cannot answer it, so the service uuid does: TITANBOT_SERVICE, the same uuid
+# deploy/r750/one-console-migrate.sh matches on. With no uuid and more than one box running there
+# is no honest answer, and this refuses rather than picking one. TITANBOT_BOX still wins outright
+# for a hand-installed box or a one-off run.
+if ! docker inspect "$BOX" >/dev/null 2>&1; then
+  matches="$(docker ps --filter label=com.titanbot.role=box --format '{{.Names}}' 2>/dev/null | sort)"
+  if [ -n "$SERVICE" ]; then
+    matches="$(printf '%s\n' "$matches" | grep -- "-${SERVICE}\$" || true)"
+  fi
+  found="$(printf '%s\n' "$matches" | grep -c . || true)"
+  if [ "$found" = 1 ]; then
+    BOX="$(printf '%s\n' "$matches" | grep . )"
+    say "box container $BOX (found by label${SERVICE:+ and service $SERVICE})"
+  elif [ "$found" = 0 ]; then
+    # Nothing to pause and nothing to pick wrongly. The copy runs and the manifest says "live",
+    # which is the honest answer for a box that is not running.
+    say "no box container named $BOX${SERVICE:+ and none for service $SERVICE}; this snapshot will be a live one"
+  else
+    die "$found box containers are running and none of them is named \"$BOX\". This server has customers on it, and pausing an arbitrary one would freeze a customer and tear this copy. Set TITANBOT_SERVICE to the operator's Coolify service uuid, or TITANBOT_BOX to the container name"
+  fi
+fi
 
 step "destination"
 mkdir -p "$DEST_ROOT/$INSTANCE" || die "could not create $DEST_ROOT/$INSTANCE"

@@ -919,6 +919,51 @@ left is the network, and TENANT-5 changed its shape: the box is now deliberately
 the relay and the control plane on it. That is by design. The relay has to reach the box, and the
 control plane has to wait for a box it just built.
 
+### 19.1 What it opened between customers, and what closed it
+
+The first version of this section only looked at the host, and that was the wrong half. Containers
+on one bridge talk to each other freely, so putting every customer's box on `titanbot-net` made
+every customer's box a peer of every other customer's box. Measured from the demo tenant's box on
+the R750, 2026-09-07:
+
+| from demo's box | answer |
+| --- | --- |
+| the operator's box `192.168.48.3`, ports 1340, 6080, 6081 | all three **OPEN** |
+| `1340` with no bearer | `401`, which is correct |
+| `6080` `GET /websockify` with the plain websocket headers | `101 Switching Protocols`, first frame `RFB 003.008`, security types `01 01` — **type 1, None** |
+| `6081?token=3` (a fork display, where the token is the display number) | `101` |
+| the control plane `192.168.48.5:7790` `GET /v1/health` | `200 {"ok":true,...}` |
+| the relay `192.168.48.4:7777` `GET /login` | `200` |
+
+The scan is symmetric: the same three ports answered from the operator's box against demo's. So one
+customer could drive another customer's screen and keyboard with no credential at all, which is the
+opposite of the sentence this whole wave rests on. The control plane was reachable too, and it is
+never called by a box: the box fetches its bundle from `titanbot-relay:7777` and that is the only
+thing it has to say on that network.
+
+**What closed it: `deploy/r750/box-isolation.sh`.** One chain, hooked first into `DOCKER-USER`,
+rebuilt from what is running:
+
+    -i br-<net> -o br-<net> -s <each box> -d <relay> -p tcp --dport 7777 -j RETURN
+    -i br-<net> -o br-<net> -s <each box>                              -j DROP
+
+Both `-i` and `-o` name the shared bridge, so nothing here touches a box's route to the internet, to
+its own Coolify network, or to the host. Traffic between *different* docker bridges is already
+dropped by docker's own `DOCKER-ISOLATION-STAGE` chains; the same-bridge case is the one docker does
+not cover, and it is the one TENANT-5 created. Replies from the relay are not matched, because the
+source of a reply is the relay.
+
+`titanbot-isolation.timer` reapplies it every minute and at boot, because docker rebuilds its chains
+on start and because a box the control plane builds at three in the morning has to be covered
+without anybody being awake. The control plane has no route to the host's firewall, which is why
+this is a timer and not a provisioning step.
+
+The gate is `bash deploy/r750/box-isolation.sh --verify`, which runs the scan above from every box
+against every other box, and `scripts/verify-deploy.mjs` carries it as a leg so a green deploy means
+the boundary was measured and not assumed.
+
+### 19.2 What is still open: the host
+
 What the box must not reach is the **host**. Measured inside the demo tenant's box on the R750,
 2026-09-07: the default gateway is `192.168.32.1`, a TCP connect succeeds on 22, 80, 443 and 8000
 and is refused on 2375, 5432 and 6379, and `http://192.168.32.1:8000/` answers a 302 to its own
@@ -947,7 +992,35 @@ runs in the daemon's namespace, so DNS needs no exception, and container-to-cont
 same bridge is untouched.
 
 Everything else on a customer's box is unchanged. The gateway answers, and the job bus, mail and
-subscriptions all work the way section 5 routes them.
+subscriptions all work the way section 5 routes them. The one thing a box does reach on
+`titanbot-net` is `titanbot-relay:7777`, which is where its host bundle comes from, and 19.1 is why
+that is the only thing.
+
+### 19.3 A box is not a proxy
+
+The shared network had a second consequence, on the relay rather than between boxes.
+`SAND_UI_TRUSTED_PROXIES` and `CP_TRUSTED_PROXIES` name the docker private ranges, because Coolify
+allocates a fresh network per resource and its address is not knowable in advance. Under TENANT-2
+the only peers inside those ranges were Traefik and the operator's own box. TENANT-5 put every
+customer's box inside them, so every customer's agents became a trusted forwarder: measured from
+demo's box on the R750, 2026-09-07, a request carrying `X-Forwarded-Proto: https` came back with
+HSTS, and two wrong-password sign-ins carrying forged `X-Forwarded-For` values were logged and
+counted against the addresses the box chose. The login lockout is keyed on that value, so it stopped
+bounding guessing from inside a box, and it could be aimed at the operator's own address to hold him
+out of the console and of `/v1`.
+
+Narrowing the ranges does not fix it. The relay's Traefik pin is `titanbot-net` itself
+(section 6), so the proxy reaches the relay from the same subnet the boxes are on, and any subnet
+that keeps the proxy keeps the boxes.
+
+So the rule is written where it is true: **an address that belongs to a box is never a proxy.**
+`ui/auth.mjs` `createBoxPeers` holds that set, the relay refreshes it on the tenant registry's own
+cycle from the box container names it already carries, and the control plane refreshes it every
+minute from `box_container` in its ledger. Docker's own resolver turns a container name into the
+address that container reaches us from. A refresh that resolves nothing keeps the last good set,
+for the same reason the box-name sweep does. The relay says the size at boot:
+
+    peer 2 box address(es) held untrusted as forwarders
 
 ---
 

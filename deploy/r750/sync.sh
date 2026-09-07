@@ -120,6 +120,8 @@ rsync -a "$REPO/deploy/r750/common.sh" "$REPO/deploy/r750/install.sh" \
   "$REPO/deploy/r750/disable-route.sh" "$REPO/deploy/r750/relay.Dockerfile" \
   "$REPO/deploy/r750/move-relay-state.sh" \
   "$REPO/deploy/r750/one-console-migrate.sh" \
+  "$REPO/deploy/r750/box-isolation.sh" \
+  "$REPO/deploy/r750/titanbot-isolation.service" "$REPO/deploy/r750/titanbot-isolation.timer" \
   "$REPO/deploy/r750/control-plane-install.sh" "$HOST:$ROOT/deploy/"
 rsync -a "$REPO/scripts/box-patches/apply-start-window-fix.sh" "$HOST:$ROOT/deploy/"
 # The Coolify stack's init service runs this from the same directory, bind-mounted read-only. It
@@ -130,7 +132,7 @@ rsync -a "$REPO/deploy/coolify/init-box.sh" "$HOST:$ROOT/deploy/"
 # ~/.config/systemd/user. A directory, because the units name paths inside it.
 ssh "$HOST" "mkdir -p '$ROOT/deploy/backup'"
 rsync -a --delete "$REPO/deploy/backup/" "$HOST:$ROOT/deploy/backup/"
-say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,one-console-migrate.sh,control-plane-install.sh,apply-start-window-fix.sh,init-box.sh,backup/}"
+say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,one-console-migrate.sh,box-isolation.sh,titanbot-isolation.{service,timer},control-plane-install.sh,apply-start-window-fix.sh,init-box.sh,backup/}"
 
 step "ship the control plane"
 # TENANT-1. docs/TENANCY.md section 9 tells the operator to run this script and then build the

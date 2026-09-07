@@ -300,3 +300,54 @@ test("the health of the process is measurable while sign-in derivations are in f
   const elapsed = Date.now() - started;
   assert.ok(turns > 0, `the event loop turned ${turns} times in ${elapsed} ms of derivations`);
 });
+
+// ---- a name that still has doors into it does not go back into circulation ---------------------
+//
+// Deleting a tenant deliberately leaves its accounts alone, because the operator may be rebuilding
+// and cascading would lock those people out to tidy a row. Sign-up then derived a name from the
+// company and checked only the tenants that exist right now, so the freed name could be handed to a
+// DIFFERENT company and the previous customer's sign-ins would resolve to the new company's box
+// with full /api access to it.
+
+test("a workspace removed while sign-ins still point at it keeps its name out of circulation", async () => {
+  await withStore((store) => {
+    store.createTenant({ slug: "acme", name: "Acme" });
+    store.createAccount({ email: "owner@acme.example", password: "a-good-password", tenant: "acme" });
+    assert.equal(store.isSlugRetired("acme"), false);
+
+    store.deleteTenant("acme");
+    assert.equal(store.isSlugRetired("acme"), true, "somebody can still sign in with that name");
+    assert.deepEqual(store.listRetiredSlugs().map((row) => row.slug), ["acme"]);
+    assert.equal(store.listRetiredSlugs()[0].accounts, 1);
+
+    // The operator building it again under the same name is the case the delete answer offers, and
+    // it puts those sign-ins back where they belong.
+    store.createTenant({ slug: "acme", name: "Acme" });
+    assert.equal(store.isSlugRetired("acme"), false);
+  });
+});
+
+test("a sign-up that failed half way through leaves its name free", async () => {
+  await withStore((store) => {
+    // The row is written a line before the account and taken back out when the account throws.
+    // Nobody has ever been able to sign in with it, so holding the name would only deny it to a
+    // later customer with the same company name.
+    store.createTenant({ slug: "acme", name: "Acme" });
+    store.deleteTenant("acme");
+    assert.equal(store.isSlugRetired("acme"), false);
+  });
+});
+
+test("removing the last account into a removed workspace releases its name", async () => {
+  await withStore((store) => {
+    store.createTenant({ slug: "acme", name: "Acme" });
+    const one = store.createAccount({ email: "one@acme.example", password: "a-good-password", tenant: "acme" });
+    const two = store.createAccount({ email: "two@acme.example", password: "a-good-password", tenant: "acme" });
+    store.deleteTenant("acme");
+    assert.equal(store.isSlugRetired("acme"), true);
+    store.deleteAccount(one.id);
+    assert.equal(store.isSlugRetired("acme"), true, "one door is still open");
+    store.deleteAccount(two.id);
+    assert.equal(store.isSlugRetired("acme"), false, "the last door closed, so the name is free again");
+  });
+});

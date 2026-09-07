@@ -27,9 +27,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  clientAddress, edgeAddress, isSecureRequest, isTrustedProxy, newAuthRecord, parseAddress,
-  parseTrustedProxies, writeAuthFile,
+  clientAddress, createBoxPeers, edgeAddress, isSecureRequest, isTrustedProxy, newAuthRecord,
+  parseAddress, parseTrustedProxies, writeAuthFile,
 } from "../ui/auth.mjs";
+import { startRelay as startTenantRelay, tenantRow, tenantsFile } from "./relay-tenant-support.mjs";
 
 // Cloudflare's published ranges, trimmed to the ones these tests use. The relay reads the same
 // shape out of SAND_UI_CLOUDFLARE_RANGES.
@@ -389,5 +390,70 @@ test("neither page the relay serves asks for an http asset, and the desktop fram
     const operator = await (await fetch(`${relay.base}/operator`, { headers, redirect: "manual" })).text();
     assert.match(operator, /\/vnc\/1\/vnc_lite\.html\?/);
     assert.match(operator, /path=%2Fvnc%2F1%2Fwebsockify/);
+  } finally { relay.stop(); }
+});
+
+// ---- a customer's box is never a proxy ---------------------------------------------------------
+//
+// TENANT-5 put every customer's box on a network with the relay, so a box's address is inside the
+// docker private ranges SAND_UI_TRUSTED_PROXIES names. Measured from a tenant's box on the R750,
+// 2026-09-07: a request to the relay carrying X-Forwarded-Proto: https came back with HSTS, and two
+// wrong-password sign-ins carrying forged X-Forwarded-For values were counted against the addresses
+// the box chose, which is a lockout that bounds nothing and can be aimed at the operator.
+//
+// Narrowing the ranges cannot fix it: Traefik reaches the relay over that same shared network. So
+// the box addresses are held apart by name.
+
+test("a box address is held untrusted however wide the ranges are", async () => {
+  const resolved = new Map([
+    ["titanbot-box-acme", ["192.168.48.6"]],
+    ["titanbot-box-titanium", ["192.168.48.3", "fd00::3"]],
+  ]);
+  const peers = createBoxPeers({ lookup: async (name) => resolved.get(name) ?? null });
+  assert.equal(peers.size(), 0, "nothing is held until a refresh has answered");
+
+  await peers.refresh(["titanbot-box-acme", "titanbot-box-titanium", ""]);
+  assert.equal(peers.size(), 3);
+  assert.equal(peers.has("192.168.48.6"), true);
+  assert.equal(peers.has("fd00::3"), true);
+  assert.equal(peers.has("192.168.48.4"), false, "the relay's own address is not a box");
+
+  // The ranges say yes and the box set says no, which is the decision the relay makes.
+  const trusted = parseTrustedProxies("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fd00::/8");
+  assert.equal(isTrustedProxy("192.168.48.6", trusted), true, "the range really does cover it");
+  assert.equal(peers.has("192.168.48.6") && isTrustedProxy("192.168.48.6", trusted), true);
+
+  // A resolver that cannot answer keeps the last good set. Emptying it would hand every box a
+  // trusted forwarder for as long as docker's resolver was unhappy.
+  await peers.refresh(["titanbot-box-acme", "titanbot-box-titanium"].map((name) => `${name}-gone`));
+  assert.equal(peers.size(), 3, "a refresh that resolved nothing changed nothing");
+
+  // A box that really has gone leaves the set the moment anything resolves again.
+  resolved.delete("titanbot-box-acme");
+  await peers.refresh(["titanbot-box-acme", "titanbot-box-titanium"]);
+  assert.equal(peers.has("192.168.48.6"), false);
+  assert.equal(peers.has("192.168.48.3"), true);
+
+  // No boxes at all is a fleet with no boxes, not a resolver that failed.
+  await peers.refresh([]);
+  assert.equal(peers.size(), 0);
+});
+
+test("the relay reads no forwarded header from a peer that is a box", async () => {
+  // The row's box name is "localhost", so the address the registry resolves for it is the address
+  // this test connects from. That is the only way to be a box on a loopback socket.
+  const box = tenantRow("boxpeer", { box: "localhost" });
+  const relay = await startTenantRelay({
+    SAND_UI_TENANTS_FILE: tenantsFile([box.row]),
+    SAND_UI_TRUSTED_PROXIES: "127.0.0.0/8,10.0.0.0/8,192.168.0.0/16",
+  }, { prefix: "relay-boxpeer-", pathValue: "/nonexistent" });
+  try {
+    assert.match(relay.boot, /peer [1-9]\d* box address\(es\) are held untrusted as forwarders/);
+    const asBox = await fetch(`${relay.base}/login`, {
+      redirect: "manual",
+      headers: { "x-forwarded-proto": "https", "x-forwarded-for": "203.0.113.7" },
+    });
+    assert.equal(asBox.headers.get("strict-transport-security"), null,
+      "a box saying the connection was TLS does not make this response claim HSTS");
   } finally { relay.stop(); }
 });

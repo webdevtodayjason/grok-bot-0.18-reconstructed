@@ -690,3 +690,31 @@ test("a workspace that is deleted names the sign-ins it leaves standing, and the
     assert.equal((await plane.admin("DELETE", "/v1/accounts/nobody@nowhere.test", { confirm: "nobody@nowhere.test" })).status, 404);
   }, { withCoolify: true });
 });
+
+test("a workspace name with sign-ins still pointing at it is never handed to a second company", async () => {
+  await withPlane(async (plane) => {
+    // The first company signs up and gets "acme".
+    const first = await plane.request("POST", "/v1/signups", {
+      body: { email: "owner@acme.example", password: PASSWORD, company: "Acme" },
+    });
+    assert.equal(first.status, 201, first.text);
+    assert.equal(first.body.tenant.slug, "acme");
+
+    // The operator finishes with them and removes the workspace. The account is deliberately left
+    // alone, and the answer says the name is held back.
+    await plane.admin("POST", "/v1/tenants/acme/stop");
+    const removed = await plane.admin("DELETE", "/v1/tenants/acme", { confirm: "acme" });
+    assert.equal(removed.status, 200, removed.text);
+    assert.deepEqual(removed.body.accountsLeft, ["owner@acme.example"]);
+    assert.match(removed.body.message, /the name acme is held back/);
+
+    // A different company with the same name gets a different workspace, so the first company's
+    // sign-in cannot land in it.
+    const second = await plane.request("POST", "/v1/signups", {
+      body: { email: "owner@acme-roofing.example", password: PASSWORD, company: "Acme" },
+    });
+    assert.equal(second.status, 201, second.text);
+    assert.notEqual(second.body.tenant.slug, "acme");
+    assert.match(second.body.tenant.slug, /^acme-\d+$/);
+  }, { withCoolify: true, env: { CP_ALLOW_SIGNUP: "1" } });
+});

@@ -99,6 +99,9 @@ const signature = (entry) => JSON.stringify([
  *              kind of documented override SAND_UI_AUTH_FILE already is.
  * dockerNames  async () => Set<string> | null. null means "docker could not be asked", which skips
  *              the verification rather than marking the fleet unreachable.
+ * boxPeers     the ui/auth.mjs createBoxPeers set, refreshed on this same cycle with every box
+ *              container name in the fleet. A box is never a trusted forwarder, so the relay has
+ *              to know which addresses are boxes.
  */
 export function createTenantRegistry({
   operator,
@@ -107,6 +110,7 @@ export function createTenantRegistry({
   tenantsFile = "",
   fetchImpl = fetch,
   dockerNames = null,
+  boxPeers = null,
   refreshMs = 60_000,
   timeoutMs = 10_000,
   missRefreshMs = 10_000,
@@ -230,6 +234,11 @@ export function createTenantRegistry({
     }
     next.set(seed.slug, seed);
     await verifyBoxes(next);
+    // On the same cycle and from the same list: which addresses belong to a box. See
+    // createBoxPeers in ui/auth.mjs for why a box must never be read as a proxy.
+    if (boxPeers != null && typeof boxPeers.refresh === "function") {
+      await boxPeers.refresh([...next.values()].map((entry) => entry.box)).catch(() => {});
+    }
     rebuild(next);
     lastGoodAt = now();
     return { ok: true, count: next.size };

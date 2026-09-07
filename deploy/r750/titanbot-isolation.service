@@ -1,0 +1,14 @@
+[Unit]
+Description=Titanbot: one customer's box cannot reach another customer's box
+Documentation=file://%h/titanbot/deploy/box-isolation.sh
+
+[Service]
+Type=oneshot
+# A USER unit, like the snapshot job, because this whole install runs as the operator's own user.
+# The script asks for root itself with `sudo -n iptables`, which is how the R750 is set up; a host
+# where that prompts will fail loudly here rather than silently leaving the bridge open.
+#
+# Rebuilt from what is running, every time. A box created by the control plane at three in the
+# morning has to be covered without anybody being awake, and the control plane has no route to this
+# host's firewall, so the timer beside this unit is what closes that window.
+ExecStart=/bin/bash %h/titanbot/deploy/box-isolation.sh
