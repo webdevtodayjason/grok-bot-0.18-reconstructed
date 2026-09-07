@@ -93,12 +93,22 @@ node scripts/verify-machine-room.mjs --all
 SAND_PROFILE_DIRS=... node scripts/verify-local-turn.mjs --rounds 5
 node scripts/verify-agent-identity.mjs
 node scripts/verify-onboarding.mjs
+node scripts/verify-admin.mjs
 node --test tests/
 ```
 
 `verify-agent-identity` is worth re-running after any model switch: on the frontier model both
 agents name themselves correctly; on Nemotron they do not answer the question at all, which is
 the "agents think they are Grok" report and is a model-quality problem, not a prompt bug.
+
+`verify-admin` measures the super admin console at `api.titanium.bot/admin`: the flag, the door
+against a normal customer's own valid session, the failed sign-in ledger and its keyed hash, the
+attack rule, and all five panels rendered in headless Chrome from a fixture it carries. It starts its
+own control plane on a free port with a throwaway data directory, a fake Coolify and a fake relay, so
+it needs no box, no docker and no network, and it touches nothing on the R750. Pass `--no-browser` to
+skip the page leg. The whole design, including which numbers on that console are **not measured** and
+what would fix each one, is [docs/ADMIN.md](ADMIN.md), and so are the two commands that give Jason
+his own account: `account add jason@... titanium` then `account promote jason@...`.
 
 `verify-onboarding` measures the first run a new customer gets, and the ceiling of thirteen agents
 per box. **Neither is on the box yet**, so today it exits 2 and says which half is missing rather
