@@ -235,11 +235,22 @@ services:
       # network" at the top of this file: without it the choice is a randomised Go map order and
       # the console answers 502 on about half of Traefik's provider refreshes.
       #
-      # The value is the name of the network Coolify made for THIS resource, which on this server
-      # is the resource's own uuid. Read it once and set TITANBOT_PROXY_NETWORK on the resource:
-      #   docker inspect <the relay container> --format '{{json .NetworkSettings.Networks}}'
-      # The one that is not titanbot-net is the one to name here.
-      traefik.docker.network: ${TITANBOT_PROXY_NETWORK}
+      # A LITERAL, and it has to be. Measured on the R750 2026-09-07: Coolify's parser rewrites
+      # every ${...} inside a labels block to $${...} on its way to the generated compose, which
+      # docker reads as an escaped dollar and hands Traefik the eleven characters
+      # "${TITANBOT_PROXY_NETWORK}" as a network name. The variable was set on the resource and was
+      # in the .env beside the file; the escape is in the labels block only, because that is where
+      # Coolify's own Traefik rules live and it has its own use for a dollar there. So a variable
+      # can never work here, and one that looks like it did is the worst of the three outcomes: the
+      # pin is present, it names nothing, and the console goes back to the coin flip while the
+      # deploy that caused it looks clean.
+      #
+      # titanbot-net is the right literal because it is the one network name this file itself
+      # declares and every service in it joins. Coolify attaches coolify-proxy to it on deploy
+      # (read back after the first one: coolify-proxy is on titanbot-net beside the relay and the
+      # box), so Traefik has a route to this address. The alternative was Coolify's own per-resource
+      # network, whose name is this resource's uuid, and a file cannot know its own uuid.
+      traefik.docker.network: titanbot-net
     # The shared network, and nothing else. Coolify merges its own per-resource network in beside
     # what a service declares (its parser keeps the declared list and adds the uuid one), so
     # naming the Coolify network here would be naming a value this file cannot know. The relay

@@ -128,14 +128,33 @@ const tombstones = async () => {
 };
 
 step(`shape of the install on ${HOST}`);
-// By label first, by name second. A compose orchestrator names a service's container after its own
-// resource id, so the label is the only identifier that survives the move into Coolify -- and the
-// gate looking for a name that no longer exists would report an install that is missing when it is
-// merely renamed.
+// By label AND service, by name last. A compose orchestrator names a service's container after its
+// own resource id, so the label is the only identifier that survives the move into Coolify -- but
+// the label alone stopped being an identifier the day a second customer arrived.
+//
+// Measured on the R750 2026-09-07, with the demo tenant running: `docker ps --filter
+// label=com.titanbot.role=relay | head -1` answered titanbot-relay-sy74dau8ilh1g4u7a9eaw8f8, which
+// is DEMO's relay. Every leg below that reads a container -- both running, the port bindings, the
+// mounts, the traefik pin, the box's own files -- was measuring a customer's containers and
+// reporting the answer as though it were the console's. A green gate on the wrong machine is worse
+// than a red one.
+//
+// TITANBOT_SERVICE is the Coolify service uuid whose containers this run is about. Coolify names
+// them <compose service>-<uuid>, so the suffix is the part that tells one customer from another.
+// Empty it, and this falls back to the label alone, which is right on a single-box install where
+// there is one of everything and the names carry no uuid at all.
+const SERVICE = process.env.TITANBOT_SERVICE ?? "p927bfqm83ioloibamlvyd7g";
 const byRole = async (role, fallback) => {
-  const found = (await ssh(`docker ps --filter label=com.titanbot.role=${role} --format '{{.Names}}' | head -n 1`)
-    .catch(() => "")).trim();
-  return found.length > 0 ? found : fallback;
+  const names = (await ssh(`docker ps --filter label=com.titanbot.role=${role} --format '{{.Names}}'`)
+    .catch(() => "")).trim().split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  const mine = SERVICE.length > 0 ? names.filter((name) => name.endsWith(`-${SERVICE}`)) : names;
+  if (mine.length > 0) return mine[0];
+  // Nothing carries this service's uuid. One candidate is a single-box install whose containers are
+  // named without one, and taking it is right. Several is a host with customers on it and no way to
+  // tell which is the console, so this returns the plain name instead: the next check says that
+  // container is not running, which is a red gate naming a container, and not a green one measuring
+  // somebody else's.
+  return names.length === 1 ? names[0] : fallback;
 };
 const BOX_NAME = process.env.TITANBOT_BOX ?? await byRole("box", "titanbot-box");
 const RELAY_NAME = process.env.TITANBOT_RELAY ?? await byRole("relay", "titanbot-relay");
