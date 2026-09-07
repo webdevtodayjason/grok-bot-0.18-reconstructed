@@ -2,80 +2,36 @@
 //
 // Two surfaces make one hole. POST /endpoints saves any base URL the browser sends, and the health
 // probe behind GET /endpoints then fetches `<baseUrl>/models` with an Authorization header the same
-// browser chose and hands back the status, the latency and the model list. On Jason's own instance
-// that is a feature: it is his machine and the box next door is a legitimate endpoint. On a tenant
-// it is a port scanner with a bearer, driven by whoever holds that customer's session. Measured
-// from a signed-in tenant session before the guard: the relay answered HTTP 401, the box gateway
-// HTTP 404, the host address refused and an off-network address timed out, which is four different
-// answers and therefore a working scan of the machine every other customer is on.
+// browser chose and hands back the status, the latency and the model list. On Jason's own console
+// that is a feature: it is his machine and the box next door is a legitimate endpoint. For a
+// customer it is a port scanner with a bearer, driven by whoever holds that customer's session.
+// Measured from a signed-in tenant session before the guard: the relay answered HTTP 401, the box
+// gateway HTTP 404, the host address refused and an off-network address timed out, which is four
+// different answers and therefore a working scan of the machine every other customer is on.
 //
-// So this measures both halves on a real relay on a real port: the save is refused in words a
-// business owner can read, the probe never leaves the process, and the same relay WITHOUT tenant
-// mode still accepts exactly what the tenant was refused.
+// TENANT-5 moved what decides this. There is one relay and one console for everybody, so the guard
+// can no longer key off "is this process a tenant instance": it keys off whose session THIS request
+// carries. The same running relay refuses the customer and accepts the operator, which is what the
+// last test here measures and what a per-process flag could never have said.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { spawn } from "node:child_process";
-import { copyFileSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-import { newAuthRecord, writeAuthFile } from "../ui/auth.mjs";
-import { tenantSessionSecret } from "../ui/session-token.mjs";
+import {
+  RELAY_TOKEN, signInAsOperator, signInAsTenant, startRelay, tenantRow, tenantsFile,
+} from "./relay-tenant-support.mjs";
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const RELAY_PASSWORD = "an instance password no test types";
-const KEY = tenantSessionSecret("a control plane master key no tenant ever holds", "demo");
-
-// A copy of ui/, never ui/ itself: the operator's own auth.json and endpoints.json are in there.
-function serverCopy() {
-  const dir = mkdtempSync(path.join(tmpdir(), "relay-endpoints-"));
-  for (const name of readdirSync(path.join(repo, "ui")).filter((file) => file.endsWith(".mjs"))) {
-    copyFileSync(path.join(repo, "ui", name), path.join(dir, name));
-  }
-  writeAuthFile(path.join(dir, "auth.json"), newAuthRecord(RELAY_PASSWORD));
-  return dir;
-}
-
-// Same shape as tests/relay-tenant-login: SAND_UI_PORT=0 prints the value it was given, so a port
-// is picked and retried.
-async function startRelay(env = {}) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const dir = serverCopy();
-    const port = 34000 + Math.floor(Math.random() * 8000);
-    const child = spawn(process.execPath, [path.join(dir, "server.mjs")], {
-      env: {
-        ...process.env, SAND_UI_PORT: String(port), SAND_UI_BIND_HOST: "127.0.0.1",
-        SAND_HOST_GATEWAY_TOKEN: "not-a-real-token", SAND_HOST_GATEWAY_URL: "http://127.0.0.1:1",
-        TENANT_ID: "", CP_URL: "", CP_SESSION_SECRET: "", SAND_UI_STATE_DIR: "", SAND_UI_AUTH_FILE: "",
-        SAND_UI_ENDPOINTS_FILE: "", PATH: "/nonexistent",
-        ...env,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const listening = await new Promise((resolve) => {
-      let out = "";
-      child.stdout.on("data", (chunk) => { out += chunk; if (out.includes("cfip ")) resolve(out); });
-      child.on("exit", () => resolve(null));
-      setTimeout(() => resolve(null), 15_000).unref();
-    });
-    if (listening != null) {
-      return { base: `http://127.0.0.1:${port}`, dir, catalog: path.join(dir, "endpoints.json"), stop: () => child.kill("SIGKILL") };
-    }
-    child.kill("SIGKILL");
-  }
-  throw new Error("the relay copy would not start on any of five ports");
-}
-
-async function signIn(relay) {
-  const res = await fetch(`${relay.base}/login`, {
-    method: "POST", redirect: "manual",
-    headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
-    body: new URLSearchParams({ password: RELAY_PASSWORD }).toString(),
-  });
-  const cookie = /(?:^|,\s*)(gb_session=[^;]+)/.exec(res.headers.get("set-cookie") ?? "")?.[1] ?? "";
-  assert.ok(cookie.length > 0, "the test needs a session before it can call /endpoints");
-  return cookie;
+// A console with the operator and one customer on it, with no docker and no control plane: the
+// registry comes out of the override file, which is what makes this test need no network.
+async function startConsole() {
+  const demo = tenantRow("demo");
+  const relay = await startRelay({
+    CP_URL: "http://127.0.0.1:1",
+    CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
+  }, { prefix: "relay-endpoints-", pathValue: "/nonexistent" });
+  return { relay, demo, tenantCatalog: path.join(demo.state, "endpoints.json") };
 }
 
 const save = (relay, cookie, endpoints) => fetch(`${relay.base}/endpoints`, {
@@ -86,9 +42,9 @@ const save = (relay, cookie, endpoints) => fetch(`${relay.base}/endpoints`, {
 const row = (baseUrl) => ({ id: "probe", name: "probe", baseUrl, model: "m", apiKey: "a bearer the customer chose" });
 
 test("a tenant cannot save an endpoint that points inside this server's network", async () => {
-  const relay = await startRelay({ TENANT_ID: "demo", CP_URL: "http://127.0.0.1:1", CP_SESSION_SECRET: KEY });
+  const { relay, tenantCatalog } = await startConsole();
   try {
-    const cookie = await signIn(relay);
+    const cookie = await signInAsTenant(relay, "demo");
 
     // The four shapes the live scan used, each refused before anything is written.
     for (const [baseUrl, why] of [
@@ -114,26 +70,34 @@ test("a tenant cannot save an endpoint that points inside this server's network"
     assert.equal(junk.status, 400);
     assert.match(String((await junk.json()).error), /not a web address/);
 
-    // Nothing was written by any of that.
-    let written = "";
-    try { written = readFileSync(relay.catalog, "utf8"); } catch { written = ""; }
-    assert.equal(written, "", "a refused save must not leave a catalog behind");
+    // Nothing was written by any of that, and nothing was written into the OPERATOR's file either:
+    // a customer's save goes to that customer's own state directory. TENANT-5.
+    for (const file of [tenantCatalog, relay.catalog]) {
+      let written = "";
+      try { written = readFileSync(file, "utf8"); } catch { written = ""; }
+      assert.equal(written, "", `a refused save must not leave a catalog behind (${file})`);
+    }
 
     // A public address over https is saved, so the guard is a fence and not a wall. A literal
     // address rather than a name, so this test needs no DNS.
     const ok = await save(relay, cookie, [row("https://93.184.216.34/v1")]);
     assert.equal(ok.status, 200);
     assert.equal((await ok.json()).saved, 1);
+    // And it landed in the customer's directory, not in the release directory every console shares.
+    assert.match(readFileSync(tenantCatalog, "utf8"), /93\.184\.216\.34/);
+    let operatorFile = "";
+    try { operatorFile = readFileSync(relay.catalog, "utf8"); } catch { operatorFile = ""; }
+    assert.equal(operatorFile, "", "a customer's endpoint must not be written where the operator's goes");
   } finally { relay.stop(); }
 });
 
 test("a tenant's health probe does not fetch an address inside this server's network", async () => {
-  const relay = await startRelay({ TENANT_ID: "demo", CP_URL: "http://127.0.0.1:1", CP_SESSION_SECRET: KEY });
+  const { relay, tenantCatalog } = await startConsole();
   try {
-    const cookie = await signIn(relay);
+    const cookie = await signInAsTenant(relay, "demo");
     // Past the save guard on purpose: a catalog written before this shipped, or by any other path,
     // still must not be probed. This is the half that leaks the scan.
-    writeFileSync(relay.catalog, JSON.stringify({ endpoints: [row("https://192.168.32.1:8000")] }, null, 2));
+    writeFileSync(tenantCatalog, JSON.stringify({ endpoints: [row("https://192.168.32.1:8000")] }, null, 2));
     const res = await fetch(`${relay.base}/endpoints`, { headers: { cookie, accept: "application/json" } });
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -149,14 +113,27 @@ test("a tenant's health probe does not fetch an address inside this server's net
   } finally { relay.stop(); }
 });
 
-test("without tenant mode the same address is still Jason's to point at", async () => {
-  // The control. Without this the tests above would pass on a relay that refused everything
-  // always, which would take the box next door away from the operator who owns the machine.
-  const relay = await startRelay();
+test("the same running console still lets the operator point at the box next door", async () => {
+  // The control, and under TENANT-5 it is a sharper one than it was: this is the SAME process that
+  // just refused the customer. Without this the tests above would pass on a relay that refused
+  // everybody always, which would take the box next door away from the operator who owns the
+  // machine.
+  const { relay, tenantCatalog } = await startConsole();
   try {
-    const cookie = await signIn(relay);
-    const res = await save(relay, cookie, [row("http://titanbot-box:1340")]);
+    const operator = await signInAsOperator(relay);
+    const res = await save(relay, operator, [row("http://titanbot-box:1340")]);
     assert.equal(res.status, 200, "the operator's own console may point anywhere it can reach");
     assert.equal((await res.json()).saved, 1);
+    // It went to the operator's file, and the customer's catalog was not touched by it.
+    assert.match(readFileSync(relay.catalog, "utf8"), /titanbot-box:1340/);
+    let tenantFile = "";
+    try { tenantFile = readFileSync(tenantCatalog, "utf8"); } catch { tenantFile = ""; }
+    assert.equal(tenantFile, "", "the operator's save must not reach a customer's catalog");
+
+    // And the customer, on the same relay and the same second, is still refused the same address.
+    const cookie = await signInAsTenant(relay, "demo");
+    const refused = await save(relay, cookie, [row("http://titanbot-box:1340")]);
+    assert.equal(refused.status, 400);
+    assert.match(String((await refused.json()).error), /have to start with https:\/\//);
   } finally { relay.stop(); }
 });

@@ -72,8 +72,16 @@ export function signSession(payload, secretHex) {
   return `${body}.${mac(body, secretHex)}`;
 }
 
-export function createSession(secretHex, { nowMs = Date.now(), lifetimeMs = SESSION_LIFETIME_MS } = {}) {
-  return signSession({ iat: nowMs, exp: nowMs + lifetimeMs }, secretHex);
+// TENANT-5. One relay serves every workspace, so the cookie has to say which one this session is
+// for. It is a claim inside the signed payload, not a second cookie: readSession already returns
+// the whole payload, so nothing about the format, the signature or the lifetime changes.
+//
+// A cookie minted before this shipped carries no tenant claim and reads back as the operator, which
+// is what keeps Jason signed in across the deploy. That is a property to be aware of rather than to
+// rely on: rotating the cookie secret is what ends every old session at once.
+export function createSession(secretHex, { nowMs = Date.now(), lifetimeMs = SESSION_LIFETIME_MS, tenant = "" } = {}) {
+  const slug = String(tenant ?? "").trim();
+  return signSession({ iat: nowMs, exp: nowMs + lifetimeMs, ...(slug.length > 0 ? { tenant: slug } : {}) }, secretHex);
 }
 
 // Returns the payload, or null for anything that is not a live signature: wrong secret, edited

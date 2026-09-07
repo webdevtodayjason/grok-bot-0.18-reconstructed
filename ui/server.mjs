@@ -25,17 +25,26 @@
 //   SAND_HOST_RUNTIME_DIR    the ship's runtime directory (host-main.cjs plus the version file
 //                            stage-host-bundle.mjs writes). Unset means /runtime answers 503 and
 //                            the box simply never finds a host bundle to update to. SHIP-2.
-//   SAND_UI_STATE_DIR        where this relay's writable files go: auth.json, endpoints.json,
+//   SAND_UI_STATE_DIR        where the OPERATOR's writable files go: auth.json, endpoints.json,
 //                            subscriptions.json, mail.json, mail-inbox.jsonl. Unset means beside
 //                            this file, which is what every single-relay install has always done.
-//                            A tenant sets it because ui/ is shared with every other tenant there.
-//                            ui/state-dir.mjs. TENANT-2.
+//                            Every other tenant's come out of its own state directory, which the
+//                            registry names. ui/state-dir.mjs. TENANT-2, TENANT-5.
 //   SAND_UI_AUTH_FILE        auth.json, overriding the state directory. Older than the line above.
-//   SAND_UI_ENDPOINTS_FILE   endpoints.json, overriding the state directory. TENANT-2.
-//   TENANT_ID                this instance's tenant name on the control plane. With the two below,
+//                            There is one auth.json for the console: it is the operator's door.
+//   SAND_UI_ENDPOINTS_FILE   the OPERATOR's endpoints.json, overriding the state directory.
+//   SAND_BOX_CONTAINER       the operator's own box container, for `docker exec`. Under Coolify it
+//                            is titanbot-box-<service uuid>. A name that is not running is said in
+//                            the log and never guessed at, because guessing on a shared host means
+//                            reaching into a customer's box. TENANT-5.
 //   CP_URL                   the control plane's public URL, and
-//   CP_SESSION_SECRET        this tenant's own derived session key, the login page also takes a
-//                            Titanium Bot account. All three or none. ui/tenant-login.mjs. TENANT-2.
+//   CP_RELAY_TOKEN           the credential that opens GET /v1/relay/tenants and nothing else.
+//                            Both or neither. With them the login page also takes a Titanium Bot
+//                            account and this console serves every tenant the control plane knows.
+//                            ui/tenant-login.mjs, ui/tenant-registry.mjs. TENANT-5.
+//   SAND_UI_TENANTS_FILE     a JSON tenant list read INSTEAD of the control plane, the same kind of
+//                            documented override SAND_UI_AUTH_FILE is. It is what makes the whole
+//                            registry testable with no network and no control plane.
 import { createServer } from "node:http";
 import net from "node:net";
 import { lookup } from "node:dns/promises";
@@ -51,12 +60,19 @@ import {
   readSession, safeEqual, safeNextPath, serializeCookie, verifyPassword,
 } from "./auth.mjs";
 import {
-  createRateLimiter, jobBusTokenFile, jobCreateArgs, jobSubmitterId, newJobToken, resolveJobToken,
-  routeJobBus,
+  createRateLimiter, jobBusProfileDir, jobBusTokenFile, jobCreateArgs, jobSubmitterId, jobTokenInDir,
+  newJobToken, resolveJobToken, routeJobBus,
 } from "./job-bus-edge.mjs";
-import { createMailEdge } from "./mail-edge.mjs";
+import {
+  MAIL_BODY_LIMIT, MAIL_LEDGER_FILE, MAIL_SETTINGS_FILE, createMailEdge, domainOf, readMailSettings,
+  toAddressList,
+} from "./mail-edge.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
-import { accountSignIn, ssoVerdict, tenantConfig } from "./tenant-login.mjs";
+import { accountSignIn, relayConfig, ssoVerdict } from "./tenant-login.mjs";
+import {
+  NOT_AVAILABLE_SENTENCE, OPERATOR_SLUG, createTenantRegistry, dockerNameReader, operatorEntry,
+  tenantFile,
+} from "./tenant-registry.mjs";
 import { NOT_AVAILABLE, createDockerProbe, notAvailable } from "./docker-edge.mjs";
 import { chmod, chown, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -68,15 +84,14 @@ import path from "node:path";
 // with readFileSync on every single request -- so writing it takes effect on the next message,
 // with no restart and no container recreate. The gateway's own setBoxSecrets refuses
 // SAND_-prefixed names, which is why this writes the file directly instead of going through it.
-let BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const SECRETS_PATH = "/home/box/sand-data/box-secrets.json";
 // This directory, which is where the relay's writable files went before there was more than one
 // relay on a machine. SAND_UI_STATE_DIR moves them; see ui/state-dir.mjs and STATE_DIR below.
 const HERE = path.dirname(new URL(import.meta.url).pathname);
-// The saved endpoint list. SAND_UI_ENDPOINTS_FILE wins, then the state directory, then here. It
-// had no variable of its own until now, which is why a tenant would have written this one into the
-// release directory every other tenant reads.
-const ENDPOINTS_FILE = process.env.SAND_UI_ENDPOINTS_FILE?.trim() || stateFile("endpoints.json", HERE);
+// The OPERATOR's saved endpoint list. SAND_UI_ENDPOINTS_FILE wins, then the state directory, then
+// here. Every other tenant's endpoints.json comes out of its own state directory and is resolved
+// per request, because one console now serves all of them: see contextOf below.
+const ENDPOINTS_OVERRIDE = process.env.SAND_UI_ENDPOINTS_FILE?.trim() || "";
 const PROVIDER_KEYS = ["SAND_OPENAI_COMPATIBLE_BASE_URL", "SAND_OPENAI_COMPATIBLE_MODEL",
   "SAND_OPENAI_COMPATIBLE_API_KEY"];
 
@@ -88,49 +103,39 @@ const dockerOut = (args) => new Promise((resolve) =>
 // need it say so in plain words instead of answering 200 with a null in every field. See
 // ui/docker-edge.mjs for why an honest refusal beats the silent version.
 const dockerAvailable = createDockerProbe({ execFile });
-// The one refusal shape. 409 rather than 503: nothing is temporarily down, this instance simply
-// does not carry the feature, and a retry will not change that.
+// The one refusal shape. 409 rather than 503: nothing is temporarily down, this console simply
+// does not carry the feature here, and a retry will not change that. Used for a relay with no
+// docker and, under TENANT-5, for the operator-only surfaces a customer's session reaches.
 const refuseWithoutDocker = (res, detail) => {
   res.writeHead(409, { "content-type": "application/json", "cache-control": "no-store" });
   return res.end(JSON.stringify(notAvailable(detail)));
 };
 
-// Under a compose orchestrator the container is not necessarily called what the compose file calls
-// it: Coolify names a service's container after its own resource id. Every `docker exec` below
-// would then find nothing, and the failure is invisible -- the console loads and the model picker
-// and the connector editor just return nothing. So if the configured name is not a container here,
-// fall back to whatever is running with our own role label. The gateway URL never needs this: a
-// compose network answers the SERVICE name whatever the container is called.
-async function resolveBoxContainer() {
-  // No docker here at all, which is a tenant instance rather than a fault. Say it once in the log
-  // and skip the two lookups, so the boot does not spend two failed spawns proving what the probe
-  // already answered.
-  if (!await dockerAvailable()) {
-    console.log("box  no docker on this relay, so the model picker, the connectors editor and the desktop view say so rather than failing");
-    return;
-  }
-  // docker inspect prints "[]" on stdout for a missing container and exits 1, so a non-null
-  // answer is not proof the name exists: on the R750 that read the Mac's container name as
-  // found and every docker-backed route aimed at nothing (the desktop verdict, the endpoint
-  // label, the connectors file). Only a real name, which docker prints with a leading slash, counts.
-  const inspected = String(await dockerOut(["inspect", BOX, "--format", "{{.Name}}"]) ?? "").trim();
-  if (inspected.startsWith("/")) return;
-  const found = String(await dockerOut(["ps", "--filter", "label=com.titanbot.role=box", "--format", "{{.Names}}"]) ?? "")
-    .split("\n").map((name) => name.trim()).find((name) => name.length > 0);
-  if (found == null) return;
-  console.log(`box  no container named ${BOX}; using ${found}, which carries com.titanbot.role=box`);
-  BOX = found;
-}
+// TENANT-5 DELETED THE LABEL FALLBACK, and this comment is the reason it is not coming back.
+//
+// The relay used to answer "which container is the box" with `docker ps --filter
+// label=com.titanbot.role=box`, taking the first match, whenever the configured name did not
+// resolve. On a machine with one box that was a convenience. On a machine with N customers it
+// resolves to an ARBITRARY customer's container, and every `docker exec` this file makes -- the
+// model picker writing box-secrets.json, the connector editor writing connectors.json in
+// plaintext, the desktop buttons -- would land in somebody else's box. There is no version of that
+// which is safe to keep, including a per-tenant label, because a label is a string somebody
+// eventually mistypes.
+//
+// So a box name is now VERIFIED and never guessed: ui/tenant-registry.mjs asks `docker ps` once per
+// refresh for the names that exist, and a tenant whose box is not among them answers "That
+// workspace is not available right now." rather than reaching into a neighbour. The operator's own
+// name comes from SAND_BOX_CONTAINER and a name that is not running is a loud line in the log.
 
-const readSecrets = async () => {
-  const raw = await dockerOut(["exec", BOX, "cat", SECRETS_PATH]);
+const readSecrets = async (t) => {
+  const raw = await dockerOut(["exec", t.box, "cat", SECRETS_PATH]);
   try { return JSON.parse(raw).secrets ?? {}; } catch { return {}; }
 };
 // Merge, never replace: this file is also where the operator's real secrets live.
-async function writeSecrets(next) {
+async function writeSecrets(t, next) {
   const body = JSON.stringify({ version: 1, secrets: next });
   return new Promise((resolve, reject) => {
-    const child = execFile("docker", ["exec", "-i", BOX, "sh", "-c", `cat > ${SECRETS_PATH}`],
+    const child = execFile("docker", ["exec", "-i", t.box, "sh", "-c", `cat > ${SECRETS_PATH}`],
       (err) => (err ? reject(err) : resolve()));
     child.stdin.end(body);
   });
@@ -142,25 +147,25 @@ const CONNECTORS_PATH = "/home/box/sand-data/connectors.json";
 // handled, so adding a connector is an edit in the UI rather than a docker exec.
 // null means "the box could not be read"; an empty or missing file is an empty map. The two used to
 // look the same, and the dashboard's connector sweep once rebuilt connectors.json from a hiccup.
-const readConnectors = async () => {
-  const raw = await dockerOut(["exec", BOX, "cat", CONNECTORS_PATH]);
+const readConnectors = async (t) => {
+  const raw = await dockerOut(["exec", t.box, "cat", CONNECTORS_PATH]);
   if (raw == null) return null;
   if (String(raw).trim().length === 0) return { mcpServers: {} };
   try { return JSON.parse(raw); } catch { return { mcpServers: {} }; }
 };
-async function writeConnectors(next) {
+async function writeConnectors(t, next) {
   const body = JSON.stringify(next, null, 2);
   return new Promise((resolve, reject) => {
     // 0600: this file carries connector tokens in plaintext.
-    const child = execFile("docker", ["exec", "-i", BOX, "sh", "-c",
+    const child = execFile("docker", ["exec", "-i", t.box, "sh", "-c",
       `umask 077 && cat > ${CONNECTORS_PATH} && chmod 600 ${CONNECTORS_PATH}`],
       (err) => (err ? reject(err) : resolve()));
     child.stdin.end(body);
   });
 }
 
-const readCatalog = async () => {
-  try { return JSON.parse(await readFile(ENDPOINTS_FILE, "utf8")); } catch { return { endpoints: [] }; }
+const readCatalog = async (t) => {
+  try { return JSON.parse(await readFile(t.endpointsFile, "utf8")); } catch { return { endpoints: [] }; }
 };
 
 // ---- where a tenant is allowed to point an endpoint -------------------------------------------
@@ -190,8 +195,10 @@ const TENANT_ENDPOINT = {
 // the two calls is not stopped by this. What it does stop is the whole of the surface above:
 // saving an address in the private ranges, and probing one. Closing the rest means pinning the
 // resolved address into the connection, which node's fetch has no supported way to do.
-async function tenantEndpointRefusal(baseUrl) {
-  if (TENANT == null) return null;
+async function tenantEndpointRefusal(t, baseUrl) {
+  // Keyed off whose console this request belongs to, which is the correct reading of the guard and
+  // always was: on one shared relay "is this process a tenant" is not a question with an answer.
+  if (t.operator) return null;
   let url;
   try { url = new URL(String(baseUrl ?? "")); } catch { return TENANT_ENDPOINT.shape; }
   if (url.protocol !== "https:") return TENANT_ENDPOINT.scheme;
@@ -209,9 +216,9 @@ async function tenantEndpointRefusal(baseUrl) {
 }
 
 // A saved endpoint is only useful if it is actually up, so say so rather than implying it.
-async function probe(endpoint) {
+async function probe(t, endpoint) {
   const started = Date.now();
-  const refusal = await tenantEndpointRefusal(endpoint?.baseUrl);
+  const refusal = await tenantEndpointRefusal(t, endpoint?.baseUrl);
   if (refusal != null) return { reachable: false, detail: refusal, ms: Date.now() - started };
   try {
     const res = await fetch(`${endpoint.baseUrl.replace(/\/+$/, "")}/models`,
@@ -228,7 +235,7 @@ async function probe(endpoint) {
   }
 }
 
-const GATEWAY = (process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:1340").replace(/\/+$/, "");
+const OPERATOR_GATEWAY = (process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:1340").replace(/\/+$/, "");
 // ponytail: the local-docker connector writes this token in plaintext (0600) next to
 // its settings, so read it instead of making the operator export one. Env still wins.
 function tokenFromProfile() {
@@ -242,7 +249,7 @@ function tokenFromProfile() {
   }
   return "";
 }
-const TOKEN = process.env.SAND_HOST_GATEWAY_TOKEN?.trim() || tokenFromProfile();
+const OPERATOR_TOKEN = process.env.SAND_HOST_GATEWAY_TOKEN?.trim() || tokenFromProfile();
 const PORT = Number.parseInt(process.env.SAND_UI_PORT ?? "7777", 10);
 
 // ---- where this relay's own files live --------------------------------------------------------
@@ -261,7 +268,96 @@ if (STATE_DIR.length > 0) {
   catch (error) { console.log(`state could not make ${STATE_DIR}: ${error?.message ?? error}`); }
 }
 
-const upstreamHeaders = (extra = {}) => ({ ...(TOKEN.length > 0 ? { authorization: `Bearer ${TOKEN}` } : {}), ...extra });
+// ---- one console, every tenant (TENANT-5) -----------------------------------------------------
+//
+// There is one relay, one console and one login page. Which BOX, which TOKEN, which files a request
+// reaches is decided once per request from the session cookie, and everything below takes that
+// answer as a parameter called `t` instead of reading a module-level constant.
+//
+// With no control plane configured the registry holds exactly one entry -- this one, built from the
+// environment the relay already had -- every seam resolves to it, and a developer Mac or a
+// single-box install behaves precisely as it did before. That is the whole compatibility story, and
+// it is also why a control plane that is down cannot take the operator's own console with it.
+const RELAY = relayConfig();
+const registry = createTenantRegistry({
+  operator: operatorEntry({
+    gateway: OPERATOR_GATEWAY,
+    token: OPERATOR_TOKEN,
+    stateDir: STATE_DIR,
+    profileDir: jobBusProfileDir() ?? "",
+  }),
+  cpUrl: RELAY?.cpUrl ?? "",
+  relayToken: RELAY?.relayToken ?? "",
+  tenantsFile: process.env.SAND_UI_TENANTS_FILE?.trim() || "",
+  dockerNames: dockerNameReader(execFile),
+  log: (line) => console.log(line),
+});
+
+// One context per tenant, rebuilt only when the registry entry behind it actually changed. The
+// registry hands back the same entry object while nothing about a tenant moves, so this cache is
+// keyed on identity and costs one Map lookup per request.
+const contexts = new Map();
+
+function buildContext(entry) {
+  const file = (name) => tenantFile(entry, name, { here: HERE, stateFile });
+  const gateway = entry.gateway.length > 0 ? entry.gateway : OPERATOR_GATEWAY;
+  let boxHost = "";
+  try { boxHost = new URL(gateway).hostname; } catch { boxHost = ""; }
+  const jobTokenFile = entry.operator
+    ? jobBusTokenFile()
+    : (entry.profileDir.length > 0 ? path.join(entry.profileDir, "job-bus.json") : null);
+  return {
+    entry,
+    slug: entry.slug,
+    name: entry.name,
+    operator: entry.operator === true,
+    box: entry.box,
+    gateway,
+    boxHost,
+    token: entry.token,
+    stateDir: entry.stateDir,
+    profileDir: entry.profileDir,
+    file,
+    // The operator's endpoints file keeps every override it ever had; a tenant's comes out of its
+    // own state directory and nowhere else.
+    endpointsFile: entry.operator && ENDPOINTS_OVERRIDE.length > 0 ? ENDPOINTS_OVERRIDE : file("endpoints.json"),
+    mailSettingsFile: entry.operator ? MAIL_SETTINGS_FILE : file("mail.json"),
+    mailLedgerFile: entry.operator ? MAIL_LEDGER_FILE : file("mail-inbox.jsonl"),
+    jobTokenFile,
+    // TITAN_JOB_TOKEN is a fact about this DEPLOYMENT, so it can only ever mean the operator. Read
+    // for every tenant it would arm one environment value across every customer's box.
+    jobToken: () => (entry.operator ? resolveJobToken() : jobTokenInDir(entry.profileDir)),
+    // The single choke point every upstream call already went through, now per tenant.
+    headers: (extra = {}) => ({ ...(entry.token.length > 0 ? { authorization: `Bearer ${entry.token}` } : {}), ...extra }),
+    // A tenant's state directory is made by the provisioner, so it normally exists before the relay
+    // ever hears of the tenant. Making it here as well means a first save is a saved file rather
+    // than an unexplained 500 on the one click a customer just made.
+    ensureDir: () => {
+      const dir = entry.operator ? STATE_DIR : entry.stateDir;
+      if (dir.length === 0) return;
+      try { mkdirSync(dir, { recursive: true }); } catch { /* already there, or somebody else's */ }
+    },
+  };
+}
+
+// Which key verifies a sign-in for a workspace, and "" for one this console cannot serve. It goes
+// through contextOf rather than straight to the registry on purpose: a workspace whose box is not
+// running must meet the same plain sentence at the login as it does on every other route, rather
+// than being signed in to a session that answers "not available" on its very first page.
+const sessionKeyFor = (slug) => (contextOf(slug) == null ? "" : registry.sessionKeyOf(slug));
+
+// The context for a slug, or null when this console cannot serve it: unknown to the registry, or
+// known and pointing at a box that is not running.
+function contextOf(slug) {
+  const entry = registry.get(slug);
+  if (entry == null) { registry.miss(slug); return null; }
+  if (entry.reachable === false) return null;
+  const found = contexts.get(entry.slug);
+  if (found != null && found.entry === entry) return found;
+  const built = buildContext(entry);
+  contexts.set(entry.slug, built);
+  return built;
+}
 
 function fail(res, status, message, headers = {}) {
   res.writeHead(status, { "content-type": "application/json", ...headers });
@@ -285,13 +381,6 @@ const AUTH_FILE = process.env.SAND_UI_AUTH_FILE?.trim() || stateFile("auth.json"
 const AUTH = readAuthFile(AUTH_FILE);
 const SESSION_COOKIE = "gb_session";
 const throttle = createLoginThrottle();
-
-// ---- the account door (TENANT-2) --------------------------------------------------------------
-// null on Jason's instance and on every developer Mac, and then this file behaves exactly as it did
-// before: one password, one field, no control plane anywhere in the request path. Non-null only
-// when TENANT_ID, CP_URL and CP_SESSION_SECRET are all set, which is what the control plane renders
-// into a tenant's compose. ui/tenant-login.mjs carries the rules and the reasons.
-const TENANT = tenantConfig();
 
 // Which peers may tell this process who its caller is. Empty by default, which is the loopback and
 // tailnet shape: no header is read and the socket address is the client. Inside Coolify the socket
@@ -326,16 +415,37 @@ const HSTS = "max-age=31536000; includeSubDomains";
 // scripts without taking any capability away from someone who has the token.
 function bearerMatches(req) {
   const header = String(req.headers.authorization ?? "");
-  return TOKEN.length > 0 && header.startsWith("Bearer ") && safeEqual(header.slice(7).trim(), TOKEN);
+  // Exactly one token opens this door, and it is the OPERATOR's. A customer's gateway token is a
+  // credential for their own box and must never be a way past the console's login.
+  const token = registry.operator().token;
+  return token.length > 0 && header.startsWith("Bearer ") && safeEqual(header.slice(7).trim(), token);
 }
-function hasSession(req) {
-  if (AUTH == null) return false;
+
+// The live session's payload, or null. It is the whole payload rather than a boolean because the
+// tenant claim lives in it. TENANT-5.
+function sessionPayload(req) {
+  if (AUTH == null) return null;
   const raw = parseCookies(req.headers.cookie)[SESSION_COOKIE];
-  return raw != null && readSession(raw, AUTH.cookieSecret) != null;
+  return raw == null ? null : readSession(raw, AUTH.cookieSecret);
+}
+const hasSession = (req) => sessionPayload(req) != null;
+
+// Which tenant this request is for, or null when it is not signed in at all.
+//
+// With no password configured the console is a loopback developer console and every request is the
+// operator's, which is the shape it has always had. The gateway bearer is the operator's too. A
+// cookie minted before this shipped carries no tenant claim and reads back as the operator, which
+// is what keeps a session alive across the deploy.
+function tenantOf(req) {
+  if (AUTH == null) return OPERATOR_SLUG;
+  if (bearerMatches(req)) return OPERATOR_SLUG;
+  const payload = sessionPayload(req);
+  if (payload == null) return null;
+  const claimed = typeof payload.tenant === "string" ? payload.tenant.trim() : "";
+  return claimed.length > 0 ? claimed : OPERATOR_SLUG;
 }
 function isAuthorized(req) {
-  if (AUTH == null) return true;
-  return bearerMatches(req) || hasSession(req);
+  return tenantOf(req) != null;
 }
 
 // A bearer on a page request also mints a session, so a browser handed the token as a header can
@@ -349,7 +459,7 @@ function mintSessionFromBearer(req, res, url) {
   if (AUTH == null) return;
   if (url.pathname.startsWith("/api/")) return;
   if (!bearerMatches(req) || hasSession(req)) return;
-  res.setHeader("set-cookie", serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret),
+  res.setHeader("set-cookie", serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret, { tenant: OPERATOR_SLUG }),
     { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: secureOf(req) }));
 }
 
@@ -439,7 +549,7 @@ function loginPage({ error = "", next = "/", tenant = false } = {}) {
 // Every render of the page goes through here, so which form this instance draws is decided in one
 // place. A page that offered the email field on one route and not on another would be a bug nobody
 // notices until a customer meets the wrong one after a mistyped password.
-const renderLoginPage = (options = {}) => loginPage({ tenant: TENANT != null, ...options });
+const renderLoginPage = (options = {}) => loginPage({ tenant: RELAY != null, ...options });
 
 function sendLoginPage(res, status, options) {
   res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
@@ -525,7 +635,7 @@ async function handleLogin(req, res, url) {
   // An address in the email field means this is an account sign-in, so the control plane decides
   // and the instance password is not consulted at all. Empty means the door that was always here.
   const email = String(fields.email ?? "").trim();
-  if (TENANT != null && email.length > 0) {
+  if (RELAY != null && email.length > 0) {
     return await handleAccountLogin(req, res, { email, password: String(fields.password ?? ""), next, key, wantsHtml });
   }
 
@@ -543,7 +653,8 @@ async function handleLogin(req, res, url) {
   }
 
   throttle.recordSuccess(key);
-  const cookie = serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret),
+  // The instance password is the operator's door and means the operator's workspace. TENANT-5.
+  const cookie = serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret, { tenant: OPERATOR_SLUG }),
     { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: secureOf(req) });
   res.writeHead(302, { location: next, "set-cookie": cookie, "cache-control": "no-store" });
   return res.end();
@@ -562,7 +673,10 @@ async function handleLogin(req, res, url) {
 function mintAccountSession(req, res, payload, location) {
   const now = Date.now();
   const lifetimeMs = Math.min(Math.max(0, Number(payload.exp) - now), SESSION_LIFETIME_MS);
-  const cookie = serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret, { nowMs: now, lifetimeMs }),
+  // The tenant claim comes off the VERIFIED token, never off the form. It is what every seam in
+  // this file resolves a box, a token and a state directory from for the rest of this session.
+  const cookie = serializeCookie(SESSION_COOKIE,
+    createSession(AUTH.cookieSecret, { nowMs: now, lifetimeMs, tenant: String(payload.tenant ?? "") }),
     { maxAgeSeconds: lifetimeMs / 1000, secure: secureOf(req) });
   res.writeHead(302, { location, "set-cookie": cookie, "cache-control": "no-store" });
   return res.end();
@@ -571,7 +685,9 @@ function mintAccountSession(req, res, payload, location) {
 // The account door. Every answer here is a plain sentence a business owner can act on, because the
 // person meeting them owns a company and not this software.
 async function handleAccountLogin(req, res, { email, password, next, key, wantsHtml }) {
-  const verdict = await accountSignIn({ config: TENANT, email, password, client: key });
+  const verdict = await accountSignIn({
+    config: RELAY, email, password, client: key, keyOf: sessionKeyFor,
+  });
   const say = (status, page, json) => {
     if (!wantsHtml) return fail(res, status, json);
     return sendLoginPage(res, status, { error: page, next });
@@ -579,27 +695,24 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
 
   if (verdict.kind === "session") {
     throttle.recordSuccess(key);
-    console.log(`login by account on ${TENANT.tenant} from ${key}`);
+    console.log(`login by account on ${verdict.payload.tenant} from ${key}`);
     return mintAccountSession(req, res, verdict.payload, next);
   }
 
-  // A working sign-in for somebody else's instance. Send them to their own front door with the
-  // token the control plane just minted for them; that relay verifies it with its own key.
+  // A right password for a workspace this console cannot serve right now: one that is still
+  // provisioning, or one the control plane has created since the last registry read. Their
+  // credential was correct, so this is not a refusal, and there is no other host to send them to
+  // any more -- console.titanium.bot is everybody's front door. It is the same sentence a session
+  // for an unknown workspace gets, because it is the same fact.
   //
   // The lockout counter is left exactly as it was, neither charged nor cleared, and that is the
-  // whole point of this comment. Clearing it here handed every account holder on every other
-  // instance a reset button for THIS relay's door: four wrong instance passwords, one sign-in with
-  // their own account, four more wrong passwords, forever, and the five-try lockout never fires.
-  // A credential that belongs somewhere else says nothing about whether the person knocking here
-  // is who they say they are, so it must not move this counter in either direction.
-  if (verdict.kind === "elsewhere") {
-    console.log(`login for another instance (${verdict.host}) from ${key}, redirected`);
-    if (!wantsHtml) {
-      res.writeHead(302, { location: verdict.location, "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ signInAt: verdict.location }));
-    }
-    res.writeHead(302, { location: verdict.location, "cache-control": "no-store" });
-    return res.end();
+  // whole point of this comment. Clearing it here would hand every account holder a reset button
+  // for the instance password door: four wrong passwords, one sign-in of their own, four more,
+  // forever, and the five-try lockout never fires. Charging it would lock a customer out of a
+  // console over a workspace that is merely still being built.
+  if (verdict.kind === "unknown") {
+    console.log(`login for ${verdict.slug} from ${key}, which is not a workspace this console serves`);
+    return say(503, NOT_AVAILABLE_SENTENCE, "that workspace is not available right now");
   }
 
   if (verdict.kind === "refused") {
@@ -621,7 +734,7 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
   // No answer at all. Not a failed attempt, so it does not count toward the lockout: locking the
   // operator out because a different service is down would take away the very door this sentence
   // is pointing at.
-  console.log(`account login could not reach ${TENANT.cpUrl} (${verdict.detail ?? "no answer"})`);
+  console.log(`account login could not reach ${RELAY.cpUrl} (${verdict.detail ?? "no answer"})`);
   return say(503, "Titanium Bot sign-in is not answering right now. The instance password still works.",
     "titanium bot sign-in is not answering right now; the instance password still works");
 }
@@ -630,10 +743,14 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
 // this relay's own key, and its tenant claim is checked against this relay's own name, before
 // anything is minted. Nothing about the link is trusted, including that it came from us.
 function handleSso(req, res, token) {
-  const verdict = ssoVerdict({ config: TENANT, token });
+  const verdict = ssoVerdict({ token, keyOf: sessionKeyFor });
   if (verdict.kind === "session") {
-    console.log(`login by sign-in link on ${TENANT.tenant} from ${clientOf(req)}`);
+    console.log(`login by sign-in link on ${verdict.payload.tenant} from ${clientOf(req)}`);
     return mintAccountSession(req, res, verdict.payload, "/");
+  }
+  if (verdict.kind === "unknown") {
+    console.log(`sign-in link for ${verdict.slug} from ${clientOf(req)}, which is not a workspace this console serves`);
+    return sendLoginPage(res, 503, { error: NOT_AVAILABLE_SENTENCE });
   }
   console.log(`sign-in link refused from ${clientOf(req)} (${verdict.detail ?? "not valid"})`);
   return sendLoginPage(res, 401, { error: "That sign-in link is not valid here." });
@@ -674,12 +791,12 @@ async function readBody(req, maxBytes = Infinity) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-// POST /api/<method> -> gateway. The browser never sees the token.
-async function relayCommand(req, res, method) {
+// POST /api/<method> -> that tenant's gateway. The browser never sees the token.
+async function relayCommand(t, req, res, method) {
   const body = await readBody(req);
-  const upstream = await fetch(`${GATEWAY}/api/${method}`, {
+  const upstream = await fetch(`${t.gateway}/api/${method}`, {
     method: "POST",
-    headers: upstreamHeaders({ "content-type": "application/json" }),
+    headers: t.headers({ "content-type": "application/json" }),
     body: body.length > 0 ? body : "{}",
   });
   const text = await upstream.text();
@@ -695,10 +812,10 @@ async function relayCommand(req, res, method) {
 }
 
 // GET /events -> gateway SSE, piped through unchanged so reconnects behave normally.
-async function relayEvents(req, res, search) {
+async function relayEvents(t, req, res, search) {
   const controller = new AbortController();
   res.on("close", () => controller.abort());
-  const upstream = await fetch(`${GATEWAY}/events${search}`, { headers: upstreamHeaders(), signal: controller.signal });
+  const upstream = await fetch(`${t.gateway}/events${search}`, { headers: t.headers(), signal: controller.signal });
   if (!upstream.ok || upstream.body == null) return fail(res, upstream.status, `gateway events unavailable (${upstream.status})`);
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
   const reader = upstream.body.getReader();
@@ -712,8 +829,8 @@ async function relayEvents(req, res, search) {
   res.end();
 }
 
-async function relayAvatar(req, res, pathname) {
-  const upstream = await fetch(`${GATEWAY}${pathname}`, { headers: upstreamHeaders() });
+async function relayAvatar(t, req, res, pathname) {
+  const upstream = await fetch(`${t.gateway}${pathname}`, { headers: t.headers() });
   if (!upstream.ok) return fail(res, upstream.status, "no avatar");
   const bytes = Buffer.from(await upstream.arrayBuffer());
   res.writeHead(200, { "content-type": upstream.headers.get("content-type") ?? "image/png", "cache-control": "no-store", "content-length": bytes.byteLength });
@@ -734,10 +851,10 @@ const jobBusLimiter = createRateLimiter({ limit: 120, windowMs: 60_000 });
 const jobBusGlobalLimiter = createRateLimiter({ limit: 600, windowMs: 60_000, capacity: 1 });
 const JOB_BUS_GLOBAL = "bus";
 
-async function jobBusCall(command, args) {
-  const upstream = await fetch(`${GATEWAY}/api/${command}`, {
+async function jobBusCall(t, command, args) {
+  const upstream = await fetch(`${t.gateway}/api/${command}`, {
     method: "POST",
-    headers: upstreamHeaders({ "content-type": "application/json" }),
+    headers: t.headers({ "content-type": "application/json" }),
     body: JSON.stringify(args ?? {}),
   });
   return {
@@ -773,21 +890,33 @@ async function handleJobBus(req, res, url) {
     return fail(res, 429, `too many attempts; wait ${seconds}s`, { "retry-after": String(seconds) });
   }
 
-  const configured = resolveJobToken();
   const header = String(req.headers.authorization ?? "");
   const presented = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  // TENANT-5. /v1 arrives with a bearer and no session, so the bearer is what says which tenant
+  // this is: every tenant's own bus token is compared, with no early break, and the one that
+  // matches names the box the jobs go to. A tenant's Chief of Staff therefore reaches that tenant's
+  // bus and no other, using the token that tenant's own console generated.
+  const matched = registry.matchBy(presented, (entry) =>
+    (entry.operator ? resolveJobToken() : jobTokenInDir(entry.profileDir)).token);
+  const t = matched == null ? null : contextOf(matched.slug);
   // One answer for unconfigured, missing and wrong. The 503 that used to say "job bus not
   // configured" told an unauthenticated stranger that this host runs a bus and that its token is
   // currently unset, which is the one moment it is worth knowing. The console still says it, to a
-  // caller that already signed in. docs/JOB-BUS.md 10.6.
-  if (configured.token.length === 0 || presented.length === 0 || !safeEqual(presented, configured.token)) {
+  // caller that already signed in. docs/JOB-BUS.md 10.6. A workspace whose box is not running gets
+  // the same answer for the same reason: which workspaces exist here is not a stranger's business.
+  if (t == null) {
     const lockoutMs = throttle.recordFailure(client);
     // recordFailure only reports a wait on the attempt that trips the lock, and a locked client is
     // turned away above, so this fires once per lockout rather than once per refused request.
     if (lockoutMs > 0) {
       console.log(`job bus bearer locked out for ${client}`);
-      jobBusCall("jobBusAudit", { event: "auth_locked", client })
-        .catch((error) => console.log(`job bus audit failed: ${error?.message ?? error}`));
+      // The audit row goes to the OPERATOR's box: there is no tenant to attribute a bearer nobody
+      // holds to, and the operator is who reads the fleet's own audit.
+      const operator = contextOf(OPERATOR_SLUG);
+      if (operator != null) {
+        jobBusCall(operator, "jobBusAudit", { event: "auth_locked", client })
+          .catch((error) => console.log(`job bus audit failed: ${error?.message ?? error}`));
+      }
     }
     return fail(res, 401, "unauthorized", JOB_BUS_REALM);
   }
@@ -805,7 +934,7 @@ async function handleJobBus(req, res, url) {
   if (route == null) return fail(res, 404, `not found: ${url.pathname}`);
   if (req.method !== route.method) return fail(res, 405, route.method, { allow: route.method });
 
-  if (route.command !== "jobBusCreate") return answerUpstream(res, await jobBusCall(route.command, route.args));
+  if (route.command !== "jobBusCreate") return answerUpstream(res, await jobBusCall(t, route.command, route.args));
 
   let raw;
   try { raw = await readBody(req, JOB_BUS_BODY_LIMIT); }
@@ -819,7 +948,7 @@ async function handleJobBus(req, res, url) {
     { client, submitterId: jobSubmitterId(presented) });
   if (shaped.error != null) return fail(res, 400, shaped.error);
 
-  const upstream = await jobBusCall("jobBusCreate", shaped.args);
+  const upstream = await jobBusCall(t, "jobBusCreate", shaped.args);
   if (upstream.status !== 200) return answerUpstream(res, upstream);
   // jobBusCreate answers {created, job}. The status is the only place a REST client can see the
   // difference between a job it just made and one its retry found, so it is `created` that picks
@@ -847,8 +976,8 @@ async function handleJobBus(req, res, url) {
 // bus on" is exactly the kind of thing an operator must be able to read back out of a container
 // log. It runs on every relay start with the env token set, which is the honest reading of that
 // variable: the deployment says the bus is on. An operator who wants it off clears the variable.
-async function armJobBus(why) {
-  const answer = await jobBusCall("jobBusSetSettings", { enabled: true }).catch((error) => ({
+async function armJobBus(t, why) {
+  const answer = await jobBusCall(t, "jobBusSetSettings", { enabled: true }).catch((error) => ({
     status: 0, text: String(error?.message ?? error), type: "",
   }));
   if (answer.status === 200) console.log(`bus  armed the job bus (${why})`);
@@ -861,8 +990,8 @@ async function armJobBus(why) {
 // Returns null on success and the reason on failure, because the two ways this fails -- no
 // profile directory, and a read-only mount -- are both operator faults with different fixes, and
 // a 502 saying "gateway unreachable" would send whoever meets them to the wrong place entirely.
-async function writeJobToken(token) {
-  const file = jobBusTokenFile();
+async function writeJobToken(t, token) {
+  const file = t.jobTokenFile;
   if (file == null) return "no profile directory to write the token to: SAND_PROFILE_DIRS is unset";
   try {
     await writeFile(file, JSON.stringify({ token }), { mode: 0o600 });
@@ -876,13 +1005,13 @@ async function writeJobToken(token) {
   }
 }
 
-async function handleJobBusConsole(req, res, url) {
+async function handleJobBusConsole(t, req, res, url) {
   const sendJson = (status, value) => {
     res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
     return res.end(JSON.stringify(value));
   };
   const state = () => {
-    const current = resolveJobToken();
+    const current = t.jobToken();
     const host = String(req.headers.host ?? "");
     return {
       configured: current.token.length > 0,
@@ -898,21 +1027,21 @@ async function handleJobBusConsole(req, res, url) {
   if (req.method !== "POST") return fail(res, 405, "POST", { allow: "POST" });
   // The env wins wherever it is set, so writing the file would only produce a token that never
   // works. Say so rather than accepting the write.
-  const envWins = resolveJobToken().source === "env";
+  const envWins = t.jobToken().source === "env";
 
   if (url.pathname === "/job-bus/token/generate") {
     if (envWins) return fail(res, 409, "TITAN_JOB_TOKEN is set in the environment; it would win over this file");
     const token = newJobToken();
-    const failed = await writeJobToken(token);
+    const failed = await writeJobToken(t, token);
     if (failed != null) return fail(res, 503, failed);
     // Nobody generates a bearer for a bus they want shut. The browser asks for this as well; doing
     // it here means the bus is armed even when the console is not the caller.
-    await armJobBus("a token was generated in the console");
+    await armJobBus(t, "a token was generated in the console");
     // Once. It is not readable back through any route on this server.
     return sendJson(200, { token, ...state() });
   }
   if (url.pathname === "/job-bus/token/clear") {
-    const file = jobBusTokenFile();
+    const file = t.jobTokenFile;
     // force skips a file that is not there, which is a successful clear; a read-only mount still
     // throws, and that is worth saying rather than dressing up as a gateway fault.
     if (file != null) {
@@ -926,9 +1055,9 @@ async function handleJobBusConsole(req, res, url) {
     let token;
     try { token = JSON.parse(await readBody(req, JOB_BUS_BODY_LIMIT))?.token; } catch { token = null; }
     if (typeof token !== "string" || token.trim().length < 32) return fail(res, 400, "the token must be at least 32 characters");
-    const failed = await writeJobToken(token.trim());
+    const failed = await writeJobToken(t, token.trim());
     if (failed != null) return fail(res, 503, failed);
-    await armJobBus("a token was set in the console");
+    await armJobBus(t, "a token was set in the console");
     return sendJson(200, state());
   }
   return fail(res, 404, `not found: ${url.pathname}`);
@@ -942,13 +1071,90 @@ async function handleJobBusConsole(req, res, url) {
 //
 // Sixty a minute per address on the public hook. Resend sends one request per message and retries
 // slowly, so anything above that rate is not Resend.
-const mailEdge = createMailEdge({
-  readBody, drainThenEnd, fail, clientOf, secureOf,
-  gatewayCall: jobBusCall,
-  ownLikeParent,
-  limiter: createRateLimiter({ limit: 60, windowMs: 60_000 }),
-  log: (line) => console.log(line),
-});
+//
+// TENANT-5 makes it one edge PER TENANT rather than one for the process, which createMailEdge was
+// already shaped for: it takes settingsFile, ledgerFile and gatewayCall, so this is a factory and
+// not a rewrite. The rate limiter is deliberately NOT per tenant -- /hooks/resend is one public
+// door on one host, and sixty a minute is a fact about that door.
+const mailLimiter = createRateLimiter({ limit: 60, windowMs: 60_000 });
+const mailEdges = new Map();
+function mailEdgeFor(t) {
+  const found = mailEdges.get(t.slug);
+  if (found != null && found.settingsFile === t.mailSettingsFile) return found.edge;
+  t.ensureDir();
+  const edge = createMailEdge({
+    readBody, drainThenEnd, fail, clientOf, secureOf,
+    gatewayCall: (command, args) => jobBusCall(t, command, args),
+    ownLikeParent,
+    settingsFile: t.mailSettingsFile,
+    ledgerFile: t.mailLedgerFile,
+    limiter: mailLimiter,
+    log: (line) => console.log(line),
+  });
+  mailEdges.set(t.slug, { settingsFile: t.mailSettingsFile, edge });
+  return edge;
+}
+
+// ---- POST /hooks/resend, for a console with more than one tenant on it ------------------------
+//
+// The webhook carries no session and no bearer: its credential is the Svix signature, and the
+// signing secret is per tenant, so the tenant has to be chosen BEFORE anything is verified. The
+// contract offered "one shared domain, unique agent name" and that is not sound: agent names are
+// not unique across tenants, and the moment two customers each have a Titan, titan@titanium.bot is
+// ambiguous and one customer's mail lands in the other's box.
+//
+// What is sound and costs one file read per tenant: route by DOMAIN. A tenant's mail domain is
+// already a per-state-directory setting (MAIL-3), a domain is verified inside exactly one Resend
+// account so a tie is impossible, and the recipient is in the webhook body which is already read
+// without a fetch. Choosing a KEY from an unverified claim is the pattern ui/session-token.mjs
+// already blesses: the claim picks the secret, the secret then has to check out, and a liar picks a
+// secret that does not verify their signature.
+//
+// No tenant owns the domain: 200 and a reason. A webhook that answers anything else is a webhook
+// Resend retries for hours over a decision we made on purpose.
+function recipientDomains(raw) {
+  let event;
+  try { event = JSON.parse(raw); } catch { return []; }
+  const data = event?.data ?? {};
+  const addresses = [...toAddressList(data.received_for), ...toAddressList(data.to)];
+  return [...new Set(addresses.map((address) => domainOf(address)).filter((domain) => domain.length > 0))];
+}
+
+async function handleMailWebhook(req, res) {
+  const serving = registry.all().filter((entry) => entry.reachable !== false);
+  // One tenant on this console, which is Jason's own machine and every developer Mac: the edge
+  // reads the body itself and this route is byte for byte the one it always was.
+  if (serving.length <= 1) {
+    const only = contextOf(serving[0]?.slug ?? OPERATOR_SLUG);
+    if (only == null) return fail(res, 503, "no workspace on this console");
+    return await mailEdgeFor(only).handleWebhook(req, res);
+  }
+  if (req.method !== "POST") return fail(res, 405, "POST", { allow: "POST" });
+  // Charged here rather than inside the edge, because the body has to be read before the tenant is
+  // known and an address sending floods must not make this process hold anything on its behalf.
+  const wait = mailLimiter.retryAfterSeconds(clientOf(req));
+  if (wait > 0) return fail(res, 429, `too many requests; wait ${wait}s`, { "retry-after": String(wait) });
+
+  let raw;
+  try { raw = await readBody(req, MAIL_BODY_LIMIT); }
+  catch (error) {
+    if (error?.code !== "BODY_TOO_LARGE") throw error;
+    return drainThenEnd(req, res, 413, { "content-type": "application/json" },
+      JSON.stringify({ error: "that webhook body is too large" }));
+  }
+
+  const domains = recipientDomains(raw);
+  for (const entry of serving) {
+    const t = contextOf(entry.slug);
+    if (t == null) continue;
+    const settings = await readMailSettings(t.mailSettingsFile).catch(() => null);
+    const domain = String(settings?.domain ?? "").toLowerCase();
+    if (domain.length === 0 || !domains.includes(domain)) continue;
+    return await mailEdgeFor(t).handleWebhook(req, res, { raw });
+  }
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify({ ignored: "no_tenant" }));
+}
 
 // ---- the desktop ----------------------------------------------------------------------------
 // The host answers ensureForeverBox with a vnc URL on ITS OWN loopback (127.0.0.1:6081), which is
@@ -984,19 +1190,19 @@ async function readLatestBundleVersion() {
 // file first and measured rather than streamed straight out of tar, so a compose that fails still
 // fails as an HTTP status the host can report instead of as a truncated body it would try to
 // extract.
-async function serveHostBundleTarball(res, version) {
-  await runExec(["cp", path.join(RUNTIME_DIR, "host-main.cjs"), `${BOX}:${BOX_INCOMING_ENTRY}`]);
-  await runExec(["exec", BOX, "sh", "-c", composeHostBundleScript({ version })]);
-  const size = Number.parseInt(String(await runExec(["exec", BOX, "stat", "-c", "%s", BOX_TARBALL_PATH])).trim(), 10);
+async function serveHostBundleTarball(t, res, version) {
+  await runExec(["cp", path.join(RUNTIME_DIR, "host-main.cjs"), `${t.box}:${BOX_INCOMING_ENTRY}`]);
+  await runExec(["exec", t.box, "sh", "-c", composeHostBundleScript({ version })]);
+  const size = Number.parseInt(String(await runExec(["exec", t.box, "stat", "-c", "%s", BOX_TARBALL_PATH])).trim(), 10);
   if (!Number.isInteger(size) || size <= 0) throw new Error("the composed bundle measured 0 bytes");
   await new Promise((resolve, reject) => {
     res.writeHead(200, { "content-type": "application/gzip", "content-length": String(size), "cache-control": "no-store" });
-    const child = spawn("docker", ["exec", BOX, "cat", BOX_TARBALL_PATH], { stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn("docker", ["exec", t.box, "cat", BOX_TARBALL_PATH], { stdio: ["ignore", "pipe", "ignore"] });
     child.stdout.pipe(res);
     child.on("error", reject);
     child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`cat exited ${code}`))));
   });
-  await runExec(["exec", BOX, "rm", "-f", BOX_TARBALL_PATH]).catch(() => {});
+  await runExec(["exec", t.box, "rm", "-f", BOX_TARBALL_PATH]).catch(() => {});
 }
 
 async function handleRuntimeBundle(req, res, url) {
@@ -1004,7 +1210,13 @@ async function handleRuntimeBundle(req, res, url) {
   // 404 rather than 401 on a bad token: this route is reached before the console's login, and a
   // refusal that distinguished "wrong token" from "no such file" would confirm the path exists to
   // anyone who found it.
-  if (asked == null || TOKEN.length === 0 || !safeEqual(asked.token, TOKEN)) return fail(res, 404, "not found");
+  //
+  // TENANT-5: the caller is a box's own host process asking for its next bundle, so the token in
+  // the path says which box. Every tenant's gateway token is compared with no early break, so the
+  // time this takes says nothing about which one matched or how many exist.
+  const matched = asked == null ? null : registry.matchToken(asked.token);
+  const t = matched == null ? null : contextOf(matched.slug);
+  if (t == null) return fail(res, 404, "not found");
   if (RUNTIME_DIR.length === 0) return fail(res, 503, "no SAND_HOST_RUNTIME_DIR on this relay, so no host bundle is served");
   const latest = await readLatestBundleVersion();
   if (latest == null) return fail(res, 404, "no staged host bundle version");
@@ -1023,7 +1235,7 @@ async function handleRuntimeBundle(req, res, url) {
   // ui/host-bundle.mjs). An honest refusal, so the host retries later instead of unpacking a
   // truncated download. TENANT-2 item 4, and docs/TENANCY.md says the same.
   if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.hostBundle);
-  const mine = bundleCompose.then(() => serveHostBundleTarball(res, latest));
+  const mine = bundleCompose.then(() => serveHostBundleTarball(t, res, latest));
   bundleCompose = mine.catch(() => {});
   try {
     await mine;
@@ -1035,15 +1247,14 @@ async function handleRuntimeBundle(req, res, url) {
   return undefined;
 }
 
-const BOX_HOST = new URL(GATEWAY).hostname;
 const VNC_ROUTE = /^\/vnc\/([1-9][0-9]?)\/(.*)$/;
 const vncTarget = (display) => (display === 1 ? { port: 6080, query: "" } : { port: 6081, query: `?token=${display}` });
 
-async function relayVnc(req, res, display, rest, search) {
+async function relayVnc(t, req, res, display, rest, search) {
   const { port } = vncTarget(display);
   // Only what the box needs to answer. The browser's cookie and the relay's bearer are ours, not
   // the box's, and forwarding either would hand a credential to a process that never asked.
-  const upstream = await fetch(`http://${BOX_HOST}:${port}/${rest}${search}`,
+  const upstream = await fetch(`http://${t.boxHost}:${port}/${rest}${search}`,
     { headers: { accept: String(req.headers.accept ?? "*/*") } });
   if (!upstream.ok) return fail(res, upstream.status, `the box did not serve ${rest} (HTTP ${upstream.status})`);
   // vnc.html, and nothing else, comes back with the clipboard bridge appended to its head; every
@@ -1064,15 +1275,15 @@ async function relayVnc(req, res, display, rest, search) {
 // request line the two sockets are simply piped, including the upstream's 101 -- nothing here
 // parses a frame, so there is no framing bug to have.
 const WS_KEY = /^[A-Za-z0-9+/=]{16,32}$/;
-function relayVncSocket(req, socket, head, display) {
+function relayVncSocket(t, req, socket, head, display) {
   const key = String(req.headers["sec-websocket-key"] ?? "");
   const version = String(req.headers["sec-websocket-version"] ?? "13");
   if (!WS_KEY.test(key) || !/^\d{1,3}$/.test(version)) return socket.destroy();
   const { port, query } = vncTarget(display);
-  const target = net.connect(port, BOX_HOST, () => {
+  const target = net.connect(port, t.boxHost, () => {
     const lines = [
       `GET /websockify${query} HTTP/1.1`,
-      `Host: ${BOX_HOST}:${port}`,
+      `Host: ${t.boxHost}:${port}`,
       "Connection: Upgrade",
       "Upgrade: websocket",
       `Sec-WebSocket-Version: ${version}`,
@@ -1129,7 +1340,7 @@ const server = createServer(async (req, res) => {
     // Before the console's login as well: this is Resend calling with mail for an agent, and a
     // webhook carries no cookie and no bearer. Its credential is the Svix signature on the body,
     // which the mail edge verifies before it reads a single field. MAIL-1.
-    if (url.pathname === "/hooks/resend") return await mailEdge.handleWebhook(req, res);
+    if (url.pathname === "/hooks/resend") return await handleMailWebhook(req, res);
     // Whether a password is configured is not a secret: the login page announces it to anyone who
     // asks for it. The console reads this to decide whether to draw a Log out control.
     if (req.method === "GET" && url.pathname === "/auth/state") {
@@ -1143,10 +1354,11 @@ const server = createServer(async (req, res) => {
     } else {
       if (url.pathname === "/login") {
         if (req.method === "GET") {
-          // A sign-in link minted for this tenant, handed over by whichever relay the customer
-          // happened to type their address into. Verified here, never taken on trust. TENANT-2.
+          // A sign-in link the control plane minted for a workspace. It is verified here with that
+          // workspace's own key, out of the registry, and nothing about the link is taken on trust
+          // including that it came from us. TENANT-2, reshaped by TENANT-5.
           const sso = url.searchParams.get("sso");
-          if (TENANT != null && sso != null) return handleSso(req, res, sso);
+          if (RELAY != null && sso != null) return handleSso(req, res, sso);
           return sendLoginPage(res, 200, { next: safeNextPath(url.searchParams.get("next")) });
         }
         if (req.method === "POST") return await handleLogin(req, res, url);
@@ -1161,6 +1373,21 @@ const server = createServer(async (req, res) => {
       if (!isAuthorized(req)) return denyUnauthenticated(req, res, url);
       mintSessionFromBearer(req, res, url);
     }
+
+    // ---- which workspace this request is for (TENANT-5) ---------------------------------------
+    //
+    // Once, here, and every route below takes the answer. The session cookie carries the tenant;
+    // the instance password and the gateway bearer both mean the operator; a console with no
+    // control plane has exactly one workspace and resolves to it.
+    //
+    // A session naming a workspace this console cannot serve gets a page and a plain sentence, and
+    // the cookie is deliberately NOT cleared: a workspace is unknown while it is being built and
+    // during a control plane outage, and signing a customer out over a state that mends itself in
+    // sixty seconds is worse than the sentence.
+    const slug = tenantOf(req);
+    if (slug == null) return denyUnauthenticated(req, res, url);
+    const t = contextOf(slug);
+    if (t == null) return sendLoginPage(res, 503, { error: NOT_AVAILABLE_SENTENCE });
     // Before the static branch below, which claims every path ending in .js or .css and would
     // otherwise swallow the box's own noVNC assets at /vnc/<display>/app/ui.js.
     if (req.method === "GET" && VNC_ROUTE.test(url.pathname)) {
@@ -1168,7 +1395,7 @@ const server = createServer(async (req, res) => {
       // The rest is pasted into a URL aimed at the box's web server, so a traversal segment never
       // gets to be its problem.
       if (rest.length === 0 || rest.split("/").includes("..")) return fail(res, 400, "bad vnc path");
-      return await relayVnc(req, res, Number(display), rest, url.search);
+      return await relayVnc(t, req, res, Number(display), rest, url.search);
     }
     // The Machine Room is the console at "/"; the operator page lives at /operator/ (2026-09-02).
     if (req.method === "GET" && (url.pathname === "/operator" || url.pathname === "/operator/" || url.pathname === "/operator/index.html")) {
@@ -1201,7 +1428,7 @@ const server = createServer(async (req, res) => {
       const script = `for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${cls}"' && echo present && break; done`;
       const { execFile } = await import("node:child_process");
       const present = await new Promise((resolve) => {
-        execFile("docker", ["exec", "-e", `DISPLAY=${surfaceDisplay}`, BOX, "sh", "-c", script], (error, stdout) =>
+        execFile("docker", ["exec", "-e", `DISPLAY=${surfaceDisplay}`, t.box, "sh", "-c", script], (error, stdout) =>
           resolve(!error && String(stdout).includes("present")));
       });
       // Also report whether the display has ANY desktop session. Fork displays on this box image
@@ -1213,7 +1440,7 @@ const server = createServer(async (req, res) => {
       // failure on this box image, and it must not be counted as three windows.
       const anyScript = `xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //' | tr ',' '\n' | grep -c '0x' || true`;
       const windows = await new Promise((resolve) => {
-        execFile("docker", ["exec", "-e", `DISPLAY=${surfaceDisplay}`, BOX, "sh", "-c", anyScript],
+        execFile("docker", ["exec", "-e", `DISPLAY=${surfaceDisplay}`, t.box, "sh", "-c", anyScript],
           (error, stdout) => resolve(error ? 0 : Number(String(stdout).trim()) || 0));
       });
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -1272,20 +1499,20 @@ const server = createServer(async (req, res) => {
       // killed Chrome three seconds into a ten-second startup.
       const findScript = `for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# //;s/,//g'); do xprop -id $w WM_CLASS 2>/dev/null | grep -q '"${spec.cls}"' && echo $w && break; done`;
       const existing = await new Promise((resolve) => {
-        execFile("docker", ["exec", "-e", `DISPLAY=${display}`, BOX, "sh", "-c", findScript],
+        execFile("docker", ["exec", "-e", `DISPLAY=${display}`, t.box, "sh", "-c", findScript],
           (error, stdout) => resolve(error ? "" : String(stdout).trim()));
       });
 
       if (existing) {
         await new Promise((resolve) => {
-          execFile("docker", ["exec", "-e", `DISPLAY=${display}`, BOX, "xdotool", "windowactivate", existing],
+          execFile("docker", ["exec", "-e", `DISPLAY=${display}`, t.box, "xdotool", "windowactivate", existing],
             () => resolve());
         });
         res.writeHead(200, { "content-type": "application/json" });
         return res.end(JSON.stringify({ launched: app, raised: true }));
       }
 
-      const child = spawn("docker", ["exec", "-d", "-e", `DISPLAY=${display}`, BOX, "sh", "-c", script], { stdio: "ignore" });
+      const child = spawn("docker", ["exec", "-d", "-e", `DISPLAY=${display}`, t.box, "sh", "-c", script], { stdio: "ignore" });
       child.on("error", () => {});
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ launched: app, raised: false }));
@@ -1324,7 +1551,7 @@ const server = createServer(async (req, res) => {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify(value));
       };
-      if (req.method === "GET") { const current = await readConnectors(); return current == null ? fail(res, 503, "the box could not be read") : sendJson(current); }
+      if (req.method === "GET") { const current = await readConnectors(t); return current == null ? fail(res, 503, "the box could not be read") : sendJson(current); }
       if (req.method === "POST") {
         let parsed;
         try { parsed = JSON.parse(await readBody(req)); } catch { return fail(res, 400, "body must be JSON"); }
@@ -1349,14 +1576,14 @@ const server = createServer(async (req, res) => {
             return fail(res, 400, `${name}: "shell" is reserved for the agent's own box shell environment, so a connector cannot use it. Rename it (for example shell-mcp) and save again.`);
           }
         }
-        await writeConnectors({ mcpServers: servers });
+        await writeConnectors(t, { mcpServers: servers });
         return sendJson({ saved: Object.keys(servers), restartRequired: true });
       }
     }
     if (req.method === "GET" && url.pathname === "/clients") {
       // The box is shared: the desktop app talks to this same gateway. Anyone driving
       // it sees your writes. Count the sockets so the page can say so out loud.
-      const port = new URL(GATEWAY).port || "80";
+      const port = new URL(t.gateway).port || "80";
       // lsof truncates COMMAND to 9 chars ("Grok B"), so take the pids and ask ps.
       const pids = await new Promise((resolve) => {
         execFile("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:ESTABLISHED"], (err, out) => {
@@ -1379,31 +1606,39 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ peers: [...new Set(peers.filter(Boolean))] }));
     }
-    // The operator's endpoint list, what is live right now, and whether each one answers.
-    // Subscriptions already authenticated on this Mac (docs/SUBSCRIPTIONS-CONTRACT.md). The scan
-    // never returns a secret; adoption writes ui/subscriptions.json and a keyless endpoint row.
+    // Subscriptions already authenticated ON THIS MACHINE (docs/SUBSCRIPTIONS-CONTRACT.md): the
+    // Codex and Claude logins in the operator's own home directory. There is exactly one machine
+    // under this console and it is Jason's, so these three are operator-only under TENANT-5. A
+    // customer gets an empty list and the ordinary not-available refusal on the two writes, which
+    // is both safer and a smaller change than threading a store file through ui/subscriptions.mjs
+    // to reach credentials that were never theirs. The scan never returns a secret; adoption
+    // writes subscriptions.json and a keyless endpoint row.
     if (req.method === "GET" && url.pathname === "/subscriptions") {
-      const subscriptions = await scanSubscriptions(process.env, await readCatalog());
+      const subscriptions = t.operator ? await scanSubscriptions(process.env, await readCatalog(t)) : [];
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ subscriptions }));
     }
     if (req.method === "POST" && url.pathname === "/subscriptions/adopt") {
       const { id, apiKey, model } = JSON.parse(await readBody(req) || "{}");
+      if (!t.operator) return refuseWithoutDocker(res, NOT_AVAILABLE.subscriptions);
       let entry;
       try { entry = await adoptSubscription(id, { apiKey, model }); } catch (error) { return fail(res, 400, error.message); }
-      const catalog = await readCatalog();
+      const catalog = await readCatalog(t);
       const endpoints = (catalog.endpoints ?? []).filter((e) => e.id !== entry.id).concat([entry]);
-      await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints }, null, 2));
-      await ownLikeParent(ENDPOINTS_FILE);
+      t.ensureDir();
+      await writeFile(t.endpointsFile, JSON.stringify({ endpoints }, null, 2));
+      await ownLikeParent(t.endpointsFile);
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ adopted: id, endpoint: entry }));
     }
     if (req.method === "POST" && url.pathname === "/subscriptions/forget") {
       const { id } = JSON.parse(await readBody(req) || "{}");
+      if (!t.operator) return refuseWithoutDocker(res, NOT_AVAILABLE.subscriptions);
       await forgetSubscription(id);
-      const catalog = await readCatalog();
-      await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints: (catalog.endpoints ?? []).filter((e) => e.subscription !== id) }, null, 2));
-      await ownLikeParent(ENDPOINTS_FILE);
+      const catalog = await readCatalog(t);
+      t.ensureDir();
+      await writeFile(t.endpointsFile, JSON.stringify({ endpoints: (catalog.endpoints ?? []).filter((e) => e.subscription !== id) }, null, 2));
+      await ownLikeParent(t.endpointsFile);
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ forgot: id }));
     }
@@ -1414,9 +1649,9 @@ const server = createServer(async (req, res) => {
       // than a null that reads as "no model is configured". TENANT-2.
       const hasDocker = await dockerAvailable();
       const [catalog, secrets, envOut] = await Promise.all([
-        readCatalog(),
-        hasDocker ? readSecrets() : {},
-        hasDocker ? dockerOut(["inspect", BOX, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]) : null,
+        readCatalog(t),
+        hasDocker ? readSecrets(t) : {},
+        hasDocker ? dockerOut(["inspect", t.box, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]) : null,
       ]);
       const envOf = (key) => (envOut ?? "").split("\n")
         .find((l) => l.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
@@ -1426,14 +1661,14 @@ const server = createServer(async (req, res) => {
       const live = { baseUrl: envOf(PROVIDER_KEYS[0]) ?? secrets[PROVIDER_KEYS[0]] ?? null,
         model: envOf(PROVIDER_KEYS[1]) ?? secrets[PROVIDER_KEYS[1]] ?? null };
       const endpoints = await Promise.all((catalog.endpoints ?? []).map(async (e) => {
-        if (!e.subscription) return { ...e, apiKey: e.apiKey ? "set" : "", health: await probe(e) };
+        if (!e.subscription) return { ...e, apiKey: e.apiKey ? "set" : "", health: await probe(t, e) };
         // A subscription row carries no key; probe with the live token where the vendor serves
         // /models, otherwise say so rather than show it down.
         let resolved = null;
         try { resolved = await resolveSubscription(e.subscription); } catch (error) { return { ...e, apiKey: "", health: { reachable: false, detail: error.message } }; }
         const health = e.transport === "responses"
           ? { reachable: true, serves: null, ms: null, detail: "subscription; verified on use" }
-          : await probe({ ...e, apiKey: resolved.apiKey });
+          : await probe(t, { ...e, apiKey: resolved.apiKey });
         return { ...e, apiKey: "subscription", health };
       }));
       res.writeHead(200, { "content-type": "application/json" });
@@ -1449,16 +1684,17 @@ const server = createServer(async (req, res) => {
       // On a tenant, before anything is written: an address inside this server's own network is
       // not a provider, it is a port scan with a saved bearer aimed at it. See tenantEndpointRefusal.
       for (const e of next.endpoints) {
-        const refusal = await tenantEndpointRefusal(e?.baseUrl);
+        const refusal = await tenantEndpointRefusal(t, e?.baseUrl);
         if (refusal != null) return fail(res, 400, refusal);
       }
-      const current = await readCatalog();
+      const current = await readCatalog(t);
       // A key the browser never received back comes in as "set"; keep the stored one.
       const merged = next.endpoints.map((e) => ({ ...e,
         apiKey: e.apiKey === "set"
           ? (current.endpoints ?? []).find((c) => c.id === e.id)?.apiKey ?? "" : (e.apiKey ?? "") }));
-      await writeFile(ENDPOINTS_FILE, JSON.stringify({ endpoints: merged }, null, 2));
-      await ownLikeParent(ENDPOINTS_FILE);
+      t.ensureDir();
+      await writeFile(t.endpointsFile, JSON.stringify({ endpoints: merged }, null, 2));
+      await ownLikeParent(t.endpointsFile);
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ saved: merged.length }));
     }
@@ -1470,13 +1706,17 @@ const server = createServer(async (req, res) => {
       // nothing is half done, but after the body is read so the caller is not left uploading into
       // a closed answer. TENANT-2.
       if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.endpointsUse);
-      const catalog = await readCatalog();
+      const catalog = await readCatalog(t);
       const chosen = (catalog.endpoints ?? []).find((e) => e.id === id);
       if (chosen == null) return fail(res, 404, `no endpoint named ${id}`);
-      const secrets = await readSecrets();
+      const secrets = await readSecrets(t);
       const next = { ...secrets, SAND_OPENAI_COMPATIBLE_BASE_URL: chosen.baseUrl, SAND_OPENAI_COMPATIBLE_MODEL: chosen.model, SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: chosen.name };
       for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR"]) delete next[key];
       if (chosen.subscription) {
+        // A subscription row names a credential in the OPERATOR's own home directory, so only the
+        // operator's console can resolve one. A tenant never has such a row: the scan that writes
+        // them answers empty for a tenant.
+        if (!t.operator) return refuseWithoutDocker(res, NOT_AVAILABLE.subscriptions);
         // The live token, refreshed through the vendor's own endpoint if it is about to expire;
         // the refreshed token goes to our store, never back to the vendor's file.
         let resolved;
@@ -1489,14 +1729,14 @@ const server = createServer(async (req, res) => {
         next.SAND_OPENAI_COMPATIBLE_API_KEY = chosen.apiKey;
       }
       if (chosen.contextWindow) next.SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW = String(chosen.contextWindow);
-      await writeSecrets(next);
+      await writeSecrets(t, next);
       // A subscription row has no key of its own and the Codex backend serves no /models; report
       // it the way the listing does instead of probing it into a false "down".
       const health = chosen.subscription
         ? (chosen.transport === "responses"
           ? { reachable: true, serves: null, ms: null, detail: "subscription; verified on use" }
-          : await probe({ ...chosen, apiKey: next.SAND_OPENAI_COMPATIBLE_API_KEY }))
-        : await probe(chosen);
+          : await probe(t, { ...chosen, apiKey: next.SAND_OPENAI_COMPATIBLE_API_KEY }))
+        : await probe(t, chosen);
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ using: chosen.name, health }));
     }
@@ -1516,7 +1756,7 @@ const server = createServer(async (req, res) => {
         return res.end(JSON.stringify({ model: null, endpoint: null, source: "unknown", note: NOT_AVAILABLE.liveModel }));
       }
       const fromEnv = await new Promise((resolve) => {
-        execFile("docker", ["inspect", BOX, "--format",
+        execFile("docker", ["inspect", t.box, "--format",
           "{{range .Config.Env}}{{println .}}{{end}}"], (err, out) => {
           if (err != null && !out) return resolve({});
           const pick = (name) => {
@@ -1530,7 +1770,7 @@ const server = createServer(async (req, res) => {
         });
       });
       const fromFile = await new Promise((resolve) => {
-        execFile("docker", ["exec", BOX, "cat", SECRETS_PATH], (err, out) => {
+        execFile("docker", ["exec", t.box, "cat", SECRETS_PATH], (err, out) => {
           if (err != null) return resolve({});
           try {
             const secrets = JSON.parse(out)?.secrets ?? {};
@@ -1552,24 +1792,24 @@ const server = createServer(async (req, res) => {
     // The console's half of the job bus: read the state, generate, set or clear the token. Behind
     // the session like every other console route, and it never reads a token back out.
     if (url.pathname === "/job-bus/status" || url.pathname.startsWith("/job-bus/token")) {
-      return await handleJobBusConsole(req, res, url);
+      return await handleJobBusConsole(t, req, res, url);
     }
     // The console's half of agent email: the domain, the addresses, the webhook URL and the two
     // write-only secrets. Behind the session like every other console route, and it never reads a
     // secret back out. MAIL-1.
-    if (url.pathname === "/mail/settings") return await mailEdge.handleSettings(req, res);
+    if (url.pathname === "/mail/settings") return await mailEdgeFor(t).handleSettings(req, res);
     if (req.method === "GET" && url.pathname === "/health") {
-      const upstream = await fetch(`${GATEWAY}/health`, { headers: upstreamHeaders() });
+      const upstream = await fetch(`${t.gateway}/health`, { headers: t.headers() });
       const text = await upstream.text();
       res.writeHead(upstream.status, { "content-type": "application/json" });
       return res.end(text);
     }
-    if (req.method === "GET" && url.pathname === "/events") return await relayEvents(req, res, url.search);
-    if (req.method === "GET" && url.pathname.startsWith("/avatars/")) return await relayAvatar(req, res, url.pathname + url.search);
+    if (req.method === "GET" && url.pathname === "/events") return await relayEvents(t, req, res, url.search);
+    if (req.method === "GET" && url.pathname.startsWith("/avatars/")) return await relayAvatar(t, req, res, url.pathname + url.search);
     if (req.method === "POST" && url.pathname.startsWith("/api/")) {
       const method = url.pathname.slice("/api/".length);
       if (!/^[A-Za-z][A-Za-z0-9]*$/.test(method)) return fail(res, 400, "bad method name");
-      return await relayCommand(req, res, method);
+      return await relayCommand(t, req, res, method);
     }
     return fail(res, 404, `not found: ${req.method} ${url.pathname}`);
   } catch (error) {
@@ -1586,8 +1826,14 @@ server.on("upgrade", (req, socket, head) => {
   if (match == null || match[2] !== "websockify") return socket.destroy();
   // A refusal a browser can read, rather than a reset socket: noVNC reports "failed to connect"
   // either way, but the operator opening devtools sees which of the two it was.
-  if (!isAuthorized(req)) return socket.end("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n");
-  return relayVncSocket(req, socket, head, Number(match[1]));
+  const slug = tenantOf(req);
+  if (slug == null) return socket.end("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n");
+  // And which box's screen this is, decided here rather than inherited: an upgrade never reaches
+  // the request handler, so the one route carrying a keyboard would otherwise be the one route
+  // that never asked whose box it was aiming at.
+  const t = contextOf(slug);
+  if (t == null) return socket.end("HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\n\r\n");
+  return relayVncSocket(t, req, socket, head, Number(match[1]));
 });
 
 // Loopback by default: this process holds the gateway token, so it must not be reachable off-box
@@ -1606,25 +1852,42 @@ if (AUTH == null && !isLoopbackHost(BIND)) {
   console.error(`It writes ${AUTH_FILE} at mode 0600. Loopback needs no password and is unchanged.`);
   process.exit(1);
 }
-await resolveBoxContainer();
+// The first read of the tenant list, before the first request rather than after it, and the sixty
+// second schedule behind it. It is awaited because a console that answered "not available" to the
+// first customer through the door while it caught up would be worse than a second of boot; a
+// control plane that is not answering yet costs the ten second timeout and then serves the
+// operator alone, which is exactly what it did before any of this existed.
+await registry.refresh().catch((error) => console.log(`reg  first read failed: ${error?.message ?? error}`));
+registry.start();
+if (!await dockerAvailable()) {
+  console.log("box  no docker on this relay, so the model picker, the connectors editor and the desktop view say so rather than failing");
+}
 // The env deploy path (docs/JOB-BUS.md 8): TITAN_JOB_TOKEN set on the deployment means the bus is
-// meant to be answering, so the relay arms it on its own start. Not awaited into the listen: a
+// meant to be answering, so the relay arms it on its own start. It arms the OPERATOR's box and no
+// other: the variable is a fact about this deployment, and read for every tenant it would turn on
+// a bus in every customer's box that none of them asked for. Not awaited into the listen: a
 // gateway that is not up yet must not stop the console from coming up, and the call logs either way.
 if (String(process.env.TITAN_JOB_TOKEN ?? "").trim().length > 0) {
-  void armJobBus("TITAN_JOB_TOKEN is set in the environment");
+  const operator = contextOf(OPERATOR_SLUG);
+  if (operator != null) void armJobBus(operator, "TITAN_JOB_TOKEN is set in the environment");
 }
 server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
-  console.log(`gw   ${GATEWAY}${TOKEN.length > 0 ? " (bearer)" : " (no auth)"}`);
+  console.log(`gw   ${OPERATOR_GATEWAY}${OPERATOR_TOKEN.length > 0 ? " (bearer)" : " (no auth)"} `
+    + `via ${registry.operator().box}`);
   console.log(`auth ${AUTH == null ? "none (loopback, no ui/auth.json)" : "password login, 12 h sessions"}`);
   // Which files this instance owns, said out loud. On a shared server the answer decides whether
   // two tenants are writing over each other, and it is not visible from anywhere else.
   console.log(`state ${STATE_DIR.length > 0 ? STATE_DIR : `${HERE} (beside the code, SAND_UI_STATE_DIR is unset)`}`);
-  // Two doors or one. Worth a line because the difference is a field on the login page, and an
-  // operator looking at a page with no email field needs somewhere to read why.
-  console.log(`tnnt ${TENANT == null
-    ? "not a tenant, the instance password is the only sign-in (TENANT_ID, CP_URL, CP_SESSION_SECRET)"
-    : `${TENANT.tenant}, accounts sign in through ${TENANT.cpUrl}`}`);
+  // Two doors or one, and how many workspaces this console serves. Worth two lines because the
+  // first difference is a field on the login page, which an operator looking at a page with no
+  // email field needs somewhere to read why about, and the second is the only place the fleet this
+  // process is serving is visible at all.
+  const serving = registry.all().map((entry) => `${entry.slug}${entry.reachable === false ? " (box not running)" : ""}`);
+  console.log(`tnnt ${RELAY == null
+    ? "one workspace, the instance password is the only sign-in (set CP_URL and CP_RELAY_TOKEN for accounts)"
+    : `accounts sign in through ${RELAY.cpUrl}`}`);
+  console.log(`work ${serving.length}: ${serving.join(", ")}`);
   console.log(`prox ${TRUSTED_PROXIES.any ? "any peer may forward a client address" : (TRUSTED_PROXIES.ranges.length === 0
     ? "none, so the socket address is the client and no forwarded header is read"
     : `${TRUSTED_PROXIES.ranges.length} trusted range(s) from SAND_UI_TRUSTED_PROXIES`)}`);

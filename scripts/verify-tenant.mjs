@@ -324,6 +324,32 @@ async function postForm(base, pathname, fields, { cookie } = {}) {
 }
 const sessionCookie = (res) => /(?:^|,\s*)(gb_session=[^;]+)/.exec(res.headers.get("set-cookie") ?? "")?.[1] ?? "";
 
+// ---- superseded by TENANT-5 -------------------------------------------------------------------
+//
+// This gate measures the TENANT-2 shape: one relay PER CUSTOMER, each on its own hostname, each in
+// tenant mode with TENANT_ID and CP_SESSION_SECRET, and a customer who types the wrong address sent
+// to their own host with ?sso=. TENANT-5 replaced all of that with one relay, one console and one
+// login page at console.titanium.bot; the relay no longer reads either variable, and there is no
+// other host to redirect anyone to. Run as it stands, 30 of its legs fail on a console that is
+// working exactly as designed, which is the worst thing a gate can do: it reads as a regression.
+//
+// So it refuses rather than lying, and exit 2 is the status this file's own header already defines
+// for "nothing could be measured at all". Its replacement is scripts/verify-one-console.mjs
+// (TENANT-5 step 8f): two sessions in one console, two rosters, the cross-check, the registry
+// route's credential and the unknown-workspace answer.
+//
+// Kept rather than deleted because the docker suite below (the plain-words refusals on an instance
+// with no docker socket, and the runtime route's two halves) is still the right measurement and is
+// worth lifting into the new gate rather than rewriting from nothing.
+console.error("verify-tenant.mjs measures the TENANT-2 shape and TENANT-5 replaced it.");
+console.error("");
+console.error("It expects one relay per customer, each on its own hostname in tenant mode, and a");
+console.error("sign-in for another customer redirected to that customer's host. There is one relay");
+console.error("and one login page now, so those legs would fail on a console that is working.");
+console.error("");
+console.error("Use   node scripts/verify-one-console.mjs   instead.");
+process.exit(2);
+
 // ---- the run --------------------------------------------------------------------------------
 console.log("verify-tenant.mjs -- TENANT-2, a customer's own instance");
 console.log(LIVE ? `  relay: ${URL_FLAG}` : "  relay: two copies this gate starts");

@@ -1,15 +1,24 @@
-// TENANT-2, item 3. Signing in to a tenant relay with a Titanium Bot account.
+// TENANT-5, items 3, 4 and 6. One console, one login page, every workspace.
 //
 // The relay has always had one door: an instance password read once at boot. A customer needs a
 // second one, their own account, and the thing that makes it safe is that the relay verifies the
-// control plane's token itself, with a key that is only ever this tenant's, and checks the tenant
-// claim before it mints anything.
+// control plane's token itself, with the key that belongs to the workspace the token names, before
+// it mints anything.
 //
-// Four failures are worth naming, because each of them looks like working software:
+// What TENANT-5 changed is that there is no longer one relay per customer. console.titanium.bot is
+// everybody's front door, so this file is handed a LOOKUP of keys rather than one key, and the
+// redirect to <slug>.titanium.bot went away with the hostnames it pointed at. A right password for
+// a workspace this console does not serve is not a redirect and not a refusal: it is the plain
+// "That workspace is not available right now.", the same sentence a session for a workspace that is
+// still being built gets.
+//
+// Five failures are worth naming, because each of them looks like working software:
 //   - a token for another customer, validly signed by the same control plane, accepted here;
 //   - a forged sign-in link accepted because the query string was believed;
 //   - the instance password stopping working the day the account door was added;
-//   - the control plane being down turning into a locked-out operator instead of a sentence.
+//   - the control plane being down turning into a locked-out operator instead of a sentence;
+//   - the registry route answering anyone who asks, which would publish every workspace's gateway
+//     token in one GET.
 // There is a test below for each.
 //
 // The control plane in these tests is a real http server in this process, so the relay makes a real
@@ -18,48 +27,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
-import { copyFileSync, mkdtempSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-import { base64urlEncode, mintSessionToken, tenantSessionSecret } from "../ui/session-token.mjs";
-import { accountSignIn, hostOfUnverifiedToken, ssoVerdict, tenantConfig, CP_TIMEOUT_MS } from "../ui/tenant-login.mjs";
-import { newAuthRecord, writeAuthFile } from "../ui/auth.mjs";
+import { base64urlEncode, mintSessionToken } from "../ui/session-token.mjs";
+import { accountSignIn, relayConfig, ssoVerdict, CP_TIMEOUT_MS } from "../ui/tenant-login.mjs";
+import {
+  MASTER, RELAY_PASSWORD, RELAY_TOKEN, cookieOf, form, keyFor, startRelay, tenantRow, tenantsFile,
+  tokenFor,
+} from "./relay-tenant-support.mjs";
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-
-const MASTER = "a control plane master key no tenant ever holds";
 const TENANT = "demo";
 const OTHER = "acme";
-const RELAY_PASSWORD = "an instance password no test types";
-const KEY = tenantSessionSecret(MASTER, TENANT);
-const OTHER_KEY = tenantSessionSecret(MASTER, OTHER);
+const KEY = keyFor(TENANT);
+const OTHER_KEY = keyFor(OTHER);
 
-function tokenFor(tenant, secret, { host = `${tenant}.titanium.bot`, ttlMs = 60 * 60 * 1000, now = Date.now() } = {}) {
-  return mintSessionToken({
-    sub: "acct_demo", email: `demo@titanium.bot`, tenant, host,
-    iat: now, exp: now + ttlMs, jti: `${tenant}-${now}`,
-  }, secret, now).token;
-}
+// The lookup the console hands the module: this console serves demo and nobody else.
+const keyOf = (slug) => (slug === TENANT ? KEY : "");
 
 // ---- the module, with the control plane faked at the fetch ------------------------------------
 
-test("tenant mode needs all three variables, and treats two of three as none", () => {
-  const full = { TENANT_ID: "demo", CP_URL: "https://api.titanium.bot/", CP_SESSION_SECRET: KEY };
-  assert.deepEqual(tenantConfig(full), { tenant: "demo", cpUrl: "https://api.titanium.bot", secret: KEY });
-  for (const missing of ["TENANT_ID", "CP_URL", "CP_SESSION_SECRET"]) {
-    assert.equal(tenantConfig({ ...full, [missing]: "" }), null, `${missing} empty must mean no tenant mode`);
-    assert.equal(tenantConfig({ ...full, [missing]: "   " }), null);
+test("the account door needs both variables, and one of two is none", () => {
+  const full = { CP_URL: "https://api.titanium.bot/", CP_RELAY_TOKEN: RELAY_TOKEN };
+  assert.deepEqual(relayConfig(full), { cpUrl: "https://api.titanium.bot", relayToken: RELAY_TOKEN });
+  for (const missing of ["CP_URL", "CP_RELAY_TOKEN"]) {
+    assert.equal(relayConfig({ ...full, [missing]: "" }), null, `${missing} empty must mean no account door`);
+    assert.equal(relayConfig({ ...full, [missing]: "   " }), null);
     const without = { ...full };
     delete without[missing];
-    assert.equal(tenantConfig(without), null);
+    assert.equal(relayConfig(without), null);
   }
-  assert.equal(tenantConfig({}), null);
+  assert.equal(relayConfig({}), null);
 });
 
-const config = { tenant: TENANT, cpUrl: "https://api.titanium.bot", secret: KEY };
+const config = { cpUrl: "https://api.titanium.bot", relayToken: RELAY_TOKEN };
 
 // A fetch that answers like the control plane, and records what it was asked.
 function fakeCp(answer) {
@@ -78,11 +77,11 @@ function fakeCp(answer) {
   return { fetchImpl, calls };
 }
 
-test("a right password for this tenant comes back as a verified session", async () => {
+test("a right password for a workspace we serve comes back as a verified session", async () => {
   const now = 1_800_000_000_000;
   const token = tokenFor(TENANT, KEY, { now });
   const cp = fakeCp({ status: 200, body: { token, expiresAt: new Date(now + 3_600_000).toISOString() } });
-  const verdict = await accountSignIn({ config, email: "demo@titanium.bot", password: "hunter2hunter2", ...cp, now: now + 1000 });
+  const verdict = await accountSignIn({ config, email: "demo@titanium.bot", password: "hunter2hunter2", keyOf, ...cp, now: now + 1000 });
   assert.equal(verdict.kind, "session");
   assert.equal(verdict.payload.tenant, TENANT);
 
@@ -90,130 +89,130 @@ test("a right password for this tenant comes back as a verified session", async 
   assert.equal(cp.calls.length, 1);
   assert.equal(cp.calls[0].url, "https://api.titanium.bot/v1/sessions");
   assert.equal(cp.calls[0].init.method, "POST");
-  assert.equal(cp.calls[0].init.url, undefined);
   assert.deepEqual(JSON.parse(cp.calls[0].init.body), { email: "demo@titanium.bot", password: "hunter2hunter2" });
   assert.ok(cp.calls[0].init.signal, `the call carries a timeout (${CP_TIMEOUT_MS} ms)`);
+  // The relay credential opens the registry route and nothing else. It must never be sent with a
+  // customer's password.
+  assert.equal(JSON.stringify(cp.calls[0].init).includes(RELAY_TOKEN), false);
 });
 
 test("the sign-in tells the control plane who is actually signing in", async () => {
   const now = 1_800_000_000_000;
   const token = tokenFor(TENANT, KEY, { now });
   const cp = fakeCp({ status: 200, body: { token } });
-  await accountSignIn({ config, email: "demo@titanium.bot", password: "hunter2hunter2", client: "203.0.113.44", ...cp, now: now + 1 });
+  await accountSignIn({ config, email: "demo@titanium.bot", password: "hunter2hunter2", client: "203.0.113.44", keyOf, ...cp, now: now + 1 });
   // Without this the control plane counts its address lockout against this container, so every
-  // customer on every instance shares one bucket there: the fleet is locked out by one guesser.
+  // customer shares one bucket there: the fleet is locked out by one guesser.
   assert.equal(cp.calls[0].init.headers["x-forwarded-for"], "203.0.113.44");
 
   // And with no client to name, the header is absent rather than empty: an empty forwarded value is
   // a hop that parses as nothing, which is worse than saying nothing at all.
   const quiet = fakeCp({ status: 200, body: { token } });
-  await accountSignIn({ config, email: "demo@titanium.bot", password: "hunter2hunter2", ...quiet, now: now + 1 });
+  await accountSignIn({ config, email: "demo@titanium.bot", password: "hunter2hunter2", keyOf, ...quiet, now: now + 1 });
   assert.equal("x-forwarded-for" in quiet.calls[0].init.headers, false);
 });
 
-test("a token this control plane signed for ANOTHER customer is not a session here", async () => {
+test("a token this control plane signed for a workspace we do not serve is not a session here", async () => {
   const now = 1_800_000_000_000;
   const token = tokenFor(OTHER, OTHER_KEY, { now });
   const cp = fakeCp({ status: 200, body: { token } });
-  const verdict = await accountSignIn({ config, email: "somebody@acme.example", password: "their password", ...cp, now });
-  // Not refused and not accepted: sent to their own front door with the token the control plane
-  // just minted for them, which only their relay's key can verify.
-  assert.equal(verdict.kind, "elsewhere");
-  assert.equal(verdict.host, "acme.titanium.bot");
-  assert.equal(verdict.location, `https://acme.titanium.bot/login?sso=${encodeURIComponent(token)}`);
+  const verdict = await accountSignIn({ config, email: "somebody@acme.example", password: "their password", keyOf, ...cp, now });
+  // Not refused: their password was right. Not accepted either, and there is no other console to
+  // send them to any more.
+  assert.equal(verdict.kind, "unknown");
+  assert.equal(verdict.slug, OTHER);
 });
 
-test("a token that claims to be ours and does not verify is a refusal, whatever it claims", async () => {
+test("a token that claims a workspace we serve and does not verify is a refusal, whatever it claims", async () => {
   const now = 1_800_000_000_000;
-  // The right tenant name, signed with the wrong key. This is what a stolen or a home-made token
+  // The right workspace name, signed with the wrong key. This is what a stolen or a home-made token
   // looks like, and the only thing that catches it is that the relay checks the signature itself.
   const forged = tokenFor(TENANT, OTHER_KEY, { now });
   const cp = fakeCp({ status: 200, body: { token: forged } });
-  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "x", ...cp, now })).kind, "refused");
+  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "x", keyOf, ...cp, now })).kind, "refused");
 
   // An expired one, from a control plane whose clock or whose ttl is wrong.
   const stale = tokenFor(TENANT, KEY, { now: now - 3_600_000, ttlMs: 60_000 });
   const staleCp = fakeCp({ status: 200, body: { token: stale } });
-  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "x", ...staleCp, now })).kind, "refused");
+  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "x", keyOf, ...staleCp, now })).kind, "refused");
+
+  // A token naming no workspace at all: hand made, because the minter refuses to write one.
+  const nameless = `v1.${base64urlEncode(JSON.stringify({
+    sub: "s", email: "e@x.y", tenant: "", host: "h", iat: now, exp: now + 1000, jti: "j",
+  }))}.no-signature-needed`;
+  const namelessCp = fakeCp({ status: 200, body: { token: nameless } });
+  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "x", keyOf, ...namelessCp, now })).kind, "refused");
 });
 
-test("the four answers a control plane can give, each in its own words", async () => {
+test("the answers a control plane can give, each in its own words", async () => {
   const wrong = fakeCp({ status: 401, body: { error: "invalid_login" } });
-  assert.equal((await accountSignIn({ config, email: "nobody@titanium.bot", password: "no", ...wrong })).kind, "refused");
+  assert.equal((await accountSignIn({ config, email: "nobody@titanium.bot", password: "no", keyOf, ...wrong })).kind, "refused");
 
   const locked = fakeCp({ status: 429, body: { error: "locked", retryAfter: 30 } });
-  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "no", ...locked })).kind, "busy");
+  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "no", keyOf, ...locked })).kind, "busy");
 
   // The control plane's own sentence for an account whose instance is not registered yet. Passing
   // it through beats telling a customer sign-in is "not answering" when it answered very clearly.
   const orphan = fakeCp({ status: 409, body: { error: "tenant_missing", message: "Your account is set up but its instance is not registered yet. Please contact support." } });
-  const said = await accountSignIn({ config, email: "demo@titanium.bot", password: "yes", ...orphan });
+  const said = await accountSignIn({ config, email: "demo@titanium.bot", password: "yes", keyOf, ...orphan });
   assert.equal(said.kind, "message");
   assert.match(said.text, /not registered yet/);
 
   const down = { fetchImpl: async () => { throw new Error("connect ECONNREFUSED"); } };
-  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "yes", ...down })).kind, "unreachable");
+  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "yes", keyOf, ...down })).kind, "unreachable");
 
   const nonsense = fakeCp({ status: 200, body: { nothing: true } });
-  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "yes", ...nonsense })).kind, "unreachable");
+  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "yes", keyOf, ...nonsense })).kind, "unreachable");
 
   const html = fakeCp({ status: 502 });
-  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "yes", ...html })).kind, "unreachable");
+  assert.equal((await accountSignIn({ config, email: "demo@titanium.bot", password: "yes", keyOf, ...html })).kind, "unreachable");
+
+  // No control plane behind this console at all: the account door is not a door, and the instance
+  // password is the only sign-in. Same as it was before any of this.
+  assert.equal((await accountSignIn({ config: null, email: "a@b.c", password: "x", keyOf })).kind, "unreachable");
 });
 
-test("a host claim that is not a hostname is never turned into a redirect", () => {
+test("a sign-in link is verified with the claimed workspace's own key", () => {
   const now = 1_800_000_000_000;
-  // Built by hand rather than minted, because this reads a claim the minter would refuse to write
-  // and a signature it would refuse to make. That is the point: the token comes from somewhere
-  // else, this relay cannot verify it, and the only thing standing between the claim and a Location
-  // header is the check being measured here.
-  const handMade = (host) => `v1.${base64urlEncode(JSON.stringify({
-    sub: "s", email: "e@x.y", tenant: OTHER, host, iat: now, exp: now + 1000, jti: "j",
-  }))}.no-signature-needed`;
-
-  for (const host of [
-    "acme.titanium.bot/../evil", "https://evil.example", "acme.titanium.bot:7777",
-    "acme.titanium.bot\r\nSet-Cookie: a=b", "localhost", "", "   ", "-acme.titanium.bot", "..",
-    "acme.titanium.bot?x=1", "user@acme.titanium.bot", "a".repeat(300),
-    "acme .titanium.bot", 7, null,
-  ]) {
-    assert.equal(hostOfUnverifiedToken(handMade(host)), "",
-      `${JSON.stringify(host)} must not be usable as a redirect target`);
-  }
-  // And the shapes that are real hosts, case folded so the Location header is one thing.
-  assert.equal(hostOfUnverifiedToken(handMade("Acme.Titanium.Bot")), "acme.titanium.bot");
-  assert.equal(hostOfUnverifiedToken(handMade("a-b.example.co.uk")), "a-b.example.co.uk");
-  assert.equal(hostOfUnverifiedToken(tokenFor(OTHER, OTHER_KEY, { host: "acme.titanium.bot", now })), "acme.titanium.bot");
-  // Not a token at all.
-  for (const junk of ["", "one.two", "a.b.c.d", null]) assert.equal(hostOfUnverifiedToken(junk), "");
-});
-
-test("a sign-in link is verified with this relay's own key and its own tenant name", () => {
-  const now = 1_800_000_000_000;
-  assert.equal(ssoVerdict({ config, token: tokenFor(TENANT, KEY, { now }), now: now + 1 }).kind, "session");
-  // Signed with another tenant's key: the signature does not check out here, which is the point of
-  // deriving a key per tenant rather than handing everybody the master.
-  assert.equal(ssoVerdict({ config, token: tokenFor(OTHER, OTHER_KEY, { now }), now }).kind, "bad");
-  // Signed with OUR key but claiming another tenant. Only reachable if the secret was configured
-  // wrong; it still fails closed rather than letting any tenant in.
-  assert.equal(ssoVerdict({ config, token: tokenFor(OTHER, KEY, { now }), now }).kind, "bad");
+  assert.equal(ssoVerdict({ token: tokenFor(TENANT, KEY, { now }), keyOf, now: now + 1 }).kind, "session");
+  // A workspace this console does not serve: a sentence, not a refusal and not a redirect.
+  assert.equal(ssoVerdict({ token: tokenFor(OTHER, OTHER_KEY, { now }), keyOf, now }).kind, "unknown");
+  // Claiming a workspace we serve but signed with another key: the point of deriving a key per
+  // workspace rather than handing everybody the master.
+  assert.equal(ssoVerdict({ token: tokenFor(TENANT, OTHER_KEY, { now }), keyOf, now }).kind, "bad");
   // Expired, empty, and edited.
-  assert.equal(ssoVerdict({ config, token: tokenFor(TENANT, KEY, { now: now - 7_200_000, ttlMs: 1000 }), now }).kind, "bad");
-  assert.equal(ssoVerdict({ config, token: "", now }).kind, "bad");
+  assert.equal(ssoVerdict({ token: tokenFor(TENANT, KEY, { now: now - 7_200_000, ttlMs: 1000 }), keyOf, now }).kind, "bad");
+  assert.equal(ssoVerdict({ token: "", keyOf, now }).kind, "bad");
   const edited = tokenFor(TENANT, KEY, { now }).replace(/.$/, (c) => (c === "A" ? "B" : "A"));
-  assert.equal(ssoVerdict({ config, token: edited, now }).kind, "bad");
-  assert.equal(ssoVerdict({ config: null, token: tokenFor(TENANT, KEY, { now }), now }).kind, "bad");
+  assert.equal(ssoVerdict({ token: edited, keyOf, now }).kind, "bad");
+  // And with no lookup at all, nothing verifies: a console with an empty registry lets nobody in
+  // through this door rather than everybody.
+  assert.equal(ssoVerdict({ token: tokenFor(TENANT, KEY, { now }), now }).kind, "unknown");
 });
 
 // ---- the relay itself, against a control plane on a real port ----------------------------------
 
-// A control plane that answers /v1/sessions the way the real one does, and records what it saw.
-function startFakeControlPlane({ accounts }) {
+// A control plane that answers /v1/sessions and /v1/relay/tenants the way the real one does, and
+// records what it saw. The registry route is the new half: it is the only place a gateway token or
+// a derived session key is ever handed out, and it is opened by the relay credential and by nothing
+// else.
+function startFakeControlPlane({ accounts, tenants = [], relayToken = RELAY_TOKEN }) {
   const seen = [];
+  const registryCalls = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {
+      if (req.method === "GET" && req.url === "/v1/relay/tenants") {
+        const header = String(req.headers.authorization ?? "");
+        registryCalls.push({ authorization: header });
+        if (header !== `Bearer ${relayToken}`) {
+          res.writeHead(401, { "content-type": "application/json" });
+          return res.end(JSON.stringify({ error: "unauthorized" }));
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ tenants, skipped: [] }));
+      }
       if (req.method !== "POST" || req.url !== "/v1/sessions") {
         res.writeHead(404, { "content-type": "application/json" });
         return res.end(JSON.stringify({ error: "not_found" }));
@@ -227,12 +226,12 @@ function startFakeControlPlane({ accounts }) {
         return res.end(JSON.stringify({ error: "invalid_login" }));
       }
       const now = Date.now();
-      const token = tokenFor(account.tenant, account.secret, { host: account.host, now });
+      const token = tokenFor(account.tenant, account.secret, { host: "console.titanium.bot", now });
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         token, expiresAt: new Date(now + 60 * 60 * 1000).toISOString(),
         account: { id: "acct_1", email: fields.email, name: "Demo" },
-        tenant: { slug: account.tenant, host: account.host, status: "running" },
+        tenant: { slug: account.tenant, host: "console.titanium.bot", status: "running" },
       }));
     });
   });
@@ -240,68 +239,23 @@ function startFakeControlPlane({ accounts }) {
     server.listen(0, "127.0.0.1", () => resolve({
       url: `http://127.0.0.1:${server.address().port}`,
       seen,
+      registryCalls,
       stop: () => new Promise((done) => server.close(done)),
     }));
   });
 }
 
-// A copy of ui/, never ui/ itself: the operator's own auth.json would change which branch runs.
-function serverCopy() {
-  const dir = mkdtempSync(path.join(tmpdir(), "relay-tenant-"));
-  for (const name of readdirSync(path.join(repo, "ui")).filter((file) => file.endsWith(".mjs"))) {
-    copyFileSync(path.join(repo, "ui", name), path.join(dir, name));
-  }
-  return dir;
-}
-
-// There is no way to read back the port from a server started with SAND_UI_PORT=0 -- it prints the
-// value it was given -- so a port is picked and retried, the same as tests/relay-login-guards.
-async function startRelay(env = {}) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const dir = serverCopy();
-    writeAuthFile(path.join(dir, "auth.json"), newAuthRecord(RELAY_PASSWORD));
-    const port = 34000 + Math.floor(Math.random() * 8000);
-    const child = spawn(process.execPath, [path.join(dir, "server.mjs")], {
-      env: {
-        ...process.env, SAND_UI_PORT: String(port), SAND_UI_BIND_HOST: "127.0.0.1",
-        SAND_HOST_GATEWAY_TOKEN: "not-a-real-token",
-        // Nothing answers here. Every request in these tests is decided by the login before the
-        // relay reaches upstream, so a 502 from a dead gateway is itself proof of getting past.
-        SAND_HOST_GATEWAY_URL: "http://127.0.0.1:1",
-        TENANT_ID: "", CP_URL: "", CP_SESSION_SECRET: "", SAND_UI_STATE_DIR: "", SAND_UI_AUTH_FILE: "",
-        ...env,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const listening = await new Promise((resolve) => {
-      let out = "";
-      child.stdout.on("data", (chunk) => { out += chunk; if (out.includes("cfip ")) resolve(out); });
-      child.on("exit", () => resolve(null));
-      setTimeout(() => resolve(null), 15_000).unref();
-    });
-    if (listening != null) return { base: `http://127.0.0.1:${port}`, boot: listening, stop: () => child.kill("SIGKILL") };
-    child.kill("SIGKILL");
-  }
-  throw new Error("the relay copy would not start on any of five ports");
-}
-
-const cookieOf = (response) => /(?:^|,\s*)(gb_session=[^;]+)/.exec(response.headers.get("set-cookie") ?? "")?.[1] ?? "";
-
-const form = (fields) => ({
-  method: "POST",
-  redirect: "manual",
-  headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
-  body: new URLSearchParams(fields).toString(),
-});
-
-test("without tenant mode the login page is exactly what it was", async () => {
+test("without a control plane the login page is exactly what it was", async () => {
   const relay = await startRelay();
   try {
     const page = await (await fetch(`${relay.base}/login`, { headers: { accept: "text/html" } })).text();
-    assert.equal(page.includes('name="email"'), false, "no email field on an instance that is not a tenant");
+    assert.equal(page.includes('name="email"'), false, "no email field on a console with no control plane");
     assert.match(page, /This console drives the box/);
     assert.equal(page.includes("Titanium Bot account"), false);
-    assert.match(relay.boot, /tnnt not a tenant/);
+    assert.match(relay.boot, /tnnt one workspace/);
+    // One workspace, the operator's, seeded from this process's own environment. That is the whole
+    // compatibility story: a developer Mac and a single-box install behave as they always did.
+    assert.match(relay.boot, /work 1: titanium/);
 
     // And a sso link is not a route here at all: it is just the login page.
     const sso = await fetch(`${relay.base}/login?sso=anything`, { redirect: "manual", headers: { accept: "text/html" } });
@@ -310,16 +264,25 @@ test("without tenant mode the login page is exactly what it was", async () => {
   } finally { relay.stop(); }
 });
 
-test("a tenant relay signs an account in, sends another customer home, and keeps its own password", async () => {
+test("one console signs an account in, says so about a workspace it does not serve, and keeps its password", async () => {
+  const demo = tenantRow(TENANT);
   const cp = await startFakeControlPlane({
     accounts: {
-      "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY, host: "demo.titanium.bot" },
-      "someone@acme.example": { password: "the acme account password", tenant: OTHER, secret: OTHER_KEY, host: "acme.titanium.bot" },
+      "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY },
+      "someone@acme.example": { password: "the acme account password", tenant: OTHER, secret: OTHER_KEY },
     },
+    tenants: [demo.row],
   });
-  const relay = await startRelay({ TENANT_ID: TENANT, CP_URL: cp.url, CP_SESSION_SECRET: KEY });
+  const relay = await startRelay({ CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN }, { pathValue: "/nonexistent" });
   try {
-    assert.match(relay.boot, new RegExp(`tnnt ${TENANT}, accounts sign in through`));
+    assert.match(relay.boot, /tnnt accounts sign in through/);
+    // The registry came off the control plane over the relay credential, and it holds the customer
+    // beside the operator.
+    assert.match(relay.boot, /work 2: /);
+    assert.match(relay.boot, /titanium/);
+    assert.match(relay.boot, new RegExp(TENANT));
+    assert.ok(cp.registryCalls.length > 0, "the relay read the registry route on its way up");
+    assert.equal(cp.registryCalls[0].authorization, `Bearer ${RELAY_TOKEN}`);
 
     // 1. The page offers both doors, in one form with one button.
     const page = await (await fetch(`${relay.base}/login`, { headers: { accept: "text/html" } })).text();
@@ -335,7 +298,7 @@ test("a tenant relay signs an account in, sends another customer home, and keeps
     assert.equal(cookieOf(wrong), "");
     assert.match(await wrong.text(), /That email or password is not right\./);
 
-    // 3. The right password for this tenant: a session cookie, and it opens the console on its own.
+    // 3. The right password: a session cookie, and it opens the console on its own.
     const right = await fetch(`${relay.base}/login`, form({ email: "demo@titanium.bot", password: "the demo account password" }));
     assert.equal(right.status, 302);
     assert.equal(right.headers.get("location"), "/");
@@ -355,21 +318,12 @@ test("a tenant relay signs an account in, sends another customer home, and keeps
     assert.equal(out.status, 200);
     assert.match(String(out.headers.get("set-cookie")), /gb_session=;.*Max-Age=0/);
 
-    // 4. A customer whose instance is somewhere else: sent to their own host with a sign-in link,
-    //    not refused and certainly not signed in here.
+    // 4. A customer whose workspace this console does not serve. Their password was right, so this
+    //    is not a refusal; it is the sentence, and no session is minted.
     const elsewhere = await fetch(`${relay.base}/login`, form({ email: "someone@acme.example", password: "the acme account password" }));
-    assert.equal(elsewhere.status, 302);
-    assert.equal(cookieOf(elsewhere), "", "no session is minted for another customer's account");
-    const location = new URL(String(elsewhere.headers.get("location")));
-    assert.equal(location.origin, "https://acme.titanium.bot");
-    assert.equal(location.pathname, "/login");
-    const handed = location.searchParams.get("sso");
-    assert.ok(handed, "the redirect carries the token, which is the only way a browser carries it across origins");
-    // And that token is worthless here, which is what the tenant check is for.
-    const replayed = await fetch(`${relay.base}/login?sso=${encodeURIComponent(handed)}`, { redirect: "manual", headers: { accept: "text/html" } });
-    assert.equal(replayed.status, 401);
-    assert.equal(cookieOf(replayed), "");
-    assert.match(await replayed.text(), /That sign-in link is not valid here\./);
+    assert.equal(elsewhere.status, 503);
+    assert.equal(cookieOf(elsewhere), "", "no session is minted for a workspace this console does not serve");
+    assert.match(await elsewhere.text(), /That workspace is not available right now\./);
 
     // 5. The instance password still signs in, with the email left empty. This is the door Jason
     //    already has and the one the "not answering" sentence points at.
@@ -384,7 +338,11 @@ test("a tenant relay signs an account in, sends another customer home, and keeps
 });
 
 test("a sign-in link mints a session, and a forged one does not", async () => {
-  const relay = await startRelay({ TENANT_ID: TENANT, CP_URL: "http://127.0.0.1:1", CP_SESSION_SECRET: KEY });
+  const demo = tenantRow(TENANT);
+  const relay = await startRelay({
+    CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
+  }, { pathValue: "/nonexistent" });
   try {
     const good = tokenFor(TENANT, KEY);
     const arrived = await fetch(`${relay.base}/login?sso=${encodeURIComponent(good)}`, { redirect: "manual", headers: { accept: "text/html" } });
@@ -402,21 +360,32 @@ test("a sign-in link mints a session, and a forged one does not", async () => {
     });
     assert.notEqual(api.status, 401);
 
-    // Forged: our tenant's name, somebody else's key. And a token with the payload edited under a
-    // signature that was valid for the original.
+    // Forged: a workspace we serve, somebody else's key. And a token with the payload edited under
+    // a signature that was valid for the original.
     for (const bad of [tokenFor(TENANT, OTHER_KEY), `${good}x`, "v1.not.a.token", ""]) {
       const refused = await fetch(`${relay.base}/login?sso=${encodeURIComponent(bad)}`, { redirect: "manual", headers: { accept: "text/html" } });
       assert.equal(refused.status, 401, `a forged link answered ${refused.status}`);
       assert.equal(cookieOf(refused), "");
       assert.match(await refused.text(), /That sign-in link is not valid here\./);
     }
+
+    // A valid link for a workspace this console does not serve is the sentence, not the refusal.
+    const away = await fetch(`${relay.base}/login?sso=${encodeURIComponent(tokenFor(OTHER, OTHER_KEY))}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(away.status, 503);
+    assert.equal(cookieOf(away), "");
+    assert.match(await away.text(), /That workspace is not available right now\./);
   } finally { relay.stop(); }
 });
 
 test("a control plane that is not answering says so, and does not take the password door away", async () => {
   // Port 1 on loopback: nothing listens, and the connection is refused rather than hanging, so this
   // measures the sentence and not the timeout.
-  const relay = await startRelay({ TENANT_ID: TENANT, CP_URL: "http://127.0.0.1:1", CP_SESSION_SECRET: KEY });
+  const demo = tenantRow(TENANT);
+  const relay = await startRelay({
+    CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
+  }, { pathValue: "/nonexistent" });
   try {
     const down = await fetch(`${relay.base}/login`, form({ email: "demo@titanium.bot", password: "whatever" }));
     assert.equal(down.status, 503);
@@ -435,14 +404,23 @@ test("a control plane that is not answering says so, and does not take the passw
     const byPassword = await fetch(`${relay.base}/login`, form({ email: "", password: RELAY_PASSWORD }));
     assert.equal(byPassword.status, 302, "the instance password still works after the control plane failed seven times");
     assert.ok(cookieOf(byPassword).length > 0);
+
+    // The workspaces read before it went down are still served, which is the point of keeping the
+    // last good answer: a control plane outage must not sign a customer out.
+    const sso = await fetch(`${relay.base}/login?sso=${encodeURIComponent(tokenFor(TENANT, KEY))}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(sso.status, 302);
+    assert.ok(cookieOf(sso).length > 0);
   } finally { relay.stop(); }
 });
 
 test("a wrong account password counts toward the lockout the way a wrong instance password does", async () => {
+  const demo = tenantRow(TENANT);
   const cp = await startFakeControlPlane({
-    accounts: { "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY, host: "demo.titanium.bot" } },
+    accounts: { "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY } },
+    tenants: [demo.row],
   });
-  const relay = await startRelay({ TENANT_ID: TENANT, CP_URL: cp.url, CP_SESSION_SECRET: KEY });
+  const relay = await startRelay({ CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN }, { pathValue: "/nonexistent" });
   try {
     for (let i = 0; i < 5; i += 1) {
       const attempt = await fetch(`${relay.base}/login`, form({ email: "demo@titanium.bot", password: `guess ${i}` }));
@@ -458,19 +436,21 @@ test("a wrong account password counts toward the lockout the way a wrong instanc
   } finally { relay.stop(); await cp.stop(); }
 });
 
-test("a sign-in that belongs to another instance does not reset this relay's lockout", async () => {
-  // The hole this measures: the `elsewhere` branch used to call recordSuccess, which deletes the
-  // failure count for the address. Anyone holding an account on ANY other instance could therefore
-  // guess this relay's instance password four at a time, sign in with their own account to wipe the
-  // counter, and go again. Eight consecutive wrong passwords with no lockout was measured against a
-  // live console before the fix.
+test("a sign-in for a workspace this console does not serve does not reset the lockout", async () => {
+  // The hole this measures: the branch for a credential that belongs somewhere else used to call
+  // recordSuccess, which deletes the failure count for the address. Anyone holding an account the
+  // control plane knows could therefore guess this console's instance password four at a time, sign
+  // in with their own account to wipe the counter, and go again. Eight consecutive wrong passwords
+  // with no lockout was measured against a live console before the fix.
+  const demo = tenantRow(TENANT);
   const cp = await startFakeControlPlane({
     accounts: {
-      "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY, host: "demo.titanium.bot" },
-      "someone@acme.example": { password: "the acme account password", tenant: OTHER, secret: OTHER_KEY, host: "acme.titanium.bot" },
+      "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY },
+      "someone@acme.example": { password: "the acme account password", tenant: OTHER, secret: OTHER_KEY },
     },
+    tenants: [demo.row],
   });
-  const relay = await startRelay({ TENANT_ID: TENANT, CP_URL: cp.url, CP_SESSION_SECRET: KEY });
+  const relay = await startRelay({ CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN }, { pathValue: "/nonexistent" });
   try {
     // Four wrong instance passwords: one short of the five that lock the address.
     for (let i = 0; i < 4; i += 1) {
@@ -478,11 +458,10 @@ test("a sign-in that belongs to another instance does not reset this relay's loc
       assert.equal(attempt.status, 401, `attempt ${i} answered ${attempt.status}`);
     }
 
-    // A real sign-in, for a real account, on somebody else's instance. It is a redirect and it is
-    // correct; what it must not be is a reset.
+    // A real sign-in, for a real account, on a workspace this console does not serve. It is the
+    // sentence and it is correct; what it must not be is a reset.
     const away = await fetch(`${relay.base}/login`, form({ email: "someone@acme.example", password: "the acme account password" }));
-    assert.equal(away.status, 302);
-    assert.match(String(away.headers.get("location")), /^https:\/\/acme\.titanium\.bot\/login\?sso=/);
+    assert.equal(away.status, 503);
     assert.equal(cookieOf(away), "");
 
     // The fifth wrong password is still the fifth, so it trips the lockout, and the sixth is
@@ -490,21 +469,23 @@ test("a sign-in that belongs to another instance does not reset this relay's loc
     const fifth = await fetch(`${relay.base}/login`, form({ email: "", password: "guess 4" }));
     assert.equal(fifth.status, 401);
     const sixth = await fetch(`${relay.base}/login`, form({ email: "", password: "guess 5" }));
-    assert.equal(sixth.status, 429, "an other-tenant sign-in cleared the lockout");
+    assert.equal(sixth.status, 429, "an unknown-workspace sign-in cleared the lockout");
     assert.ok(Number(sixth.headers.get("retry-after")) > 0);
 
-    // And the redirect itself is still refused while the address is locked, so the reset button
-    // cannot be pressed from the far side of the lockout either.
+    // And it is still refused while the address is locked, so the reset button cannot be pressed
+    // from the far side of the lockout either.
     const lockedAway = await fetch(`${relay.base}/login`, form({ email: "someone@acme.example", password: "the acme account password" }));
     assert.equal(lockedAway.status, 429);
   } finally { relay.stop(); await cp.stop(); }
 });
 
-test("a sign-in on THIS instance still clears the lockout, which is the door that proves you belong here", async () => {
+test("a sign-in on a workspace this console serves still clears the lockout", async () => {
+  const demo = tenantRow(TENANT);
   const cp = await startFakeControlPlane({
-    accounts: { "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY, host: "demo.titanium.bot" } },
+    accounts: { "demo@titanium.bot": { password: "the demo account password", tenant: TENANT, secret: KEY } },
+    tenants: [demo.row],
   });
-  const relay = await startRelay({ TENANT_ID: TENANT, CP_URL: cp.url, CP_SESSION_SECRET: KEY });
+  const relay = await startRelay({ CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN }, { pathValue: "/nonexistent" });
   try {
     for (let i = 0; i < 4; i += 1) {
       assert.equal((await fetch(`${relay.base}/login`, form({ email: "", password: `guess ${i}` }))).status, 401);
@@ -515,7 +496,65 @@ test("a sign-in on THIS instance still clears the lockout, which is the door tha
     // Four more wrong ones after it, all answered rather than locked: the counter really did reset.
     for (let i = 0; i < 4; i += 1) {
       assert.equal((await fetch(`${relay.base}/login`, form({ email: "", password: `again ${i}` }))).status, 401,
-        "a sign-in on this instance is a success here and resets the counter");
+        "a sign-in on a workspace this console serves is a success here and resets the counter");
     }
   } finally { relay.stop(); await cp.stop(); }
 });
+
+test("the registry route is opened by the relay credential and by nothing else", async () => {
+  // The route deliberately returns per-workspace gateway tokens and derived session keys, which is
+  // the one amendment TENANT-5 makes to the control plane's "this service never returns a key"
+  // rule. That makes the credential on it the whole of the fleet's security, so the relay must
+  // never present anything else and the route must never answer anything else.
+  const demo = tenantRow(TENANT);
+  const cp = await startFakeControlPlane({ accounts: {}, tenants: [demo.row] });
+
+  const wrong = await fetch(`${cp.url}/v1/relay/tenants`);
+  assert.equal(wrong.status, 401, "no bearer must not read the fleet's tokens");
+  const guessed = await fetch(`${cp.url}/v1/relay/tenants`, { headers: { authorization: "Bearer an admin token" } });
+  assert.equal(guessed.status, 401, "a different credential must not read the fleet's tokens");
+  const right = await fetch(`${cp.url}/v1/relay/tenants`, { headers: { authorization: `Bearer ${RELAY_TOKEN}` } });
+  assert.equal(right.status, 200);
+  const body = await right.json();
+  assert.equal(body.tenants[0].slug, TENANT);
+  // The derived key is per workspace and the master never leaves the control plane, which is the
+  // property that makes handing a key out at all acceptable.
+  assert.equal(body.tenants[0].sessionKey, KEY);
+  assert.equal(JSON.stringify(body).includes(MASTER), false, "the master key must appear nowhere in the answer");
+
+  // The three probes above are in the record too, so only what the relay itself sent is measured.
+  const before = cp.registryCalls.length;
+  const relay = await startRelay({ CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN }, { pathValue: "/nonexistent" });
+  try {
+    // Every call the relay made carried the relay credential and nothing else.
+    const mine = cp.registryCalls.slice(before);
+    assert.ok(mine.length > 0, "the relay read the registry route on its way up");
+    for (const call of mine) assert.equal(call.authorization, `Bearer ${RELAY_TOKEN}`);
+  } finally { relay.stop(); await cp.stop(); }
+});
+
+test("a relay with the wrong relay credential serves the operator and nobody else", async () => {
+  // A control plane that refuses this relay is the same fact as a control plane that is down: the
+  // last good answer is kept, and at boot the last good answer is the operator alone. What must not
+  // happen is a console that will not come up, or one that lets a customer in on no evidence.
+  const demo = tenantRow(TENANT);
+  const cp = await startFakeControlPlane({ accounts: {}, tenants: [demo.row], relayToken: "the real one" });
+  const relay = await startRelay({ CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN }, { pathValue: "/nonexistent" });
+  try {
+    assert.match(relay.boot, /work 1: titanium/);
+    assert.match(relay.boot, /reg  could not reach the control plane \(HTTP 401\)/);
+    const away = await fetch(`${relay.base}/login?sso=${encodeURIComponent(tokenFor(TENANT, KEY))}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(away.status, 503);
+    assert.equal(cookieOf(away), "");
+    // And the operator's own door is untouched, which is the whole reason the last good answer is
+    // kept rather than the console refusing to start.
+    const byPassword = await fetch(`${relay.base}/login`, form({ email: "", password: RELAY_PASSWORD }));
+    assert.equal(byPassword.status, 302);
+    assert.ok(cookieOf(byPassword).length > 0);
+  } finally { relay.stop(); await cp.stop(); }
+});
+
+// mintSessionToken is imported for the hand-made token above; naming it here keeps the linter and
+// the reader agreed that it is used on purpose.
+assert.equal(typeof mintSessionToken, "function");
