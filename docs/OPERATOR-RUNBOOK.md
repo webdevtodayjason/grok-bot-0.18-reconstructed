@@ -119,6 +119,18 @@ the control plane every sixty seconds.
 That one line makes the account, works the workspace name out of the company name, and builds the
 box. Measured on the R750 on 2026-09-07: **16 seconds**, end to end.
 
+Taking one away is two commands, and they are separate on purpose:
+
+    node cp/cli.mjs tenant list                     # find the slug
+    # stop it, then delete it: the container goes, /data/titanbot/<slug>/ stays
+    node cp/cli.mjs account remove owner@theircompany.com
+
+Deleting a workspace does **not** delete the sign-ins that point at it, and the delete answer names
+them. That is deliberate: building the workspace again under the same name gives those people their
+access back exactly as it was, which is how the demo workspace was moved onto this shape. Until you
+build it again or remove the accounts, those people are told the workspace is not available. And
+nothing ever deletes `/data/titanbot/<slug>/`; that is yours to remove when you are sure.
+
 `deploy/r750/control-plane-install.sh` on the server makes `/data/titanbot`, builds `titanbot-cp:local`
 and generates the secrets into `/home/sem/titanbot/cp.env`, then
 `node deploy/r750/control-plane-coolify.mjs` from this Mac makes the Coolify service, sets its

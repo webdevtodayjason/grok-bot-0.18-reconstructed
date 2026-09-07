@@ -658,6 +658,23 @@ upstream's name for an agent nobody has named yet. Titan is the name Jason gave 
 
 ## 13. Stop, start, restart, delete
 
+**Deleting a workspace leaves its sign-ins standing, and says so.** The delete answer carries
+`accountsLeft` and names every address that pointed at that workspace. Cascading would have been the
+obvious thing and it is wrong: building the workspace again under the same slug restores those
+people's access exactly as it was, which is how the demo workspace was moved onto the one-console
+shape, and cascading would have locked them out to tidy up a row. Until the workspace is rebuilt or
+the accounts removed, those people meet "That workspace is not available right now."
+
+Removing one is its own command, and it asks for the address to be typed back:
+
+    node cp/cli.mjs account remove owner@theircompany.com
+
+It closes one door and touches nothing else. Not the workspace, not `/data/titanbot/<slug>/`, and
+not the login-failure rows, which are the lockout's memory and belong to the address rather than to
+the account. A session that person already holds keeps working until it expires, because a session
+is a signed token this service does not hold; twelve hours is the ceiling. So this is the shape for
+"they have left" and not for "they are hostile", and the answer says as much.
+
     POST /v1/tenants/{slug}/stop        POST /v1/tenants/{slug}/start
     POST /v1/tenants/{slug}/restart
 
