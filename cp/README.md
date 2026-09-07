@@ -102,17 +102,51 @@ Operator only, `Authorization: Bearer $CP_ADMIN_TOKEN`:
 | `POST /v1/tenants/{slug}/stop`, `/start`, `/restart` | passed through to Coolify |
 | `DELETE /v1/tenants/{slug}` | only when it is stopped, and only with `{"confirm":"<slug>"}`. 409 on an adopted instance |
 
-## Building a new instance
+Either door, `Authorization: Bearer $CP_ADMIN_TOKEN` or nothing when `CP_ALLOW_SIGNUP=1`:
 
-`POST /v1/tenants` answers `409 {"error":"new_tenants_off"}` unless `CP_ALLOW_NEW_TENANTS=1`. A
-tenant relay mounts the operator's shared `ui` directory read-only, and the relay still reads
-`endpoints.json` from beside its own code, which is where the provider API keys are. Until the relay
-reads that file from the tenant's own state directory, a second customer's console could read the
-first one's keys. Rehearsals, adopts and finishing a build that had already started are unaffected.
+| route | answer |
+| --- | --- |
+| `POST /v1/signups` | `{email, password, company}`. 201 with the account and the workspace, or 403 `signup_closed`, 409 `duplicate_email`, 429 `locked` |
+
+The console relay only, `Authorization: Bearer $CP_RELAY_TOKEN`:
+
+| route | answer |
+| --- | --- |
+| `GET /v1/relay/tenants` | `{tenants, skipped}`. Per tenant: its box container, its gateway address, its gateway token, its derived session key, its two directories |
+
+## What a tenant is
+
+One container, the sandbox that customer's agents live in, plus one directory on the disk under
+`CP_TENANT_ROOT`. There is one relay and one console at `console.titanium.bot` for everybody, and
+the relay works out which box a request belongs to from the session. So a customer has no hostname,
+nothing about them is public, and adding one is one more container rather than a second copy of
+everything. Jason's words for why: "Every time we add somebody new, we're basically duplicating
+everything. That sounds crazy."
+
+Every box joins one shared docker network, `CP_SHARED_NETWORK`, made once on the server:
+
+    docker network create titanbot-net
+
+Coolify puts every service on a network of its own, so without that shared one the relay could not
+reach anybody. `deploy/coolify/box.compose.yml` is the one-service template, and it declares that
+network `external: true` so a deploy neither creates it nor renames it.
+
+## Building a new workspace
+
+`POST /v1/tenants` and `POST /v1/signups` both answer `409 {"error":"new_tenants_off"}` unless
+`CP_ALLOW_NEW_TENANTS=1`. Every new customer is another 5.2 GB container on this server, so turning
+them on is a decision somebody makes rather than a default. Rehearsals, adopts and finishing a build
+that had already started are unaffected.
+
+A build ends by waiting for the box to answer, up to `CP_BOX_READY_TIMEOUT_MS`. A timeout there is
+not a failure: the image is large and a server that has never pulled it takes longer than any wait
+worth putting a customer through, so the answer says the workspace is still starting and the `ready`
+step is recorded as `waiting`, which means the next run waits again instead of assuming.
 
 An adopted instance is one this service did not build. It will not rebuild one and it will not
 delete one, and stopping it first does not change that: an adopted row keeps saying `adopted`
-through a stop. On `titanium` those two calls would have been `console.titanium.bot`.
+through a stop. `tenant adopt` is also how `titanium`, Jason's own instance, gets its box container
+name and the directory its gateway token is read from into the registry above.
 
 ## Sessions are signed per tenant
 
@@ -132,12 +166,19 @@ It talks to a running server over http and reads `CP_ADMIN_TOKEN` from the envir
 takes a password as an argument, because an argument is in the shell history and in the process
 list.
 
+    node cp/cli.mjs signup add <email> <company> [--name "..."]
     node cp/cli.mjs account add <email> <tenant> [--name "..."]
     node cp/cli.mjs account list
     node cp/cli.mjs tenant add <slug> <name> [--dry-run]
     node cp/cli.mjs tenant list
-    node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host>
+    node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]
     node cp/cli.mjs session verify <token>
+
+`signup add` is the whole of adding a customer in one line: it makes the account, works the
+workspace name out of the company name, and builds the box. "Acme Roofing & Sons" becomes
+`acme-roofing-sons`, and a second company with the same name gets `acme-roofing-sons-2` rather than
+somebody else's workspace. `account add` is the older two-step way, for adding a second person to a
+workspace that already exists.
 
 `session verify` prints the payload and says whether it is still good. It is the fastest way to
 answer "why is this customer being asked to sign in again".
@@ -184,15 +225,23 @@ image by digest and writes down the version it measured.
 ## What never leaves this service
 
 The password, in any form. The scrypt hash and its salt stay in the store and appear in no answer
-and no log. `CP_SESSION_SECRET` and `CP_ADMIN_TOKEN` are read from the environment and are never
-written to the store, never returned and never printed. The master session key never reaches a
-tenant at all: what goes into a tenant's Coolify environment is that tenant's derived key. A tenant's gateway token goes to Coolify's
-environment store and to the tenant's own profile file, and nowhere else. A tenant's relay password
-is shown once, in the answer to the create that generated it, and is not kept in the ledger: if it
-is lost, reset it rather than looking for it.
+and no log. `CP_SESSION_SECRET`, `CP_ADMIN_TOKEN` and `CP_RELAY_TOKEN` are read from the environment
+and are never written to the store, never returned and never printed.
 
-The gate's last leg is a search of every response body for three of those. Keep it that way when
-you add a route.
+One route is a deliberate exception and it is the only one: `GET /v1/relay/tenants`, behind
+`CP_RELAY_TOKEN`, hands the one console relay each tenant's gateway token and each tenant's DERIVED
+session key, because that relay serves every customer and has to reach every customer's box. What
+it never hands over is the master those keys are derived from, and holding one tenant's key does
+not walk back to the master or sideways to another tenant's. The admin token does not open that
+route and the relay token opens nothing else.
+
+There is no relay password any more. Provisioning used to generate one per tenant and show it once,
+because each tenant had a console of its own. There is one console for everybody now, so that
+password opened nothing, and a credential on disk that looks like a second door and is not one is
+worse than none.
+
+The gate's last leg is a search of every response body for those secrets, including the two ways
+the registry route can be asked with the wrong credential. Keep it that way when you add a route.
 
 ## The image
 

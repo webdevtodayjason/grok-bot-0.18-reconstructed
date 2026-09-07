@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { renderCompose } from "../cp/provision.mjs";
+import { renderBoxCompose } from "../cp/provision.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const COMPOSE = path.join(repo, "deploy/coolify/docker-compose.yml");
@@ -35,21 +35,32 @@ test("the operator's own compose writes its state somewhere the tenants do not m
   assert.equal(/- \/home\/sem\/titanbot\/(ui|state)\/[^:]*\.json:/.test(compose), false);
 });
 
-test("a tenant's render keeps exactly one state directory, and it is the tenant's own", () => {
-  // The base file now carries the operator's. Left in, a tenant would have two SAND_UI_STATE_DIR
-  // keys in one environment block, which docker will not read, and two mounts on /state, which is
-  // a container that will not start.
-  const rendered = renderCompose({
+test("a tenant does not mount the shared ui directory at all any more", () => {
+  // TENANT-5 answered this the short way. The whole risk above was that a TENANT'S RELAY mounted
+  // the operator's ui directory and could read the three files in it. A tenant has no relay: it is
+  // one box container, and the box has never mounted ui/. So there is nothing to make read-only,
+  // nothing to move out of reach, and nothing a customer's container can open.
+  const rendered = renderBoxCompose({
     slug: "acme",
-    config: { releaseRoot: "/home/sem/titanbot", tenantRoot: "/data/titanbot", publicUrl: "https://api.titanium.bot", baseDomain: "titanium.bot" },
+    config: {
+      releaseRoot: "/home/sem/titanbot",
+      tenantRoot: "/data/titanbot",
+      publicUrl: "https://api.titanium.bot",
+      baseDomain: "titanium.bot",
+      consoleHost: "console.titanium.bot",
+      sharedNetwork: "titanbot-net",
+      relayHost: "titanbot-relay",
+    },
   });
-  assert.equal((rendered.match(/^ *SAND_UI_STATE_DIR:/gm) ?? []).length, 1);
-  assert.equal((rendered.match(/^ *- .*:\/state$/gm) ?? []).length, 1);
-  assert.match(rendered, /^ *- \/data\/titanbot\/acme\/state:\/state$/m);
-  assert.equal(rendered.includes("/home/sem/titanbot/state:/state"), false,
-    "no tenant may mount the operator's own state directory");
-  // And the shared release directory is still there, still read-only, still the code.
-  assert.match(rendered, /- \/home\/sem\/titanbot\/ui:\/app\/ui:ro/);
+  assert.equal(rendered.includes("/app/ui"), false, "a tenant has no relay, so it mounts no ui directory");
+  assert.equal(rendered.includes("/home/sem/titanbot/state"), false, "and none of the operator's own state");
+  assert.equal(rendered.includes("/home/sem/titanbot/ui"), false);
+  assert.equal(rendered.includes("SAND_UI_STATE_DIR"), false, "there is no relay in this file to have a state directory");
+  assert.equal(/docker\.sock/.test(rendered), false, "and no docker socket, which would be root on the server");
+  // One service, and it is the box. Read out of the services block rather than off the whole file,
+  // because the top-level networks block has entries at the same indent.
+  const services = rendered.split(/^services:$/m)[1].split(/^\S/m)[0];
+  assert.deepEqual(services.match(/^ {2}\S+:$/gm), ["  titanbot-box:"]);
 });
 
 function world() {

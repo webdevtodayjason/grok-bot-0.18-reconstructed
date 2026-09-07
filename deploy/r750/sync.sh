@@ -138,15 +138,19 @@ step "ship the control plane"
 # deploy had nothing to build from.
 #
 # The image's build context is $ROOT, and the Dockerfile copies cp/, ui/auth.mjs,
-# ui/set-password.mjs (both already shipped above) and deploy/coolify/docker-compose.yml, which is
-# the template every tenant's compose is rendered from. So all four have to be here.
+# ui/set-password.mjs (both already shipped above), deploy/coolify/box.compose.yml, which is the
+# template every tenant is rendered from, and deploy/coolify/docker-compose.yml, which is the
+# operator's own stack and the file the install script checks for. So all of them have to be here.
+#
+# box.compose.yml in particular: without it the image builds and then every provisioning run fails
+# on the compose step with ENOENT, which is a deploy that looks fine until the first customer.
 #
 # cp/*.mjs by glob and the Dockerfile by name, never the directory: cp/.data is the local sqlite
 # store with account rows in it, and a directory copy would carry it to the server.
 ssh "$HOST" "mkdir -p '$ROOT/cp' '$ROOT/deploy/coolify'"
 rsync -a "$REPO"/cp/*.mjs "$REPO/cp/Dockerfile" "$REPO/cp/README.md" "$HOST:$ROOT/cp/"
-rsync -a "$REPO/deploy/coolify/docker-compose.yml" "$REPO/deploy/coolify/control-plane.compose.yml" "$HOST:$ROOT/deploy/coolify/"
-say "cp/{$(cd "$REPO/cp" && ls *.mjs | tr '\n' ',')Dockerfile,README.md} and deploy/coolify/{docker-compose.yml,control-plane.compose.yml}"
+rsync -a "$REPO/deploy/coolify/docker-compose.yml" "$REPO/deploy/coolify/box.compose.yml" "$REPO/deploy/coolify/control-plane.compose.yml" "$HOST:$ROOT/deploy/coolify/"
+say "cp/{$(cd "$REPO/cp" && ls *.mjs | tr '\n' ',')Dockerfile,README.md} and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml}"
 # The control plane's own store is never shipped. It lives on the server under /data/titanbot and
 # holds every customer's password hash.
 say "cp/.data is not shipped"

@@ -28,16 +28,15 @@ WORKDIR /app
 # cp/ is the whole service: server.mjs, session.mjs (a re-export), store.mjs, provision.mjs, cli.mjs.
 COPY cp/ /app/cp/
 
-# ui/auth.mjs is copied because the provisioner writes each tenant's own auth.json with the
-# routine the relay already reads: newAuthRecord and writeAuthFile. The relay parses that file at
-# boot and throws on a shape it does not recognise, so the file format is not a thing to reimplement
-# from memory. Copying the module means the two can never drift.
+# ui/auth.mjs is copied because cp/server.mjs imports clientAddress and parseTrustedProxies from it:
+# the login lockout counts against the address the relay's own code decides on, and two
+# implementations of that answer is how one of them goes stale.
 #
 # ui/set-password.mjs is copied for the operator, not for the code. It is a script with top-level
-# prompts, so nothing imports it; it is here so a password can be reset by hand from inside this
-# container:
-#
-#   docker exec -it <cp container> node /app/ui/set-password.mjs /data/titanbot/<slug>/state/auth.json
+# prompts, so nothing imports it; it is here so the operator's own console password can be reset by
+# hand from inside a container that has the release directory mounted. A tenant has no password file
+# of its own any more: there is one relay, one operator auth.json, and a customer signs in with the
+# account this service holds.
 COPY ui/auth.mjs /app/ui/auth.mjs
 COPY ui/set-password.mjs /app/ui/set-password.mjs
 
@@ -48,10 +47,20 @@ COPY ui/set-password.mjs /app/ui/set-password.mjs
 # line the image builds and then fails at import on the first sign-in.
 COPY ui/session-token.mjs /app/ui/session-token.mjs
 
-# The template every tenant's compose is rendered from. The renderer replaces the four data-volume
-# paths and the profile and credential paths with the tenant's own, keeps runtime, deploy and ui
-# shared, and sets TENANT_ID. Shipping the template inside the image means a tenant created today
-# is rendered from the file that was reviewed with this image, not from whatever is on the server.
+# The template every tenant's compose is rendered from: ONE service, the box, on the shared network.
+# The renderer replaces the four data-volume paths and the credential path with the tenant's own,
+# keeps the runtime directory shared, writes the tenant's name into TENANT_ID and into its network
+# alias, and stops rather than guessing if any of that is not where it expects. Shipping the
+# template inside the image means a tenant created today is rendered from the file that was reviewed
+# with this image, not from whatever is on the server.
+#
+# Without this line the image builds and then every provisioning run fails on the compose step with
+# ENOENT, which is a build that looks fine until the first customer.
+COPY deploy/coolify/box.compose.yml /app/deploy/coolify/box.compose.yml
+
+# The operator's own two-container stack. Nothing here renders it any more; it is copied because
+# deploy/r750/control-plane-install.sh checks for it before it will build, and because it is the
+# file the box template above was cut from and a reader in this container will want it.
 COPY deploy/coolify/docker-compose.yml /app/deploy/coolify/docker-compose.yml
 
 # ---- the defaults ------------------------------------------------------------------------------

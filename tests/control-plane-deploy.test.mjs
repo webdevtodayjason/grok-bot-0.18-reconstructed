@@ -32,6 +32,7 @@ const COMPOSE = path.join(repo, "deploy/coolify/control-plane.compose.yml");
 // something the same shape.
 const FAKE_SESSION_SECRET = randomBytes(32).toString("hex");
 const FAKE_ADMIN_TOKEN = randomBytes(24).toString("hex");
+const FAKE_RELAY_TOKEN = randomBytes(32).toString("hex");
 const FAKE_API_KEY = `${randomBytes(24).toString("base64url")}|fake`;
 const temps = [];
 function tempTree() {
@@ -41,13 +42,18 @@ function tempTree() {
 }
 test.after(() => { for (const one of temps) rmSync(one, { recursive: true, force: true }); });
 
-// A release tree with the five files the install script insists on before it will build anything.
+// A release tree with the files the install script insists on before it will build anything.
+// box.compose.yml is in the list as of TENANT-5: it is the template every tenant is rendered from,
+// and an image built without it fails on the compose step of the first customer rather than at
+// build time.
+const REQUIRED_IN_THE_BUILD_CONTEXT = [
+  "cp/Dockerfile", "cp/server.mjs", "ui/auth.mjs", "ui/set-password.mjs",
+  "deploy/coolify/docker-compose.yml", "deploy/coolify/box.compose.yml",
+];
 function releaseTree() {
   const root = path.join(tempTree(), "titanbot");
   for (const dir of ["cp", "ui", "deploy/coolify"]) mkdirSync(path.join(root, dir), { recursive: true });
-  for (const file of ["cp/Dockerfile", "cp/server.mjs", "ui/auth.mjs", "ui/set-password.mjs", "deploy/coolify/docker-compose.yml"]) {
-    writeFileSync(path.join(root, file), "# stand-in\n");
-  }
+  for (const file of REQUIRED_IN_THE_BUILD_CONTEXT) writeFileSync(path.join(root, file), "# stand-in\n");
   return root;
 }
 
@@ -116,7 +122,7 @@ test("the install script names the missing file rather than failing inside a doc
   );
 });
 
-test("a real install generates the two secrets once and a second run keeps them", async () => {
+test("a real install generates the three secrets once and a second run keeps them", async () => {
   const root = releaseTree();
   const tenants = path.join(tempTree(), "titanbot-data");
   const log = path.join(tempTree(), "commands.log");
@@ -139,12 +145,19 @@ test("a real install generates the two secrets once and a second run keeps them"
   const written = readFileSync(cpEnv, "utf8");
   const sessionSecret = /^CP_SESSION_SECRET=(.+)$/m.exec(written)?.[1];
   const adminToken = /^CP_ADMIN_TOKEN=(.+)$/m.exec(written)?.[1];
+  // TENANT-5. The console relay's own bearer, generated here beside the other two because it is
+  // the third thing the relay and this service have to agree on.
+  const relayToken = /^CP_RELAY_TOKEN=(.+)$/m.exec(written)?.[1];
   assert.match(String(sessionSecret), /^[0-9a-f]{64}$/, "32 bytes as hex");
   assert.match(String(adminToken), /^[0-9a-f]{48}$/, "24 bytes as hex");
+  assert.match(String(relayToken), /^[0-9a-f]{64}$/, "32 bytes as hex, which is the floor the service refuses to start below");
+  assert.notEqual(relayToken, adminToken, "two doors, and neither holds the other's key");
+  assert.notEqual(relayToken, sessionSecret);
 
-  // Neither of them is ever printed, on either run.
+  // None of them is ever printed, on either run.
   assert.equal(first.stdout.includes(sessionSecret), false, "the session secret is not printed");
   assert.equal(first.stdout.includes(adminToken), false, "the admin token is not printed");
+  assert.equal(first.stdout.includes(relayToken), false, "the relay token is not printed");
 
   // What it actually ran.
   const commands = readFileSync(log, "utf8");
@@ -158,7 +171,35 @@ test("a real install generates the two secrets once and a second run keeps them"
   assert.equal(readFileSync(cpEnv, "utf8"), written, "cp.env is byte for byte what the first run left");
   assert.match(second.stdout, /CP_SESSION_SECRET is already in .*cp\.env, kept/);
   assert.match(second.stdout, /CP_ADMIN_TOKEN is already in .*cp\.env, kept/);
+  assert.match(second.stdout, /CP_RELAY_TOKEN is already in .*cp\.env, kept/);
   assert.equal(second.stdout.includes(sessionSecret), false, "still not printed on a second run");
+});
+
+test("an install that predates the relay token adds only that, and keeps the master it already had", async () => {
+  // The case that really runs on the R750: cp.env has been there since TENANT-1 with the two
+  // secrets in it, and the third is new. Minting a second master here would sign every customer out
+  // of every instance at once, so the test is as much about what is kept as about what is added.
+  const root = releaseTree();
+  const log = path.join(tempTree(), "commands.log");
+  writeFileSync(log, "");
+  const env = {
+    ...process.env,
+    PATH: `${stubBin(log)}:${process.env.PATH}`,
+    TITANBOT_ROOT: root,
+    TITANBOT_TENANT_ROOT: path.join(tempTree(), "titanbot-data"),
+    TITANBOT_UID: "1001",
+    TITANBOT_GID: "1001",
+  };
+  const cpEnv = path.join(root, "cp.env");
+  writeFileSync(cpEnv, `CP_SESSION_SECRET=${FAKE_SESSION_SECRET}\nCP_ADMIN_TOKEN=${FAKE_ADMIN_TOKEN}\n`, { mode: 0o600 });
+
+  const { stdout } = await run("bash", [INSTALL], { env });
+  const written = readFileSync(cpEnv, "utf8");
+  assert.equal(/^CP_SESSION_SECRET=(.+)$/m.exec(written)[1], FAKE_SESSION_SECRET, "the master is untouched");
+  assert.equal(/^CP_ADMIN_TOKEN=(.+)$/m.exec(written)[1], FAKE_ADMIN_TOKEN);
+  assert.match(/^CP_RELAY_TOKEN=(.+)$/m.exec(written)[1], /^[0-9a-f]{64}$/, "and the new one is there");
+  assert.match(stdout, /CP_RELAY_TOKEN generated/);
+  assert.equal(stdout.includes(FAKE_SESSION_SECRET), false);
 });
 
 // ---- the Coolify half ---------------------------------------------------------------------------
@@ -228,6 +269,11 @@ const toolEnv = (url) => ({
   COOLIFY_API_KEY: FAKE_API_KEY,
   CP_SESSION_SECRET: FAKE_SESSION_SECRET,
   CP_ADMIN_TOKEN: FAKE_ADMIN_TOKEN,
+  // TENANT-5. The console relay's own bearer, and the only thing that opens the route that hands
+  // it every customer's gateway token.
+  CP_RELAY_TOKEN: FAKE_RELAY_TOKEN,
+  // Off, which is the shape the product is in: the operator adds a customer from the CLI.
+  CP_ALLOW_SIGNUP: "0",
   // The server's own outbound address: every customer's sign-in reaches the control plane from it,
   // so the address half of its lockout has to know which caller is a relay and which is a person.
   CP_RELAY_PEERS: "203.0.113.7/32",
@@ -250,11 +296,12 @@ test("the Coolify tool's dry run prints the plan and reaches Coolify not at all"
     assert.match(stdout, /urls\[\{name: titanbot-cp, url: https:\/\/api\.titanium\.bot:7790\}\]/);
 
     // And the plan is safe to paste into a ticket, which is the only reason to print one.
-    for (const secret of [FAKE_SESSION_SECRET, FAKE_ADMIN_TOKEN, FAKE_API_KEY]) {
+    for (const secret of [FAKE_SESSION_SECRET, FAKE_ADMIN_TOKEN, FAKE_RELAY_TOKEN, FAKE_API_KEY]) {
       assert.equal(stdout.includes(secret), false, "a secret reached the terminal");
     }
     assert.match(stdout, /CP_SESSION_SECRET\s+\(set, 64 characters, not printed\)/);
     assert.match(stdout, /CP_ADMIN_TOKEN\s+\(set, 48 characters, not printed\)/);
+    assert.match(stdout, /CP_RELAY_TOKEN\s+\(set, 64 characters, not printed\)/);
   } finally { fake.server.close(); }
 });
 
@@ -295,6 +342,11 @@ test("the Coolify tool creates the service, sets the environment, sets the addre
     assert.equal(fake.state.envs.get("CP_ALLOW_NEW_TENANTS"), "1", "on, because this is the operator standing it up");
     assert.equal(fake.state.envs.get("CP_SESSION_SECRET"), FAKE_SESSION_SECRET);
     assert.equal(fake.state.envs.get("CP_ADMIN_TOKEN"), FAKE_ADMIN_TOKEN);
+    // TENANT-5. Without this the one relay cannot read the registry and every customer's console
+    // answers "that workspace is not available right now", so the deploy has to carry it.
+    assert.equal(fake.state.envs.get("CP_RELAY_TOKEN"), FAKE_RELAY_TOKEN);
+    assert.equal(fake.state.envs.get("CP_CONSOLE_HOST"), "console.titanium.bot");
+    assert.equal(fake.state.envs.get("CP_SHARED_NETWORK"), "titanbot-net");
     assert.equal(fake.state.envs.get("COOLIFY_PROJECT_UUID"), "proj-uuid", "resolved, not carried in a shell");
     assert.equal(fake.state.envs.get("COOLIFY_SERVER_UUID"), "zl2ti5llrtpx83918j8arb9f");
     assert.equal(fake.state.envs.get("CP_TENANT_ROOT"), "/data/titanbot");
@@ -323,7 +375,7 @@ test("the Coolify tool creates the service, sets the environment, sets the addre
     for (const secret of [FAKE_SESSION_SECRET, FAKE_ADMIN_TOKEN, FAKE_API_KEY, url]) {
       assert.equal(stdout.includes(secret), false, "a secret reached the terminal");
     }
-    assert.match(stdout, /18 added, 0 corrected, 0 already right/);
+    assert.match(stdout, /24 added, 0 corrected, 0 already right/);
   } finally { fake.server.close(); }
 });
 
@@ -339,13 +391,13 @@ test("a second run of the Coolify tool updates rather than duplicating, and is q
 
     assert.equal(second.filter((route) => route === "POST /api/v1/services").length, 0, "it must never create a second service");
     assert.match(stdout, /found titanbot-cp at svc-uuid/);
-    assert.match(stdout, /0 added, 0 corrected, 18 already right/, "nothing changed, so nothing was written");
+    assert.match(stdout, /0 added, 0 corrected, 24 already right/, "nothing changed, so nothing was written");
     assert.equal(fake.state.started, 2, "it still starts, because a start on a running service is how a redeploy happens");
 
     // And a changed value is corrected, not added twice.
     fake.state.envs.set("CP_BASE_DOMAIN", "wrong.example");
     const third = await run("node", [COOLIFY_TOOL], { env: toolEnv(url) });
-    assert.match(third.stdout, /0 added, 1 corrected, 17 already right/);
+    assert.match(third.stdout, /0 added, 1 corrected, 23 already right/);
     assert.equal(fake.state.envs.get("CP_BASE_DOMAIN"), "titanium.bot");
   } finally { fake.server.close(); }
 });
@@ -382,6 +434,32 @@ test("the Dockerfile takes the uid as a build argument and defaults to sem on th
   const script = readFileSync(INSTALL, "utf8");
   assert.match(script, /--build-arg "UID=\$UID_WANT" --build-arg "GID=\$GID_WANT"/, "the build is given the same pair the directory is owned by");
   assert.match(script, /install -d -o "\$UID_WANT" -g "\$GID_WANT" -m 0750/);
+});
+
+// TENANT-5. The template every customer is rendered from is a file, and three separate things have
+// to agree that it exists: the Dockerfile copies it into the image, sync.sh puts it on the server so
+// the build context has it, and the install script checks for it by name before it builds. Miss any
+// one and the image builds cleanly and then fails on the compose step of the first customer, which
+// is the worst time to find out.
+test("the box template travels with the control plane, in all three places", () => {
+  const dockerfile = readFileSync(path.join(repo, "cp/Dockerfile"), "utf8");
+  assert.match(dockerfile, /^COPY deploy\/coolify\/box\.compose\.yml \/app\/deploy\/coolify\/box\.compose\.yml$/m);
+
+  const sync = readFileSync(path.join(repo, "deploy/r750/sync.sh"), "utf8").replace(/\\\n\s*/g, " ");
+  const shipped = [...sync.matchAll(/^rsync .*$/gm)].map((m) => m[0]).join("\n");
+  assert.match(shipped, /deploy\/coolify\/box\.compose\.yml/);
+
+  assert.match(readFileSync(INSTALL, "utf8"), /deploy\/coolify\/box\.compose\.yml/);
+
+  // And the file itself is what the renderer expects to find: one service, the shared network
+  // declared external, and the two places the tenant's name is written.
+  const template = readFileSync(path.join(repo, "deploy/coolify/box.compose.yml"), "utf8");
+  const services = template.split(/^services:$/m)[1].split(/^\S/m)[0];
+  assert.deepEqual(services.match(/^ {2}\S+:$/gm), ["  titanbot-box:"]);
+  assert.match(template, /^ {2}titanbot-net:\n {4}external: true\n {4}name: titanbot-net$/m);
+  assert.equal(template.split("TENANT_SLUG").length - 1, 2);
+  assert.equal(/^\s*ports:/m.test(template), false, "a customer's box is never on a server port");
+  assert.equal(/docker\.sock/.test(template), false, "and never holds the host's docker socket");
 });
 
 test("sync.sh puts the install script on the server, because that is where it runs", () => {

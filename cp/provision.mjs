@@ -1,16 +1,23 @@
-// cp/provision.mjs -- turning a slug into a customer's own instance.
+// cp/provision.mjs -- turning a company name into a customer's sandbox.
+//
+// TENANT-5 changed what a tenant IS. It used to be a box and a relay and a hostname of its own, and
+// Jason's words for why that stopped are the whole design: "Every time we add somebody new, we're
+// basically duplicating everything. That sounds crazy." A tenant is now ONE container, the sandbox
+// their agents live in, plus one directory on the disk. There is one relay and one console at
+// console.titanium.bot for everybody, and it works out which box a request belongs to from the
+// session. So there is no relay to build here, no hostname to set, and no second login door.
 //
 // Seven steps, in this order, every one of them idempotent and every one of them written to the
 // provisioning ledger with the answer Coolify gave:
 //
 //   directories  the tenant's own tree under CP_TENANT_ROOT
-//   secrets      the gateway token and the relay password, generated once and never again
-//   compose      deploy/coolify/docker-compose.yml re-pointed at that tree
-//   service      POST /services
-//   envs         POST /services/{uuid}/envs, the two values the compose refers to but does not carry
+//   secrets      the gateway token, generated once and never again
+//   compose      deploy/coolify/box.compose.yml re-pointed at that tree
+//   service      POST /services, and the container name Coolify will give the box written down
+//   envs         POST /services/{uuid}/envs, the one value the compose refers to but does not carry
 //                (PATCH instead when Coolify already made the field from the compose's ${VAR})
-//   urls         PATCH /services/{uuid}, which is what puts https://<slug>.titanium.bot on the relay
 //   start        POST /services/{uuid}/start
+//   ready        wait for that box to answer, so "created" means something
 //
 // "Idempotent" is doing work here, not decoration. A step that already succeeded is skipped on a
 // retry, and every step that can be run twice safely is written so that it can be: mkdir -p, a
@@ -18,27 +25,39 @@
 // that reuses the uuid already in the ledger. So POST /v1/tenants/{slug}/provision after a failure
 // picks up at the step that failed instead of building a second half-instance beside the first.
 //
-// Two things never reach the ledger and never reach the compose text: the gateway token and the
-// relay password. The token goes into Coolify's environment store and into a 0600 file in the
-// tenant's profile directory, which is where the relay already looks for it. The relay password is
-// hashed into the tenant's auth.json and handed back to the operator exactly once, in the answer to
-// the request that created the tenant. Nothing can print it again, and the operator's way to change
-// it is the same `node ui/set-password.mjs <file>` that has always been the way.
+// One thing never reaches the ledger and never reaches the compose text: the gateway token. It goes
+// into Coolify's environment store and into a 0600 file in the tenant's profile directory, and the
+// relay is handed it over GET /v1/relay/tenants behind CP_RELAY_TOKEN. Nothing puts it in a
+// browser, in a plan preview or in a log line.
 
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { newAuthRecord, writeAuthFile } from "../ui/auth.mjs";
 import { tenantSessionSecret } from "./session.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..");
 
-// The compose the tenants are cut from. Read from disk at render time rather than at import, so a
-// container that ships a different copy of it does not need this file rebuilt.
+// The operator's own two-container stack, which nothing here renders any more. It stays named
+// because deploy/r750 and the docs still point at it as the file Jason's own instance is pasted
+// from, and because the box template below is derived from its box half.
 export const BASE_COMPOSE_PATH = path.join(REPO_ROOT, "deploy", "coolify", "docker-compose.yml");
+
+// The compose a tenant is cut from: one service, the box, on the shared network. Read from disk at
+// render time rather than at import, so a container that ships a different copy of it does not need
+// this file rebuilt.
+export const BOX_COMPOSE_PATH = path.join(REPO_ROOT, "deploy", "coolify", "box.compose.yml");
+
+// What Coolify calls the box's container. Measured on the R750 2026-09-07: every Coolify service's
+// containers are named "<compose service name>-<resource uuid>", and both live boxes are exactly
+// titanbot-box-p927bfqm83ioloibamlvyd7g and titanbot-box-sy74dau8ilh1g4u7a9eaw8f8. It is computed
+// once, when the service is created, and WRITTEN DOWN, because a re-provision mints a new uuid and
+// a relay that rebuilt this name from a stale row would land on a container that is not this
+// customer's.
+export const BOX_SERVICE_NAME = "titanbot-box";
+export const boxContainerName = (uuid) => `${BOX_SERVICE_NAME}-${String(uuid ?? "")}`;
 
 // Names a tenant may not take. www, console, api, mail, app, admin, status, docs, blog, help and
 // support are the hostnames the product itself will want; titanium and titan are the brand; resend,
@@ -75,6 +94,50 @@ export function validateSlug(slug) {
   return { ok: true, reason: "" };
 }
 
+// ---- a name from a company name ------------------------------------------------------------
+//
+// TENANT-5, item 5. Nobody signing up types a slug. They type the name of their company, and this
+// is the one place that turns one into the other, so the sign-up route and the CLI cannot disagree
+// about what "Acme Roofing & Sons" becomes.
+//
+// Accents are folded rather than dropped, so "Café Noir" is cafe-noir and not caf-noir. Everything
+// that is not a letter or a number becomes one dash, the dashes at the ends come off, and the
+// result is cut to the 32 characters a name may be. A company whose name has no letters or numbers
+// in it at all gets an empty string back and the caller asks them for a different one, which is
+// better than inventing a name they will not recognise.
+export function slugFromCompany(company) {
+  return String(company ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, SLUG_MAX)
+    .replace(/-+$/g, "");
+}
+
+// The name that company actually gets: theirs if it is free, and theirs with a number on the end if
+// it is not. `taken` answers whether a name is already in the ledger; the reserved list and the
+// character rules are applied here so a customer can never be handed "api" or "titanium" because
+// that happened to be their company name.
+//
+// Two below the minimum length is a real case: a company called "GK" is a two character name and
+// the rule is three. It becomes "gk-workspace", which is a name they will recognise, rather than a
+// refusal they cannot do anything about.
+export function deriveSlug(company, taken = () => false) {
+  let base = slugFromCompany(company);
+  if (base.length === 0) return null;
+  if (base.length < SLUG_MIN) base = `${base}-workspace`.slice(0, SLUG_MAX);
+  for (let suffix = 1; suffix <= 99; suffix += 1) {
+    const tail = suffix === 1 ? "" : `-${suffix}`;
+    const candidate = `${base.slice(0, SLUG_MAX - tail.length).replace(/-+$/g, "")}${tail}`;
+    if (!validateSlug(candidate).ok) continue;
+    if (taken(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
 // ---- configuration -------------------------------------------------------------------------
 //
 // One reader for every environment variable the control plane takes, so the names live in one
@@ -83,10 +146,24 @@ export function validateSlug(slug) {
 export const CONFIG_DEFAULTS = {
   port: 7790,
   baseDomain: "titanium.bot",
+  // Where every customer signs in, and the only hostname the product has. Per-tenant hostnames are
+  // retired: TENANT-5 put one relay and one console in front of everybody.
+  consoleHost: "console.titanium.bot",
   tenantRoot: "/data/titanbot",
   releaseRoot: "/home/sem/titanbot",
   environmentName: "production",
   publicUrl: "https://api.titanium.bot",
+  // The one docker network the relay and every box share. Made once on the server, declared
+  // external in the box template, never created by a deploy.
+  sharedNetwork: "titanbot-net",
+  // What the box calls the relay on that network, for the host bundle route. The relay's compose
+  // service name is titanbot-relay and Coolify keeps a compose service name as a network alias.
+  relayHost: "titanbot-relay",
+  // How long provisioning waits for a new box to answer before it stops waiting and says so. A
+  // 5.2 GB image that is not on the server yet takes longer than any wait worth having, so a
+  // timeout here is a sentence about a box that is still starting, never a failed tenant.
+  boxReadyTimeoutMs: 90_000,
+  boxReadyIntervalMs: 3_000,
 };
 
 export function loadConfig(env = process.env) {
@@ -99,7 +176,17 @@ export function loadConfig(env = process.env) {
     dataDir: text("CP_DATA_DIR", path.join(REPO_ROOT, "cp", ".data")),
     sessionSecret: text("CP_SESSION_SECRET"),
     adminToken: text("CP_ADMIN_TOKEN"),
+    // TENANT-5. The relay's own credential, and the only thing that opens GET /v1/relay/tenants.
+    // It is not the admin token and the admin token does not open that route: two doors, neither
+    // holding the other's key. Unset, the route answers 401 to everybody, which is what a single
+    // box install with no relay to feed should do.
+    relayToken: text("CP_RELAY_TOKEN"),
     baseDomain: text("CP_BASE_DOMAIN", CONFIG_DEFAULTS.baseDomain),
+    consoleHost: text("CP_CONSOLE_HOST", CONFIG_DEFAULTS.consoleHost),
+    sharedNetwork: text("CP_SHARED_NETWORK", CONFIG_DEFAULTS.sharedNetwork),
+    relayHost: text("CP_RELAY_HOST", CONFIG_DEFAULTS.relayHost),
+    boxReadyTimeoutMs: Number(text("CP_BOX_READY_TIMEOUT_MS", String(CONFIG_DEFAULTS.boxReadyTimeoutMs))) || CONFIG_DEFAULTS.boxReadyTimeoutMs,
+    boxReadyIntervalMs: Number(text("CP_BOX_READY_INTERVAL_MS", String(CONFIG_DEFAULTS.boxReadyIntervalMs))) || CONFIG_DEFAULTS.boxReadyIntervalMs,
     // CP_COOLIFY_URL first, because COOLIFY_URL is a name Coolify owns. Coolify injects its own
     // COOLIFY_URL into every service container, set to that service's public address, and its
     // value wins over the environment record an operator sets with the same name. Measured on the
@@ -122,6 +209,9 @@ export function loadConfig(env = process.env) {
     publicUrl: text("CP_PUBLIC_URL", CONFIG_DEFAULTS.publicUrl).replace(/\/+$/, ""),
     dryRun: /^(1|true|yes)$/i.test(text("CP_DRY_RUN", "")),
     allowNewTenants: /^(1|true|yes)$/i.test(text("CP_ALLOW_NEW_TENANTS", "")),
+    // Whether a stranger may sign themselves up, or only the operator may add them. Off by default,
+    // because the day this is on is a decision about who pays for a 5.2 GB container, not a default.
+    allowSignup: /^(1|true|yes)$/i.test(text("CP_ALLOW_SIGNUP", "")),
     // Which peers may say who the visitor is. Same two settings the relay already runs with, read
     // by the same code, because two implementations of one answer is how one of them goes stale.
     trustedProxies: text("CP_TRUSTED_PROXIES"),
@@ -133,22 +223,21 @@ export function loadConfig(env = process.env) {
   };
 }
 
-// Off until a customer's relay reads its own files, which it does as of TENANT-2.
+// The switch that decides whether this server builds new customers at all.
 //
-// A tenant relay mounts the operator's shared ui directory, and the relay still opens
-// ui/endpoints.json beside its own code: that file holds the provider API keys. Read-only, which
-// the render now is, stops a tenant WRITING them. It does not stop a tenant reading them, and the
-// variable that moves that file (SAND_UI_ENDPOINTS_FILE) is set in the render but not yet read by
-// the relay. So building a second instance is refused until it is, and the operator turns it on
-// deliberately with CP_ALLOW_NEW_TENANTS=1 once the relay wave has landed.
+// It used to be about a safety condition that TENANT-2 met and TENANT-5 removed outright: a tenant
+// relay mounted the operator's shared ui directory and could read the provider API keys in it. A
+// tenant has no relay now, so there is nothing to read. What is left is the ordinary operator
+// question, which is that every new customer is a 5.2 GB container on this server, so switching
+// them on is a decision somebody makes rather than a default.
 //
 // Adopting an instance that already exists is unaffected, and so is finishing one that was already
 // started, so this cannot strand a half-built tenant.
 export const NEW_TENANTS_BLOCKED =
-  "New customer instances are turned off. A customer's console would still read the shared settings file on this server, which holds your provider API keys, so it is not safe to build one yet. Adopting an instance that already exists still works. Set CP_ALLOW_NEW_TENANTS=1 once the relay reads its settings from each customer's own state directory.";
+  "New customer workspaces are turned off on this server. Every new one is another container, so turning them on is deliberate. Set CP_ALLOW_NEW_TENANTS=1 on the control plane. Finishing a workspace that was already started and claiming one that already exists both still work.";
 
-// The two things a config must have before it can sign anybody in. Reported as sentences because
-// this is what the service prints and refuses to start on.
+// The things a config must have before it can sign anybody in. Reported as sentences because this
+// is what the service prints and refuses to start on.
 export function configProblems(config) {
   const problems = [];
   if (!config.sessionSecret || config.sessionSecret.length < 32) {
@@ -157,11 +246,19 @@ export function configProblems(config) {
   if (!config.adminToken || config.adminToken.length < 16) {
     problems.push("CP_ADMIN_TOKEN is missing or shorter than 16 characters. It is the password for the routes that add accounts and tenants.");
   }
+  // Unset is fine and means the relay route is closed to everybody. Set and short is not fine: this
+  // one value hands out every customer's gateway token, so a guessable one is every customer's box.
+  if (config.relayToken && config.relayToken.length < 32) {
+    problems.push("CP_RELAY_TOKEN is shorter than 32 characters. It is the console relay's own password and it hands out every customer's gateway token, so make it at least 32 characters or leave it unset.");
+  }
   return problems;
 }
 
-export function tenantHost(slug, config) {
-  return `${slug}.${config.baseDomain}`;
+// Where a tenant's people sign in. One console for everybody as of TENANT-5, so this does not
+// depend on the tenant at all, and the argument is kept only so a caller reads at the call site
+// which tenant it was asking about.
+export function consoleHost(config) {
+  return config.consoleHost || CONFIG_DEFAULTS.consoleHost;
 }
 
 export function tenantDirectory(slug, config) {
@@ -169,9 +266,14 @@ export function tenantDirectory(slug, config) {
 }
 
 // Every directory a tenant owns. The volumes are the four the box writes into; profile holds the
-// gateway token file the relay reads; credential is the placeholder inference file the box refuses
-// to start without; state is the relay's own writable corner, which is what lets the release's ui
-// directory be shared by every tenant instead of copied per tenant.
+// gateway token file; credential is the placeholder inference file the box refuses to start
+// without; state is this tenant's writable corner of the one relay, which is what lets the relay's
+// own code and the release directory be one shared copy instead of a copy per customer.
+//
+// There is no auth.json here any more, and that is deliberate. Provisioning used to write one, with
+// a generated password printed to the operator once. Under TENANT-5 there is one relay with one
+// operator auth.json, so that file opened nothing: a credential on disk that looks like a second
+// door and is not one is worse than no credential at all. A customer signs in with their account.
 export function tenantPaths(slug, config) {
   const root = tenantDirectory(slug, config);
   return {
@@ -185,7 +287,6 @@ export function tenantPaths(slug, config) {
     store: path.join(root, "volumes", "store"),
     chrome: path.join(root, "volumes", "chrome"),
     profileTokenFile: path.join(root, "profile", "local-docker-vm.json"),
-    authFile: path.join(root, "state", "auth.json"),
   };
 }
 
@@ -196,194 +297,76 @@ export function tenantDirectoryList(slug, config) {
 
 // ---- rendering the compose ---------------------------------------------------------------------
 
-// A splice that refuses to guess. If the anchor is gone or appears twice, the base compose has
-// changed underneath this renderer and the honest answer is to stop: a tenant compose that quietly
-// lost its TENANT_ID or its state mount is a broken instance nobody would look at until a customer
-// complained.
-function spliceBefore(text, anchor, lines) {
-  const first = text.indexOf(anchor);
-  if (first === -1) throw new Error(`the base compose no longer has the line "${anchor.trim()}", so this tenant cannot be rendered`);
-  if (text.indexOf(anchor, first + anchor.length) !== -1) throw new Error(`the base compose has "${anchor.trim()}" more than once, so this tenant cannot be rendered`);
-  return `${text.slice(0, first)}${lines.join("\n")}\n${text.slice(first)}`;
+// Every substitution refuses to guess. If a thing this renderer replaces is not in the template
+// exactly as many times as it expects, the template changed underneath it and the honest answer is
+// to stop: a tenant compose that quietly kept the shared docker volumes is a customer looking at
+// Jason's agents, and nobody would find that until they said so.
+function substitute(text, from, to, { atLeast = 1, exactly = null } = {}) {
+  const parts = String(text).split(from);
+  const found = parts.length - 1;
+  // Gone entirely reads better as gone entirely, whichever rule was going to catch it.
+  if (found === 0) {
+    throw new Error(`the box compose no longer has "${from}", so this tenant cannot be rendered`);
+  }
+  if (exactly !== null && found !== exactly) {
+    throw new Error(`the box compose has "${from}" ${found} times and this renderer expects ${exactly}, so this tenant cannot be rendered`);
+  }
+  if (found < atLeast) {
+    throw new Error(`the box compose has "${from}" ${found} times and this renderer needs at least ${atLeast}, so this tenant cannot be rendered`);
+  }
+  return parts.join(to);
 }
 
-function spliceAfter(text, anchor, lines) {
-  const first = text.indexOf(anchor);
-  if (first === -1) throw new Error(`the base compose no longer has the line "${anchor.trim()}", so this tenant cannot be rendered`);
-  if (text.indexOf(anchor, first + anchor.length) !== -1) throw new Error(`the base compose has "${anchor.trim()}" more than once, so this tenant cannot be rendered`);
-  const at = first + anchor.length;
-  return `${text.slice(0, at)}\n${lines.join("\n")}${text.slice(at)}`;
-}
-
-// Takes one line OUT and leaves an explanation where it was. Same refusal to guess as the two
-// above: a tenant compose that quietly kept a line this renderer thought it had removed is a
-// tenant that quietly has something it must not have.
-// The anchor here is a WHOLE line, matched exactly, unlike the two above: a line that has grown a
-// suffix (`...docker.sock:ro`) is not the line this was written against, and replacing its prefix
-// would leave the tail behind as a broken half mount.
+// deploy/coolify/box.compose.yml, pointed at one customer's own tree.
 //
-// The comment lines directly above the anchor go with it. They were written about the line being
-// replaced, so keeping them would leave a tenant's compose explaining a mount that is not in it,
-// in words that contradict the replacement two lines further down.
-function replaceLine(text, anchor, lines) {
-  const rows = text.split("\n");
-  const hits = rows.reduce((all, row, index) => (row === anchor ? [...all, index] : all), []);
-  if (hits.length === 0) throw new Error(`the base compose no longer has the line "${anchor.trim()}", so this tenant cannot be rendered`);
-  if (hits.length > 1) throw new Error(`the base compose has "${anchor.trim()}" more than once, so this tenant cannot be rendered`);
-  let from = hits[0];
-  while (from > 0 && rows[from - 1].trim().startsWith("#")) from -= 1;
-  rows.splice(from, hits[0] - from + 1, ...lines);
-  return rows.join("\n");
-}
-
-const BOX_ENV_ANCHOR = '      SAND_SUPERVISOR_ENABLED: "1"';
-const RELAY_ENV_ANCHOR = '      SAND_UI_PORT: "7777"';
-// The three the base compose names for an instance nobody built, so an operator can turn tenancy on
-// in Coolify without a different file. A tenant's copy carries its own values written in, so these
-// placeholders come out and the block below goes in. Removing them is not optional: two TENANT_ID
-// keys in one environment block is a compose docker will not read.
-const RELAY_TENANT_ID_PLACEHOLDER = "      TENANT_ID: ${TENANT_ID}";
-const RELAY_CP_URL_PLACEHOLDER = "      CP_URL: ${CP_URL}";
-const RELAY_CP_SECRET_PLACEHOLDER = "      CP_SESSION_SECRET: ${CP_SESSION_SECRET}";
-const RELAY_UI_MOUNT_ANCHOR = "      - /home/sem/titanbot/ui:/app/ui";
-// The operator's own state directory and the variable that points at it. A tenant has its own of
-// both, written by the block below, so these two come out rather than leaving a second copy of the
-// same key: two SAND_UI_STATE_DIR lines in one environment block is a compose docker will not read,
-// and two /state mounts is a container that will not start.
-const RELAY_STATE_DIR_PLACEHOLDER = "      SAND_UI_STATE_DIR: /state";
-const RELAY_STATE_MOUNT_ANCHOR = "      - /home/sem/titanbot/state:/state";
-const RELAY_SOCKET_ANCHOR = "      - /var/run/docker.sock:/var/run/docker.sock";
-const RELAY_LAST_VOLUME_ANCHOR = "      - /home/sem/titanbot/deploy:/init:ro";
-
-export function renderCompose({ slug, config, composeText = readFileSync(BASE_COMPOSE_PATH, "utf8") }) {
+// What changes per tenant: the name (twice, as the network alias and as TENANT_ID), the four data
+// mounts, the credential directory. What is shared by every tenant and therefore does not change:
+// the runtime directory, which is one copy of the release on the server, which is what makes an
+// update one ship rather than one ship per customer. What is a secret and is therefore not in this
+// text at all: the gateway token, which is a Coolify environment value on the resource.
+export function renderBoxCompose({ slug, config, composeText = readFileSync(BOX_COMPOSE_PATH, "utf8") }) {
   const paths = tenantPaths(slug, config);
-  const host = tenantHost(slug, config);
   let text = composeText;
 
-  // The insertions run FIRST and the path substitutions after, because the anchors are lines that
-  // carry the release paths and substituting those paths first would leave nothing to anchor to.
-  // A release root anywhere but /home/sem/titanbot used to render a compose with no state mount and
-  // no tenancy block at all, silently.
-  text = spliceBefore(text, BOX_ENV_ANCHOR, [
-    `      # Which customer this box belongs to. Nothing in the host reads it yet; it is here so a`,
-    `      # \`docker inspect\` on a server with twenty boxes on it answers the question directly.`,
-    `      TENANT_ID: ${slug}`,
-  ]);
+  // The name, in the alias and in TENANT_ID.
+  text = substitute(text, "TENANT_SLUG", slug, { exactly: 2 });
 
-  // Out first, comment and all: replaceLine takes the comment block above the line it replaces, and
-  // the tenancy block below carries its own.
-  text = replaceLine(text, RELAY_STATE_DIR_PLACEHOLDER, []);
-  text = replaceLine(text, RELAY_CP_SECRET_PLACEHOLDER, []);
-  text = replaceLine(text, RELAY_CP_URL_PLACEHOLDER, []);
-  text = replaceLine(text, RELAY_TENANT_ID_PLACEHOLDER, []);
-
-  text = spliceBefore(text, RELAY_ENV_ANCHOR, [
-    `      # ---- tenancy -----------------------------------------------------------------------`,
-    `      # Written by the control plane when this tenant was created. TENANT_ID and CP_URL are`,
-    `      # plain values and are in this text; CP_SESSION_SECRET and TITANBOT_GATEWAY_TOKEN are`,
-    `      # references, and their values live in Coolify's environment store for this resource, so`,
-    `      # neither secret is ever in a file anyone can paste into a chat window.`,
-    `      TENANT_ID: ${slug}`,
-    `      CP_URL: ${config.publicUrl}`,
-    `      # THIS TENANT'S OWN signing key, not the control plane's master. It is`,
-    `      # HMAC-SHA256(master, "${slug}"), so reading it out of this container signs for ${slug} and`,
-    `      # for nobody else. cp/session.mjs, tenantSessionSecret, says why that matters.`,
-    `      CP_SESSION_SECRET: \${CP_SESSION_SECRET}`,
-    `      # The relay's own writable corner, so the release's ui directory above can be one shared`,
-    `      # copy instead of a copy per customer. Every file the relay writes goes under here, and`,
-    `      # the five below name the ones that also have a variable of their own. SAND_UI_AUTH_FILE`,
-    `      # is what makes this tenant's password their own.`,
-    `      SAND_UI_STATE_DIR: /state`,
-    `      SAND_UI_AUTH_FILE: /state/auth.json`,
-    `      # The three writable stores the relay already takes from the environment, pointed at this`,
-    `      # tenant's own directory so nothing this instance saves lands in the shared ui directory`,
-    `      # beside the operator's own files.`,
-    `      GROK_BOT_SUBSCRIPTIONS_FILE: /state/subscriptions.json`,
-    `      GROK_BOT_MAIL_FILE: /state/mail.json`,
-    `      GROK_BOT_MAIL_LEDGER_FILE: /state/mail-inbox.jsonl`,
-    `      # The provider list, and the reason a second instance is safe to build at all. Without`,
-    `      # this the relay read and wrote the shared ui/endpoints.json beside its own code, which`,
-    `      # holds the operator's provider API keys, and a customer's console could have opened it.`,
-    `      # The shared directory is mounted read-only above and this points the reads and the`,
-    `      # writes at the tenant's own copy. See CP_ALLOW_NEW_TENANTS in cp/provision.mjs.`,
-    `      SAND_UI_ENDPOINTS_FILE: /state/endpoints.json`,
-  ]);
-
-  // Read-only for a tenant. It is the operator's own console directory: endpoints.json holds the
-  // provider API keys, subscriptions.json the adopted tokens, auth.json the console password hash
-  // and the cookie signing secret. A tenant's relay had this mounted read-write, so a second
-  // customer's console could overwrite all three. It cannot now.
-  text = replaceLine(text, RELAY_UI_MOUNT_ANCHOR, [
-    `      # Shared, and READ-ONLY for a tenant. This is the operator's own ui directory and the`,
-    `      # files beside the code in it are theirs: endpoints.json (provider API keys),`,
-    `      # subscriptions.json (adopted tokens), auth.json (the console password hash and the cookie`,
-    `      # signing secret). Every file this tenant writes goes to /state below instead.`,
-    `      - /home/sem/titanbot/ui:/app/ui:ro`,
-  ]);
-
-  // The docker socket does not go to a customer.
-  //
-  // On the operator's own instance it is what lets the console reach into the box with
-  // `docker exec` for box-secrets.json, connectors.json and the desktop buttons. On a tenant's
-  // instance it is root on the R750: anything running in that customer's relay could read every
-  // other customer's data, the control plane's account store and its Coolify api key. The three
-  // surfaces that need it are off on a tenant until they have a path scoped to that tenant's own
-  // box, and off is the right direction to fail.
-  text = replaceLine(text, RELAY_SOCKET_ANCHOR, [
-    `      # NO DOCKER SOCKET. The operator's own compose mounts one here; a tenant does not get it,`,
-    `      # because a socket in this container is root on the host, and root on the host is every`,
-    `      # other customer's files, the control plane's account store and the Coolify api key.`,
-    `      # What a tenant gives up for that: the model picker, the connector editor and the desktop`,
-    `      # buttons, all three of which reach the box with \`docker exec\` today. They come back when`,
-    `      # they have a path that can only touch this tenant's own box.`,
-    `      #`,
-  ]);
-
-  // This tenant's own state directory in place of the operator's. Replaced rather than added: the
-  // base file now mounts one of its own, and two mounts on /state is a container that will not
-  // start.
-  text = replaceLine(text, RELAY_STATE_MOUNT_ANCHOR, [
-    `      # This tenant's own writable files: auth.json, endpoints.json, subscriptions and mail.`,
-    `      # Nothing this instance writes lands in the shared release directory above.`,
-    `      - ${paths.state}:/state`,
-  ]);
-
-  // The four data mounts. On Jason's own instance these are the docker volume directories; a tenant
-  // has no such volumes and never should, because a named volume here is the rename trap the base
-  // file's header is about. Each one becomes a plain directory in the tenant's tree.
+  // The four data mounts, off the shared docker volumes and onto this tenant's own directories. A
+  // named volume would be renamed by Coolify's parser and created empty; these are plain paths.
   const volumeMap = [
     ["/data/docker/volumes/titanbot-box-workspace/_data", paths.workspace],
     ["/data/docker/volumes/titanbot-box-data/_data", paths.data],
     ["/data/docker/volumes/titanbot-box-store/_data", paths.store],
     ["/data/docker/volumes/titanbot-box-chrome/_data", paths.chrome],
   ];
-  for (const [from, to] of volumeMap) {
-    if (!text.includes(from)) throw new Error(`the base compose no longer mounts ${from}, so this tenant cannot be rendered`);
-    text = text.split(from).join(to);
-  }
+  for (const [from, to] of volumeMap) text = substitute(text, from, to, { exactly: 1 });
 
-  // Per tenant: the profile (their gateway token) and the credential placeholder.
-  text = text.split("/home/sem/titanbot/profile").join(paths.profile);
-  text = text.split("/home/sem/titanbot/credential").join(paths.credential);
-  // Shared by every tenant: one copy of the release on the host. These three are the same bytes for
-  // everybody, which is what makes an update one ship rather than one ship per customer.
-  text = text.split("/home/sem/titanbot/runtime").join(path.join(config.releaseRoot, "runtime"));
-  text = text.split("/home/sem/titanbot/deploy").join(path.join(config.releaseRoot, "deploy"));
-  text = text.split("/home/sem/titanbot/ui").join(path.join(config.releaseRoot, "ui"));
+  // Per tenant. The credential is a placeholder inference file the box refuses to start without.
+  text = substitute(text, "/home/sem/titanbot/credential", paths.credential, { exactly: 1 });
+  // Shared by every tenant: the release directory the host bundle and the exec daemon are shipped
+  // into. Two mounts, so exactly two.
+  text = substitute(text, "/home/sem/titanbot/runtime", path.join(config.releaseRoot, "runtime"), { exactly: 2 });
+
+  // The network everybody shares and the relay's name on it. Both are configurable because an
+  // install that calls them something else should say so once here rather than editing the
+  // template, and both are replaced everywhere including in the comments, so a rendered file never
+  // explains a name it does not use.
+  text = substitute(text, "titanbot-relay", config.relayHost, { atLeast: 1 });
+  text = substitute(text, "titanbot-net", config.sharedNetwork, { atLeast: 3 });
 
   const header = [
     `# Rendered for tenant "${slug}" by the control plane (cp/provision.mjs). Do not hand-edit this`,
-    `# copy: the next provisioning run renders it again from deploy/coolify/docker-compose.yml and`,
-    `# your change would go with it. Edit the base file instead.`,
+    `# copy: the next provisioning run renders it again from deploy/coolify/box.compose.yml and your`,
+    `# change would go with it. Edit the template instead.`,
     `#`,
     `#   tenant        ${slug}`,
-    `#   console       https://${host}`,
+    `#   console       https://${consoleHost(config)} (shared, this customer has no hostname)`,
     `#   data          ${paths.root}`,
     `#   release       ${config.releaseRoot} (shared by every tenant on this server)`,
+    `#   network       ${config.sharedNetwork} (shared, so the one relay can reach this box)`,
     `#`,
-    `# There are no secrets in this text. TITANBOT_GATEWAY_TOKEN and CP_SESSION_SECRET are Coolify`,
-    `# environment values on the resource, and the relay password is a scrypt hash in`,
-    `# ${paths.authFile} on the server.`,
+    `# There is no secret in this text. TITANBOT_GATEWAY_TOKEN is a Coolify environment value on the`,
+    `# resource and a 0600 file in ${paths.profile}.`,
     ``,
   ].join("\n");
 
@@ -519,9 +502,12 @@ export async function readCoolifyState(uuid, client) {
 // 32 bytes as 64 hex characters, the same width the existing install minted, because the box takes
 // it as SAND_GATEWAY_TOKEN and the relay serves it as a path segment on /runtime.
 export const newGatewayToken = (bytes = randomBytes) => bytes(32).toString("hex");
-// 24 url-safe bytes: 32 characters an operator can read out over the phone without a spelling
-// alphabet, and far past anything the relay's ten-tries-a-minute lockout could be walked through.
-export const newRelayPassword = (bytes = randomBytes) => bytes(24).toString("base64url");
+
+// There is no second secret here any more. Provisioning used to mint a relay password as well and
+// hand it to the operator once, because a tenant had a console of its own with its own password
+// box. It has not had one since TENANT-5: there is one relay, one operator auth.json, and a
+// customer signs in with the account the control plane holds. A generated password that opens
+// nothing is worse than none, so it is gone rather than kept "just in case".
 
 // ---- the plan ------------------------------------------------------------------------------------
 
@@ -530,7 +516,6 @@ export const newRelayPassword = (bytes = randomBytes) => bytes(24).toString("bas
 // reason a dry run is safe to paste into a ticket.
 export function provisioningPlan({ slug, name, config }) {
   const paths = tenantPaths(slug, config);
-  const host = tenantHost(slug, config);
   return [
     {
       name: "directories",
@@ -542,13 +527,13 @@ export function provisioningPlan({ slug, name, config }) {
       name: "secrets",
       method: "local",
       path: paths.profile,
-      bodyPreview: { write: [paths.profileTokenFile, paths.authFile], gatewayToken: "(generated)", relayPassword: "(generated, shown once)" },
+      bodyPreview: { write: [paths.profileTokenFile], gatewayToken: "(generated)" },
     },
     {
       name: "compose",
       method: "local",
-      path: BASE_COMPOSE_PATH,
-      bodyPreview: { rendersFor: slug, dataRoot: paths.root, releaseRoot: config.releaseRoot },
+      path: BOX_COMPOSE_PATH,
+      bodyPreview: { rendersFor: slug, dataRoot: paths.root, releaseRoot: config.releaseRoot, network: config.sharedNetwork },
     },
     {
       name: "service",
@@ -568,19 +553,25 @@ export function provisioningPlan({ slug, name, config }) {
       name: "envs",
       method: "POST",
       path: "/services/{uuid}/envs",
-      bodyPreview: { keys: ["TITANBOT_GATEWAY_TOKEN", "CP_SESSION_SECRET"], values: "(set)" },
+      // One key now, not two. The session key used to be written into the tenant's own Coolify
+      // environment because the tenant had a relay of its own to verify with it. It has no relay,
+      // so the one relay is handed that key over GET /v1/relay/tenants instead and Coolify never
+      // sees it.
+      bodyPreview: { keys: ["TITANBOT_GATEWAY_TOKEN"], values: "(set)" },
     },
-    {
-      name: "urls",
-      method: "PATCH",
-      path: "/services/{uuid}",
-      bodyPreview: { urls: [{ name: "titanbot-relay", url: `https://${host}:7777` }] },
-    },
+    // No urls step. A tenant has no hostname: everybody signs in at the one console, and a PATCH
+    // that put <slug>.titanium.bot on this service would publish a customer's box to the internet.
     {
       name: "start",
       method: "POST",
       path: "/services/{uuid}/start",
       bodyPreview: {},
+    },
+    {
+      name: "ready",
+      method: "local",
+      path: `${BOX_SERVICE_NAME}-{uuid}:1340`,
+      bodyPreview: { waitsUpToMs: config.boxReadyTimeoutMs, everyMs: config.boxReadyIntervalMs },
     },
   ];
 }
@@ -599,7 +590,6 @@ function ensureDirectories(slug, config) {
 function ensureSecrets(slug, config, { bytes = randomBytes } = {}) {
   const paths = tenantPaths(slug, config);
   let gatewayToken = null;
-  let relayPassword = null;
 
   if (existsSync(paths.profileTokenFile)) {
     try { gatewayToken = String(JSON.parse(readFileSync(paths.profileTokenFile, "utf8"))?.token ?? "") || null; }
@@ -611,17 +601,89 @@ function ensureSecrets(slug, config, { bytes = randomBytes } = {}) {
     chmodSync(paths.profileTokenFile, 0o600);
   }
 
-  if (!existsSync(paths.authFile)) {
-    relayPassword = newRelayPassword(bytes);
-    // The relay's own routine, imported rather than copied, so this file cannot drift from what
-    // ui/server.mjs reads at boot. Same record, same 0600, same rotated cookie secret.
-    writeAuthFile(paths.authFile, newAuthRecord(relayPassword));
-  }
-
-  return { gatewayToken, relayPassword };
+  return { gatewayToken };
 }
 
-// The one entry point. Returns {ok, tenant, plan?, relayPassword?, steps}. Throws nothing an
+// The token a tenant's box authenticates with, read back off the disk. This is the one place that
+// reads it, and it is read for exactly one caller: GET /v1/relay/tenants, which hands it to the
+// relay so the relay can talk to that customer's box. It never goes to a browser and never goes in
+// an answer to anybody holding any other credential.
+export function readGatewayToken(slug, config) {
+  const paths = tenantPaths(slug, config);
+  if (!existsSync(paths.profileTokenFile)) return null;
+  try {
+    const token = String(JSON.parse(readFileSync(paths.profileTokenFile, "utf8"))?.token ?? "");
+    return token.length > 0 ? token : null;
+  } catch { return null; }
+}
+
+// ---- waiting for the box -------------------------------------------------------------------
+//
+// "Created" used to mean "Coolify said it queued the start", which is a sentence about a request
+// and not about a customer's workspace. This waits for the box itself, two ways, and takes
+// whichever answers first:
+//
+//   the gateway   an http request straight to that box on the shared network. ANY answer counts,
+//                 including a 401 or a 404: the question is whether something is listening on
+//                 1340, and only a connection error says no. This is the definitive one and it
+//                 works when the control plane is on the shared network too.
+//   Coolify       the service's own container status. This is what answers when the control plane
+//                 is not on that network, which is the ordinary case: it is an api call, not a
+//                 connection to the box.
+//
+// A timeout is NOT a failure. Pulling a 5.2 GB image the server does not have yet takes longer than
+// any wait worth putting a customer through, so the answer says "still starting" and provisioning
+// carries on. The ledger records which of the two answered, so an operator reading it afterwards
+// knows whether the box really spoke or whether Coolify merely said the container was up.
+export async function waitForBox(options = {}) {
+  const {
+    client = null,
+    uuid = "",
+    gateway = "",
+    token = "",
+    // The thing that talks to the BOX, which is not the thing that talks to Coolify. They are the
+    // same fetch in production and they are not in a test: a test process has no docker network, so
+    // a probe of titanbot-box-svc-1:1340 is a name lookup that means nothing. Separating them is
+    // what lets a test drive the Coolify half honestly and skip the half it cannot have.
+    probeImpl = globalThis.fetch,
+    timeoutMs = CONFIG_DEFAULTS.boxReadyTimeoutMs,
+    intervalMs = CONFIG_DEFAULTS.boxReadyIntervalMs,
+    now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = options;
+
+  const started = now();
+  const deadline = started + Math.max(0, timeoutMs);
+  let lastReason = "nothing answered yet";
+
+  for (;;) {
+    if (gateway && typeof probeImpl === "function") {
+      try {
+        // A short abort of its own, so one hung connection cannot eat the whole wait.
+        const answer = await probeImpl(`${gateway.replace(/\/+$/, "")}/api/health`, {
+          headers: token ? { authorization: `Bearer ${token}` } : {},
+          signal: AbortSignal.timeout(Math.min(5_000, Math.max(1_000, intervalMs))),
+        });
+        return { ready: true, how: "gateway", status: answer?.status ?? 0, waitedMs: now() - started };
+      } catch (error) { lastReason = `the box has not answered yet (${String(error?.message ?? error)})`; }
+    }
+
+    if (client != null && uuid) {
+      const live = await readCoolifyState(uuid, client);
+      if (live.reachable && live.status === "running") {
+        return { ready: true, how: "coolify", status: live.status, waitedMs: now() - started };
+      }
+      lastReason = live.reachable ? `Coolify says this box is ${live.status}` : `Coolify could not be read (${live.reason})`;
+    }
+
+    if (now() + intervalMs >= deadline) {
+      return { ready: false, how: "timeout", reason: lastReason, waitedMs: now() - started };
+    }
+    await sleep(intervalMs);
+  }
+}
+
+// The one entry point. Returns {ok, tenant, plan?, ran?, boxReady?, steps}. Throws nothing an
 // operator would have to read a stack trace to understand: a failure lands in the ledger, marks the
 // tenant failed with the message, and comes back as {ok: false, error}.
 export async function provisionTenant(options) {
@@ -634,17 +696,22 @@ export async function provisionTenant(options) {
     fetchImpl = globalThis.fetch,
     bytes = randomBytes,
     composeText,
+    readyTimeoutMs = config.boxReadyTimeoutMs,
+    readyIntervalMs = config.boxReadyIntervalMs,
+    // The box probe, separate from the Coolify fetch. See waitForBox.
+    probeImpl = fetchImpl,
+    sleep,
   } = options;
 
   const paths = tenantPaths(slug, config);
-  const host = tenantHost(slug, config);
+  const host = consoleHost(config);
   const plan = provisioningPlan({ slug, name, config });
 
   if (dryRun) {
     // Everything a real run reads, and every render, with nothing created. The rendered compose is
     // built here too, because a rendering failure is exactly the thing a dry run is for.
     let rendered;
-    try { rendered = renderCompose({ slug, config, composeText }); }
+    try { rendered = renderBoxCompose({ slug, config, composeText }); }
     catch (error) {
       store.recordStep({ slug, step: "plan", status: "failed", detail: String(error?.message ?? error) });
       return { ok: false, dryRun: true, error: String(error?.message ?? error), plan: { steps: plan } };
@@ -657,9 +724,9 @@ export async function provisionTenant(options) {
   const done = store.completedSteps(slug);
   const ran = [];
   let gatewayToken = null;
-  let relayPassword = null;
   let rendered = null;
   let serviceUuid = store.getTenant(slug)?.coolifyServiceUuid ?? null;
+  let boxContainer = store.getTenant(slug)?.boxContainer ?? null;
 
   const fail = (step, error) => {
     const message = String(error?.message ?? error);
@@ -677,28 +744,31 @@ export async function provisionTenant(options) {
     }
   } catch (error) { return fail("directories", error); }
 
-  // 2. secrets. Run even when the ledger says it is done, because it is a read when the files are
+  // 2. secrets. Run even when the ledger says it is done, because it is a read when the file is
   // there and the later steps need the token in hand.
   try {
     const secrets = ensureSecrets(slug, config, { bytes });
     gatewayToken = secrets.gatewayToken;
-    relayPassword = secrets.relayPassword;
     if (!done.has("secrets")) {
-      store.recordStep({ slug, step: "secrets", status: "ok", detail: JSON.stringify({ wrote: [paths.profileTokenFile, paths.authFile] }) });
+      store.recordStep({ slug, step: "secrets", status: "ok", detail: JSON.stringify({ wrote: [paths.profileTokenFile] }) });
       ran.push("secrets");
     }
   } catch (error) { return fail("secrets", error); }
 
   // 3. compose
   try {
-    rendered = renderCompose({ slug, config, composeText });
+    rendered = renderBoxCompose({ slug, config, composeText });
     if (!done.has("compose")) {
-      store.recordStep({ slug, step: "compose", status: "ok", detail: JSON.stringify({ sha256: sha256(rendered), bytes: Buffer.byteLength(rendered, "utf8") }) });
+      store.recordStep({ slug, step: "compose", status: "ok", detail: JSON.stringify({ sha256: sha256(rendered), bytes: Buffer.byteLength(rendered, "utf8"), network: config.sharedNetwork }) });
       ran.push("compose");
     }
   } catch (error) { return fail("compose", error); }
 
-  // 4. the Coolify service
+  // 4. the Coolify service, and the name of the container it will run the box in.
+  //
+  // The name is written down here rather than rebuilt at read time, and that is the point of the
+  // column: a re-provision mints a new uuid, and a relay resolving a box by rebuilding a name from
+  // a stale row would land on a container belonging to nobody or, worse, to somebody else.
   try {
     if (!done.has("service") || !serviceUuid) {
       const body = {
@@ -714,34 +784,36 @@ export async function provisionTenant(options) {
       const created = await client.createService(body);
       serviceUuid = String(created?.uuid ?? "");
       if (!serviceUuid) throw new Error("Coolify created the service but did not answer with its uuid");
-      store.updateTenant(slug, { coolifyServiceUuid: serviceUuid });
-      store.recordStep({ slug, step: "service", status: "ok", detail: JSON.stringify({ uuid: serviceUuid, domains: created?.domains ?? [] }) });
+      boxContainer = boxContainerName(serviceUuid);
+      store.updateTenant(slug, { coolifyServiceUuid: serviceUuid, boxContainer, boxReady: false });
+      store.recordStep({ slug, step: "service", status: "ok", detail: JSON.stringify({ uuid: serviceUuid, boxContainer, domains: created?.domains ?? [] }) });
       ran.push("service");
+    }
+    // A row from before this column existed, or one whose service was made by an older run. The
+    // name is knowable from the uuid, so fill it in rather than leaving the relay with nothing.
+    if (!boxContainer && serviceUuid) {
+      boxContainer = boxContainerName(serviceUuid);
+      store.updateTenant(slug, { boxContainer });
     }
   } catch (error) { return fail("service", error); }
 
-  // 5. the two environment values the compose refers to. Posted one at a time because the bulk
-  // route is a PATCH and a PATCH of a key that does not exist yet is not a create.
+  // 5. the one environment value the compose refers to. Posted first and PATCHed on the collision,
+  // rather than reading the list and deciding: when Coolify creates a service it reads the compose
+  // and makes an empty field for every ${VAR} in it, so this key already exists by the time this
+  // runs and the POST answers 409 "Environment variable already exists. Use PATCH request to update
+  // it." That is what failed the first real tenant build on the R750, 2026-09-07. Re-running this
+  // step has to be safe too, because a retry is the normal way out of a half-finished provision.
+  //
+  // One key, not two. The session key is not here any more: a tenant has no relay of its own to
+  // verify tokens with, so the one relay is handed each tenant's derived key over
+  // GET /v1/relay/tenants and Coolify's environment store never holds it.
   try {
     if (!done.has("envs")) {
-      const envs = [
-        { key: "TITANBOT_GATEWAY_TOKEN", value: gatewayToken },
-        // This tenant's own key, never the master. Whoever can read this container's environment
-        // can sign a session for this tenant, and that is all they can sign: the master never
-        // leaves the control plane, and one tenant's key does not derive another's.
-        { key: "CP_SESSION_SECRET", value: tenantSessionSecret(config.sessionSecret, slug) },
-      ];
+      const envs = [{ key: "TITANBOT_GATEWAY_TOKEN", value: gatewayToken }];
       for (const env of envs) {
         // is_literal, because a generated secret has to reach the container byte for byte and
         // Coolify escapes $ in a value that is not marked literal.
         const body = { key: env.key, value: env.value, is_preview: false, is_literal: true, is_multiline: false, is_shown_once: false };
-        // POST first and PATCH on the collision, rather than reading the list and deciding. When
-        // Coolify creates a service it reads the compose and makes an empty field for every ${VAR}
-        // it finds, so both of these keys already exist by the time this runs and the POST answers
-        // 409 "Environment variable already exists. Use PATCH request to update it." That is what
-        // failed the first real tenant build on the R750, 2026-09-07: the service, the directories
-        // and the secrets were all made and the row still came out `failed`. Re-running this step
-        // has to be safe too, because a retry is the normal way out of a half-finished provision.
         try {
           await client.addEnv(serviceUuid, body);
         } catch (error) {
@@ -754,30 +826,13 @@ export async function provisionTenant(options) {
     }
   } catch (error) { return fail("envs", error); }
 
-  // 6. the public address. The service-level urls PATCH is what works on Coolify 4.0.0; the
-  // per-component PATCH answers Not found (measured on this server for DOMAIN-1).
-  try {
-    if (!done.has("urls")) {
-      const urls = [{ name: "titanbot-relay", url: `https://${host}:7777` }];
-      let answer;
-      try { answer = await client.patchService(serviceUuid, { urls }); }
-      catch (error) {
-        // Measured 2026-09-07 while re-provisioning demo: a tenant deleted seconds earlier still
-        // held its hostname in Coolify's books, and the PATCH answered 409 "Domain conflicts
-        // detected. Use force_domain_override". The name is this tenant's by construction, so the
-        // override is the right answer to that one refusal and to nothing else.
-        if (error?.status !== 409 || !/domain conflict/i.test(String(error?.message ?? ""))) throw error;
-        answer = await client.patchService(serviceUuid, { urls, force_domain_override: true });
-      }
-      store.updateTenant(slug, { host });
-      store.recordStep({ slug, step: "urls", status: "ok", detail: JSON.stringify({ url: `https://${host}:7777`, domains: answer?.domains ?? [] }) });
-      ran.push("urls");
-    }
-  } catch (error) { return fail("urls", error); }
+  // No urls step. A tenant has no hostname of its own: everybody signs in at the one console, and a
+  // PATCH that put <slug>.titanium.bot on this service would publish a customer's box to the
+  // internet with no login page in front of it. The host on the tenant row is the shared console,
+  // which is what the session token says and what the relay checks.
 
-  // 7. start. Asynchronous on Coolify's side: it queues the request and answers immediately, which
-  // is why the tenant is left "provisioning" and GET /v1/tenants/{slug} is the thing that says when
-  // the containers are actually up.
+  // 6. start. Asynchronous on Coolify's side: it queues the request and answers immediately, which
+  // is why the wait below exists at all.
   try {
     if (!done.has("start")) {
       const answer = await client.startService(serviceUuid);
@@ -786,16 +841,58 @@ export async function provisionTenant(options) {
     }
   } catch (error) { return fail("start", error); }
 
-  store.updateTenant(slug, { status: "provisioning", host, lastError: null });
+  // 7. ready. Waits for the box to answer and records which way it answered.
+  //
+  // A timeout here is NOT a failure and never marks the tenant failed: the image is 5.2 GB and a
+  // server that does not have it yet takes longer than any wait worth putting a customer through.
+  // The step is recorded as "waiting" rather than "ok", so completedSteps does not count it and the
+  // next provisioning run waits again instead of assuming.
+  let ready = { ready: false, how: "skipped", reason: "the wait was turned off" };
+  try {
+    if (!done.has("ready")) {
+      ready = await waitForBox({
+        client,
+        uuid: serviceUuid,
+        gateway: boxContainer ? `http://${boxContainer}:1340` : "",
+        token: gatewayToken,
+        probeImpl,
+        timeoutMs: readyTimeoutMs,
+        intervalMs: readyIntervalMs,
+        ...(sleep ? { sleep } : {}),
+      });
+      store.recordStep({
+        slug,
+        step: "ready",
+        status: ready.ready ? "ok" : "waiting",
+        detail: JSON.stringify({ how: ready.how, waitedMs: ready.waitedMs, ...(ready.reason ? { reason: ready.reason } : {}) }),
+      });
+      if (ready.ready) ran.push("ready");
+    } else {
+      ready = { ready: true, how: "already", waitedMs: 0 };
+    }
+  } catch (error) {
+    // The wait itself throwing is a bug in this code, not a broken tenant, and it must not lose a
+    // workspace that is otherwise built. It is recorded and the run carries on.
+    store.recordStep({ slug, step: "ready", status: "waiting", detail: String(error?.message ?? error) });
+  }
+
+  store.updateTenant(slug, {
+    status: ready.ready ? "running" : "provisioning",
+    host,
+    boxContainer,
+    boxReady: ready.ready,
+    lastError: null,
+  });
   return {
     ok: true,
     tenant: store.getTenant(slug),
-    // Once, and only on the run that created it. A retry answers null here and the note says where
-    // the operator goes instead.
-    relayPassword,
-    relayPasswordNote: relayPassword
-      ? "Write this down now. It is the tenant's relay password and nothing can print it again."
-      : "The relay password was set on an earlier run and cannot be shown again. Reset it with node ui/set-password.mjs on the server.",
+    boxContainer,
+    boxReady: ready.ready,
+    // The sentence an operator or a customer reads, in words rather than a status word. A box that
+    // is still starting is the normal case on a server that has never pulled the image.
+    boxNote: ready.ready
+      ? "The workspace is up and answering."
+      : "The workspace was created and is still starting. It usually takes a few minutes the first time, because the server has to pull a large image.",
     ran,
     steps: store.listSteps(slug),
   };
