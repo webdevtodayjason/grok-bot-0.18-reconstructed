@@ -8,6 +8,7 @@
 //   compose      deploy/coolify/docker-compose.yml re-pointed at that tree
 //   service      POST /services
 //   envs         POST /services/{uuid}/envs, the two values the compose refers to but does not carry
+//                (PATCH instead when Coolify already made the field from the compose's ${VAR})
 //   urls         PATCH /services/{uuid}, which is what puts https://<slug>.titanium.bot on the relay
 //   start        POST /services/{uuid}/start
 //
@@ -418,6 +419,7 @@ export function createCoolifyClient({ config, fetchImpl = globalThis.fetch }) {
     getService: (uuid) => call("GET", `/services/${uuid}`),
     getServiceApplications: (uuid) => call("GET", `/services/${uuid}/applications`),
     addEnv: (uuid, body) => call("POST", `/services/${uuid}/envs`, { body }),
+    updateEnv: (uuid, body) => call("PATCH", `/services/${uuid}/envs`, { body }),
     patchService: (uuid, body) => call("PATCH", `/services/${uuid}`, { body }),
     startService: (uuid) => call("POST", `/services/${uuid}/start`),
     stopService: (uuid) => call("POST", `/services/${uuid}/stop`),
@@ -705,7 +707,20 @@ export async function provisionTenant(options) {
       for (const env of envs) {
         // is_literal, because a generated secret has to reach the container byte for byte and
         // Coolify escapes $ in a value that is not marked literal.
-        await client.addEnv(serviceUuid, { key: env.key, value: env.value, is_preview: false, is_literal: true, is_multiline: false, is_shown_once: false });
+        const body = { key: env.key, value: env.value, is_preview: false, is_literal: true, is_multiline: false, is_shown_once: false };
+        // POST first and PATCH on the collision, rather than reading the list and deciding. When
+        // Coolify creates a service it reads the compose and makes an empty field for every ${VAR}
+        // it finds, so both of these keys already exist by the time this runs and the POST answers
+        // 409 "Environment variable already exists. Use PATCH request to update it." That is what
+        // failed the first real tenant build on the R750, 2026-09-07: the service, the directories
+        // and the secrets were all made and the row still came out `failed`. Re-running this step
+        // has to be safe too, because a retry is the normal way out of a half-finished provision.
+        try {
+          await client.addEnv(serviceUuid, body);
+        } catch (error) {
+          if (error?.status !== 409) throw error;
+          await client.updateEnv(serviceUuid, body);
+        }
       }
       store.recordStep({ slug, step: "envs", status: "ok", detail: JSON.stringify({ keys: envs.map((env) => env.key) }) });
       ran.push("envs");

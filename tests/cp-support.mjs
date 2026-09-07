@@ -40,6 +40,14 @@ export async function startFakeCoolify(options = {}) {
     services.set(String(uuid), { uuid: String(uuid), name: `existing-${uuid}`, docker_compose_raw: "", envs: [], urls: [], started: true });
   }
 
+  // Every ${VAR} in a compose, once each, which is the set of fields Coolify creates with it.
+  const composeVariables = (text) => {
+    const decoded = /^[A-Za-z0-9+/=\s]+$/.test(String(text ?? "")) && !String(text).includes(":")
+      ? Buffer.from(String(text), "base64").toString("utf8")
+      : String(text ?? "");
+    return [...new Set([...decoded.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((m) => m[1]))];
+  };
+
   const server = http.createServer((request, response) => {
     const chunks = [];
     request.on("data", (chunk) => chunks.push(chunk));
@@ -71,6 +79,13 @@ export async function startFakeCoolify(options = {}) {
 
       if (route === "POST /services") {
         const created = { uuid: `svc-${randomUUID().slice(0, 8)}`, name: body?.name ?? "", docker_compose_raw: body?.docker_compose_raw ?? "", envs: [], urls: [], started: false };
+        // Coolify reads the compose when it creates a service and makes an empty environment field
+        // for every ${VAR} in it, so the fields the control plane is about to POST already exist.
+        // Copied here because the real one does it, and because not doing it is what let this fake
+        // pass a provisioning run that failed on the R750 on 2026-09-07 with a 409 on the first env.
+        for (const name of composeVariables(created.docker_compose_raw)) {
+          created.envs.push({ key: name, value: "" });
+        }
         services.set(created.uuid, created);
         return send(201, { uuid: created.uuid, domains: [] });
       }
@@ -84,8 +99,18 @@ export async function startFakeCoolify(options = {}) {
         return send(200, CONTAINER_NAMES.map((name) => ({ uuid: `${service.uuid}-${name}`, name, status, fqdn: service.urls[0]?.url ?? null })));
       }
       if (route === "POST /services/{uuid}/envs") {
+        // Coolify's own words and status for a key that is already there.
+        if (service.envs.some((entry) => entry?.key === body?.key)) {
+          return send(409, { message: "Environment variable already exists. Use PATCH request to update it." });
+        }
         service.envs.push(body);
         return send(201, { uuid: `env-${service.envs.length}` });
+      }
+      if (route === "PATCH /services/{uuid}/envs") {
+        const at = service.envs.findIndex((entry) => entry?.key === body?.key);
+        if (at === -1) return send(404, { message: "Environment variable not found." });
+        service.envs[at] = body;
+        return send(201, { message: "Environment variable updated." });
       }
       if (route === "PATCH /services/{uuid}") {
         if (Array.isArray(body?.urls)) service.urls = body.urls;

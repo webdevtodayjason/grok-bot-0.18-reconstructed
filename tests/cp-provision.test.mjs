@@ -283,13 +283,25 @@ test("provisioning walks the seven steps and calls Coolify the way the openapi d
       assert.equal(result.ok, true, result.error);
       assert.deepEqual(result.ran, ["directories", "secrets", "compose", "service", "envs", "urls", "start"]);
 
+      // Two POSTs that each answer 409 and two PATCHes behind them. Coolify makes an empty field
+      // for every ${VAR} the compose names as soon as the service exists, so the fields these two
+      // keys go in are already there and only a PATCH fills them. The POST goes first anyway
+      // because a retry of a half-finished provision can find them missing.
       assert.deepEqual(coolify.routes(), [
         "POST /services",
         "POST /services/{uuid}/envs",
+        "PATCH /services/{uuid}/envs",
         "POST /services/{uuid}/envs",
+        "PATCH /services/{uuid}/envs",
         "PATCH /services/{uuid}",
         "POST /services/{uuid}/start",
       ]);
+      // And the values did land, which is the thing the 409 hid on the R750.
+      const stored = [...coolify.services.values()][0].envs;
+      for (const key of ["TITANBOT_GATEWAY_TOKEN", "CP_SESSION_SECRET"]) {
+        const entry = stored.find((one) => one.key === key);
+        assert.ok(entry != null && String(entry.value).length > 0, `${key} was left empty`);
+      }
 
       const created = coolify.callsTo("POST /services")[0];
       assert.equal(created.authorized, true);

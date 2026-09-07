@@ -319,7 +319,10 @@ test("creating a tenant provisions it and hands the relay password back once", a
     assert.ok(answer.body.relayPassword.length >= 32);
     assert.match(answer.body.relayPasswordNote, /Write this down now/);
     assert.deepEqual(coolify.routes(), [
-      "POST /services", "POST /services/{uuid}/envs", "POST /services/{uuid}/envs", "PATCH /services/{uuid}", "POST /services/{uuid}/start",
+      // The two PATCHes are Coolify's 409 on a field it made itself from the compose's ${VAR}.
+      "POST /services", "POST /services/{uuid}/envs", "PATCH /services/{uuid}/envs",
+      "POST /services/{uuid}/envs", "PATCH /services/{uuid}/envs",
+      "PATCH /services/{uuid}", "POST /services/{uuid}/start",
     ]);
 
     // And the read-back carries the live Coolify state alongside the ledger row.
