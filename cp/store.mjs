@@ -162,6 +162,27 @@ CREATE TABLE IF NOT EXISTS login_failures (
   at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS login_failures_at ON login_failures (at);
+-- ADMIN-1. Every sign-in this service decided, refused or allowed, and what was tried.
+--
+-- login_failures above is the LOCKOUT's memory: it is counted, it is cleared on a success, and it
+-- is pruned to a ten minute window, so by design it cannot answer "who has been knocking today".
+-- This table is the RECORD, and it is kept separately for exactly that reason: nothing clears it on
+-- a successful sign-in and nothing prunes it inside the retention window.
+--
+-- tried_hash is HMAC-SHA256(this service's own salt, the password). Never the password. See
+-- adminSalt in cp/admin.mjs for the decision; the short version is that the panel has to be able to
+-- say "the same password forty times" (a stale saved password) versus "forty different passwords"
+-- (an attack), and that is the least it can hold and still tell them apart.
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  at         INTEGER NOT NULL,
+  email      TEXT NOT NULL DEFAULT '',
+  ip         TEXT NOT NULL DEFAULT '',
+  outcome    TEXT NOT NULL DEFAULT 'refused',
+  tried_hash TEXT NOT NULL DEFAULT '',
+  tenant     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS login_attempts_at ON login_attempts (at);
 -- A workspace name that has been removed while sign-ins still pointed at it.
 --
 -- Deleting a tenant deliberately leaves its accounts alone: the operator may be rebuilding, and
@@ -183,6 +204,14 @@ const accountRow = (row) => (row == null ? null : {
   email: row.email,
   name: row.name ?? "",
   tenant: row.tenant,
+  // ADMIN-1. Whether this account may open the super admin console. It is read from the store on
+  // every admin request and it is NOT in the session token: a claim in a token is a fact from
+  // whenever the token was minted, and "this person was demoted" has to take effect now rather than
+  // in up to twelve hours.
+  superAdmin: Number(row.super_admin ?? 0) === 1,
+  // A door that has been closed without the account being deleted. Deleting is the right shape for
+  // "this person has left"; this is the right shape for "not right now", and it is reversible.
+  disabled: Number(row.disabled ?? 0) === 1,
   createdAt: Number(row.created_at),
   updatedAt: Number(row.updated_at),
 });
@@ -210,6 +239,11 @@ const tenantRow = (row) => (row == null ? null : {
 const TENANT_MIGRATIONS = [
   "ALTER TABLE tenants ADD COLUMN box_container TEXT",
   "ALTER TABLE tenants ADD COLUMN box_ready INTEGER NOT NULL DEFAULT 0",
+  // ADMIN-1. Both default to 0, which is the only safe default for either: an upgrade of the R750's
+  // existing database gives nobody the super admin console and locks nobody out of their workspace.
+  // Jason's own flag is set afterwards by hand, with `account promote`, on an account he creates.
+  "ALTER TABLE accounts ADD COLUMN super_admin INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
 ];
 
 export function openStore(options = {}) {
@@ -270,6 +304,16 @@ export function openStore(options = {}) {
   const selectRetired = statement("SELECT slug FROM retired_slugs WHERE slug = ?");
   const selectRetiredAll = statement("SELECT * FROM retired_slugs ORDER BY retired_at, slug");
   const deleteRetired = statement("DELETE FROM retired_slugs WHERE slug = ?");
+
+  const updateSuperAdmin = statement("UPDATE accounts SET super_admin = ?, updated_at = ? WHERE id = ?");
+  const updateDisabled = statement("UPDATE accounts SET disabled = ?, updated_at = ? WHERE id = ?");
+  const countSuperAdminsRow = statement("SELECT COUNT(*) AS n FROM accounts WHERE super_admin = 1");
+
+  const insertAttempt = statement("INSERT INTO login_attempts (at, email, ip, outcome, tried_hash, tenant) VALUES (?, ?, ?, ?, ?, ?)");
+  const selectAttempts = statement("SELECT * FROM login_attempts WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?");
+  const selectAttemptsByOutcome = statement("SELECT * FROM login_attempts WHERE at >= ? AND outcome = ? ORDER BY at DESC, id DESC LIMIT ?");
+  const deleteOldAttempts = statement("DELETE FROM login_attempts WHERE at < ?");
+  const countAttemptsRow = statement("SELECT COUNT(*) AS n FROM login_attempts WHERE at >= ?");
 
   const insertFailure = statement("INSERT INTO login_failures (email, ip, at) VALUES (?, ?, ?)");
   const countFailuresByEmail = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM login_failures WHERE email = ? AND at >= ?");
@@ -374,6 +418,68 @@ export function openStore(options = {}) {
       updateAccountPassword.run(JSON.stringify(hashPassword(password)), now(), String(id));
       return accountRow(selectAccountById.get(String(id)));
     },
+
+    // ---- super admin, and a door that is shut rather than removed (ADMIN-1) ---------------------
+
+    // Promote or demote. Takes an id or an email, because the operator types an email and the
+    // console holds an id, and making both callers convert first is how one of them gets it wrong.
+    setSuperAdmin(idOrEmail, flag) {
+      const row = selectAccountById.get(String(idOrEmail)) ?? selectAccountByEmail.get(normalizeEmail(idOrEmail));
+      if (row == null) return null;
+      updateSuperAdmin.run(flag ? 1 : 0, now(), row.id);
+      return accountRow(selectAccountById.get(row.id));
+    },
+
+    setAccountDisabled(idOrEmail, flag) {
+      const row = selectAccountById.get(String(idOrEmail)) ?? selectAccountByEmail.get(normalizeEmail(idOrEmail));
+      if (row == null) return null;
+      updateDisabled.run(flag ? 1 : 0, now(), row.id);
+      return accountRow(selectAccountById.get(row.id));
+    },
+
+    // How many super admins there are. The demote route reads it before it does anything: taking the
+    // last one away leaves a console nobody can open, and the only way back in is the CLI with
+    // CP_ADMIN_TOKEN. That is a recoverable mistake and it should still be refused, out loud.
+    countSuperAdmins() { return Number(countSuperAdminsRow.get()?.n ?? 0); },
+
+    // ---- the sign-in record (ADMIN-1) ------------------------------------------------------------
+    //
+    // Separate from login_failures on purpose. That one is the lockout's counter, cleared on a
+    // success and pruned to ten minutes; this one is the record the panel reads, and nothing clears
+    // it early.
+    recordLoginAttempt({ at = now(), email = "", ip = "", outcome = "refused", triedHash = "", tenant = "" }) {
+      insertAttempt.run(
+        Number(at), normalizeEmail(email), String(ip ?? ""), String(outcome),
+        // Only ever a hex digest. A caller that passed a password here by mistake would be writing
+        // a password into the database, so the shape is checked rather than trusted.
+        /^[0-9a-f]{64}$/i.test(String(triedHash ?? "")) ? String(triedHash) : "",
+        String(tenant ?? ""),
+      );
+    },
+
+    listLoginAttempts({ since = 0, outcome = "", limit = 500 } = {}) {
+      const cap = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.min(Number(limit), 5000) : 500;
+      const rows = String(outcome ?? "").length > 0
+        ? selectAttemptsByOutcome.all(Number(since) || 0, String(outcome), cap)
+        : selectAttempts.all(Number(since) || 0, cap);
+      return rows.map((row) => ({
+        at: new Date(Number(row.at)).toISOString(),
+        door: "account",
+        email: row.email ?? "",
+        ip: row.ip ?? "",
+        userAgent: "",
+        triedHash: row.tried_hash ?? "",
+        outcome: row.outcome ?? "refused",
+        tenant: row.tenant ?? "",
+      }));
+    },
+
+    countLoginAttempts(since = 0) { return Number(countAttemptsRow.get(Number(since) || 0)?.n ?? 0); },
+
+    // Thirty days by default. Long enough that "has this been going on for weeks" is answerable and
+    // short enough that the table does not become a permanent record of everybody who ever mistyped
+    // their own password.
+    pruneLoginAttempts(before) { deleteOldAttempts.run(Number(before)); },
 
     // ---- tenants -----------------------------------------------------------------------------
 

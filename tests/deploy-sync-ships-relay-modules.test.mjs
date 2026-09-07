@@ -34,13 +34,53 @@ test("sync.sh ships the control plane and the two compose files the image is bui
   const dockerfile = readFileSync(path.join(repo, "cp/Dockerfile"), "utf8");
   const copied = [...dockerfile.matchAll(/^COPY (\S+) /gm)].map((m) => m[1]);
   assert.ok(copied.length >= 4, `cp/Dockerfile copies ${copied.length} things`);
+  // Every file by name, or by a glob over its directory with its extension, or by a directory
+  // rsync. All three are ways sync.sh already ships things and all three put the file where the
+  // build context expects it.
+  //
+  // ADMIN-1 widened this. `COPY cp/ /app/cp/` used to be satisfied by seeing "cp/*" anywhere in the
+  // script, which `rsync -a "$REPO"/cp/*.mjs` matches -- so cp/admin/, the super admin console's
+  // three files, passed this test while shipping nothing. The image then built, the service started,
+  // and GET /admin answered 500. So a directory COPY is now expanded and every file under it is
+  // checked on its own name.
+  const shipsFile = (relative) => {
+    const dir = path.posix.dirname(relative);
+    const base = path.posix.basename(relative);
+    const escaped = base.replace(/[.]/g, "\\.");
+    const extension = path.posix.extname(relative).replace(/[.]/g, "\\.");
+    const byName = new RegExp(`/${dir}/${escaped}`);
+    const byGlob = extension.length > 0 ? new RegExp(`/${dir}/\\*${extension}`) : null;
+    // rsync -a "$REPO/cp/admin/" "$HOST:...": the whole directory, trailing slash and all.
+    const byDirectory = new RegExp(`"\\$REPO/${dir}/"`);
+    return byName.test(script) || (byGlob != null && byGlob.test(script)) || byDirectory.test(script);
+  };
+  const filesUnder = (relative) => {
+    const full = path.join(repo, relative);
+    const out = [];
+    for (const entry of readdirSync(full, { withFileTypes: true })) {
+      const next = path.posix.join(relative, entry.name);
+      // cp/.data is the local sqlite store and is deliberately never shipped, which the last
+      // assertion in this test is about. It is not part of the image either: the Dockerfile's
+      // build context on the server has no such directory.
+      if (entry.name.startsWith(".")) continue;
+      if (entry.isDirectory()) { out.push(...filesUnder(next)); continue; }
+      out.push(next);
+    }
+    return out;
+  };
   for (const source of copied) {
-    // Either the file by name or a glob over its directory with its extension. Both are ways
-    // sync.sh already ships things, and both put the file where the build context expects it.
-    const shipped = source.endsWith("/")
-      ? new RegExp(`/${source}\\*`)
-      : new RegExp(`/${path.posix.dirname(source)}/(?:${path.posix.basename(source).replace(/[.]/g, "\\.")}|\\*${path.posix.extname(source).replace(/[.]/g, "\\.")})`);
-    assert.match(script, shipped, `cp/Dockerfile copies ${source}, so sync.sh has to put it on the server`);
+    const targets = source.endsWith("/") ? filesUnder(source.replace(/\/$/, "")) : [source];
+    assert.ok(targets.length > 0, `cp/Dockerfile copies ${source} and there is nothing there`);
+    for (const target of targets) {
+      assert.ok(shipsFile(target), `cp/Dockerfile copies ${source}, so sync.sh has to put ${target} on the server`);
+    }
+  }
+
+  // Named outright as well, because this is the one that was missed and a regression here is a
+  // console that answers 500 rather than a build that fails.
+  assert.match(script, /rsync -a --delete "\$REPO\/cp\/admin\/"/, "the super admin console's three files ship as a directory");
+  for (const page of ["index.html", "admin.css", "admin.js"]) {
+    assert.ok(readdirSync(path.join(repo, "cp/admin")).includes(page), `cp/admin/${page} is what the control plane serves at /admin`);
   }
 
   // The tenant template and the control plane's own resource file.

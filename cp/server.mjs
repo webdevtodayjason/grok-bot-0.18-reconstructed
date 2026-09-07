@@ -44,6 +44,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, parseTrustedProxies, sourceAddress } from "../ui/auth.mjs";
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
+import { createAdminApi } from "./admin.mjs";
 import {
   NEW_TENANTS_BLOCKED,
   boxContainerName,
@@ -139,6 +140,11 @@ const MAX_CONCURRENT_DERIVATIONS = 4;
 
 const publicAccount = (account) => (account == null ? null : {
   id: account.id, email: account.email, name: account.name, tenant: account.tenant,
+  // ADMIN-1. Two facts about a door, and neither is a secret: who may open the super admin console,
+  // and whose sign-in is shut off right now. Both are read from the store on every request that
+  // cares, never from a token.
+  superAdmin: account.superAdmin === true,
+  disabled: account.disabled === true,
   createdAt: new Date(account.createdAt).toISOString(),
 });
 
@@ -315,6 +321,71 @@ export function createApp(options = {}) {
     return { ...publicTenant(current), coolify: live };
   }
 
+  // ---- the two things that can be DONE to a workspace, in one place each (ADMIN-1) --------------
+  //
+  // Lifted out of the /v1/tenants routes rather than copied, because the super admin console offers
+  // the same four buttons and two implementations of "stop a customer's workspace" is how one of
+  // them ends up without the adopted guard. Both route trees call these.
+
+  async function tenantPower(response, slug, action) {
+    const row = store.getTenant(slug);
+    if (row == null) return json(response, 404, { error: "not_found" });
+    if (!row.coolifyServiceUuid) return json(response, 409, { error: "no_service", message: "This tenant has no Coolify service yet." });
+    try {
+      const answer = action === "stop" ? await client.stopService(row.coolifyServiceUuid)
+        : action === "start" ? await client.startService(row.coolifyServiceUuid)
+        : await client.restartService(row.coolifyServiceUuid);
+      // Coolify queues all three and answers immediately, so the ledger records what was asked
+      // for, not what has happened. GET /v1/tenants/{slug} is what says when it took.
+      //
+      // An adopted row keeps saying "adopted": that is how it got here, not a container state,
+      // and it is what the delete and provision guards read. Writing "stopped" over it would turn
+      // a stop into a way around them.
+      const next = wasAdopted(slug, row) ? "adopted" : action === "stop" ? "stopped" : "provisioning";
+      const updated = store.updateTenant(slug, { status: next, lastError: null });
+      return json(response, 200, { tenant: publicTenant(updated), message: String(answer?.message ?? "") });
+    } catch (error) {
+      store.updateTenant(slug, { lastError: String(error?.message ?? error) });
+      return json(response, 502, { error: "coolify_error", message: String(error?.message ?? error) });
+    }
+  }
+
+  async function tenantProvision(response, slug, body) {
+    const row = store.getTenant(slug);
+    if (row == null) return json(response, 404, { error: "not_found" });
+    const dryRun = body?.dryRun === true || config.dryRun;
+    // Provision on an adopted instance is not a retry, it is a second instance. On tenant
+    // "titanium" that would be a second copy of Jason's live console.
+    if (!dryRun && wasAdopted(slug, row)) {
+      return json(response, 409, {
+        error: "adopted",
+        message: "This instance was already running when it was claimed, so this service did not build it and will not rebuild it. Building it again would make a second copy beside the one that is live.",
+      });
+    }
+    // Finishing a build that was already allowed is fine; starting a new one is not.
+    if (!dryRun && !config.allowNewTenants && !row.coolifyServiceUuid) {
+      return json(response, 409, { error: "new_tenants_off", message: NEW_TENANTS_BLOCKED });
+    }
+    const result = await provisionTenant({ store, config, slug, name: row.name, dryRun, fetchImpl, probeImpl });
+    if (!result.ok) {
+      const status = dryRun ? 500 : 502;
+      return json(response, status, { error: dryRun ? "render_failed" : "provisioning_failed", step: result.step, message: result.error, plan: result.plan });
+    }
+    if (dryRun) return json(response, 200, { dryRun: true, slug, plan: result.plan, composeSha256: result.composeSha256 });
+    return json(response, 200, { tenant: publicTenant(result.tenant), ran: result.ran, boxReady: result.boxReady, message: result.boxNote });
+  }
+
+  // ---- the super admin console (ADMIN-1) --------------------------------------------------------
+  //
+  // Its own file, handed the pieces this one already owns, so there is one store, one Coolify
+  // client and one session verifier in this process rather than two. It mounts below, before the
+  // operator-token routes, and every route inside it refuses anything that is not a super admin.
+  const admin = createAdminApi({
+    config, store, client, now, fetchImpl,
+    json, noContent, publicAccount, publicTenant, tenantView, tenantPower, tenantProvision,
+    currentSession, version: CP_VERSION,
+  });
+
   async function handleSessionCreate(request, response, body) {
     const email = normalizeEmail(body.email);
     const password = typeof body.password === "string" ? body.password : "";
@@ -327,6 +398,9 @@ export function createApp(options = {}) {
     store.pruneLoginFailures(at);
     const lock = store.loginLock({ email, ip, at, countIp: !viaRelay });
     if (lock.locked) {
+      // ADMIN-1. Written down before the answer goes out. No hash: this branch never reached the
+      // password check, so there is nothing that was tried, only somebody who kept knocking.
+      admin.recordAttempt({ email, ip, outcome: "locked", at });
       return json(response, 429, { error: "locked", retryAfter: lock.retryAfter }, { "retry-after": String(lock.retryAfter) });
     }
 
@@ -352,7 +426,20 @@ export function createApp(options = {}) {
 
     if (!attempt.ok) {
       store.recordLoginFailure({ email, ip, at });
+      // The keyed hash of what was tried, never the password. cp/admin.mjs carries the decision.
+      admin.recordAttempt({ email, ip, outcome: "refused", password, at });
       return json(response, 401, { error: "invalid_login" });
+    }
+
+    // A door that was shut without the account being removed. The password was right, so this is
+    // not a refusal in the lockout's sense and it is not counted as one; it is a sentence saying
+    // their sign-in is off. ADMIN-1.
+    if (attempt.account.disabled === true) {
+      admin.recordAttempt({ email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at });
+      return json(response, 403, {
+        error: "disabled",
+        message: "This sign-in has been turned off. Contact your Titanium Bot support contact.",
+      });
     }
 
     const tenant = store.getTenant(attempt.account.tenant);
@@ -364,6 +451,10 @@ export function createApp(options = {}) {
     }
 
     store.clearLoginFailures({ email, ip });
+    // Successes are recorded too, and with no hash: there is no reason to hold anything derived
+    // from a password that worked, and a file of keyed hashes where one is known-good is a worse
+    // file than one where none is. This is also what fills the "last sign-in" column.
+    admin.recordAttempt({ email, ip, outcome: "ok", tenant: attempt.account.tenant, at });
     store.pruneRevocations(at);
     const host = tenant.host || consoleHost(config);
     const { token, payload } = mintSessionToken({
@@ -380,7 +471,17 @@ export function createApp(options = {}) {
     return json(response, 200, {
       token,
       expiresAt: new Date(payload.exp).toISOString(),
-      account: { id: attempt.account.id, email: attempt.account.email, name: attempt.account.name },
+      // superAdmin is answered HERE, in the body, and not put in the token. The token's claim set is
+      // fixed (ui/session-token.mjs, REQUIRED_CLAIMS) and, more to the point, a claim is a fact from
+      // whenever it was minted: the admin routes look the flag up in the store on every request so a
+      // demotion takes effect now rather than in up to twelve hours. This field is what tells the
+      // console page which door to draw, nothing more. ADMIN-1.
+      account: {
+        id: attempt.account.id,
+        email: attempt.account.email,
+        name: attempt.account.name,
+        superAdmin: attempt.account.superAdmin === true,
+      },
       tenant: { slug: tenant.slug, host, status: tenant.status },
     });
   }
@@ -508,6 +609,14 @@ export function createApp(options = {}) {
       try { body = await readJsonBody(request); }
       catch (error) { return json(response, 400, { error: error.code === "too_large" ? "too_large" : "bad_json", message: String(error.message) }); }
     }
+
+    // ---- the super admin console (ADMIN-1) -----------------------------------------------------
+    //
+    // Before the /v1 check, because the page itself is served at /admin and not under /v1, and
+    // before the operator-token routes, because its own guard is a different one: CP_ADMIN_TOKEN for
+    // the CLI, or a session whose account carries super_admin, looked up in the store on every
+    // request. It answers false for anything that is not its own, and the routing below carries on.
+    if (await admin.handle(request, response, { segments, method, body, url })) return undefined;
 
     if (segments[0] !== "v1") return json(response, 404, { error: "not_found" });
 
@@ -776,57 +885,20 @@ export function createApp(options = {}) {
         return json(response, 200, { tenant: publicTenant(tenant), boxContainer, stateDir, profileDir });
       }
 
+      // Both of these are tenantProvision and tenantPower above. Adopt records one ledger step
+      // called "adopt", so none of the seven provisioning steps is marked done and every one of
+      // them would run on a re-provision: a duplicate Coolify service, a second container carrying
+      // the com.titanbot.role=box label the relay resolves its box by, and the hostname rewritten
+      // to one that does not exist. That guard lives in tenantProvision, where the admin console
+      // gets it too.
       if (segments.length === 4 && segments[3] === "provision" && method === "POST") {
         if (row == null) return json(response, 404, { error: "not_found" });
-        const dryRun = body.dryRun === true || config.dryRun;
-        // Provision on an adopted instance is not a retry, it is a second instance.
-        //
-        // Adopt records one ledger step called "adopt", so none of the seven provisioning steps is
-        // marked done and every one of them would run: a duplicate Coolify service, a second
-        // container carrying the com.titanbot.role=box label the relay resolves its box by, the
-        // ledger repointed at the new service, and the hostname rewritten from
-        // console.titanium.bot to titanium.titanium.bot, which does not exist. On tenant
-        // "titanium" that is Jason's live console.
-        if (!dryRun && wasAdopted(slug, row)) {
-          return json(response, 409, {
-            error: "adopted",
-            message: "This instance was already running when it was claimed, so this service did not build it and will not rebuild it. Building it again would make a second copy beside the one that is live.",
-          });
-        }
-        // Finishing a build that was already allowed is fine; starting a new one is not.
-        if (!dryRun && !config.allowNewTenants && !row.coolifyServiceUuid) {
-          return json(response, 409, { error: "new_tenants_off", message: NEW_TENANTS_BLOCKED });
-        }
-        const result = await provisionTenant({ store, config, slug, name: row.name, dryRun, fetchImpl, probeImpl });
-        if (!result.ok) {
-          const status = dryRun ? 500 : 502;
-          return json(response, status, { error: dryRun ? "render_failed" : "provisioning_failed", step: result.step, message: result.error, plan: result.plan });
-        }
-        if (dryRun) return json(response, 200, { dryRun: true, slug, plan: result.plan, composeSha256: result.composeSha256 });
-        return json(response, 200, { tenant: publicTenant(result.tenant), ran: result.ran, boxReady: result.boxReady, message: result.boxNote });
+        return await tenantProvision(response, slug, body);
       }
 
       if (segments.length === 4 && ["stop", "start", "restart"].includes(segments[3]) && method === "POST") {
         if (row == null) return json(response, 404, { error: "not_found" });
-        if (!row.coolifyServiceUuid) return json(response, 409, { error: "no_service", message: "This tenant has no Coolify service yet." });
-        const action = segments[3];
-        try {
-          const answer = action === "stop" ? await client.stopService(row.coolifyServiceUuid)
-            : action === "start" ? await client.startService(row.coolifyServiceUuid)
-            : await client.restartService(row.coolifyServiceUuid);
-          // Coolify queues all three and answers immediately, so the ledger records what was asked
-          // for, not what has happened. GET /v1/tenants/{slug} is what says when it took.
-          //
-          // An adopted row keeps saying "adopted": that is how it got here, not a container state,
-          // and it is what the delete and provision guards above read. Writing "stopped" over it
-          // would turn a stop into a way around them.
-          const next = wasAdopted(slug, row) ? "adopted" : action === "stop" ? "stopped" : "provisioning";
-          const updated = store.updateTenant(slug, { status: next, lastError: null });
-          return json(response, 200, { tenant: publicTenant(updated), message: String(answer?.message ?? "") });
-        } catch (error) {
-          store.updateTenant(slug, { lastError: String(error?.message ?? error) });
-          return json(response, 502, { error: "coolify_error", message: String(error?.message ?? error) });
-        }
+        return await tenantPower(response, slug, segments[3]);
       }
 
       return json(response, 404, { error: "not_found" });

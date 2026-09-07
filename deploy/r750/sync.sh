@@ -150,10 +150,20 @@ step "ship the control plane"
 #
 # cp/*.mjs by glob and the Dockerfile by name, never the directory: cp/.data is the local sqlite
 # store with account rows in it, and a directory copy would carry it to the server.
-ssh "$HOST" "mkdir -p '$ROOT/cp' '$ROOT/deploy/coolify'"
+ssh "$HOST" "mkdir -p '$ROOT/cp' '$ROOT/cp/admin' '$ROOT/deploy/coolify'"
 rsync -a "$REPO"/cp/*.mjs "$REPO/cp/Dockerfile" "$REPO/cp/README.md" "$HOST:$ROOT/cp/"
+# ADMIN-1. The super admin console's three files. A directory of its own, with --delete, because it
+# is the one place under cp/ that is a whole directory and nothing in it is a secret: the page shell
+# carries no customer data at all, and everything it renders arrives from a route that refuses
+# anything but a super admin.
+#
+# It is a separate line rather than a wider glob for the reason two comments up: cp/ itself is never
+# copied as a directory, because cp/.data is the local sqlite store with account rows in it. Without
+# this line the image builds, the service starts, and GET /admin answers 500 "the admin console's
+# index.html is not in this image", which is a deploy that looks fine until somebody opens it.
+rsync -a --delete "$REPO/cp/admin/" "$HOST:$ROOT/cp/admin/"
 rsync -a "$REPO/deploy/coolify/docker-compose.yml" "$REPO/deploy/coolify/box.compose.yml" "$REPO/deploy/coolify/control-plane.compose.yml" "$HOST:$ROOT/deploy/coolify/"
-say "cp/{$(cd "$REPO/cp" && ls *.mjs | tr '\n' ',')Dockerfile,README.md} and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml}"
+say "cp/{$(cd "$REPO/cp" && ls *.mjs | tr '\n' ',')Dockerfile,README.md}, cp/admin/ and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml}"
 # The control plane's own store is never shipped. It lives on the server under /data/titanbot and
 # holds every customer's password hash.
 say "cp/.data is not shipped"

@@ -69,6 +69,8 @@ import {
   svixHeaders, toAddressList, verifySvixSignature,
 } from "./mail-edge.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
+import { createLoginLedger, filterAttempts } from "./login-ledger.mjs";
+import { readBoxHealth } from "./box-health.mjs";
 import { accountSignIn, relayConfig, ssoVerdict } from "./tenant-login.mjs";
 import {
   NOT_AVAILABLE_SENTENCE, OPERATOR_SLUG, createTenantRegistry, dockerNameReader, operatorEntry,
@@ -268,6 +270,22 @@ if (STATE_DIR.length > 0) {
   try { mkdirSync(STATE_DIR, { recursive: true }); }
   catch (error) { console.log(`state could not make ${STATE_DIR}: ${error?.message ?? error}`); }
 }
+
+// ---- the failed sign-in ledger (ADMIN-1) -------------------------------------------------------
+//
+// Every refusal and every lockout at either door lands in <state dir>/login-attempts.jsonl, with the
+// tried password kept only as a keyed hash so the panel can say "the same password forty times"
+// versus "forty different passwords" without holding anybody's secret. ui/login-ledger.mjs carries
+// the decision and the salt.
+//
+// It goes in the OPERATOR's state directory, not a tenant's, and that is not an oversight: a refused
+// sign-in has no tenant yet. Somebody typing a wrong email at the login page belongs to nobody, and
+// a per-tenant ledger would simply lose them.
+const LOGIN_LEDGER = createLoginLedger({
+  dir: STATE_DIR.length > 0 ? STATE_DIR : HERE,
+  ownLikeParent,
+  log: (line) => console.log(line),
+});
 
 // ---- one console, every tenant (TENANT-5) -----------------------------------------------------
 //
@@ -613,6 +631,20 @@ async function drainThenEnd(req, res, status, headers, payload) {
   return res.end(payload);
 }
 
+// One attempt written to <state dir>/login-attempts.jsonl. Never awaited by a route: the ledger is
+// a record of the door, not the door, and a slow disk must not hold a sign-in open. Never throws
+// either -- createLoginLedger swallows its own write errors and logs them.
+//
+// The password reaches this and goes no further: what lands on disk is the keyed hash, and a
+// successful sign-in gets not even that.
+const noteLoginAttempt = (req, fields) => {
+  void LOGIN_LEDGER.record({
+    ip: clientOf(req),
+    userAgent: req.headers["user-agent"] ?? "",
+    ...fields,
+  });
+};
+
 async function handleLogin(req, res, url) {
   const wantsHtml = String(req.headers.accept ?? "").includes("text/html");
   const key = clientOf(req);
@@ -623,6 +655,11 @@ async function handleLogin(req, res, url) {
   if (waitMs > 0) {
     const seconds = Math.ceil(waitMs / 1000);
     console.log(`login rate limited for ${key}, ${seconds}s left`);
+    // A lockout row carries no hash and no email, and that is honest rather than lazy: this branch
+    // answers BEFORE the body is read, so there is no password here and no address either. What the
+    // panel learns from it is the one thing that matters, which is that this address kept knocking
+    // after it had been told to stop.
+    noteLoginAttempt(req, { door: "instance", outcome: "locked" });
     const stalled = safeNextPath(url.searchParams.get("next"));
     const headers = { "retry-after": String(seconds) };
     if (!wantsHtml) return endAndClose(req, res, 429, { ...headers, "content-type": "application/json" }, JSON.stringify({ error: `too many attempts; wait ${seconds}s` }));
@@ -637,6 +674,10 @@ async function handleLogin(req, res, url) {
     // It counts as a failure: a flood of oversized bodies is an attack on this port, and the
     // lockout is the only thing that makes any of it slow.
     throttle.recordFailure(key);
+    // Recorded as the instance door because that is the door the routing below would have sent it
+    // to: no body means no email, and an empty email is the instance door. No hash, because there
+    // is no password in a body this size, only a payload.
+    noteLoginAttempt(req, { door: "instance", outcome: "refused" });
     if (!wantsHtml) return drainThenEnd(req, res, 413, { "content-type": "application/json" }, JSON.stringify({ error: "that is not a password" }));
     return drainThenEnd(req, res, 413, { "content-type": "text/html; charset=utf-8" },
       renderLoginPage({ error: "That request was too large to be a password." }));
@@ -656,6 +697,7 @@ async function handleLogin(req, res, url) {
 
   if (!verifyPassword(String(fields.password ?? ""), AUTH.password)) {
     throttle.recordFailure(key);
+    noteLoginAttempt(req, { door: "instance", outcome: "refused", password: String(fields.password ?? "") });
     // The address, never the password, and the address is the client's rather than the proxy's
     // wherever a trusted proxy said so. On a public console this line is the only record that
     // anyone is knocking.
@@ -668,6 +710,7 @@ async function handleLogin(req, res, url) {
   }
 
   throttle.recordSuccess(key);
+  noteLoginAttempt(req, { door: "instance", outcome: "ok", tenant: OPERATOR_SLUG });
   // The instance password is the operator's door and means the operator's workspace. TENANT-5.
   const cookie = serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret, { tenant: OPERATOR_SLUG }),
     { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: secureOf(req) });
@@ -703,6 +746,11 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
   const verdict = await accountSignIn({
     config: RELAY, email, password, client: key, keyOf: sessionKeyFor,
   });
+  // ADMIN-1. The email as typed, lowercased, because "who is being guessed at" is the question the
+  // operator is asking and an address that is not an address is still an answer to it. The tenant is
+  // left empty on anything but a success: this relay does not know which workspace an unknown email
+  // belongs to, and the control plane fills that in when it merges the two ledgers.
+  const note = (outcome, tenant = "") => noteLoginAttempt(req, { door: "account", email, outcome, tenant, password });
   const say = (status, page, json) => {
     if (!wantsHtml) return fail(res, status, json);
     return sendLoginPage(res, status, { error: page, next });
@@ -711,6 +759,7 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
   if (verdict.kind === "session") {
     throttle.recordSuccess(key);
     console.log(`login by account on ${verdict.payload.tenant} from ${key}`);
+    note("ok", String(verdict.payload.tenant ?? ""));
     return mintAccountSession(req, res, verdict.payload, next);
   }
 
@@ -735,10 +784,14 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
     // The address of the caller, never the address that was typed and never the password.
     const edge = edgeOf(req);
     console.log(`account login refused from ${key}${edge === key ? "" : ` (via ${edge})`}`);
+    note("refused");
     return say(401, "That email or password is not right.", "that email or password is not right");
   }
 
   if (verdict.kind === "busy") {
+    // The control plane's own lockout said no. It is a lockout wherever it was decided, and the
+    // panel should show it as one rather than as a refusal that never reached a password check.
+    note("locked");
     return say(429, "Too many sign-in attempts. Wait a moment and try again.", "too many attempts");
   }
 
@@ -769,6 +822,46 @@ function handleSso(req, res, token) {
   }
   console.log(`sign-in link refused from ${clientOf(req)} (${verdict.detail ?? "not valid"})`);
   return sendLoginPage(res, 401, { error: "That sign-in link is not valid here." });
+}
+
+// ---- what the control plane asks this relay for (ADMIN-1) --------------------------------------
+//
+// Two GETs, both read-only, both behind CP_RELAY_TOKEN, and neither reachable with a console
+// session or with a job bus bearer. They exist because the super admin console lives on the control
+// plane and two of its facts do not: the failed sign-in ledger is written at THIS door, and box
+// health needs the docker socket, which the control plane's container deliberately does not have.
+//
+// An install with no control plane serves neither. There is nothing to ask and nobody to ask it, and
+// answering 404 rather than 401 is the truthful shape: this route does not exist here.
+async function handleRelayAdmin(req, res, url) {
+  const expected = String(RELAY?.relayToken ?? "");
+  if (expected.length === 0) return fail(res, 404, "not found");
+  if (req.method !== "GET") return fail(res, 405, "GET");
+  const header = String(req.headers.authorization ?? "");
+  const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
+  // Constant time over the value and over the length, the same compare the registry uses on a
+  // gateway token. A wrong credential learns nothing from how long the refusal took.
+  if (presented.length === 0 || !safeEqual(presented, expected)) return fail(res, 401, "unauthorized");
+
+  if (url.pathname === "/admin/login-attempts") {
+    const rows = filterAttempts(await LOGIN_LEDGER.rows(), {
+      since: url.searchParams.get("since"),
+      outcome: url.searchParams.get("outcome") ?? "",
+      limit: Number(url.searchParams.get("limit") ?? 500),
+    });
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    // The salt is not in here and never will be. What leaves this process is the keyed hash, which
+    // is what lets the panel count distinct passwords and nothing else.
+    return res.end(JSON.stringify({ source: "relay", measuredAt: new Date().toISOString(), rows }));
+  }
+
+  if (url.pathname === "/admin/boxes") {
+    const report = await readBoxHealth(registry.all());
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify(report));
+  }
+
+  return fail(res, 404, "not found");
 }
 
 function handleLogout(req, res) {
@@ -1409,6 +1502,17 @@ const server = createServer(async (req, res) => {
     // webhook carries no cookie and no bearer. Its credential is the Svix signature on the body,
     // which the mail edge verifies before it reads a single field. MAIL-1.
     if (url.pathname === "/hooks/resend") return await handleMailWebhook(req, res);
+    // Before the console's login as well, and behind a credential the console session cannot
+    // present: this is the CONTROL PLANE asking the relay for the two things only the relay can
+    // see. The failed sign-in ledger, because a refusal happens at this door and never reaches the
+    // control plane at all; and box health, because this container has the docker socket and the
+    // control plane's deliberately does not. ADMIN-1.
+    //
+    // The credential is CP_RELAY_TOKEN, which is the same value the control plane already checks on
+    // its own registry route. One shared secret between these two services, not two.
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
+      return await handleRelayAdmin(req, res, url);
+    }
     // Whether a password is configured is not a secret: the login page announces it to anyone who
     // asks for it. The console reads this to decide whether to draw a Log out control.
     if (req.method === "GET" && url.pathname === "/auth/state") {

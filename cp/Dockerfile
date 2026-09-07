@@ -47,6 +47,16 @@ COPY ui/set-password.mjs /app/ui/set-password.mjs
 # line the image builds and then fails at import on the first sign-in.
 COPY ui/session-token.mjs /app/ui/session-token.mjs
 
+# ui/login-ledger.mjs is copied because cp/admin.mjs imports the keyed hash and the row shape from
+# it. Both services write down who tried to sign in, and the super admin console shows the two
+# ledgers as one list, so the row shape has to be one shape and the hash has to be one function.
+#
+# The SALTS stay separate and that is deliberate: the relay's salt lives in its state directory and
+# this service's lives in CP_DATA_DIR, so a hash from one is never comparable to a hash from the
+# other, and stealing either file does not widen the other's blast radius. The console counts
+# distinct passwords per source for exactly that reason. ADMIN-1.
+COPY ui/login-ledger.mjs /app/ui/login-ledger.mjs
+
 # The template every tenant's compose is rendered from: ONE service, the box, on the shared network.
 # The renderer replaces the four data-volume paths and the credential path with the tenant's own,
 # keeps the runtime directory shared, writes the tenant's name into TENANT_ID and into its network

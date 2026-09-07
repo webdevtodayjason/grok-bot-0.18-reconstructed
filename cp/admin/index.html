@@ -1,0 +1,130 @@
+<!doctype html>
+<!--
+  cp/admin/index.html -- the super admin console. ADMIN-1.
+
+  Three files, no framework, no CDN, no font service. Everything this page shows arrives from a
+  /v1/admin route that refuses anything but a super admin, so the shell itself carries no customer
+  data: no counts, no names, no hostnames, nothing but the words below.
+
+  The panels are in the order Jason asked for them, which is also the order an operator opens them
+  in on a bad morning: who has been knocking, then who the customers are, then whether their boxes
+  are up, then whether the machine is, then the money that is not wired in yet.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Titanium Bot admin</title>
+<link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+
+<!-- The sign-in. The same email and password the person already uses for their workspace, and the
+     same lockout: this posts to POST /v1/sessions, which is the one door on this service, and the
+     page checks the superAdmin field in the answer before it shows anything. -->
+<main id="door" class="door">
+  <div class="mark" aria-hidden="true">Ti</div>
+  <h1>Titanium Bot admin</h1>
+  <p class="quiet">For the person who runs the whole system.</p>
+  <form id="signin" autocomplete="on">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button id="signinButton" type="submit">Sign in</button>
+  </form>
+  <p id="doorMessage" class="message" role="status"></p>
+</main>
+
+<div id="console" class="console" hidden>
+  <header class="top">
+    <div class="mark" aria-hidden="true">Ti</div>
+    <div class="who">
+      <strong>Titanium Bot admin</strong>
+      <span id="whoami" class="quiet"></span>
+    </div>
+    <div class="topActions">
+      <span id="measuredAt" class="quiet"></span>
+      <button id="refresh" type="button" class="ghost">Refresh</button>
+      <button id="signout" type="button" class="ghost">Sign out</button>
+    </div>
+  </header>
+
+  <p id="banner" class="banner" role="status" hidden></p>
+
+  <!-- 1. Sign-in attempts ------------------------------------------------------------------- -->
+  <section class="panel" id="panel-signins" data-panel="sign-ins">
+    <h2>Sign-in attempts</h2>
+    <p class="quiet">Every refusal and every lockout at both doors, from the console and from this
+      service. The password that was tried is never kept. What is kept is a keyed hash of it, which
+      is enough to say whether it was the same password again or a different one, and nothing else.</p>
+    <div class="controls">
+      <label for="hours">Last</label>
+      <select id="hours">
+        <option value="1">hour</option>
+        <option value="24" selected>24 hours</option>
+        <option value="72">3 days</option>
+        <option value="168">7 days</option>
+      </select>
+      <label for="outcome">Showing</label>
+      <select id="outcome">
+        <option value="">everything</option>
+        <option value="refused">refused only</option>
+        <option value="locked">locked out only</option>
+        <option value="ok">successful only</option>
+      </select>
+      <span id="signInsNote" class="quiet"></span>
+    </div>
+    <h3>By address</h3>
+    <div class="scroll"><table id="addresses"><thead><tr>
+      <th>Address</th><th>Tries</th><th>Refused</th><th>Locked</th><th>In</th>
+      <th>Passwords</th><th>Accounts named</th><th>Last seen</th>
+    </tr></thead><tbody></tbody></table></div>
+    <h3>Every attempt</h3>
+    <div class="scroll"><table id="attempts"><thead><tr>
+      <th>Time</th><th>Door</th><th>Email</th><th>Address</th><th>Workspace</th>
+      <th>Outcome</th><th>Seen by</th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- 2. Clients and users ------------------------------------------------------------------ -->
+  <section class="panel" id="panel-clients" data-panel="clients">
+    <h2>Clients and users</h2>
+    <p class="quiet">One row per customer, and the people who can sign in to it.</p>
+    <div id="clients" class="clients"></div>
+  </section>
+
+  <!-- 3. Box health ------------------------------------------------------------------------- -->
+  <section class="panel" id="panel-boxes" data-panel="boxes">
+    <h2>Box health</h2>
+    <p class="quiet">A container can be running while the thing inside it is not answering, so both
+      are asked separately. Anything this service cannot see from inside its own container says
+      "not measured" and why.</p>
+    <div class="scroll"><table id="boxes"><thead><tr>
+      <th>Workspace</th><th>Container</th><th>Gateway</th><th>Last activity</th>
+      <th>Disk</th><th>Memory</th><th>Last backup</th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- 4. System health ---------------------------------------------------------------------- -->
+  <section class="panel" id="panel-system" data-panel="system">
+    <h2>System health</h2>
+    <p class="quiet">The machine everything runs on, as far as this service can see it.</p>
+    <div id="system" class="cards"></div>
+  </section>
+
+  <!-- 5. Payments --------------------------------------------------------------------------- -->
+  <section class="panel" id="panel-payments" data-panel="payments">
+    <h2>Payments</h2>
+    <p class="placeholder">Not connected yet. Plan and billing appear here when Stripe is wired in.</p>
+  </section>
+
+  <footer class="foot">
+    <span id="version" class="quiet"></span>
+  </footer>
+</div>
+
+<script src="/admin/admin.js"></script>
+</body>
+</html>
