@@ -39,6 +39,14 @@
     // A `series` groups tiles under one heading in the picker; seasonal sets come the same way, one
     // line each, with the season in the series name.
     { id: "habitat-1", name: "Habitat I", series: "Habitat" },
+    { id: "habitat-2", name: "Habitat II", series: "Habitat" },
+    { id: "habitat-3", name: "Habitat III", series: "Habitat" },
+    { id: "habitat-4", name: "Habitat IV", series: "Habitat" },
+    { id: "habitat-5", name: "Habitat V", series: "Habitat" },
+    // Two painted plates for the regular set (Jason, 2026-09-07, from bg2.png and bg3.png): named
+    // here for what they show, since the files carried no name of their own.
+    { id: "crystal-dunes", name: "Crystal Dunes" },
+    { id: "deep-current", name: "Deep Current" },
   ].map((b) => ({
     ...b,
     full: b.full ?? `assets/backgrounds/${b.id}.webp`,
