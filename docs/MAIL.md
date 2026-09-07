@@ -207,7 +207,8 @@ signed `email.received` to the first agent's address is delivered and its ledger
 `GET /mail/settings.recent`, a forged signature is 401, a signature older than the window is 401, a
 replayed `email_id` is a duplicate, a signed message arriving while Receiving is off is not taken
 in, the GET never returns a secret, and the settings are put back with both secrets cleared even
-when a leg fails. 35 PASS on a relay copy on this Mac.
+when a leg fails. Measured 2026-09-07 on this Mac against a second relay on 127.0.0.1:7799 pointed at the same box
+as the running one: 35 PASS 0 FAIL with `--stub`, 16 PASS 0 FAIL without it.
 
 Without `--stub` only the non-mutating legs run, so a production relay that is already configured
 is never overwritten.
