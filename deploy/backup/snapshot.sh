@@ -2,7 +2,7 @@
 # snapshot.sh -- one consistent copy of everything an instance is (docs/GAP-ANALYSIS.md BACKUP-1).
 #
 # An instance is five things: the four docker volumes (workspace, sand-data, box store, chrome
-# profile) and the relay side on the host (ui/auth.json, ui/endpoints.json, ui/subscriptions.json,
+# profile) and the relay side on the host (ui/auth.json, ui/endpoints.json, ui/subscriptions.json, ui/mail.json, ui/mail-inbox.jsonl,
 # profile/, credential/). Until this script there was no backup job of any kind on the R750, so a
 # lost volume was a lost instance: every agent, every transcript, every credential.
 #
@@ -194,7 +194,7 @@ done
 step "relay side"
 RELAY_ENTRIES=""
 mkdir -p "$OUT/relay"
-for rel in ui/auth.json ui/endpoints.json ui/subscriptions.json ui/job-bus.json profile credential; do
+for rel in ui/auth.json ui/endpoints.json ui/subscriptions.json ui/mail.json ui/mail-inbox.jsonl profile credential; do
   src="$ROOT/$rel"
   if [ ! -e "$src" ]; then say "$rel absent, skipped"; continue; fi
   mkdir -p "$OUT/relay/$(dirname "$rel")"

@@ -107,7 +107,7 @@ done
 say "every module ui/server.mjs imports is on the server"
 # auth.json is the server's own password, set on the server by set-password.mjs and never held on
 # this Mac. It is on the same do-not-ship footing as the two files above, for the same reason.
-say "endpoints.json, subscriptions.json and auth.json are not shipped"
+say "endpoints.json, subscriptions.json, auth.json and mail.json are not shipped"
 
 step "ship the deploy scripts"
 rsync -a "$REPO/deploy/r750/common.sh" "$REPO/deploy/r750/install.sh" \
