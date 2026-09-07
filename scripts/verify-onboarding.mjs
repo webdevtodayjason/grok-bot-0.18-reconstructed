@@ -456,8 +456,11 @@ async function offlineArm() {
     check(first.modal.top >= (first.modal.barBottom ?? 0) - 1,
       "it comes down below the top bar rather than over it",
       `dialog top ${first.modal.top}px, top bar ends at ${first.modal.barBottom}px`);
-    check(first.modal.stageWidth != null && Math.abs(first.modal.width - first.modal.stageWidth) <= 40,
-      "and it is the width of the stage, not a settings-sized card",
+    // The width of the stage less its gutter, not edge to edge: the dialog is inset 44px each
+    // side (onboarding.css), which is what keeps it reading as a sheet over the console rather
+    // than a new page. What this measures is that it is nothing like a Settings-sized card.
+    check(first.modal.stageWidth != null && first.modal.stageWidth - first.modal.width <= 96,
+      "and it runs the width of the stage, not a settings-sized card",
       `dialog ${first.modal.width}px, stage ${first.modal.stageWidth}px`);
     check(first.modal.isModal,
       "the chat behind it is dimmed and inert, because the dialog is a modal one",
@@ -513,7 +516,7 @@ async function offlineArm() {
     }, { standIn: SELF_TEST });
     check(!done.modal.present || done.modal.open === false,
       "a box reporting done:true opens straight into the console with no modal",
-      done.modal.present ? "the dialog is open anyway" : "no dialog in the page");
+      done.modal.open ? "the dialog was opened anyway" : "the dialog element is in the page and was never opened");
   } finally {
     for (const rendered of [first, saved, done]) await rendered?.context?.close().catch(() => {});
     await browser.close().catch(() => {});
@@ -588,6 +591,7 @@ async function liveArm(landed) {
   let previousEndpoint = null;
   let browser = null;
   let context = null;
+  let scratchTitan = null;
   try {
     hooksBefore = await readSetting("SAND_TEST_HOOKS");
     await writeSetting("SAND_TEST_HOOKS", "1");
@@ -623,6 +627,17 @@ async function liveArm(landed) {
       "with SAND_TEST_HOOKS unset the same command is refused",
       guarded == null ? "the command vanished" : `${guarded.status} ${guarded.text.slice(0, 120)}`);
     await writeSetting("SAND_TEST_HOOKS", "1");
+
+    // A Titan of this arm's own. On a real fresh box the first agent IS Titan and his conversation
+    // is empty; on THIS box the oldest agent is a working one carrying a quarter of a million
+    // tokens, and a turn dispatched into it never reaches a model inside this arm's patience. The
+    // console picks the agent named Titan before it falls back to the oldest, so minting one is
+    // also the only way to measure that rule. It is deleted in the finally.
+    const madeTitan = await gw("createAgent", { name: "Titan", description: "", origin: "user", isKickstartRequested: false });
+    scratchTitan = madeTitan.body?.id ?? madeTitan.body?.agent?.id ?? null;
+    check(scratchTitan != null, "a scratch Titan can be made to run the interview on",
+      madeTitan.ok ? String(scratchTitan) : `${madeTitan.status} ${String(madeTitan.body?.error ?? madeTitan.text).slice(0, 120)}`);
+    if (scratchTitan == null) return;
 
     // The stub, and the box pointed at it.
     const started = await startStubModel(STUB_PORT, stubState);
@@ -660,6 +675,8 @@ async function liveArm(landed) {
     const roster = nonGroupAgents(await must("listAgents"));
     const bound = roster.find((a) => a.id === agentId) ?? null;
     check(bound != null, "which is a real agent on this box", bound ? `${bound.name} (${agentId})` : `${agentId} is on no roster`);
+    check(agentId === scratchTitan, "and it is the agent named Titan, not whichever one is oldest",
+      bound ? `${bound.name} (${agentId})` : String(agentId));
 
     // The console sends Titan's first message itself: createFallbackSession never sets
     // introductionPending, so kickstartAgent does not fire on a fresh box's first agent.
@@ -739,6 +756,10 @@ async function liveArm(landed) {
   } finally {
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
+    if (scratchTitan != null) {
+      await gw("deleteAgent", { id: scratchTitan }).catch(() => {});
+      info(`the scratch Titan ${scratchTitan} was deleted`);
+    }
     if (endpointsTouched && previousEndpoint != null) {
       await relay("/endpoints/use", { id: previousEndpoint }).catch(() => {});
       const now = await relay("/endpoints").catch(() => ({ endpoints: [] }));
@@ -762,6 +783,7 @@ async function capArm(landed) {
   let capBefore;
   let capTouched = false;
   let minted = null;
+  let room = null;
   let browser = null;
   let context = null;
   try {
@@ -786,17 +808,40 @@ async function capArm(landed) {
     }
     check(published === 13, "with nothing set the box's ceiling is 13, Titan and twelve", String(published));
 
+    // The population the ceiling is actually enforced against, asked of the host rather than
+    // counted off listAgents. They are not always the same number: an agent can hold a directory
+    // the roster does not draw, and on this box they differ by one. Sizing the fake roster off
+    // the console's view instead made the last check below fail against a correct product.
+    const capacity = await must("getAgentCapacity").catch(() => null);
+    const bots = Number.isFinite(Number(capacity?.bots)) ? Number(capacity.bots) : roster.length;
+    if (capacity == null) info("the box has no getAgentCapacity; the roster's own count is standing in");
+    else info(`the host counts ${bots} bots where the roster draws ${roster.length} and countAgents says ${inclusive}`);
+
+    // A room is not a bot, measured rather than argued: make one, and the number the ceiling
+    // reads must not move while the inclusive count does. Made before the ceiling comes down, so
+    // nothing here depends on rooms being exempt from a cap that is already reached.
+    const madeRoom = await gw("createGroup", { name: `probe-cap-room-${Math.random().toString(36).slice(2, 6)}`, description: "", memberAgentIds: roster.slice(0, 2).map((a) => a.id) });
+    room = madeRoom.body?.id ?? madeRoom.body?.agent?.id ?? null;
+    if (room == null) skip("a room does not spend one of the thirteen", `createGroup answered ${madeRoom.status} ${String(madeRoom.body?.error ?? madeRoom.text).slice(0, 100)}`);
+    else {
+      const withRoom = await must("getAgentCapacity").catch(() => null);
+      const inclusiveNow = await must("countAgents").catch(() => null);
+      check(Number(withRoom?.bots) === bots && Number(inclusiveNow) === Number(inclusive) + 1,
+        "a room does not spend one of the thirteen",
+        `bots ${bots} -> ${withRoom?.bots}, countAgents ${inclusive} -> ${inclusiveNow}`);
+    }
+
     // The fake roster: move the ceiling down to what is already here rather than minting twelve.
-    await writeSetting("SAND_MAX_AGENTS", String(roster.length));
+    await writeSetting("SAND_MAX_AGENTS", String(bots));
     capTouched = true;
     const refused = await gw("createAgent", { name: `probe-cap-${Math.random().toString(36).slice(2, 7)}`, description: "", origin: "user", isKickstartRequested: false });
     const message = typeof refused.body === "string" ? refused.body : (refused.body?.error ?? refused.text);
     check(refused.ok === false, "at the ceiling, createAgent is refused", `${refused.status} ${String(message).slice(0, 140)}`);
     const said = REFUSAL.exec(String(message));
     check(said != null, "in one plain sentence that tells the person what to do", String(message).slice(0, 160));
-    check(said != null && Number(said[1]) === roster.length - 1,
+    check(said != null && Number(said[1]) === bots - 1,
       "counting from the ceiling in force, so a box at 13 reads twelve",
-      said ? `${said[1]} with the ceiling at ${roster.length}` : "no sentence to count");
+      said ? `${said[1]} with the ceiling at ${bots}` : "no sentence to count");
     check(!JARGON.test(String(message)), "with no status code, class name or machine word in it", String(message).slice(0, 120));
     check(refused.status === 409, "and the wire says refused rather than broken", `HTTP ${refused.status}`);
 
@@ -809,20 +854,20 @@ async function capArm(landed) {
     check(after.length === roster.length, "and neither refusal left a half-made agent behind",
       `${after.length} agents, was ${roster.length}`);
 
-    // Groups do not count. The ceiling goes up by one; if the group were being counted this box
-    // would still be full, because countAgents is one higher than the roster.
-    await writeSetting("SAND_MAX_AGENTS", String(roster.length + 1));
+    // One place under the ceiling and the same create goes through: the refusal above is a
+    // ceiling being read, not a wall the box hit for some other reason.
+    await writeSetting("SAND_MAX_AGENTS", String(bots + 1));
     const allowed = await gw("createAgent", { name: `probe-cap-${Math.random().toString(36).slice(2, 7)}`, description: "", origin: "user", isKickstartRequested: false });
     minted = allowed.body?.id ?? allowed.body?.agent?.id ?? null;
     check(allowed.ok && minted != null,
-      "one more room under the ceiling and the same create goes through, so the group is not counted",
+      "one place under the ceiling and the same create goes through",
       allowed.ok ? `made ${minted}` : `${allowed.status} ${String(allowed.body?.error ?? allowed.text).slice(0, 120)}`);
 
     // The refusal a person actually sees: the toast the console raises on the Add form.
     if (chromium == null) { skip("the refusal as a toast in the console", "playwright-core is not installed"); }
     else if (minted == null) { skip("the refusal as a toast in the console", "the ceiling test could not put the box back at its cap"); }
     else {
-      await writeSetting("SAND_MAX_AGENTS", String(roster.length + 1));
+      await writeSetting("SAND_MAX_AGENTS", String(bots + 1));
       browser = await chromium.launch({ executablePath: CHROME, headless: true });
       context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
       const page = await context.newPage();
@@ -838,14 +883,18 @@ async function capArm(landed) {
       const toast = await page.evaluate(() => (document.querySelector("#toast")?.textContent ?? "").replace(/\s+/g, " ").trim());
       check(REFUSAL.test(toast), "the console says it in the same words, as a toast", toast.slice(0, 160) || "the toast said nothing");
       check(!JARGON.test(toast), "and the toast carries no machine words either", toast.slice(0, 120));
-      const settled = nonGroupAgents(await must("listAgents"));
-      check(settled.length === roster.length + 1, "and the refused create made nothing",
-        `${settled.length} agents, expected ${roster.length + 1}`);
+      const settled = await must("getAgentCapacity").catch(() => null);
+      check(Number(settled?.bots) === bots + 1, "and the refused create made nothing",
+        `${settled?.bots} bots, expected ${bots + 1}`);
     }
   } finally {
     if (minted != null) {
       await gw("deleteAgent", { id: minted }).catch(() => {});
       info(`the probe agent ${minted} was deleted`);
+    }
+    if (room != null) {
+      await gw("deleteAgent", { id: room }).catch(() => {});
+      info(`the probe room ${room} was deleted`);
     }
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});

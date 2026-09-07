@@ -4827,7 +4827,7 @@
     return ONBOARDING_STEPS.map((step) => {
       const done = onboardingAnswered(step.field);
       const said = done ? String(answers[step.field]) : "";
-      return `<li class="onboarding-step${done ? " is-done" : ""}" data-onboarding-step="${escapeHtml(step.field)}">
+      return `<li class="onboarding-step${done ? " is-done" : ""}" data-onboarding-step="${escapeHtml(step.field)}" data-done="${done}">
         <span class="onboarding-tick" aria-hidden="true">${done ? "✓" : ""}</span>
         <span>${escapeHtml(step.label)}</span>
         ${done ? `<span class="onboarding-answer">${escapeHtml(said)}</span>` : ""}
@@ -4844,7 +4844,7 @@
       </div>
       <ul class="onboarding-progress" aria-label="What Titan still needs">${onboardingStepsMarkup()}</ul>
       <p class="onboarding-count" data-onboarding-count>${answered} of ${ONBOARDING_STEPS.length} answered</p>
-      <div class="onboarding-transcript" id="onboarding-transcript" aria-live="polite"></div>
+      <div class="onboarding-transcript" id="onboarding-transcript" data-onboarding-transcript aria-live="polite"></div>
       <form class="composer onboarding-composer" data-onboarding-composer>
         <label class="sr-only" for="onboarding-input">Answer Titan</label>
         <textarea id="onboarding-input" name="message" rows="1" autocomplete="off" placeholder="Answer Titan…"></textarea>
@@ -4860,6 +4860,9 @@
   function paintOnboardingFace() {
     const frame = elements.onboardingContent.querySelector(".onboarding-face");
     if (!frame) return;
+    // The hook docs/ONBOARDING.md section 6 names, set here rather than woven into avatarMarkup:
+    // that function draws every face on the page and has no business knowing about this dialog.
+    frame.setAttribute("data-onboarding-face", "");
     delete frame.dataset.titanAgent;
     const mood = onboardingMood();
     if (frame.dataset.titanMood === mood) return;
@@ -4891,6 +4894,10 @@
     const sig = `${titan ? titan.id : ""}|${ONBOARDING_STEPS.map((step) => String(onboardingAnswers()[step.field] ?? "")).join("")}`;
     if (sig !== onboardingPaintedSig) {
       onboardingPaintedSig = sig;
+      // Whose conversation this is. On the dialog rather than inside it, so anything reading the
+      // page can tell which agent the modal is bound to without walking the transcript.
+      if (titan) elements.onboardingDialog.dataset.onboardingAgent = titan.id;
+      else delete elements.onboardingDialog.dataset.onboardingAgent;
       const draft = elements.onboardingContent.querySelector("#onboarding-input")?.value ?? "";
       elements.onboardingContent.innerHTML = onboardingMarkup(titan);
       const input = elements.onboardingContent.querySelector("#onboarding-input");
