@@ -111,7 +111,10 @@ async function api(method, pathname, body) {
   return parsed ?? {};
 }
 
-const pad = (value, width) => String(value ?? "").padEnd(width);
+// One space of gutter always, even when the value is wider than the column. Without it a box name
+// that fills its column runs straight into the next one, which is what
+// "titanbot-box-atonqjq7zx593jsacaccpfaurunning" was.
+const pad = (value, width) => `${String(value ?? "").padEnd(width - 1)} `;
 
 // One line adds a customer: the account, the workspace name from the company name, and the box.
 //
@@ -184,7 +187,12 @@ async function tenantList() {
   if (answer.tenants.length === 0) return out("no tenants yet");
   out(`${pad("SLUG", 20)}${pad("BOX", 34)}${pad("STATUS", 14)}${pad("LIVE", 14)}SERVICE`);
   for (const tenant of answer.tenants) {
-    out(`${pad(tenant.slug, 20)}${pad(tenant.boxContainer ?? "(none)", 34)}${pad(tenant.status, 14)}${pad(tenant.coolify?.status ?? "unknown", 14)}${tenant.coolifyServiceUuid ?? ""}`);
+    // An adopted row with no box recorded is not a fault and must not read like one: the relay
+    // builds the operator's own entry from its own environment, which is what keeps that console
+    // working when this service is down. Every other row has to have a box or it cannot be served.
+    const box = tenant.boxContainer
+      ?? (tenant.status === "adopted" ? "(from the relay's own env)" : "(none yet)");
+    out(`${pad(tenant.slug, 20)}${pad(box, 34)}${pad(tenant.status, 14)}${pad(tenant.coolify?.status ?? "unknown", 14)}${tenant.coolifyServiceUuid ?? ""}`);
     if (tenant.lastError) out(`  last error: ${tenant.lastError}`);
   }
   out("");
