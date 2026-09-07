@@ -478,6 +478,10 @@ footer.site a:hover{ color:var(--ink) }
    chip landed on the last line of the invoice reminder). */
 .sc .hint, .port .hint, .fig .hint { position:absolute; right:8px; top:50%; transform:translateY(-50%); width:auto; height:auto; min-width:0; min-height:0; background:#0D1117; color:#F4F5F7; padding:5px 9px; border-radius:999px; font-family:'Space Grotesk',Inter,system-ui,sans-serif; font-size:10px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; line-height:1; box-shadow:0 0 0 1px #2A2E35; pointer-events:none; }
 .sc, .port { position:relative; }
+
+/* The scroll fade is a band on the right edge, not a disc: a radial blob read as a dark circle over the frame on phones. */
+.sc::after, .sc[data-more]::after { content:""; position:absolute; top:0; right:0; bottom:0; width:64px; height:auto; border-radius:0; background:linear-gradient(to right, rgba(13,17,23,0), rgba(13,17,23,.82)); pointer-events:none; }
+.sc:not([data-more])::after { display:none; }
 </style>
 </head>
 <body>
