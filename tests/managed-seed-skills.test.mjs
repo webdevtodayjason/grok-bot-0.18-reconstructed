@@ -49,8 +49,11 @@ const service = (cacheDir, fetch) => new SandManagedSkillsService({ getCacheDir:
 
 const SEEDS = unionWithSeedSkills([]).map((skill) => skill.id).sort();
 
-test("the bundle carries the two real managed skills, frontmatter and all", () => {
-  assert.deepEqual(SEEDS, ["add-connector", "learn-from-demonstration"]);
+test("the bundle carries the three real managed skills, frontmatter and all", () => {
+  // email joined them with MAIL-1: an agent that is handed mail needs the recipe for answering it,
+  // and this box fetches nothing from a dashboard, so a skill it is not shipped is a skill it
+  // never has.
+  assert.deepEqual(SEEDS, ["add-connector", "email", "learn-from-demonstration"]);
   const learn = unionWithSeedSkills([]).find((skill) => skill.id === "learn-from-demonstration");
   assert.equal(learn.name, "learn-from-demonstration", "the name comes from the file's frontmatter");
   // The frontmatter folds the description onto several lines (`description: >-`), which the
@@ -70,7 +73,7 @@ test("a fetched skill wins over the seed of the same id, and both are kept", () 
     { id: "other-skill", name: "Other", description: "", body: "other body" },
   ];
   const union = unionWithSeedSkills(fetched);
-  assert.deepEqual(union.map((skill) => skill.id).sort(), ["add-connector", "learn-from-demonstration", "other-skill"]);
+  assert.deepEqual(union.map((skill) => skill.id).sort(), [...SEEDS, "other-skill"].sort());
   assert.equal(union.find((skill) => skill.id === "learn-from-demonstration").body, "newer body");
   assert.equal(union.find((skill) => skill.id === "add-connector").body.startsWith("# Add a connector"), true);
 });

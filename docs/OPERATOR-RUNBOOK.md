@@ -289,6 +289,28 @@ the bearer still applies. Nothing else on the relay is reachable with that beare
 `/box/surface`. CDP, noVNC and the desktop stay on loopback: the same gate asserts the port
 bindings when it is run against the server, and says so when it is handed only a URL.
 
+## Email for your agents
+
+Every agent can have an address at your own domain, and mail sent to it arrives in that agent's
+conversation. The whole thing, including the DNS records and the two values you paste, is
+[docs/MAIL.md](MAIL.md). The short version:
+
+1. Verify your domain in Resend, turn inbound on, and add the MX record Resend shows you at the
+   apex of the domain. If you already read mail at that domain, use one you do not.
+2. In Resend, create a webhook for the `email.received` event and paste the address the Email card
+   shows under **Settings**, which is `https://<your console>/hooks/resend`.
+3. Paste the signing secret Resend gives you, and a Resend API key, into the two fields on that
+   card. Both are write-only: the card says Saved or Not saved yet, and nothing on this server can
+   read either back.
+4. Type your domain, pick who gets mail nobody else is named for, and turn **Receiving** on. Each
+   agent's address is its name in lower case with the spaces taken out, and the card lists them.
+5. For an agent to send, it needs `RESEND_API_KEY` in its shell. Ask the agent to send an email and
+   it will ask you for the key on a card, the same way every other shell secret is handed over.
+
+`node scripts/verify-mail.mjs --url <your console> --stub` measures the whole path against a stub
+Resend and puts your settings back afterwards. Without `--stub` it runs only the legs that change
+nothing, which is what you want against an instance already carrying mail.
+
 ## Your own skills after you deploy
 
 The August 15 backup of the original install holds eleven global workflow skills written for

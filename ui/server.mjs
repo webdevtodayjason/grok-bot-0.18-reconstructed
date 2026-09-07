@@ -42,6 +42,7 @@ import {
   createRateLimiter, jobBusTokenFile, jobCreateArgs, jobSubmitterId, newJobToken, resolveJobToken,
   routeJobBus,
 } from "./job-bus-edge.mjs";
+import { createMailEdge } from "./mail-edge.mjs";
 import { chmod, chown, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
@@ -707,6 +708,22 @@ async function handleJobBusConsole(req, res, url) {
   return fail(res, 404, `not found: ${url.pathname}`);
 }
 
+// ---- agent email (MAIL-1, docs/MAIL.md) -------------------------------------------------------
+// The receive side lives beside the job bus edge and is wired the same way: one module holds every
+// rule, this file holds the mount and hands it the helpers it needs. jobBusCall is the upstream
+// helper -- it is the one call that carries this relay's bearer -- so the gateway token stays here
+// and mail reaches an agent as an ordinary sendPrompt.
+//
+// Sixty a minute per address on the public hook. Resend sends one request per message and retries
+// slowly, so anything above that rate is not Resend.
+const mailEdge = createMailEdge({
+  readBody, drainThenEnd, fail, clientOf, secureOf,
+  gatewayCall: jobBusCall,
+  ownLikeParent,
+  limiter: createRateLimiter({ limit: 60, windowMs: 60_000 }),
+  log: (line) => console.log(line),
+});
+
 // ---- the desktop ----------------------------------------------------------------------------
 // The host answers ensureForeverBox with a vnc URL on ITS OWN loopback (127.0.0.1:6081), which is
 // the right address for exactly one browser: one running on the same machine as the box. Through
@@ -876,6 +893,10 @@ const server = createServer(async (req, res) => {
       if (req.method !== "GET") return fail(res, 405, "GET");
       return await handleRuntimeBundle(req, res, url);
     }
+    // Before the console's login as well: this is Resend calling with mail for an agent, and a
+    // webhook carries no cookie and no bearer. Its credential is the Svix signature on the body,
+    // which the mail edge verifies before it reads a single field. MAIL-1.
+    if (url.pathname === "/hooks/resend") return await mailEdge.handleWebhook(req, res);
     // Whether a password is configured is not a secret: the login page announces it to anyone who
     // asks for it. The console reads this to decide whether to draw a Log out control.
     if (req.method === "GET" && url.pathname === "/auth/state") {
@@ -1255,6 +1276,10 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/job-bus/status" || url.pathname.startsWith("/job-bus/token")) {
       return await handleJobBusConsole(req, res, url);
     }
+    // The console's half of agent email: the domain, the addresses, the webhook URL and the two
+    // write-only secrets. Behind the session like every other console route, and it never reads a
+    // secret back out. MAIL-1.
+    if (url.pathname === "/mail/settings") return await mailEdge.handleSettings(req, res);
     if (req.method === "GET" && url.pathname === "/health") {
       const upstream = await fetch(`${GATEWAY}/health`, { headers: upstreamHeaders() });
       const text = await upstream.text();
