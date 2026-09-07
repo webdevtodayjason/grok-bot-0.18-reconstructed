@@ -107,6 +107,15 @@ and ships everything and runs the install over ssh; `enable-route.sh` on the ser
 takes it down; `scripts/verify-deploy.mjs` proves the instance from here. Until `ui/endpoints.json`
 exists on the server no agent can answer.
 
+One instance per customer is a separate thing on the same machine, and `docs/TENANCY.md` is the
+whole of it: `deploy/r750/control-plane-install.sh` on the server makes `/data/titanbot`, builds
+`titanbot-cp:local` and generates the two secrets into `/home/sem/titanbot/cp.env`, then
+`node deploy/r750/control-plane-coolify.mjs` from this Mac makes the Coolify service, sets its
+environment, gives it `https://api.titanium.bot:7790` and starts it. Both are idempotent and both
+take `--dry-run` or `TITANBOT_DRY_RUN=1`, so read the plan before you run either. Your own console
+signs in with your Titanium Bot account once its service carries `TENANT_ID`, `CP_URL` and its own
+derived `CP_SESSION_SECRET`, and its relay password keeps working either way.
+
 ## Updating without restarting anyone (SHIP-2)
 
 A ship used to recreate both containers, which cut every turn in flight and wiped whatever the
