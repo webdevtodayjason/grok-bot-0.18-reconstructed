@@ -28,6 +28,9 @@
     { id: "bg2-misty-dessert", name: "Desert Mist" },
     { id: "bg2-nebulous", name: "Nebulous" },
     { id: "bg2-Pine-mist", name: "Pine Mist" },
+    // Jason's nebula for the product brand (2026-09-06): teal and violet on near-black, the console's own
+    // teal reads as part of the picture.
+    { id: "titan-nebula", name: "Titan Nebula" },
   ].map((b) => ({
     ...b,
     full: b.full ?? `assets/backgrounds/${b.id}.webp`,

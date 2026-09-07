@@ -5,3 +5,5 @@
 - Interface geometry, glass, shadows, status colors, and motion are implemented in CSS instead of rasterized screenshots.
 
 The prototype does not crop interface elements from the design board. Every control remains selectable, responsive HTML.
+
+- `backgrounds/titan-nebula.webp` and `.thumb.webp`: Jason's nebula wallpaper (source `new-space-bg-titan.png`, 1672x941, delivered 2026-09-06 for the Titanium Bot product brand), re-encoded here at 1672 wide / 320 wide.
