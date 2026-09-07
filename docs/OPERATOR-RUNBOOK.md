@@ -107,22 +107,40 @@ and ships everything and runs the install over ssh; `enable-route.sh` on the ser
 takes it down; `scripts/verify-deploy.mjs` proves the instance from here. Until `ui/endpoints.json`
 exists on the server no agent can answer.
 
-One instance per customer is a separate thing on the same machine, and `docs/TENANCY.md` is the
-whole of it: `deploy/r750/control-plane-install.sh` on the server makes `/data/titanbot`, builds
-`titanbot-cp:local` and generates the two secrets into `/home/sem/titanbot/cp.env`, then
+**A customer is one extra container and nothing else**, and `docs/TENANCY.md` is the whole of it.
+There is one relay, one console and one login page at `console.titanium.bot`, for everybody. Adding
+a customer adds one box container and one directory under `/data/titanbot/<slug>/`; it does not add
+a console, a hostname, a certificate or a password anyone has to be handed. Which customer a request
+belongs to is decided by the session cookie, and the relay looks that up in a registry it reads from
+the control plane every sixty seconds.
+
+    node cp/cli.mjs signup add owner@theircompany.com "Their Company"
+
+That one line makes the account, works the workspace name out of the company name, and builds the
+box. Measured on the R750 on 2026-09-07: **16 seconds**, end to end.
+
+`deploy/r750/control-plane-install.sh` on the server makes `/data/titanbot`, builds `titanbot-cp:local`
+and generates the secrets into `/home/sem/titanbot/cp.env`, then
 `node deploy/r750/control-plane-coolify.mjs` from this Mac makes the Coolify service, sets its
 environment, gives it `https://api.titanium.bot:7790` and starts it. Both are idempotent and both
-take `--dry-run` or `TITANBOT_DRY_RUN=1`, so read the plan before you run either. Your own console
-signs in with your Titanium Bot account once its service carries `TENANT_ID`, `CP_URL` and its own
-derived `CP_SESSION_SECRET`, and its relay password keeps working either way.
+take `--dry-run` or `TITANBOT_DRY_RUN=1`, so read the plan before you run either.
 
-All of that is live as of 2026-09-07: the control plane answers at `https://api.titanium.bot`,
-`console.titanium.bot` is the tenant `titanium` and is in tenant mode with `verify-deploy` still
-passing 56 of 56, and there is a second real instance at `https://demo.titanium.bot` whose account
-is `demo@titanium.bot` with its password in `cp.env` as `DEMO_PASSWORD`. One thing to remember when
-you change a tenancy variable on a Coolify service: **an environment value the compose file does not
-name never reaches the container**, so push the current compose as well as setting the value, then
-restart. Give a box ninety seconds after a recreate before you believe a gate run against it.
+All of that is live as of 2026-09-07. The server runs four containers: your relay (the one console),
+your box, the control plane, and demo's box. The demo account is `demo@titanium.bot` with its
+password in `cp.env` as `DEMO_PASSWORD`, and it signs in at `console.titanium.bot` like any customer.
+`verify-deploy` passes 56 of 56 there, `scripts/verify-one-console.mjs` proves two customers get two
+rosters, and `scripts/verify-one-console-browser.mjs` proves it in a real browser in two contexts.
+
+Three things to remember when you change something on a Coolify service. **An environment value the
+compose file does not name never reaches the container**, so push the current compose as well as
+setting the value, then restart. **A variable inside a `labels:` block never resolves at all** —
+Coolify escapes the dollar, and the label arrives as the variable's own name in plain text, which is
+how `console.titanium.bot` would go back to answering 502 at random; the Traefik pin is a literal for
+that reason and `verify-deploy` reads it back off the running container after every restart. And
+**never pick a container by its role label alone** on this machine: every customer's box carries
+`com.titanbot.role=box` and every relay carries `com.titanbot.role=relay`, so "the first one" is an
+arbitrary customer's container. Match the Coolify service uuid at the end of the name. Give a box
+ninety seconds after a recreate before you believe a gate run against it.
 
 ## Updating without restarting anyone (SHIP-2)
 

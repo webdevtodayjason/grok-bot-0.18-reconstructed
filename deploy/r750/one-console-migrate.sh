@@ -172,27 +172,27 @@ printf '\n'
 say "a. Coolify -> the console.titanium.bot service -> Environment Variables. Add or check:"
 printf '\n'
 if [ -n "$RELAY_CONTAINER" ]; then
-  PROXY_NET="$(docker inspect "$RELAY_CONTAINER" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
-    | tr ' ' '\n' | grep -v "^$NET$" | grep -v '^$' | head -n 1 || true)"
   BOX_CONTAINER="$(printf '%s\n' $BOXES | grep -- "-${RELAY_SERVICE}\$" | head -n 1 || true)"
   # A pin that names a network this container is not on is worse than no pin at all, so the value
   # this script prints is read off the relay of THIS service and nowhere else.
 else
-  PROXY_NET=""
   BOX_CONTAINER=""
 fi
-printf '       TITANBOT_PROXY_NETWORK  = %s\n' "${PROXY_NET:-<the relay container network that is NOT $NET>}"
 # No apostrophe inside these braces, ever: the word half of ${VAR:-word} is quote-processed even
 # inside double quotes, so one in there opens a single-quoted string and takes the rest of the file
 # with it.
 printf '       TITANBOT_BOX_CONTAINER  = %s\n' "${BOX_CONTAINER:-<the titanbot-box-<uuid> container of this service>}"
 printf '\n'
-say "   TITANBOT_PROXY_NETWORK pins which of the relay's two addresses Coolify's Traefik routes to."
-say "   Without it the console answers 502 on about half of Traefik's provider refreshes, hours"
-say "   after a deploy that looked fine. Read the header of this script for why."
 say "   TITANBOT_BOX_CONTAINER names the operator's own box for docker exec. It used to be found by"
 say "   label; on a host with more than one box that found an arbitrary customer's container, so the"
 say "   fallback is deleted and this value is how the name is known."
+printf '\n'
+say "   ONE variable, and there used to be two. The Traefik pin is NOT a variable any more. Coolify"
+say "   rewrites every dollar-brace inside a labels block to an escaped one, so a variable there"
+say "   reaches Traefik as its own name in plain text: measured on this server, the label came back"
+say "   as the literal characters of TITANBOT_PROXY_NETWORK. The compose now carries the literal"
+say "   $NET, which is the one network name that file declares and every service in it joins."
+say "   Nothing to set, and nothing to get wrong."
 printf '\n'
 say "b. Same service -> Configuration -> Docker Compose. Paste deploy/coolify/docker-compose.yml"
 say "   from this release, whole. It is the same file with three additions: both services join"
@@ -224,7 +224,8 @@ if [ -n "$RELAY_CONTAINER" ]; then
       if [ -z "$PIN" ] || [ "$PIN" = "<no value>" ]; then
         warn "The relay is on $NET and carries NO traefik.docker.network label. This is the state"
         warn "the header of this script is about: console.titanium.bot will answer 502 at random."
-        warn "Set TITANBOT_PROXY_NETWORK on the service and redeploy, or roll step 2 back."
+        warn "The compose is meant to carry traefik.docker.network: $NET as a literal. Paste it"
+        warn "again and redeploy, or roll step 2 back."
       else
         case "$NETS" in
           *"$PIN"*) say "the pin names a network this container is actually on. Good." ;;

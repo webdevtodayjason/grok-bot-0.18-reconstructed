@@ -226,7 +226,9 @@ check(wideOpen.length === 0, "no titanbot port is published on 0.0.0.0", wideOpe
       pinned ? `traefik.docker.network=${pin}` :
         `on ${relayNetworks.length} networks (${relayNetworks.join(", ")}) with no traefik.docker.network label: `
         + "Traefik picks one at random on every provider refresh and the console will 502 at random. "
-        + "Set TITANBOT_PROXY_NETWORK on the resource and redeploy, or take the relay back off the second network.");
+        + "deploy/coolify/docker-compose.yml carries traefik.docker.network as a LITERAL network name, "
+        + "because Coolify escapes a variable inside a labels block. Paste it again and redeploy, or take "
+        + "the relay back off the second network.");
     check(!pinned || relayNetworks.includes(pin), "and it is a network this container is actually on",
       pinned ? `${pin} ${relayNetworks.includes(pin) ? "is" : "is NOT"} among ${relayNetworks.join(", ")}` : "there is no pin to check");
   }

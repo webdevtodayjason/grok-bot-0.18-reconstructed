@@ -202,13 +202,29 @@ redecided on every provider refresh. The symptom is `console.titanium.bot` answe
 hours after a deploy that looked fine, and it is not reproducible and not attributable to the change
 that caused it.
 
-The fix is one label on the relay, pinning the network Coolify made for that resource:
+The fix is one label on the relay, pinning which of its two addresses Traefik routes to:
 
-    traefik.docker.network: ${TITANBOT_PROXY_NETWORK}
+    traefik.docker.network: titanbot-net
 
-Set `TITANBOT_PROXY_NETWORK` on the resource to the relay's Coolify network, which on this server is
-the resource's own uuid. The control plane carries the same label for the same reason, because it
-answers on `api.titanium.bot`.
+**A literal, and it has to be one.** The first attempt at this on the live server wrote the label as
+`${TITANBOT_PROXY_NETWORK}` and set that variable on the resource. It did not work, and the way it
+failed is worth knowing, because it fails silently. Coolify's parser rewrites every `${...}` inside
+a `labels:` block to `$${...}` on its way to the generated compose, which docker reads as an escaped
+dollar. Read back off the running container, the label was the twenty-six literal characters of the
+variable's own name. The variable was set, it was in the `.env` Coolify wrote beside the file, and
+none of that mattered. That outcome is worse than having no label at all: the pin is present, it
+names no network, and the console is back on the coin flip after a deploy that read as clean.
+
+`titanbot-net` is the right literal because it is the one network name the file itself declares and
+every service in it joins, and Coolify attaches `coolify-proxy` to it on deploy (read back after the
+first one: `coolify-proxy` sits on `titanbot-net` beside the relay and the box). The alternative was
+Coolify's own per-resource network, whose name is the resource's uuid, and a file cannot know its
+own uuid.
+
+The control plane needs no pin: `api.titanium.bot` is not routed through a second address the way
+the console is. It joins `titanbot-net` for one reason of its own, which is that it waits for a new
+customer's box to answer on `http://titanbot-box-<uuid>:1340` before it calls the workspace ready,
+and that address exists only on the shared network.
 
 **And the label is gated, not trusted.** Coolify does not deploy the compose it is given: it parses
 it, rewrites parts of it and deploys the result. Custom labels are believed to survive that rewrite
@@ -515,7 +531,6 @@ your shell rather than into a file, and it needs the Coolify pair from wherever 
     export CP_ADMIN_TOKEN="$(ssh dell-remote "grep '^CP_ADMIN_TOKEN=' /home/sem/titanbot/cp.env | cut -d= -f2-")"
     export CP_RELAY_TOKEN=...                      # section 4. The same value goes on the console
     export CP_RELAY_PEERS=...                      # the server's own outbound address, /32
-    export TITANBOT_PROXY_NETWORK=...              # section 3. The pin, or api.titanium.bot 502s
     export COOLIFY_URL=... COOLIFY_API_KEY=...     # your own shell's names; the tool writes
                                                    # CP_COOLIFY_URL onto the service
 
@@ -798,6 +813,18 @@ relay with no docker gives, is `tests/relay-docker-absent.test.mjs` (10 tests, i
 runtime-bundle legs are in `tests/relay-one-console.test.mjs`, per workspace, and its endpoint guard
 is in `tests/relay-tenant-endpoints.test.mjs`.
 
+`scripts/verify-tenant-browser.mjs` is gone with it, for the same reason: it drove a real Chrome at
+`demo.titanium.bot` and measured an account typed into the wrong per-customer hostname being
+redirected to its own, and there are no per-customer hostnames. Its replacement is
+`scripts/verify-one-console-browser.mjs`, which is section 22's browser proof.
+
+`tests/cp-relay-pair.test.mjs` is the one that has no gate above it and is worth naming here. Every
+other suite tests one half of TENANT-5 against the other's contract: the relay suites feed a fake
+control plane, the control plane suites answer a fake relay. That is the arrangement in which two
+correct halves disagree, because the relay reads `sessionKey` and the control plane could have
+called it `key` with every test still green. This one starts the real control plane and a real relay
+and points the second at the first.
+
 **Run the gates one at a time, a minute apart.** The relay's login throttle is five failures per
 address per 30 seconds, the account door and the password door share it, and every gate here fills
 it on purpose. Run them back to back from one Mac and the next one is measuring its own lockout.
@@ -962,14 +989,41 @@ overwrites on the next deploy. `TITANBOT_DRY_RUN=1` changes nothing at all.
 
     bash deploy/r750/one-console-migrate.sh
 
+**Run on the R750 on 2026-09-07 between 04:59 and 06:00 CDT, from this Mac (Darwin 25.5.0, node
+22.23.1, docker 29.0.0 on the server).** Every row below is what happened, not what was planned.
+
 | step | what it is | measured |
 | --- | --- | --- |
-| a | `docker network create titanbot-net`. No restart, safe at any hour | *to be measured* |
-| b | paste the new compose, set `TITANBOT_PROXY_NETWORK` and `TITANBOT_BOX_CONTAINER`, ONE quiet-window restart, then check `console.titanium.bot` answers | *to be measured* |
-| c | ship the relay and control plane source, rebuild both local images, redeploy | *to be measured* |
-| d | `CP_RELAY_TOKEN` on both resources; restart the control plane; `GET /v1/relay/tenants` answers the relay and refuses the admin token | *to be measured* |
-| e | re-provision demo as one box on the shared network; stop and delete the old two-container service, keeping its data directory | *to be measured* |
-| f | the browser proof (two customers, two rosters, two contexts), then `verify-deploy`, `verify-one-console`, `verify-mail` | *to be measured* |
+| a | `docker network create titanbot-net`. No restart, safe at any hour | created, subnet `192.168.48.0/20`, nothing attached yet. The script found Jason's relay only after it was fixed to match on the service uuid: with demo running it had read **demo's** relay and printed demo's network as the pin, which is the one value that would have taken the console down |
+| b | paste the new compose, set `TITANBOT_BOX_CONTAINER`, ONE quiet-window restart, then check `console.titanium.bot` answers | quiet first (Titan and Scribe, 0 mid-turn, 0 open jobs). Console back to 200 within **50 seconds**. Took **two** restarts, not one, and why is section 3: the first paste's pin was a variable and Coolify escapes it inside a labels block, so the label arrived as the literal text `${TITANBOT_PROXY_NETWORK}`. Second paste, literal `titanbot-net`, read back off the running container: networks `p927bfqm83ioloibamlvyd7g titanbot-net`, pin `titanbot-net`, `coolify-proxy` attached to `titanbot-net`. `verify-deploy` **56 PASS 0 FAIL** |
+| c | ship the relay and control plane source, rebuild both local images, redeploy | `deploy/r750/sync.sh`, host bundle sha256 `054d26c6bd2e4d31…`, then a plain `docker restart` of the relay container, because `ui/` is a bind mount and its code does not live in the image. Relay boot: `box container titanbot-box-p927bfqm83ioloibamlvyd7g`, `work 1: titanium`, and `reg could not reach the control plane (HTTP 404)`, which is right: the control plane was still on the old image. Console 200 throughout |
+| d | `CP_RELAY_TOKEN` on both resources; restart the control plane; `GET /v1/relay/tenants` answers the relay and refuses the admin token | generated on the server with `openssl rand -hex 32` into `/home/sem/titanbot/cp.env`, set on both Coolify resources, control plane image rebuilt on the server and redeployed. Health `{"ok":true,"version":"1.0.0","tenants":2,"accounts":1}`. The route: **401** with no bearer, **401** with the admin token, **200** with the relay credential. Relay after its restart: `work 2: demo, titanium` |
+| e | re-provision demo as one box on the shared network; stop and delete the old two-container service, keeping its data directory | stopped (45 s to reconcile), deleted with `{"confirm":"demo"}`, `/data/titanbot/demo` kept (41 MB, `credential profile state volumes`). Provisioned again: **23 seconds** from the call to `status running, boxReady true`. One container, `titanbot-box-atonqjq7zx593jsacaccpfau`, on `atonqjq7zx593jsacaccpfau` and `titanbot-net`. The dry run first, which planned `directories, secrets, compose, service, envs, start, ready` and **no urls step** |
+| f | the browser proof (two customers, two rosters, two contexts), then `verify-deploy`, `verify-one-console`, `verify-mail` | a second customer was signed up to have two: `POST /v1/signups` with `owner@northbay.test` and company `North Bay Roofing` made the account, derived the slug `north-bay-roofing` and built the box in **16 seconds**. Browser, headless Chrome, two contexts: **17 PASS 0 FAIL**, no agent id on both rosters (`c63fdce4…` and `d7df78a5…`). `verify-one-console` live **18 PASS 0 FAIL 8 SKIP**. `verify-deploy` **56 PASS 0 FAIL**. `verify-mail` read-only **16 PASS 0 FAIL**. Over HTTP, three rosters from one console: demo `New Bot c63fdce4…`, north-bay `New Bot d7df78a5…`, the operator over the gateway bearer `Titan 96a720b6…, Scribe f97bfb2e…`. The proof customer was then stopped and deleted; its data directory stays |
+
+### What the server looks like now
+
+Four containers, and Jason's sentence is the shape of them:
+
+    titanbot-relay-p927bfqm83ioloibamlvyd7g   the one console, for everybody
+    titanbot-box-p927bfqm83ioloibamlvyd7g     Jason's own sandbox
+    titanbot-cp-hnhzi0ongkw0gsg9k4flcv7d      the control plane
+    titanbot-box-atonqjq7zx593jsacaccpfau     demo's sandbox, and that is all a customer is
+
+`titanbot-net` carries all four plus `coolify-proxy`. Adding a customer adds one line to that list.
+
+### Two things worth knowing before the next customer
+
+**A brand new workspace can answer "not available" for up to a minute.** The relay reads the
+registry every 60 seconds, and the container has to exist when it looks. Provisioning now waits for
+the box to answer before it reports the workspace ready, so the gap is the relay's refresh and not
+the build. It closes itself.
+
+**The instance-password legs of `verify-one-console` were not measured**, because Jason's own
+console password is not written down anywhere a script can read and should not be. The operator's
+door was measured over the gateway bearer instead, which resolves to the same workspace: `Titan` and
+`Scribe`, and neither customer's agent on that roster. Set `ONE_CONSOLE_INSTANCE_PASSWORD` to
+measure the password half.
 
 **The network goes on before the code, which reverses the order this was first planned in.** The
 reason is attribution. Step b changes the container's networks and nothing else: the relay image, the
@@ -988,9 +1042,15 @@ The relay is then single-homed on Coolify's own network exactly as it was, and
 `console.titanium.bot` routes the way it did yesterday. Nothing else has changed at that point,
 because step **c** has not run.
 
-Before any restart of Jason's service, check it is quiet:
+Before any restart of Jason's service, check it is quiet, **against that service's own box by
+name**. Every customer's box carries `com.titanbot.role=box`, so a check that filters on the label
+and takes the first name is asking an arbitrary customer whether Jason is busy:
 
-    $S/ship-r750.sh quiet     # must show 0 mid-turn and 0 open
+    docker exec titanbot-box-<this service uuid> sh -c \
+      'curl -s -m 10 -X POST http://127.0.0.1:1340/api/listAgents \
+         -H "authorization: Bearer $SAND_GATEWAY_TOKEN" -H "content-type: application/json" -d {}'
+
+Nobody mid-turn and no open job is what a quiet window is.
 
 Copy-in is on (`SAND_BOX_STORE_COPY_IN=1`), so the box recreate restores the agents' CLI logins and
 git config on the way back up. **Wait 90 seconds or more for the box before any gate.** A deploy gate
@@ -1001,13 +1061,23 @@ box still loading agents and not a fault.
 
 Two browser contexts side by side, because two sessions in one cookie jar prove nothing:
 
-1. `demo@titanium.bot` signs in at `console.titanium.bot` and sees demo's agents.
-2. Sign out. Jason's console password signs in at the same address and sees Titan and Scribe.
-3. Neither roster carries one name from the other.
+1. One customer signs in at `console.titanium.bot` and sees their own agents.
+2. A second customer signs in at the **same address**, in a second context, and sees theirs.
+3. Neither roster carries one agent from the other's box.
 
-`scripts/verify-one-console.mjs` does the same three over HTTP, plus the registry route's four auth
-cases and the unknown-tenant answer, and it can be run again. The browser run is what proves a
-person can do it; the HTTP run is what proves the status codes and the copy.
+`scripts/verify-one-console-browser.mjs` is that run, and it compares agent **ids**, not names. This
+matters more than it looks: every fresh box calls its first agent `New Bot`, so two properly
+isolated customers have rosters that read identically. A cross-check on names would pass whether the
+isolation worked or not. On the run above both customers showed one card reading `New Bot`, and the
+ids were `c63fdce4-4fc0-4ea7-8a1b-93657df2c6c5` and `d7df78a5-3c3d-471d-9d13-ef3d9535f9e8`.
+
+    ONE_CONSOLE_EMAIL_A=demo@titanium.bot ONE_CONSOLE_PASSWORD_A=... \
+    ONE_CONSOLE_EMAIL_B=... ONE_CONSOLE_PASSWORD_B=... \
+      node scripts/verify-one-console-browser.mjs
+
+`scripts/verify-one-console.mjs` does the same over HTTP, plus the registry route's four auth cases
+and the unknown-tenant answer. The browser run is what proves a person can do it; the HTTP run is
+what proves the status codes and the copy.
 
 ---
 
