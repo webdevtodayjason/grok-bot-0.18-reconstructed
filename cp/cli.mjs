@@ -18,7 +18,7 @@
 // echo turned off, exactly the way ui/set-password.mjs does.
 
 import { loadConfig, validateSlug } from "./provision.mjs";
-import { verifySessionToken } from "./session.mjs";
+import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 
 const config = loadConfig();
 const BASE = config.publicUrl;
@@ -164,14 +164,20 @@ async function tenantAdopt(args) {
 // Verified here rather than at the service when CP_SESSION_SECRET is in the environment, because
 // that is the check a relay does and this is the way to reproduce it by hand. Without the secret it
 // asks the service instead.
+//
+// CP_SESSION_SECRET here is the MASTER. Each tenant's relay holds only its own derived key, so the
+// key this checks with is derived from the tenant the token names, which is what the control plane
+// signed with. Pointing this at a tenant's own key instead would only verify that tenant's tokens.
 async function sessionVerify(args) {
   const [token] = positional(args);
   if (!token) die("usage: node cp/cli.mjs session verify <token>");
   if (config.sessionSecret) {
     const now = Date.now();
-    const verdict = verifySessionToken(token, config.sessionSecret, now);
+    const claimed = tenantOfUnverifiedToken(token);
+    if (claimed.length === 0) return die("this is not a session token from this service", 2);
+    const verdict = verifySessionToken(token, tenantSessionSecret(config.sessionSecret, claimed), now);
     if (!verdict.ok) {
-      const said = { malformed: "this is not a session token from this service", bad_signature: "the signature does not match CP_SESSION_SECRET", expired: "this session has expired" };
+      const said = { malformed: "this is not a session token from this service", bad_signature: `the signature does not match the key for tenant ${claimed}`, expired: "this session has expired" };
       return die(said[verdict.reason] ?? verdict.reason, 2);
     }
     const left = Math.round((verdict.payload.exp - now) / 60000);

@@ -21,6 +21,7 @@ import {
   tenantPaths,
   validateSlug,
 } from "../cp/provision.mjs";
+import { tenantSessionSecret } from "../cp/session.mjs";
 import { openStore } from "../cp/store.mjs";
 import { makeTempRoot, startFakeCoolify } from "./cp-support.mjs";
 
@@ -115,15 +116,60 @@ test("the rendered compose points at this tenant's own directories and nobody el
     // Shared by every tenant: one copy of the release on the host, so an update is one ship.
     assert.match(rendered, /- \/home\/sem\/titanbot\/runtime:\/opt\/titanbot-runtime:ro/);
     assert.match(rendered, /- \/home\/sem\/titanbot\/deploy:\/init:ro/);
-    assert.match(rendered, /- \/home\/sem\/titanbot\/ui:\/app\/ui/);
-    // And the note that says what happens to that ui mount next.
-    assert.match(rendered, /SAND_UI_STATE_DIR lands in the relay this mount becomes :ro/);
+    // READ-ONLY, and this is the operator's own console directory: endpoints.json in it holds the
+    // provider API keys, and read-write it was a second customer's to overwrite.
+    assert.match(rendered, /- \/home\/sem\/titanbot\/ui:\/app\/ui:ro/);
+    assert.equal(/- \/home\/sem\/titanbot\/ui:\/app\/ui$/m.test(rendered), false, "no writable copy of that mount is left behind");
 
-    // The tenant's own writable corner.
+    // The tenant's own writable corner, and every store the relay takes from the environment
+    // pointed into it.
     assert.match(rendered, new RegExp(`- ${paths.state}:/state`));
     assert.match(rendered, /SAND_UI_STATE_DIR: \/state/);
     assert.match(rendered, /SAND_UI_AUTH_FILE: \/state\/auth\.json/);
+    assert.match(rendered, /GROK_BOT_SUBSCRIPTIONS_FILE: \/state\/subscriptions\.json/);
+    assert.match(rendered, /GROK_BOT_MAIL_FILE: \/state\/mail\.json/);
+    assert.match(rendered, /GROK_BOT_MAIL_LEDGER_FILE: \/state\/mail-inbox\.jsonl/);
+    assert.match(rendered, /SAND_UI_ENDPOINTS_FILE: \/state\/endpoints\.json/);
   });
+});
+
+test("no tenant gets the docker socket, because a socket in that container is root on the host", async () => {
+  await withWorld(async ({ config }) => {
+    const base = readFileSync(BASE_COMPOSE_PATH, "utf8");
+    // The operator's own stack does mount it, which is what makes the removal worth asserting.
+    assert.match(base, /^ {6}- \/var\/run\/docker\.sock:\/var\/run\/docker\.sock$/m);
+
+    const rendered = renderCompose({ slug: "acme", config });
+    assert.equal(
+      /^ {6}- .*docker\.sock/m.test(rendered),
+      false,
+      "a tenant relay with the host socket is root on the R750 and holds every other customer's files",
+    );
+    assert.match(rendered, /NO DOCKER SOCKET/);
+
+    // And the renderer refuses to guess: if the line it removes ever moves, rendering stops rather
+    // than quietly shipping a tenant that still has it.
+    const moved = base.replace("      - /var/run/docker.sock:/var/run/docker.sock", "      - /var/run/docker.sock:/var/run/docker.sock:ro");
+    assert.throws(() => renderCompose({ slug: "acme", config, composeText: moved }), /no longer has the line/);
+  });
+});
+
+test("the tenant's Coolify environment gets its own session key, never the master", async () => {
+  const coolify = await startFakeCoolify();
+  try {
+    await withWorld(async ({ config, store }) => {
+      store.createTenant({ slug: "acme", name: "Acme" });
+      const result = await provisionTenant({ store, config, slug: "acme", name: "Acme" });
+      assert.equal(result.ok, true, result.error);
+
+      const sent = coolify.callsTo("POST /services/{uuid}/envs").find((call) => call.body.key === "CP_SESSION_SECRET");
+      assert.equal(sent.body.value, tenantSessionSecret(config.sessionSecret, "acme"));
+      assert.notEqual(sent.body.value, config.sessionSecret, "the master signs for every tenant and is never handed to one");
+      // A key for a different tenant is a different value, so what acme holds cannot sign for
+      // titanium even though acme can read it out of its own container.
+      assert.notEqual(sent.body.value, tenantSessionSecret(config.sessionSecret, "titanium"));
+    }, { coolify });
+  } finally { await coolify.close(); }
 });
 
 test("the rendered compose names the tenant and the control plane", async () => {

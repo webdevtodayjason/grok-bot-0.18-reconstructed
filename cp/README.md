@@ -45,6 +45,7 @@ the spot, and a Coolify url that points at nothing.
     export COOLIFY_PROJECT_UUID=local-project
     export COOLIFY_SERVER_UUID=local-server
     export COOLIFY_ENVIRONMENT_NAME=production
+    export CP_ALLOW_NEW_TENANTS=1        # off in production. See "Building a new instance" below
 
     node cp/server.mjs
 
@@ -89,11 +90,32 @@ Operator only, `Authorization: Bearer $CP_ADMIN_TOKEN`:
 | `POST /v1/accounts` | 201, 409 if the email is already there, 400 if the tenant it names does not exist yet |
 | `GET /v1/accounts` | the list, without a hash and without a salt |
 | `POST /v1/accounts/{id}/password` | 204. An operator reset |
-| `POST /v1/tenants` | 201 and provisioning starts. `{"dryRun": true}` returns the plan and does nothing |
+| `POST /v1/tenants` | 201 and provisioning starts, or 409 `new_tenants_off`. `{"dryRun": true}` returns the plan and does nothing |
 | `GET /v1/tenants`, `GET /v1/tenants/{slug}` | the ledger row plus Coolify's live state |
 | `POST /v1/tenants/{slug}/adopt` | marks an instance that already exists as this tenant |
+| `POST /v1/tenants/{slug}/provision` | runs the build again from where it stopped. 409 on an adopted instance |
 | `POST /v1/tenants/{slug}/stop`, `/start`, `/restart` | passed through to Coolify |
-| `DELETE /v1/tenants/{slug}` | only when it is stopped, and only with `{"confirm":"<slug>"}` |
+| `DELETE /v1/tenants/{slug}` | only when it is stopped, and only with `{"confirm":"<slug>"}`. 409 on an adopted instance |
+
+## Building a new instance
+
+`POST /v1/tenants` answers `409 {"error":"new_tenants_off"}` unless `CP_ALLOW_NEW_TENANTS=1`. A
+tenant relay mounts the operator's shared `ui` directory read-only, and the relay still reads
+`endpoints.json` from beside its own code, which is where the provider API keys are. Until the relay
+reads that file from the tenant's own state directory, a second customer's console could read the
+first one's keys. Rehearsals, adopts and finishing a build that had already started are unaffected.
+
+An adopted instance is one this service did not build. It will not rebuild one and it will not
+delete one, and stopping it first does not change that: an adopted row keeps saying `adopted`
+through a stop. On `titanium` those two calls would have been `console.titanium.bot`.
+
+## Sessions are signed per tenant
+
+`CP_SESSION_SECRET` here is a master. Each tenant relay is given only
+`HMAC-SHA256(master, its own name)`, and that is the key that tenant's sessions are signed with. A
+key sitting in a container's environment is readable by whatever runs in that container, so a shared
+key would let any customer sign a session claiming any tenant. `node cp/cli.mjs session verify
+<token>` derives the same key from the master and the tenant the token names.
 
 A wrong email and a wrong password give the same answer, in the same shape, so the api never says
 whether an address is a customer. Ten failures in ten minutes, counted per email and per address,
@@ -158,7 +180,8 @@ image by digest and writes down the version it measured.
 
 The password, in any form. The scrypt hash and its salt stay in the store and appear in no answer
 and no log. `CP_SESSION_SECRET` and `CP_ADMIN_TOKEN` are read from the environment and are never
-written to the store, never returned and never printed. A tenant's gateway token goes to Coolify's
+written to the store, never returned and never printed. The master session key never reaches a
+tenant at all: what goes into a tenant's Coolify environment is that tenant's derived key. A tenant's gateway token goes to Coolify's
 environment store and to the tenant's own profile file, and nowhere else. A tenant's relay password
 is shown once, in the answer to the create that generated it, and is not kept in the ledger: if it
 is lost, reset it rather than looking for it.

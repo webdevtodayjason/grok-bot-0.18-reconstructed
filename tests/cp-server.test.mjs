@@ -10,13 +10,13 @@ import { readAuthFile } from "../ui/auth.mjs";
 import { tenantPaths } from "../cp/provision.mjs";
 import { CP_VERSION } from "../cp/server.mjs";
 import { LOCKOUT_MAX_FAILURES } from "../cp/store.mjs";
-import { verifySessionToken } from "../cp/session.mjs";
+import { tenantSessionSecret, verifySessionToken } from "../cp/session.mjs";
 import { startControlPlane, startFakeCoolify } from "./cp-support.mjs";
 
 const PASSWORD = "a-good-tenant-password";
 
 async function withPlane(run, options = {}) {
-  const coolify = options.withCoolify ? await startFakeCoolify() : null;
+  const coolify = options.withCoolify ? await startFakeCoolify({ existing: options.existingServices ?? [] }) : null;
   const plane = await startControlPlane({
     ...(coolify ? { coolifyUrl: coolify.url, coolifyApiKey: coolify.apiKey } : {}),
     ...options,
@@ -128,7 +128,7 @@ test("a short password is refused on both the create and the reset", async () =>
   });
 });
 
-test("signing in returns a session that names the tenant, and verifies with the shared secret", async () => {
+test("signing in returns a session that names the tenant, and verifies with that tenant's own key", async () => {
   await withPlane(async (plane) => {
     const account = await seedTenantAndAccount(plane);
     const answer = await plane.request("POST", "/v1/sessions", { body: { email: "Owner@Example.com", password: PASSWORD } });
@@ -137,9 +137,13 @@ test("signing in returns a session that names the tenant, and verifies with the 
     assert.deepEqual(answer.body.account, { id: account.id, email: "owner@example.com", name: "The Owner" });
     assert.deepEqual(answer.body.tenant, { slug: "acme", host: "acme.titanium.bot", status: "adopted" });
 
-    // This is the check the tenant's own relay will run, with the same secret and this same file.
-    const verdict = verifySessionToken(answer.body.token, plane.config.sessionSecret, Date.now());
+    // This is the check the tenant's own relay will run, with the key that relay is given and this
+    // same file. That key is derived from the master, and the master itself does not verify it:
+    // handing every tenant the master would let any one of them sign for console.titanium.bot.
+    const verdict = verifySessionToken(answer.body.token, tenantSessionSecret(plane.config.sessionSecret, "acme"), Date.now());
     assert.equal(verdict.ok, true);
+    assert.equal(verifySessionToken(answer.body.token, plane.config.sessionSecret, Date.now()).ok, false);
+    assert.equal(verifySessionToken(answer.body.token, tenantSessionSecret(plane.config.sessionSecret, "titanium"), Date.now()).ok, false);
     assert.equal(verdict.payload.tenant, "acme");
     assert.equal(verdict.payload.host, "acme.titanium.bot");
     assert.equal(verdict.payload.sub, account.id);
@@ -227,7 +231,7 @@ test("the current session reads back and a delete revokes it", async () => {
     assert.equal((await plane.request("GET", "/v1/sessions/current", { token })).status, 401);
     // The signature is still good, which is exactly why the relay side needs the twelve hour life:
     // it has no revocation table and checks only the signature and the expiry.
-    assert.equal(verifySessionToken(token, plane.config.sessionSecret, Date.now()).ok, true);
+    assert.equal(verifySessionToken(token, tenantSessionSecret(plane.config.sessionSecret, "acme"), Date.now()).ok, true);
   });
 });
 
@@ -453,4 +457,134 @@ test("the retry route re-runs provisioning from the step that failed", async () 
     assert.equal(retried.body.relayPassword, null);
     assert.match(retried.body.relayPasswordNote, /set on an earlier run/);
   }, { withCoolify: true });
+});
+
+test("building a new customer instance is refused while the shared console files are still readable", async () => {
+  await withPlane(async (plane, coolify) => {
+    const answer = await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme Roofing" });
+    assert.equal(answer.status, 409);
+    assert.equal(answer.body.error, "new_tenants_off");
+    assert.match(answer.body.message, /provider API keys/);
+    assert.doesNotMatch(answer.body.message, /—/);
+    assert.deepEqual(coolify.routes(), [], "nothing reached Coolify");
+    assert.equal(plane.store.countTenants(), 0, "and no half tenant was left in the ledger");
+
+    // A rehearsal still works, because it builds nothing.
+    const dry = await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme Roofing", dryRun: true });
+    assert.equal(dry.status, 200);
+    // And so does claiming an instance that is already running, which is how Jason's own console
+    // gets into the ledger.
+    const adopted = await plane.admin("POST", "/v1/tenants/titanium/adopt", { coolifyServiceUuid: "p927bfqm83ioloibamlvyd7g", host: "console.titanium.bot" });
+    assert.equal(adopted.status, 200);
+  }, { withCoolify: true, env: { CP_ALLOW_NEW_TENANTS: "0" } });
+});
+
+test("provisioning an adopted instance is refused, because it would build a second one beside it", async () => {
+  await withPlane(async (plane, coolify) => {
+    await plane.admin("POST", "/v1/tenants/titanium/adopt", { coolifyServiceUuid: "p927bfqm83ioloibamlvyd7g", host: "console.titanium.bot" });
+
+    const answer = await plane.admin("POST", "/v1/tenants/titanium/provision", {});
+    assert.equal(answer.status, 409);
+    assert.equal(answer.body.error, "adopted");
+    assert.match(answer.body.message, /did not build it and will not rebuild it/);
+    assert.doesNotMatch(answer.body.message, /—/);
+
+    assert.deepEqual(coolify.routes(), [], "no service was created");
+    const row = plane.store.getTenant("titanium");
+    assert.equal(row.status, "adopted");
+    assert.equal(row.host, "console.titanium.bot", "the live hostname is not rewritten to titanium.titanium.bot");
+    assert.equal(row.coolifyServiceUuid, "p927bfqm83ioloibamlvyd7g");
+  }, { withCoolify: true });
+});
+
+test("deleting an adopted instance is refused, and stopping it first does not get around that", async () => {
+  await withPlane(async (plane, coolify) => {
+    await plane.admin("POST", "/v1/tenants/titanium/adopt", { coolifyServiceUuid: "p927bfqm83ioloibamlvyd7g", host: "console.titanium.bot" });
+
+    const straight = await plane.admin("DELETE", "/v1/tenants/titanium", { confirm: "titanium" });
+    assert.equal(straight.status, 409);
+    assert.equal(straight.body.error, "adopted");
+    assert.match(straight.body.message, /will not delete it/);
+
+    // A stop used to write "stopped" over "adopted", which was the way past the guard: stop, then
+    // confirm, and the live console's Coolify service was gone.
+    const stopped = await plane.admin("POST", "/v1/tenants/titanium/stop");
+    assert.equal(stopped.status, 200);
+    assert.equal(stopped.body.tenant.status, "adopted", "how it got here is not a container state");
+    const afterStop = await plane.admin("DELETE", "/v1/tenants/titanium", { confirm: "titanium" });
+    assert.equal(afterStop.status, 409);
+    assert.equal(afterStop.body.error, "adopted");
+
+    assert.equal(coolify.callsTo("DELETE /services/{uuid}").length, 0, "the live console's service was never deleted");
+    assert.notEqual(plane.store.getTenant("titanium"), null);
+  }, { withCoolify: true, existingServices: ["p927bfqm83ioloibamlvyd7g"] });
+});
+
+test("a forged X-Forwarded-For does not buy a fresh lockout bucket per try", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane);
+    // Every try carries a different address and a different email, so neither bucket can fill on
+    // the header's word. The socket peer is loopback for all of them, and that is what counts.
+    for (let attempt = 0; attempt < LOCKOUT_MAX_FAILURES; attempt += 1) {
+      const answer = await plane.request("POST", "/v1/sessions", {
+        body: { email: `nobody${attempt}@example.com`, password: "not-the-password" },
+        headers: { "x-forwarded-for": `203.0.113.${attempt}` },
+      });
+      assert.equal(answer.status, 401, `attempt ${attempt + 1}`);
+    }
+    const locked = await plane.request("POST", "/v1/sessions", {
+      body: { email: "nobody99@example.com", password: "not-the-password" },
+      headers: { "x-forwarded-for": "203.0.113.99" },
+    });
+    assert.equal(locked.status, 429, "the address that actually sent them is locked");
+    assert.equal(locked.body.error, "locked");
+  });
+});
+
+test("the forwarded address is believed only from a proxy the operator named", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane);
+    // Now loopback IS the named proxy, which is what the R750's Traefik will be, so each forged
+    // entry is a different visitor and no single bucket reaches ten.
+    for (let attempt = 0; attempt < LOCKOUT_MAX_FAILURES + 4; attempt += 1) {
+      const answer = await plane.request("POST", "/v1/sessions", {
+        body: { email: `nobody${attempt}@example.com`, password: "not-the-password" },
+        headers: { "x-forwarded-for": `203.0.113.${attempt}` },
+      });
+      assert.equal(answer.status, 401, `attempt ${attempt + 1}`);
+    }
+    // And one visitor who keeps trying is still locked, from behind the same proxy.
+    for (let attempt = 0; attempt < LOCKOUT_MAX_FAILURES; attempt += 1) {
+      await plane.request("POST", "/v1/sessions", {
+        body: { email: `someone${attempt}@example.com`, password: "not-the-password" },
+        headers: { "x-forwarded-for": "198.51.100.7" },
+      });
+    }
+    const locked = await plane.request("POST", "/v1/sessions", {
+      body: { email: "someone99@example.com", password: "not-the-password" },
+      headers: { "x-forwarded-for": "198.51.100.7" },
+    });
+    assert.equal(locked.status, 429);
+  }, { env: { CP_TRUSTED_PROXIES: "127.0.0.1/32,::1/128" } });
+});
+
+test("a burst of sign-in attempts is capped rather than queued, so the service keeps answering", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane);
+    // Sixty at once, all of them unknown addresses so every one costs a full derivation. Only four
+    // may derive at a time; the rest are told to come back rather than queueing behind them, which
+    // is what stops one client stalling every other customer's sign-in.
+    const answers = await Promise.all(Array.from({ length: 60 }, (_, index) => plane.request("POST", "/v1/sessions", {
+      body: { email: `nobody${index}@example.com`, password: "not-the-password" },
+    })));
+    assert.equal(answers.length, 60, "every request was answered");
+    const busy = answers.filter((answer) => answer.body?.error === "busy");
+    assert.ok(busy.length > 0, `nothing was capped: ${answers.map((a) => a.status).join(",")}`);
+    assert.equal(busy[0].status, 429);
+    assert.equal(busy[0].headers.get("retry-after"), "1");
+    assert.match(busy[0].body.message, /Wait a moment and try again/);
+    assert.doesNotMatch(busy[0].body.message, /—/);
+    // The service is still answering everything else while that is going on.
+    assert.equal((await plane.request("GET", "/v1/health")).status, 200);
+  });
 });

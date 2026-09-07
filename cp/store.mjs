@@ -17,7 +17,7 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
 
 // N is 2^15, one notch above the relay's own auth.json (ui/auth.mjs uses 2^14). The relay's file
 // is on a host an operator already has to be on; this one holds every customer, so it buys the
@@ -64,14 +64,51 @@ export function verifyPassword(password, record) {
   return safeEqualHex(derived, hash);
 }
 
+// The same derivation on the libuv threadpool instead of on the event loop.
+//
+// This matters more than it looks. scryptSync at these parameters holds the ONLY thread this
+// service has for about 40 ms, and the sign-in route is the one route a stranger can reach without
+// a bearer. Measured before this change: forty sign-in attempts in flight from one client took the
+// health route from 1.6 ms to 88 ms, a 54x slowdown, and every customer's sign-in went with it. The
+// async form hands the work to the threadpool, so the process keeps answering while it runs.
+// cp/server.mjs caps how many can be in flight at once, because the threadpool is small and an
+// uncapped queue is the same denial of service one step further along.
+function scryptAsync(password, salt, keylen, options) {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, keylen, options, (error, derived) => (error ? reject(error) : resolve(derived)));
+  });
+}
+
+export async function hashPasswordAsync(password, salt = randomBytes(16).toString("hex"), params = CP_SCRYPT_PARAMS) {
+  const { N, r, p, keylen, maxmem } = params;
+  const hash = (await scryptAsync(utf8(password), utf8(salt), keylen, { N, r, p, maxmem })).toString("hex");
+  return { algorithm: "scrypt", N, r, p, keylen, salt, hash };
+}
+
+export async function verifyPasswordAsync(password, record) {
+  if (record === null || typeof record !== "object") return false;
+  if (record.algorithm !== "scrypt") return false;
+  const { N, r, p, keylen, salt, hash } = record;
+  if (typeof salt !== "string" || typeof hash !== "string") return false;
+  if (![N, r, p, keylen].every((n) => Number.isInteger(n) && n > 0)) return false;
+  let derived;
+  try { derived = (await scryptAsync(utf8(password), utf8(salt), keylen, { N, r, p, maxmem: CP_SCRYPT_PARAMS.maxmem })).toString("hex"); }
+  catch { return false; }
+  return safeEqualHex(derived, hash);
+}
+
 // A sign-in for an address that does not exist must cost the same as one for an address that does,
 // or the response time is a free account enumeration oracle. This is a real record over a fixed
 // salt and a password nobody holds, so verifying against it runs the same scrypt the real path
-// runs. It is built once at import so the cost lands on the sign-in, not on module load.
+// runs. It is built once, on the first sign-in, and reused after that.
 let decoyRecord = null;
-export function burnPasswordTime(password) {
-  if (decoyRecord === null) decoyRecord = hashPassword(randomBytes(32).toString("hex"));
-  verifyPassword(password, decoyRecord);
+let decoyBuild = null;
+export async function burnPasswordTime(password) {
+  if (decoyRecord === null) {
+    if (decoyBuild === null) decoyBuild = hashPasswordAsync(randomBytes(32).toString("hex"));
+    decoyRecord = await decoyBuild;
+  }
+  await verifyPasswordAsync(password, decoyRecord);
   return false;
 }
 
@@ -187,7 +224,18 @@ export function openStore(options = {}) {
   const insertFailure = statement("INSERT INTO login_failures (email, ip, at) VALUES (?, ?, ?)");
   const countFailuresByEmail = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM login_failures WHERE email = ? AND at >= ?");
   const countFailuresByIp = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM login_failures WHERE ip = ? AND at >= ?");
-  const clearFailuresFor = statement("DELETE FROM login_failures WHERE email = ? OR ip = ?");
+  // AND, not OR, and the difference is the whole lockout.
+  //
+  // With OR, a successful sign-in deleted every failure row for that address whoever it belonged
+  // to. So anyone with one working account of their own could guess a stranger's password without
+  // limit: spread the guesses one per address so no address bucket reaches ten, then sign in to
+  // their own account once from each of those addresses and the victim's rows are gone with them.
+  // Measured before this change: 60 guesses out of 60 reached the password check, against 10 of 60
+  // with no clearing sign-ins.
+  //
+  // With AND only the rows that are this person, at this address, are cleared, which is exactly the
+  // case the clear exists for: somebody who mistyped their own password and then got it right.
+  const clearFailuresFor = statement("DELETE FROM login_failures WHERE email = ? AND ip = ?");
   const deleteOldFailures = statement("DELETE FROM login_failures WHERE at < ?");
 
   const store = {
@@ -230,6 +278,19 @@ export function openStore(options = {}) {
       let record;
       try { record = JSON.parse(row.password_json); } catch { return { ok: false, account: null }; }
       if (!verifyPassword(password, record)) return { ok: false, account: null };
+      return { ok: true, account: accountRow(row) };
+    },
+
+    // The same answer, with the derivation on the threadpool. This is what the sign-in route uses,
+    // because that route is open to strangers and the sync form would stop the whole service for
+    // 40 ms per attempt. The sync one above stays for the operator routes, which are behind
+    // CP_ADMIN_TOKEN and are not a lever anybody else can pull.
+    async verifyAccountPasswordAsync(email, password) {
+      const row = selectAccountByEmail.get(normalizeEmail(email));
+      if (row == null) return { ok: false, account: null };
+      let record;
+      try { record = JSON.parse(row.password_json); } catch { return { ok: false, account: null }; }
+      if (!(await verifyPasswordAsync(password, record))) return { ok: false, account: null };
       return { ok: true, account: accountRow(row) };
     },
 

@@ -9,10 +9,13 @@ import {
   CP_SCRYPT_PARAMS,
   LOCKOUT_MAX_FAILURES,
   LOCKOUT_WINDOW_MS,
+  burnPasswordTime,
   hashPassword,
+  hashPasswordAsync,
   normalizeEmail,
   openStore,
   verifyPassword,
+  verifyPasswordAsync,
 } from "../cp/store.mjs";
 import { makeTempRoot } from "./cp-support.mjs";
 
@@ -206,4 +209,70 @@ test("a successful sign-in clears the counters for that email and that address",
     store.clearLoginFailures({ email: "owner@example.com", ip: "203.0.113.9" });
     assert.equal(store.loginLock({ email: "owner@example.com", ip: "203.0.113.9", at: now + 50 }).locked, false);
   });
+});
+
+test("one person's successful sign-in does not clear the lock somebody else was walking into", async () => {
+  await withStore(async (store) => {
+    const now = 1_780_000_000_000;
+    // The attacker owns attacker@example.com and is guessing target@example.com. Their guesses are
+    // spread one per address so no address bucket ever reaches ten, and the email bucket fills.
+    for (let index = 0; index < LOCKOUT_MAX_FAILURES; index += 1) {
+      store.recordLoginFailure({ email: "target@example.com", ip: `198.51.100.${index}`, at: now + index });
+    }
+    assert.equal(store.loginLock({ email: "target@example.com", ip: "198.51.100.50", at: now + 60 }).locked, true);
+
+    // Now they sign in successfully as themselves, from every one of those same addresses. Under
+    // the old `email = ? OR ip = ?` clear this deleted the target's rows and the lock was gone.
+    for (let index = 0; index < LOCKOUT_MAX_FAILURES; index += 1) {
+      store.clearLoginFailures({ email: "attacker@example.com", ip: `198.51.100.${index}` });
+    }
+    assert.equal(
+      store.loginLock({ email: "target@example.com", ip: "198.51.100.50", at: now + 60 }).locked,
+      true,
+      "somebody else's sign-in must not unlock an account that is being guessed at",
+    );
+
+    // And the clear still does the job it exists for: the same person, at the same address.
+    store.clearLoginFailures({ email: "target@example.com", ip: "198.51.100.0" });
+    for (let index = 1; index < LOCKOUT_MAX_FAILURES; index += 1) {
+      store.clearLoginFailures({ email: "target@example.com", ip: `198.51.100.${index}` });
+    }
+    assert.equal(store.loginLock({ email: "target@example.com", ip: "198.51.100.50", at: now + 60 }).locked, false);
+  });
+});
+
+test("the async password path answers the same as the sync one, off the event loop", async () => {
+  const record = await hashPasswordAsync("correct horse battery staple");
+  assert.equal(record.algorithm, "scrypt");
+  assert.equal(record.N, CP_SCRYPT_PARAMS.N);
+  assert.equal(await verifyPasswordAsync("correct horse battery staple", record), true);
+  assert.equal(await verifyPasswordAsync("not the password", record), false);
+  // The two forms read each other's records, which is what lets the operator routes stay sync.
+  assert.equal(verifyPassword("correct horse battery staple", record), true);
+  assert.equal(await verifyPasswordAsync("correct horse battery staple", hashPassword("correct horse battery staple")), true);
+
+  await withStore(async (store) => {
+    store.createTenant({ slug: "acme", name: "Acme" });
+    const account = store.createAccount({ email: "owner@example.com", password: "a-good-password", tenant: "acme" });
+    const right = await store.verifyAccountPasswordAsync("Owner@Example.com", "a-good-password");
+    assert.equal(right.ok, true);
+    assert.equal(right.account.id, account.id);
+    assert.equal((await store.verifyAccountPasswordAsync("owner@example.com", "wrong")).ok, false);
+    assert.equal((await store.verifyAccountPasswordAsync("nobody@example.com", "a-good-password")).ok, false);
+  });
+});
+
+test("the health of the process is measurable while sign-in derivations are in flight", async () => {
+  // The point of the async path, stated as a measurement rather than as a claim: with forty
+  // derivations running, a plain turn of the event loop still happens promptly. The sync form held
+  // the only thread for about 40 ms each, so this loop could not have run at all until they were
+  // all done.
+  const started = Date.now();
+  const work = Array.from({ length: 40 }, () => burnPasswordTime("whatever-they-typed"));
+  let turns = 0;
+  const ticker = setInterval(() => { turns += 1; }, 5);
+  await Promise.all(work);
+  clearInterval(ticker);
+  const elapsed = Date.now() - started;
+  assert.ok(turns > 0, `the event loop turned ${turns} times in ${elapsed} ms of derivations`);
 });

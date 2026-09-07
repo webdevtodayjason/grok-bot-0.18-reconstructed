@@ -11,6 +11,8 @@ import {
   base64urlDecode,
   base64urlEncode,
   mintSessionToken,
+  tenantOfUnverifiedToken,
+  tenantSessionSecret,
   verifySessionToken,
 } from "../cp/session.mjs";
 
@@ -121,3 +123,62 @@ test("the verifier does not know about revocation, which is the relay's whole co
 function mintSignedShape(part) {
   return `v1.${part}.${base64urlEncode(createHmac("sha256", SECRET).update(part, "utf8").digest())}`;
 }
+
+// ---- one key per tenant ---------------------------------------------------------------------
+
+test("each tenant gets its own key, derived from the master, and one key does not reach another", () => {
+  const acme = tenantSessionSecret(SECRET, "acme");
+  const roofing = tenantSessionSecret(SECRET, "roofing");
+  const titanium = tenantSessionSecret(SECRET, "titanium");
+
+  assert.equal(acme.length, 64, "32 bytes as hex, which is what the relay's own check wants");
+  assert.notEqual(acme, SECRET, "the master is never what a tenant is given");
+  assert.notEqual(acme, roofing);
+  assert.notEqual(acme, titanium);
+  // Derivation is a function of the two inputs and nothing else, so the same tenant is the same key
+  // on every run of the service.
+  assert.equal(tenantSessionSecret(SECRET, "acme"), acme);
+  // A different master gives a different key for the same tenant, which is what makes rotating the
+  // master sign everybody out.
+  assert.notEqual(tenantSessionSecret(randomBytes(32).toString("hex"), "acme"), acme);
+  assert.throws(() => tenantSessionSecret("", "acme"), /session secret is empty/);
+  assert.throws(() => tenantSessionSecret(SECRET, ""), /tenant name is empty/);
+});
+
+test("a tenant holding its own key cannot mint a session for another tenant", () => {
+  // This is the whole point. Acme's relay holds acme's key, because that key is in acme's own
+  // container environment. Whoever holds it can sign whatever claims they like.
+  const acmeKey = tenantSessionSecret(SECRET, "acme");
+  const forged = mintSessionToken(
+    claims({ tenant: "titanium", host: "console.titanium.bot" }),
+    acmeKey,
+    NOW,
+  ).token;
+
+  // The control plane and the relay both check with the key for the tenant the token names, and
+  // that is titanium's key, which acme does not have.
+  const asTitanium = verifySessionToken(forged, tenantSessionSecret(SECRET, "titanium"), NOW);
+  assert.equal(asTitanium.ok, false);
+  assert.equal(asTitanium.reason, "bad_signature");
+  // Nor does it verify under the master, which is what it would have been signed with before.
+  assert.equal(verifySessionToken(forged, SECRET, NOW).ok, false);
+  // Acme's own sessions still work, which is the other half of the answer.
+  const honest = mintSessionToken(claims(), acmeKey, NOW).token;
+  assert.equal(verifySessionToken(honest, acmeKey, NOW).ok, true);
+});
+
+test("the tenant a token names can be read before it is checked, and only to pick the key", () => {
+  const { token } = mintSessionToken(claims(), tenantSessionSecret(SECRET, "acme"), NOW);
+  assert.equal(tenantOfUnverifiedToken(token), "acme");
+  assert.equal(tenantOfUnverifiedToken(""), "");
+  assert.equal(tenantOfUnverifiedToken("not-a-token"), "");
+  assert.equal(tenantOfUnverifiedToken("v2.abc.def"), "");
+  assert.equal(tenantOfUnverifiedToken(`v1.${base64urlEncode("{not json")}.sig`), "");
+  assert.equal(tenantOfUnverifiedToken(`v1.${base64urlEncode(JSON.stringify([1, 2]))}.sig`), "");
+  // A rewritten claim reads back as the rewritten name, which is exactly what makes the check that
+  // follows fail: it picks the key that name means, and the signature was made with another.
+  const parts = token.split(".");
+  const lying = `v1.${base64urlEncode(JSON.stringify({ ...claims(), tenant: "titanium", iat: NOW, exp: NOW + SESSION_TTL_MS }))}.${parts[2]}`;
+  assert.equal(tenantOfUnverifiedToken(lying), "titanium");
+  assert.equal(verifySessionToken(lying, tenantSessionSecret(SECRET, "titanium"), NOW).ok, false);
+});

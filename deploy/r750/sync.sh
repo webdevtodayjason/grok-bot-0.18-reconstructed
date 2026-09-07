@@ -124,6 +124,26 @@ ssh "$HOST" "mkdir -p '$ROOT/deploy/backup'"
 rsync -a --delete "$REPO/deploy/backup/" "$HOST:$ROOT/deploy/backup/"
 say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,apply-start-window-fix.sh,init-box.sh,backup/}"
 
+step "ship the control plane"
+# TENANT-1. docs/TENANCY.md section 5 tells the operator to run this script and then build the
+# control plane image on the server with `-f $ROOT/cp/Dockerfile $ROOT`. Nothing here shipped cp/
+# or the two compose files, so that build could not run at all: the first documented step of the
+# deploy had nothing to build from.
+#
+# The image's build context is $ROOT, and the Dockerfile copies cp/, ui/auth.mjs,
+# ui/set-password.mjs (both already shipped above) and deploy/coolify/docker-compose.yml, which is
+# the template every tenant's compose is rendered from. So all four have to be here.
+#
+# cp/*.mjs by glob and the Dockerfile by name, never the directory: cp/.data is the local sqlite
+# store with account rows in it, and a directory copy would carry it to the server.
+ssh "$HOST" "mkdir -p '$ROOT/cp' '$ROOT/deploy/coolify'"
+rsync -a "$REPO"/cp/*.mjs "$REPO/cp/Dockerfile" "$REPO/cp/README.md" "$HOST:$ROOT/cp/"
+rsync -a "$REPO/deploy/coolify/docker-compose.yml" "$REPO/deploy/coolify/control-plane.compose.yml" "$HOST:$ROOT/deploy/coolify/"
+say "cp/{$(cd "$REPO/cp" && ls *.mjs | tr '\n' ',')Dockerfile,README.md} and deploy/coolify/{docker-compose.yml,control-plane.compose.yml}"
+# The control plane's own store is never shipped. It lives on the server under /data/titanbot and
+# holds every customer's password hash.
+say "cp/.data is not shipped"
+
 if [ "$INSTALL" = no ]; then
   printf '\n== shipped, not installed\n'
   say "run it yourself: ssh $HOST bash $ROOT/deploy/install.sh"

@@ -1,10 +1,13 @@
 // cp/session.mjs -- the session token the control plane mints and every tenant relay verifies.
 //
 // This file is the shared half of tenancy. The control plane signs a token when a customer signs
-// in; the relay on that customer's own instance verifies the same bytes with the same secret and
-// lets the session in instead of asking for the relay password. So it has to be importable from
+// in; the relay on that customer's own instance verifies the same bytes with the key it was given
+// and lets the session in instead of asking for the relay password. So it has to be importable from
 // both sides, and it must never grow a dependency on the store, the config or the network. It
 // imports node:crypto and nothing else, on purpose.
+//
+// The key is per tenant, not one key for everybody. See tenantSessionSecret below: the control
+// plane holds a master and gives each tenant only HMAC-SHA256(master, that tenant's name).
 //
 // The shape, written out:
 //
@@ -25,6 +28,45 @@ export const SESSION_VERSION = "v1";
 // Twelve hours. Long enough that a working day does not end with a sign-in, short enough that a
 // laptop left in a coffee shop is not a standing key to the instance.
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+// ---- one key per tenant --------------------------------------------------------------------
+//
+// CP_SESSION_SECRET on the control plane is a MASTER key and is never handed to a tenant. Each
+// tenant relay is given only this, its own derived key, and that key signs for that tenant and
+// nothing else.
+//
+// Why it has to work this way: the tenant's key is written into that tenant's Coolify environment,
+// which means it is readable by anyone who can read the container's environment, which is anyone
+// who can run code in that customer's relay. If the value there were the master, that customer
+// could sign a token claiming any tenant they liked, including console.titanium.bot, and the
+// relay's tenant check would be no defence at all: they would simply mint the claim it wants.
+//
+// HMAC is what makes the derivation one-way, so holding a tenant key does not walk back to the
+// master and cannot produce a second tenant's key. The label is in the message so this value can
+// never collide with some other thing derived from the same master later.
+const TENANT_KEY_LABEL = "titanbot-tenant-session-v1";
+
+export function tenantSessionSecret(masterSecret, tenant) {
+  const master = String(masterSecret ?? "");
+  const slug = String(tenant ?? "");
+  if (master.length === 0) throw new Error("the session secret is empty");
+  if (slug.length === 0) throw new Error("the tenant name is empty");
+  return createHmac("sha256", master).update(`${TENANT_KEY_LABEL}:${slug}`, "utf8").digest("hex");
+}
+
+// Which tenant a token SAYS it is for, read without checking anything. It is used for one purpose
+// only: choosing the key to verify with. A liar picks a key that is not the one the token was
+// signed under, so the signature check that follows fails, which is the whole reason reading an
+// unverified claim is safe here and nowhere else.
+export function tenantOfUnverifiedToken(token) {
+  const parts = String(token ?? "").split(".");
+  if (parts.length !== 3 || parts[0] !== SESSION_VERSION) return "";
+  try {
+    const payload = JSON.parse(base64urlDecode(parts[1]).toString("utf8"));
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return "";
+    return typeof payload.tenant === "string" ? payload.tenant : "";
+  } catch { return ""; }
+}
 
 // The claims a token must carry. sub is the account id, tenant is the slug, host is the hostname
 // the relay answers on. host is in here so a relay can refuse a token minted for somebody else's

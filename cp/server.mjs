@@ -3,9 +3,12 @@
 // Two audiences, and they are kept apart by which bearer they carry:
 //
 //   customers  POST /v1/sessions with an email and a password, and the answer is a signed session
-//              that names their tenant. Their own relay verifies that token with the same secret
-//              and lets them in without the relay password. Nothing else on this service is
-//              reachable with a customer session.
+//              that names their tenant. Their own relay verifies that token with the key it was
+//              given and lets them in without the relay password. Nothing else on this service is
+//              reachable with a customer session. That key is theirs alone: CP_SESSION_SECRET here
+//              is a master, and what a tenant gets is HMAC-SHA256(master, its own name), so a
+//              customer who reads it out of their own container can sign for themselves and for
+//              nobody else. cp/session.mjs, tenantSessionSecret, is where that lives.
 //   the operator  every route that adds an account, adds a tenant or touches Coolify, behind
 //              CP_ADMIN_TOKEN and a constant-time compare.
 //
@@ -20,9 +23,11 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { mintSessionToken, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
+import { clientAddress, parseTrustedProxies } from "../ui/auth.mjs";
+import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import {
+  NEW_TENANTS_BLOCKED,
   configProblems,
   createCoolifyClient,
   loadConfig,
@@ -102,18 +107,13 @@ function bearer(request) {
   return header.replace(/^bearer\s+/i, "").trim();
 }
 
-const PRIVATE_ADDRESS = /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|::ffff:(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|f[cd])/i;
-
-// The address the lockout counts against. Everything reaching this process arrives from Coolify's
-// Traefik on a docker network, and Traefik rewrites X-Forwarded-For from the connection it actually
-// accepted, so behind a private peer the first entry is the visitor. When the peer is not private
-// there is no proxy in front and the socket address is the visitor.
-export function clientAddress(request) {
-  const socket = String(request.socket?.remoteAddress ?? "");
-  if (!PRIVATE_ADDRESS.test(socket)) return socket;
-  const forwarded = String(request.headers["x-forwarded-for"] ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-  return forwarded[0] ?? socket;
-}
+// How many password derivations may be running at once.
+//
+// scrypt at these parameters runs on the libuv threadpool, which is four threads by default, and
+// the sign-in route is open to strangers. Without a cap, a trickle of attempts fills the queue and
+// every customer's sign-in waits behind it; with one, the attempts past the cap are refused
+// immediately and cheaply, which is the difference between a slow service and no service.
+const MAX_CONCURRENT_DERIVATIONS = 4;
 
 const publicAccount = (account) => (account == null ? null : {
   id: account.id, email: account.email, name: account.name, tenant: account.tenant,
@@ -137,6 +137,27 @@ export function createApp(options = {}) {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const now = options.now ?? (() => Date.now());
   const client = createCoolifyClient({ config, fetchImpl });
+
+  // The address the lockout counts against, decided by the relay's own code (ui/auth.mjs) with the
+  // relay's own two settings.
+  //
+  // The rule it enforces, and the reason the settings exist: X-Forwarded-For is a header the caller
+  // writes, so it is read only when the peer that sent it is one the operator named in
+  // CP_TRUSTED_PROXIES, and CF-Connecting-IP is read only when that peer is inside
+  // CP_CLOUDFLARE_RANGES. Without them the visitor is the socket address, which cannot be forged.
+  // The old code here trusted the header from any private peer, so a forged list from a loopback
+  // caller gave a fresh bucket per guess and the address half of the lockout never fired.
+  const trustedProxies = parseTrustedProxies(config.trustedProxies);
+  const cloudflareRanges = parseTrustedProxies(config.cloudflareRanges);
+  const clientOf = (request) => clientAddress(request, trustedProxies, cloudflareRanges);
+
+  // In-flight scrypt derivations. See MAX_CONCURRENT_DERIVATIONS.
+  let derivations = 0;
+
+  // Was this instance already running when it was claimed? Read from the ledger rather than from
+  // the status column, because the status column moves: a stop writes "stopped" over "adopted", and
+  // a guard that read only the column could be walked around by stopping first.
+  const wasAdopted = (slug, row) => row?.status === "adopted" || store.completedSteps(slug).has("adopt");
 
   const requireAdmin = (request, response) => {
     if (secretsMatch(bearer(request), config.adminToken)) return true;
@@ -162,7 +183,7 @@ export function createApp(options = {}) {
     const password = typeof body.password === "string" ? body.password : "";
     if (email.length === 0 || password.length === 0) return json(response, 400, { error: "bad_request", message: "Send an email address and a password." });
 
-    const ip = clientAddress(request);
+    const ip = clientOf(request);
     const at = now();
     store.pruneLoginFailures(at);
     const lock = store.loginLock({ email, ip, at });
@@ -170,11 +191,27 @@ export function createApp(options = {}) {
       return json(response, 429, { error: "locked", retryAfter: lock.retryAfter }, { "retry-after": String(lock.retryAfter) });
     }
 
-    const attempt = store.verifyAccountPassword(email, password);
+    // The cap goes on before the derivation and comes off after it, in a finally, because a
+    // counter that leaks on a throw is a service that stops answering sign-ins for good.
+    if (derivations >= MAX_CONCURRENT_DERIVATIONS) {
+      return json(response, 429, {
+        error: "busy",
+        retryAfter: 1,
+        message: "Too many people are signing in at once. Wait a moment and try again.",
+      }, { "retry-after": "1" });
+    }
+    derivations += 1;
+    let attempt;
+    try {
+      attempt = await store.verifyAccountPasswordAsync(email, password);
+      if (!attempt.ok) {
+        // An address with no account still costs a scrypt derivation, so the two answers take the
+        // same time and this route cannot be used to find out who has an account here.
+        if (store.getAccountByEmail(email) == null) await burnPasswordTime(password);
+      }
+    } finally { derivations -= 1; }
+
     if (!attempt.ok) {
-      // An address with no account still costs a scrypt derivation, so the two answers take the
-      // same time and this route cannot be used to find out who has an account here.
-      if (store.getAccountByEmail(email) == null) burnPasswordTime(password);
       store.recordLoginFailure({ email, ip, at });
       return json(response, 401, { error: "invalid_login" });
     }
@@ -198,7 +235,8 @@ export function createApp(options = {}) {
       iat: at,
       exp: at + SESSION_TTL_MS,
       jti: randomUUID(),
-    }, config.sessionSecret, at);
+      // Signed with this tenant's own key, which is the only key their relay is given.
+    }, tenantSessionSecret(config.sessionSecret, tenant.slug), at);
 
     return json(response, 200, {
       token,
@@ -210,7 +248,15 @@ export function createApp(options = {}) {
 
   function currentSession(request) {
     const token = bearer(request);
-    const verdict = verifySessionToken(token, config.sessionSecret, now());
+    // Which key to check with is decided by the tenant the token names, read before anything is
+    // verified. Naming a tenant you were not issued for picks a key your signature was not made
+    // with, so the check below fails: the claim selects the key, it never grants anything.
+    const claimed = tenantOfUnverifiedToken(token);
+    if (claimed.length === 0) return { ok: false };
+    let secret;
+    try { secret = tenantSessionSecret(config.sessionSecret, claimed); }
+    catch { return { ok: false }; }
+    const verdict = verifySessionToken(token, secret, now());
     if (!verdict.ok) return { ok: false };
     if (store.isSessionRevoked(verdict.payload.jti)) return { ok: false };
     return { ok: true, payload: verdict.payload };
@@ -342,6 +388,8 @@ export function createApp(options = {}) {
           return json(response, 200, { dryRun: true, slug, host: tenantHost(slug, config), plan: result.plan, composeSha256: result.composeSha256 });
         }
 
+        if (!config.allowNewTenants) return json(response, 409, { error: "new_tenants_off", message: NEW_TENANTS_BLOCKED });
+
         store.createTenant({ slug, name, host: tenantHost(slug, config), status: "provisioning", ownerEmail });
         const result = await provisionTenant({ store, config, slug, name, fetchImpl });
         if (!result.ok) {
@@ -364,6 +412,16 @@ export function createApp(options = {}) {
 
       if (segments.length === 3 && method === "DELETE") {
         if (row == null) return json(response, 404, { error: "not_found" });
+        // An adopted instance was not built here and is not this service's to delete. On tenant
+        // "titanium" the Coolify service behind that row is the live console, and a stop followed
+        // by a confirmed delete would take it away. Forgetting the row is the operator's way out
+        // and it touches nothing on Coolify.
+        if (wasAdopted(slug, row)) {
+          return json(response, 409, {
+            error: "adopted",
+            message: "This instance was already running when it was claimed, so this service did not build it and will not delete it. Remove it in Coolify if that is really what you want.",
+          });
+        }
         if (row.status !== "stopped") {
           return json(response, 409, { error: "not_stopped", message: "Stop the tenant first. Only a stopped tenant can be removed." });
         }
@@ -407,6 +465,24 @@ export function createApp(options = {}) {
       if (segments.length === 4 && segments[3] === "provision" && method === "POST") {
         if (row == null) return json(response, 404, { error: "not_found" });
         const dryRun = body.dryRun === true || config.dryRun;
+        // Provision on an adopted instance is not a retry, it is a second instance.
+        //
+        // Adopt records one ledger step called "adopt", so none of the seven provisioning steps is
+        // marked done and every one of them would run: a duplicate Coolify service, a second
+        // container carrying the com.titanbot.role=box label the relay resolves its box by, the
+        // ledger repointed at the new service, and the hostname rewritten from
+        // console.titanium.bot to titanium.titanium.bot, which does not exist. On tenant
+        // "titanium" that is Jason's live console.
+        if (!dryRun && wasAdopted(slug, row)) {
+          return json(response, 409, {
+            error: "adopted",
+            message: "This instance was already running when it was claimed, so this service did not build it and will not rebuild it. Building it again would make a second copy beside the one that is live.",
+          });
+        }
+        // Finishing a build that was already allowed is fine; starting a new one is not.
+        if (!dryRun && !config.allowNewTenants && !row.coolifyServiceUuid) {
+          return json(response, 409, { error: "new_tenants_off", message: NEW_TENANTS_BLOCKED });
+        }
         const result = await provisionTenant({ store, config, slug, name: row.name, dryRun, fetchImpl });
         if (!result.ok) {
           const status = dryRun ? 500 : 502;
@@ -426,7 +502,11 @@ export function createApp(options = {}) {
             : await client.restartService(row.coolifyServiceUuid);
           // Coolify queues all three and answers immediately, so the ledger records what was asked
           // for, not what has happened. GET /v1/tenants/{slug} is what says when it took.
-          const next = action === "stop" ? "stopped" : "provisioning";
+          //
+          // An adopted row keeps saying "adopted": that is how it got here, not a container state,
+          // and it is what the delete and provision guards above read. Writing "stopped" over it
+          // would turn a stop into a way around them.
+          const next = wasAdopted(slug, row) ? "adopted" : action === "stop" ? "stopped" : "provisioning";
           const updated = store.updateTenant(slug, { status: next, lastError: null });
           return json(response, 200, { tenant: publicTenant(updated), message: String(answer?.message ?? "") });
         } catch (error) {

@@ -29,6 +29,9 @@
 //             plan does not carry the session secret in clear
 //   adopt     an existing service becomes a tenant, and the tenant reads back adopted with its
 //             uuid and host
+//   guards    that adopted instance is not rebuilt and not deleted, and a stop does not get past
+//             either refusal
+//   off       building a new customer instance is refused while CP_ALLOW_NEW_TENANTS is unset
 //   slugs     the reserved names and the malformed shapes are all refused, and none of them
 //             created a tenant
 //   counts    /v1/health's tenants and accounts moved
@@ -391,12 +394,28 @@ try {
   // Re-derived here, not asked of the code under test. If the signature is over the decoded json
   // instead of over the encoded part, the detail says which, because that is the one thing the
   // relay wave has to match byte for byte.
-  const overPart = createHmac("sha256", SESSION_SECRET).update(parts[1] ?? "").digest("base64url");
-  const overJson = createHmac("sha256", SESSION_SECRET).update(Buffer.from(parts[1] ?? "", "base64url")).digest("base64url");
+  //
+  // And the key is the TENANT'S key, not the master. CP_SESSION_SECRET on this service is a master
+  // that never leaves it; each tenant relay is given only HMAC-SHA256(master, its own name), so a
+  // customer who reads the key out of their own container can sign for themselves and for nobody
+  // else. Derived here from the master and the tenant the token names, the same two inputs the
+  // service had, so this leg would fail if the service ever went back to signing with the master.
+  const tenantKey = createHmac("sha256", SESSION_SECRET).update(`titanbot-tenant-session-v1:${payload?.tenant ?? ""}`, "utf8").digest("hex");
+  const overPart = createHmac("sha256", tenantKey).update(parts[1] ?? "").digest("base64url");
+  const overJson = createHmac("sha256", tenantKey).update(Buffer.from(parts[1] ?? "", "base64url")).digest("base64url");
+  const underMaster = createHmac("sha256", SESSION_SECRET).update(parts[1] ?? "").digest("base64url");
   check(
     parts[2] === overPart,
-    "the signature is HMAC-SHA256 of the payload part under CP_SESSION_SECRET",
-    parts[2] === overPart ? "" : parts[2] === overJson ? "it signs the decoded json instead of the encoded part" : "neither convention matches",
+    "the signature is HMAC-SHA256 of the payload part under this tenant's own derived key",
+    parts[2] === overPart ? ""
+      : parts[2] === underMaster ? "it signs under the master, so every tenant could sign for every other"
+      : parts[2] === overJson ? "it signs the decoded json instead of the encoded part"
+      : "neither convention matches",
+  );
+  check(
+    parts[2] !== underMaster && tenantKey !== SESSION_SECRET,
+    "and that key is not the master every other tenant also holds",
+    tenantKey === SESSION_SECRET ? "the derivation returned the master itself" : "",
   );
 
   // ---- the session reads back -----------------------------------------------------------------
@@ -490,6 +509,43 @@ try {
   check(row?.host === ADOPT_HOST, "it carries the host it was adopted on", String(row?.host));
   const adoptNoBearer = await call("POST", `/v1/tenants/${ADOPT_SLUG}/adopt`, { body: { coolifyServiceUuid: ADOPT_UUID, host: ADOPT_HOST } });
   check(adoptNoBearer.status === 401, "adopt with no bearer is 401", `status ${adoptNoBearer.status}`);
+
+  // ---- the two things that must not happen to an adopted instance ------------------------------
+  // The instance behind this row is running and was not built here. Provisioning it is not a retry,
+  // it is a second stack beside the live one with the same box label, the ledger repointed at it
+  // and the hostname rewritten. Deleting it hands Coolify a service this api did not create.
+  step("an adopted instance is not rebuilt and not deleted");
+  const beforeGuards = coolifyCalls.length;
+  const reprovision = await call("POST", `/v1/tenants/${ADOPT_SLUG}/provision`, { admin: true, body: {} });
+  check(reprovision.status === 409, "provision on an adopted instance is refused", `status ${reprovision.status} ${reprovision.text.slice(0, 160)}`);
+  check(!reprovision.text.includes("\u2014"), "and says so without an em dash", reprovision.text.slice(0, 160));
+  const stillThere = await call("GET", `/v1/tenants/${ADOPT_SLUG}`, { admin: true });
+  const guarded = stillThere.json?.tenant ?? stillThere.json;
+  check(guarded?.host === ADOPT_HOST, "the adopted hostname was not rewritten", String(guarded?.host));
+  check(guarded?.coolifyServiceUuid === ADOPT_UUID, "and it still points at the service it was adopted on", String(guarded?.coolifyServiceUuid));
+
+  const stopAdopted = await call("POST", `/v1/tenants/${ADOPT_SLUG}/stop`, { admin: true, body: {} });
+  check(stopAdopted.status === 200 || stopAdopted.status === 502, "a stop is passed through", `status ${stopAdopted.status}`);
+  const deleteAdopted = await call("DELETE", `/v1/tenants/${ADOPT_SLUG}`, { admin: true, body: { confirm: ADOPT_SLUG } });
+  check(deleteAdopted.status === 409, "delete on an adopted instance is refused, stopped or not", `status ${deleteAdopted.status} ${deleteAdopted.text.slice(0, 160)}`);
+  check(
+    !coolifyCalls.slice(beforeGuards).some((c) => c.method === "DELETE" || (c.method === "POST" && /\/services\/?$/.test(c.path))),
+    "neither reached Coolify with a create or a delete",
+    coolifyCalls.slice(beforeGuards).map((c) => `${c.method} ${c.path}`).join(", "),
+  );
+
+  // ---- building a new instance is off ----------------------------------------------------------
+  // CP_ALLOW_NEW_TENANTS is unset in this run, which is how production ships it, and the reason is
+  // in cp/provision.mjs: a customer's relay can still read the operator's shared endpoints.json.
+  step("a new customer instance is refused while that is off");
+  const beforeBuild = coolifyCalls.length;
+  const blocked = await call("POST", "/v1/tenants", { admin: true, body: { slug: TENANT_SLUG, name: "Gate Tenant" } });
+  check(blocked.status === 409, "POST /v1/tenants without the switch is refused", `status ${blocked.status} ${blocked.text.slice(0, 160)}`);
+  check(blocked.json?.error === "new_tenants_off", "the error names the switch", String(blocked.json?.error));
+  check(!blocked.text.includes("\u2014"), "the sentence has no em dash in it", blocked.text.slice(0, 200));
+  check(coolifyCalls.length === beforeBuild, "nothing reached Coolify", `${coolifyCalls.length - beforeBuild} calls`);
+  const notCreated = await call("GET", `/v1/tenants/${TENANT_SLUG}`, { admin: true });
+  check(notCreated.status === 404, "and no half tenant was left in the ledger", `status ${notCreated.status}`);
 
   // ---- the slugs --------------------------------------------------------------------------------
   step("the slugs that must be refused");

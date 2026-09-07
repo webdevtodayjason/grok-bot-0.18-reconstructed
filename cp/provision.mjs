@@ -30,6 +30,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { newAuthRecord, writeAuthFile } from "../ui/auth.mjs";
+import { tenantSessionSecret } from "./session.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..");
@@ -112,8 +113,27 @@ export function loadConfig(env = process.env) {
     releaseRoot: text("CP_RELEASE_ROOT", CONFIG_DEFAULTS.releaseRoot),
     publicUrl: text("CP_PUBLIC_URL", CONFIG_DEFAULTS.publicUrl).replace(/\/+$/, ""),
     dryRun: /^(1|true|yes)$/i.test(text("CP_DRY_RUN", "")),
+    allowNewTenants: /^(1|true|yes)$/i.test(text("CP_ALLOW_NEW_TENANTS", "")),
+    // Which peers may say who the visitor is. Same two settings the relay already runs with, read
+    // by the same code, because two implementations of one answer is how one of them goes stale.
+    trustedProxies: text("CP_TRUSTED_PROXIES"),
+    cloudflareRanges: text("CP_CLOUDFLARE_RANGES"),
   };
 }
+
+// Off until a customer's relay reads its own files.
+//
+// A tenant relay mounts the operator's shared ui directory, and the relay still opens
+// ui/endpoints.json beside its own code: that file holds the provider API keys. Read-only, which
+// the render now is, stops a tenant WRITING them. It does not stop a tenant reading them, and the
+// variable that moves that file (SAND_UI_ENDPOINTS_FILE) is set in the render but not yet read by
+// the relay. So building a second instance is refused until it is, and the operator turns it on
+// deliberately with CP_ALLOW_NEW_TENANTS=1 once the relay wave has landed.
+//
+// Adopting an instance that already exists is unaffected, and so is finishing one that was already
+// started, so this cannot strand a half-built tenant.
+export const NEW_TENANTS_BLOCKED =
+  "New customer instances are turned off. A customer's console would still read the shared settings file on this server, which holds your provider API keys, so it is not safe to build one yet. Adopting an instance that already exists still works. Set CP_ALLOW_NEW_TENANTS=1 once the relay reads its settings from each customer's own state directory.";
 
 // The two things a config must have before it can sign anybody in. Reported as sentences because
 // this is what the service prints and refuses to start on.
@@ -183,9 +203,31 @@ function spliceAfter(text, anchor, lines) {
   return `${text.slice(0, at)}\n${lines.join("\n")}${text.slice(at)}`;
 }
 
+// Takes one line OUT and leaves an explanation where it was. Same refusal to guess as the two
+// above: a tenant compose that quietly kept a line this renderer thought it had removed is a
+// tenant that quietly has something it must not have.
+// The anchor here is a WHOLE line, matched exactly, unlike the two above: a line that has grown a
+// suffix (`...docker.sock:ro`) is not the line this was written against, and replacing its prefix
+// would leave the tail behind as a broken half mount.
+//
+// The comment lines directly above the anchor go with it. They were written about the line being
+// replaced, so keeping them would leave a tenant's compose explaining a mount that is not in it,
+// in words that contradict the replacement two lines further down.
+function replaceLine(text, anchor, lines) {
+  const rows = text.split("\n");
+  const hits = rows.reduce((all, row, index) => (row === anchor ? [...all, index] : all), []);
+  if (hits.length === 0) throw new Error(`the base compose no longer has the line "${anchor.trim()}", so this tenant cannot be rendered`);
+  if (hits.length > 1) throw new Error(`the base compose has "${anchor.trim()}" more than once, so this tenant cannot be rendered`);
+  let from = hits[0];
+  while (from > 0 && rows[from - 1].trim().startsWith("#")) from -= 1;
+  rows.splice(from, hits[0] - from + 1, ...lines);
+  return rows.join("\n");
+}
+
 const BOX_ENV_ANCHOR = '      SAND_SUPERVISOR_ENABLED: "1"';
 const RELAY_ENV_ANCHOR = '      SAND_UI_PORT: "7777"';
 const RELAY_UI_MOUNT_ANCHOR = "      - /home/sem/titanbot/ui:/app/ui";
+const RELAY_SOCKET_ANCHOR = "      - /var/run/docker.sock:/var/run/docker.sock";
 const RELAY_LAST_VOLUME_ANCHOR = "      - /home/sem/titanbot/deploy:/init:ro";
 
 export function renderCompose({ slug, config, composeText = readFileSync(BASE_COMPOSE_PATH, "utf8") }) {
@@ -211,6 +253,9 @@ export function renderCompose({ slug, config, composeText = readFileSync(BASE_CO
     `      # neither secret is ever in a file anyone can paste into a chat window.`,
     `      TENANT_ID: ${slug}`,
     `      CP_URL: ${config.publicUrl}`,
+    `      # THIS TENANT'S OWN signing key, not the control plane's master. It is`,
+    `      # HMAC-SHA256(master, "${slug}"), so reading it out of this container signs for ${slug} and`,
+    `      # for nobody else. cp/session.mjs, tenantSessionSecret, says why that matters.`,
     `      CP_SESSION_SECRET: \${CP_SESSION_SECRET}`,
     `      # The relay's own writable corner, so the release's ui directory above can be one shared`,
     `      # copy instead of a copy per customer. SAND_UI_STATE_DIR is the variable the relay wave`,
@@ -218,12 +263,48 @@ export function renderCompose({ slug, config, composeText = readFileSync(BASE_CO
     `      # is the one that exists today and is what makes this tenant's password their own.`,
     `      SAND_UI_STATE_DIR: /state`,
     `      SAND_UI_AUTH_FILE: /state/auth.json`,
+    `      # The three writable stores the relay already takes from the environment, pointed at this`,
+    `      # tenant's own directory so nothing this instance saves lands in the shared ui directory`,
+    `      # beside the operator's own files.`,
+    `      GROK_BOT_SUBSCRIPTIONS_FILE: /state/subscriptions.json`,
+    `      GROK_BOT_MAIL_FILE: /state/mail.json`,
+    `      GROK_BOT_MAIL_LEDGER_FILE: /state/mail-inbox.jsonl`,
+    `      # The provider list. The relay still reads ui/endpoints.json beside its own code and does`,
+    `      # NOT read this yet; it is the name the relay wave takes, and it is set now so a tenant`,
+    `      # built today needs no compose edit on the day it lands. Until then a tenant relay can`,
+    `      # still READ the shared endpoints.json, which is why the control plane refuses to build a`,
+    `      # second instance. See CP_ALLOW_NEW_TENANTS in cp/provision.mjs.`,
+    `      SAND_UI_ENDPOINTS_FILE: /state/endpoints.json`,
   ]);
 
-  text = spliceBefore(text, RELAY_UI_MOUNT_ANCHOR, [
-    `      # Shared, and still read-write only because the console writes endpoints.json beside the`,
-    `      # code. Once SAND_UI_STATE_DIR lands in the relay this mount becomes :ro for tenants and`,
-    `      # every writable file moves to /state below, which is the point of that variable.`,
+  // Read-only for a tenant. It is the operator's own console directory: endpoints.json holds the
+  // provider API keys, subscriptions.json the adopted tokens, auth.json the console password hash
+  // and the cookie signing secret. A tenant's relay had this mounted read-write, so a second
+  // customer's console could overwrite all three. It cannot now.
+  text = replaceLine(text, RELAY_UI_MOUNT_ANCHOR, [
+    `      # Shared, and READ-ONLY for a tenant. This is the operator's own ui directory and the`,
+    `      # files beside the code in it are theirs: endpoints.json (provider API keys),`,
+    `      # subscriptions.json (adopted tokens), auth.json (the console password hash and the cookie`,
+    `      # signing secret). Every file this tenant writes goes to /state below instead.`,
+    `      - /home/sem/titanbot/ui:/app/ui:ro`,
+  ]);
+
+  // The docker socket does not go to a customer.
+  //
+  // On the operator's own instance it is what lets the console reach into the box with
+  // `docker exec` for box-secrets.json, connectors.json and the desktop buttons. On a tenant's
+  // instance it is root on the R750: anything running in that customer's relay could read every
+  // other customer's data, the control plane's account store and its Coolify api key. The three
+  // surfaces that need it are off on a tenant until they have a path scoped to that tenant's own
+  // box, and off is the right direction to fail.
+  text = replaceLine(text, RELAY_SOCKET_ANCHOR, [
+    `      # NO DOCKER SOCKET. The operator's own compose mounts one here; a tenant does not get it,`,
+    `      # because a socket in this container is root on the host, and root on the host is every`,
+    `      # other customer's files, the control plane's account store and the Coolify api key.`,
+    `      # What a tenant gives up for that: the model picker, the connector editor and the desktop`,
+    `      # buttons, all three of which reach the box with \`docker exec\` today. They come back when`,
+    `      # they have a path that can only touch this tenant's own box.`,
+    `      #`,
   ]);
 
   text = spliceAfter(text, RELAY_LAST_VOLUME_ANCHOR, [
@@ -609,7 +690,10 @@ export async function provisionTenant(options) {
     if (!done.has("envs")) {
       const envs = [
         { key: "TITANBOT_GATEWAY_TOKEN", value: gatewayToken },
-        { key: "CP_SESSION_SECRET", value: config.sessionSecret },
+        // This tenant's own key, never the master. Whoever can read this container's environment
+        // can sign a session for this tenant, and that is all they can sign: the master never
+        // leaves the control plane, and one tenant's key does not derive another's.
+        { key: "CP_SESSION_SECRET", value: tenantSessionSecret(config.sessionSecret, slug) },
       ];
       for (const env of envs) {
         // is_literal, because a generated secret has to reach the container byte for byte and

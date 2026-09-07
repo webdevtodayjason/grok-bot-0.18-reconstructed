@@ -33,6 +33,12 @@ export async function startFakeCoolify(options = {}) {
   const calls = [];
   const services = new Map();
   const failures = new Map();
+  // Services this Coolify already had before the control plane ever spoke to it. That is what an
+  // adopted tenant is: a stack that was running long before this service existed, so a test about
+  // adopt needs one here to stop, start or (never) delete.
+  for (const uuid of options.existing ?? []) {
+    services.set(String(uuid), { uuid: String(uuid), name: `existing-${uuid}`, docker_compose_raw: "", envs: [], urls: [], started: true });
+  }
 
   const server = http.createServer((request, response) => {
     const chunks = [];
@@ -133,6 +139,10 @@ export async function startControlPlane(options = {}) {
     COOLIFY_PROJECT_UUID: options.projectUuid ?? "project-uuid",
     COOLIFY_SERVER_UUID: options.serverUuid ?? "server-uuid",
     COOLIFY_ENVIRONMENT_NAME: "production",
+    // On, because most of these tests are about what building a tenant does. Production ships it
+    // off (deploy/coolify/control-plane.compose.yml says why), and the test that covers the
+    // refusal passes CP_ALLOW_NEW_TENANTS: "0" through options.env.
+    CP_ALLOW_NEW_TENANTS: "1",
     ...(options.env ?? {}),
   };
   const config = loadConfig(env);
