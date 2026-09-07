@@ -38,6 +38,7 @@
 //                            Titanium Bot account. All three or none. ui/tenant-login.mjs. TENANT-2.
 import { createServer } from "node:http";
 import net from "node:net";
+import { lookup } from "node:dns/promises";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
 import { rewriteVncAsset } from "./vnc-bridge.mjs";
 import {
@@ -46,8 +47,8 @@ import {
 } from "./host-bundle.mjs";
 import {
   SESSION_LIFETIME_MS, clientAddress, createLoginThrottle, createSession, edgeAddress,
-  isLoopbackHost, isSecureRequest, parseCookies, parseTrustedProxies, readAuthFile, readSession,
-  safeEqual, safeNextPath, serializeCookie, verifyPassword,
+  isLoopbackHost, isPrivateAddress, isSecureRequest, parseCookies, parseTrustedProxies, readAuthFile,
+  readSession, safeEqual, safeNextPath, serializeCookie, verifyPassword,
 } from "./auth.mjs";
 import {
   createRateLimiter, jobBusTokenFile, jobCreateArgs, jobSubmitterId, newJobToken, resolveJobToken,
@@ -162,9 +163,56 @@ const readCatalog = async () => {
   try { return JSON.parse(await readFile(ENDPOINTS_FILE, "utf8")); } catch { return { endpoints: [] }; }
 };
 
+// ---- where a tenant is allowed to point an endpoint -------------------------------------------
+//
+// On Jason's own instance the console is his and an endpoint may be anything he can reach,
+// including the box next door and a model server on his own LAN. On a TENANT the console belongs
+// to a customer, and this pair of surfaces -- save a base URL, then have the relay fetch it and
+// report the status, the latency and the model list -- is a request generator inside the R750's
+// private network with the answers handed back. Measured from a signed-in tenant session before
+// this guard: the relay itself answered HTTP 401, the box gateway HTTP 404, the host address
+// refused and an off-network address timed out. Those four answers apart are a port scan, and the
+// apiKey field let the customer aim any bearer they liked at any host they liked.
+//
+// So a tenant's endpoint has to be somewhere on the public internet, over https. The sentences are
+// the ones a business owner reads on the endpoint row, so they say what to do rather than what
+// went wrong inside.
+const TENANT_ENDPOINT = {
+  shape: "That is not a web address. It should start with https:// and then the host name.",
+  scheme: "Endpoints on this instance have to start with https://",
+  unknown: "That host name could not be looked up, so nothing can be saved for it.",
+  inside: "That address is inside this server's own network, so it cannot be used here.",
+};
+
+// null when the base URL is fine, otherwise the sentence to show. Always null off a tenant.
+//
+// The name is resolved here and the fetch resolves it again, so a name whose answer changes between
+// the two calls is not stopped by this. What it does stop is the whole of the surface above:
+// saving an address in the private ranges, and probing one. Closing the rest means pinning the
+// resolved address into the connection, which node's fetch has no supported way to do.
+async function tenantEndpointRefusal(baseUrl) {
+  if (TENANT == null) return null;
+  let url;
+  try { url = new URL(String(baseUrl ?? "")); } catch { return TENANT_ENDPOINT.shape; }
+  if (url.protocol !== "https:") return TENANT_ENDPOINT.scheme;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (host.length === 0) return TENANT_ENDPOINT.shape;
+  if (isPrivateAddress(host)) return TENANT_ENDPOINT.inside;
+  let found;
+  try { found = await lookup(host, { all: true }); }
+  catch { return TENANT_ENDPOINT.unknown; }
+  if (!Array.isArray(found) || found.length === 0) return TENANT_ENDPOINT.unknown;
+  // Every answer, not the first: a name that resolves to one public address and one private one is
+  // the ordinary shape of this attack.
+  if (found.some((entry) => isPrivateAddress(entry.address))) return TENANT_ENDPOINT.inside;
+  return null;
+}
+
 // A saved endpoint is only useful if it is actually up, so say so rather than implying it.
 async function probe(endpoint) {
   const started = Date.now();
+  const refusal = await tenantEndpointRefusal(endpoint?.baseUrl);
+  if (refusal != null) return { reachable: false, detail: refusal, ms: Date.now() - started };
   try {
     const res = await fetch(`${endpoint.baseUrl.replace(/\/+$/, "")}/models`,
       { signal: AbortSignal.timeout(6000),
@@ -1398,6 +1446,12 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/endpoints") {
       const next = JSON.parse(await readBody(req) || "{}");
       if (!Array.isArray(next.endpoints)) return fail(res, 400, "endpoints must be an array");
+      // On a tenant, before anything is written: an address inside this server's own network is
+      // not a provider, it is a port scan with a saved bearer aimed at it. See tenantEndpointRefusal.
+      for (const e of next.endpoints) {
+        const refusal = await tenantEndpointRefusal(e?.baseUrl);
+        if (refusal != null) return fail(res, 400, refusal);
+      }
       const current = await readCatalog();
       // A key the browser never received back comes in as "set"; keep the stored one.
       const merged = next.endpoints.map((e) => ({ ...e,

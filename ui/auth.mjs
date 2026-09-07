@@ -342,6 +342,34 @@ export function clientAddress(req, trusted = null, cloudflare = null) {
   return forwardedAddress(String(req?.headers?.["cf-connecting-ip"] ?? "").split(",")[0]) ?? edge;
 }
 
+// The addresses that are not somewhere else.
+//
+// A tenant console lets a customer save a provider endpoint and the relay then fetches it to say
+// whether it is up. Left open, that is a request generator inside the private network, with a
+// bearer the customer chose and the answer -- status, latency, model list -- handed straight back
+// to them: a working port scan of the machine every other customer is on. So on a tenant the
+// address a base URL resolves to has to be somewhere on the public internet, and this list is what
+// "somewhere else" means.
+//
+// It is deliberately wider than RFC1918. 100.64/10 is carrier NAT and is also every tailnet
+// address; 169.254/16 is the link local range that holds cloud metadata services; 0.0.0.0/8 and
+// the v6 unspecified address reach the local host on several stacks. A range that is arguable is
+// in, because the cost of blocking one is a customer who cannot health-check an endpoint they
+// could not reach from their laptop either.
+const PRIVATE_RANGES = parseTrustedProxies([
+  "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+  "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15",
+  "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+  "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+].join(","));
+
+// True for an address inside any of those, false for a public one AND for anything that is not an
+// address at all. The caller resolves a name to addresses first: a name is not something this can
+// answer about, and answering "not private" for a name would be the wrong direction to fail.
+export function isPrivateAddress(value) {
+  return isTrustedProxy(value, PRIVATE_RANGES);
+}
+
 // Anything not recognised here is treated as reachable, so the loose end of this test is the
 // dangerous one: "127.0.0.1.example.com" starts with "127." and is a name someone else's DNS
 // answers. Only the numeric forms node itself treats as loopback count, shorthands included

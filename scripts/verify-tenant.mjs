@@ -16,7 +16,9 @@
 //            still works; and a control plane that is not answering says so without taking the
 //            instance password away
 //   docker   the routes that need the box refuse in words a business owner can read, with the
-//            console still serving underneath them
+//            console still serving underneath them; and the one route that does NOT need the box
+//            but would reach into this server's network -- saving a provider endpoint -- refuses
+//            an address inside it
 //
 // Run it two ways.
 //
@@ -636,6 +638,20 @@ if (RUN_DOCKER) {
     const modelBody = await model.json().catch(() => null);
     check(model.status === 200, "GET /model answers rather than refusing on every page load", `status ${model.status}`);
     check(modelBody != null && "note" in modelBody, "and it says the live model is not knowable here");
+
+    // Where a tenant may point an endpoint. A refusal writes nothing, so this is safe to run
+    // against a live instance: the catalog is not touched on any of these.
+    for (const [baseUrl, what] of [
+      ["https://127.0.0.1:7777/v1", "this relay itself"],
+      ["https://192.168.32.1:8000/v1", "the host, which is where Coolify listens"],
+      ["http://api.example.com/v1", "plain http"],
+    ]) {
+      const saved = await fetch(`${RELAY}/endpoints`, {
+        method: "POST", redirect: "manual", headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ endpoints: [{ id: "gate-probe", name: "gate probe", baseUrl, model: "m", apiKey: "" }] }),
+      });
+      check(saved.status === 400, `POST /endpoints refuses ${what}`, `status ${saved.status}`);
+    }
   }
   if (!LIVE) {
     // The version file is read straight off the mounted runtime directory, so it answers on a

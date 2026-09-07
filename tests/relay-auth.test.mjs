@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  clientAddress, comparableDigest, createLoginThrottle, createSession, hashPassword, isLoopbackHost,
+  clientAddress, comparableDigest, createLoginThrottle, createSession, hashPassword, isLoopbackHost, isPrivateAddress,
   isSecureRequest, newAuthRecord, parseCookies, parseTrustedProxies, readAuthFile, readSession,
   safeEqual, safeNextPath, serializeCookie, signSession, sourceAddress, verifyPassword, writeAuthFile,
 } from "../ui/auth.mjs";
@@ -186,6 +186,31 @@ test("loopback is recognised by every name the operator might type", () => {
   for (const host of ["0.0.0.0", "100.110.83.82", "192.168.1.10", "", null,
     "127.0.0.1.example.com", "127.", "127.0.0.999"]) {
     assert.equal(isLoopbackHost(host), false, String(host));
+  }
+});
+
+test("the addresses a tenant may not point an endpoint at", () => {
+  // What this list is for: a tenant console saves a base URL and the relay then fetches it and
+  // reports the status, the latency and the model list back. Anything that resolves inside this
+  // machine's networks turns that into a port scan with an attacker-chosen bearer, so those
+  // addresses are refused before the fetch. Wider than RFC1918 on purpose.
+  for (const address of [
+    "10.0.2.5", "172.16.0.1", "172.31.255.254", "192.168.32.1", "127.0.0.1", "127.1.2.3",
+    "0.0.0.0", "169.254.169.254", "100.64.3.4", "100.110.83.82", "198.18.0.1", "224.0.0.1",
+    "240.0.0.1", "::1", "::", "fc00::1", "fd12:3456::1", "fe80::1", "ff02::1",
+    // The mapped spelling of a private v4 address is the same address and must read the same way.
+    "::ffff:10.0.2.5", "::ffff:192.168.1.1", "[::1]",
+  ]) {
+    assert.equal(isPrivateAddress(address), true, address);
+  }
+  // Public addresses, and everything that is not an address at all. A NAME is not private here:
+  // the caller resolves it first, because "not an address" must never read as "safe to fetch".
+  for (const address of [
+    "8.8.8.8", "93.184.216.34", "172.15.0.1", "172.32.0.1", "100.63.255.255", "100.128.0.1",
+    "2606:4700::1111", "2001:4860:4860::8888",
+    "titanbot-box", "api.titanium.bot", "localhost", "", "   ", null, undefined, 7,
+  ]) {
+    assert.equal(isPrivateAddress(address), false, String(address));
   }
 });
 
