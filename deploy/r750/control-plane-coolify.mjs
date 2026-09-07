@@ -4,7 +4,7 @@
 // deploy/r750/control-plane-install.sh makes the tenant root, builds the image and generates the
 // two secrets on the R750. This makes the Coolify object that starts that image: one service named
 // titanbot-cp, its environment, its address, and a start. Together they replace the twelve manual
-// clicks docs/TENANCY.md section 5 used to describe, which is the point: a step done by hand on a
+// clicks docs/TENANCY.md section 9 used to describe, which is the point: a step done by hand on a
 // live server is a step nobody can repeat or review.
 //
 //   node deploy/r750/control-plane-coolify.mjs --dry-run     # prints the plan, calls nothing
@@ -335,6 +335,12 @@ async function main() {
       "  reaches the control plane from it. On the server: curl -s https://api.ipify.org, then",
       "  export CP_RELAY_PEERS=<that address>/32 here. Without it the login lockout counts every",
       "  customer on every instance in one bucket.",
+      "",
+      "  CP_RELAY_TOKEN is the credential the fleet's one relay reads GET /v1/relay/tenants with,",
+      "  which is how it learns which customer has which box. The SAME value goes on the console",
+      "  resource. Generate it once and keep it: rotating it stops every customer signing in until",
+      "  both sides have the new one.",
+      "    node -e \"console.log(require('node:crypto').randomBytes(32).toString('hex'))\"",
     ].join("\n"), 2);
   }
 

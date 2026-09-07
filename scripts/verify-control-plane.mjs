@@ -328,7 +328,7 @@ try {
   step("an account");
   // The tenant has to exist before an account can name it. cp/server.mjs refuses an account whose
   // instance is not there, because that account would sign in and land nowhere, so the gate does
-  // what the operator does first (docs/TENANCY.md sections 6 and 7): adopt console.titanium.bot as
+  // what the operator does first (docs/TENANCY.md sections 10 and 11): adopt console.titanium.bot as
   // tenant `titanium`, then add the person who signs into it. Adopt is used rather than create
   // because create would reach Coolify, and this leg is about the account.
   const homeTenant = await call("POST", "/v1/tenants/titanium/adopt", {

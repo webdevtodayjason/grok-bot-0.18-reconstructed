@@ -21,7 +21,7 @@ test("sync.sh ships every module the relay imports, and never the three secret j
   assert.match(script, /imports \.\/\$mod but/, "the sync proves each import is on the server before a restart");
 });
 
-// TENANT-1. docs/TENANCY.md section 5 is the deploy: run sync.sh, then build the control plane
+// TENANT-1. docs/TENANCY.md section 9 is the deploy: run sync.sh, then build the control plane
 // image on the server from $ROOT with cp/Dockerfile. Nothing shipped cp/ or the compose files, so
 // that build had nothing to build from and the documented first step could not run.
 test("sync.sh ships the control plane and the two compose files the image is built from", () => {

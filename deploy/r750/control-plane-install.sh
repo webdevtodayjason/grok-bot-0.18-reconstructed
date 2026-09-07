@@ -4,7 +4,7 @@
 # Two things live on the server and nowhere else: the directory every tenant is written into, and
 # the image Coolify starts. This script makes both, generates the three secrets once, and then stops.
 # It creates no Coolify object at all. deploy/r750/control-plane-coolify.mjs does that half, from
-# the Mac, and docs/TENANCY.md section 5 runs the two in order.
+# the Mac, and docs/TENANCY.md section 9 runs the two in order.
 #
 #   bash /home/sem/titanbot/deploy/control-plane-install.sh
 #
@@ -160,5 +160,5 @@ cat <<'NEXT'
        node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot
        node cp/cli.mjs account add you@example.com titanium --name "Your Name"
 
-  docs/TENANCY.md section 5 is the same list with the reasoning.
+  docs/TENANCY.md section 9 is the same list with the reasoning.
 NEXT

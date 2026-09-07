@@ -171,6 +171,48 @@ if (EXTERNAL) {
 const wideOpen = [...relayBindings, ...boxBindings].filter((b) => b.host.startsWith("0.0.0.0:") || b.host.startsWith(":::"));
 check(wideOpen.length === 0, "no titanbot port is published on 0.0.0.0", wideOpen.map((b) => b.host).join(" ") || "none");
 
+// ---- which address Traefik routes to (TENANT-5) -----------------------------------------------
+// TENANT-5 put the relay on a second network, titanbot-net, because one console now serves every
+// customer and it has to reach every customer's box. A container on more than one network is the
+// arrangement Coolify's own documentation warns about, and here is why, measured on this server
+// 2026-09-07: coolify-proxy is traefik:v3.6 started with --providers.docker=true and NO
+// --providers.docker.network. With no default network Traefik takes the first entry of the
+// container's network map, Go randomises map iteration order, and the choice is therefore
+// redecided on every provider refresh. The symptom is console.titanium.bot answering 502 at random
+// hours after a deploy that looked fine, which is the worst failure shape there is: it is not
+// reproducible and it is not attributable to the deploy that caused it.
+//
+// The traefik.docker.network label pins it. This leg reads the label back OFF THE RUNNING
+// CONTAINER after every restart rather than trusting the compose, because Coolify does not deploy
+// the compose it was given: it parses it, rewrites parts of it and deploys the result. Custom
+// labels are believed to survive that rewrite (com.titanbot.role does), but that is one sample of
+// one label, and a stripped pin must be caught by a gate rather than by Jason's console going down
+// on a Tuesday.
+//
+// One network and no label is the state BEFORE the migration and it is correct: there is nothing
+// to pin. Two networks and no label is the trap.
+{
+  const networksOf = async (name) => Object.keys(JSON.parse(
+    await ssh(`docker inspect ${name} --format '{{json .NetworkSettings.Networks}}'`).catch(() => "{}"),
+  ) ?? {});
+  const relayNetworks = await networksOf(RELAY_NAME);
+  const pin = (await ssh(`docker inspect ${RELAY_NAME} --format '{{index .Config.Labels "traefik.docker.network"}}'`)
+    .catch(() => "")).trim();
+  const pinned = pin.length > 0 && pin !== "<no value>";
+  if (relayNetworks.length <= 1) {
+    check(true, "the relay is on one network, so Traefik has one address to choose from",
+      relayNetworks.join(", ") || "none");
+  } else {
+    check(pinned, "the relay names which of its networks Traefik routes to",
+      pinned ? `traefik.docker.network=${pin}` :
+        `on ${relayNetworks.length} networks (${relayNetworks.join(", ")}) with no traefik.docker.network label: `
+        + "Traefik picks one at random on every provider refresh and the console will 502 at random. "
+        + "Set TITANBOT_PROXY_NETWORK on the resource and redeploy, or take the relay back off the second network.");
+    check(!pinned || relayNetworks.includes(pin), "and it is a network this container is actually on",
+      pinned ? `${pin} ${relayNetworks.includes(pin) ? "is" : "is NOT"} among ${relayNetworks.join(", ")}` : "there is no pin to check");
+  }
+}
+
 // ---- the four data mounts, which is the one thing that fails silently ------------------------
 // Every agent, transcript and workspace on this box lives in four docker volumes. The hand install
 // mounts them by name; the Coolify stack cannot, because Coolify's compose parser renames a named
