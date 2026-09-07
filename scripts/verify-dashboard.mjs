@@ -33,7 +33,10 @@
 // --leaks: no adopted secret, no connector argv, no attested tool output and no attachment
 //   preview carrying a secret in the dashboard DOM.
 // --offline: with the gateway blocked, the demo factory's copy says the value was discarded and
-//   the writes it does not implement are not drawn as live controls.
+//   the writes it does not implement are not drawn as live controls. It also carries ONBOARD-1's
+//   first-run dialog and AGENTS-CAP-1's counts, both of which are drawn from the roster on the
+//   page rather than from a host: ?onboarding=1 arms the demo adapter to report a box that has
+//   never been set up (docs/ONBOARDING.md).
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -578,6 +581,132 @@ try {
     check((removed?.repos ?? []).length === (added?.repos ?? []).length - 1,
       "and Remove takes one away", `${(added?.repos ?? []).length} -> ${(removed?.repos ?? []).length}`);
     check(configured?.overflows === false, "and the card still fits its panel with the table on it");
+
+    // -- ONBOARD-1: the first-run dialog, with no host at all. The demo adapter reports a box that
+    // has never been set up only when it is asked to (?onboarding=1), so the rest of this arm
+    // opens on the console it always did. What is checked here is the dialog itself: it is modal
+    // and sits under the window bar with the chat behind it, Titan's own face is in it and it is
+    // large, the five questions he asks are drawn and none of them is answered yet, his opening
+    // line is in the dialog's own transcript, an answer typed into the dialog's own composer lands
+    // there as well, and Skip for now closes it into the normal console. No model turn is spent:
+    // the demo's reply is the demo's.
+    await page.goto(`${GATEWAY}/?onboarding=1`, { waitUntil: "load" });
+    await page.waitForSelector("#onboarding-dialog[open]", { timeout: 20000 }).catch(() => {});
+    const setup = await page.evaluate(() => {
+      const dialog = document.getElementById("onboarding-dialog");
+      if (!dialog || !dialog.open) return null;
+      const box = dialog.getBoundingClientRect();
+      const bar = document.querySelector(".window-bar")?.getBoundingClientRect() ?? { bottom: 0 };
+      const face = dialog.querySelector(".onboarding-face");
+      const faceBox = face ? face.getBoundingClientRect() : null;
+      const steps = Array.from(dialog.querySelectorAll("[data-onboarding-step]")).map((li) => ({
+        field: li.dataset.onboardingStep,
+        label: li.textContent.replace(/\s+/g, " ").trim(),
+        done: li.classList.contains("is-done"),
+      }));
+      return {
+        modal: typeof dialog.matches === "function" && dialog.matches(":modal"),
+        below: Math.round(box.top) >= Math.round(bar.bottom) - 1,
+        wide: box.width > Math.min(700, window.innerWidth - 120),
+        chatBehind: Boolean(document.getElementById("transcript")),
+        face: Boolean(face),
+        character: face?.dataset.titanCharacter ?? "",
+        mood: face?.dataset.titanMood ?? "",
+        drawn: Boolean(face && (face.querySelector("titan-mascot") || face.querySelector("img"))),
+        faceSize: faceBox ? Math.round(Math.min(faceBox.width, faceBox.height)) : 0,
+        steps,
+        counter: dialog.querySelector("[data-onboarding-count]")?.textContent?.trim() ?? "",
+        skip: dialog.querySelector("[data-onboarding-skip]")?.textContent?.trim() ?? "",
+        composer: Boolean(dialog.querySelector("[data-onboarding-composer] textarea")),
+        // The box to answer him in has to be reachable: a long conversation must scroll inside the
+        // transcript rather than push the composer out of the dialog and off the screen.
+        composerInside: (() => {
+          const form = dialog.querySelector("[data-onboarding-composer]");
+          if (!form) return false;
+          const rect = form.getBoundingClientRect();
+          return Math.round(rect.bottom) <= Math.round(box.bottom) + 1
+            && Math.round(rect.top) >= Math.round(box.top) - 1
+            && Math.round(rect.bottom) <= window.innerHeight + 1;
+        })(),
+        opening: dialog.querySelector("#onboarding-transcript")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+        openingRows: dialog.querySelectorAll("#onboarding-transcript .message-row").length,
+        // The dialog must not push itself wider than its own frame.
+        overflows: dialog.scrollWidth > dialog.clientWidth + 1,
+      };
+    });
+    if (setup == null) {
+      check(false, "the first-run dialog opens on a box that reports setup is not done");
+      notReached("no dialog on screen",
+        "the first-run dialog is modal, under the window bar, with the chat still behind it",
+        "Titan's own face is in it, live and large",
+        "the five questions are drawn, none of them answered yet",
+        "the counter says none of the five is answered",
+        "Skip for now is the way out",
+        "and the box to answer him in sits inside the dialog, on the screen",
+        "Titan opens the conversation himself inside the dialog",
+        "an answer typed in the dialog lands in the dialog's own conversation",
+        "and the box is cleared for the next one",
+        "and Titan looks pleased the moment an answer is given",
+        "Skip for now closes the dialog into the normal console");
+    } else {
+      check(true, "the first-run dialog opens on a box that reports setup is not done");
+      check(setup.modal && setup.below && setup.wide && setup.chatBehind && !setup.overflows,
+        "the first-run dialog is modal, under the window bar, with the chat still behind it",
+        `modal ${setup.modal}, below the bar ${setup.below}, full width ${setup.wide}, chat behind ${setup.chatBehind}`);
+      check(setup.face && setup.drawn && setup.character === "Titan" && setup.faceSize >= 96,
+        "Titan's own face is in it, live and large", `${setup.character || "no character"} at ${setup.faceSize}px, mood ${setup.mood || "none"}`);
+      const fields = setup.steps.map((step) => step.field).join(",");
+      check(fields === "name,location,business,ownsBusiness,workingStyle",
+        "the five questions are drawn, none of them answered yet", `${fields || "no steps"} · ${setup.steps.filter((s) => s.done).length} answered`);
+      check(setup.steps.length === 5 && setup.steps.every((step) => !step.done && /[a-z]/.test(step.label)),
+        "and each one is a plain-words label rather than a field name", setup.steps.map((s) => s.label).join(" | "));
+      check(/^0 of 5 answered$/.test(setup.counter), "the counter says none of the five is answered", setup.counter || "no counter");
+      check(setup.skip === "Skip for now" && setup.composer, "Skip for now is the way out", `${setup.skip || "no button"}, composer ${setup.composer}`);
+      check(setup.composerInside, "and the box to answer him in sits inside the dialog, on the screen", `inside ${setup.composerInside}`);
+      // The fixture opens on a conversation that has not started, so his opening line is the only
+      // thing in the dialog. One row, and it is his: the console asked for it, because the host's
+      // own kickstart never fires on a fresh box's first agent.
+      check(setup.openingRows === 1 && /I am Titan, your AI lead/.test(setup.opening),
+        "Titan opens the conversation himself inside the dialog", `${setup.openingRows} row(s): ${setup.opening.slice(0, 90) || "an empty transcript"}`);
+
+      await page.fill("#onboarding-input", "Jason");
+      await page.click("[data-onboarding-composer] button[type=submit]");
+      await page.waitForTimeout(900);
+      const answered = await page.evaluate(() => {
+        const dialog = document.getElementById("onboarding-dialog");
+        return {
+          rows: Array.from(dialog.querySelectorAll("#onboarding-transcript .message-row")).map((row) => row.textContent.replace(/\s+/g, " ").trim()),
+          mine: dialog.querySelectorAll("#onboarding-transcript .message-row.is-user").length,
+          mood: dialog.querySelector(".onboarding-face")?.dataset.titanMood ?? "",
+          field: dialog.querySelector("#onboarding-input")?.value ?? "",
+        };
+      });
+      check(answered.mine > 0 && answered.rows.some((row) => /Jason/.test(row)),
+        "an answer typed in the dialog lands in the dialog's own conversation", `${answered.mine} of mine in ${answered.rows.length} row(s)`);
+      check(answered.field === "", "and the box is cleared for the next one", answered.field || "empty");
+      check(answered.mood === "excited", "and Titan looks pleased the moment an answer is given", answered.mood || "no mood");
+
+      await page.click("[data-onboarding-skip]");
+      await page.waitForTimeout(900);
+      const after = await page.evaluate(() => ({
+        open: document.getElementById("onboarding-dialog")?.open === true,
+        cards: document.querySelectorAll(".worker-card").length,
+        composer: Boolean(document.getElementById("message-input")),
+      }));
+      check(!after.open && after.cards > 0 && after.composer,
+        "Skip for now closes the dialog into the normal console", `open ${after.open}, ${after.cards} roster card(s)`);
+    }
+
+    // -- AGENTS-CAP-1, offline: the cap is drawn from the roster on the page, not from a host.
+    const capCounts = await page.evaluate(() => ({
+      header: document.querySelector("[data-agent-count]")?.textContent?.trim() ?? "",
+      add: document.querySelector('[data-capability="add"] [data-add-count]')?.textContent?.trim() ?? "",
+      bots: document.querySelectorAll(".worker-card:not(.room-card)").length,
+    }));
+    check(capCounts.header === `${capCounts.bots} / 13 bots`,
+      "the roster header counts this box's bots against the cap of 13", `${capCounts.header || "empty"} beside ${capCounts.bots} bot card(s)`);
+    check(capCounts.add === `${Math.max(0, capCounts.bots - 1)} of 12`,
+      "and the Add button says how many of the twelve beside Titan are taken", capCounts.add || "empty");
   } else if (LEAKS) {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     const { storedSecrets } = await import(path.join(repoRoot, "ui", "subscriptions.mjs"));
@@ -1445,10 +1574,19 @@ try {
         check(gone === true && callsTo("deleteAgents") === 1, "and the second click deletes it on the host through deleteAgents");
         if (gone) copyAgentId = null;
       }
-      // (e) The roster header is countAgents, the host's on-disk count.
+      // (e) The roster header, against AGENTS-CAP-1's cap of 13. The number drawn is the bots on
+      // the box, NOT countAgents: countAgents counts a room as an agent and the cap does not, so
+      // pinning the two together would pin a number that disagrees with the cap beside it. The
+      // host's own count is read anyway and reported in the detail, because when the two differ by
+      // anything other than the rooms on screen that is worth seeing in the log.
       const hostCount = await gw("countAgents").catch(() => null);
-      const shownCount = await until(() => page.evaluate((n) => { const el = document.querySelector("[data-agent-count]"); return el && !el.hidden && el.textContent.startsWith(`${n} / 50`) ? el.textContent : null; }, hostCount), 25_000, 1500);
-      check(typeof hostCount === "number" && shownCount != null, "(e) the roster header shows countAgents against the 50 cap", `${shownCount ?? await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent)} vs host ${hostCount}`);
+      const shownCount = await until(() => page.evaluate(() => { const el = document.querySelector("[data-agent-count]"); return el && !el.hidden && /^\d+ \/ 13 bots$/.test(el.textContent.trim()) ? el.textContent.trim() : null; }), 25_000, 1500);
+      const botCards = await page.$$eval(".worker-card:not(.room-card)", (els) => els.length).catch(() => -1);
+      check(shownCount != null, "(e) the roster header shows this box's bots against the cap of 13", `${shownCount ?? await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent)} vs host countAgents ${hostCount}`);
+      check(shownCount != null && Number(shownCount.split(" ")[0]) === botCards, "(e) and that number is the bot cards on screen, with the rooms left out", `header ${shownCount}, ${botCards} bot card(s)`);
+      // The Add button carries what is left of the twelve beside Titan, before anyone clicks it.
+      const addCount = await page.evaluate(() => document.querySelector('[data-capability="add"] [data-add-count]')?.textContent?.trim() ?? "");
+      check(/^\d+ of 12$/.test(addCount) && Number(addCount.split(" ")[0]) === Math.max(0, botCards - 1), "(e) the Add button says how many of the twelve bots beside Titan are taken", addCount || "empty");
       await page.waitForTimeout(300);
     }
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);

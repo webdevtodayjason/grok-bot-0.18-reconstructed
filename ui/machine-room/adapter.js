@@ -120,6 +120,27 @@
       ],
     };
 
+    // ONBOARD-1: the first-run setup with Titan, in this page only. A live box answers
+    // getOnboardingState out of its own settings; there is no box here, so the fixture is armed
+    // deliberately -- ?onboarding=1 on the URL, or window.__machineRoomOnboardingDemo set before
+    // boot -- and every other offline view of this console opens the way it always did.
+    function onboardingArmed() {
+      if (global.__machineRoomOnboardingDemo === true) return true;
+      try { return new URLSearchParams(global.location.search).get("onboarding") === "1"; } catch { return false; }
+    }
+    const onboarding = { done: !onboardingArmed(), startedAt: null, answers: {} };
+    // Armed, the roster has to look like the box the dialog is really for: a first agent called
+    // Titan whose conversation has not started. Leaving the seeded conversation under it would
+    // have the first-run dialog open on four days of somebody else's chat, which is not the thing
+    // being shown. The id is left alone, so the rooms and routines that point at it still resolve.
+    if (!onboarding.done && state.workers.length > 0) {
+      state.workers[0].name = "Titan";
+      state.workers[0].messages = [];
+      state.workers[0].preview = "";
+      state.workers[0].unread = 0;
+    }
+
+
     // The shape both mail routes answer with. The addresses come off the roster, so adding an
     // agent in the demo adds its address here, which is what the relay does with the real one.
     function mailShape() {
@@ -518,6 +539,33 @@
         if (typeof patch.webhookSecret === "string") mail.webhookSecretSet = patch.webhookSecret.trim().length > 0;
         else if (patch.webhookSecret === null) mail.webhookSecretSet = false;
         return Promise.resolve(mailShape());
+      },
+
+      // ONBOARD-1. The same three shapes the gateway adapter answers with, so the dialog is one
+      // piece of code on both paths.
+      getOnboardingState() {
+        return Promise.resolve(clone(onboarding));
+      },
+      completeOnboarding(answers) {
+        onboarding.done = true;
+        onboarding.answers = { ...onboarding.answers, ...clone(answers || {}) };
+        return Promise.resolve(clone(onboarding));
+      },
+      // Live, this is the sendPrompt carrying the onboarding marker, and the host answers it with
+      // Titan's own opening. There is no host here and no model, so the demo says the first line
+      // itself rather than leaving the dialog silent -- as Titan, because the agent it is pushed
+      // onto is the one the dialog is bound to.
+      startOnboarding(workerId) {
+        const worker = workerById(workerId);
+        if (!worker) return Promise.resolve({ started: false });
+        if (onboarding.startedAt == null) onboarding.startedAt = Date.now();
+        worker.messages.push({
+          id: uid("onboarding"), authorId: worker.id, authorName: worker.name, type: "text",
+          time: timeLabel(),
+          text: "I am Titan, your AI lead. I run the crew on this box and I am the one you talk to. Give me a minute of setup and I will know how to help. First, what should I call you?",
+        });
+        emit("message:created", { context: { kind: "worker", id: worker.id } });
+        return Promise.resolve({ started: true });
       },
     };
   }

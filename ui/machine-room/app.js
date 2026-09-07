@@ -489,6 +489,8 @@
     routineWorker: document.getElementById("routine-worker"),
     routineMeta: document.getElementById("routine-meta"),
     panelDialog: document.getElementById("panel-dialog"),
+    onboardingDialog: document.getElementById("onboarding-dialog"),
+    onboardingContent: document.getElementById("onboarding-content"),
     panelTitle: document.getElementById("panel-title"),
     panelEyebrow: document.getElementById("panel-eyebrow"),
     panelContent: document.getElementById("panel-content"),
@@ -689,18 +691,51 @@
     const hidden = list.filter((r) => r.hidden === true);
     elements.rosterList.innerHTML = shown.map(markup).join("")
       + (hidden.length ? `<details class="roster-hidden" data-roster-hidden${hiddenGroupOpen ? " open" : ""}><summary>Hidden · ${hidden.length}</summary>${hidden.map(markup).join("")}</details>` : "");
-    // countAgents is the host's on-disk count, the one its 50-agent cap is measured against. The
-    // number is absent, not zero, until the host has answered.
-    const count = document.querySelector("[data-agent-count]");
-    if (count) {
-      const known = Number.isFinite(state.agentCount) ? state.agentCount : null;
-      count.hidden = known == null;
-      count.textContent = known == null ? "" : `${known} / ${AGENT_CAP} agents`;
-      count.title = known == null ? "" : "countAgents, as the host reports it — the cap is the host's";
-    }
+    renderAgentCount();
     renderNeedsYouCount();
   }
-  const AGENT_CAP = 50;
+
+  // ---- AGENTS-CAP-1: Titan and twelve more ---------------------------------------------------
+  // The box holds 13 bots at most and the host refuses the fourteenth (SAND_MAX_AGENTS). Rooms are
+  // not bots and are not counted, so the number drawn here is the roster's own bot count rather
+  // than countAgents, which counts a room as an agent. The host's own number is kept on the
+  // tooltip, because when the two disagree that is worth being able to see.
+  const AGENT_CAP_DEFAULT = 13;
+  const agentCap = () => (Number.isFinite(state.agentCap) && state.agentCap > 0 ? state.agentCap : AGENT_CAP_DEFAULT);
+  const botCount = () => state.workers.length;
+  // Titan is one of the thirteen, so what is left to add is twelve. This is the number the Add
+  // button carries, and the one the refusal talks about.
+  const extraBotCount = () => Math.max(0, botCount() - 1);
+  const extraBotCap = () => Math.max(0, agentCap() - 1);
+
+  function renderAgentCount() {
+    const count = document.querySelector("[data-agent-count]");
+    if (count) {
+      const bots = botCount();
+      count.hidden = state.workers.length === 0 && !Number.isFinite(state.agentCount);
+      count.textContent = count.hidden ? "" : `${bots} / ${agentCap()} bots`;
+      const host = Number.isFinite(state.agentCount) ? `The host counts ${state.agentCount}, rooms included. ` : "";
+      count.title = count.hidden ? "" : `${host}This box holds Titan and ${extraBotCap()} more bots. Rooms do not count.`;
+    }
+    // The Add button says how much room is left before it is clicked, so the refusal is never the
+    // first time anyone hears about the cap.
+    const add = document.querySelector('[data-capability="add"] [data-add-count]');
+    if (add) add.textContent = `${extraBotCount()} of ${extraBotCap()}`;
+  }
+
+  // The host's own words when it refuses. It sends this sentence back as {error}; the console says
+  // it as it stands rather than wrapping it in one of its own, and falls back to the same sentence
+  // when an older host refuses with something less readable. Read at the moment of the refusal, not
+  // once at load: the cap can arrive from the host after this file has been evaluated, and a
+  // sentence baked in at load would then name a number the box no longer holds to.
+  const agentCapRefusalText = () => `This workspace holds Titan and ${extraBotCap()} more bots. Remove one to add another.`;
+  function agentCapRefusal(error) {
+    const said = String(error?.message ?? error ?? "").trim();
+    if (/Titan and \d+ more bots/.test(said)) return said;
+    if (/limit|maximum|cap/i.test(said)) return agentCapRefusalText();
+    return "";
+  }
+  // ---- end AGENTS-CAP-1 ----------------------------------------------------------------------
 
   function renderConversationHeader() {
     const context = activeContext();
@@ -1138,6 +1173,7 @@
     renderWorkspaces();
     renderCapabilities();
     renderNowAndSchedule();
+    renderOnboarding();
   }
 
   function selectContext(kind, id) {
@@ -4084,7 +4120,7 @@
       const data = new FormData(form);
       Promise.resolve(adapter.addWorker({ name: data.get("name"), role: data.get("role") }))
         .then((worker) => { rosterMode = "workers"; elements.panelDialog.close(); showToast(`${worker.name} created with a direct conversation`); })
-        .catch((error) => showToast(`Could not create that agent: ${error.message}`));
+        .catch((error) => showToast(agentCapRefusal(error) || `Could not create that agent: ${error.message}`));
     } else if (form.hasAttribute("data-add-room")) {
       const data = new FormData(form);
       const memberId = data.get("memberId");
@@ -4518,10 +4554,12 @@
       more.disabled = false;
     } else if (more) more.remove();
   }
-  function fillAttachments() {
+  // ONBOARD-1: the root is a parameter because the onboarding dialog paints the same messages into
+  // a container of its own. Called with nothing it walks the stage's transcript, as it always did.
+  function fillAttachments(root = elements.transcript) {
     if (typeof adapter.readAttachmentImage !== "function") return;
     const agentId = activeContext().kind === "worker" ? activeContext().id : (contextRecord()?.memberIds ?? [])[0] ?? null;
-    elements.transcript.querySelectorAll("[data-attachment]").forEach((figure) => {
+    root.querySelectorAll("[data-attachment]").forEach((figure) => {
       const path = figure.dataset.attachment;
       const slot = figure.querySelector("[data-attachment-slot]");
       if (!slot) return;
@@ -4720,9 +4758,271 @@
     if (event.target instanceof Element && event.target.closest(".teach-shield")) setTeachScreenControl(true);
   });
 
+
+  // ===== ONBOARD-1: the first-run setup with Titan =============================================
+  // On a box that has never been set up, the console opens a dialog under the window bar, the
+  // width of the stage, with the chat still behind it. Titan's own face is in it, large and live;
+  // the conversation inside it is his conversation, sent and read through the same adapter the
+  // stage uses; and the five things he asks fill in as the host records each answer.
+  //
+  // Everything here is drawn from two facts and nothing else: what the box says about its own
+  // setup (getOnboardingState), and the roster. A host too old to answer the command opens
+  // nothing at all -- the adapter answers null and this file leaves the console alone.
+  //
+  // The transcript and the composer are singletons in the stage, and showModal() makes everything
+  // outside this dialog inert, so the dialog carries its own of each. Both are built from the same
+  // functions the stage uses (messageMarkup, adapter.sendMessage), so a message reads the same in
+  // both places.
+
+  // The five questions, in the order Titan asks them. `field` is the key the host stores an answer
+  // under (save_onboarding_answer), so this list and docs/ONBOARDING.md are the same contract.
+  const ONBOARDING_STEPS = [
+    { field: "name", label: "Your name" },
+    { field: "location", label: "Where you are" },
+    { field: "business", label: "What kind of work" },
+    { field: "ownsBusiness", label: "Whether you own it" },
+    { field: "workingStyle", label: "How you want to work" },
+  ];
+  // How long Titan looks pleased after an answer goes in. The crew's own celebration is 6s
+  // (mascot-crew.js CELEBRATION_MS); this is the same beat, so the dialog does not feel like a
+  // different product from the roster behind it.
+  const ONBOARDING_EXCITED_MS = 6000;
+  // While the dialog is open the box is asked what it has captured. Titan writes an answer the
+  // moment he gets it, and nothing pushes that to this page.
+  const ONBOARDING_POLL_MS = 2500;
+
+  let onboardingState = null;
+  let onboardingPoll = null;
+  let onboardingExcitedUntil = 0;
+  let onboardingStarted = false;
+  let onboardingPaintedSig = "";
+
+  const onboardingAnswers = () => (onboardingState && typeof onboardingState.answers === "object" && onboardingState.answers) || {};
+  const onboardingAnswered = (field) => {
+    const value = onboardingAnswers()[field];
+    return typeof value === "string" ? value.trim().length > 0 : value != null && value !== "";
+  };
+  const onboardingAnsweredCount = () => ONBOARDING_STEPS.filter((step) => onboardingAnswered(step.field)).length;
+
+  // Titan is the crew's first face and the box's first agent, and mascot-crew.js settles who that
+  // is the same way: the agent actually named Titan, else the oldest one on the box. Reading it
+  // the same way here means the face in this dialog is the face on the first roster card.
+  function onboardingTitan() {
+    const bots = state.workers.filter((worker) => worker.isGroup !== true);
+    if (bots.length === 0) return null;
+    const named = bots.find((worker) => String(worker.name || "").trim().toLowerCase() === "titan");
+    if (named) return named;
+    const dated = bots.filter((worker) => Number.isFinite(worker.createdAt));
+    if (dated.length) return dated.reduce((oldest, worker) => (worker.createdAt < oldest.createdAt ? worker : oldest));
+    return bots[0];
+  }
+
+  // Curious while he waits for an answer, pleased for a few seconds after one lands. Those are two
+  // of the crew's three moods (mascot-crew.js moodFor); calm is the resting face and is not one
+  // this conversation ever sits on.
+  const onboardingMood = () => (Date.now() < onboardingExcitedUntil ? "excited" : "curious");
+
+  function onboardingStepsMarkup() {
+    const answers = onboardingAnswers();
+    return ONBOARDING_STEPS.map((step) => {
+      const done = onboardingAnswered(step.field);
+      const said = done ? String(answers[step.field]) : "";
+      return `<li class="onboarding-step${done ? " is-done" : ""}" data-onboarding-step="${escapeHtml(step.field)}">
+        <span class="onboarding-tick" aria-hidden="true">${done ? "✓" : ""}</span>
+        <span>${escapeHtml(step.label)}</span>
+        ${done ? `<span class="onboarding-answer">${escapeHtml(said)}</span>` : ""}
+      </li>`;
+    }).join("");
+  }
+
+  function onboardingMarkup(titan) {
+    const face = titan ? avatarMarkup(titan, "onboarding-face", titan.name) : "";
+    const answered = onboardingAnsweredCount();
+    return `<div class="onboarding-lede">
+        ${face}
+        <p>This is Titan, the bot that leads the rest of them on this box. He is going to ask you a few short questions, then show you what he can take off your hands. It takes about a minute.</p>
+      </div>
+      <ul class="onboarding-progress" aria-label="What Titan still needs">${onboardingStepsMarkup()}</ul>
+      <p class="onboarding-count" data-onboarding-count>${answered} of ${ONBOARDING_STEPS.length} answered</p>
+      <div class="onboarding-transcript" id="onboarding-transcript" aria-live="polite"></div>
+      <form class="composer onboarding-composer" data-onboarding-composer>
+        <label class="sr-only" for="onboarding-input">Answer Titan</label>
+        <textarea id="onboarding-input" name="message" rows="1" autocomplete="off" placeholder="Answer Titan…"></textarea>
+        <button class="send-button" type="submit"><span>➤</span> Send</button>
+      </form>
+      <p class="onboarding-note">Nothing here leaves this box. You can close this and finish later.</p>`;
+  }
+
+  // The face is drawn by mascots.js, which also keeps every face on the page in step with its
+  // agent's status. That is right for the roster and wrong here: this face answers to the
+  // conversation in front of it, not to whether Titan is mid-turn. Dropping the marker mascots.js
+  // looks for leaves this one element to this file.
+  function paintOnboardingFace() {
+    const frame = elements.onboardingContent.querySelector(".onboarding-face");
+    if (!frame) return;
+    delete frame.dataset.titanAgent;
+    const mood = onboardingMood();
+    if (frame.dataset.titanMood === mood) return;
+    frame.dataset.titanMood = mood;
+    const mascot = frame.querySelector("titan-mascot");
+    if (mascot) { mascot.setAttribute("mood", mood); return; }
+    // The still, under prefers-reduced-motion. Same character, different frame.
+    const still = frame.querySelector("img");
+    const crew = window.TitanCrew;
+    const index = crew ? crew.indexOfCharacter(frame.dataset.titanCharacter || "Titan") : -1;
+    if (still && crew && index >= 0) still.src = crew.stillFor(index, mood);
+  }
+
+  function paintOnboardingTranscript() {
+    const box = elements.onboardingContent.querySelector("#onboarding-transcript");
+    if (!box) return;
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 90;
+    box.innerHTML = contextMessages().map(messageMarkup).join("");
+    fillAttachments(box);
+    if (nearBottom) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+  }
+
+  // Called from renderAll, so the dialog follows the same events the stage does. The body is
+  // rebuilt only when something in it actually moved: a rebuild on every tick would take the
+  // composer's half-typed answer with it.
+  function renderOnboarding() {
+    if (!elements.onboardingDialog?.open) return;
+    const titan = onboardingTitan();
+    const sig = `${titan ? titan.id : ""}|${ONBOARDING_STEPS.map((step) => String(onboardingAnswers()[step.field] ?? "")).join("")}`;
+    if (sig !== onboardingPaintedSig) {
+      onboardingPaintedSig = sig;
+      const draft = elements.onboardingContent.querySelector("#onboarding-input")?.value ?? "";
+      elements.onboardingContent.innerHTML = onboardingMarkup(titan);
+      const input = elements.onboardingContent.querySelector("#onboarding-input");
+      if (input && draft) input.value = draft;
+      if (typeof window.__titanMascots?.afterRender === "function") window.__titanMascots.afterRender();
+    }
+    paintOnboardingFace();
+    paintOnboardingTranscript();
+  }
+
+  function sendOnboardingMessage(text) {
+    const clean = String(text || "").trim();
+    if (!clean) return;
+    const context = { ...activeContext() };
+    adapter.sendMessage(context, clean, []);
+    // He has just been told something. The face says so before the answer is anywhere near the box.
+    onboardingExcitedUntil = Date.now() + ONBOARDING_EXCITED_MS;
+    paintOnboardingFace();
+    window.setTimeout(paintOnboardingFace, ONBOARDING_EXCITED_MS + 60);
+    // Demo-only, the same rule the stage composer follows: against a live gateway Titan answers
+    // for himself and a simulated reply would talk over him.
+    if (!window.__machineRoomLive) simulateReply(context, clean);
+  }
+
+  function refreshOnboardingState() {
+    if (typeof adapter.getOnboardingState !== "function") return Promise.resolve(null);
+    return Promise.resolve(adapter.getOnboardingState())
+      .then((next) => {
+        if (!next || typeof next !== "object") return null;
+        onboardingState = next;
+        if (next.done === true) { closeOnboarding(); return next; }
+        renderOnboarding();
+        return next;
+      })
+      .catch(() => null);
+  }
+
+  function openOnboarding() {
+    const titan = onboardingTitan();
+    if (!titan || elements.onboardingDialog.open) return;
+    // His conversation, not whichever one the console happened to open on -- and the console is
+    // left on it when the dialog closes, which is where the person should land.
+    if (!sameContext(activeContext(), { kind: "worker", id: titan.id })) selectContext("worker", titan.id);
+    onboardingPaintedSig = "";
+    onboardingExcitedUntil = 0;
+    elements.onboardingDialog.showModal();
+    renderOnboarding();
+    // The dialog is filled after showModal, so the browser's own first focus lands on Skip for now
+    // -- the one control in it at that moment. Put the caret where the person is meant to type.
+    elements.onboardingContent.querySelector("#onboarding-input")?.focus();
+    // The opening line is the console's to ask for: the fresh-box first agent never gets the
+    // host's own kickstart (agent-lifecycle.ts mints it without setIntroductionPending), so
+    // without this the dialog would open on an empty conversation and wait forever.
+    if (!onboardingStarted && typeof adapter.startOnboarding === "function") {
+      onboardingStarted = true;
+      Promise.resolve(adapter.startOnboarding(titan.id)).catch(() => { onboardingStarted = false; });
+    }
+    window.clearInterval(onboardingPoll);
+    onboardingPoll = window.setInterval(refreshOnboardingState, ONBOARDING_POLL_MS);
+  }
+
+  function closeOnboarding() {
+    window.clearInterval(onboardingPoll);
+    onboardingPoll = null;
+    if (elements.onboardingDialog?.open) elements.onboardingDialog.close();
+  }
+
+  // Skip for now: the box is told setup is finished, and it keeps whatever Titan captured before
+  // the click. A host that refuses the write leaves the dialog open and says why, because closing
+  // it on a flag that did not move would bring it back on the next load.
+  function skipOnboarding(button) {
+    if (typeof adapter.completeOnboarding !== "function") { closeOnboarding(); return; }
+    if (button) button.disabled = true;
+    Promise.resolve(adapter.completeOnboarding(onboardingAnswers()))
+      .then((next) => {
+        if (next && typeof next === "object") onboardingState = next;
+        closeOnboarding();
+        showToast("Setup closed. Titan is on the roster whenever you want to finish it.");
+      })
+      .catch((error) => {
+        if (button) button.disabled = false;
+        showToast(`Setup was not closed: ${error.message}`);
+      });
+  }
+
+  // The one read at boot. A box that says it is done, a host that cannot answer, and a roster with
+  // nobody on it all mean the same thing here: open nothing.
+  function maybeOpenOnboarding() {
+    if (typeof adapter.getOnboardingState !== "function") return;
+    Promise.resolve(adapter.getOnboardingState())
+      .then((next) => {
+        if (!next || typeof next !== "object" || next.done !== false) return;
+        onboardingState = next;
+        openOnboarding();
+      })
+      .catch(() => { /* a box that will not say is not a box in its first run */ });
+  }
+
+  elements.onboardingDialog?.addEventListener("click", (event) => {
+    const skip = event.target instanceof Element ? event.target.closest("[data-onboarding-skip]") : null;
+    if (skip) { skipOnboarding(skip); return; }
+  });
+  elements.onboardingDialog?.addEventListener("submit", (event) => {
+    if (!(event.target instanceof Element) || !event.target.hasAttribute("data-onboarding-composer")) return;
+    event.preventDefault();
+    const input = elements.onboardingContent.querySelector("#onboarding-input");
+    if (!input) return;
+    const text = input.value;
+    input.value = "";
+    sendOnboardingMessage(text);
+  });
+  // Enter sends, Shift+Enter opens a line -- the stage composer's rule (QOL-COMPOSER), so the two
+  // boxes do not behave differently.
+  elements.onboardingDialog?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    const form = event.target instanceof Element ? event.target.closest("[data-onboarding-composer]") : null;
+    if (!form) return;
+    event.preventDefault();
+    form.requestSubmit();
+  });
+  // Escape is the same act as Skip for now: it has to reach the box, or the dialog comes back on
+  // the next load with nothing recorded about why it was dismissed.
+  elements.onboardingDialog?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    skipOnboarding(elements.onboardingDialog.querySelector("[data-onboarding-skip]"));
+  });
+  // ===== end ONBOARD-1 =========================================================================
+
   countdownInterval = window.setInterval(renderNowAndSchedule, 30_000);
   window.addEventListener("beforeunload", () => {
     window.clearInterval(countdownInterval);
+    window.clearInterval(onboardingPoll);
     stopTeachTimers();
     adapter.destroy();
   });
@@ -4739,4 +5039,5 @@
   renderAll(false);
   renderDesktop("browser");
   resumeTeachMode();
+  maybeOpenOnboarding();
 })();

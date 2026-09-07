@@ -612,8 +612,11 @@ try {
   // activeAgentId`) and is filtered out of the count. Same store, different argument -- so the
   // discrepancy is real and unexplained-by-design, not a synthesized card. Measured on the R750:
   // countAgents 0 twice in a row while listAgents returned agent 96a720b6 with a store.db path.
+  // AGENTS-CAP-1: the cap is 13 now, Titan and twelve more, and the number beside it is the bots
+  // the console can see rather than countAgents. That also settles the discrepancy described above:
+  // the header no longer reads 0 while a card is on screen, because it counts the cards.
   const count = await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent?.trim() ?? "");
-  check(/\d+\s*\/\s*50/.test(count), "the roster header shows the host's agent count", count || "empty");
+  check(/\d+\s*\/\s*13\s*bots/.test(count), "the roster header shows this box's bots against the cap of 13", count || "empty");
 
   // A gateway the page cannot reach shows up here long before it shows up as a blank panel.
   const gatewayErrors = pageErrors.filter((t) => /gateway|api\/|fetch|502|401/i.test(t));
