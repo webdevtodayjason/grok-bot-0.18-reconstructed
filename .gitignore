@@ -33,6 +33,10 @@ node_modules/
 ui/endpoints.json
 ui/subscriptions.json
 ui/auth.json
+# Agent email: the settings file carries the Resend key and the webhook signing
+# secret, and the ledger is this operator's own received mail (MAIL-1).
+ui/mail.json
+ui/mail-inbox.jsonl
 
 # a build artifact once landed here from an undefined output path (GATE-3)
 undefined/

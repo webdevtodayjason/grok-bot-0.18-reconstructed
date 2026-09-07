@@ -94,6 +94,56 @@
     };
     const demoToken = () => Array.from({ length: 48 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("");
 
+    // Agent email (docs/MAIL.md), the same shape the relay answers with so the card is one piece
+    // of code here too. The two secrets are booleans in this demo for the same reason they are
+    // booleans on the relay: nothing on this page can read one back.
+    const mail = {
+      enabled: false,
+      domain: "titanium.bot",
+      fromName: "Titanium Bot",
+      apiBase: "",
+      catchAllAgentId: "",
+      routes: {},
+      apiKeySet: false,
+      webhookSecretSet: false,
+      recent: [
+        {
+          at: "2026-09-06T21:04:00.000Z", email_id: "em_demo2", message_id: "<b@client.test>",
+          from: "jane@client.test", to: "books@titanium.bot", subject: "September invoice",
+          agentId: "books", agentName: "Books", outcome: "delivered",
+        },
+        {
+          at: "2026-09-06T18:22:00.000Z", email_id: "em_demo1", message_id: "<a@client.test>",
+          from: "noreply@vendor.test", to: "sales@titanium.bot", subject: "Your renewal quote",
+          agentId: "", agentName: "", outcome: "no_route",
+        },
+      ],
+    };
+
+    // The shape both mail routes answer with. The addresses come off the roster, so adding an
+    // agent in the demo adds its address here, which is what the relay does with the real one.
+    function mailShape() {
+      const origin = (global.location && global.location.origin) || "https://your-console";
+      return {
+        enabled: mail.enabled,
+        domain: mail.domain,
+        fromName: mail.fromName,
+        apiBase: mail.apiBase,
+        catchAllAgentId: mail.catchAllAgentId,
+        routes: clone(mail.routes),
+        apiKeySet: mail.apiKeySet,
+        webhookSecretSet: mail.webhookSecretSet,
+        webhookUrl: `${origin}/hooks/resend`,
+        addresses: mail.domain
+          ? state.workers.filter((worker) => !worker.isGroup).map((worker) => ({
+            agentId: worker.id, name: worker.name,
+            address: `${String(worker.name).toLowerCase().replace(/\s+/g, "")}@${mail.domain}`,
+          }))
+          : [],
+        recent: clone(mail.recent),
+      };
+    }
+
     function emit(type, detail) {
       const event = { type, detail: clone(detail || {}), snapshot: clone(state) };
       listeners.forEach((listener) => listener(event));
@@ -446,6 +496,23 @@
         // Save can send the lists without either of them clearing the other.
         jobBus.settings = { ...jobBus.settings, ...clone(partial || {}) };
         return Promise.resolve(clone(jobBus.settings));
+      },
+
+      // Agent email, in this page only. The addresses are derived from the demo roster exactly the
+      // way the relay derives them from the real one.
+      getMailSettings() { return Promise.resolve(mailShape()); },
+      setMailSettings(partial) {
+        const patch = clone(partial || {});
+        for (const field of ["enabled", "domain", "fromName", "apiBase", "catchAllAgentId", "routes"]) {
+          if (patch[field] !== undefined) mail[field] = patch[field];
+        }
+        // A string sets the secret, null clears it, absent keeps it -- the relay's own rule, held
+        // here as the boolean this demo can honestly report.
+        if (typeof patch.apiKey === "string") mail.apiKeySet = patch.apiKey.trim().length > 0;
+        else if (patch.apiKey === null) mail.apiKeySet = false;
+        if (typeof patch.webhookSecret === "string") mail.webhookSecretSet = patch.webhookSecret.trim().length > 0;
+        else if (patch.webhookSecret === null) mail.webhookSecretSet = false;
+        return Promise.resolve(mailShape());
       },
     };
   }

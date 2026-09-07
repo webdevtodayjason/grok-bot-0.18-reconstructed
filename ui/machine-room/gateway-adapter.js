@@ -3078,6 +3078,30 @@
           .catch((error) => { failed(`The job bus settings were not saved: ${error.message}`); throw error; });
       },
 
+      // ---- agent email (docs/MAIL.md) ---------------------------------------------------------
+      // Relay-local, like the subscriptions and the endpoint catalog: the settings file, the
+      // signing secret and the received-mail ledger all live beside the relay, so this is a
+      // session call rather than a gateway command. Both routes answer the same shape, and that
+      // shape never carries the two secrets -- it says whether each one is set.
+      getMailSettings() {
+        return relayFetch("/mail/settings").then(async (r) => {
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(body?.error ?? `the relay answered ${r.status}`);
+          return body;
+        });
+      },
+      // A partial save. A secret is sent as a string to set it and as null to clear it; leaving it
+      // out is what lets the card save the rest of the form without ever holding one.
+      setMailSettings(partial) {
+        return relayFetch("/mail/settings", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(partial ?? {}),
+        }).then(async (r) => {
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(body?.error ?? `the relay answered ${r.status}`);
+          return body;
+        });
+      },
+
       startTeaching(workerId) {
         const id = workerId ?? state.activeContext?.id;
         const worker = state.workers.find((w) => w.id === id);

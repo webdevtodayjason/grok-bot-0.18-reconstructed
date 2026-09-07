@@ -3722,3 +3722,61 @@ body[data-composer-drop="1"] .composer {
 .job-bus-table .status-pill { font-size: 9px; }
 .job-bus-id { font-family: var(--font-mono); color: var(--text-secondary); }
 .job-bus-line { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- the Email card (docs/MAIL.md) ---------------------------------------------------------
+   Same shapes as the job bus card above: rows that wrap rather than push the panel sideways, a
+   copy row for the one value the operator has to paste elsewhere, and a table that scrolls inside
+   its own box. The two secret rows put the field and its buttons on one line and let it wrap on a
+   narrow panel. */
+[data-mail] { min-width: 0; }
+[data-mail] .setting-row { margin-top: 12px; }
+[data-mail] .form-actions { margin-top: 12px; }
+
+.mail-block { min-width: 0; margin-top: 16px; }
+.mail-block > strong { display: block; margin-bottom: 6px; font-size: 12px; }
+.mail-block > .field-hint { display: block; margin-bottom: 8px; }
+
+.mail-grid { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; margin-top: 14px; }
+.mail-grid label {
+  display: flex; flex: 1 1 200px; min-width: 0; flex-direction: column; gap: 5px;
+  color: var(--text-secondary); font-size: 11px;
+}
+
+.mail-copy-row,
+.mail-secret-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.mail-copy-row input,
+.mail-secret-row input { flex: 1 1 200px; min-width: 0; }
+.mail-copy-row input { font-family: var(--font-mono); font-size: 11px; }
+.mail-copy-row .ghost-button,
+.mail-secret-row .ghost-button,
+.mail-secret-row .danger-button { flex: 0 0 auto; padding: 6px 10px; font-size: 11px; }
+
+/* These fields sit outside a .field wrapper, so they carry the field look themselves. */
+.mail-grid input,
+.mail-copy-row input,
+.mail-secret-row input {
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: 10px;
+  outline: 0;
+  color: var(--text-primary);
+  background: rgba(7, 16, 20, 0.34);
+}
+
+.mail-address-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0;
+  padding: 6px 0; border-bottom: 1px solid var(--glass-edge-soft);
+}
+.mail-address-row:last-child { border-bottom: 0; }
+.mail-address-name { flex: 0 0 auto; color: var(--text-secondary); font-size: 11px; }
+.mail-address { flex: 1 1 auto; min-width: 0; color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
+
+.mail-table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid var(--glass-edge-soft); border-radius: var(--radius-lg); }
+.mail-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.mail-table th,
+.mail-table td { padding: 9px 11px; border-bottom: 1px solid var(--glass-edge-soft); font-size: 11px; text-align: left; white-space: nowrap; }
+.mail-table th { color: var(--text-tertiary); font-size: 9px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
+.mail-table tr:last-child td { border-bottom: 0; }
+.mail-cell { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
