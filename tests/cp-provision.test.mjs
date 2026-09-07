@@ -531,7 +531,7 @@ test("a hostname Coolify still holds for a tenant deleted moments ago is taken w
       assert.equal(patches[0].body.force_domain_override, undefined, "the first try never forces");
       assert.equal(patches[1].body.force_domain_override, true);
       assert.deepEqual(patches[1].body.urls, patches[0].body.urls);
-    });
+    }, { coolify });
   } finally { await coolify.close(); }
 });
 
@@ -544,6 +544,6 @@ test("any other refusal of the hostname is still a failed step, not an override"
       const result = await provisionTenant({ store, config, slug: "acme", name: "Acme" });
       assert.equal(result.ok, false);
       assert.equal(coolify.callsTo("PATCH /services/{uuid}").length, 1);
-    });
+    }, { coolify });
   } finally { await coolify.close(); }
 });
