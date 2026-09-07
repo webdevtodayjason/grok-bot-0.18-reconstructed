@@ -129,7 +129,7 @@ export function loadConfig(env = process.env) {
   };
 }
 
-// Off until a customer's relay reads its own files.
+// Off until a customer's relay reads its own files, which it does as of TENANT-2.
 //
 // A tenant relay mounts the operator's shared ui directory, and the relay still opens
 // ui/endpoints.json beside its own code: that file holds the provider API keys. Read-only, which
@@ -234,6 +234,13 @@ function replaceLine(text, anchor, lines) {
 
 const BOX_ENV_ANCHOR = '      SAND_SUPERVISOR_ENABLED: "1"';
 const RELAY_ENV_ANCHOR = '      SAND_UI_PORT: "7777"';
+// The three the base compose names for an instance nobody built, so an operator can turn tenancy on
+// in Coolify without a different file. A tenant's copy carries its own values written in, so these
+// placeholders come out and the block below goes in. Removing them is not optional: two TENANT_ID
+// keys in one environment block is a compose docker will not read.
+const RELAY_TENANT_ID_PLACEHOLDER = "      TENANT_ID: ${TENANT_ID}";
+const RELAY_CP_URL_PLACEHOLDER = "      CP_URL: ${CP_URL}";
+const RELAY_CP_SECRET_PLACEHOLDER = "      CP_SESSION_SECRET: ${CP_SESSION_SECRET}";
 const RELAY_UI_MOUNT_ANCHOR = "      - /home/sem/titanbot/ui:/app/ui";
 const RELAY_SOCKET_ANCHOR = "      - /var/run/docker.sock:/var/run/docker.sock";
 const RELAY_LAST_VOLUME_ANCHOR = "      - /home/sem/titanbot/deploy:/init:ro";
@@ -253,6 +260,12 @@ export function renderCompose({ slug, config, composeText = readFileSync(BASE_CO
     `      TENANT_ID: ${slug}`,
   ]);
 
+  // Out first, comment and all: replaceLine takes the comment block above the line it replaces, and
+  // the tenancy block below carries its own.
+  text = replaceLine(text, RELAY_CP_SECRET_PLACEHOLDER, []);
+  text = replaceLine(text, RELAY_CP_URL_PLACEHOLDER, []);
+  text = replaceLine(text, RELAY_TENANT_ID_PLACEHOLDER, []);
+
   text = spliceBefore(text, RELAY_ENV_ANCHOR, [
     `      # ---- tenancy -----------------------------------------------------------------------`,
     `      # Written by the control plane when this tenant was created. TENANT_ID and CP_URL are`,
@@ -266,9 +279,9 @@ export function renderCompose({ slug, config, composeText = readFileSync(BASE_CO
     `      # for nobody else. cp/session.mjs, tenantSessionSecret, says why that matters.`,
     `      CP_SESSION_SECRET: \${CP_SESSION_SECRET}`,
     `      # The relay's own writable corner, so the release's ui directory above can be one shared`,
-    `      # copy instead of a copy per customer. SAND_UI_STATE_DIR is the variable the relay wave`,
-    `      # adds next and will move auth, subscriptions, the job bus and mail under; SAND_UI_AUTH_FILE`,
-    `      # is the one that exists today and is what makes this tenant's password their own.`,
+    `      # copy instead of a copy per customer. Every file the relay writes goes under here, and`,
+    `      # the five below name the ones that also have a variable of their own. SAND_UI_AUTH_FILE`,
+    `      # is what makes this tenant's password their own.`,
     `      SAND_UI_STATE_DIR: /state`,
     `      SAND_UI_AUTH_FILE: /state/auth.json`,
     `      # The three writable stores the relay already takes from the environment, pointed at this`,
@@ -277,11 +290,11 @@ export function renderCompose({ slug, config, composeText = readFileSync(BASE_CO
     `      GROK_BOT_SUBSCRIPTIONS_FILE: /state/subscriptions.json`,
     `      GROK_BOT_MAIL_FILE: /state/mail.json`,
     `      GROK_BOT_MAIL_LEDGER_FILE: /state/mail-inbox.jsonl`,
-    `      # The provider list. The relay still reads ui/endpoints.json beside its own code and does`,
-    `      # NOT read this yet; it is the name the relay wave takes, and it is set now so a tenant`,
-    `      # built today needs no compose edit on the day it lands. Until then a tenant relay can`,
-    `      # still READ the shared endpoints.json, which is why the control plane refuses to build a`,
-    `      # second instance. See CP_ALLOW_NEW_TENANTS in cp/provision.mjs.`,
+    `      # The provider list, and the reason a second instance is safe to build at all. Without`,
+    `      # this the relay read and wrote the shared ui/endpoints.json beside its own code, which`,
+    `      # holds the operator's provider API keys, and a customer's console could have opened it.`,
+    `      # The shared directory is mounted read-only above and this points the reads and the`,
+    `      # writes at the tenant's own copy. See CP_ALLOW_NEW_TENANTS in cp/provision.mjs.`,
     `      SAND_UI_ENDPOINTS_FILE: /state/endpoints.json`,
   ]);
 

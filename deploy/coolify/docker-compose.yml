@@ -196,6 +196,27 @@ services:
     labels:
       com.titanbot.role: relay
     environment:
+      # ---- tenancy -------------------------------------------------------------------------
+      # Empty here, and empty is the single-instance console this has always been: one password
+      # box on the login page and nothing else. Set all three, as environment values on this
+      # resource in Coolify, and the login page also takes a Titanium Bot account. The relay reads
+      # all three or none, so a half-set instance is not a half-open door.
+      #
+      # They are named in this file because a compose service only sees what its own environment
+      # block lists. An environment value set on the resource and not named here reaches the .env
+      # this file is read with and no further, so it never arrives in the container. That is what
+      # these three lines are for.
+      #
+      # A customer's instance is built by the control plane, which writes TENANT_ID and CP_URL into
+      # its own copy of this file. The operator's own instance is not built by anything, so it gets
+      # the same three values the same way any operator would: in Coolify.
+      #
+      # CP_SESSION_SECRET is THIS instance's own derived key, never the control plane's master.
+      # On the R750, with the master from cp.env:
+      #   node -e 'import("./ui/session-token.mjs").then(m => console.log(m.tenantSessionSecret(master, "titanium")))'
+      TENANT_ID: ${TENANT_ID}
+      CP_URL: ${CP_URL}
+      CP_SESSION_SECRET: ${CP_SESSION_SECRET}
       SAND_UI_PORT: "7777"
       # The Titan Job Bus bearer (docs/JOB-BUS.md section 10.6). Optional on purpose: with no value
       # here the relay falls back to the token file the console writes, and with neither every
