@@ -343,9 +343,9 @@ export function createCoolifyClient({ config, fetchImpl = globalThis.fetch }) {
   };
 }
 
-// Coolify's service record carries no status field; the per-application list does, and it is an
-// untyped array in their own schema, so this reads defensively and says "unknown" rather than
-// guessing. Coolify writes things like "running (healthy)" and "exited (0)".
+// Coolify writes a status per container as "running:healthy", "running:unknown", "exited" and so
+// on, and this reads defensively and says "unknown" rather than guessing, because the shape is
+// untyped in their own schema.
 export function coolifyStatusOf(applications) {
   const rows = Array.isArray(applications) ? applications : [];
   const statuses = rows.map((row) => String(row?.status ?? "").trim().toLowerCase()).filter((value) => value.length > 0);
@@ -361,13 +361,32 @@ export async function readCoolifyState(uuid, client) {
   if (!uuid) return { reachable: false, status: "unknown", reason: "this tenant has no Coolify service yet" };
   try {
     const service = await client.getService(uuid);
-    let applications = [];
-    try { applications = await client.getServiceApplications(uuid); } catch { applications = []; }
+    // Measured against the R750's Coolify 4.0.0 on 2026-09-07, and it is not what the openapi says.
+    // GET /services/{uuid}/applications, the documented place for a container status, answers
+    // 404 {"message":"Not found."} on this build, the same way the per-component PATCH did in
+    // DOMAIN-1. What that build does return is a service object RICHER than the documented Service
+    // schema: a service-level `status` ("running:unknown"), a `server_status` boolean, and an inline
+    // `applications` array of {uuid, name, fqdn, status} per container. So the service object is
+    // read first and the sub-route is only asked when the object carries nothing, which keeps this
+    // working on a Coolify that has the documented route and no inline list.
+    let applications = Array.isArray(service?.applications) ? service.applications : [];
+    if (applications.length === 0) {
+      try {
+        const listed = await client.getServiceApplications(uuid);
+        if (Array.isArray(listed)) applications = listed;
+      } catch { /* the route is not on every Coolify. The service-level status below still answers */ }
+    }
+    const fromContainers = coolifyStatusOf(applications);
+    // If there are no containers to read, the service's own status line is the next best thing, and
+    // it is written in the same vocabulary.
+    const status = fromContainers === "unknown" && service?.status
+      ? coolifyStatusOf([{ status: service.status }])
+      : fromContainers;
     return {
       reachable: true,
-      status: coolifyStatusOf(applications),
+      status,
       name: service?.name ?? null,
-      containers: (Array.isArray(applications) ? applications : []).map((row) => ({
+      containers: applications.map((row) => ({
         name: row?.name ?? null,
         status: row?.status ?? null,
         fqdn: row?.fqdn ?? null,

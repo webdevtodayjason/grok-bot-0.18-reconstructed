@@ -14,6 +14,7 @@ import {
   RESERVED_SLUGS,
   coolifyStatusOf,
   loadConfig,
+  readCoolifyState,
   provisionTenant,
   renderCompose,
   tenantDirectoryList,
@@ -393,11 +394,61 @@ test("the Coolify API key is only ever an Authorization header", async () => {
 
 // ---- reading the state back ----------------------------------------------------------------------------
 
-test("the live status comes from the per-service application rows, because the service record has none", () => {
+test("the live status reads the container rows, in the vocabulary Coolify writes them in", () => {
   assert.equal(coolifyStatusOf([{ status: "running (healthy)" }, { status: "running" }]), "running");
   assert.equal(coolifyStatusOf([{ status: "exited (0)" }, { status: "exited (137)" }]), "stopped");
   assert.equal(coolifyStatusOf([{ status: "running (healthy)" }, { status: "exited (0)" }]), "provisioning");
   assert.equal(coolifyStatusOf([]), "unknown");
   assert.equal(coolifyStatusOf(null), "unknown");
   assert.equal(coolifyStatusOf([{}]), "unknown");
+});
+
+// The next three are the shape the R750's Coolify 4.0.0 really answers with, measured 2026-09-07,
+// which is not the shape its own openapi documents. GET /services/{uuid}/applications is a 404 on
+// that build; GET /services/{uuid} carries a service-level `status` and an inline `applications`
+// array instead. Reading only the documented sub-route is how a running tenant reads as "unknown".
+test("the live state reads the applications the service object carries inline", async () => {
+  const calls = [];
+  const client = {
+    getService: async (uuid) => {
+      calls.push(`GET /services/${uuid}`);
+      return {
+        name: "titanbot",
+        status: "running:unknown",
+        server_status: true,
+        applications: [
+          { uuid: "afndip4rpuc371jjdk9m97kl", name: "titanbot-relay", fqdn: "https://console.titanium.bot:7777", status: "running:unknown" },
+          { uuid: "boxuuid0000000000000000", name: "titanbot-box", fqdn: null, status: "running:healthy" },
+        ],
+      };
+    },
+    getServiceApplications: async () => { throw new Error("Not found."); },
+  };
+  const state = await readCoolifyState("p927bfqm83ioloibamlvyd7g", client);
+  assert.equal(state.reachable, true);
+  assert.equal(state.status, "running");
+  assert.equal(state.name, "titanbot");
+  assert.equal(state.containers.length, 2);
+  assert.deepEqual(state.containers.map((c) => c.name).sort(), ["titanbot-box", "titanbot-relay"]);
+  assert.equal(calls.length, 1, "the sub-route is not asked when the service object already answered");
+});
+
+test("a service object with no applications falls back to its own status line", async () => {
+  const client = {
+    getService: async () => ({ name: "titanbot", status: "exited", applications: [] }),
+    getServiceApplications: async () => { throw new Error("Not found."); },
+  };
+  const state = await readCoolifyState("some-uuid", client);
+  assert.equal(state.status, "stopped");
+  assert.deepEqual(state.containers, []);
+});
+
+test("a Coolify that does have the documented sub-route is still read", async () => {
+  const client = {
+    getService: async () => ({ name: "titanbot" }),
+    getServiceApplications: async () => ([{ name: "titanbot-relay", status: "running:healthy", fqdn: null }]),
+  };
+  const state = await readCoolifyState("some-uuid", client);
+  assert.equal(state.status, "running");
+  assert.equal(state.containers[0].name, "titanbot-relay");
 });

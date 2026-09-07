@@ -325,10 +325,15 @@ that is the field, and `GET /projects/{uuid}/environments` is where the uuid is.
 
 Start is asynchronous. Coolify answers "Service starting request queued." straight away, so the
 status in the ledger is `provisioning` until the containers report running. `GET /v1/tenants/acme`
-is the ledger row plus whatever Coolify says right now. One thing to know about that: the
-documented Service object has no status field at all. The container states come from
-`GET /services/{uuid}/applications`, which the openapi types as an untyped array, so a missing or
-oddly shaped answer is treated as unknown rather than as stopped.
+is the ledger row plus whatever Coolify says right now. One thing to know about that, measured on
+the R750's Coolify 4.0.0 on 2026-09-07: `GET /services/{uuid}/applications`, which the openapi
+documents as the place a container status lives, answers `404 {"message":"Not found."}` on that
+build, the same way the per-component PATCH did in DOMAIN-1. What it does return is a service
+object richer than the documented one: a service-level `status` like `running:unknown`, a
+`server_status` boolean, and an inline `applications` array of `{uuid, name, fqdn, status}` per
+container. So the service object is read first and the sub-route is only asked when that object
+carries nothing, and an answer in a shape nobody recognises is reported as unknown rather than as
+stopped.
 
 ## 9. Stop, start, restart, delete
 
