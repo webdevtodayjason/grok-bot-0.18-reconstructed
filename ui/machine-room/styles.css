@@ -695,9 +695,32 @@ select:focus-visible {
 }
 
 .message-avatar {
-  width: 34px;
-  height: 34px;
+  /* 40px, up from 34: at 34 the crew's bob left the ring in a room (Jason, 2026-09-07 13:38). */
+  width: 40px;
+  height: 40px;
   margin-bottom: 8px;
+}
+
+.message-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  margin-bottom: 8px;
+}
+
+.message-side > .message-avatar { margin-bottom: 0; }
+
+.message-who {
+  max-width: 72px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .message-block {

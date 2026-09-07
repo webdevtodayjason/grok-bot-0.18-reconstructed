@@ -37,7 +37,7 @@
    silhouette's waves, plus the drift, has to clear the inner edge. Biggest mark first. */
 .context-profile-avatar.titan-avatar { --titan-fill: 1.74; }
 .worker-avatar.titan-avatar { --titan-fill: 1.68; }
-.message-avatar.titan-avatar { --titan-fill: 1.6; }
+.message-avatar.titan-avatar { --titan-fill: 1.42; }
 .now-avatar.titan-avatar { --titan-fill: 1.5; }
 .member-avatar.titan-avatar,
 .workspace-avatar.titan-avatar { --titan-fill: 1.46; }

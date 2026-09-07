@@ -937,6 +937,17 @@
     return `<button type="button" ${attrs} data-evidence="1" data-message-id="${escapeHtml(message.id)}"><span>${escapeHtml(text)}</span></button>`;
   }
 
+  // In a room the face sits at the foot of a long bubble and the small name line at its head, so a
+  // reader looking at the face does not know who spoke (Jason, 2026-09-07 13:38). The speaker's
+  // name goes under the face there. A direct conversation has one speaker and needs no caption.
+  function roomSpeakerMarkup(author, message) {
+    const face = avatarMarkup(author, "message-avatar");
+    if (activeContext()?.kind !== "room" || message.type === "working") return face;
+    const who = message.authorName || (author && author.name) || "";
+    if (!who) return face;
+    return `<div class="message-side">${face}<small class="message-who">${escapeHtml(who)}</small></div>`;
+  }
+
   function messageMarkup(message) {
     if (message.type === "system") {
       // SHOT-4: a tool row the adapter summarised in words carries the verbatim command and output
@@ -952,7 +963,7 @@
     const body = isWorking ? `<div class="typing-dots" aria-label="${escapeHtml(message.authorName)} is working"><i></i><i></i><i></i></div>`
       : message.type === "attachment" && message.attachment ? `${paragraphMarkup(message.text)}${attachmentMarkup(message)}`
       : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
-    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? avatarMarkup(author, "message-avatar") : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${evidenceChipMarkup(message)}</div></article>`;
+    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? roomSpeakerMarkup(author, message) : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${evidenceChipMarkup(message)}</div></article>`;
   }
 
   // The transcript is a tail window; the row above it says the host holds more and offers to
