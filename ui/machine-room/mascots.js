@@ -52,6 +52,9 @@
   const lastStatus = new Map();
   let celebrationTimer = null;
   let adapter = null;
+  // Records the crew has no face for: groups, and anything the roster no longer holds. See
+  // ensureAssignment below for why this has to be remembered rather than re-derived per face.
+  const faceless = new Set();
 
   function rosterOf(snapshot) {
     if (!snapshot) return [];
@@ -61,6 +64,7 @@
   function reassign(snapshot) {
     if (!crew) return;
     assignment = crew.assignCrew(rosterOf(snapshot));
+    faceless.clear();
   }
 
   /** Status transitions, read off the roster the page already paints. */
@@ -104,8 +108,10 @@
 
   /** Move the moods of the faces already on screen without rebuilding any of them. */
   function syncMoods() {
+    const snapshot = adapter && typeof adapter.getSnapshot === "function" ? adapter.getSnapshot() : null;
+    const roster = new Map(rosterOf(snapshot).map((r) => [r.id, r]));
     doc.querySelectorAll("[data-titan-agent]").forEach((frame) => {
-      const record = recordById(frame.dataset.titanAgent);
+      const record = roster.get(frame.dataset.titanAgent);
       if (!record) return;
       const mood = moodOf(record);
       if (frame.dataset.titanMood === mood) return;
@@ -132,8 +138,14 @@
     const agrees = stored == null
       ? Boolean(face) && face.source !== "stored"
       : Boolean(face) && face.source === "stored" && (stored === face.opt || stored === face.character);
-    if (!agrees) reassign(adapter && typeof adapter.getSnapshot === "function" ? adapter.getSnapshot() : null);
-    return assignment.get(worker.id);
+    // A group takes no character, and neither does a record the roster does not hold. Rebuilding
+    // the map for one of those would rebuild it again on the next face drawn and never settle, so
+    // the answer is remembered until the next roster event clears it.
+    if (agrees || worker.isGroup === true || faceless.has(worker.id)) return face ?? null;
+    reassign(adapter && typeof adapter.getSnapshot === "function" ? adapter.getSnapshot() : null);
+    const found = assignment.get(worker.id) ?? null;
+    if (!found) faceless.add(worker.id);
+    return found;
   }
 
   // ---- the hook app.js calls ---------------------------------------------------------------

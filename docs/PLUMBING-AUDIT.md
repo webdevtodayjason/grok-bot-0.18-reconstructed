@@ -110,6 +110,40 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-06 (AVATAR-1: the agents are the Titan crew, and they move).** Jason's brief the same
+  night: "that blue canvas mascot is how we're going to make our first bot. Titan will always be
+  the first one for everybody, and we will use all the other bot characters. Inside the dashboard I
+  want them to be little mini canvases where they're actually moving." Every face the console draws
+  is now a live `<titan-mascot>` from the design kit, vendored byte for byte at
+  `ui/machine-room/assets/titan-mascot.js` (a test diffs it against `docs/design/titan-mascot-kit/`).
+  The work splits three ways so the tested part has no DOM in it: `mascot-crew.js` is pure (who is
+  who, what mood, the still for a character, 14 tests at `tests/titan-crew.test.mjs`), `mascots.js`
+  is the wiring, and `app.js` gains one hook at `avatarMarkup`, the single funnel every face on the
+  page already went through, so the roster card, the chat header pill, Agent details, the composer
+  chip strip and the Now island all follow from one place.
+  **Who is who.** The oldest non-group agent, or the one named Titan, is Titan; the rest take
+  companions in creation order, skipping ones taken and wrapping when the twelve run out; an agent
+  the host reports with no `createdAt` starts from a hash of its id and steps past what is taken.
+  A pick in Agent details is written to the host, not to this browser. There is no `character`
+  field to write: measured on the box, `updateAgent { id, profile }` answers 200 and drops a key the
+  profile does not know, but keeps an arbitrary string in `avatarShape` and leaves it alone on a
+  partial write. So a pick goes in as `avatarShape: "titan:<name>"`, namespaced away from the
+  desktop app's eight shape names, with the character's own colour in `avatarColor` so that app's
+  avatar comes up matching. Two opt-outs sit beside the thirteen: the flat mark, and the picture
+  uploaded to the host, which is a choice on the record now rather than something inferred.
+  **Mood** is the status the roster already paints: calm idle, curious mid-turn, excited while the
+  agent needs a person and for six seconds after a turn lands a reply.
+  **Measured on this Mac box.** Eight canvases on the roster, ten seconds: the main thread ran at
+  4.6% of a second per second against a 30% budget, 0 long tasks, script 0.106 s, layout 0.000 s,
+  recalc 0.054 s. The three canvases in the roster's collapsed Hidden group were paused and resumed
+  when it was opened. `prefers-reduced-motion: reduce` drew 0 canvases and 8 of the kit's stills.
+  The brand landed with it: the window bar carries the Titanium Bot lockup at the bar's own 26px
+  with "Machine Room" kept as the eyebrow and the page title, the favicon is the product mark rather
+  than the empty `data:` URI that was only there to stop a 404, and a browser with nothing stored
+  opens on Titan Nebula with Original still one click away. The accent tokens were deliberately NOT
+  moved to Signal Cyan tonight (BRAND-3): the crew colours were landing the same night, and moving
+  both at once leaves no way to tell which change made a face unreadable.
+
 - **2026-09-06 (PERSIST-1, SHIP-2, BACKUP-1: an instance that survives its own updates).** Three
   gaps in one wave, each proved on the Mac box `grok-bot-local-vm` before it was written down.
   PERSIST-1 (`1f2f3eb`): the box store has mirrored `/home/box/cli-config` out on every sync cycle
