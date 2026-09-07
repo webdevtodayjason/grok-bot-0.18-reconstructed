@@ -65,27 +65,30 @@ ENV CP_PORT=7790 \
 EXPOSE 7790
 
 # ---- the user ---------------------------------------------------------------------------------
-# uid 1000, which the base image already carries as `node`.
+# The uid this runs as, set at build time and defaulting to 1001.
 #
-# Why 1000 and not root: this process creates and writes every tenant's directories under
-# CP_TENANT_ROOT, and those directories hold a tenant's gateway token and its relay password file.
-# Running as root would make them root-owned on the host, which means the release files (owned by
-# sem) and the tenant files (owned by root) end up in two ownership worlds on one disk, and a
-# backup or an rsync run as sem starts failing on files it cannot read.
+# Why not root: this process creates and writes every tenant's directories under CP_TENANT_ROOT,
+# and those directories hold a tenant's gateway token and its relay password file. Running as root
+# would make them root-owned on the host, which means the release files (owned by sem) and the
+# tenant files (owned by root) end up in two ownership worlds on one disk, and a backup or an
+# rsync run as sem starts failing on files it cannot read.
 #
-# Why 1000 specifically: it is the first login account on the R750, which is `sem`, the account
-# that owns /home/sem/titanbot and runs every other deploy step there. Same uid inside the
-# container and outside it means a file this service writes is a file Jason can read over ssh
-# without sudo.
+# Why 1001: it is `sem` on the R750. Measured there on 2026-09-07 with `id -u sem`, which answered
+# 1001, not 1000. The earlier version of this file said 1000 and said so because `node` in the base
+# image happens to be 1000 and the first login account on a Linux box usually is too. On this
+# machine it is not, so every tenant directory this service made would have come out owned by a uid
+# with no account behind it and Jason would have needed sudo to read his own customers' files.
+# Numbers that "usually" match are the ones to measure.
 #
-# The one thing to check before the first deploy, because it is the thing that would silently break
-# this: `id -u sem` on the R750 must be 1000. If it is not, set `user: "<uid>:<gid>"` on the service
-# in deploy/coolify/control-plane.compose.yml instead of changing this line, and the image stays
-# the same for everyone.
+# Numeric, not `USER node`, because the point is the host's uid rather than a name inside the
+# image. Docker does not need the account to exist to run as it.
 #
-# The tenant root has to exist and be writable before the first start. Once, on the server:
+# To build for a host where sem is some other uid, pass it in, and pass the same pair to
+# deploy/r750/control-plane-install.sh so the tenant root and the image agree:
 #
-#   sudo install -d -o 1000 -g 1000 -m 0750 /data/titanbot
-USER node
+#   docker build -t titanbot-cp:local -f cp/Dockerfile --build-arg UID=1001 --build-arg GID=1001 .
+ARG UID=1001
+ARG GID=1001
+USER ${UID}:${GID}
 
 CMD ["node", "/app/cp/server.mjs"]

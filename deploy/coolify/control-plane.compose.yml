@@ -129,11 +129,14 @@ services:
       COOLIFY_PROJECT_UUID: ${COOLIFY_PROJECT_UUID}
       COOLIFY_SERVER_UUID: ${COOLIFY_SERVER_UUID}
     volumes:
-      # The tenant root and the store, in one bind. Owned by uid 1000 on the host, which is `sem`,
-      # which is the uid this image runs as (cp/Dockerfile says why). Once, before the first
-      # deploy:
+      # The tenant root and the store, in one bind. Owned by uid 1001 on the host, which is `sem`,
+      # which is the uid this image is built to run as (cp/Dockerfile says why, and 1001 is what
+      # `id -u sem` answers on this machine, measured, not assumed). Nothing to do by hand:
+      # deploy/r750/control-plane-install.sh makes both directories with that owner and builds the
+      # image with the matching --build-arg, which is the whole reason those two steps are one
+      # script. By hand it would be:
       #
-      #   sudo install -d -o 1000 -g 1000 -m 0750 /data/titanbot
+      #   sudo install -d -o 1001 -g 1001 -m 0750 /data/titanbot
       #
       # /data is this host's docker data-root and the disk with room on it, which is why the
       # tenants live there rather than under /home/sem.

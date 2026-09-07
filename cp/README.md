@@ -191,9 +191,14 @@ you add a route.
 
 ## The image
 
-    docker build -t titanbot-cp:local -f cp/Dockerfile .
+    docker build -t titanbot-cp:local -f cp/Dockerfile --build-arg UID=1001 --build-arg GID=1001 .
 
 From the repo root, not from this directory: it copies `cp/`, `ui/auth.mjs`, `ui/set-password.mjs`
-and `deploy/coolify/docker-compose.yml`. It runs as uid 1000, which is `sem` on the R750, so the
-tenant directories it creates are files Jason can read over ssh without sudo. `cp/Dockerfile` says
-what to check if that uid is ever different.
+and `deploy/coolify/docker-compose.yml`. It runs as uid 1001, which is `sem` on the R750, so the
+tenant directories it creates are files Jason can read over ssh without sudo. That number is a
+build argument because it is a fact about the host rather than about the image: 1001 is what
+`id -u sem` answers on the R750, measured on 2026-09-07. It is not 1000, which is what `node` is
+inside the base image and what a first login account usually is elsewhere.
+
+On the server, do not run that build by hand. `deploy/r750/control-plane-install.sh` runs it with
+the same uid it just gave the tenant root, which is the pairing that has to hold.

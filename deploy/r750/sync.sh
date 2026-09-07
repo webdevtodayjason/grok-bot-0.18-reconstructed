@@ -110,9 +110,15 @@ say "every module ui/server.mjs imports is on the server"
 say "endpoints.json, subscriptions.json, auth.json and mail.json are not shipped"
 
 step "ship the deploy scripts"
+# control-plane-install.sh is here rather than with the cp/ files below because it is a deploy
+# script that runs ON the server, like the other five. Its other half,
+# deploy/r750/control-plane-coolify.mjs, is deliberately NOT shipped: it holds the Coolify api key
+# in its environment while it runs, and that key can delete every resource on this machine. It runs
+# from the Mac.
 rsync -a "$REPO/deploy/r750/common.sh" "$REPO/deploy/r750/install.sh" \
   "$REPO/deploy/r750/uninstall.sh" "$REPO/deploy/r750/enable-route.sh" \
-  "$REPO/deploy/r750/disable-route.sh" "$REPO/deploy/r750/relay.Dockerfile" "$HOST:$ROOT/deploy/"
+  "$REPO/deploy/r750/disable-route.sh" "$REPO/deploy/r750/relay.Dockerfile" \
+  "$REPO/deploy/r750/control-plane-install.sh" "$HOST:$ROOT/deploy/"
 rsync -a "$REPO/scripts/box-patches/apply-start-window-fix.sh" "$HOST:$ROOT/deploy/"
 # The Coolify stack's init service runs this from the same directory, bind-mounted read-only. It
 # lives here rather than under deploy/coolify on the server because that is the directory the
@@ -122,7 +128,7 @@ rsync -a "$REPO/deploy/coolify/init-box.sh" "$HOST:$ROOT/deploy/"
 # ~/.config/systemd/user. A directory, because the units name paths inside it.
 ssh "$HOST" "mkdir -p '$ROOT/deploy/backup'"
 rsync -a --delete "$REPO/deploy/backup/" "$HOST:$ROOT/deploy/backup/"
-say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,apply-start-window-fix.sh,init-box.sh,backup/}"
+say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,control-plane-install.sh,apply-start-window-fix.sh,init-box.sh,backup/}"
 
 step "ship the control plane"
 # TENANT-1. docs/TENANCY.md section 5 tells the operator to run this script and then build the
