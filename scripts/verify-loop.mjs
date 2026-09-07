@@ -26,7 +26,10 @@
 // Usage: node scripts/verify-loop.mjs [--cap 5] [--send-cap] [--timeout-ms 60000] [--port 18777]
 import { execFile } from "node:child_process";
 import http from "node:http";
+import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:7777";
 const BOX = "grok-bot-local-vm";
@@ -81,6 +84,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // The console's heartbeat, from ui/machine-room/gateway-adapter.js: the roster is re-read every
 // 15s, so "within one heartbeat" is the honest deadline for anything the sidebar must show.
 const HEARTBEAT_MS = 15_000;
+// AVATAR-1: the console draws a waiting agent as an excited crew member, which is the one mood
+// nothing else on the page can raise. Reading it needs a real browser, and this gate is the only
+// place a genuine awaitingUserResponse exists, so it is read here rather than faked elsewhere.
+const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR ?? path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), ".cache/playwright");
+const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 // ---------------------------------------------------------------- the looping stub
 let toolRequests = 0;
@@ -268,6 +276,37 @@ try {
     const startRow = await agentRow();
     check(startRow != null && startRow.awaitingUserResponse == null, "the row starts with no awaiting badge", startRow == null ? "no roster row" : JSON.stringify(startRow.awaitingUserResponse));
 
+    // The console, open on this box, for the length of both halves. A mood read is one attribute
+    // off the agent's own roster card; the browser is a courtesy of this gate, not a dependency of
+    // it, so a box with no playwright-core installed simply skips the two checks by name.
+    let moodPage = null;
+    let moodBrowser = null;
+    try {
+      const { chromium } = createRequire(path.join(PW_DIR, "package.json"))("playwright-core");
+      moodBrowser = await chromium.launch({ executablePath: CHROME, headless: true });
+      moodPage = await moodBrowser.newPage({ viewport: { width: 1440, height: 900 } });
+      // Not networkidle: the console holds an open SSE stream, so the network is never idle, and
+      // under this gate's own load the wait simply ran out. The roster card is the real signal.
+      await moodPage.goto(`${GATEWAY}/`, { waitUntil: "domcontentloaded" });
+      await moodPage.waitForSelector(`.worker-card[data-context-id="${agentId}"]`, { timeout: 60_000 });
+    } catch (error) {
+      moodPage = null;
+      console.log(`  SKIP  the console's crew mood is not read this run — ${String(error.message).slice(0, 120)}`);
+    }
+    // Polls rather than reads once: the badge reaches the page on the console's own heartbeat, and
+    // the mood follows the render that heartbeat drives.
+    const moodOf = async (want, windowMs) => {
+      if (!moodPage) return null;
+      const until = Date.now() + windowMs;
+      let seen = "";
+      while (Date.now() < until) {
+        seen = await moodPage.evaluate((id) => document.querySelector(`.worker-card[data-context-id="${id}"] [data-titan-mood]`)?.dataset.titanMood ?? "", agentId).catch(() => "");
+        if (seen === want) return seen;
+        await sleep(1000);
+      }
+      return seen;
+    };
+
     setStubMode("ask");
     // Shaped as a question on purpose: an imperative here would trip the host's work redrive and
     // buy the turn extra model steps that have nothing to do with what is being measured.
@@ -283,6 +322,11 @@ try {
     // Not a box hand-off and not an auto-review approval: the tab id says the turn classifier is
     // what raised it, which is the whole point of this arm.
     check(raised.row?.awaitingUserResponse?.tabId === "turn-question", "the badge came from the closing-message classifier", String(raised.row?.awaitingUserResponse?.tabId ?? "none"));
+    // AVATAR-1: needs-you drives excited on the roster card.
+    const excitedAt = Date.now();
+    const excited = await moodOf("excited", 40_000);
+    if (excited == null) console.log("  SKIP  a waiting agent's crew member is excited on the roster card — not reached: no browser this run");
+    else check(excited === "excited", "a waiting agent's crew member is excited on the roster card", `${excited || "no face on the card"} after ${Date.now() - excitedAt}ms`);
 
     // The clear. The stub stops asking first, so the turn this reply drives ends on a plain
     // statement -- which both clears the badge and proves a quiet close does not raise it again.
@@ -295,6 +339,12 @@ try {
     check(cleared.sawAt !== 0, "the follow-up turn delivered its closing statement", cleared.sawAt !== 0 ? String(cleared.row?.lastMessagePreview ?? "").slice(0, 120) : "no closing message in 75s");
     const after = await agentRow();
     check(after != null && after.awaitingUserResponse == null, "a turn that closes on a statement, rhetorical question and all, does not raise the badge", after == null ? "no roster row" : JSON.stringify(after.awaitingUserResponse));
+    // And the face settles again. The six-second celebration for the delivered reply has to expire
+    // first, so the window here is longer than the badge's own.
+    const settled = await moodOf("calm", 30_000);
+    if (settled == null) console.log("  SKIP  and it settles back to calm once the operator has answered — not reached: no browser this run");
+    else check(settled === "calm", "and it settles back to calm once the operator has answered", settled || "no face on the card");
+    if (moodBrowser) await moodBrowser.close().catch(() => {});
     setStubMode("loop");
   }
 } catch (error) {
