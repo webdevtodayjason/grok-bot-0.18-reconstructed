@@ -226,6 +226,9 @@ export function loadConfig(env = process.env) {
     // is the compose service name on the shared network, which Coolify keeps as a network alias, and
     // the relay's own port. The credential is CP_RELAY_TOKEN, already above.
     relayUrl: text("CP_RELAY_URL", `http://${text("CP_RELAY_HOST", CONFIG_DEFAULTS.relayHost)}:7777`).replace(/\/+$/, ""),
+    // How long to wait on that relay. The box-health sweep on the other end is bounded, so the
+    // default is comfortably longer than that budget and this exists for a fleet that outgrows it.
+    relayTimeoutMs: Number(text("CP_RELAY_TIMEOUT_MS", "")) || 0,
     // Where the nightly backup manifests are, IF anybody ever mounts them in. They live on
     // /mnt/rosa-storage, which is mounted into no container, so unset is the normal state and the
     // admin console reads "not measured" rather than guessing. See docs/ADMIN.md.

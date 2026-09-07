@@ -833,6 +833,30 @@ function handleSso(req, res, token) {
 //
 // An install with no control plane serves neither. There is nothing to ask and nobody to ask it, and
 // answering 404 rather than 401 is the truthful shape: this route does not exist here.
+
+// One box-health sweep, shared.
+//
+// The sweep runs `docker inspect`, `docker stats` and `du -sk` once per customer, which is real
+// work on the host. One refresh of the admin console asks for it twice, because the Box health
+// panel and the System health panel both want it, and two asks used to be two full fleet sweeps
+// running at the same time. `inFlight` makes concurrent asks share one sweep; the short window
+// makes back-to-back asks share one too. Anything older than the window is measured again, because
+// a health panel that shows a cached minute is a panel that quietly shows the past.
+const BOX_HEALTH_CACHE_MS = 5_000;
+let boxHealthShared = { at: 0, report: null, inFlight: null };
+function sharedBoxHealth() {
+  if (boxHealthShared.report != null && Date.now() - boxHealthShared.at < BOX_HEALTH_CACHE_MS) {
+    return Promise.resolve(boxHealthShared.report);
+  }
+  if (boxHealthShared.inFlight != null) return boxHealthShared.inFlight;
+  const pending = readBoxHealth(registry.all()).then(
+    (report) => { boxHealthShared = { at: Date.now(), report, inFlight: null }; return report; },
+    (error) => { boxHealthShared = { at: 0, report: null, inFlight: null }; throw error; },
+  );
+  boxHealthShared = { ...boxHealthShared, inFlight: pending };
+  return pending;
+}
+
 async function handleRelayAdmin(req, res, url) {
   const expected = String(RELAY?.relayToken ?? "");
   if (expected.length === 0) return fail(res, 404, "not found");
@@ -856,7 +880,7 @@ async function handleRelayAdmin(req, res, url) {
   }
 
   if (url.pathname === "/admin/boxes") {
-    const report = await readBoxHealth(registry.all());
+    const report = await sharedBoxHealth();
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     return res.end(JSON.stringify(report));
   }

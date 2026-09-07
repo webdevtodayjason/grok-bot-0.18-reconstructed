@@ -27,10 +27,12 @@
 // THE PASSWORD DECISION, in plain words. When a sign-in is refused, this service writes down a
 // keyed hash of the password that was tried, never the password. That is the least it can keep and
 // still tell the operator the difference between one address trying the same wrong password forty
-// times (somebody's phone with a stale saved password) and one address trying forty different
-// passwords (an attack). The key is 32 random bytes made once, kept 0600 in the control plane's own
-// data directory, and it never leaves the machine, so the file cannot be run through a dictionary
-// by anybody who steals it. A sign-in that WORKED gets no hash at all.
+// times (somebody's phone with a stale saved password), one address trying forty different
+// passwords (an attack), and one password tried against forty accounts (a spray, which trips no
+// lockout anywhere and is invisible in every other view). The key is 32 random bytes made once,
+// kept 0600 in the control plane's own data directory, and it never leaves the machine, so the file
+// cannot be run through a dictionary by anybody who steals it. A sign-in that WORKED gets no hash
+// at all.
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, statfsSync } from "node:fs";
@@ -42,6 +44,7 @@ import path from "node:path";
 // which is the point: a hash from here and a hash from there are never comparable, so neither salt
 // widens the other's blast radius.
 import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.mjs";
+import { normalizeEmail } from "./store.mjs";
 
 export const ADMIN_SALT_NAME = "login-attempt-salt";
 
@@ -54,6 +57,17 @@ export const ADMIN_SALT_NAME = "login-attempt-salt";
 export const ATTACK_DISTINCT_PASSWORDS = 6;
 export const ATTACK_WINDOW_MS = 10 * 60 * 1000;
 
+// And the attack that runs the other way: ONE password against many accounts. A spray.
+//
+// Six different passwords from one address is somebody working through a password list against one
+// account, and every brake in the product catches it: the relay locks an address out after five
+// failures, and this service locks an email out after ten. A spray trips none of them. One password
+// tried once against a hundred accounts from a hundred addresses is a hundred rows, no lockout on
+// any address, no lockout on any account, and nothing flagged, which is exactly the shape that gets
+// in. So the same window is asked the mirror question: how many DIFFERENT accounts did one password
+// get tried against. Six, for the same reason six is the number above.
+export const ATTACK_SPRAY_ACCOUNTS = 6;
+
 // How long the sign-in record is kept. Long enough to answer "has this been going on for weeks",
 // short enough that it does not become a permanent list of everybody who ever mistyped their own
 // password.
@@ -63,7 +77,19 @@ export const ATTEMPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 // It is shown once and stored as a scrypt hash like every other password here.
 const TEMP_PASSWORD_BYTES = 18;
 
-const RELAY_TIMEOUT_MS = 8_000;
+// How long this service waits on the relay.
+//
+// It used to be eight seconds, which was shorter than the sweep on the other end could take: one
+// customer whose `du` ran long blanked the whole Box health panel AND put "not answering" on the
+// System panel's relay card, which is a false alarm about the relay being down. The sweep is now
+// bounded on the relay side (ui/box-health.mjs, SWEEP_BUDGET_MS), so this only has to be
+// comfortably longer than that budget plus the trip. CP_RELAY_TIMEOUT_MS moves it.
+export const RELAY_TIMEOUT_MS = 15_000;
+
+// One box-health sweep answers every ask inside this window. One click on Refresh loads the Box
+// health panel and the System health panel together and both want the same answer, so without this
+// a single refresh runs the relay's whole docker-plus-du fleet sweep twice.
+export const BOXES_CACHE_MS = 5_000;
 
 /** The control plane's own salt, made once in CP_DATA_DIR at 0600. */
 export function adminSalt(dataDir, { name = ADMIN_SALT_NAME } = {}) {
@@ -88,6 +114,12 @@ export function summariseByAddress(rows, {
 } = {}) {
   const byAddress = new Map();
   for (const row of rows ?? []) {
+    // A row THIS service wrote for a sign-in that arrived through the relay carries the relay's own
+    // egress address rather than the visitor's, because that is the address the request came from.
+    // Bucketing those by address would pile the whole fleet's console sign-ins under one phantom
+    // address that can raise the attack chip on nobody. They stay in Every attempt and in the
+    // by-account table, neither of which depends on the address being a person's.
+    if (String(row?.via ?? "") === "relay") continue;
     const ip = String(row?.ip ?? "") || "unknown";
     let bucket = byAddress.get(ip);
     if (bucket == null) {
@@ -119,22 +151,7 @@ export function summariseByAddress(rows, {
     let topRepeat = 0;
     for (const count of counts.values()) if (count > topRepeat) topRepeat = count;
 
-    // The sliding window. Sorted by time, then a left edge walked forward while the right edge
-    // advances; the widest set of distinct keys ever held between them is the answer.
-    const sorted = [...bucket.tries].sort((a, b) => a.at - b.at);
-    let worst = 0;
-    let left = 0;
-    const live = new Map();
-    for (let right = 0; right < sorted.length; right += 1) {
-      live.set(sorted[right].key, (live.get(sorted[right].key) ?? 0) + 1);
-      while (sorted[right].at - sorted[left].at > windowMs) {
-        const key = sorted[left].key;
-        const left_ = (live.get(key) ?? 0) - 1;
-        if (left_ <= 0) live.delete(key); else live.set(key, left_);
-        left += 1;
-      }
-      if (live.size > worst) worst = live.size;
-    }
+    const worst = widestInWindow(bucket.tries, windowMs);
 
     summaries.push({
       ip: bucket.ip,
@@ -162,14 +179,169 @@ export function summariseByAddress(rows, {
   return summaries;
 }
 
+/** The widest set of distinct keys ever held inside one sliding window. */
+function widestInWindow(tries, windowMs) {
+  const sorted = [...tries].sort((a, b) => a.at - b.at);
+  const live = new Map();
+  let worst = 0;
+  let left = 0;
+  for (let right = 0; right < sorted.length; right += 1) {
+    live.set(sorted[right].key, (live.get(sorted[right].key) ?? 0) + 1);
+    while (sorted[right].at - sorted[left].at > windowMs) {
+      const key = sorted[left].key;
+      const rest = (live.get(key) ?? 0) - 1;
+      if (rest <= 0) live.delete(key); else live.set(key, rest);
+      left += 1;
+    }
+    if (live.size > worst) worst = live.size;
+  }
+  return worst;
+}
+
+/**
+ * The spray, seen from the password's side: one tried password, and every account it was tried on.
+ *
+ * A row with no account named cannot be part of a spray, so the instance-password door is not in
+ * here. Hashes are counted per source, for the same reason they are in summariseByAddress: the two
+ * services keep different salts, so one password through both doors is two hashes and comparing
+ * them across sources would be comparing nothing.
+ */
+export function summariseByPassword(rows, {
+  windowMs = ATTACK_WINDOW_MS, threshold = ATTACK_SPRAY_ACCOUNTS,
+} = {}) {
+  const byKey = new Map();
+  for (const row of rows ?? []) {
+    const hash = String(row?.triedHash ?? "");
+    const email = String(row?.email ?? "");
+    const at = Date.parse(String(row?.at ?? ""));
+    if (hash.length === 0 || email.length === 0 || !Number.isFinite(at)) continue;
+    const source = String(row?.source ?? "relay");
+    const key = `${source}:${hash}`;
+    let bucket = byKey.get(key);
+    if (bucket == null) {
+      bucket = { source, attempts: 0, emails: new Set(), addresses: new Set(), tries: [], firstAt: "", lastAt: "" };
+      byKey.set(key, bucket);
+    }
+    bucket.attempts += 1;
+    bucket.emails.add(email);
+    // A row this service wrote for a sign-in that came THROUGH the relay carries the relay's own
+    // egress address rather than the visitor's, so it is not an address a person was at.
+    const ip = String(row?.ip ?? "");
+    if (ip.length > 0 && String(row?.via ?? "") !== "relay") bucket.addresses.add(ip);
+    bucket.tries.push({ at, key: email });
+    if (bucket.firstAt === "" || at < Date.parse(bucket.firstAt)) bucket.firstAt = new Date(at).toISOString();
+    if (bucket.lastAt === "" || at > Date.parse(bucket.lastAt)) bucket.lastAt = new Date(at).toISOString();
+  }
+
+  const summaries = [];
+  for (const bucket of byKey.values()) {
+    const worst = widestInWindow(bucket.tries, windowMs);
+    summaries.push({
+      source: bucket.source,
+      attempts: bucket.attempts,
+      accounts: [...bucket.emails].sort(),
+      addresses: [...bucket.addresses].sort(),
+      accountsInWindow: worst,
+      spray: worst >= threshold,
+      firstAt: bucket.firstAt,
+      lastAt: bucket.lastAt,
+    });
+  }
+  summaries.sort((a, b) => (b.spray === a.spray ? b.attempts - a.attempts : (b.spray ? 1 : -1)));
+  return summaries;
+}
+
+/**
+ * The same window, per ACCOUNT rather than per address.
+ *
+ * This is the table the by-address one cannot be: a spray comes from a hundred addresses and lands
+ * on a hundred accounts, so every address bucket holds one harmless-looking row and the attack is
+ * only visible when the rows are lined up by who was being guessed at. `sprayed` is set from
+ * summariseByPassword: this account was one of the accounts that a single password was tried
+ * against inside one window.
+ */
+export function summariseByAccount(rows, {
+  windowMs = ATTACK_WINDOW_MS, threshold = ATTACK_SPRAY_ACCOUNTS,
+} = {}) {
+  const sprayed = new Set();
+  for (const password of summariseByPassword(rows, { windowMs, threshold })) {
+    if (password.spray) for (const email of password.accounts) sprayed.add(email);
+  }
+
+  const byEmail = new Map();
+  for (const row of rows ?? []) {
+    const email = String(row?.email ?? "");
+    // The instance-password door names nobody, so those rows belong to the by-address table only.
+    if (email.length === 0) continue;
+    let bucket = byEmail.get(email);
+    if (bucket == null) {
+      bucket = { email, tenant: "", attempts: 0, refused: 0, locked: 0, ok: 0, addresses: new Set(), tries: [], firstAt: "", lastAt: "" };
+      byEmail.set(email, bucket);
+    }
+    bucket.attempts += 1;
+    const outcome = String(row?.outcome ?? "");
+    if (outcome === "refused") bucket.refused += 1;
+    else if (outcome === "locked") bucket.locked += 1;
+    else if (outcome === "ok") bucket.ok += 1;
+    if (bucket.tenant === "" && String(row?.tenant ?? "").length > 0) bucket.tenant = String(row.tenant);
+    const ip = String(row?.ip ?? "");
+    if (ip.length > 0 && String(row?.via ?? "") !== "relay") bucket.addresses.add(ip);
+    const at = Date.parse(String(row?.at ?? ""));
+    if (Number.isFinite(at)) {
+      const hash = String(row?.triedHash ?? "");
+      if (hash.length > 0) bucket.tries.push({ at, key: `${String(row?.source ?? "relay")}:${hash}` });
+      if (bucket.firstAt === "" || at < Date.parse(bucket.firstAt)) bucket.firstAt = new Date(at).toISOString();
+      if (bucket.lastAt === "" || at > Date.parse(bucket.lastAt)) bucket.lastAt = new Date(at).toISOString();
+    }
+  }
+
+  const summaries = [];
+  for (const bucket of byEmail.values()) {
+    const counts = new Map();
+    for (const try_ of bucket.tries) counts.set(try_.key, (counts.get(try_.key) ?? 0) + 1);
+    const distinct = counts.size;
+    let topRepeat = 0;
+    for (const count of counts.values()) if (count > topRepeat) topRepeat = count;
+    summaries.push({
+      email: bucket.email,
+      tenant: bucket.tenant,
+      attempts: bucket.attempts,
+      refused: bucket.refused,
+      locked: bucket.locked,
+      ok: bucket.ok,
+      addresses: [...bucket.addresses].sort(),
+      distinctPasswords: distinct,
+      repeatedMost: topRepeat,
+      distinctInWindow: widestInWindow(bucket.tries, windowMs),
+      sprayed: sprayed.has(bucket.email),
+      firstAt: bucket.firstAt,
+      lastAt: bucket.lastAt,
+      passwordStory: distinct === 0
+        ? "no password reached the check"
+        : distinct === 1
+          ? `the same password ${topRepeat} time${topRepeat === 1 ? "" : "s"}`
+          : `${distinct} different passwords`,
+    });
+  }
+  summaries.sort((a, b) => (b.sprayed === a.sprayed ? b.attempts - a.attempts : (b.sprayed ? 1 : -1)));
+  return summaries;
+}
+
 /**
  * One list out of two ledgers.
  *
  * An account sign-in that arrives through the console is written down TWICE, once at the relay's
  * door and once here, because the relay forwards it. Showing both would double every number on the
- * panel, so a control plane row that matches a relay row on address, email and outcome within two
- * seconds is dropped in favour of the relay's, which is the richer of the two: it knows which door
- * was used and what the browser called itself.
+ * panel, so a control plane row that matches a relay row within two seconds is dropped in favour of
+ * the relay's, which is the richer of the two: it knows which door was used and what the browser
+ * called itself.
+ *
+ * WHICH FIELDS HAVE TO MATCH depends on how the row got here. A row this service wrote for a
+ * request that arrived through the relay carries the relay's own egress address, not the visitor's,
+ * so its address will never equal the relay's row and matching on address would keep every
+ * duplicate. Those rows carry via "relay" and are matched on the email and the outcome alone.
+ * Everything else still has to match on the address too, because two different people failing on
+ * the same account inside two seconds are two attempts and not one.
  *
  * What survives from the control plane's side is exactly what the contract wanted it for: an
  * attempt that never went through the relay at all, which is a client posting straight at
@@ -178,13 +350,20 @@ export function summariseByAddress(rows, {
 export function mergeAttempts(relayRows, controlRows, { windowMs = 2000 } = {}) {
   const merged = (relayRows ?? []).map((row) => ({ ...row, source: "relay" }));
   const index = new Map();
-  for (const row of merged) {
-    const key = `${row.ip}|${row.email}|${row.outcome}`;
+  const add = (key, at) => {
     if (!index.has(key)) index.set(key, []);
-    index.get(key).push(Date.parse(String(row.at ?? "")));
+    index.get(key).push(at);
+  };
+  for (const row of merged) {
+    const at = Date.parse(String(row.at ?? ""));
+    add(`${row.ip}|${row.email}|${row.outcome}`, at);
+    add(`|${row.email}|${row.outcome}`, at);
   }
   for (const row of controlRows ?? []) {
-    const key = `${String(row.ip ?? "")}|${String(row.email ?? "")}|${String(row.outcome ?? "")}`;
+    const forwarded = String(row.via ?? "") === "relay";
+    const key = forwarded
+      ? `|${String(row.email ?? "")}|${String(row.outcome ?? "")}`
+      : `${String(row.ip ?? "")}|${String(row.email ?? "")}|${String(row.outcome ?? "")}`;
     const at = Date.parse(String(row.at ?? ""));
     const near = (index.get(key) ?? []).some((seen) => Number.isFinite(seen) && Number.isFinite(at) && Math.abs(seen - at) <= windowMs);
     if (near) continue;
@@ -318,16 +497,42 @@ export function createAdminApi({
   json, noContent, publicAccount, publicTenant, tenantView, tenantPower, tenantProvision,
   currentSession, version = "0.0.0", pageDir = new URL("./admin/", import.meta.url).pathname,
   read = (file) => readFileSync(file, "utf8"),
+  log = (line) => { try { process.stderr.write(`${line}\n`); } catch { /* a closed stderr is not worth throwing over */ } },
 } = {}) {
   // Made on the first refused sign-in rather than at boot, so a data directory that is not writable
   // yet cannot stop the service from starting.
+  //
+  // A FAILURE IS NOT MEMOISED, and it is not silent. A directory that could not be written at the
+  // first refusal is usually writable at the next one, and remembering the empty value would turn
+  // one bad moment into a process that never hashes another password. What that looks like on the
+  // panel is every address reading "no password reached the check" with attack false, which is the
+  // made-up green light this file's own header refuses to ship. So the empty value is retried, the
+  // reason is kept for the System panel, and the failure goes to the log with the path in it. The
+  // salt itself is never logged.
   let salt = null;
+  let saltWhy = "";
+  const saltFile = () => path.join(String(config.dataDir ?? "."), ADMIN_SALT_NAME);
   const saltOf = () => {
-    if (salt != null) return salt;
-    try { salt = adminSalt(config.dataDir); }
-    catch { salt = ""; }
+    if (salt) return salt;
+    try { salt = adminSalt(config.dataDir); saltWhy = ""; }
+    catch (error) {
+      salt = "";
+      saltWhy = `this service could not read or make its salt at ${saltFile()}: ${notMeasured(error)}`;
+      log(`admin console: the sign-in record cannot be signed. ${saltWhy}`);
+    }
     return salt;
   };
+
+  /**
+   * Whether the sign-in record is actually being signed, for the System panel.
+   *
+   * Asking makes the salt if it is not there yet, which is the same thing the next refused sign-in
+   * would do, so this card is a live check and not a memory of one. It exists because "no attacks"
+   * and "the ledger cannot hash" look identical on every other panel.
+   */
+  const signInRecord = () => (saltOf().length > 0
+    ? { signing: true, why: `a refused sign-in is written down with a keyed hash of the password that was tried, under ${ADMIN_SALT_NAME} in this service's data directory` }
+    : { signing: false, why: saltWhy || `this service could not read or make its salt at ${saltFile()}` });
 
   const relayBase = String(config.relayUrl ?? "").replace(/\/+$/, "");
 
@@ -351,19 +556,34 @@ export function createAdminApi({
    * Otherwise a session whose account carries super_admin, looked up now. Nothing is taken from the
    * token: a token is a fact from whenever it was minted, and "this person was demoted" has to mean
    * demoted now and not in up to twelve hours.
+   *
+   * The account the token names has to BE the account the token was issued for, and that is three
+   * checks rather than one. A session is signed with the tenant's OWN derived key, and every tenant
+   * relay is handed its own key (cp/server.mjs, the relay registry), which is a key that lives in
+   * that customer's Coolify environment. So the signature proves "somebody who holds tenant X's key
+   * minted this" and nothing more. Without the two lines below, a customer who can run code in
+   * their own relay could mint a token under their own tenant's key carrying a SUPER ADMIN'S
+   * account id and open every route on this console, including the promote that makes the
+   * escalation permanent. Matching the account's tenant and address against the token's own claims
+   * closes it: cp/server.mjs fills sub, email and tenant from one account row when it mints, so
+   * every real token passes and a token whose sub was swapped for somebody else's does not.
    */
   const requireSuperAdmin = (request, response) => {
     if (secretsMatch(bearer(request), config.adminToken)) return { ok: true, via: "operator token", account: null };
     const session = currentSession(request);
     if (session.ok) {
       const account = store.getAccountById(session.payload.sub);
-      if (account != null && account.superAdmin === true && account.disabled !== true) {
+      const sameTenant = account != null && String(account.tenant) === String(session.payload.tenant ?? "");
+      const sameEmail = account != null && normalizeEmail(account.email) === normalizeEmail(session.payload.email ?? "");
+      if (account != null && sameTenant && sameEmail && account.superAdmin === true && account.disabled !== true) {
         return { ok: true, via: "session", account };
       }
     }
     json(response, 401, { error: "unauthorized", message: "This console is for super admins." });
     return { ok: false };
   };
+
+  const relayTimeoutMs = Number(config.relayTimeoutMs) > 0 ? Number(config.relayTimeoutMs) : RELAY_TIMEOUT_MS;
 
   /** The relay, asked for the two things only it can see. Never throws; says why instead. */
   async function askRelay(pathname, query = "") {
@@ -373,13 +593,34 @@ export function createAdminApi({
     try {
       const response = await fetchImpl(`${relayBase}${pathname}${query}`, {
         headers: { authorization: `Bearer ${config.relayToken}`, accept: "application/json" },
-        signal: AbortSignal.timeout(RELAY_TIMEOUT_MS),
+        signal: AbortSignal.timeout(relayTimeoutMs),
       });
       if (!response.ok) return { ok: false, why: `the relay answered ${response.status}` };
       return { ok: true, body: await response.json() };
     } catch (error) {
       return { ok: false, why: error?.name === "TimeoutError" ? "the relay did not answer in time" : "the relay did not answer" };
     }
+  }
+
+  /**
+   * The relay's box-health answer, asked for once and handed to everybody who wants it.
+   *
+   * Two panels want it: Box health for all of it, System health for one line saying whether the
+   * relay is reachable. They load together, so `inFlight` is what makes two CONCURRENT asks one
+   * sweep and the short cache is what makes two asks a second apart one sweep. Aborting on this
+   * side never stopped the work on the other one, so asking twice was two full docker-and-du fleet
+   * sweeps on the host for one click.
+   */
+  let boxesCache = { at: 0, answer: null, inFlight: null };
+  function askRelayBoxes() {
+    if (boxesCache.answer != null && now() - boxesCache.at < BOXES_CACHE_MS) return Promise.resolve(boxesCache.answer);
+    if (boxesCache.inFlight != null) return boxesCache.inFlight;
+    const pending = askRelay("/admin/boxes").then(
+      (answer) => { boxesCache = { at: now(), answer, inFlight: null }; return answer; },
+      (error) => { boxesCache = { at: 0, answer: null, inFlight: null }; throw error; },
+    );
+    boxesCache = { ...boxesCache, inFlight: pending };
+    return pending;
   }
 
   /** The merged sign-in ledger, both sides, filtered and summarised. */
@@ -398,6 +639,9 @@ export function createAdminApi({
     return {
       rows: merged,
       addresses: summariseByAddress(merged),
+      // The mirror of the address table, and the only one a spray shows up in.
+      accounts: summariseByAccount(merged),
+      passwords: summariseByPassword(merged),
       relay: relay.ok ? { reachable: true } : { reachable: false, why: relay.why },
       measuredAt: new Date(now()).toISOString(),
     };
@@ -433,7 +677,7 @@ export function createAdminApi({
 
   /** Box health: the ledger's view, plus the relay's, joined on the slug. */
   async function boxes() {
-    const relay = await askRelay("/admin/boxes");
+    const relay = await askRelayBoxes();
     const fromRelay = new Map();
     if (relay.ok && Array.isArray(relay.body?.boxes)) {
       for (const box of relay.body.boxes) fromRelay.set(String(box?.slug ?? ""), box);
@@ -480,7 +724,9 @@ export function createAdminApi({
       try { await client.call("GET", "/projects"); return { reachable: true, url: client.base }; }
       catch (error) { return { reachable: false, why: notMeasured(error) }; }
     })();
-    const relay = await askRelay("/admin/boxes");
+    // The same sweep the Box health panel just asked for, not a second one. All this card needs is
+    // whether the relay answered.
+    const relay = await askRelayBoxes();
     const backup = await lastBackup(config.backupManifestDir);
     const isolation = await isolationReport(config.isolationReport);
     return {
@@ -503,6 +749,9 @@ export function createAdminApi({
       // The relay owns the mail webhook and its secret; this container has neither, so the honest
       // answer is that it cannot see it from here.
       mailWebhook: { measured: false, why: "the mail webhook is configured on the relay, which this service cannot read from inside its container. Check it in the console's Email card." },
+      // Whether the sign-in panel's numbers can be trusted at all. Without this card, a data
+      // directory this service cannot write reads as a quiet day rather than as a broken ledger.
+      signInRecord: signInRecord(),
       backup,
       isolation,
       stuckProvisioning: stuckProvisioning(store, { at: now() }),
@@ -568,6 +817,7 @@ export function createAdminApi({
       const sinceMs = now() - hours * 60 * 60 * 1000;
       const attempts = await signIns({ sinceMs, outcome: "", limit: 2000 });
       const attacks = attempts.addresses.filter((row) => row.attack);
+      const sprayed = attempts.accounts.filter((row) => row.sprayed);
       json(response, 200, {
         version,
         measuredAt: new Date(now()).toISOString(),
@@ -584,6 +834,9 @@ export function createAdminApi({
           locked: attempts.rows.filter((row) => row.outcome === "locked").length,
           ok: attempts.rows.filter((row) => row.outcome === "ok").length,
           attackAddresses: attacks.map((row) => row.ip),
+          // The other shape: one password against many accounts. It trips no lockout anywhere, so
+          // this list is the only place it appears.
+          sprayedAccounts: sprayed.map((row) => row.email),
         },
         stuckProvisioning: stuckProvisioning(store, { at: now() }),
         relay: attempts.relay,
@@ -605,6 +858,7 @@ export function createAdminApi({
       json(response, 200, {
         ...answer,
         rule: `an address that tried ${ATTACK_DISTINCT_PASSWORDS} or more different passwords inside ${Math.round(ATTACK_WINDOW_MS / 60000)} minutes is flagged as an attack`,
+        sprayRule: `one password tried against ${ATTACK_SPRAY_ACCOUNTS} or more accounts inside ${Math.round(ATTACK_WINDOW_MS / 60000)} minutes is flagged as a spray, however many addresses it came from`,
       });
       return true;
     }
@@ -668,7 +922,12 @@ export function createAdminApi({
         json(response, 200, {
           account: publicAccount(store.getAccountById(account.id)),
           temporaryPassword: temporary,
-          message: "This password is shown once. Send it to them by a route that is not this screen, and have them change it when they sign in.",
+          // The second sentence is the one that matters when this button is being pressed because
+          // an account is compromised. A session is a signed token neither this service nor the
+          // relay holds a copy of, so changing the password shuts the door and leaves anybody who
+          // is already inside where they are. It is said here because the disable button two blocks
+          // up says it, and a reset that stayed quiet about it reads as though the door is now shut.
+          message: "This password is shown once. Send it to them by a route that is not this screen, and have them change it when they sign in. The old password stops working now, but a session that is already open keeps working until it expires, which is at most 12 hours.",
         });
         return true;
       }
@@ -698,9 +957,9 @@ export function createAdminApi({
    * One sign-in written down, from cp/server.mjs's own sign-in route. The PASSWORD comes in and the
    * keyed hash goes to disk; a success gets no hash at all.
    */
-  function recordAttempt({ email, ip, outcome, password = "", tenant = "", at = now() }) {
+  function recordAttempt({ email, ip, outcome, password = "", tenant = "", at = now(), via = "" }) {
     store.recordLoginAttempt({
-      at, email, ip, outcome, tenant,
+      at, email, ip, outcome, tenant, via,
       triedHash: outcome === "ok" ? "" : hashTried(password, saltOf()),
     });
     // Pruned on the same call rather than on a timer, so the table cannot grow without bound on a

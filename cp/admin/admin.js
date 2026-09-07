@@ -224,6 +224,35 @@
       addresses.appendChild(tr);
     }
 
+    const accounts = $("accounts").querySelector("tbody");
+    clear(accounts);
+    const accountRows = answer.accounts ?? [];
+    if (accountRows.length === 0) {
+      accounts.appendChild(rowSpanning(8, "No account was named during this window."));
+    }
+    for (const row of accountRows) {
+      const tr = document.createElement("tr");
+      const who = el("td", "mono");
+      who.appendChild(text(row.email));
+      if (row.sprayed) {
+        who.appendChild(text(" "));
+        const chip = el("span", "chip attack", "Spray");
+        chip.title = answer.sprayRule ?? "";
+        who.appendChild(chip);
+      }
+      tr.appendChild(who);
+      tr.appendChild(el("td", "num", row.attempts));
+      tr.appendChild(el("td", "num", row.refused));
+      tr.appendChild(el("td", "num", row.locked));
+      tr.appendChild(el("td", "num", row.ok));
+      tr.appendChild(el("td", null, row.passwordStory));
+      tr.appendChild(el("td", null, row.addresses.length === 0 ? "through the console" : row.addresses.join(", ")));
+      const seen = el("td", null, ago(row.lastAt));
+      seen.title = when(row.lastAt);
+      tr.appendChild(seen);
+      accounts.appendChild(tr);
+    }
+
     const attempts = $("attempts").querySelector("tbody");
     clear(attempts);
     if (answer.rows.length === 0) {
@@ -236,7 +265,11 @@
       tr.appendChild(at);
       tr.appendChild(el("td", null, row.door === "account" ? "account" : "instance password"));
       tr.appendChild(el("td", "mono", row.email || "-"));
-      tr.appendChild(el("td", "mono", row.ip || "unknown"));
+      // A row this service wrote for a sign-in that came through a customer's console carries that
+      // machine's address, not the visitor's, so printing it would name the wrong place.
+      tr.appendChild(row.via === "relay"
+        ? el("td", null, "through the console")
+        : el("td", "mono", row.ip || "unknown"));
       tr.appendChild(el("td", null, row.tenant || "-"));
       const outcomeCell = document.createElement("td");
       outcomeCell.appendChild(el("span", `chip ${row.outcome}`, row.outcome === "ok" ? "signed in" : row.outcome === "locked" ? "locked out" : "refused"));
@@ -466,6 +499,15 @@
       answer.relay.reachable ? "good" : "bad"));
 
     host.appendChild(card("Mail webhook", null, answer.mailWebhook.why));
+
+    // Without this card, a ledger that cannot sign looks exactly like a quiet day: every address
+    // reads "no password reached the check" and nothing is flagged.
+    if (answer.signInRecord) {
+      host.appendChild(card("Sign-in record",
+        answer.signInRecord.signing ? "being written" : "not being written",
+        answer.signInRecord.why,
+        answer.signInRecord.signing ? "good" : "bad"));
+    }
 
     host.appendChild(card("Nightly backup",
       answer.backup.measured ? answer.backup.stamp : null,

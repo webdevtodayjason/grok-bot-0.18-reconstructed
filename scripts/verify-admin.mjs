@@ -19,8 +19,10 @@
 //   boot        the control plane starts on a free port with a throwaway data dir and answers health
 //   promote     an account is added, `account promote` makes it a super admin, demote takes it back,
 //               and the last super admin cannot be demoted into a console nobody can open
-//   door        every /v1/admin route refuses no bearer, a wrong bearer, and a NORMAL account's
-//               own valid session; the operator token opens them; a super admin's session opens them
+//   door        every /v1/admin route refuses no bearer, a wrong bearer, a NORMAL account's own
+//               valid session, and a token minted under ANOTHER tenant's derived key carrying the
+//               super admin's account id; the operator token opens them; a super admin's session
+//               opens them
 //   ledger      a refused sign-in lands in the control plane's own record with a keyed hash, and
 //               the password TEXT is nowhere in the data directory (every file, byte by byte)
 //   relay       the relay's own ledger writer: the hash is HMAC-SHA256 under the salt, the salt file
@@ -55,6 +57,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 import { createLoginLedger, hashTried } from "../ui/login-ledger.mjs";
+import { mintSessionToken, tenantSessionSecret } from "../ui/session-token.mjs";
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log([
@@ -158,6 +161,26 @@ for (let index = 0; index < 4; index += 1) {
     tenant: "",
   });
 }
+// One password against six accounts, one try each, a different address every time. A spray, and the
+// shape of it is the point: no address bucket reaches anything, no account is locked out, and every
+// row on its own looks like somebody mistyping. The by-address table cannot see this by
+// construction, so it is the by-account table and the password summary that have to.
+const SPRAY_EMAILS = [];
+for (let index = 0; index < 6; index += 1) SPRAY_EMAILS.push(`sprayed${index}@acme-roofing.example`);
+const SPRAY_IPS = SPRAY_EMAILS.map((_, index) => `203.0.113.${60 + index}`);
+for (let index = 0; index < SPRAY_EMAILS.length; index += 1) {
+  fixtureRows.push({
+    at: new Date(FIXTURE_AT + 20_000 + index * 25_000).toISOString(),
+    door: "account",
+    email: SPRAY_EMAILS[index],
+    ip: SPRAY_IPS[index],
+    userAgent: "python-requests/2.31",
+    triedHash: fixtureHash("one-common-password"),
+    outcome: "refused",
+    tenant: "",
+  });
+}
+
 // One refusal and then a lockout and then a success. An ordinary bad morning.
 fixtureRows.push({
   at: new Date(FIXTURE_AT + 60_000).toISOString(), door: "instance", email: "", ip: ORDINARY_IP,
@@ -423,6 +446,34 @@ let userToken = "";
   const escalate = await call("POST", `/v1/admin/users/${encodeURIComponent(USER_EMAIL)}/promote`, { token: userToken });
   check(escalate.status === 401, "a normal account cannot promote itself", `status ${escalate.status}`);
 
+  // A token minted under ANOTHER tenant's own key, carrying the super admin's account id.
+  //
+  // This is the shape of the real attack and not a theoretical one. Every tenant relay is handed
+  // its own derived session key, that key sits in that customer's Coolify environment, and anyone
+  // who can run code in that customer's relay holds it. A signature made with it proves which key
+  // was used and nothing about who the person is, so the account the token NAMES has to be the
+  // account the token was issued for. Without that binding this mints a super admin out of one
+  // ordinary customer's key.
+  const roster = await call("GET", "/v1/accounts", { admin: true });
+  const bossId = String((roster.json?.accounts ?? []).find((row) => row.email === BOSS_EMAIL)?.id ?? "");
+  check(bossId.length > 0, "the gate knows the super admin's account id, which is what a forgery would carry");
+  const forgedAt = Date.now();
+  const { token: forged } = mintSessionToken({
+    sub: bossId,
+    email: BOSS_EMAIL,
+    tenant: "a-different-customer",
+    host: "a-different-customer.titanium.bot",
+    iat: forgedAt,
+    exp: forgedAt + 60 * 60 * 1000,
+    jti: randomBytes(16).toString("hex"),
+  }, tenantSessionSecret(SESSION_SECRET, "a-different-customer"), forgedAt);
+  for (const route of ADMIN_ROUTES) {
+    const refused = await call("GET", route, { token: forged });
+    check(refused.status === 401, `${route} refuses a token signed with another customer's key`, `status ${refused.status}`);
+  }
+  const forgedPromote = await call("POST", `/v1/admin/users/${encodeURIComponent(USER_EMAIL)}/promote`, { token: forged });
+  check(forgedPromote.status === 401, "and it cannot promote anybody, which is the escalation that would outlive the token", `status ${forgedPromote.status}`);
+
   const bossSession = await call("POST", "/v1/sessions", { body: { email: BOSS_EMAIL, password: BOSS_PASSWORD } });
   bossToken = String(bossSession.json?.token ?? "");
   check(bossSession.status === 200 && bossSession.json?.account?.superAdmin === true, "the super admin signs in and the answer says so", `status ${bossSession.status}`);
@@ -561,6 +612,23 @@ step("the attack rule");
   check(bySource.has("relay") && bySource.has("control plane"), "and both ledgers are in the one list", [...bySource].join(", "));
   check(relayCalls.some((row) => row.path === "/admin/login-attempts" && row.authorized), "the control plane read the relay's ledger with the relay token");
 
+  // The spray, which every other brake in the product misses.
+  const sprayAddresses = new Set(SPRAY_IPS);
+  const sprayBuckets = addresses.filter((row) => sprayAddresses.has(row.ip));
+  check(sprayBuckets.length === SPRAY_IPS.length, "the spray's addresses are all in the by-address table", String(sprayBuckets.length));
+  check(sprayBuckets.every((row) => row.attack === false), "and not one of them is flagged, which is exactly why the address table cannot catch this");
+
+  const accounts = answer.json?.accounts ?? [];
+  const sprayed = accounts.filter((row) => row.sprayed);
+  check(sprayed.length === SPRAY_EMAILS.length, "the by-account table flags every account the one password was tried on", `${sprayed.length} of ${SPRAY_EMAILS.length}`);
+  check(sprayed.every((row) => row.addresses.length === 1), "each of those accounts saw one address and one attempt");
+  check(accounts.some((row) => row.email === USER_EMAIL && row.sprayed === false), "and an ordinary account in the same window is not flagged");
+
+  const password = (answer.json?.passwords ?? []).find((row) => row.spray);
+  check(password?.accountsInWindow === SPRAY_EMAILS.length, "one password reached six accounts inside the window", String(password?.accountsInWindow));
+  check((password?.addresses ?? []).length === SPRAY_IPS.length, "from six different addresses", String((password?.addresses ?? []).length));
+  check(String(answer.json?.sprayRule ?? "").includes("spray"), "and the panel carries the rule in plain words", String(answer.json?.sprayRule ?? "").slice(0, 60));
+
   const refusedOnly = await call("GET", "/v1/admin/sign-ins?hours=24&outcome=refused&limit=1000", { token: bossToken });
   check((refusedOnly.json?.rows ?? []).every((row) => row.outcome === "refused"), "the outcome filter filters");
   const oneHour = await call("GET", "/v1/admin/sign-ins?hours=1&limit=1000", { token: bossToken });
@@ -573,6 +641,8 @@ step("the five panels' data");
   const overview = await call("GET", "/v1/admin/overview", { token: bossToken });
   check(overview.status === 200 && overview.json?.counts?.clients === 1, "overview counts the workspaces", JSON.stringify(overview.json?.counts));
   check(overview.json?.signIns?.attackAddresses?.includes(ATTACK_IP), "and names the attacking address");
+  check((overview.json?.signIns?.sprayedAccounts ?? []).length === SPRAY_EMAILS.length,
+    "and names the accounts one password was sprayed across", String((overview.json?.signIns?.sprayedAccounts ?? []).length));
 
   const clients = await call("GET", "/v1/admin/clients", { token: bossToken });
   const client = (clients.json?.clients ?? [])[0];
@@ -603,6 +673,9 @@ step("the five panels' data");
   check(Array.isArray(system.json?.disks) && system.json.disks.length === 2, "two disks are reported, one of them the archives mount that is not there");
   check(system.json?.disks?.[1]?.freeBytes === null, "and the one that is not mounted reads null rather than zero");
   check(Array.isArray(system.json?.stuckProvisioning), "stuck builds are a list");
+  // The one card that says whether the sign-in panel's numbers mean anything. Without it, a data
+  // directory this service cannot write reads as a quiet day rather than as a broken ledger.
+  check(system.json?.signInRecord?.signing === true, "the sign-in record says it is being written", String(system.json?.signInRecord?.why ?? "").slice(0, 60));
   check(system.json?.counts?.superAdmins === 1, "and there is one super admin", String(system.json?.counts?.superAdmins));
 
   // The named actions. Coolify is the fake one, so this measures that the route reaches it with the
@@ -701,6 +774,12 @@ if (!WANT_BROWSER) {
   check(String(attackRow).includes("6 different passwords"), "and its row says six different passwords", String(attackRow).replace(/\s+/g, " ").slice(0, 90));
   const sameRow = await page.locator("#addresses tbody tr", { hasText: SAME_IP }).first().textContent();
   check(String(sameRow).includes("the same password 4 times"), "the other address's row says the same password four times", String(sameRow).replace(/\s+/g, " ").slice(0, 90));
+
+  const sprayChips = await page.locator("#accounts .chip.attack").count();
+  check(sprayChips === SPRAY_EMAILS.length, "a Spray chip on every account the one password was tried on", String(sprayChips));
+  const sprayRow = await page.locator("#accounts tbody tr", { hasText: SPRAY_EMAILS[0] }).first().textContent();
+  check(String(sprayRow).includes("the same password 1 time"), "and that row says one password, once, which is why nothing else caught it",
+    String(sprayRow).replace(/\s+/g, " ").slice(0, 90));
 
   const clientCards = await page.locator(".client").count();
   check(clientCards === 1, "the clients panel drew the workspace", String(clientCards));

@@ -180,7 +180,10 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   ip         TEXT NOT NULL DEFAULT '',
   outcome    TEXT NOT NULL DEFAULT 'refused',
   tried_hash TEXT NOT NULL DEFAULT '',
-  tenant     TEXT NOT NULL DEFAULT ''
+  tenant     TEXT NOT NULL DEFAULT '',
+  -- "relay" when a tenant console forwarded this sign-in, which makes the ip column that machine's
+  -- egress address rather than the visitor's. Empty is a client posting straight at this service.
+  via        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS login_attempts_at ON login_attempts (at);
 -- A workspace name that has been removed while sign-ins still pointed at it.
@@ -244,6 +247,11 @@ const TENANT_MIGRATIONS = [
   // Jason's own flag is set afterwards by hand, with `account promote`, on an account he creates.
   "ALTER TABLE accounts ADD COLUMN super_admin INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
+  // Whether this row's address is a person's or a relay's. "relay" means the sign-in arrived here
+  // forwarded by a tenant console, so `ip` is that machine's egress address and not the visitor's;
+  // the relay wrote its own richer row for the same attempt at its own door. Empty is the ordinary
+  // case, a client posting straight at this service. See recordLoginAttempt.
+  "ALTER TABLE login_attempts ADD COLUMN via TEXT NOT NULL DEFAULT ''",
 ];
 
 export function openStore(options = {}) {
@@ -309,7 +317,7 @@ export function openStore(options = {}) {
   const updateDisabled = statement("UPDATE accounts SET disabled = ?, updated_at = ? WHERE id = ?");
   const countSuperAdminsRow = statement("SELECT COUNT(*) AS n FROM accounts WHERE super_admin = 1");
 
-  const insertAttempt = statement("INSERT INTO login_attempts (at, email, ip, outcome, tried_hash, tenant) VALUES (?, ?, ?, ?, ?, ?)");
+  const insertAttempt = statement("INSERT INTO login_attempts (at, email, ip, outcome, tried_hash, tenant, via) VALUES (?, ?, ?, ?, ?, ?, ?)");
   const selectAttempts = statement("SELECT * FROM login_attempts WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?");
   const selectAttemptsByOutcome = statement("SELECT * FROM login_attempts WHERE at >= ? AND outcome = ? ORDER BY at DESC, id DESC LIMIT ?");
   const deleteOldAttempts = statement("DELETE FROM login_attempts WHERE at < ?");
@@ -447,13 +455,20 @@ export function openStore(options = {}) {
     // Separate from login_failures on purpose. That one is the lockout's counter, cleared on a
     // success and pruned to ten minutes; this one is the record the panel reads, and nothing clears
     // it early.
-    recordLoginAttempt({ at = now(), email = "", ip = "", outcome = "refused", triedHash = "", tenant = "" }) {
+    //
+    // `via` is "relay" when a tenant console forwarded the sign-in. It matters because the address
+    // on such a row is the forwarding machine's, not the visitor's: every console on this server
+    // reaches this service from one egress address, so without the flag the whole fleet's console
+    // sign-ins pile into one bucket that belongs to nobody. The relay wrote its own row for the same
+    // attempt, with the real address on it, and the merge drops this one in favour of that.
+    recordLoginAttempt({ at = now(), email = "", ip = "", outcome = "refused", triedHash = "", tenant = "", via = "" }) {
       insertAttempt.run(
         Number(at), normalizeEmail(email), String(ip ?? ""), String(outcome),
         // Only ever a hex digest. A caller that passed a password here by mistake would be writing
         // a password into the database, so the shape is checked rather than trusted.
         /^[0-9a-f]{64}$/i.test(String(triedHash ?? "")) ? String(triedHash) : "",
         String(tenant ?? ""),
+        String(via ?? "") === "relay" ? "relay" : "",
       );
     },
 
@@ -471,6 +486,7 @@ export function openStore(options = {}) {
         triedHash: row.tried_hash ?? "",
         outcome: row.outcome ?? "refused",
         tenant: row.tenant ?? "",
+        via: row.via ?? "",
       }));
     },
 

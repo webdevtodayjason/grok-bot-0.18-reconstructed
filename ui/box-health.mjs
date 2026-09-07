@@ -30,6 +30,18 @@ const execFile = promisify(execFileCb);
 
 const DOCKER_TIMEOUT_MS = 5_000;
 const GATEWAY_TIMEOUT_MS = 4_000;
+// `du -sk` on a customer's whole tree is the slowest probe here by a long way, so it gets its own
+// ceiling. It is also clamped to whatever is left of the sweep's budget, below.
+const DISK_TIMEOUT_MS = 20_000;
+
+// How long the WHOLE sweep may take.
+//
+// The control plane asks for this report over HTTP and gives up after its own ceiling, and giving
+// up there never stopped the work here: the execs carried on burning the host while the panel read
+// "not measured" for every box and the System panel read "the relay is not answering", which is a
+// false alarm about the relay being down. So the sweep bounds itself. A customer the budget did not
+// reach says so, by name, instead of the whole report arriving late or not at all.
+export const SWEEP_BUDGET_MS = 8_000;
 // How deep to look for a box's agent stores. deploy/backup/snapshot.sh finds them as
 // volumes/data/<agent>/store.db, so two levels below volumes/data is already generous.
 const ACTIVITY_DEPTH = 3;
@@ -80,9 +92,9 @@ export async function containerMemory(name, { exec = run } = {}) {
  * customer costs, and their workspace files, their chrome profile and their agent databases are all
  * that answer.
  */
-export async function tenantDisk(root, { exec = run } = {}) {
+export async function tenantDisk(root, { exec = run, timeoutMs = DISK_TIMEOUT_MS } = {}) {
   if (String(root ?? "").length === 0) return { kb: null, why: "this workspace has no directory on this host" };
-  const result = await exec("du", ["-sk", String(root)], 20_000);
+  const result = await exec("du", ["-sk", String(root)], Math.max(500, Math.round(Number(timeoutMs) || DISK_TIMEOUT_MS)));
   if (!result.ok) return { kb: null, why: result.why };
   const kb = Number(String(result.out).split(/\s+/)[0]);
   return Number.isFinite(kb) ? { kb } : { kb: null, why: `du said ${result.out.slice(0, 60)}` };
@@ -147,10 +159,21 @@ export async function gatewayAnswering(gateway, token, { fetchImpl = fetch } = {
  * `entries` are tenant registry entries: {slug, name, box, gateway, token, stateDir, operator}. The
  * probes run per tenant in sequence rather than all at once, because `docker stats` on a busy host
  * is not free and a fleet of thirty would otherwise arrive as thirty simultaneous execs.
+ *
+ * The whole loop is capped at `budgetMs`. Sequential probes with no cap meant one customer with a
+ * big directory could hold the report past the control plane's own patience, and every OTHER
+ * customer's row was then lost with it. Now the slow one takes what is left of the budget and the
+ * customers the sweep did not reach are named as not measured, which is a report with a hole in it
+ * rather than no report.
  */
-export async function readBoxHealth(entries, { exec = run, fetchImpl = fetch, now = () => Date.now() } = {}) {
-  const measuredAt = new Date(now()).toISOString();
+export async function readBoxHealth(entries, {
+  exec = run, fetchImpl = fetch, now = () => Date.now(), budgetMs = SWEEP_BUDGET_MS,
+} = {}) {
+  const startedAt = now();
+  const measuredAt = new Date(startedAt).toISOString();
+  const budget = Number(budgetMs) > 0 ? Number(budgetMs) : Infinity;
   const boxes = [];
+  let ranOut = false;
   for (const entry of entries ?? []) {
     // The tenant's root directory, worked back from the state directory the registry already
     // carries: cp/provision.mjs puts state at <root>/state. An adopted instance whose state
@@ -158,10 +181,17 @@ export async function readBoxHealth(entries, { exec = run, fetchImpl = fetch, no
     // guessing a path and reading it would be worse than saying nothing.
     const stateDir = String(entry?.stateDir ?? "");
     const root = /\/state\/?$/.test(stateDir) ? path.dirname(stateDir.replace(/\/$/, "")) : "";
+    const left = budget - (now() - startedAt);
+    if (left <= 0) {
+      ranOut = true;
+      boxes.push(unmeasuredBox(entry, root, measuredAt,
+        `the sweep ran out of its ${Math.round(budget / 1000)} second budget before it reached this workspace`));
+      continue;
+    }
     const [state, memory, disk, activity, gateway] = await Promise.all([
       containerState(entry?.box, { exec }),
       containerMemory(entry?.box, { exec }),
-      tenantDisk(root, { exec }),
+      tenantDisk(root, { exec, timeoutMs: Math.min(DISK_TIMEOUT_MS, left) }),
       lastActivity(root),
       gatewayAnswering(entry?.gateway, entry?.token, { fetchImpl }),
     ]);
@@ -186,5 +216,31 @@ export async function readBoxHealth(entries, { exec = run, fetchImpl = fetch, no
       measuredAt,
     });
   }
-  return { measuredAt, boxes };
+  // `sweptEveryWorkspace` is false when the budget ran out, so the panel can say "this list is
+  // short because the sweep was cut off" rather than showing a fleet that looks broken.
+  return { measuredAt, budgetMs: budget === Infinity ? null : budget, sweptEveryWorkspace: !ranOut, boxes };
+}
+
+/** A row for a workspace no probe reached, in the same shape as one that was measured. */
+function unmeasuredBox(entry, root, measuredAt, why) {
+  return {
+    slug: String(entry?.slug ?? ""),
+    name: String(entry?.name ?? ""),
+    box: String(entry?.box ?? ""),
+    operator: entry?.operator === true,
+    root,
+    containerState: "not measured",
+    containerStateWhy: why,
+    memoryBytes: null,
+    memoryWhy: why,
+    diskKb: null,
+    diskWhy: why,
+    lastActivityAt: null,
+    lastActivityWhy: why,
+    gatewayAnswering: null,
+    gatewayStatus: null,
+    gatewayMs: null,
+    gatewayWhy: why,
+    measuredAt,
+  };
 }

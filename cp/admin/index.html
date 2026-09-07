@@ -81,6 +81,15 @@
       <th>Address</th><th>Tries</th><th>Refused</th><th>Locked</th><th>In</th>
       <th>Passwords</th><th>Accounts named</th><th>Last seen</th>
     </tr></thead><tbody></tbody></table></div>
+    <!-- The same window lined up by who was being guessed at rather than by where it came from.
+         One password tried once against a hundred accounts from a hundred addresses puts one
+         harmless row in every address bucket and trips no lockout anywhere, so this is the only
+         table it shows up in. -->
+    <h3>By account</h3>
+    <div class="scroll"><table id="accounts"><thead><tr>
+      <th>Account</th><th>Tries</th><th>Refused</th><th>Locked</th><th>In</th>
+      <th>Passwords</th><th>Addresses</th><th>Last seen</th>
+    </tr></thead><tbody></tbody></table></div>
     <h3>Every attempt</h3>
     <div class="scroll"><table id="attempts"><thead><tr>
       <th>Time</th><th>Door</th><th>Email</th><th>Address</th><th>Workspace</th>

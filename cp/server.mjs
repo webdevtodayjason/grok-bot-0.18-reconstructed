@@ -394,13 +394,19 @@ export function createApp(options = {}) {
     const ip = clientOf(request);
     // A relay's address is not a person's, so the address bucket cannot mean anything for it.
     const viaRelay = isTrustedProxy(ip, relayPeers);
+    // And the sign-in RECORD needs the same fact, for the same reason. Every tenant console on this
+    // server forwards its sign-ins from one machine's egress address, so a row written here with
+    // that address is not a row about where anybody was. The relay wrote its own row for the same
+    // attempt with the visitor's real address on it; this one is marked so the merge can drop it
+    // and so the by-address table can leave the phantom address out. ADMIN-1.
+    const via = viaRelay ? "relay" : "";
     const at = now();
     store.pruneLoginFailures(at);
     const lock = store.loginLock({ email, ip, at, countIp: !viaRelay });
     if (lock.locked) {
       // ADMIN-1. Written down before the answer goes out. No hash: this branch never reached the
       // password check, so there is nothing that was tried, only somebody who kept knocking.
-      admin.recordAttempt({ email, ip, outcome: "locked", at });
+      admin.recordAttempt({ email, ip, outcome: "locked", at, via });
       return json(response, 429, { error: "locked", retryAfter: lock.retryAfter }, { "retry-after": String(lock.retryAfter) });
     }
 
@@ -427,7 +433,7 @@ export function createApp(options = {}) {
     if (!attempt.ok) {
       store.recordLoginFailure({ email, ip, at });
       // The keyed hash of what was tried, never the password. cp/admin.mjs carries the decision.
-      admin.recordAttempt({ email, ip, outcome: "refused", password, at });
+      admin.recordAttempt({ email, ip, outcome: "refused", password, at, via });
       return json(response, 401, { error: "invalid_login" });
     }
 
@@ -435,7 +441,7 @@ export function createApp(options = {}) {
     // not a refusal in the lockout's sense and it is not counted as one; it is a sentence saying
     // their sign-in is off. ADMIN-1.
     if (attempt.account.disabled === true) {
-      admin.recordAttempt({ email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at });
+      admin.recordAttempt({ email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at, via });
       return json(response, 403, {
         error: "disabled",
         message: "This sign-in has been turned off. Contact your Titanium Bot support contact.",
@@ -454,7 +460,7 @@ export function createApp(options = {}) {
     // Successes are recorded too, and with no hash: there is no reason to hold anything derived
     // from a password that worked, and a file of keyed hashes where one is known-good is a worse
     // file than one where none is. This is also what fills the "last sign-in" column.
-    admin.recordAttempt({ email, ip, outcome: "ok", tenant: attempt.account.tenant, at });
+    admin.recordAttempt({ email, ip, outcome: "ok", tenant: attempt.account.tenant, at, via });
     store.pruneRevocations(at);
     const host = tenant.host || consoleHost(config);
     const { token, payload } = mintSessionToken({

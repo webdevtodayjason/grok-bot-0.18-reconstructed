@@ -79,11 +79,20 @@ been knocking today". `login_attempts` is the record, kept for thirty days, and 
 early.
 
 The panel shows them as one list. A sign-in that came through the console is written down on both
-sides, because the relay forwards it, so a control plane row that matches a relay row on address,
-email and outcome within two seconds is dropped in favour of the relay's, which knows which door was
-used and what the browser called itself. What survives from the control plane's own side is the
-thing that table exists for: an attempt that never went through the console at all, which is a
-client posting straight at `api.titanium.bot`.
+sides, because the relay forwards it, so a control plane row that matches a relay row within two
+seconds is dropped in favour of the relay's, which knows which door was used and what the browser
+called itself. What survives from the control plane's own side is the thing that table exists for:
+an attempt that never went through the console at all, which is a client posting straight at
+`api.titanium.bot`.
+
+Which fields have to match depends on how the row arrived. A forwarded sign-in reaches this service
+from the relay's own machine, so the address on the control plane's copy is that machine's egress
+address and not the visitor's, and matching on address would keep every duplicate. Those rows are
+marked `via: relay` when they are written and matched on the email and the outcome alone. They are
+also left out of the by-address table, because that address belongs to nobody: it is one bucket that
+would otherwise hold the whole fleet's console sign-ins and could raise the Attack chip on a phantom.
+The relay's own row, with the real address, is the one in that table. On screen those rows read
+"through the console" in the Address column.
 
 The control plane reads the relay's file over `GET /admin/login-attempts`, behind `CP_RELAY_TOKEN`,
 the same credential the relay already uses on the registry route. One shared secret between those two
@@ -102,6 +111,22 @@ It is a sliding window, not a calendar bucket, so somebody who straddles the top
 caught. Six passwords spread twelve minutes apart are not flagged, and they should not be: that is a
 person, slowly.
 
+### The spray rule
+
+**One password tried against six or more accounts inside ten minutes** raises the Spray chip, however
+many addresses it came from.
+
+The attack rule above catches somebody working a password list against one account. It catches
+nothing running the other way. One common password tried once against a hundred accounts from a
+hundred addresses is a hundred rows, and every brake in the product misses it: the relay locks an
+address out after five failures and no address here has one, and this service locks an email out
+after ten failures and no email here has one. Nothing about any single row looks wrong. The attack is
+only visible when the rows are lined up by who was being guessed at, which is what the By account
+table is for, and by which password was tried, which is what raises the chip.
+
+Same window and same number as the attack rule, for the same reasons, and the passwords are still
+counted per source because the two services keep different salts.
+
 ---
 
 ## The five panels, and where every number comes from
@@ -111,11 +136,20 @@ measured"** and why, and never a zero, a dash, or a green tick.
 
 ### 1. Sign-in attempts
 
-Both ledgers, merged. The table by address gives you tries, refused, locked out, signed in, the
-accounts that were named, and the sentence that matters: "the same password 4 times" or "6 different
-passwords". The Attack chip appears on an address that meets the rule above. Filters for the window
-and the outcome are at the top; the "Seen by" column says whether a row came from the console or from
-this service.
+Both ledgers, merged, and three tables over the same rows.
+
+**By address** gives you tries, refused, locked out, signed in, the accounts that were named, and the
+sentence that matters: "the same password 4 times" or "6 different passwords". The Attack chip
+appears on an address that meets the attack rule above.
+
+**By account** is the same window lined up by who was being guessed at instead of by where it came
+from, and the Spray chip appears there. It is a separate table rather than a column because a spray
+has no address to sit under: it arrives from a hundred of them and each one looks harmless. An
+account whose only rows came through a customer's console reads "through the console" instead of an
+address list, for the reason in the merge section above.
+
+**Every attempt** is the rows themselves. Filters for the window and the outcome are at the top; the
+"Seen by" column says whether a row came from the console or from this service.
 
 ### 2. Clients and users
 
@@ -134,6 +168,15 @@ files all stay. A session they already hold keeps working until it expires, whic
 hours. Reset password hands back one temporary password, shown once, stored as a scrypt hash like
 every other password here. Nothing can be asked for it again. You cannot turn off your own sign-in
 from this console.
+
+**Neither button closes a session that is already open**, and reset password is the one where that
+matters, because it is the button you reach for when an account is compromised. The old password
+stops working the moment you press it. A session token that person is already holding keeps working
+for up to twelve hours, because a session is signed rather than stored: the relay checks the
+signature and the expiry with that workspace's own key and there is no revocation list on that path
+at all. Both messages on screen say so. If somebody hostile is inside an account right now, resetting
+the password is not the whole answer; stop that customer's workspace from the Clients panel, which
+takes the box away from anybody holding a session for it.
 
 ### 3. Box health
 
@@ -154,6 +197,15 @@ Last activity is a lower bound and should be read as one. It is the newest file 
 customer's data volume, which is where the agent stores live, so it tells you which customers are
 actually using the thing. It cannot tell an idle box from a stuck one.
 
+**The sweep is bounded, and it is run once per refresh.** It is real work on the host: `docker
+inspect`, `docker stats` and `du -sk` for every customer, in sequence. Two things follow. It gives
+itself an eight second budget, and a customer the budget did not reach says so by name rather than
+holding the whole report past the control plane's patience and taking every other customer's row
+down with it; `du` on the slow one is cut to whatever is left. And the relay answers every ask
+inside a five second window from one sweep, because a single click on Refresh loads this panel and
+System health together and both want the same answer. The control plane waits fifteen seconds for
+it, which is longer than the budget plus the trip; `CP_RELAY_TIMEOUT_MS` moves that.
+
 ### 4. System health
 
 | What | Where it comes from |
@@ -165,11 +217,20 @@ actually using the thing. It cannot tell an idle box from a stuck one.
 | Relay reachable | a live call to the relay's admin route |
 | Control plane version | the service's own `CP_VERSION` |
 | Builds that never finished | the provisioning ledger: `provisioning` for more than 15 minutes |
+| Sign-in record | whether this service can sign the record at all, checked live |
 | Sign-ins in the last day | the control plane's own record |
 | Mail webhook | **not measured** |
 | Nightly backup | **not measured** |
 | Box isolation check | **not measured** |
 | Free on the archives mount | **not measured** |
+
+The Sign-in record card is there because "no attacks" and "the ledger cannot hash" look identical
+everywhere else. The keyed hash needs a 32 byte salt kept `0600` in this service's data directory; a
+directory it cannot write means every refused sign-in is stored with no hash, every address reads "no
+password reached the check", and nothing is ever flagged. The card asks for the salt live, which
+makes it if it is not there yet, and says whether the record is being written and why not if it is
+not. The failure also goes to the container log with the path in it, and it is retried on the next
+sign-in rather than remembered for the life of the process.
 
 ### 5. Payments
 
@@ -229,6 +290,16 @@ measures exactly that: it demotes an account with a live session and the very ne
 
 A normal customer's own valid session opens none of it. Neither does the relay's credential: the
 admin token and the relay token never open each other's routes.
+
+Neither does a session token that was *made up*. A session is signed with its tenant's own derived
+key, and every tenant relay holds its own key, which means it sits in that customer's Coolify
+environment where anybody who can run code in that relay can read it. So a valid signature says
+which key was used and nothing about who the person is. The console checks the rest: the account the
+token names has to carry the same workspace and the same email address the token itself claims,
+which every token this service mints does, and a token whose account id was swapped for a super
+admin's does not. Without that check, one customer's own key mints a super admin. The gate measures
+it: a token signed with another tenant's key carrying the super admin's account id is refused by
+every route, including promote.
 
 The page itself at `/admin` is public, and it has to be, because it carries the sign-in form. There
 is no customer data in those three files: no count, no name, no hostname. Every byte the panel

@@ -375,7 +375,7 @@ test("the Coolify tool creates the service, sets the environment, sets the addre
     for (const secret of [FAKE_SESSION_SECRET, FAKE_ADMIN_TOKEN, FAKE_API_KEY, url]) {
       assert.equal(stdout.includes(secret), false, "a secret reached the terminal");
     }
-    assert.match(stdout, /24 added, 0 corrected, 0 already right/);
+    assert.match(stdout, /25 added, 0 corrected, 0 already right/);
   } finally { fake.server.close(); }
 });
 
@@ -391,13 +391,13 @@ test("a second run of the Coolify tool updates rather than duplicating, and is q
 
     assert.equal(second.filter((route) => route === "POST /api/v1/services").length, 0, "it must never create a second service");
     assert.match(stdout, /found titanbot-cp at svc-uuid/);
-    assert.match(stdout, /0 added, 0 corrected, 24 already right/, "nothing changed, so nothing was written");
+    assert.match(stdout, /0 added, 0 corrected, 25 already right/, "nothing changed, so nothing was written");
     assert.equal(fake.state.started, 2, "it still starts, because a start on a running service is how a redeploy happens");
 
     // And a changed value is corrected, not added twice.
     fake.state.envs.set("CP_BASE_DOMAIN", "wrong.example");
     const third = await run("node", [COOLIFY_TOOL], { env: toolEnv(url) });
-    assert.match(third.stdout, /0 added, 1 corrected, 23 already right/);
+    assert.match(third.stdout, /0 added, 1 corrected, 24 already right/);
     assert.equal(fake.state.envs.get("CP_BASE_DOMAIN"), "titanium.bot");
   } finally { fake.server.close(); }
 });

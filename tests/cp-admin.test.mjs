@@ -4,14 +4,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { rm } from "node:fs/promises";
+import path from "node:path";
 
 import { openStore } from "../cp/store.mjs";
 import {
   ATTACK_DISTINCT_PASSWORDS,
+  ATTACK_SPRAY_ACCOUNTS,
   ATTACK_WINDOW_MS,
+  createAdminApi,
   mergeAttempts,
   stuckProvisioning,
+  summariseByAccount,
   summariseByAddress,
+  summariseByPassword,
 } from "../cp/admin.mjs";
 import { makeTempRoot } from "./cp-support.mjs";
 
@@ -192,6 +197,93 @@ test("the same attempt seen by both ledgers appears once, and the relay's versio
   assert.equal(later.length, 2);
 });
 
+test("one password against many accounts from many addresses is a spray, and nothing else catches it", () => {
+  const at = Date.now();
+  const rows = [];
+  // The shape of the attack: one common password, one try per account, a different address each
+  // time. No address reaches the relay's five-failure lockout, no email reaches this service's
+  // ten-failure lockout, and every by-address bucket holds exactly one harmless row.
+  for (let index = 0; index < ATTACK_SPRAY_ACCOUNTS; index += 1) {
+    rows.push({
+      at: new Date(at + index * 20_000).toISOString(),
+      ip: `203.0.113.${10 + index}`,
+      email: `person${index}@example.com`,
+      outcome: "refused",
+      triedHash: HASH(7),
+      source: "relay",
+    });
+  }
+  assert.equal(summariseByAddress(rows).some((row) => row.attack), false, "the by-address table sees nothing, which is the whole problem");
+
+  const passwords = summariseByPassword(rows);
+  assert.equal(passwords.length, 1, "one password was tried");
+  assert.equal(passwords[0].accountsInWindow, ATTACK_SPRAY_ACCOUNTS);
+  assert.equal(passwords[0].spray, true);
+  assert.equal(passwords[0].addresses.length, ATTACK_SPRAY_ACCOUNTS, "and it came from that many places");
+
+  const accounts = summariseByAccount(rows);
+  assert.equal(accounts.length, ATTACK_SPRAY_ACCOUNTS);
+  assert.equal(accounts.every((row) => row.sprayed), true, "every account it touched is flagged");
+  assert.equal(accounts[0].passwordStory, "the same password 1 time");
+});
+
+test("ordinary retries are not a spray, and the spray window slides", () => {
+  // One person, one account, the same wrong password six times. Nobody else was touched.
+  const at = Date.now();
+  const mine = [];
+  for (let index = 0; index < 6; index += 1) {
+    mine.push({ at: new Date(at + index * 20_000).toISOString(), ip: "198.51.100.3", email: "owner@example.com", outcome: "refused", triedHash: HASH(3), source: "relay" });
+  }
+  assert.equal(summariseByPassword(mine)[0].spray, false, "six tries on one account is a person, not a spray");
+  assert.equal(summariseByAccount(mine)[0].sprayed, false);
+
+  // The same password against six accounts, but spread over an hour: no window holds more than one.
+  const spread = [];
+  for (let index = 0; index < ATTACK_SPRAY_ACCOUNTS; index += 1) {
+    spread.push({ at: new Date(at + index * 12 * 60_000).toISOString(), ip: "198.51.100.4", email: `slow${index}@example.com`, outcome: "refused", triedHash: HASH(4), source: "relay" });
+  }
+  const slow = summariseByPassword(spread)[0];
+  assert.equal(slow.accounts.length, ATTACK_SPRAY_ACCOUNTS);
+  assert.equal(slow.accountsInWindow, 1);
+  assert.equal(slow.spray, false);
+});
+
+test("a sign-in forwarded by a customer's console is not an address, and not a second row", () => {
+  const at = "2026-09-07T12:00:00.000Z";
+  // The relay's row carries the visitor. The control plane's copy of the same attempt carries the
+  // R750's own egress address, because that is where the forwarded request came from.
+  const relay = [{ at, ip: "192.0.2.77", email: "owner@example.com", outcome: "refused", door: "account", userAgent: "Firefox", triedHash: HASH(1) }];
+  const control = [{ at: "2026-09-07T12:00:01.000Z", ip: "66.90.191.45", email: "owner@example.com", outcome: "refused", triedHash: HASH(2), via: "relay" }];
+
+  const merged = mergeAttempts(relay, control);
+  assert.equal(merged.length, 1, "the address differs, so only matching on email and outcome drops the duplicate");
+  assert.equal(merged[0].ip, "192.0.2.77", "and what is left is the visitor's address, not the server's");
+
+  // One that did NOT come through the console keeps its own row, which is what the second ledger
+  // exists for.
+  const direct = mergeAttempts(relay, [{ at: "2026-09-07T12:00:01.000Z", ip: "203.0.113.9", email: "owner@example.com", outcome: "refused", triedHash: HASH(3) }]);
+  assert.equal(direct.length, 2);
+
+  // And a forwarded row that survived on its own is still kept out of the by-address table, because
+  // that address is the server's and bucketing by it would pile the whole fleet under one phantom.
+  const alone = [{ at, ip: "66.90.191.45", email: "owner@example.com", outcome: "refused", triedHash: HASH(2), via: "relay", source: "control plane" }];
+  assert.deepEqual(summariseByAddress(alone), []);
+  assert.equal(summariseByAccount(alone)[0].addresses.length, 0, "the account still shows the attempt, with no address to blame");
+  assert.equal(summariseByAccount(alone)[0].attempts, 1);
+});
+
+test("the record carries whether a sign-in was forwarded, and only ever that word", async () => {
+  await withStore((store) => {
+    store.recordLoginAttempt({ email: "owner@example.com", ip: "66.90.191.45", outcome: "refused", triedHash: HASH(1), via: "relay" });
+    store.recordLoginAttempt({ email: "owner@example.com", ip: "203.0.113.9", outcome: "refused", triedHash: HASH(2) });
+    store.recordLoginAttempt({ email: "owner@example.com", ip: "203.0.113.9", outcome: "refused", triedHash: HASH(3), via: "something else" });
+    const rows = store.listLoginAttempts({ since: 0 });
+    assert.equal(rows[2].via, "relay");
+    assert.equal(rows[1].via, "");
+    assert.equal(rows[0].via, "", "anything that is not the one word this means is not written down");
+  });
+});
+
 test("a workspace whose build stopped moving shows up, and one that just started does not", async () => {
   await withStore((store) => {
     const at = Date.now();
@@ -208,5 +300,78 @@ test("a workspace whose build stopped moving shows up, and one that just started
     assert.equal(stuck.find((row) => row.slug === "starting").lastStep, "compose");
     assert.equal(stuck.find((row) => row.slug === "stalled").lastStep, "none recorded");
     assert.equal(stuck.some((row) => row.slug === "fine"), false, "a workspace that is running is not stuck building");
+  });
+});
+
+test("one refresh of the console is one box-health sweep on the relay, not two", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    // The sweep runs docker inspect, docker stats and du for every customer on the host, and the
+    // Box health panel and the System health panel both want the same answer. They load together,
+    // so asking twice was two full fleet sweeps running at once for one click on Refresh.
+    let asks = 0;
+    const api = createAdminApi({
+      config: { dataDir: root, tenantRoot: root, relayUrl: "http://relay.invalid", relayToken: "r".repeat(32) },
+      store,
+      client: { base: "", call: async () => ({}) },
+      json: () => {},
+      noContent: () => {},
+      publicAccount: (account) => account,
+      publicTenant: (tenant) => tenant,
+      tenantView: async (row) => ({ slug: row.slug, status: row.status, coolify: { reachable: false } }),
+      tenantPower: async () => {},
+      tenantProvision: async () => {},
+      currentSession: () => ({ ok: false }),
+      fetchImpl: async () => {
+        asks += 1;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { ok: true, status: 200, json: async () => ({ boxes: [{ slug: "acme", containerState: "running" }] }) };
+      },
+    });
+
+    const [boxes, system] = await Promise.all([api.boxes(), api.system()]);
+    assert.equal(asks, 1, "both panels shared the one sweep");
+    assert.equal(boxes.boxes[0].containerState, "running", "and the panel that needed the whole answer got it");
+    assert.equal(system.relay.reachable, true, "and the one that only needed a reachability line got that");
+
+    // A second refresh inside the window is still the same sweep; the window is short so the panel
+    // cannot quietly show a stale minute.
+    await api.boxes();
+    assert.equal(asks, 1);
+  });
+});
+
+test("the system panel says whether the sign-in record can be signed at all", async () => {
+  await withStore(async (store, root) => {
+    const make = (dataDir) => createAdminApi({
+      config: { dataDir, tenantRoot: root },
+      store,
+      client: { base: "", call: async () => ({}) },
+      json: () => {},
+      noContent: () => {},
+      publicAccount: (account) => account,
+      publicTenant: (tenant) => tenant,
+      tenantView: async (row) => ({ slug: row.slug, status: row.status, coolify: { reachable: false } }),
+      tenantPower: async () => {},
+      tenantProvision: async () => {},
+      currentSession: () => ({ ok: false }),
+      log: () => {},
+    });
+
+    const working = await make(root).system();
+    assert.equal(working.signInRecord.signing, true);
+
+    // A directory this service cannot write. Without this card that reads as a quiet day: every
+    // refusal is stored with no hash, every address says "no password reached the check", and
+    // nothing is ever flagged.
+    const broken = make(path.join(root, "not-there", "either"));
+    const answer = await broken.system();
+    assert.equal(answer.signInRecord.signing, false);
+    assert.match(answer.signInRecord.why, /could not read or make its salt/);
+
+    // And the failure is not remembered: the next call tries again rather than leaving the ledger
+    // unable to hash for the life of the process.
+    const retried = await broken.system();
+    assert.equal(retried.signInRecord.signing, false, "still broken, and still asked");
   });
 });

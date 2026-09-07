@@ -91,6 +91,10 @@ services:
       # workspace is still starting. Not a failure: the image is 5.2 GB and a server that has never
       # pulled it takes longer than any wait worth putting a customer through.
       CP_BOX_READY_TIMEOUT_MS: "90000"
+      # How long the admin console waits on the relay for the box-health sweep. The sweep bounds
+      # itself at eight seconds on the relay side, so this is that budget plus the trip, and it only
+      # needs moving on a fleet big enough that the budget itself has to grow.
+      CP_RELAY_TIMEOUT_MS: "15000"
 
       # ---- who the visitor is ------------------------------------------------------------------
       # The same two settings the relay runs with, read by the same code (ui/auth.mjs), and here
