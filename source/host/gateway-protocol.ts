@@ -21,6 +21,9 @@ export const SAND_GATEWAY_COMMANDS = {
   appendConnectorCard: (api: GatewayApi, body: string) => api.appendConnectorCard(parseCommandArgs(body)),
   listAgents: (api: GatewayApi) => api.listAgents(),
   countAgents: (api: GatewayApi) => api.countAgents(),
+  // AGENTS-CAP-1. Bots against the ceiling, for the Add button's "n of 12". `countAgents` above
+  // counts groups too, so it is the wrong number to show beside a cap that never refuses one.
+  getAgentCapacity: (api: GatewayApi) => api.getAgentCapacity(),
   searchAgents: (api: GatewayApi, body: string) => api.searchAgents(parseCommandArgs(body)),
   searchMedia: (api: GatewayApi, body: string) => api.searchMedia(parseCommandArgs(body)),
   createAgent: (api: GatewayApi, body: string) => api.createAgent(parseCommandArgs(body)),
@@ -117,6 +120,13 @@ export const SAND_GATEWAY_COMMANDS = {
   readAttachmentImage: (api: GatewayApi, body: string) => api.readAttachmentImage(parseCommandArgs(body)),
   readAttachmentText: (api: GatewayApi, body: string) => api.readAttachmentText(parseCommandArgs(body)),
   readAttachmentChunk: (api: GatewayApi, body: string) => api.readAttachmentChunk(parseCommandArgs(body)),
+  // ONBOARD-1. First run, at the box level. `getOnboardingState` is safe to call on an older host
+  // through the console's tryCall: it answers "unknown gateway method" and the console degrades to
+  // no modal rather than throwing.
+  getOnboardingState: (api: GatewayApi) => api.getOnboardingState(),
+  startOnboarding: (api: GatewayApi, body: string) => api.startOnboarding(parseCommandArgs(body)),
+  completeOnboarding: (api: GatewayApi, body: string) => api.completeOnboarding(parseCommandArgs(body)),
+  resetOnboarding: (api: GatewayApi) => api.resetOnboarding(),
   getHostSettings: (api: GatewayApi) => api.getHostSettings(),
   setHostSettings: (api: GatewayApi, body: string) => api.setHostSettings(parseCommandArgs(body)),
   setBoxSecrets: (api: GatewayApi, body: string) => api.setBoxSecrets(parseCommandArgs(body)),

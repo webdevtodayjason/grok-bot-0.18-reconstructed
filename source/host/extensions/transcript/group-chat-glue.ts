@@ -127,9 +127,13 @@ export class GroupChatGlue {
       };
     }
 
+    // AGENTS-CAP-1. A group rides the agent mint because it lives in an agent directory, but it
+    // is a room, not a bot: it must not be refused when the box already holds its thirteen, and
+    // `countCapAgents` does not count it once its group config lands below.
     const created = await this.tm.createAgent(
       { name: args.name, description: args.description ?? "" },
       "user",
+      { isExemptFromAgentCap: true },
     );
     writeSandGroupConfig(this.tm.sessionStore.getAgentDir(created.agent.id), {
       version: GROUP_CONFIG_VERSION,

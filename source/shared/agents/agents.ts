@@ -51,16 +51,50 @@ export function isSandDefaultAgentName(name: string): boolean {
 }
 
 export const GROUP_MAX_MEMBERS = 6;
-export const MAX_AGENTS_PER_USER = 50;
-export const SAND_AGENT_LIMIT_MESSAGE = `${MAX_AGENTS_PER_USER} is the maximum`;
+
+/**
+ * AGENTS-CAP-1. The crew is Titan plus twelve, so a box holds thirteen bots. An operator can move
+ * the ceiling with SAND_MAX_AGENTS (sand-host-settings.json, or the container env); the host
+ * reads it through `resolveSandMaxAgents` and hands the resolved number to the error below, so
+ * the refusal always names the number actually in force.
+ *
+ * Groups are not bots and do not count: `SandSessionMaterialization.countCapAgents` skips any
+ * agent directory carrying a group config, and a group is minted exempt from the check.
+ */
+export const SAND_DEFAULT_MAX_AGENTS = 13;
+export const SAND_MAX_AGENTS_SETTING = "SAND_MAX_AGENTS";
+
+/** A person reads this, so it is plain words and it names the thing they can do about it. */
+export function sandAgentLimitMessage(max: number = SAND_DEFAULT_MAX_AGENTS): string {
+  const others = Math.max(0, Math.trunc(max) - 1);
+  return `This workspace holds Titan and ${others} more bots. Remove one to add another.`;
+}
+export const SAND_AGENT_LIMIT_MESSAGE = sandAgentLimitMessage();
 
 export class SandAgentLimitError extends Error {
-  constructor() {
-    super(SAND_AGENT_LIMIT_MESSAGE);
+  constructor(max: number = SAND_DEFAULT_MAX_AGENTS) {
+    super(sandAgentLimitMessage(max));
     this.name = "SandAgentLimitError";
   }
 }
 
+/**
+ * Matched on the NAME, not on the message. It used to compare the message with
+ * SAND_AGENT_LIMIT_MESSAGE while the error the host actually threw was a second class declared in
+ * session-materialization.ts whose message read "Agent limit of 50 reached" -- so this answered
+ * false for every real limit error, and `tryEnsureSession` rethrew the one condition it exists to
+ * swallow. There is one class now, its message carries the resolved ceiling, and the test is the
+ * name that class sets.
+ */
 export function isSandAgentLimitError(error: unknown): boolean {
-  return error instanceof Error && error.message === SAND_AGENT_LIMIT_MESSAGE;
+  return error instanceof Error && error.name === "SandAgentLimitError";
 }
+
+/**
+ * ONBOARD-1. A box's very first agent is Titan, the person's AI lead, not the anonymous
+ * "New Bot". This applies ONLY where a fresh box seeds its first agent with no profile of its own
+ * (`createFallbackSession`), so no agent that already exists is ever renamed.
+ */
+export const SAND_FIRST_AGENT_NAME = "Titan";
+/** mascot-crew.js reads a stored face as `titan:<Name>`; index 0 of the crew is Titan's own. */
+export const SAND_FIRST_AGENT_AVATAR_SHAPE = "titan:Titan";

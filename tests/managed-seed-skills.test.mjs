@@ -49,11 +49,12 @@ const service = (cacheDir, fetch) => new SandManagedSkillsService({ getCacheDir:
 
 const SEEDS = unionWithSeedSkills([]).map((skill) => skill.id).sort();
 
-test("the bundle carries the three real managed skills, frontmatter and all", () => {
+test("the bundle carries the four real managed skills, frontmatter and all", () => {
   // email joined them with MAIL-1: an agent that is handed mail needs the recipe for answering it,
   // and this box fetches nothing from a dashboard, so a skill it is not shipped is a skill it
-  // never has.
-  assert.deepEqual(SEEDS, ["add-connector", "email", "learn-from-demonstration"]);
+  // never has. onboarding joined them with ONBOARD-1, for the same reason: it is the recipe Titan
+  // runs on a box's very first conversation, and it has to be there before anyone can log in.
+  assert.deepEqual(SEEDS, ["add-connector", "email", "learn-from-demonstration", "onboarding"]);
   const learn = unionWithSeedSkills([]).find((skill) => skill.id === "learn-from-demonstration");
   assert.equal(learn.name, "learn-from-demonstration", "the name comes from the file's frontmatter");
   // The frontmatter folds the description onto several lines (`description: >-`), which the
@@ -82,6 +83,25 @@ test("the bundle carries the three real managed skills, frontmatter and all", ()
     "the key is read from the shell environment; a body naming no variable is the wrong file");
   assert.ok(!email.body.includes("re_"), "the skill must carry no key-shaped literal");
   assert.ok(!email.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
+
+  // ONBOARD-1. The interview Titan runs on a box's first conversation. The console dispatches it
+  // as a workflow reference to this id, so the id, the five questions and the tool it tells him to
+  // call are the load-bearing parts.
+  const onboarding = unionWithSeedSkills([]).find((skill) => skill.id === "onboarding");
+  assert.equal(onboarding.name, "onboarding", "the name comes from the file's frontmatter");
+  assert.match(onboarding.description, /^Run first-time setup as Titan/);
+  assert.match(onboarding.body, /^# First-time setup/m);
+  assert.match(onboarding.body, /save_onboarding_answer/,
+    "the tool that captures each answer has to be named in the recipe, or nothing is captured");
+  assert.match(onboarding.body, /update_state/,
+    "the memory write is what makes him still know the person after setup closes");
+  for (const field of ["name", "location", "timeZone", "business", "ownsBusiness", "workingStyle"]) {
+    assert.match(onboarding.body, new RegExp(`\`${field}\``),
+      `the recipe has to name the ${field} field it saves`);
+  }
+  assert.match(onboarding.body, /twelve more bots/,
+    "the crew size the person is told about is the box's own ceiling");
+  assert.ok(!onboarding.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
 });
 
 test("a fetched skill wins over the seed of the same id, and both are kept", () => {

@@ -35,6 +35,16 @@ import {
   shellSecretProbeCommand,
 } from "./extensions/shell-tools/shell-tools-service.js";
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
+import { isSandGroupDir } from "./groups/group-store.js";
+import { resolveSandMaxAgents } from "./sand-box-setting.js";
+import { sandAgentLimitMessage } from "../shared/agents/agents.js";
+import { createOnboardingService } from "./extensions/onboarding/onboarding-service.js";
+import { createHostBoxUseProbe } from "./extensions/onboarding/onboarding-probe.js";
+import { isValidIanaTimeZoneName } from "./extensions/onboarding/onboarding-box-store.js";
+import {
+  SAND_ONBOARDING_START_PROMPT,
+  onboardingPromptRichText,
+} from "./extensions/onboarding/onboarding-prompt.js";
 import { evidenceRegistry, readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
 import { GatewayCommandError } from "./gateway-command-error.js";
 import {
@@ -142,6 +152,40 @@ export function createHostGatewayApi(
   const sharing = deps.extensions.api("cross-user-sharing");
   const now = deps.now ?? Date.now;
   const createAgentMintsByNonce = new Map<string, Promise<any>>();
+
+  /**
+   * ONBOARD-1. The box's first-run service. The record lives in the settings document, and the
+   * probe is the two signals the migration rule reads: bots on disk (groups skipped) and whether
+   * any of them has a message the person sent. `getAgentTranscriptEntries` is the store's own
+   * reader, so nothing here opens a database the host has not already agreed to open.
+   *
+   * The probe only ever runs on a box whose settings document carries no onboarding record, which
+   * is once in the life of a box. Jason's instance and the Mac dev box both trip rule (a) -- more
+   * than one bot -- on that first read and are marked done without a modal ever opening.
+   */
+  const onboarding = createOnboardingService({
+    store: {
+      read: () => method(settings, "getOnboarding")(),
+      write: (value: Record<string, unknown> | undefined) => method(settings, "setOnboarding")(value),
+    },
+    probe: createHostBoxUseProbe({
+      listAgentRecordIds: async () =>
+        await (manager as any).sessionStore?.listAgentRecordIds?.() ?? [],
+      getAgentDir: (agentId: string) =>
+        (manager as any).sessionStore?.getAgentDir?.(agentId) ?? "",
+      isGroupDir: (agentDir: string) => isSandGroupDir(agentDir),
+      readTranscriptEntries: async (agentId: string) =>
+        await (manager as any).sessionStore?.getAgentTranscriptEntries?.(agentId) ?? [],
+    }),
+    maxAgents: resolveSandMaxAgents,
+    isValidTimeZone: isValidIanaTimeZoneName,
+    applyTimeZone: (zone: string) => {
+      // Through the SERVICE, not the store: this is the write that fires the userTimeZone
+      // listeners, which is what re-anchors the person's routines to their own clock.
+      method(settings, "setHostSettings")({ userTimeZone: zone });
+    },
+    now,
+  });
 
   // JOBBUS. The Titan Job Bus (docs/JOB-BUS.md). Same root the connector and shell-tool stores use,
   // so `<sand-data>/job-bus/` lands on the box data volume with the rest of the host's state. The
@@ -531,6 +575,22 @@ export function createHostGatewayApi(
 
     listAgents: () => method(manager, "listAgents")(),
     countAgents: () => method(manager, "countAgentsOnDisk")(),
+    /**
+     * AGENTS-CAP-1. What the Add button's "n of 12" is counting. Deliberately NOT `countAgents`:
+     * that one is `listAgents().length` and includes groups, so on a box with rooms it answers a
+     * bigger number than the ceiling ever refuses. `bots` is the number the cap actually reads.
+     */
+    getAgentCapacity: async () => {
+      const bots = await (manager as any).sessionStore?.countCapAgents?.() ?? 0;
+      const maxAgents = resolveSandMaxAgents();
+      return {
+        bots,
+        maxAgents,
+        remaining: Math.max(0, maxAgents - bots),
+        isFull: bots >= maxAgents,
+        refusal: sandAgentLimitMessage(maxAgents),
+      };
+    },
     searchAgents: async (args: any) =>
       await method(deps.extensions.api("content-search"), "isEnabled")()
         ? method(manager, "searchAgents")(args.query, args.limit)
@@ -926,6 +986,35 @@ export function createHostGatewayApi(
     readAttachmentImage: (args: any) => method(attachments, "readImage")(args),
     readAttachmentText: (args: any) => method(attachments, "readText")(args),
     readAttachmentChunk: (args: any) => method(attachments, "readChunk")(args),
+    // ONBOARD-1. Three commands and a test hook.
+    //  - getOnboardingState is the console's boot read. It applies the migration rule once, on a
+    //    box that has no record yet, and answers done:true for anything already in use.
+    //  - startOnboarding dispatches Titan's first turn. The prompt's rich text is one
+    //    workflow-reference node, so the seed skill's body is inlined into that turn and no
+    //    system-prompt override is needed (an override would withhold update_state, which is how
+    //    Titan remembers the person afterwards).
+    //  - completeOnboarding closes it, from either the finished interview or "Skip for now", and
+    //    re-applies the captured time zone through the settings service so its listeners fire.
+    getOnboardingState: () => onboarding.getState(),
+    startOnboarding: async (args: any) => {
+      const agentId = (typeof args?.agentId === "string" && args.agentId.length > 0)
+        ? args.agentId
+        : method(manager, "getActiveAgentId")();
+      await method(manager, "sendPrompt")(SAND_ONBOARDING_START_PROMPT, {
+        ...(agentId == null ? {} : { agentId }),
+        richText: onboardingPromptRichText(),
+      });
+      return { started: true, agentId: agentId ?? null };
+    },
+    completeOnboarding: (args: any) => onboarding.complete(args ?? {}),
+    // Guarded, not shipped-open: the live arm of scripts/verify-onboarding.mjs needs a scratch box
+    // to look fresh again, and nothing on a real box should be able to reopen a person's first run.
+    resetOnboarding: () => {
+      if (process.env.SAND_TEST_HOOKS !== "1") {
+        throw new GatewayCommandError(403, { error: "resetOnboarding needs SAND_TEST_HOOKS=1" });
+      }
+      return onboarding.reset();
+    },
     getHostSettings: () => method(settings, "getHostSettings")(),
     setHostSettings: (args: any) => {
       const result = method(settings, "setHostSettings")(args);

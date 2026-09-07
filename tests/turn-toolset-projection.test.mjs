@@ -249,3 +249,36 @@ test("the trace line says which room filter ran, and says nothing outside a room
   assert.equal(parsed[1].isSharedRoomRunner, false);
   assert.equal(parsed[1].sharedRoomBoxTools, null);
 });
+
+// ONBOARD-1. `save_onboarding_answer` is the one tool Titan gets while he is running first-time
+// setup, and it exists for exactly as long as the box's onboarding record says done:false. A
+// finished box must not carry it: an extra tool in every toolset forever is a description the
+// model reads on every turn for a conversation that happened once.
+test("save_onboarding_answer is offered while the box is in first-time setup", () => {
+  const names = namesOf(mod.buildTurnTools(
+    hostFor({ isOnboardingActive: () => true }), turn, propsWithMcp,
+  ));
+  assert.ok(names.includes("save_onboarding_answer"), `offered (got ${names.join(", ")})`);
+});
+
+test("a box that has finished setup never sees it", () => {
+  const names = namesOf(mod.buildTurnTools(
+    hostFor({ isOnboardingActive: () => false }), turn, propsWithMcp,
+  ));
+  assert.ok(!names.includes("save_onboarding_answer"));
+});
+
+test("a subagent is never handed the interview tool", () => {
+  // Setup is a conversation with the person. A subagent has no one to ask.
+  const names = namesOf(mod.buildTurnTools(
+    hostFor({
+      isOnboardingActive: () => true,
+      isSubagentRunner: true,
+      isBoxScopedSubagent: true,
+      isComputerUseSubagent: true,
+    }),
+    { ...turn, subagentConfigs: [] },
+    propsWithMcp,
+  ));
+  assert.ok(!names.includes("save_onboarding_answer"));
+});

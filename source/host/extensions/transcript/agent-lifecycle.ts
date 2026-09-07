@@ -33,6 +33,11 @@ interface CreateOptions {
   purpose?: string;
   isKickstartRequested?: boolean;
   isIntroductionSuppressed?: boolean;
+  /**
+   * AGENTS-CAP-1. Set only by group creation. A group is a room, not a bot, so it does not count
+   * against the box's thirteen and cannot be refused by that ceiling.
+   */
+  isExemptFromAgentCap?: boolean;
   configureAgentDir?(dir: string): void;
 }
 
@@ -110,6 +115,7 @@ export class AgentLifecycle {
       profile,
       origin,
       options.purpose,
+      { isExemptFromAgentCap: options.isExemptFromAgentCap === true },
     );
     options.configureAgentDir?.(this.tm.sessionStore.getAgentDir(session.id));
     if (options.isIntroductionSuppressed !== true)
