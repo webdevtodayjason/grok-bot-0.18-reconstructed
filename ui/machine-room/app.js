@@ -576,6 +576,13 @@
 
   function avatarMarkup(worker, className, title) {
     if (!worker) return "";
+    // AVATAR-1. Every face on this page comes through here, so this is the one place the Titan
+    // crew has to be taught about: mascots.js answers with a live <titan-mascot> at the size the
+    // static mark had, and answers with nothing when it should not draw one -- an agent whose own
+    // avatar the host is serving, an operator who chose the classic mark, or a browser that cannot
+    // run the canvas. The <img> below is what is left in every one of those cases.
+    const crewFace = typeof window.titanAvatarMarkup === "function" ? window.titanAvatarMarkup(worker, className, title) : "";
+    if (crewFace) return crewFace;
     return `<img class="${className}" src="${escapeHtml(worker.avatar)}" alt="${escapeHtml(title || worker.name)}" />`;
   }
 
@@ -1075,6 +1082,10 @@
       elements.routineTitle.textContent = display.name;
       const performer = workerById(display.delegatedToId || display.coordinatorId || (display.scope.kind === "worker" ? display.scope.id : null));
       elements.routineWorker.textContent = running ? `${performer ? performer.name : contextName()} is working` : `Attached to ${contextName()}`;
+      // AVATAR-1: the same face the roster shows, beside the line that names it. Empty when the
+      // host has not said who is performing -- a blank is honest, a stand-in face is not.
+      const performerSlot = document.getElementById("routine-performer");
+      if (performerSlot) performerSlot.innerHTML = performer ? avatarMarkup(performer, "now-avatar", performer.name) : "";
       const startedMs = display.lastRunAt ? Date.now() - Number(display.lastRunAt) : null;
       elements.routineMeta.textContent = !running
         ? `Scheduled in ${formatCountdown(display.nextRunAt)}`

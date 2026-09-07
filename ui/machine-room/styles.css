@@ -121,6 +121,25 @@ select:focus-visible {
   letter-spacing: 0.01em;
 }
 
+/* The Titanium Bot lockup, at the bar's own height (the bar is 42px; the mark reads at 26 without
+   crowding the traffic lights). The words that used to be here are the eyebrow beside it: the mark
+   says whose console this is, the eyebrow says which room of it you are looking at. */
+.window-lockup {
+  display: block;
+  width: auto;
+  height: 26px;
+}
+
+.window-identity .window-eyebrow {
+  padding-left: 11px;
+  border-left: 1px solid rgba(255, 255, 255, 0.16);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
 
 .traffic-lights {
   display: flex;
@@ -2828,6 +2847,10 @@ dialog[open] {
     grid-template-columns: auto 1fr auto;
     padding: 8px 10px 0;
   }
+
+  /* On a phone the bar has room for the mark or for the eyebrow, not both. The mark stays. */
+  .window-identity .window-eyebrow { display: none; }
+  .window-lockup { height: 22px; }
 
   .window-identity strong {
     display: none;

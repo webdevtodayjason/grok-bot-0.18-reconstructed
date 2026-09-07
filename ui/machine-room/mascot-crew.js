@@ -47,9 +47,12 @@
   ];
 
   const SHAPE_PREFIX = "titan:";
-  // The operator's opt-out. It is a stored choice like any other, not the absence of one: an agent
-  // with no stored choice still gets a crew face, so "I want the old mark back" has to be sayable.
+  // The two opt-outs. Both are stored choices like any other, not the absence of one: an agent with
+  // no stored choice gets a crew face, so "draw the flat mark instead" and "draw the picture I
+  // uploaded instead" each have to be sayable rather than inferred.
   const CLASSIC = "classic";
+  const UPLOADED = "uploaded";
+  const OPTIONS = [CLASSIC, UPLOADED];
   const CELEBRATION_MS = 6000;
 
   const slugOf = (name) => String(name).toLowerCase();
@@ -64,7 +67,7 @@
 
   /** The value written into the profile's avatarShape for a choice. */
   function shapeValueFor(choice) {
-    if (choice === CLASSIC) return `${SHAPE_PREFIX}${CLASSIC}`;
+    if (OPTIONS.includes(choice)) return `${SHAPE_PREFIX}${choice}`;
     const index = indexOfCharacter(choice);
     if (index < 0) throw new RangeError(`${choice} is not one of the Titan crew`);
     return `${SHAPE_PREFIX}${CREW[index].name}`;
@@ -78,7 +81,7 @@
     const shape = agent == null ? null : agent.avatarShape;
     if (typeof shape !== "string" || !shape.startsWith(SHAPE_PREFIX)) return null;
     const rest = shape.slice(SHAPE_PREFIX.length).trim();
-    if (slugOf(rest) === CLASSIC) return CLASSIC;
+    if (OPTIONS.includes(slugOf(rest))) return slugOf(rest);
     const index = indexOfCharacter(rest);
     return index < 0 ? null : CREW[index].name;
   }
@@ -96,10 +99,11 @@
   /**
    * Who is who, for one instance's roster.
    *
-   * Returns a Map of agent id -> { character, index, source, classic }. `source` says how the
-   * answer was reached -- "stored" (the host holds it), "first" (Titan), "order" (creation order)
-   * or "hash" (no createdAt to order by) -- so a panel can tell the operator which it is looking
-   * at rather than implying every face was chosen deliberately.
+   * Returns a Map of agent id -> { character, index, source, opt }. `source` says how the answer
+   * was reached -- "stored" (the host holds it), "first" (Titan), "order" (creation order) or
+   * "hash" (no createdAt to order by) -- so a panel can tell the operator which it is looking at
+   * rather than implying every face was chosen deliberately. `opt` is null for a character, or
+   * "classic" / "uploaded" where the operator asked for something other than a character.
    *
    * Groups take no character: a room draws the faces of its members.
    */
@@ -122,16 +126,17 @@
     for (const agent of rows) {
       const stored = storedChoice(agent);
       if (stored == null) continue;
-      const index = stored === CLASSIC ? -1 : indexOfCharacter(stored);
+      const opted = OPTIONS.includes(stored);
+      const index = opted ? -1 : indexOfCharacter(stored);
       if (index >= 0) taken.add(index);
-      out.set(agent.id, { character: stored === CLASSIC ? null : CREW[index].name, index, source: "stored", classic: stored === CLASSIC });
+      out.set(agent.id, { character: opted ? null : CREW[index].name, index, source: "stored", opt: opted ? stored : null });
     }
 
     const step = (i) => (i + 1 > CREW.length - 1 ? 1 : i + 1);
     let cursor = 1;
     const give = (agent, index, source) => {
       taken.add(index);
-      out.set(agent.id, { character: CREW[index].name, index, source, classic: false });
+      out.set(agent.id, { character: CREW[index].name, index, source, opt: null });
     };
 
     for (const agent of ordered) {
@@ -184,5 +189,5 @@
     return `assets/characters/${slugOf(CREW[safe].name)}-${state}.png`;
   }
 
-  global.TitanCrew = { CREW, CLASSIC, SHAPE_PREFIX, CELEBRATION_MS, indexOfCharacter, shapeValueFor, storedChoice, hashIndex, assignCrew, moodFor, celebrationUntil, stillFor };
+  global.TitanCrew = { CREW, CLASSIC, UPLOADED, OPTIONS, SHAPE_PREFIX, CELEBRATION_MS, indexOfCharacter, shapeValueFor, storedChoice, hashIndex, assignCrew, moodFor, celebrationUntil, stillFor };
 })(typeof window !== "undefined" ? window : globalThis);

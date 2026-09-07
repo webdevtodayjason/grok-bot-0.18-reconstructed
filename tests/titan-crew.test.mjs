@@ -85,17 +85,28 @@ test("a stored choice wins over creation order, and the walk steps around it", (
   ]);
   assert.equal(map.get("b").character, "Pixel");
   assert.equal(map.get("b").source, "stored");
+  assert.equal(map.get("b").opt, null);
   // c and d take the walk's next free companions and neither of them is the one b is holding.
   assert.equal(map.get("c").character, crew.CREW[1].name);
   assert.equal(map.get("d").character, crew.CREW[2].name);
   assert.equal([map.get("c").character, map.get("d").character].includes("Pixel"), false);
 });
 
-test("a stored choice can override Titan, and can be the classic mark", () => {
-  const map = crew.assignCrew([agent("a", 100, { avatarShape: "titan:classic" }), agent("b", 200, { avatarShape: "titan:Titan" })]);
-  assert.equal(map.get("a").classic, true);
+test("a stored choice can override Titan, and can be either opt-out", () => {
+  const map = crew.assignCrew([
+    agent("a", 100, { avatarShape: "titan:classic" }),
+    agent("b", 200, { avatarShape: "titan:Titan" }),
+    agent("c", 300, { avatarShape: "titan:uploaded" }),
+  ]);
+  assert.equal(map.get("a").opt, "classic");
   assert.equal(map.get("a").character, null);
   assert.equal(map.get("b").character, "Titan");
+  assert.equal(map.get("b").opt, null);
+  // A character is the default, so "draw the picture I uploaded" is a choice on the record, not
+  // something inferred from the host holding an avatar.
+  assert.equal(map.get("c").opt, "uploaded");
+  assert.equal(map.get("c").character, null);
+  assert.equal(crew.shapeValueFor(crew.UPLOADED), "titan:uploaded");
 });
 
 test("a shape the desktop app wrote is not read as a crew choice", () => {

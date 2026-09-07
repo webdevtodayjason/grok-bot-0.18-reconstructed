@@ -1,0 +1,79 @@
+/*
+ * AVATAR-1: the frame a live crew member is drawn in.
+ *
+ * The mascot element sizes itself from its own width and draws a canvas 0.68 as tall, with the
+ * body centred on 46% of that height. So the frame is the circle the static mark used to be, and
+ * the mascot is laid over it at twice the frame's width and pulled up by 46% of its own height --
+ * which puts the body dead centre at about 78% of the frame's diameter, leaving the silhouette's
+ * ripples room to move without being clipped by the circle. The kit's still PNGs share the same
+ * framing, so the one rule serves both.
+ */
+.titan-avatar {
+  position: relative;
+  z-index: 1;
+  display: block;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 34%, rgba(255, 255, 255, 0.09), rgba(9, 13, 20, 0.5));
+}
+
+.titan-avatar > titan-mascot,
+.titan-avatar > img {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(100% * var(--titan-fill, 1.7));
+  transform: translate(-50%, -46%);
+  /* The frame sits inside a button in the roster and in the chip strip. The pointer belongs to the
+     button, so the canvas does not take it -- except in Agent details, where the eye follows it. */
+  pointer-events: none;
+}
+
+/* How much of the frame the body fills. It cannot be one number. The character drifts sideways by
+   a fixed four canvas pixels and bobs by up to eleven, whatever size it is drawn at, so a fill that
+   sits neatly inside a 64px ring is squashed against the edge of a 27px one -- and the ring's own
+   2px accent border takes another two off the radius. Read as: body radius times 1.13 for the
+   silhouette's waves, plus the drift, has to clear the inner edge. Biggest mark first. */
+.context-profile-avatar.titan-avatar { --titan-fill: 1.74; }
+.worker-avatar.titan-avatar { --titan-fill: 1.68; }
+.message-avatar.titan-avatar { --titan-fill: 1.6; }
+.now-avatar.titan-avatar { --titan-fill: 1.5; }
+.member-avatar.titan-avatar,
+.workspace-avatar.titan-avatar { --titan-fill: 1.46; }
+.participant-avatar.titan-avatar { --titan-fill: 1.38; }
+
+/* The one place a crew member looks at you. */
+#panel-content .titan-avatar > titan-mascot { pointer-events: auto; }
+#panel-content .context-profile-avatar.titan-avatar {
+  width: 64px;
+  height: 64px;
+  --titan-fill: 1.95;
+}
+
+/* The face beside the routine on the Now / Up next island. */
+.now-performer {
+  display: flex;
+  align-items: center;
+}
+.now-avatar {
+  width: 34px;
+  height: 34px;
+  border: 2px solid var(--accent, rgba(255, 255, 255, 0.46));
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+/* The crew picker in Agent details: a swatch beside the name so the list is not thirteen words. */
+.titan-character-choice {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.titan-character-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 50%;
+  flex: 0 0 auto;
+}

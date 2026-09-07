@@ -5,12 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="Machine Room — the operator console for this box." />
     <title>Machine Room — Titanbot console</title>
-    <!-- The relay serves no favicon; without this every load logs a 404 in the console. -->
-    <link rel="icon" href="data:," />
+    <!-- The Titanium Bot mark. This used to be `data:,` -- an empty icon, only there because the
+         relay served none and every load logged a 404. -->
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
     <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="motion.css" />
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="backgrounds.css" />
+    <link rel="stylesheet" href="mascots.css" />
   </head>
   <body>
     <div class="app-shell" id="app-shell">
@@ -18,11 +20,15 @@
       <div class="ambient-vignette" aria-hidden="true"></div>
 
       <header class="window-bar">
-        <div class="window-identity" aria-label="Machine Room">
+        <div class="window-identity" aria-label="Titanium Bot — Machine Room">
           <div class="traffic-lights" aria-hidden="true">
             <span></span><span></span><span></span>
           </div>
-          <strong>Machine Room</strong>
+          <!-- The product lockup, at the bar's own height. The words "Machine Room" stay as the
+               page title and as the eyebrow beside the mark: the lockup says whose console this
+               is, the eyebrow says which room of it you are in. -->
+          <img class="window-lockup" src="assets/titanium-bot-logo.svg" alt="Titanium Bot" />
+          <strong class="window-eyebrow">Machine Room</strong>
         </div>
 
         <nav class="capability-dock" aria-label="Capabilities">
@@ -106,6 +112,9 @@
             </div>
             <div class="now-content">
               <div class="progress-orbit" aria-hidden="true"><span></span></div>
+              <!-- AVATAR-1: the face of whoever is actually doing this routine. Filled by
+                   renderNowAndSchedule and empty until the host has named a performer. -->
+              <span class="now-performer" id="routine-performer"></span>
               <div>
                 <strong id="routine-title"></strong>
                 <p id="routine-worker"></p>
@@ -273,6 +282,13 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+    <!-- AVATAR-1. The mascot element is the design kit's own file, vendored byte for byte;
+         mascot-crew.js decides who is who and what mood they are in; mascots.js is the wiring, and
+         it has to install window.titanAvatarMarkup before app.js draws its first face, so all
+         three load ahead of the boot chain below. -->
+    <script src="assets/titan-mascot.js"></script>
+    <script src="mascot-crew.js"></script>
+    <script src="mascots.js"></script>
     <script src="adapter.js"></script>
     <script src="gateway-adapter.js"></script>
     <!-- The Marketplace's Bots tab. It only attaches window.__marketplaceBots at load and reads

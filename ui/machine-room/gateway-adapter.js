@@ -1282,6 +1282,11 @@
       description: typeof a.description === "string" ? a.description : "",
       avatar: avatarOf(a, version),
       avatarVersion: version,
+      // AVATAR-1: the profile field the console's crew choice lives in. Read on every tick like
+      // the rest of the identity, so a pick made on another surface shows here on the next one.
+      // Anything without the `titan:` prefix belongs to the desktop app's avatar editor and
+      // mascot-crew.js leaves it alone.
+      avatarShape: typeof a.avatarShape === "string" ? a.avatarShape : null,
       notify: a.notifyOnUpdatesEnabled !== false,
       hidden: a.isHiddenFromSidebar === true,
     };
@@ -1321,6 +1326,10 @@
     const versions = new Map(await Promise.all(agents.map(async (a) => [a.id, a.avatarVersion ?? knownVersions.get(a.id) ?? await avatarVersionOf(a.id)])));
     const shape = (a) => ({
       id: a.id,
+      // AVATAR-1: who was here first. The crew is handed out in creation order, so the roster
+      // carries the host's own createdAt rather than the order listAgents happened to answer in.
+      createdAt: Number(a.createdAt) || null,
+      isGroup: a.isGroup === true,
       ...identityOf(a, versions.get(a.id) ?? null),
       ...statusOf(a),
       accent: pick(ACCENTS, a.id),
@@ -1418,7 +1427,7 @@
     // QOL-NEEDS-YOU adds needsYou: an agent already showing "attention" for a failed turn and
     // then blocked on the operator moves nothing else in this signature, and the pill would not
     // have been drawn until something unrelated changed.
-    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.needsYou ? 1 : 0}:${x.unread}:${x.preview}:${x.name}:${x.role}:${x.avatar}:${x.hidden ? 1 : 0}:${x.notify ? 1 : 0}`).join("|") + `|${state.agentCount}`;
+    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.needsYou ? 1 : 0}:${x.unread}:${x.preview}:${x.name}:${x.role}:${x.avatar}:${x.avatarShape ?? ""}:${x.hidden ? 1 : 0}:${x.notify ? 1 : 0}`).join("|") + `|${state.agentCount}`;
     // app.js drives the "working" bubble from simulateReply's 1.15s timer, which is right for a
     // demo and wrong for a machine: a real reply takes tens of seconds, so the dots flashed and
     // died and the wait happened in silence. The adapter owns that bubble's lifetime instead --
@@ -2282,6 +2291,47 @@
       },
       clearMemories(agentId) {
         return call("clearAgentMemories", { id: agentId }).then(() => this.getMemories(agentId));
+      },
+
+      // AVATAR-1: the operator's crew pick, on the host rather than in this browser -- the face is
+      // the agent's, so it has to be the same face on the next machine that opens the console.
+      // There is no `character` field to write: measured on the box 2026-09-06, updateAgent drops
+      // a key the profile does not know, and keeps an arbitrary string in avatarShape. So the pick
+      // goes in as `titan:<name>` (or `titan:classic` for the opt-out), namespaced away from the
+      // desktop app's eight shape names, and avatarColor takes the character's own colour so that
+      // app's avatar for this agent comes up matching instead of arguing. Read back before it is
+      // reported, like every other write here.
+      setCharacter(agentId, choice) {
+        const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((r) => r.id === agentId);
+        if (!target) return Promise.reject(new Error("that agent is not on this box any more"));
+        const crew = global.TitanCrew;
+        if (!crew) return Promise.reject(new Error("the crew list did not load in this browser"));
+        const shape = crew.shapeValueFor(choice);
+        const index = crew.indexOfCharacter(choice);
+        return call("listAgents")
+          .then((agents) => {
+            const current = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
+            if (!current) throw new Error("that agent is not on this box any more");
+            const profile = {
+              name: current.name,
+              description: current.description ?? "",
+              title: current.title ?? "",
+              avatarShape: shape,
+              // The classic mark is the operator asking for no character at all, so the colour
+              // the host is holding is left where it is rather than overwritten with a crew one.
+              avatarColor: index >= 0 ? crew.CREW[index].color : (current.avatarColor ?? ""),
+            };
+            return call("updateAgent", { id: agentId, profile });
+          })
+          .then(() => call("listAgents"))
+          .then((agents) => {
+            const fresh = (Array.isArray(agents) ? agents : []).find((a) => a.id === agentId);
+            if (!fresh) throw new Error("the host answered but that agent is gone");
+            if (fresh.avatarShape !== shape) throw new Error("the host answered and kept the old character");
+            Object.assign(target, identityOf(fresh, target.avatarVersion ?? null));
+            emit("settings:profile", { agentId });
+            return crew.storedChoice(fresh);
+          });
       },
 
       // updateAgent takes the whole profile and trims name and description, so both go with the
