@@ -378,6 +378,18 @@ built from the gb tip by `node scripts/build-host.mjs --deploy`:**
 | the gate itself | **`--self-test` 15 passed, 0 failed.** Kept, because it is what makes the fixture arm's selectors falsifiable |
 | unit tests | `npm test` 1042 passed, 0 failed, including the state, the migration table, the first-agent rule and the cap |
 
+**Shipped, 2026-09-07, commit `345d601`.** Relay files and the host bundle by sync, then a docker restart of
+Jason's relay container and `updateHostNow` inside his box. No Coolify recreate: a recreate runs the box store's
+copy-in over the live agent databases, which is BOX-6. The quiet check first (6 agents, 0 mid-turn, 2 jobs, 0 open),
+then the supervisor's own line, `post-swap watch disarmed: host up 60077ms on 345d6015a782 (healthy)`, then
+`verify-deploy --url https://console.titanium.bot`: **59 legs, 0 failing, 2 inconclusive**.
+
+His instance did not enter the first run, which is the migration rule doing its job on a live box rather than in a
+test: it answers `done:true` with `doneReason:"existing-box"`, and headless Chrome pointed at his live box draws no
+`[data-onboarding]` element at all, no open dialog, five roster cards reading Titan, Scribe, Instagram Marketer,
+X Marketer, Facebook Marketer, a header of `5 / 13 bots`, and no page errors. Nothing was renamed. Richard's box and
+the demo tenant were left on the previous bundle on purpose and take this one on their own daily update.
+
 **The relay and a command's own refusal.** `resetOnboarding` is the first gateway command that
 answers 403 on its own terms rather than on the bearer, and it found a fault in the relay: it
 folded both 401 and 403 from the box into one sentence, "SAND_HOST_GATEWAY_TOKEN is stale or the
