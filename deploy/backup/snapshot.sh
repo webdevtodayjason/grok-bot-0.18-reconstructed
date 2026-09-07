@@ -3,7 +3,8 @@
 #
 # An instance is five things: the four docker volumes (workspace, sand-data, box store, chrome
 # profile) and the relay side on the host (state/, which holds auth.json, endpoints.json,
-# subscriptions.json, mail.json and mail-inbox.jsonl, plus the same five under ui/ on an instance
+# subscriptions.json, mail.json, mail-inbox.jsonl and, since ADMIN-1, login-attempts.jsonl with the
+# key its digests are made under, plus the same files under ui/ on an instance
 # that has not been migrated, and profile/ and credential/). Until this script there was no backup job of any kind on the R750, so a
 # lost volume was a lost instance: every agent, every transcript, every credential.
 #
@@ -247,11 +248,14 @@ done
 step "relay side"
 RELAY_ENTRIES=""
 mkdir -p "$OUT/relay"
-# state/ first: since deploy/r750/move-relay-state.sh these five files live there and ui/ is code.
+# state/ first: since deploy/r750/move-relay-state.sh these files live there and ui/ is code.
 # The ui/ paths stay on the list because an instance that has not been migrated yet still keeps them
 # beside the code, and a backup that only knew about the new place would silently cover nothing.
+# login-attempt-salt is on that list for a reason worth saying out loud: lose it and every digest in
+# the login ledger stops meaning anything, so the record of who knocked survives the restore but the
+# answer to "was that the same password twice" does not.
 # Whichever is absent reports "absent, skipped" and neither is a failure.
-for rel in state ui/auth.json ui/endpoints.json ui/subscriptions.json ui/mail.json ui/mail-inbox.jsonl profile credential; do
+for rel in state ui/auth.json ui/endpoints.json ui/subscriptions.json ui/mail.json ui/mail-inbox.jsonl ui/login-attempts.jsonl ui/login-attempt-salt profile credential; do
   src="$ROOT/$rel"
   if [ ! -e "$src" ]; then say "$rel absent, skipped"; continue; fi
   mkdir -p "$OUT/relay/$(dirname "$rel")"

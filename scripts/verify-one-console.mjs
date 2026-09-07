@@ -393,7 +393,11 @@ function relayTree() {
   temps.push(dir);
   cpSync(path.join(repoRoot, "ui"), dir, {
     recursive: true,
-    filter: (source) => !/(auth|endpoints|subscriptions|mail)\.json$/.test(source) && !/mail-inbox\.jsonl$/.test(source),
+    // The login ledger and its key are on this list for the same reason the password file is: the
+    // gate must not read the operator's record of who knocked, and it must not sign its own rows
+    // with the operator's key. ADMIN-1.
+    filter: (source) => !/(auth|endpoints|subscriptions|mail)\.json$/.test(source)
+      && !/(mail-inbox|login-attempts)\.jsonl(\.1)?$/.test(source) && !/login-attempt-salt$/.test(source),
   });
   return dir;
 }

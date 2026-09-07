@@ -4,6 +4,10 @@
 // mail-inbox.jsonl. Every one of them used to default to the directory this code is in, which was
 // right for exactly one deployment: the one where ui/ belongs to the only relay on the machine.
 //
+// Two more since ADMIN-1: login-attempts.jsonl, the record of who knocked on this console's doors,
+// and login-attempt-salt, the key its digests are made with. Those two are the operator's rather
+// than any tenant's, because a refused sign-in has no tenant yet. ui/login-ledger.mjs.
+//
 // On a multi-tenant server ui/ is a shared release directory. Every tenant's container mounts the
 // same host path, so those five files would be five files every customer writes over. Two tenants
 // would share one password, one endpoint list and one mail inbox, and the mount could never be made

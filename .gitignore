@@ -37,6 +37,11 @@ ui/auth.json
 # secret, and the ledger is this operator's own received mail (MAIL-1).
 ui/mail.json
 ui/mail-inbox.jsonl
+# Who knocked on this console's doors, and the key its digests are made under (ADMIN-1). The
+# ledger holds addresses and the key is a secret; neither belongs in anybody's clone.
+ui/login-attempts.jsonl
+ui/login-attempts.jsonl.1
+ui/login-attempt-salt
 
 # a build artifact once landed here from an undefined output path (GATE-3)
 undefined/
