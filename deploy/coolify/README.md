@@ -366,3 +366,13 @@ DNS change from section 1 and `$DOMAIN` stops answering as well.
 Nothing is copied or migrated in either direction, which is the point of mounting the volumes'
 own directories rather than copies of them: whichever of the two is running, the agents are the same
 bytes in the same place, and anything written under Coolify is there when `install.sh` comes back.
+
+## 9. The other compose file in this directory
+
+`control-plane.compose.yml` is a different resource, deployed once, and it is not part of the
+console above. It is the service that holds the customer accounts and creates one instance per
+customer, at `api.titanium.bot`. It has its own bind mount (`/data/titanbot`), no docker socket and
+no relationship to the box.
+
+Everything about it, including the first deploy, adopting `console.titanium.bot` as a tenant and
+adding a customer, is in `docs/TENANCY.md`. `cp/README.md` is how to run it on a laptop first.
