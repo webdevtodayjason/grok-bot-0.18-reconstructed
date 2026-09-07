@@ -517,3 +517,33 @@ test("a Coolify that does have the documented sub-route is still read", async ()
   assert.equal(state.status, "running");
   assert.equal(state.containers[0].name, "titanbot-relay");
 });
+
+test("a hostname Coolify still holds for a tenant deleted moments ago is taken with the override, once", async () => {
+  const coolify = await startFakeCoolify();
+  try {
+    await withWorld(async ({ config, store }) => {
+      store.createTenant({ slug: "acme", name: "Acme" });
+      coolify.failOnce("PATCH /services/{uuid}", 409, "Domain conflicts detected. Use force_domain_override to override.");
+      const result = await provisionTenant({ store, config, slug: "acme", name: "Acme" });
+      assert.equal(result.ok, true, result.error);
+      const patches = coolify.callsTo("PATCH /services/{uuid}");
+      assert.equal(patches.length, 2, "the refused PATCH and the one with the override");
+      assert.equal(patches[0].body.force_domain_override, undefined, "the first try never forces");
+      assert.equal(patches[1].body.force_domain_override, true);
+      assert.deepEqual(patches[1].body.urls, patches[0].body.urls);
+    });
+  } finally { await coolify.close(); }
+});
+
+test("any other refusal of the hostname is still a failed step, not an override", async () => {
+  const coolify = await startFakeCoolify();
+  try {
+    await withWorld(async ({ config, store }) => {
+      store.createTenant({ slug: "acme", name: "Acme" });
+      coolify.failOnce("PATCH /services/{uuid}", 409, "Something else is wrong");
+      const result = await provisionTenant({ store, config, slug: "acme", name: "Acme" });
+      assert.equal(result.ok, false);
+      assert.equal(coolify.callsTo("PATCH /services/{uuid}").length, 1);
+    });
+  } finally { await coolify.close(); }
+});

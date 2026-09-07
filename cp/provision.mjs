@@ -758,7 +758,17 @@ export async function provisionTenant(options) {
   // per-component PATCH answers Not found (measured on this server for DOMAIN-1).
   try {
     if (!done.has("urls")) {
-      const answer = await client.patchService(serviceUuid, { urls: [{ name: "titanbot-relay", url: `https://${host}:7777` }] });
+      const urls = [{ name: "titanbot-relay", url: `https://${host}:7777` }];
+      let answer;
+      try { answer = await client.patchService(serviceUuid, { urls }); }
+      catch (error) {
+        // Measured 2026-09-07 while re-provisioning demo: a tenant deleted seconds earlier still
+        // held its hostname in Coolify's books, and the PATCH answered 409 "Domain conflicts
+        // detected. Use force_domain_override". The name is this tenant's by construction, so the
+        // override is the right answer to that one refusal and to nothing else.
+        if (error?.status !== 409 || !/domain conflict/i.test(String(error?.message ?? ""))) throw error;
+        answer = await client.patchService(serviceUuid, { urls, force_domain_override: true });
+      }
       store.updateTenant(slug, { host });
       store.recordStep({ slug, step: "urls", status: "ok", detail: JSON.stringify({ url: `https://${host}:7777`, domains: answer?.domains ?? [] }) });
       ran.push("urls");
