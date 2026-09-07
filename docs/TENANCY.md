@@ -889,6 +889,23 @@ one thing this does not close is a name whose DNS answer changes between the che
 closing that means pinning the resolved address into the connection, which node's `fetch` has no
 supported way to do.
 
+### What removing the socket did not close
+
+The socket is gone from a tenant's relay and its box is not privileged, has no added capabilities
+and holds no socket either. What is left is the network. Measured inside the demo tenant's box on
+the R750, 2026-09-07: the default gateway is `192.168.32.1`, a TCP connect succeeds on 22, 80, 443
+and 8000 and is refused on 2375, 5432 and 6379, and `http://192.168.32.1:8000/` answers a 302 to its
+own `/login` while `/api/v1/servers` answers `401 {"message":"Unauthenticated."}`. That is Coolify,
+which creates and deletes every resource on this machine, and `COOLIFY_API_KEY` is in the control
+plane's environment on the same host. So between a customer's agent and the machine every other
+customer runs on there is nothing but sshd's login and Coolify's.
+
+This is open today. It is `TENANT-3` in docs/GAP-ANALYSIS.md, with the two candidate fixes and the
+one trap worth knowing before writing a rule: traffic from a container to its own gateway address
+terminates on the host, so it goes through `INPUT` and not through `FORWARD`, which means a
+`DOCKER-USER` rule does not see it at all. Binding Coolify off `0.0.0.0` is the smaller change and
+is where to start.
+
 Everything else on a tenant is unchanged. The console loads, the gateway answers, and the job bus,
 mail and subscriptions all work: none of those goes through the socket.
 
