@@ -6,6 +6,18 @@
 # profile/, credential/). Until this script there was no backup job of any kind on the R750, so a
 # lost volume was a lost instance: every agent, every transcript, every credential.
 #
+# And SIX, since 2026-09-07: the tenant root, /data/titanbot. That is the control plane's own sqlite
+# store -- every account, every tenant, the provisioning ledger and the revocation table -- plus one
+# directory per customer holding that customer's whole instance. None of it was in this script:
+# measured, the newest snapshot held manifest.json, relay/ and volumes/ and nothing else, so losing
+# that disk meant losing every customer with no way to say who they had been. It is copied here
+# now, and the control plane's own directory is retaken under a pause of its container, which is
+# small and takes a moment.
+#
+# What that costs: a snapshot is now the size of every customer's data as well as Jason's, fourteen
+# times over at the default retention. Watch the array, and lower TITANBOT_BACKUP_KEEP before the
+# free-space guard starts refusing runs.
+#
 #   bash deploy/backup/snapshot.sh
 #
 # Env, all optional:
@@ -14,6 +26,7 @@
 #   TITANBOT_BOX             box container, default titanbot-box
 #   TITANBOT_VOLUME_PREFIX   volume names, default titanbot-box (so titanbot-box-data etc.)
 #   TITANBOT_ROOT            the relay side, default /home/sem/titanbot
+#   TITANBOT_TENANT_ROOT     the control plane store and every tenant, default /data/titanbot
 #   TITANBOT_BACKUP_KEEP     snapshots kept per instance, default 14
 #   TITANBOT_BACKUP_REQUIRE_MOUNT  1 (default) refuses a destination that is not a mount point
 #
@@ -59,6 +72,9 @@ if ! docker inspect "$BOX" >/dev/null 2>&1; then
 fi
 VOLUME_PREFIX="${TITANBOT_VOLUME_PREFIX:-titanbot-box}"
 ROOT="${TITANBOT_ROOT:-/home/sem/titanbot}"
+# The control plane's sqlite store and one directory per customer. Absent on a single-instance
+# install, which is not an error: the step below says so and moves on.
+TENANT_ROOT="${TITANBOT_TENANT_ROOT:-/data/titanbot}"
 KEEP="${TITANBOT_BACKUP_KEEP:-14}"
 REQUIRE_MOUNT="${TITANBOT_BACKUP_REQUIRE_MOUNT:-1}"
 
@@ -104,7 +120,14 @@ mkdir -p "$OUT" || die "could not create $OUT"
 # Unpause on EVERY exit path. A snapshot that dies half way through must not leave the instance
 # frozen: a paused box answers nothing and looks like a hung host.
 PAUSED=no
-unpause() { if [ "$PAUSED" = yes ]; then docker unpause "$BOX" >/dev/null 2>&1 && PAUSED=no; fi; }
+CP_NAME=""
+CP_PAUSED=no
+unpause() {
+  if [ "$PAUSED" = yes ]; then docker unpause "$BOX" >/dev/null 2>&1 && PAUSED=no; fi
+  # The control plane is paused too, for the seconds its store takes to copy. A paused control plane
+  # answers no sign-in on any instance, so it must come back on every exit path including a signal.
+  if [ "$CP_PAUSED" = yes ]; then docker unpause "$CP_NAME" >/dev/null 2>&1 && CP_PAUSED=no; fi
+}
 trap 'unpause' EXIT INT TERM
 
 # Copy one source. Two methods, and the manifest records which was used:
@@ -209,6 +232,62 @@ done
 # These carry the password hash, the API keys, the adopted OAuth tokens and the gateway token.
 chmod -R go-rwx "$OUT/relay" 2>/dev/null || true
 
+step "the control plane and every tenant"
+TENANT_ENTRIES=""
+TENANT_COUNT=0
+CP_CAPTURED=absent
+if [ ! -d "$TENANT_ROOT" ]; then
+  say "$TENANT_ROOT is not on this host, so there are no tenants to copy"
+else
+  mkdir -p "$OUT/tenants"
+  # The live pass: everything under the root, customers included. Their boxes are running, so this
+  # is a LIVE copy and the manifest says so, the same way the box store's is.
+  if rsync -a --delete "$TENANT_ROOT/" "$OUT/tenants/"; then
+    say "$TENANT_ROOT -> tenants/  $(du -sk "$OUT/tenants" | awk '{print $1}')K, live"
+  else
+    FAILED=yes
+    say "WARNING: $TENANT_ROOT did not copy cleanly"
+  fi
+
+  # The account store, retaken under a pause. It is the one file here that cannot be replaced from
+  # anywhere else -- every account, every tenant, the provisioning ledger -- and a sqlite file
+  # copied mid-write restores without complaint and is still wrong. It is also small, so the pause
+  # is a moment rather than the minutes a volume would cost.
+  CP_DIR="$TENANT_ROOT/_control-plane"
+  if [ -d "$CP_DIR" ]; then
+    CP_CAPTURED=live
+    CP_NAME="$(docker ps --filter label=com.titanbot.role=control-plane --format '{{.Names}}' 2>/dev/null | head -n 1)"
+    if [ -z "$CP_NAME" ]; then
+      say "no running control plane container, so its store is the live copy above"
+    elif docker pause "$CP_NAME" >/dev/null 2>&1; then
+      CP_PAUSED=yes
+      if rsync -a --delete "$CP_DIR/" "$OUT/tenants/_control-plane/"; then
+        CP_CAPTURED=paused
+        say "paused $CP_NAME and retook its store"
+      else
+        FAILED=yes
+        say "WARNING: the control plane store did not re-copy under the pause"
+      fi
+      unpause
+    else
+      say "WARNING: could not pause $CP_NAME, so its store is the live copy above"
+    fi
+  fi
+
+  for dir in "$OUT/tenants"/*/; do
+    [ -d "$dir" ] || continue
+    name="$(basename "$dir")"
+    [ "$name" = "_control-plane" ] && continue
+    kb="$(du -sk "$dir" | awk '{print $1}')"
+    TENANT_COUNT=$(( TENANT_COUNT + 1 ))
+    TENANT_ENTRIES="$TENANT_ENTRIES{\"slug\":\"$name\",\"capturedWhile\":\"live\",\"kb\":$kb},"
+    say "tenants/$name  ${kb}K, captured live"
+  done
+  say "$TENANT_COUNT tenant(s), control plane store captured $CP_CAPTURED"
+fi
+# The account hashes and every customer's credentials are in there.
+chmod -R go-rwx "$OUT/tenants" 2>/dev/null || true
+
 step "manifest"
 # Every agent store, by sha256. This is the line a restore drill checks against, and the reason a
 # torn copy cannot pass for a good one.
@@ -233,6 +312,13 @@ MODE=live
 if [ "$PAUSE_HELD" = yes ] && [ "$FAILED" = no ]; then
   MODE=consistent
 fi
+# A tenant root that is present and whose control plane store was NOT taken under a pause is a live
+# copy of the one file that cannot be rebuilt from anywhere else, so it downgrades the whole run the
+# same way a box that would not pause does. Absent is not a downgrade: a single-instance host has no
+# control plane and is complete without one.
+if [ "$CP_CAPTURED" = live ]; then
+  MODE=live
+fi
 cat > "$OUT/manifest.json" <<EOF
 {
   "schemaVersion": 1,
@@ -243,6 +329,9 @@ cat > "$OUT/manifest.json" <<EOF
   "mode": "$MODE",
   "pauseSeconds": $PAUSE_S,
   "pausedVolumes": ["data", "workspace"],
+  "controlPlane": "$CP_CAPTURED",
+  "tenantCount": $TENANT_COUNT,
+  "tenants": [${TENANT_ENTRIES%,}],
   "copyMethod": "$COPY_METHOD",
   "totalKb": $TOTAL_KB,
   "volumes": [${VOLUME_ENTRIES%,}],
@@ -251,7 +340,7 @@ cat > "$OUT/manifest.json" <<EOF
   "storeDbs": [${STORE_ENTRIES%,}]
 }
 EOF
-say "$OUT/manifest.json: mode $MODE, ${TOTAL_KB}K, $STORE_COUNT store.db"
+say "$OUT/manifest.json: mode $MODE, ${TOTAL_KB}K, $STORE_COUNT store.db, $TENANT_COUNT tenant(s), control plane $CP_CAPTURED"
 
 step "retention"
 # Oldest first, keep the newest $KEEP. The names sort lexically because they are

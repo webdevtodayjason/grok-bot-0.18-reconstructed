@@ -131,9 +131,35 @@ done <<EOF
 $(find "$WORK/volumes/data" -name store.db -type f 2>/dev/null | sort)
 EOF
 
+step "the control plane"
+# The account store is the one file in a snapshot that nothing else can rebuild: every account,
+# every tenant, the provisioning ledger. A drill that opened every agent's store and never opened
+# this one would print a green verdict on a backup that could not bring the customers back.
+CP_STATE="$(sed -n 's/.*"controlPlane"[^"]*"\([^"]*\)".*/\1/p' "$SNAP/manifest.json" | head -n 1)"
+TENANTS="$(sed -n 's/.*"tenantCount"[^0-9]*\([0-9][0-9]*\).*/\1/p' "$SNAP/manifest.json" | head -n 1)"
+say "manifest  control plane ${CP_STATE:-unstated}, ${TENANTS:-0} tenant(s)"
+CP_BAD=0
+if [ "${CP_STATE:-absent}" = absent ]; then
+  say "this snapshot is a single instance with no control plane, which is complete as it is"
+else
+  found=0
+  while IFS= read -r db; do
+    [ -n "$db" ] || continue
+    found=$(( found + 1 ))
+    result="$(integrity_check "$db")"
+    printf '  %-40s %12s  %s\n' "$(basename "$db")" "$(wc -c < "$db" | tr -d ' ')" "$result"
+    [ "$result" = ok ] || CP_BAD=$(( CP_BAD + 1 ))
+  done <<EOF
+$(find "$WORK/tenants/_control-plane" -name '*.sqlite' -type f 2>/dev/null | sort)
+EOF
+  [ "$found" -gt 0 ] || die "the manifest says the control plane store was captured $CP_STATE and none is in the snapshot"
+  say "$(find "$WORK/tenants" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -cv '_control-plane$' | tr -d ' ') tenant director(ies) restored"
+fi
+
 step "verdict"
 say "$OK store(s) opened and passed, $BAD did not"
 say "relay side: $(find "$WORK/relay" -type f 2>/dev/null | wc -l | tr -d ' ') file(s) restored"
+[ "$CP_BAD" -eq 0 ] || die "the control plane store did not open; this snapshot cannot bring the customers back and is not a restore point"
 [ "$BAD" -eq 0 ] || die "$BAD store(s) failed; this snapshot is not a restore point"
 [ "$OK" -gt 0 ] || die "no agent store was found in the snapshot at all"
 if [ -n "$EXPECTED" ] && [ "$(( OK + BAD ))" -ne "$EXPECTED" ]; then

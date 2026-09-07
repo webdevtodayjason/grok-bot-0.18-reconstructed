@@ -39,6 +39,7 @@ esac
 case "$1" in
   inspect) [ "$2" = "the-box" ] || exit 1; printf 'the-box\\n'; exit 0 ;;
   pause|unpause) printf '%s\\n' "$1 $2" >> "${root}/docker-calls"; exit 0 ;;
+  ps) case "$*" in *control-plane*) printf 'the-cp\\n' ;; esac; exit 0 ;;
 esac
 exit 0
 `, { mode: 0o755 });
@@ -61,6 +62,17 @@ mkdirSync(path.join(relayRoot, "ui"), { recursive: true });
 mkdirSync(path.join(relayRoot, "profile"), { recursive: true });
 writeFileSync(path.join(relayRoot, "ui", "auth.json"), '{"placeholder":true}\n');
 writeFileSync(path.join(relayRoot, "profile", "local-docker-vm.json"), '{"token":"placeholder"}\n');
+
+// The tenant root: the control plane's own sqlite store and one directory per customer. Nothing
+// under it was in a snapshot until 2026-09-07, so losing this disk meant losing every account and
+// every customer's instance with no way to say who they had been.
+const tenantRoot = path.join(root, "tenant-root");
+mkdirSync(path.join(tenantRoot, "_control-plane"), { recursive: true });
+execFileSync("python3", ["-c", `import sqlite3;db=sqlite3.connect(${JSON.stringify(path.join(tenantRoot, "_control-plane", "control-plane.sqlite"))});db.execute("create table accounts(email)");db.execute("insert into accounts values ('owner@example.com')");db.commit()`]);
+for (const slug of ["acme", "demo"]) {
+  mkdirSync(path.join(tenantRoot, slug, "state"), { recursive: true });
+  writeFileSync(path.join(tenantRoot, slug, "state", "auth.json"), '{"placeholder":true}\n');
+}
 
 const env = {
   ...process.env,
@@ -124,6 +136,49 @@ test("a snapshot pauses the box, copies all five sources, and writes a manifest 
   assert.equal(statSync(path.join(dir, "relay")).mode & 0o077, 0, "no group or other bits on the relay copy");
 });
 
+test("a snapshot carries the control plane and every tenant, and pauses the store it cannot rebuild", () => {
+  // What was missing: /data/titanbot holds the account store, the tenant table, the provisioning
+  // ledger and one directory per customer, and no path in this script named it. Measured on the
+  // R750 2026-09-06, the newest snapshot held manifest.json, relay/ and volumes/ and nothing else.
+  const output = snapshot({ TITANBOT_BACKUP_REQUIRE_MOUNT: "0", TITANBOT_INSTANCE: "tenants", TITANBOT_TENANT_ROOT: tenantRoot });
+  const snaps = execFileSync("ls", ["-1", path.join(dest, "tenants")], { encoding: "utf8" }).trim().split("\n");
+  const dir = path.join(dest, "tenants", snaps[0]);
+  const manifest = JSON.parse(readFileSync(path.join(dir, "manifest.json"), "utf8"));
+
+  // Every customer, and the store that says who they are.
+  assert.equal(manifest.tenantCount, 2);
+  assert.deepEqual(manifest.tenants.map((entry) => entry.slug).sort(), ["acme", "demo"]);
+  assert.ok(manifest.tenants.every((entry) => entry.capturedWhile === "live"),
+    "a tenant's own box is running, so its copy is live and has to say so");
+  assert.ok(existsSync(path.join(dir, "tenants", "acme", "state", "auth.json")));
+  assert.ok(existsSync(path.join(dir, "tenants", "_control-plane", "control-plane.sqlite")));
+
+  // The account store is the one file here nothing else can rebuild, and it is small, so it is
+  // retaken under a pause rather than left as a live copy that restores without complaint and is
+  // still wrong.
+  assert.equal(manifest.controlPlane, "paused");
+  assert.match(output, /paused the-cp and retook its store/);
+  const calls = readFileSync(path.join(root, "docker-calls"), "utf8");
+  assert.match(calls, /pause the-cp/);
+  assert.match(calls, /unpause the-cp/);
+  assert.equal(manifest.mode, "consistent");
+
+  // Password hashes for every customer are in there.
+  assert.equal(statSync(path.join(dir, "tenants")).mode & 0o077, 0, "no group or other bits on the tenant copy");
+});
+
+test("a host with no tenant root says so and is still a complete snapshot", () => {
+  // A single-instance install has no control plane. That is not a degraded run and must not read
+  // as one, or every dev box snapshot would be marked live for a thing it never had.
+  const output = snapshot({ TITANBOT_BACKUP_REQUIRE_MOUNT: "0", TITANBOT_INSTANCE: "no-tenants", TITANBOT_TENANT_ROOT: path.join(root, "nothing-here") });
+  assert.match(output, /is not on this host, so there are no tenants to copy/);
+  const snaps = execFileSync("ls", ["-1", path.join(dest, "no-tenants")], { encoding: "utf8" }).trim().split("\n");
+  const manifest = JSON.parse(readFileSync(path.join(dest, "no-tenants", snaps[0], "manifest.json"), "utf8"));
+  assert.equal(manifest.controlPlane, "absent");
+  assert.equal(manifest.tenantCount, 0);
+  assert.equal(manifest.mode, "consistent");
+});
+
 test("the retention sweep keeps the newest and only the newest", () => {
   // Its own instance directory, because a snapshot refuses to run twice in the same minute and the
   // case above already took this minute under "tb". Planted rather than run five times: the names
@@ -165,6 +220,38 @@ test("the restore drill opens every store, and says so when one is damaged", () 
     assert.match(text, /sha DRIFTED/);
     assert.match(text, /1 store\(s\) opened and passed, 1 did not/);
     assert.match(text, /not a restore point/);
+    return true;
+  });
+});
+
+test("the drill opens the control plane store, and refuses a snapshot whose copy is damaged", () => {
+  // The one file in a snapshot nothing else can rebuild. A drill that opened every agent's store
+  // and never opened this one would print a green verdict on a backup that could not bring the
+  // customers back.
+  const drillEnv = { ...env, TITANBOT_INSTANCE: "tenants" };
+  const drill = (snap) => execFileSync("bash", [path.join(repoRoot, "deploy/backup/restore-drill.sh"), snap], { env: drillEnv, encoding: "utf8" });
+  const newest = execFileSync("ls", ["-1", path.join(dest, "tenants")], { encoding: "utf8" }).trim().split("\n").filter(Boolean).sort().pop();
+  const dir = path.join(dest, "tenants", newest);
+  const output = drill(dir);
+  assert.match(output, /control plane paused, 2 tenant\(s\)/);
+  assert.match(output, /control-plane\.sqlite\s+\d+\s+ok/);
+  assert.match(output, /2 tenant director\(ies\) restored/);
+
+  // Damaged the way a bad disk would damage it.
+  const store = path.join(dir, "tenants/_control-plane/control-plane.sqlite");
+  chmodSync(store, 0o644);
+  writeFileSync(store, Buffer.alloc(readFileSync(store).length, 0x41));
+  assert.throws(() => drill(dir), (error) => {
+    const text = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    assert.match(text, /cannot bring the customers back and is not a restore point/);
+    return true;
+  });
+
+  // And a snapshot whose manifest says the store was captured and does not carry one is refused
+  // outright, which is the shape a half-failed copy leaves behind.
+  rmSync(path.join(dir, "tenants/_control-plane"), { recursive: true, force: true });
+  assert.throws(() => drill(dir), (error) => {
+    assert.match(`${error.stdout ?? ""}${error.stderr ?? ""}`, /none is in the snapshot/);
     return true;
   });
 });

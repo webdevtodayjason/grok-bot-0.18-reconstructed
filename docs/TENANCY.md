@@ -150,6 +150,13 @@ The control plane's own sqlite store lives at `/data/titanbot/_control-plane`, u
 so one backup covers both. No tenant can ever collide with it: a slug is 3 to 32 characters of
 `[a-z0-9-]` that cannot begin or end with a dash, so nothing can start with an underscore.
 
+That backup is `deploy/backup/snapshot.sh`, and it did not cover this root until 2026-09-07: the
+newest snapshot on the array held the relay side and the operator's own four volumes and nothing
+under `/data/titanbot`, so every account and every customer's instance was unprotected. It copies
+the whole root now, live, and retakes the control plane's own directory with that container paused,
+because a sqlite file copied mid-write restores without complaint and is still wrong.
+`deploy/backup/restore-drill.sh` opens it. docs/OPERATOR-RUNBOOK.md has the sizing note.
+
 ## 3. The routes
 
 Open to anybody:

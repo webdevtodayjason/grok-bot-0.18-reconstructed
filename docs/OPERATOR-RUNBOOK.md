@@ -203,8 +203,9 @@ its own credential list, and nothing else.
 
 ## Backups (BACKUP-1)
 
-`deploy/backup/snapshot.sh` copies all five places an instance lives — the four volumes and the
-relay side — into `<dest>/<instance>/<YYYY-MM-DD-HHMM>/` with a manifest, and keeps the last 14.
+`deploy/backup/snapshot.sh` copies all six places an instance lives — the four volumes, the relay
+side, and the tenant root at `/data/titanbot` — into `<dest>/<instance>/<YYYY-MM-DD-HHMM>/` with a
+manifest, and keeps the last 14.
 `install.sh` installs it as a systemd **user** timer at 04:10 (the whole install runs as `sem` with
 no sudo), so after the next install:
 
@@ -224,6 +225,21 @@ then `sand-data` and `workspace` — the volumes holding the agents' sqlite stor
 the box frozen. Each source in the manifest says which it was (`capturedWhile`), and the snapshot as
 a whole is `"mode": "consistent"` only when that second pass ran.
 
+The tenant root is the control plane's own sqlite store — every account, every tenant, the
+provisioning ledger — plus one directory per customer. It was in no snapshot at all until
+2026-09-07: the newest one on the array held `manifest.json`, `relay/` and `volumes/` and nothing
+else, so losing that disk meant losing every customer with no way to say who they had been. It is
+copied live, and the control plane's own directory is then retaken with its container paused, the
+same way and for the same reason as the agents' stores. A customer's own data is a live copy and
+the manifest says so per tenant. `"controlPlane"` in the manifest is `paused`, `live` or `absent`,
+and a `live` one downgrades the whole run, because that store is the one thing nothing else can
+rebuild.
+
+Two things that follow from it. A snapshot is now the size of every customer's data as well as
+Jason's, fourteen times over at the default retention, so watch the array and lower
+`TITANBOT_BACKUP_KEEP` before the free-space guard starts refusing runs. And a host with no control
+plane — a plain single instance — reports `absent` and is a complete snapshot, not a degraded one.
+
 Restore drills are the point of having it:
 
 ```sh
@@ -233,7 +249,10 @@ bash deploy/backup/restore-drill.sh <dir>    # a specific one
 
 It restores into a throwaway directory, never touching the live instance, opens every
 `agents/<id>/store.db` and prints a table of size, hash and `PRAGMA integrity_check`. A store that
-does not open, or whose hash has drifted from the manifest, fails the run.
+does not open, or whose hash has drifted from the manifest, fails the run. It then opens the control
+plane's own store the same way and counts the tenant directories: a snapshot whose manifest says the
+account store was captured and does not carry one, or carries one that will not open, is refused as
+a restore point, because it could not bring the customers back.
 
 On the dev box there is no array and no `mountpoint(1)`, so a run there looks like:
 
