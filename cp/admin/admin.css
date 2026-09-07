@@ -1,0 +1,187 @@
+/*
+  cp/admin/admin.css -- the super admin console's whole appearance. ADMIN-1.
+
+  The product's board, not the repository's: Signal Cyan #00C8F0 on Midnight #090D14, Inter, and the
+  rounded Ti mark. Inter is asked for by name and every fallback after it is a font that is already
+  on the machine, because this page loads nothing from anywhere -- no CDN, no font service -- and a
+  webfont request would be the one thing on the screen that could hang.
+
+  One column, one width, no theme switch. This is an operator's screen and it is read on a laptop at
+  the wrong time of day, so the contrast is high and the numbers are monospaced wherever comparing
+  two of them down a column is the point.
+*/
+
+:root {
+  --midnight: #090D14;
+  --panel: #101823;
+  --line: #1D2836;
+  --ink: #E8EDF3;
+  --quiet: #93A1B3;
+  --cyan: #00C8F0;
+  --warm: #FF8A3D;
+  --bad: #FF5C68;
+  --good: #3ECF8E;
+  --radius: 10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--midnight);
+  color: var(--ink);
+  font: 15px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 { font-size: 22px; margin: 12px 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h3 { font-size: 13px; margin: 20px 0 8px; color: var(--quiet); text-transform: uppercase; letter-spacing: 0.08em; }
+p { margin: 0 0 12px; }
+
+.quiet { color: var(--quiet); font-size: 13px; }
+
+/* The mark: a rounded square with the two letters, drawn rather than loaded, so the page still has
+   its identity with nothing fetched. */
+.mark {
+  width: 34px; height: 34px; flex: none;
+  display: grid; place-items: center;
+  border-radius: 9px;
+  background: linear-gradient(150deg, var(--cyan), #0078A8);
+  color: var(--midnight);
+  font-weight: 700; font-size: 15px; letter-spacing: -0.02em;
+}
+
+/* ---- the door ------------------------------------------------------------------------------- */
+
+.door {
+  max-width: 360px;
+  margin: 12vh auto 0;
+  padding: 28px 26px 22px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.door .mark { margin-bottom: 6px; }
+
+form { display: grid; gap: 6px; margin-top: 18px; }
+label { font-size: 13px; color: var(--quiet); }
+input, select {
+  font: inherit;
+  color: var(--ink);
+  background: #0B121B;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+input:focus, select:focus, button:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
+
+button {
+  font: inherit; font-weight: 600;
+  margin-top: 10px;
+  padding: 10px 14px;
+  border: 0; border-radius: 8px;
+  background: var(--cyan); color: #04222B;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button.ghost {
+  margin-top: 0;
+  background: transparent;
+  color: var(--quiet);
+  border: 1px solid var(--line);
+  font-weight: 500;
+  padding: 6px 11px;
+}
+button.ghost:hover:not(:disabled) { color: var(--ink); border-color: var(--cyan); }
+button.small { margin-top: 0; padding: 4px 9px; font-size: 12px; }
+
+.message { min-height: 20px; margin: 14px 0 0; font-size: 13px; color: var(--warm); }
+
+/* ---- the console ---------------------------------------------------------------------------- */
+
+.console { max-width: 1180px; margin: 0 auto; padding: 20px 22px 60px; }
+
+.top {
+  display: flex; align-items: center; gap: 12px;
+  padding-bottom: 16px; margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+.who { display: grid; line-height: 1.3; }
+.topActions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+.banner {
+  padding: 10px 13px; border-radius: 8px;
+  background: #22161C; border: 1px solid #4A2630; color: #FFC4C9;
+  font-size: 13px;
+}
+.banner.good { background: #10231C; border-color: #1E4636; color: #A9EBCE; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px 20px;
+  margin-bottom: 16px;
+}
+
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 6px; }
+.controls select { padding: 5px 9px; }
+
+.placeholder { color: var(--quiet); font-size: 14px; margin: 4px 0 0; }
+
+/* Wide content scrolls inside its own box. The page body never scrolls sideways. */
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 7px 11px; white-space: nowrap; border-bottom: 1px solid var(--line); }
+th { color: var(--quiet); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; background: #0C131C; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: #131C28; }
+td.num, td.mono { font-family: var(--mono); font-size: 12.5px; }
+td.num { text-align: right; }
+.empty { padding: 14px; color: var(--quiet); font-size: 13px; }
+
+.chip {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em;
+  border: 1px solid var(--line); color: var(--quiet);
+}
+.chip.attack { background: #2A1116; border-color: var(--bad); color: #FFB0B7; }
+.chip.refused { border-color: #57303A; color: #FFB0B7; }
+.chip.locked { border-color: #5A4326; color: #FFCE9B; }
+.chip.ok { border-color: #23503E; color: #A9EBCE; }
+.chip.super { border-color: #0E5A6B; color: #9BE7F7; }
+.chip.off { border-color: #57303A; color: #FFB0B7; }
+
+/* ---- clients ---------------------------------------------------------------------------- */
+
+.clients { display: grid; gap: 12px; }
+.client {
+  border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px; background: #0C131C;
+}
+.client .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.client .head strong { font-size: 15px; }
+.client .actions { margin-left: auto; display: flex; gap: 6px; }
+.client .users { margin-top: 10px; }
+
+/* ---- system ----------------------------------------------------------------------------- */
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); gap: 12px; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: #0C131C; }
+.card .title { font-size: 12px; color: var(--quiet); text-transform: uppercase; letter-spacing: 0.06em; }
+.card .value { font-family: var(--mono); font-size: 19px; margin-top: 5px; }
+.card .value.unmeasured { font-size: 14px; color: var(--quiet); font-family: var(--sans); }
+.card .detail { font-size: 12.5px; color: var(--quiet); margin-top: 5px; white-space: normal; }
+.card.bad { border-color: #4A2630; }
+.card.good { border-color: #1E4636; }
+
+.foot { margin-top: 22px; text-align: center; }
+
+@media (max-width: 640px) {
+  .console { padding: 14px 12px 40px; }
+  .panel { padding: 14px 13px 16px; }
+  .topActions { width: 100%; margin-left: 0; }
+}

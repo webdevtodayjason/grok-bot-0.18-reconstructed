@@ -220,6 +220,19 @@ export function loadConfig(env = process.env) {
     // tenant console posts its sign-ins here from one machine's egress address, so the address half
     // of the lockout is one bucket for the whole fleet unless this says so. See loginLock.
     relayPeers: text("CP_RELAY_PEERS"),
+    // ADMIN-1. Where this service reaches the one relay, for the two facts only the relay can see:
+    // the failed sign-in ledger (a refusal happens at that door and never arrives here) and box
+    // health (that container has the docker socket and this one deliberately does not). The default
+    // is the compose service name on the shared network, which Coolify keeps as a network alias, and
+    // the relay's own port. The credential is CP_RELAY_TOKEN, already above.
+    relayUrl: text("CP_RELAY_URL", `http://${text("CP_RELAY_HOST", CONFIG_DEFAULTS.relayHost)}:7777`).replace(/\/+$/, ""),
+    // Where the nightly backup manifests are, IF anybody ever mounts them in. They live on
+    // /mnt/rosa-storage, which is mounted into no container, so unset is the normal state and the
+    // admin console reads "not measured" rather than guessing. See docs/ADMIN.md.
+    backupManifestDir: text("CP_BACKUP_MANIFEST_DIR"),
+    // And the box isolation timer's verdict, for the day it writes one. box-isolation.sh --verify
+    // prints its result today and writes no file, so this is unset and the panel says why.
+    isolationReport: text("CP_ISOLATION_REPORT"),
   };
 }
 

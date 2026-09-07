@@ -96,7 +96,12 @@ test("an account is added, listed without its hash, and its password can be rese
 
     const listed = await plane.admin("GET", "/v1/accounts");
     assert.equal(listed.status, 200);
-    assert.deepEqual(Object.keys(listed.body.accounts[0]).sort(), ["createdAt", "email", "id", "name", "tenant"]);
+    // The exact key set, so a column added to the accounts table cannot leak out of this route by
+    // accident. superAdmin and disabled joined it with ADMIN-1: both are facts about a door and
+    // neither is a secret, and the two that matter are still absent -- no hash and no salt.
+    assert.deepEqual(Object.keys(listed.body.accounts[0]).sort(), ["createdAt", "disabled", "email", "id", "name", "superAdmin", "tenant"]);
+    assert.equal(listed.body.accounts[0].superAdmin, false, "a new account is nobody's super admin");
+    assert.equal(listed.body.accounts[0].disabled, false);
 
     const reset = await plane.admin("POST", `/v1/accounts/${created.body.account.id}/password`, { password: "a-brand-new-password" });
     assert.equal(reset.status, 204);
@@ -133,7 +138,10 @@ test("signing in returns a session that names the tenant, and verifies with that
     const answer = await plane.request("POST", "/v1/sessions", { body: { email: "Owner@Example.com", password: PASSWORD } });
     assert.equal(answer.status, 200);
     assert.deepEqual(Object.keys(answer.body).sort(), ["account", "expiresAt", "tenant", "token"]);
-    assert.deepEqual(answer.body.account, { id: account.id, email: "owner@example.com", name: "The Owner" });
+    // superAdmin rides in the BODY and never in the token: ADMIN-1. It is what tells the admin
+    // page which door to draw, and the admin routes look the flag up in the store on every request
+    // so a demotion takes effect now rather than in up to twelve hours.
+    assert.deepEqual(answer.body.account, { id: account.id, email: "owner@example.com", name: "The Owner", superAdmin: false });
     assert.deepEqual(answer.body.tenant, { slug: "acme", host: "acme.titanium.bot", status: "adopted" });
 
     // This is the check the tenant's own relay will run, with the key that relay is given and this

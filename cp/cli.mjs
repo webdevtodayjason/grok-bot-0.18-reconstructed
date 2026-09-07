@@ -5,6 +5,8 @@
 //   node cp/cli.mjs account add <email> <tenant> [--name "Jane Doe"]
 //   node cp/cli.mjs account list
 //   node cp/cli.mjs account remove <email>
+//   node cp/cli.mjs account promote <email>
+//   node cp/cli.mjs account demote <email>
 //   node cp/cli.mjs tenant add <slug> <name> [--dry-run]
 //   node cp/cli.mjs tenant list
 //   node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]
@@ -147,8 +149,14 @@ async function accountAdd(args) {
 async function accountList() {
   const answer = await api("GET", "/v1/accounts");
   if (answer.accounts.length === 0) return out("no accounts yet");
-  out(`${pad("EMAIL", 34)}${pad("TENANT", 20)}NAME`);
-  for (const account of answer.accounts) out(`${pad(account.email, 34)}${pad(account.tenant, 20)}${account.name}`);
+  out(`${pad("EMAIL", 34)}${pad("TENANT", 20)}${pad("ROLE", 14)}NAME`);
+  for (const account of answer.accounts) {
+    // Two facts about the door, printed where the operator is already looking. "off" matters more
+    // than it reads: a disabled account is still in this list and still owns its workspace, and
+    // without this column the only symptom is a customer saying they cannot sign in.
+    const role = [account.superAdmin ? "super admin" : "", account.disabled ? "off" : ""].filter(Boolean).join(", ") || "customer";
+    out(`${pad(account.email, 34)}${pad(account.tenant, 20)}${pad(role, 14)}${account.name}`);
+  }
 }
 
 // Closing one person's door. The email is typed twice on purpose, the same way the tenant delete
@@ -160,6 +168,27 @@ async function accountRemove(args) {
   const answer = await api("DELETE", `/v1/accounts/${encodeURIComponent(email)}`, { confirm: email });
   out(`removed ${answer.email} from workspace ${answer.tenant}`);
   out(answer.message);
+}
+
+// The super admin flag: who may open the console at /admin. ADMIN-1.
+//
+// It is deliberately not a flag on `account add`. Making somebody a super admin is a separate,
+// deliberate act with its own line in the shell history, and on a system that has none this is the
+// only way to make the first one, because the route it calls is the one route CP_ADMIN_TOKEN opens.
+async function accountPromote(args) {
+  const [email] = positional(args);
+  if (!email) die("usage: node cp/cli.mjs account promote <email>");
+  const answer = await api("POST", `/v1/admin/users/${encodeURIComponent(email)}/promote`);
+  out(`${answer.account.email} is now a super admin`);
+  out(`they open the console at ${BASE}/admin with the same email and password they already have`);
+}
+
+async function accountDemote(args) {
+  const [email] = positional(args);
+  if (!email) die("usage: node cp/cli.mjs account demote <email>");
+  const answer = await api("POST", `/v1/admin/users/${encodeURIComponent(email)}/demote`);
+  out(`${answer.account.email} is no longer a super admin`);
+  out("their own workspace sign-in is unchanged");
 }
 
 async function tenantAdd(args) {
@@ -259,12 +288,15 @@ const USAGE = [
   "node cp/cli.mjs account add <email> <tenant> [--name \"Jane Doe\"]",
   "node cp/cli.mjs account list",
   "node cp/cli.mjs account remove <email>",
+  "node cp/cli.mjs account promote <email>",
+  "node cp/cli.mjs account demote <email>",
   "node cp/cli.mjs tenant add <slug> <name> [--dry-run]",
   "node cp/cli.mjs tenant list",
   "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]",
   "node cp/cli.mjs session verify <token>",
   "",
   "signup add is the one line that adds a customer: account, workspace and box.",
+  "account promote makes somebody a super admin, which opens the console at /admin.",
   "CP_ADMIN_TOKEN and CP_PUBLIC_URL come from the environment.",
 ].join("\n");
 
@@ -274,6 +306,8 @@ const commands = {
   "account add": accountAdd,
   "account list": accountList,
   "account remove": accountRemove,
+  "account promote": accountPromote,
+  "account demote": accountDemote,
   "tenant add": tenantAdd,
   "tenant list": tenantList,
   "tenant adopt": tenantAdopt,
