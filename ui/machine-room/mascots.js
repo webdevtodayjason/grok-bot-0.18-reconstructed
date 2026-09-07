@@ -118,11 +118,29 @@
     });
   }
 
+  /**
+   * The map is rebuilt when the adapter says the roster changed -- but app.js subscribed first, so
+   * on the event that carries a new agent or a just-written character it redraws before this file
+   * has caught up, and the face for one frame would be the old one. Rather than fight the order,
+   * the record app.js is drawing right now is checked against the map, and the map is rebuilt when
+   * they disagree. It is one `storedChoice` per face drawn, and a rebuild only when something
+   * actually moved.
+   */
+  function ensureAssignment(worker) {
+    const face = assignment.get(worker.id);
+    const stored = crew.storedChoice(worker);
+    const agrees = stored == null
+      ? Boolean(face) && face.source !== "stored"
+      : Boolean(face) && face.source === "stored" && (stored === face.opt || stored === face.character);
+    if (!agrees) reassign(adapter && typeof adapter.getSnapshot === "function" ? adapter.getSnapshot() : null);
+    return assignment.get(worker.id);
+  }
+
   // ---- the hook app.js calls ---------------------------------------------------------------
   global.titanAvatarMarkup = function titanAvatarMarkup(worker, className, title) {
     if (!crew || !worker || !worker.id) return "";
     ensureAdapter();
-    const face = assignment.get(worker.id);
+    const face = ensureAssignment(worker);
     if (!face || face.opt || face.index < 0) return "";
     const name = title || worker.name || "Agent";
     const mood = moodOf(worker);
@@ -167,7 +185,9 @@
   function characterRowMarkup(worker, face) {
     const chosen = (value) => (face && face.opt === value ? " selected" : "");
     const options = [
-      ...crew.CREW.map((c, i) => `<option value="${esc(c.name)}"${face && !face.opt && face.index === i ? " selected" : ""}>${esc(c.name)} — ${esc(c.blurb)}</option>`),
+      // The name alone. The blurb is longer than the control and was cut mid-word; it belongs on
+      // the line under the label, where there is room for it.
+      ...crew.CREW.map((c, i) => `<option value="${esc(c.name)}"${face && !face.opt && face.index === i ? " selected" : ""}>${esc(c.name)}</option>`),
       // Only offered where there is one. An option that draws nothing is not an option.
       worker.avatarVersion != null ? `<option value="${esc(crew.UPLOADED)}"${chosen(crew.UPLOADED)}>The picture uploaded to the host</option>` : "",
       `<option value="${esc(crew.CLASSIC)}"${chosen(crew.CLASSIC)}>Classic avatar (the flat mark)</option>`,
@@ -181,7 +201,8 @@
       : face.source === "first" ? "The first agent on an instance is always Titan."
       : face.source === "hash" ? "This host reports no creation date for this agent, so the character is picked from its id and stays the same."
       : "Worked out from the order the agents on this box were created. Pick one and the host holds it instead.";
-    return `<div class="setting-row" data-titan-character-row><div><strong>Character</strong><small data-titan-character-note>${esc(note)}</small></div><div class="field" style="margin:0"><label class="sr-only" for="agent-character">Character</label><select id="agent-character" data-character-for="${esc(worker.id)}">${options}</select></div></div>`;
+    const blurb = face && !face.opt && face.index >= 0 ? `${crew.CREW[face.index].blurb} ` : "";
+    return `<div class="setting-row" data-titan-character-row><div><strong>Character</strong><small data-titan-character-note>${esc(blurb + note)}</small></div><div class="field" style="margin:0"><label class="sr-only" for="agent-character">Character</label><select id="agent-character" data-character-for="${esc(worker.id)}">${options}</select></div></div>`;
   }
 
   function syncPanel() {
@@ -204,7 +225,13 @@
       select.disabled = true;
       if (note) note.textContent = "Writing it to the host…";
       adapter.setCharacter(worker.id, choice)
-        .then((saved) => { if (note) note.textContent = `The host is holding "${saved}" for this agent.`; })
+        .then((saved) => {
+          if (!note) return;
+          const index = crew.indexOfCharacter(saved);
+          note.textContent = index >= 0
+            ? `${crew.CREW[index].blurb} The host is holding ${saved} for this agent.`
+            : `The host is holding the ${saved === crew.UPLOADED ? "uploaded picture" : "classic mark"} for this agent.`;
+        })
         .catch((error) => { if (note) note.textContent = `The host did not take it: ${error.message}`; })
         .finally(() => { select.disabled = false; });
     });
