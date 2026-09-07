@@ -620,11 +620,15 @@ async function liveArm(landed) {
     const fresh = await must("getOnboardingState");
     check(fresh?.done === false, "and the box now reports done:false", JSON.stringify(fresh ?? {}).slice(0, 160));
 
-    // The hook must not be a way in for anyone else. With it off, the reset has to be refused.
+    // The hook must not be a way in for anyone else. With it off, the reset has to be refused --
+    // and refused as ITSELF. "Any failure counts" passed here on a relay that was answering 502
+    // "SAND_HOST_GATEWAY_TOKEN is stale", which is what a broken deployment looks like and would
+    // have gone on passing if the guard had been deleted. The guard's own 403 and its own words,
+    // or nothing.
     await writeSetting("SAND_TEST_HOOKS", null);
     const guarded = await resetOnboarding();
-    check(guarded != null && guarded.ok === false,
-      "with SAND_TEST_HOOKS unset the same command is refused",
+    check(guarded != null && guarded.status === 403 && /SAND_TEST_HOOKS/.test(guarded.text),
+      "with SAND_TEST_HOOKS unset the same command is refused, in the guard's own words",
       guarded == null ? "the command vanished" : `${guarded.status} ${guarded.text.slice(0, 120)}`);
     await writeSetting("SAND_TEST_HOOKS", "1");
 

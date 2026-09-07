@@ -6,12 +6,15 @@ walks through what he can do, and asks what they want done first. Underneath it:
 box, three gateway commands, one tool, one seed prompt, one dialog in the console, and a ceiling of
 thirteen agents.
 
-**Status, 2026-09-07: written, not built.** This document is the contract, and
-`scripts/verify-onboarding.mjs` is the gate written to it. Measured on this Mac today, before any of
-it lands: the box answers `unknown gateway method: getOnboardingState`; it holds 8 agents and 1
-group; **no agent on it is named Titan**; `getHostSettings` carries no `userTimeZone` at all; and the
-enforced agent limit is still 50. Section 9 is the list of what has to be measured before any row
-here can be called done, and the gap rows `ONBOARD-1` and `AGENTS-CAP-1` stay open until it is.
+**Status, 2026-09-07: built and measured.** This document is the contract,
+`scripts/verify-onboarding.mjs` is the gate written to it, and the gate now runs against the
+product rather than against a stand-in. On this Mac, box `grok-bot-local-vm`, host bundle built
+from the gb tip: **50 passed, 0 failed, 1 not measured** across all three arms, and `npm test` 1042
+passed, 0 failed. What it was before, measured here the day it was written, is worth keeping beside
+that: the box answered `unknown gateway method: getOnboardingState`, held 8 agents and 1 group,
+had no agent named Titan, carried no `userTimeZone` at all, and enforced a limit of 50. Section 9
+carries every number and what is still not measured. The gap rows `ONBOARD-1` and `AGENTS-CAP-1`
+are landed.
 
 ## 1. What happens the first time somebody signs in
 
@@ -361,16 +364,26 @@ fixture arm's checks against it. It reports on the gate, never on the product, a
 so. It exists because a gate written before the thing it measures can have every selector wrong and
 look perfectly calm: a check that finds nothing passes nothing and fails nothing.
 
-**Open, and open until measured on this Mac:**
+**Measured, 2026-09-07, this Mac (darwin 25.5.0) against the box `grok-bot-local-vm`, host bundle
+built from the gb tip by `node scripts/build-host.mjs --deploy`:**
 
-| What | Where it stands |
+| What | What it answered |
 |---|---|
-| the fixture arm against the real console | not run. Today it reports the wave is not on the box and exits 2 |
-| the box arm | not run, same reason |
-| the ceiling arm | not run: nothing publishes `maxAgents` yet, so the arm skips itself |
-| the location answer setting the box's time zone | **not measured by any arm.** The box arm answers the name only, on purpose, because measuring the zone writes a real setting the scheduler reads on this Mac. Whoever lands section 4's time-zone leg has to say how it will be proved |
-| the gate itself | **measured, 2026-09-07, this Mac: `--self-test` 15 passed, 0 failed**. The fixture machinery, every selector and every geometry read in section 6 is satisfiable |
-| `--cap` and `--live` on this Mac | **measured, 2026-09-07: both exit 2, wave not on the box, and the box's `sand-host-settings.json` comes back byte for byte as it was** |
+| `verify-onboarding` all three arms | **50 passed, 0 failed, 1 not measured** |
+| the fixture arm against the real console | passes. The dialog opens below the top bar at the width of the stage, the chat behind it is dimmed, Titan's face is live at 131px and curious, the five questions are on the strip with none ticked, **Skip for now** is there, and a state reporting `done:true` opens straight into the console with no modal |
+| the box arm | passes. The flag went back to first run through `resetOnboarding`, the modal opened by itself, the console started Titan's turn with nobody typing (2 model calls in 2s), the turn was offered `save_onboarding_answer`, an answer typed in the dialog reached the box's own state, the strip read 1 of 5, **Skip for now** closed it, and the box read `done:true` with the answer kept |
+| the migration rule on a used box | passes. 9 agents on this Mac and it answered `done:true`, `doneReason:"existing-box"`, at the first read. No agent was renamed and no modal opened |
+| the ceiling arm | passes. Default 13 with nothing set; a room does not spend one of the thirteen (bots 10 → 10 while `countAgents` went 10 → 11); at the ceiling `createAgent` and `duplicateAgent` both answer HTTP 409 with "This workspace holds Titan and 9 more bots. Remove one to add another."; neither refusal left a half-made agent; one place under the ceiling the same create goes through; the console shows the same sentence as a toast |
+| the location answer setting the box's time zone | **still not measured by any arm.** The box arm answers the name only, on purpose, because measuring the zone writes a real setting the scheduler on this Mac reads. The write itself is exercised by the unit tests; whoever wants it proved end to end has to say on which box |
+| the gate itself | **`--self-test` 15 passed, 0 failed.** Kept, because it is what makes the fixture arm's selectors falsifiable |
+| unit tests | `npm test` 1042 passed, 0 failed, including the state, the migration table, the first-agent rule and the cap |
 
-Unit tests for the state, the migration rule and the cap land with the host half and are not in this
-file's gate.
+**The relay and a command's own refusal.** `resetOnboarding` is the first gateway command that
+answers 403 on its own terms rather than on the bearer, and it found a fault in the relay: it
+folded both 401 and 403 from the box into one sentence, "SAND_HOST_GATEWAY_TOKEN is stale or the
+box was recreated". The gateway spends 401 on the bearer and 403 on a refusal a command made
+(`resetOnboarding` without `SAND_TEST_HOOKS=1`, a browser Origin, an untrusted Host, a cross-site
+avatar). So the guard leg of this gate was passing on a stale-token 502 and would have gone on
+passing if the guard had been deleted. `ui/server.mjs` now passes 403 through with the gateway's
+own words, 401 still answers as the deployment fault it is, `tests/relay-command-status.test.mjs`
+pins both directions, and the gate leg asserts the 403 and the guard's own text.

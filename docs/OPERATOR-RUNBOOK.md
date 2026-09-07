@@ -101,12 +101,18 @@ agents name themselves correctly; on Nemotron they do not answer the question at
 the "agents think they are Grok" report and is a model-quality problem, not a prompt bug.
 
 `verify-onboarding` measures the first run a new customer gets, and the ceiling of thirteen agents
-per box. **Neither is on the box yet**, so today it exits 2 and says which half is missing rather
-than reporting the product broken; `--self-test` is the one arm that passes now, and it measures the
-gate rather than the box. It moves `SAND_MAX_AGENTS` and `SAND_TEST_HOOKS` in
-`sand-host-settings.json` while it runs and puts both back, and its box arm points the box at a stub
-model on this Mac for one turn and repins the endpoint it found. Run it on its own, not alongside
-another gate. The whole design is [docs/ONBOARDING.md](ONBOARDING.md).
+per box. All three arms are live: measured on this Mac 2026-09-07 against `grok-bot-local-vm`,
+**50 passed, 0 failed, 1 not measured** (the time-zone leg, skipped on purpose: the box arm answers
+the name only, because writing a real zone on this Mac moves the scheduler). It moves
+`SAND_MAX_AGENTS` and `SAND_TEST_HOOKS` in `sand-host-settings.json` while it runs and puts both
+back, and its box arm points the box at a stub model on this Mac for one turn and repins the
+endpoint it found. Run it on its own, not alongside another gate. The whole design is
+[docs/ONBOARDING.md](ONBOARDING.md).
+
+An existing box never enters the first run. The migration rule marks any box done at the first read
+if it holds more than one agent or any conversation with a person's message in it, so no agent on a
+working instance is renamed and no modal opens on one. This Mac read `done:true` with
+`doneReason:"existing-box"` on 9 agents, and Jason's instance is the same shape.
 
 ## Your own instance on the R750
 

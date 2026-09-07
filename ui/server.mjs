@@ -818,7 +818,13 @@ async function relayCommand(t, req, res, method) {
   // The gateway refusing the relay's own bearer is not the operator being signed out, and passing
   // its 401 through wearing our status code is how a correct password ends in a login loop. It is
   // a broken deployment, so it answers as one, with the thing to go and look at.
-  if (upstream.status === 401 || upstream.status === 403) {
+  //
+  // 401 only. The gateway spends 401 on the bearer (gateway-server.ts: "unauthorized") and 403 on
+  // a refusal the command itself made -- resetOnboarding without SAND_TEST_HOOKS=1, a browser
+  // Origin, an untrusted Host, a cross-site avatar. Folding those into the stale-token sentence
+  // sent whoever read it to re-mint a token that was never the problem, and hid the one sentence
+  // that says what to do instead. A command's own refusal is its answer to give.
+  if (upstream.status === 401) {
     return fail(res, 502, `the gateway refused this relay's token (HTTP ${upstream.status}): ` +
       `SAND_HOST_GATEWAY_TOKEN is stale or the box was recreated. Signing in again will not help.`);
   }
@@ -879,12 +885,12 @@ async function jobBusCall(t, command, args) {
   };
 }
 
-// The gateway's own status and body go through -- 400, 404, 409 and 503 are its answers to give,
-// and CoS acts on their detail. Its 401 is the exception, the same one relayCommand makes: that is
-// this relay's bearer being stale, not the caller's, and passing it on would tell CoS to re-auth
-// against a fault no token of its own can fix.
+// The gateway's own status and body go through -- 400, 403, 404, 409 and 503 are its answers to
+// give, and CoS acts on their detail. Its 401 is the exception, the same one relayCommand makes:
+// that is this relay's bearer being stale, not the caller's, and passing it on would tell CoS to
+// re-auth against a fault no token of its own can fix.
 function answerUpstream(res, upstream, status = upstream.status, text = upstream.text) {
-  if (upstream.status === 401 || upstream.status === 403) {
+  if (upstream.status === 401) {
     return fail(res, 502, `the gateway refused this relay's token (HTTP ${upstream.status}): `
       + `SAND_HOST_GATEWAY_TOKEN is stale or the box was recreated.`);
   }
