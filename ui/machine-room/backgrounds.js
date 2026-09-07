@@ -43,6 +43,10 @@
     { id: "habitat-3", name: "Habitat III", series: "Habitat" },
     { id: "habitat-4", name: "Habitat IV", series: "Habitat" },
     { id: "habitat-5", name: "Habitat V", series: "Habitat" },
+    // The Lab series (Jason, 2026-09-07 08:56).
+    { id: "lab-1", name: "The Lab I", series: "The Lab" },
+    { id: "lab-2", name: "The Lab II", series: "The Lab" },
+    { id: "lab-3", name: "The Lab III", series: "The Lab" },
     // Two painted plates for the regular set (Jason, 2026-09-07, from bg2.png and bg3.png): named
     // here for what they show, since the files carried no name of their own.
     { id: "crystal-dunes", name: "Crystal Dunes" },

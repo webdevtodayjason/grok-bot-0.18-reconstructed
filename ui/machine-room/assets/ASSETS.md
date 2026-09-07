@@ -27,3 +27,4 @@ The prototype does not crop interface elements from the design board. Every cont
   A series is one field on the entry in `backgrounds.js`; seasonal sets ship the same way.
 - `backgrounds/habitat-2..5.webp` (+ thumbs) complete the Habitat series (Jason, 2026-09-07 08:13, `~/Downloads/Habitat2..5.png`);
   `crystal-dunes` and `deep-current` (+ thumbs) are the two painted plates from `bg2.png` and `bg3.png`, same conversion.
+- `backgrounds/lab-1..3.webp` (+ thumbs) are The Lab series (Jason, 2026-09-07 08:56, `~/Downloads/The lab series 1..3.png`), same conversion.
