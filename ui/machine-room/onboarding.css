@@ -1,0 +1,195 @@
+/*
+ * ONBOARD-1: the first-run setup with Titan.
+ * ------------------------------------------
+ * Its own file rather than a block at the foot of styles.css, so the wave editing that file and
+ * this one never land on the same lines. Nothing here is used by any other surface.
+ *
+ * The dialog is the Settings dialog's frame at a different size: it starts under the 68px window
+ * bar (.app-shell grid-template-rows) and runs the width of the stage, so the chat is still there
+ * behind the backdrop's blur rather than replaced. dialog::backdrop in styles.css is what dims it.
+ */
+
+.onboarding-dialog {
+  position: fixed;
+  inset: 76px 44px 20px;
+  /* Both of these are load-bearing. The browser's own stylesheet gives a <dialog> width and HEIGHT
+     of fit-content, which beats a top-and-bottom inset: without them the frame stops at the height
+     of its own content and the conversation inside it is left with a few pixels. */
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--text-primary);
+  background: transparent;
+}
+
+@media (max-width: 900px) {
+  .onboarding-dialog { inset: 76px 16px 14px; }
+}
+
+.onboarding-frame {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: none;
+}
+
+.onboarding-frame .dialog-header {
+  flex: 0 0 auto;
+}
+
+/* The body is the scroll container's parent, not the scroller: the transcript inside it does the
+   scrolling, so the face and the five questions stay on screen while the conversation grows. */
+.onboarding-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  max-height: none;
+  padding: 20px 24px 22px;
+  overflow: hidden;
+}
+
+.onboarding-lede {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+/* The live face, large. It is a .titan-avatar like every other face on the page, so mascots.css
+   frames it: the mascot is laid over the circle at --titan-fill of the frame's width and pulled up
+   so the body sits dead centre. Only the size and that one number belong here. The scale follows
+   the same rule the other rings do -- a bigger ring takes a bigger fill, because the character's
+   drift and bob are a fixed number of canvas pixels at any size. */
+.onboarding-face {
+  width: 132px;
+  height: 132px;
+  --titan-fill: 2;
+}
+
+.onboarding-lede p {
+  max-width: 62ch;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* The five questions, filling in as Titan gets each answer. */
+.onboarding-progress {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.onboarding-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px 5px 9px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-pill);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  background: rgba(7, 16, 20, 0.34);
+}
+
+.onboarding-step .onboarding-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: 50%;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.onboarding-step.is-done {
+  border-color: rgba(103, 207, 134, 0.42);
+  color: var(--text-primary);
+  background: rgba(103, 207, 134, 0.12);
+}
+
+.onboarding-step.is-done .onboarding-tick {
+  border-color: transparent;
+  color: var(--text-dark);
+  background: var(--green-500);
+}
+
+.onboarding-step .onboarding-answer {
+  max-width: 22ch;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.onboarding-count {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* The conversation. Its own transcript element, because #transcript is a singleton in the stage
+   and showModal() makes everything outside this dialog inert. */
+.onboarding-transcript {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 14px;
+  /* Both of these, and neither is decoration. flex-basis 0 makes this the only box that gives,
+     and min-height 0 lets it give: a flex item defaults to min-height auto, which is its content
+     height, so a long conversation would push the composer out of the dialog instead of
+     scrolling inside this element. */
+  min-height: 0;
+  padding: 14px 4px 4px;
+  overflow-y: auto;
+}
+
+/* The shelf composer is a three-column grid: the attachment button, the box, then Send. This one
+   has no attachment button and its label is screen-reader only, which takes the label out of the
+   grid flow entirely -- so on the shipped template the box landed in the 38px track and Send
+   stretched across the rest. Two columns, because this composer has two things in it. */
+.onboarding-composer {
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin: 0;
+  padding: 7px 7px 7px 18px;
+}
+
+.onboarding-note {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* AGENTS-CAP-1: the count on the Add button, so the cap is visible before it is hit. The dock's
+   buttons are a two-row grid (icon over label), so this sits as a third row rather than beside
+   the word. Empty until app.js has a roster to count, and it collapses to nothing when empty. */
+.capability-count {
+  color: var(--text-tertiary);
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+
+.capability-count:empty { display: none; }

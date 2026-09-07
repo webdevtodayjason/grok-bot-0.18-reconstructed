@@ -13,6 +13,9 @@
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="backgrounds.css" />
     <link rel="stylesheet" href="mascots.css" />
+    <!-- ONBOARD-1: the first-run dialog. Its own file so the wave editing styles.css and this
+         one never land on the same lines. -->
+    <link rel="stylesheet" href="onboarding.css" />
   </head>
   <body>
     <div class="app-shell" id="app-shell">
@@ -49,8 +52,10 @@
           <button class="capability-button is-global" type="button" data-capability="marketplace" data-capability-scope="global" aria-label="Open the marketplace">
             <span class="capability-icon">✦</span><span>Marketplace</span>
           </button>
+          <!-- AGENTS-CAP-1: how many of the twelve bots beside Titan are already on this box.
+               Filled by renderAgentCount in app.js. -->
           <button class="capability-button is-global" type="button" data-capability="add" data-capability-scope="global" aria-label="Create worker or room">
-            <span class="capability-icon">＋</span><span>Add</span>
+            <span class="capability-icon">＋</span><span>Add</span><small class="capability-count" data-add-count></small>
           </button>
         </nav>
 
@@ -72,7 +77,9 @@
               <button class="roster-tab is-active" id="workers-tab" type="button" role="tab" aria-selected="true" data-roster-tab="workers">Workers</button>
               <button class="roster-tab" id="rooms-tab" type="button" role="tab" aria-selected="false" data-roster-tab="rooms">Rooms</button>
             </div>
-            <!-- countAgents, as the host reports it, against its 50-agent cap (GW-01). -->
+            <!-- AGENTS-CAP-1: the bots on this box against the box's cap of 13, Titan and twelve
+                 more. Rooms are not bots and are not counted; the host's own countAgents, which
+                 does count them, is on the tooltip. -->
             <span class="roster-count" data-agent-count hidden></span>
             <!-- QOL-NEEDS-YOU: how many agents ended a turn asking you something. -->
             <span class="roster-needs-you" data-needs-you-count hidden></span>
@@ -156,6 +163,22 @@
         </div>
       </footer>
     </div>
+
+    <!-- ONBOARD-1: the first run. app.js opens this only when the box reports that setup is not
+         done yet; a host too old to answer getOnboardingState opens nothing. Titan's face, the
+         five questions he asks, his conversation, and a way out. -->
+    <dialog class="onboarding-dialog" id="onboarding-dialog" aria-labelledby="onboarding-title">
+      <div class="dialog-frame onboarding-frame">
+        <header class="dialog-header">
+          <div>
+            <span class="dialog-eyebrow">First run</span>
+            <h2 id="onboarding-title">Meet Titan</h2>
+          </div>
+          <button class="quiet-button" type="button" data-onboarding-skip>Skip for now</button>
+        </header>
+        <div class="dialog-body onboarding-body" id="onboarding-content"></div>
+      </div>
+    </dialog>
 
     <dialog class="panel-dialog" id="panel-dialog" aria-labelledby="panel-title">
       <div class="dialog-frame">

@@ -3115,6 +3115,33 @@
         });
       },
 
+      // ---- ONBOARD-1: the first-run setup with Titan ----------------------------------------
+      // Three commands, and the console degrades on each of them rather than guessing. tryCall is
+      // what makes that possible for the read: a host older than this wave answers "unknown
+      // gateway method", which says this box cannot report a first run -- not that it is in one --
+      // so the answer is null and app.js opens no dialog at all.
+      getOnboardingState() {
+        return tryCall("getOnboardingState");
+      },
+      // Skip for now, and the close at the end of the interview. Whatever Titan captured goes with
+      // it, so a person who skips halfway keeps the answers they already gave.
+      completeOnboarding(answers) {
+        return call("completeOnboarding", { answers: answers ?? {} });
+      },
+      // Titan's opening line. It is a normal sendPrompt carrying the onboarding marker, which is
+      // what tells the host to put the onboarding prompt on this turn (docs/ONBOARDING.md). The
+      // prompt text is the cue, not the script: the words Titan says are the host's.
+      // A host that does not know the marker forwards the send without it and Titan answers as
+      // himself, which is a plainer first turn rather than a wrong one.
+      startOnboarding(agentId) {
+        const id = agentId ?? state.activeContext?.id;
+        if (!id) return Promise.resolve({ started: false });
+        return call("sendPrompt", {
+          agentId: id, clientNonce: nonce(), onboarding: true,
+          prompt: "Start the first-run setup with the person who just opened this console.",
+        }).then(() => ({ started: true }));
+      },
+
       startTeaching(workerId) {
         const id = workerId ?? state.activeContext?.id;
         const worker = state.workers.find((w) => w.id === id);
