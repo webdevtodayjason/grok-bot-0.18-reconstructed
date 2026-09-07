@@ -21,6 +21,12 @@
 // the Chrome already on this machine rather than a bundled build.
 //
 // Exit 0 no leg failed, 1 a leg failed, 2 nothing could be measured.
+//
+// Run it ONCE and leave a minute before the next gate. The relay's login throttle is five failures
+// per address per 30 seconds and the account door and the password door share it, so this script's
+// own wrong-password leg, verify-deploy's lockout legs and verify-tenant's all fill the same
+// bucket. Back-to-back runs lock this Mac out of the instance they are measuring. A leg that hits
+// that says so by name rather than failing as though the product were broken.
 import { createRequire } from "node:module";
 const flag = (name) => {
   const at = process.argv.indexOf(`--${name}`);
@@ -45,6 +51,26 @@ const check = (ok, label, detail = "") => {
 };
 const step = (name) => console.log(`\n== ${name}`);
 
+// Click and wait for where the click should land, and turn a wait that never lands into a FAIL
+// rather than a stack trace. The reason is almost always the same one and it is worth naming: the
+// relay's login throttle is five failures per address per 30 seconds, it is shared by the account
+// door and the password door, and verify-deploy and verify-tenant both end by filling it on
+// purpose. Run those and this one back to back from the same Mac and this is what you get. The
+// page it was left on is printed, so a real failure is still readable.
+async function clickAndLandOn(page, predicate, label) {
+  try {
+    await Promise.all([page.waitForURL(predicate, { timeout: 60000 }), page.click("button")]);
+    return true;
+  } catch (error) {
+    const body = await page.content().catch(() => "");
+    const why = /too many (sign-in )?attempts/i.test(body)
+      ? "the login lockout is holding; another gate filled it in the last 30 s, so run them further apart"
+      : `left on ${page.url()}`;
+    check(false, label, `${String(error?.name ?? "error")}: ${why}`);
+    return false;
+  }
+}
+
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 try {
   {
@@ -56,8 +82,8 @@ try {
     check((await page.content()).includes("Sign in with your Titanium Bot account"), "and says what the account is for");
     await page.fill('input[name="email"]', EMAIL);
     await page.fill('input[name="password"]', PASSWORD);
-    await Promise.all([page.waitForURL((u) => new URL(u).pathname === "/", { timeout: 60000 }), page.click("button")]);
-    check(new URL(page.url()).pathname === "/", "it lands on the console", page.url());
+    const landed = await clickAndLandOn(page, (u) => new URL(u).pathname === "/", "it lands on the console");
+    if (landed) check(new URL(page.url()).pathname === "/", "it lands on the console", page.url());
     const cookies = await context.cookies();
     check(cookies.some((c) => c.name === "gb_session"), "with a session cookie of that instance's own");
     await page.waitForSelector(".worker-card[data-context-id]", { timeout: 60000 }).catch(() => {});
@@ -80,8 +106,8 @@ try {
     check(await page.locator('input[name="email"]').count() === 1, "the operator's own login page also takes an account");
     await page.fill('input[name="email"]', EMAIL);
     await page.fill('input[name="password"]', PASSWORD);
-    await Promise.all([page.waitForURL((u) => new URL(u).host === new URL(RELAY).host, { timeout: 60000 }), page.click("button")]);
-    check(new URL(page.url()).host === new URL(RELAY).host, "it is sent to its own instance", new URL(page.url()).host);
+    const sent = await clickAndLandOn(page, (u) => new URL(u).host === new URL(RELAY).host, "it is sent to its own instance");
+    if (sent) check(new URL(page.url()).host === new URL(RELAY).host, "it is sent to its own instance", new URL(page.url()).host);
     check(new URL(page.url()).pathname === "/", "and lands signed in rather than at another login", new URL(page.url()).pathname);
     const cookies = await context.cookies();
     check(cookies.some((c) => c.name === "gb_session" && c.domain.includes(new URL(RELAY).hostname)), "with a session on that instance");

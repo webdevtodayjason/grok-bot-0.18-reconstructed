@@ -915,6 +915,12 @@ tool for status codes, headers and copy, and cannot tell you a person can sign i
 the wrong field name, a button that is not a submit and a redirect a browser will not follow all
 answer 200 to curl.
 
+**Run the gates one at a time, a minute apart.** The relay's login throttle is five failures per
+address per 30 seconds, the account door and the password door share it, and `verify-deploy`,
+`verify-tenant` and this script all fill it on purpose. Run them back to back from one Mac and the
+next one is measuring its own lockout. Every gate here says so by name when it hits that, rather
+than failing as though the product were broken, but the cure is to wait.
+
 1. `https://demo.titanium.bot/login` shows the email field and the sentence above it.
 2. Signing in as `demo@titanium.bot` lands on `/` with a session cookie of that instance's own, and
    the roster draws a card from that instance's own box.
