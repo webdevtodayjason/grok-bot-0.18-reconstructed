@@ -162,11 +162,22 @@ and generates the secrets into `/home/sem/titanbot/cp.env`, then
 environment, gives it `https://api.titanium.bot:7790` and starts it. Both are idempotent and both
 take `--dry-run` or `TITANBOT_DRY_RUN=1`, so read the plan before you run either.
 
-All of that is live as of 2026-09-07. The server runs four containers: your relay (the one console),
-your box, the control plane, and demo's box. The demo account is `demo@titanium.bot` with its
-password in `cp.env` as `DEMO_PASSWORD`, and it signs in at `console.titanium.bot` like any customer.
-`verify-deploy` passes 58 legs with none failing there, `scripts/verify-one-console.mjs` proves two customers get two
+All of that is live as of 2026-09-07. The server runs five containers: your relay (the one console),
+your box, the control plane, demo's box and richard-avery's box. The demo account is
+`demo@titanium.bot` with its password in `cp.env` as `DEMO_PASSWORD`, and it signs in at
+`console.titanium.bot` like any customer.
+`verify-deploy` passes 59 legs with none failing there and two inconclusive, `scripts/verify-one-console.mjs` proves two customers get two
 rosters, and `scripts/verify-one-console-browser.mjs` proves it in a real browser in two contexts.
+
+Shipping a change that touches both halves is two deploys, and they are not interchangeable. The
+console is `bash deploy/r750/sync.sh` from a clean checkout, then `docker restart` of the relay
+container by name. The control plane is `bash /home/sem/titanbot/deploy/control-plane-install.sh` on
+the server, which rebuilds `titanbot-cp:local` from whatever the sync just shipped and leaves
+`cp.env` exactly as it found it, then a Coolify **restart** of the titanbot-cp service. Restart, not
+recreate: a recreate of a service that holds a box corrupts the agent stores (BOX-6), and while the
+control plane holds no agents, keeping one verb for both halves is what stops the wrong one being
+used on the wrong service. The super admin console shipped this way on 2026-09-07, and afterwards
+`GET /admin` answered 200 and `/v1/admin/system` reported the R750's own load, memory and disk.
 
 Three things to remember when you change something on a Coolify service. **An environment value the
 compose file does not name never reaches the container**, so push the current compose as well as
