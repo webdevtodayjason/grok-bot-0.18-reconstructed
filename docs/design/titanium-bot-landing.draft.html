@@ -482,6 +482,10 @@ footer.site a:hover{ color:var(--ink) }
 /* The scroll fade is a band on the right edge, not a disc: a radial blob read as a dark circle over the frame on phones. */
 .sc::after, .sc[data-more]::after { content:""; position:absolute; top:0; right:0; bottom:0; width:64px; height:auto; border-radius:0; background:linear-gradient(to right, rgba(13,17,23,0), rgba(13,17,23,.82)); pointer-events:none; }
 .sc:not([data-more])::after { display:none; }
+
+/* Final word on the hint: no disc, no halo, no pseudo-elements. */
+.sc .hint::before, .sc .hint::after { display:none !important; content:none !important; }
+.sc .hint { position:absolute !important; right:8px !important; top:50% !important; bottom:auto !important; left:auto !important; transform:translateY(-50%) !important; width:auto !important; height:auto !important; min-width:0 !important; min-height:0 !important; aspect-ratio:auto !important; padding:5px 9px !important; border-radius:999px !important; background:#0D1117 !important; color:#F4F5F7 !important; box-shadow:0 0 0 1px #2A2E35 !important; font-size:10px !important; letter-spacing:.06em !important; text-transform:uppercase !important; display:inline-block !important; margin:0 !important; }
 </style>
 </head>
 <body>
