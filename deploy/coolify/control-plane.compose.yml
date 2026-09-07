@@ -1,0 +1,76 @@
+# The control plane as a Coolify resource. Paste this whole file into New Resource ->
+# Docker Compose Empty, fill in the environment fields below, set the domain on titanbot-cp to
+# https://api.titanium.bot:7790, deploy. docs/TENANCY.md is the operator's walk-through.
+#
+# It follows the same rules docker-compose.yml in this directory explains at length, for the same
+# measured reasons, so they are only summarised here:
+#
+#   no named volumes   Coolify renames every one to "{service-uuid}_{slug}" and creates it fresh and
+#                      empty. The two mounts below are host paths.
+#   no bind of a file  Coolify turns every bind that is not the docker socket or /tmp into a storage
+#                      record and assumes it is a directory. A single-file bind of the sqlite
+#                      database would put the customers' password hashes into Coolify's own
+#                      database. Only directories here.
+#   no ports           Coolify's Traefik reaches this container over the network it makes for the
+#                      stack. A ports: line would put the control plane on a server interface with
+#                      no proxy in front of it.
+#   no networks        Coolify makes one and attaches its proxy. A second network makes Traefik pick
+#                      an address non-deterministically.
+#   no traefik labels  Coolify writes the router, the certificate and the redirect from the Domains
+#                      field.
+#   plain ${VAR}       Coolify builds an environment field's NAME out of everything between the
+#                      braces, so ${VAR:?} produces a field literally named "VAR:?" that no UI can
+#                      set. The service refuses to start on a missing secret instead, and says which
+#                      one.
+#
+# Build the image on the server once, the same way the relay image is built:
+#
+#   docker build -t titanbot-cp:local -f /home/sem/titanbot/cp/Dockerfile /home/sem/titanbot
+#
+# pull_policy: never is what keeps Coolify's pull step from failing on an image that exists only on
+# this host.
+
+services:
+  titanbot-cp:
+    image: titanbot-cp:local
+    pull_policy: never
+    restart: unless-stopped
+    labels:
+      com.titanbot.role: control-plane
+    environment:
+      CP_PORT: "7790"
+      CP_DATA_DIR: /data/cp
+      # The tenant directories, and the same path inside and out so nothing has to translate between
+      # what this service writes and what a tenant's compose mounts.
+      CP_TENANT_ROOT: /data/titanbot
+      # The shared release: runtime, deploy and ui, one copy for every tenant on this server. Not
+      # mounted into this container, only named: the control plane writes tenant compose files that
+      # refer to it, it never reads it.
+      CP_RELEASE_ROOT: /home/sem/titanbot
+      CP_BASE_DOMAIN: titanium.bot
+      CP_PUBLIC_URL: https://api.titanium.bot
+      # The shared secret every tenant relay verifies sessions with. 32 bytes or more, generated
+      # once: `openssl rand -hex 32`. The control plane refuses to start without it, and changing it
+      # signs every customer out of every instance at once.
+      CP_SESSION_SECRET: ${CP_SESSION_SECRET}
+      # The operator bearer for the routes that add accounts and tenants. `openssl rand -hex 24`.
+      CP_ADMIN_TOKEN: ${CP_ADMIN_TOKEN}
+      # Coolify's own API, which is how a tenant gets created. The URL is this Coolify's address and
+      # the key is an API token from Keys & Tokens with write access to the project below. With
+      # neither set the service still runs: tenants can be recorded and adopted, just not created.
+      COOLIFY_URL: ${COOLIFY_URL}
+      COOLIFY_API_KEY: ${COOLIFY_API_KEY}
+      COOLIFY_PROJECT_UUID: ${COOLIFY_PROJECT_UUID}
+      COOLIFY_SERVER_UUID: ${COOLIFY_SERVER_UUID}
+      COOLIFY_ENVIRONMENT_NAME: production
+    volumes:
+      # The sqlite database. It holds every customer's scrypt password hash, so it is its own
+      # directory at 0700 on the host owned by uid 10001 (cp/Dockerfile says why that uid):
+      #
+      #   sudo mkdir -p /data/titanbot-cp /data/titanbot
+      #   sudo chown -R 10001:10001 /data/titanbot-cp /data/titanbot
+      #   sudo chmod 700 /data/titanbot-cp
+      - /data/titanbot-cp:/data/cp
+      # Every tenant's tree. The control plane creates each customer's profile, credential, state and
+      # volumes directories in here, and their compose mounts those same paths straight off the host.
+      - /data/titanbot:/data/titanbot

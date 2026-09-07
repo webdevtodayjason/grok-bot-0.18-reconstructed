@@ -76,3 +76,7 @@ import "./skill-ownership.test.mjs";
 import "./awaiting-operator.test.mjs";
 import "./env-fanout.test.mjs";
 import "./titan-crew.test.mjs";
+import "./cp-session.test.mjs";
+import "./cp-store.test.mjs";
+import "./cp-provision.test.mjs";
+import "./cp-server.test.mjs";
