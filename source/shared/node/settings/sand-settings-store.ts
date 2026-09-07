@@ -29,6 +29,13 @@ export interface SandStoredSettings {
   inferenceProvider?: SandInferenceProvider; inferenceRouterUsage?: SandInferenceRouterUsage;
   boxRuntime?: SandBoxRuntime;
   mcpCustomInstructionsAccountScope?: string; pinnedAgentIds?: string[]; sidebarSections?: SidebarSection[];
+  /**
+   * ONBOARD-1, the box's first-run record. Distinct from `hasSeenOnboarding` above, which is
+   * upstream's per-account "you have seen the Cursor welcome" bit; this one is Titan's interview
+   * and belongs to the box. Held as an opaque object here and parsed by
+   * host/extensions/onboarding/onboarding-state.ts, so the shape lives with the rule.
+   */
+  onboarding?: Record<string, unknown>;
 }
 
 export function emptySettings(): SandStoredSettings {
@@ -65,6 +72,7 @@ function parseSettings(value: unknown): SandStoredSettings | null {
   if (isSandAgentModelSelection(raw.agentDefaultModel)) result.agentDefaultModel = raw.agentDefaultModel;
   if (isSandAgentModelSelection(raw.computerUseModel)) result.computerUseModel = raw.computerUseModel;
   if (typeof raw.notifications === "object" && raw.notifications != null && !Array.isArray(raw.notifications)) result.notifications = raw.notifications as Record<string, unknown>;
+  if (typeof raw.onboarding === "object" && raw.onboarding != null && !Array.isArray(raw.onboarding)) result.onboarding = raw.onboarding as Record<string, unknown>;
   for (const key of ["userTimeZone", "userTimeZoneOverride", "mcpCustomInstructionsAccountScope"] as const) if (typeof raw[key] === "string" && raw[key].length > 0) result[key] = raw[key];
   if (typeof raw.autoReviewInstructions === "object" && raw.autoReviewInstructions != null) result.autoReviewInstructions = normalizeSandAutoReviewInstructions(raw.autoReviewInstructions as Record<string, unknown>);
   if (isSandLocalToolPermission(raw.localToolPermission)) result.localToolPermission = raw.localToolPermission;
@@ -169,6 +177,9 @@ export class SandSettingsStore {
     });
   }
   setLocalToolPermissionCeiling(value?: SandLocalToolPermission): void { this.update((s) => { const { localToolPermissionCeiling: _old, ...rest } = s; return value === undefined ? rest : { ...rest, localToolPermissionCeiling: value }; }); }
+  /** ONBOARD-1. The box's first-run record, read and written whole. */
+  getOnboarding(): Record<string, unknown> | undefined { return this.load().onboarding; }
+  setOnboarding(value: Record<string, unknown> | undefined): void { this.update((s) => { const { onboarding: _old, ...rest } = s; return value === undefined ? rest : { ...rest, onboarding: value }; }); }
   getPinnedAgentIds(): string[] | undefined { return this.load().pinnedAgentIds; }
   setPinnedAgentIds(ids: readonly string[]): void { this.update((s) => ({ ...s, pinnedAgentIds: [...new Set(ids)] })); }
   static storable(args: { sections: readonly SidebarSection[]; stored?: readonly SidebarSection[] }): SidebarSection[] { return SidebarSections.carryFolds(args).map((s) => ({ id: s.id, name: s.name, agentIds: [...s.agentIds], isCollapsed: s.isCollapsed ?? false })); }

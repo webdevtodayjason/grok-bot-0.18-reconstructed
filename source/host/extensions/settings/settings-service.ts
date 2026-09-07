@@ -55,6 +55,9 @@ export class SettingsService {
     const fields = Object.keys(update); if (fields.length > 0) for (const listener of [...this.changeListeners]) listener({ fields });
     return this.getHostSettings();
   }
+  /** ONBOARD-1. The box's first-run record, read and written whole by the onboarding service. */
+  getOnboarding(): Record<string, unknown> | undefined { return this.store.getOnboarding(); }
+  setOnboarding(value: Record<string, unknown> | undefined): void { this.store.setOnboarding(value); }
   subscribeToChanges(listener: (event: { readonly fields: string[] }) => void): () => void { this.changeListeners.add(listener); return () => this.changeListeners.delete(listener); }
   getAgentDefaultModel(): SandAgentModelSelection | undefined { return this.store.getAgentDefaultModel(); }
   getComputerUseModel(): SandAgentModelSelection | undefined { return this.store.getComputerUseModel(); }

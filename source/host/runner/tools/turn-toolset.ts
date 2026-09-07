@@ -42,6 +42,8 @@ import {
   SAND_TOOL_TRACE_SETTING,
 } from "../../sand-box-setting.js";
 import { fencedToolSet } from "./sand-spotlight-tools.js";
+import { isOnboardingActive } from "../../extensions/onboarding/onboarding-box-store.js";
+import { createSaveOnboardingAnswerTool } from "./onboarding-answer-tool.js";
 import {
   McpDescriptor,
   McpMetaToolOptions,
@@ -1428,6 +1430,11 @@ export interface TurnToolsetHost {
   /** TOOLS-15: "bridge" when the answer is the live local-exec liveness window, "setting" when an operator pinned it. */
   localMachineSource?(): "bridge" | "setting";
   spotlightEnabled(): boolean;
+  /**
+   * ONBOARD-1: whether this box is mid first-run setup, which is the only time
+   * `save_onboarding_answer` is offered. Undefined reads the box's own settings document.
+   */
+  isOnboardingActive?(): boolean;
   isDynamicToolsEnabled?(): boolean;
   isMultitaskEnabled?(): boolean;
   isSharedRoomBoxToolsEnabled?(): boolean;
@@ -1552,6 +1559,13 @@ export function buildTurnTools(
     if (!host.isSystemPromptOverridden) {
       const updateState = factories.updateState?.();
       if (updateState !== undefined) tools.push(updateState);
+    }
+    // ONBOARD-1. Offered only while this box's first-run record says done:false, so it exists for
+    // the length of one interview and then stops being built at all. `host.isOnboardingActive`
+    // lets a test pin the answer; the default reads the box's settings document, the same way the
+    // trace switch a few lines down reads the operator's.
+    if ((host.isOnboardingActive ?? isOnboardingActive)()) {
+      tools.push(asTurnTool(createSaveOnboardingAnswerTool()));
     }
   }
 

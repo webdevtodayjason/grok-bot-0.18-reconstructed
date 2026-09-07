@@ -358,6 +358,10 @@ export class SharedRooms {
       "user",
       {
         isIntroductionSuppressed: true,
+        // AGENTS-CAP-1. This mint becomes a room the moment `configureAgentDir` writes its group
+        // config, and `countCapAgents` will not count it afterwards -- so the bots' ceiling must
+        // not be able to refuse it on the way in either.
+        isExemptFromAgentCap: true,
         configureAgentDir: (dir: string) => writeSandGroupConfig(dir, binding),
       },
     );
@@ -411,7 +415,9 @@ export class SharedRooms {
     const created = await this.tm.createBackgroundAgent(
       { name: room.name, description: "" },
       "user",
-      { isIntroductionSuppressed: true, configureAgentDir: writeBinding },
+      // Exempt for the same reason as the hosted room above: `writeBinding` makes this a room, and
+      // a room is not one of the box's thirteen bots.
+      { isIntroductionSuppressed: true, isExemptFromAgentCap: true, configureAgentDir: writeBinding },
     );
     await this.applyMirrorRoomPicture(created.agent.id, room.avatarDataUrl);
     return created.agent.id;

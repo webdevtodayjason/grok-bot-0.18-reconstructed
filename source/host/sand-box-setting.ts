@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getSandRootDir } from "./host-paths.js";
+import { SAND_DEFAULT_MAX_AGENTS, SAND_MAX_AGENTS_SETTING } from "../shared/agents/agents.js";
 
 /**
  * Host-side switches an operator has to be able to flip on a *running* box.
@@ -82,6 +83,33 @@ export function isSandOverrideTruthy(value: string | undefined): boolean {
 
 export function isSandBoxSettingEnabled(name: string): boolean {
   return isSandOverrideTruthy(readSandBoxSetting(name));
+}
+
+/**
+ * Every value in the file is a string, so a switch that carries a number needs its own reader.
+ * Anything that is not a whole number at or above `min` is treated as "no override", because a
+ * typo in the settings file must not be able to lower a ceiling to zero and lock a box out.
+ */
+export function readSandBoxSettingNumber(
+  name: string,
+  options: { readonly min?: number; readonly max?: number } = {},
+): number | undefined {
+  const raw = readSandBoxSetting(name);
+  if (raw == null) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) return undefined;
+  if (parsed < (options.min ?? 1)) return undefined;
+  if (options.max != null && parsed > options.max) return undefined;
+  return parsed;
+}
+
+/**
+ * AGENTS-CAP-1. How many bots one box holds: Titan plus twelve unless an operator says otherwise.
+ * Read per call like every other switch, so a live box can be moved without a recreate.
+ */
+export function resolveSandMaxAgents(): number {
+  return readSandBoxSettingNumber(SAND_MAX_AGENTS_SETTING, { min: 1, max: 1_000 })
+    ?? SAND_DEFAULT_MAX_AGENTS;
 }
 
 /**
