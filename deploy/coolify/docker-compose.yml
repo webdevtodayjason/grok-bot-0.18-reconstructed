@@ -405,6 +405,11 @@ services:
       # storage trap at the top of this file, and the file it would read into Coolify's database is
       # the one with the password hash in it.
       - /home/sem/titanbot/state:/state
+      # TENANT-5: every customer's state directory (their endpoints, subscriptions, mail) lives under
+      # /data/titanbot/<slug>/state and the registry hands the relay those host paths, so the relay has
+      # to see them. Found 2026-09-07 with Richard's workspace: without this the relay read an empty
+      # provider list for every customer.
+      - /data/titanbot:/data/titanbot
       # The token file the hand install wrote, and the relay's ONLY source for the gateway bearer:
       # nothing in the environment above sets it. 0600 on the host, and the relay never writes it.
       #
