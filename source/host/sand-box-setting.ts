@@ -130,6 +130,22 @@ export function resolveBrowserUseEnabled(
 export const SAND_BROWSER_USE_SETTING = "SAND_BROWSER_USE";
 
 /**
+ * BROWSER-1. Titan's own four browser tools (browser_open, browser_click, browser_type,
+ * browser_screenshot), offered to the main agent rather than only to a subagent. Unlike the four
+ * switches above there is no Statsig gate behind this one -- nothing upstream ever shipped these
+ * tools -- so the default is ON and the setting can only take them away. An operator who wants
+ * Titan out of the browser writes "0" here and the next tool build stops offering them, with no
+ * recreate; the browserUse subagent and its fifteen page-level tools are a separate switch
+ * (SAND_BROWSER_USE) and are not affected either way.
+ */
+export function resolveBrowserToolsEnabled(envOverride: string | undefined): boolean {
+  return envOverride != null && envOverride.length > 0 ? isSandOverrideTruthy(envOverride) : true;
+}
+
+/** The name an operator writes into sand-host-settings.json (or the container env). */
+export const SAND_BROWSER_TOOLS_SETTING = "SAND_BROWSER_TOOLS";
+
+/**
  * Teach by demonstration sat behind a bare Statsig gate too, so on a box with no Cursor
  * login the recorder refused every start and the whole feature was unreachable. Same shape as
  * `resolveBrowserUseEnabled`: an explicit local override wins, otherwise the gate decides.

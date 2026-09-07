@@ -74,6 +74,12 @@ export interface PromptCollectorHost<Context = unknown> {
   mcpCustomInstructionsForTurn?(): ReadonlyMap<string, string>;
   isMcpDiscoveryUnavailableForTurn?(): boolean;
   isBrowserUseSubagentEnabled?: (() => boolean) | undefined;
+  /**
+   * BROWSER-1. Whether this turn's toolset carries browser_open / browser_click / browser_type /
+   * browser_screenshot. Undefined means offered, which is the same default the tool gate uses, so
+   * the paragraph and the tools swing on one answer.
+   */
+  isBrowserToolsEnabled?: (() => boolean) | undefined;
   resolveBoxBrowser?: (() => { readonly display: string; readonly cdpUrl: string } | null) | undefined;
   getConversationId?: (() => string) | undefined;
   getAutomationStatusReminder?: ((firingAutomationId?: string) => string | null) | undefined;
@@ -270,20 +276,54 @@ export function createPromptCollectorGlue<Context = unknown>(host: PromptCollect
     ].join("\n");
     if (host.isSubagentRunner === true) return null;
     const browserUseOffered = host.isBrowserUseSubagentEnabled?.() === true;
+    /**
+     * BROWSER-1. Titan holds browser_open / browser_click / browser_type / browser_screenshot
+     * himself now, so the flat "delegate every browser interaction" rule this section used to
+     * open with is no longer true, and a model reading it would refuse to use the tools it was
+     * handed. Same reader as the tool gate (host-runner-composition), so a box with the tools
+     * switched off gets the old wording back and never teaches a tool nobody was given.
+     */
+    const browserToolsOffered = host.isBrowserToolsEnabled?.() !== false;
+    const desktopHands = browserToolsOffered
+      ? "You cannot click, move, type, press keys, scroll, or wait on the desktop yourself. The browser is the one exception: you open and work a web page with your own browser tools."
+      : "You cannot click, move, type, press keys, scroll, or wait on the desktop yourself.";
+    const browserRouting = browserToolsOffered
+      ? "A single web page is yours to open and work; browser work that runs past a page or two goes to `browserUse`, and the desktop itself to `computerUse`."
+      : "Browser work goes to `browserUse` first; the desktop itself goes to `computerUse`.";
+    const browserRoutingWithoutSubagent = browserToolsOffered
+      ? "A single web page is yours to open and work; longer browser work and the desktop itself go through `computerUse` (and `browserUse` only when Task actually offers that type)."
+      : "Browser and GUI work goes through `computerUse` (and `browserUse` only when Task actually offers that type).";
+    const reachForBrowserUse = browserToolsOffered
+      ? "- Reach for the `browserUse` subagent for browser work that runs past a page or two: filling long forms, pulling data from a list of pages, clicking through a web app."
+      : "- Reach for the `browserUse` subagent first for anything that happens in the browser: reading pages, filling forms, pulling data from sites, clicking through web apps.";
+    const reachForComputerUse = browserToolsOffered
+      ? "- Reach for the computerUse subagent for GUI apps, and for browser work that runs past a page or two;"
+      : "- Reach for the computerUse subagent for browsing, signing in to sites, and GUI apps;";
+    const delegateWhat = browserToolsOffered
+      ? "Delegate the rest of the desktop — and any browser job long enough to need many steps — to a subagent"
+      : "Delegate every browser and desktop interaction to a subagent";
     return [
       "## The box desktop",
       ...(browserUseOffered ? [
-        "You have your own desktop on the box (your screen alone — see Your box), with a browser, and you hold the read-only Screenshot tool to see its current screen, confirm where a flow landed, or check on a running subagent. You cannot click, move, type, press keys, scroll, or wait on the desktop yourself. Delegate every browser and desktop interaction to a subagent; like any Task it runs in the background, so you keep working and are revived with its result. Do not bypass this boundary with Shell-driven GUI automation such as xdotool, or by driving the box browser from Shell — no CDP attach, no Playwright, Puppeteer, or `websocket-client`, no `/json/new`, no cookie-DB scraping, and no page JS eval over DevTools. Browser work goes to `browserUse` first; the desktop itself goes to `computerUse`.",
-        "- Reach for the `browserUse` subagent first for anything that happens in the browser: reading pages, filling forms, pulling data from sites, clicking through web apps. It drives the box's signed-in Chrome at the page level with element references instead of pixel clicks, so it is faster and more reliable than desktop automation, and it never touches the desktop's mouse, so it can run alongside other work. Logins and files persist in the box across turns, so a sign-in is a one-time step.",
+        `You have your own desktop on the box (your screen alone — see Your box), with a browser, and you hold the read-only Screenshot tool to see its current screen, confirm where a flow landed, or check on a running subagent. ${desktopHands} ${delegateWhat}; like any Task it runs in the background, so you keep working and are revived with its result. Do not bypass this boundary with Shell-driven GUI automation such as xdotool, or by driving the box browser from Shell — no CDP attach, no Playwright, Puppeteer, or \`websocket-client\`, no \`/json/new\`, no cookie-DB scraping, and no page JS eval over DevTools. ${browserRouting}`,
+        `${reachForBrowserUse} It drives the box's signed-in Chrome at the page level with element references instead of pixel clicks, so it is faster and more reliable than desktop automation, and it never touches the desktop's mouse, so it can run alongside other work. Logins and files persist in the box across turns, so a sign-in is a one-time step.`,
         "- Use the `computerUse` subagent only when the task needs the desktop itself — GUI apps, file dialogs, drag interactions — or when a site defeats page-level automation. If a `browserUse` dispatch reports it could not operate a site, re-dispatch that same task to `computerUse` rather than retrying `browserUse` harder.",
       ] : [
-        "You have your own desktop on the box (your screen alone — see Your box), with a browser, and you hold the read-only Screenshot tool to see its current screen, confirm where a flow landed, or check on a running computerUse subagent. You cannot click, move, type, press keys, scroll, or wait on the desktop yourself. Delegate every desktop interaction to a computerUse subagent; like any Task it runs in the background, so you keep working and are revived with its result. Do not bypass this boundary with Shell-driven GUI automation such as xdotool, or by driving the box browser from Shell — no CDP attach, no Playwright, Puppeteer, or `websocket-client`, no `/json/new`, no cookie-DB scraping, and no page JS eval over DevTools. Browser and GUI work goes through `computerUse` (and `browserUse` only when Task actually offers that type).",
-        "- Reach for the computerUse subagent for browsing, signing in to sites, and GUI apps; logins and files persist in the box across turns, so a sign-in is a one-time step.",
+        `You have your own desktop on the box (your screen alone — see Your box), with a browser, and you hold the read-only Screenshot tool to see its current screen, confirm where a flow landed, or check on a running computerUse subagent. ${desktopHands} ${browserToolsOffered ? delegateWhat : "Delegate every desktop interaction to a computerUse subagent"}; like any Task it runs in the background, so you keep working and are revived with its result. Do not bypass this boundary with Shell-driven GUI automation such as xdotool, or by driving the box browser from Shell — no CDP attach, no Playwright, Puppeteer, or \`websocket-client\`, no \`/json/new\`, no cookie-DB scraping, and no page JS eval over DevTools. ${browserRoutingWithoutSubagent}`,
+        `${reachForComputerUse} logins and files persist in the box across turns, so a sign-in is a one-time step.`,
       ]),
+      ...(browserToolsOffered ? [
+        "- The browser is yours for a single page. browser_open opens a web address and hands you the page's words and one picture of it; browser_click and browser_type work the page; browser_screenshot looks again. Reach for them when reading or nudging one page IS the job — a page to read, a few clicks, a short form.",
+        "- Read the web in this order, and don't skip a rung. Fetch the page first (WebSearch when you don't know the address, then WebFetch). If the fetch is refused, or comes back a stub or a cookie wall, try the TinyFish connector when this box has one. Open it in the browser only after those — it is the slow, expensive rung, and it is for pages the others can't get, pages behind the person's own sign-in, and pages you genuinely have to see.",
+        "- One page you do yourself; a job you hand off. If the work runs many steps across a site — a checkout, a multi-page form, a sweep through a dozen listings — dispatch a subagent instead of driving it click by click, or you'll spend the whole turn on it and still be mid-flow when it ends.",
+        "- Never say a tool's name to the person. They don't know what browser_open is and shouldn't have to. Say what you found and where: \"I opened their pricing page, it lists three plans\", never \"I called browser_open\".",
+        "- When a page wants a sign-in, say so plainly and stop there: tell them they can sign in on the computer's screen, and that you'll pick the page back up once they have. Never type a password, a one-time code, or a card number yourself, and never ask them to send you one.",
+        "- When a site answers with a security check or a flat refusal instead of the page, say that in plain words and go find another source. Don't retry the same address over and over, and don't try to slip past the check.",
+      ] : []),
       "- Scope it tight — a narrow, well-defined task is your main defense against a subagent that stalls or wanders. Break a big GUI goal into the smallest concrete step(s) and dispatch those one at a time; several tightly-scoped dispatches beat one broad, open-ended objective. It runs headless and can't ask you follow-ups, so each task must stand on its own: the exact step, the specifics it needs (which site or account, exact values to enter, which button to land on), what \"done\" looks like and where to stop, and what to report back. A vague or sprawling task is how it gets lost. When you know the destination URL — one the user pasted, or one you can construct (a site's search/filter URL like `https://www.amazon.com/s?k=bread+flour`) — put that exact URL in the task, as specific as the site's query params allow, so the subagent opens it directly instead of clicking through the site to rebuild it.",
       browserUseOffered ? "- For bulk or structured data, don't type it in by hand: generate the file with Shell (e.g. a CSV), inspect it with Read when useful, then have the subagent import or upload it, far faster and more reliable than entering values one by one." : "- For bulk or structured data, don't type it in by hand: generate the file with Shell (e.g. a CSV), inspect it with Read when useful, then have the computerUse subagent import or upload it, far faster and more reliable than entering values one by one.",
       "- If it's running long or might be looping, look in with CheckSubagent rather than waiting it out; MessageSubagent redirects a stuck one mid-run (point it at the right element, or tell it the user just signed in) and StopSubagent aborts one that's wedged. When it returns, read its report before acting — if it stopped short or hit a step only the user can do, that's your cue to follow up or hand off the box.",
-      "- You share your desktop's single screen with the computerUse subagent, so only one runs at a time; while one is running, leave the screen to it and limit yourself to a screenshot to check in rather than clicking or typing. (The user's other agents have their own desktops, so their work never appears on yours.)",
+      `- You share your desktop's single screen with the computerUse subagent, so only one runs at a time; while one is running, leave the screen to it and limit yourself to a screenshot to check in rather than clicking or typing.${browserToolsOffered ? " Your own browser tools drive that same screen's browser, so while a subagent has the screen, leave the page alone too and wait for its report." : ""} (The user's other agents have their own desktops, so their work never appears on yours.)`,
       "- When a step needs the user (a login, 2FA, captcha, or payment), hand them the box with request_box_help directly — don't first ask with a question widget (or in prose) whether to hand it over, since the tool is itself both the handoff and the ask: it surfaces the box with a hand-back button and shows your instruction, so a \"hand you the box now?\" widget is just redundant friction. Pass one short instruction (no paragraph) like \"Sign in to your Google account\" (you never see their password); once they hand it back, dispatch the subagent again to continue.",
     ].join("\n");
   }

@@ -75,6 +75,15 @@ export interface BrowserDriverResponse {
   readonly title?: string | undefined;
   readonly viewId?: string | undefined;
   readonly screenshot?: boolean | undefined;
+  /**
+   * BROWSER-1. The three fields the box driver's `open` answers with beside the old ones: the
+   * page's readable words, and its two best-effort verdicts about why a page might be useless --
+   * a sign-in form is in the way, or the site refused the visit with a check or a block page.
+   * Every other op leaves all three absent, so nothing about the fifteen page-level tools moves.
+   */
+  readonly text?: string | undefined;
+  readonly needsLogin?: boolean | undefined;
+  readonly blocked?: boolean | undefined;
 }
 
 function optionalString(
@@ -119,6 +128,15 @@ export function toDriverResponse(
     ...(optionalBoolean(parsed, "screenshot") == null
       ? {}
       : { screenshot: optionalBoolean(parsed, "screenshot") }),
+    ...(optionalString(parsed, "text") == null
+      ? {}
+      : { text: optionalString(parsed, "text") }),
+    ...(optionalBoolean(parsed, "needsLogin") == null
+      ? {}
+      : { needsLogin: optionalBoolean(parsed, "needsLogin") }),
+    ...(optionalBoolean(parsed, "blocked") == null
+      ? {}
+      : { blocked: optionalBoolean(parsed, "blocked") }),
   };
 }
 
@@ -157,6 +175,15 @@ export class SandBrowserDriverError extends Error {
   override readonly name = "SandBrowserDriverError";
 }
 
+/**
+ * BROWSER-1. What the model is told when the page is walled or refused, in the words it is meant
+ * to pass on. The person never hears a tool name, so neither do these.
+ */
+export const SAND_BROWSER_NEEDS_LOGIN_NOTE =
+  "This page wants a sign-in before it shows anything. Tell the person they can sign in on the computer's screen, and say you will pick the page back up once they have.";
+export const SAND_BROWSER_BLOCKED_NOTE =
+  "The site would not show this page: it answered with a security check or a refusal instead of the real content. Say so plainly and try another source.";
+
 export interface BrowserDriverDependencies<Context> {
   readonly resourceAccessor: { get(resource: unknown): unknown };
   getWindowIndex(context: Context): Promise<number | undefined>;
@@ -190,6 +217,13 @@ export interface BrowserDriverDependencies<Context> {
   getPersistImage?():
     | ((bytes: Uint8Array, mimeType: string) => Promise<unknown>)
     | undefined;
+  /**
+   * BROWSER-1. One `browser_navigation` row in the agent's audit ledger per page Titan opens,
+   * with the page's url and title. The polling navigation probe only runs while a box-scoped
+   * subagent holds the screen, so a main-agent tool call would otherwise leave no receipt at all.
+   * Only a spec marked `recordsNavigation` calls it, and only after the driver said ok.
+   */
+  recordNavigation?(input: { readonly url: string; readonly title: string }): void;
   readonly autoReview?: SandBrowserAutoReviewOptions;
 }
 
@@ -197,6 +231,11 @@ export interface BrowserDriverOutput {
   readonly text: string;
   readonly imageB64?: string;
   readonly isError?: boolean;
+  /** BROWSER-1. Where the page ended up, for the audit row; absent when the op never navigated. */
+  readonly url?: string;
+  readonly title?: string;
+  readonly needsLogin?: boolean;
+  readonly blocked?: boolean;
 }
 
 export class SandBrowserDriver<Context = unknown> {
@@ -311,6 +350,17 @@ export class SandBrowserDriver<Context = unknown> {
     if (response.data != null && response.data.length > 0) {
       parts.push(response.data);
     }
+    // BROWSER-1. The page's words, then the two verdicts said the way Titan is expected to repeat
+    // them: no tool name, no status code, just what happened and what the person can do about it.
+    if (response.text != null && response.text.length > 0) {
+      parts.push(response.text);
+    }
+    if (response.needsLogin === true) {
+      parts.push(SAND_BROWSER_NEEDS_LOGIN_NOTE);
+    }
+    if (response.blocked === true) {
+      parts.push(SAND_BROWSER_BLOCKED_NOTE);
+    }
 
     const imageB64 = response.screenshot === true && screenshotPath != null
       ? await this.fetchScreenshot(context, screenshotPath)
@@ -318,6 +368,10 @@ export class SandBrowserDriver<Context = unknown> {
     return {
       text: parts.join("\n\n"),
       ...(imageB64 == null ? {} : { imageB64 }),
+      ...(response.url == null ? {} : { url: response.url }),
+      ...(response.title == null ? {} : { title: response.title }),
+      ...(response.needsLogin == null ? {} : { needsLogin: response.needsLogin }),
+      ...(response.blocked == null ? {} : { blocked: response.blocked }),
     };
   }
 
@@ -554,14 +608,23 @@ export interface BrowserToolDefinition<Context> {
   };
 }
 
-interface BrowserToolSpec {
+export interface BrowserToolSpec {
   readonly id: string;
   readonly name: string;
   readonly description: string;
   readonly op: string;
   readonly schema?: BrowserToolSchema;
+  /**
+   * BROWSER-1. A spec may carry its own model-facing schema instead of borrowing the one keyed by
+   * op. Titan's four tools share three ops with the fifteen (click, type, screenshot) but take
+   * different arguments -- visible text or a CSS selector instead of a snapshot ref -- so the
+   * op-keyed table cannot describe both.
+   */
+  readonly parameters?: z.ZodTypeAny;
   readonly canNavigate?: boolean;
   readonly skipScreenshot?: boolean;
+  /** BROWSER-1: write one browser_navigation audit row after this tool succeeds. */
+  readonly recordsNavigation?: boolean;
 }
 
 /**
@@ -634,15 +697,19 @@ export function createSandBrowserTools<Context>(
   dependencies: BrowserDriverDependencies<Context> & {
     readonly onPossibleNavigation?: (context: Context) => void;
   },
+  // BROWSER-1. Defaults to the fifteen page-level tools the browserUse subagent holds; Titan's
+  // four (sand-browser-direct-tools.ts) pass their own list and get the same driver, the same
+  // auto-review preflight, and the same one-image result.
+  specs: readonly BrowserToolSpec[] = BROWSER_TOOL_SPECS,
 ): BrowserToolDefinition<Context>[] {
   const driver = new SandBrowserDriver(dependencies);
-  return BROWSER_TOOL_SPECS.map((spec) => ({
+  return specs.map((spec) => ({
     id: spec.id,
     name: spec.name,
     description: spec.description,
     op: spec.op,
     schema: spec.schema ?? {},
-    parameters: BROWSER_TOOL_PARAMETERS[spec.op] ?? z.object({}),
+    parameters: spec.parameters ?? BROWSER_TOOL_PARAMETERS[spec.op] ?? z.object({}),
     ...(spec.canNavigate === true ? { canNavigate: true } : {}),
     ...(spec.skipScreenshot === true ? { skipScreenshot: true } : {}),
     async execute(context, args, metadata) {
@@ -679,6 +746,14 @@ export function createSandBrowserTools<Context>(
         });
         if (spec.canNavigate === true && output.isError !== true) {
           dependencies.onPossibleNavigation?.(context);
+        }
+        // BROWSER-1. The receipt for a page Titan opened himself. The driver's own url wins over
+        // the one asked for, because a redirect is what the ledger should show.
+        if (spec.recordsNavigation === true && output.isError !== true) {
+          const visited = output.url ?? (typeof args.url === "string" ? args.url : undefined);
+          if (visited != null && visited.length > 0) {
+            dependencies.recordNavigation?.({ url: visited, title: output.title ?? "" });
+          }
         }
         return output;
       } catch (error) {

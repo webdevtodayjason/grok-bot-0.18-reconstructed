@@ -233,6 +233,8 @@ export interface ProductionTurnToolsetHostInput {
   readonly isDynamicToolsEnabled?: () => boolean;
   readonly isMultitaskEnabled?: () => boolean;
   readonly isSharedRoomBoxToolsEnabled?: () => boolean;
+  /** BROWSER-1: undefined means offered; false withholds Titan's four browser tools. */
+  readonly isBrowserToolsEnabled?: () => boolean;
   readonly localToolPermission?: TurnToolsetHost["localToolPermission"];
   readonly recordModelToolName?: TurnToolsetHost["recordModelToolName"];
   readonly toolExecutionTimeoutMs?: TurnToolsetHost["toolExecutionTimeoutMs"];
@@ -272,6 +274,7 @@ export function createProductionTurnToolsetHost(
     ...(input.isDynamicToolsEnabled === undefined ? {} : { isDynamicToolsEnabled: input.isDynamicToolsEnabled }),
     ...(input.isMultitaskEnabled === undefined ? {} : { isMultitaskEnabled: input.isMultitaskEnabled }),
     ...(input.isSharedRoomBoxToolsEnabled === undefined ? {} : { isSharedRoomBoxToolsEnabled: input.isSharedRoomBoxToolsEnabled }),
+    ...(input.isBrowserToolsEnabled === undefined ? {} : { isBrowserToolsEnabled: input.isBrowserToolsEnabled }),
     ...(input.localToolPermission === undefined ? {} : { localToolPermission: input.localToolPermission }),
     ...(input.recordModelToolName === undefined ? {} : { recordModelToolName: input.recordModelToolName }),
     ...(input.toolExecutionTimeoutMs === undefined ? {} : { toolExecutionTimeoutMs: input.toolExecutionTimeoutMs }),

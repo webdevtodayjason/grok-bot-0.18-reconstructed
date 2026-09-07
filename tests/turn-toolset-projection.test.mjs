@@ -41,6 +41,9 @@ const mod = createRequire(import.meta.url)(bundlePath);
 
 const tool = (name) => ({ name, toolIdentifier: name, execute: async () => ({}) });
 
+// BROWSER-1. The four the main agent holds, distinct from the fifteen a browserUse subagent gets.
+const TITAN_BROWSER_TOOLS = ["browser_open", "browser_click", "browser_type", "browser_screenshot"];
+
 const hostFor = (overrides = {}) => ({
   isSubagentRunner: false,
   isSharedRoomRunner: false,
@@ -63,6 +66,7 @@ const hostFor = (overrides = {}) => ({
     boxAwait: () => tool("AwaitShell"),
     computer: () => tool("Computer"),
     browser: () => [tool("browser_navigate"), tool("browser_snapshot")],
+    browserDirect: () => TITAN_BROWSER_TOOLS.map(tool),
     mcpMeta: () => [tool("GetMcpTools"), tool("CallMcpTool")],
     mcpManagement: () => [tool("SetMcpInstructions")],
   },
@@ -113,6 +117,83 @@ test("a box-scoped browserUse subagent gets its browser tools, not the chief's",
     propsWithMcp,
   ));
   assert.deepEqual(names, ["Shell", "Read", "browser_navigate", "browser_snapshot"]);
+});
+
+// BROWSER-1: Titan drives the box's browser himself for a single page. The fifteen page-level
+// tools stayed with the browserUse subagent, which sits behind a feature gate this deployment
+// cannot turn on, so on this box the main agent had no browser at all -- neither direct nor
+// delegated. These four are offered on the same predicate as Screenshot and request_box_help
+// (a chief, on a box with a desktop that is up), with one operator switch on top of it.
+test("the main agent is offered the four browser tools", () => {
+  const names = namesOf(mod.buildTurnTools(hostFor(), turn, propsWithMcp));
+  for (const name of TITAN_BROWSER_TOOLS) {
+    assert.ok(names.includes(name), `${name} offered (got ${names.join(", ")})`);
+  }
+  // The subagent's fifteen are a different lane and must not leak into the chief's set.
+  assert.ok(!names.includes("browser_navigate"), "the chief does not get the page-level tools");
+  assert.ok(!names.includes("browser_snapshot"));
+});
+
+test("a host that never answers the switch still gets them, because the default is on", () => {
+  const names = namesOf(mod.buildTurnTools(hostFor({ isBrowserToolsEnabled: undefined }), turn, propsWithMcp));
+  for (const name of TITAN_BROWSER_TOOLS) assert.ok(names.includes(name), `${name} offered`);
+});
+
+test("SAND_BROWSER_TOOLS off withholds the four and leaves the rest of the toolset standing", () => {
+  const names = namesOf(mod.buildTurnTools(
+    hostFor({ isBrowserToolsEnabled: () => false }),
+    turn,
+    propsWithMcp,
+  ));
+  for (const name of TITAN_BROWSER_TOOLS) {
+    assert.ok(!names.includes(name), `${name} withheld (got ${names.join(", ")})`);
+  }
+  for (const name of ["Shell", "Read", "WebSearch", "GetMcpTools"]) {
+    assert.ok(names.includes(name), `${name} still offered`);
+  }
+});
+
+test("a box with no desktop, or a box that is down, gets no browser tools either", () => {
+  for (const overrides of [{ remoteBoxHasDesktop: false }, { getRemoteBoxAvailable: () => false }]) {
+    const names = namesOf(mod.buildTurnTools(hostFor(overrides), turn, propsWithMcp));
+    for (const name of TITAN_BROWSER_TOOLS) {
+      assert.ok(!names.includes(name), `${name} withheld (got ${names.join(", ")})`);
+    }
+  }
+});
+
+test("the four never reach a subagent, which has its own way to drive the same tab", () => {
+  for (const overrides of [
+    { isSubagentRunner: true, isBoxScopedSubagent: true, isComputerUseSubagent: true },
+    { isSubagentRunner: true, isBoxScopedSubagent: true, isBrowserUseSubagent: true },
+    { isSubagentRunner: true },
+  ]) {
+    const names = namesOf(mod.buildTurnTools(hostFor(overrides), { ...turn, subagentConfigs: [] }, propsWithMcp));
+    for (const name of TITAN_BROWSER_TOOLS) {
+      assert.ok(!names.includes(name), `${name} withheld from a subagent (got ${names.join(", ")})`);
+    }
+  }
+});
+
+test("the trace line says whether the browser tools were on for this build", () => {
+  const read = (host) => {
+    const previous = process.env.SAND_TOOL_TRACE;
+    process.env.SAND_TOOL_TRACE = "1";
+    const info = console.info;
+    const lines = [];
+    console.info = (line) => lines.push(String(line));
+    try {
+      mod.buildTurnTools(host, turn, propsWithMcp);
+    } finally {
+      console.info = info;
+      if (previous === undefined) delete process.env.SAND_TOOL_TRACE;
+      else process.env.SAND_TOOL_TRACE = previous;
+    }
+    const traced = lines.find((line) => line.includes("[sand][toolset] "));
+    return JSON.parse(traced.slice(traced.indexOf("[sand][toolset] ") + "[sand][toolset] ".length));
+  };
+  assert.equal(read(hostFor()).browserTools, true);
+  assert.equal(read(hostFor({ isBrowserToolsEnabled: () => false })).browserTools, false);
 });
 
 // TOOLS-15: the five tools bound with surface "host_machine" reach the operator's own computer
