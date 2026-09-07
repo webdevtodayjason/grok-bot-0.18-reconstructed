@@ -228,9 +228,38 @@ services:
       # CP_SESSION_SECRET is THIS instance's own derived key, never the control plane's master.
       # On the R750, with the master from cp.env:
       #   node -e 'import("./ui/session-token.mjs").then(m => console.log(m.tenantSessionSecret(master, "titanium")))'
+      #
+      # TENANT-5 SUPERSEDED TWO OF THESE THREE. There is now one relay, one console and one login
+      # page for everybody, so the relay is not "a tenant" any more and neither TENANT_ID nor
+      # CP_SESSION_SECRET is read. The relay reads the whole fleet from the control plane instead,
+      # over CP_RELAY_TOKEN below, and each workspace's own derived key arrives in that answer. The
+      # three lines stay for now because the tenant provisioner still renders its own values into
+      # copies of this file; they reach the container and are ignored.
       TENANT_ID: ${TENANT_ID}
       CP_URL: ${CP_URL}
       CP_SESSION_SECRET: ${CP_SESSION_SECRET}
+      # The credential that opens GET /v1/relay/tenants on the control plane and nothing else. One
+      # value, the same on this resource and in cp.env. With CP_URL it is what makes the login page
+      # take a Titanium Bot account and what fills the workspace registry; with neither, this
+      # console has exactly one workspace and behaves as it always did. Both or neither.
+      #
+      # No `:-` default, deliberately, the same as TITAN_JOB_TOKEN below: Coolify builds a
+      # variable's NAME from everything between the braces, so `${CP_RELAY_TOKEN:-}` becomes an
+      # environment field literally named `CP_RELAY_TOKEN:-` in its UI.
+      CP_RELAY_TOKEN: ${CP_RELAY_TOKEN}
+      # WHICH CONTAINER IS THE OPERATOR'S BOX, for `docker exec`. Under Coolify it is
+      # titanbot-box-<this service's uuid>; read it back with
+      #   docker ps --format '{{.Names}}' | grep titanbot-box
+      #
+      # This is REQUIRED as of TENANT-5 and it was not before. The relay used to fall back to the
+      # first container carrying com.titanbot.role=box when the configured name did not resolve.
+      # On a machine with one box that was a convenience; on a machine with customers on it, it
+      # resolves to an ARBITRARY customer's container and every `docker exec` the console makes --
+      # the model picker writing box-secrets.json, the connector editor writing connector tokens in
+      # plaintext, the desktop buttons -- lands in somebody else's box. The fallback is deleted, so
+      # without this line the model picker, the connector editor and the desktop view have nothing
+      # to reach and the relay says so on the way up (`reg  no container named ...`).
+      SAND_BOX_CONTAINER: ${SAND_BOX_CONTAINER}
       SAND_UI_PORT: "7777"
       # The Titan Job Bus bearer (docs/JOB-BUS.md section 10.6). Optional on purpose: with no value
       # here the relay falls back to the token file the console writes, and with neither every
@@ -266,10 +295,8 @@ services:
       # the container, so this is the one piece of addressing the container renaming cannot break.
       # The relay reaches the box's noVNC pages and websockify sockets through this same hostname.
       SAND_HOST_GATEWAY_URL: http://titanbot-box:1340
-      # Deliberately NOT SAND_BOX_CONTAINER. That variable names a container for `docker exec`, and
-      # the container is called titanbot-box-<uuid> here. ui/server.mjs falls back to the
-      # com.titanbot.role=box label when the name it holds does not exist, and its startup log says
-      # which container it settled on.
+      # SAND_BOX_CONTAINER is set above and is now required: the label fallback that used to make it
+      # optional is deleted, because on a machine with customers it resolves to one of their boxes.
       #
       # And NOT SAND_HOST_GATEWAY_TOKEN either. The relay falls back to reading the token out of
       # local-docker-vm.json in the first SAND_PROFILE_DIRS entry (ui/server.mjs, tokenFromProfile),

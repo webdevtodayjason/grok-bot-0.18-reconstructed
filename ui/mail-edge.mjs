@@ -570,20 +570,31 @@ export function createMailEdge({
   // on purpose, because a webhook that answers anything else is a webhook Resend retries for hours
   // over a decision. The one exception is a roster this relay could not read: that is an outage,
   // not a decision, and it answers 503 so Resend brings the message back.
-  async function handleWebhook(req, res) {
+  // `prepared` is how a multi-tenant relay hands this the body it already read. TENANT-5: there is
+  // one public /hooks/resend for every tenant, so the caller has to read the recipient's domain out
+  // of the body before it can know whose edge this is -- and a request body can only be read once.
+  // When it is given, the rate limit has already been charged by the caller for the same reason,
+  // and charging it twice would halve the published rate. Absent, which is every single-tenant
+  // install, this route behaves exactly as it always did.
+  async function handleWebhook(req, res, prepared = null) {
     if (req.method !== "POST") return fail(res, 405, "POST", { allow: "POST" });
 
     // Before the body, like the login and the job bus: an address sending us floods must not be
     // able to make this process hold anything on its behalf.
-    const wait = limiter == null ? 0 : limiter.retryAfterSeconds(clientOf(req), now());
-    if (wait > 0) return fail(res, 429, `too many requests; wait ${wait}s`, { "retry-after": String(wait) });
+    if (prepared == null) {
+      const wait = limiter == null ? 0 : limiter.retryAfterSeconds(clientOf(req), now());
+      if (wait > 0) return fail(res, 429, `too many requests; wait ${wait}s`, { "retry-after": String(wait) });
+    }
 
     let raw;
-    try { raw = await readBody(req, MAIL_BODY_LIMIT); }
-    catch (error) {
-      if (error?.code !== "BODY_TOO_LARGE") throw error;
-      return drainThenEnd(req, res, 413, { "content-type": "application/json" },
-        JSON.stringify({ error: "that webhook body is too large" }));
+    if (prepared != null) raw = String(prepared.raw ?? "");
+    else {
+      try { raw = await readBody(req, MAIL_BODY_LIMIT); }
+      catch (error) {
+        if (error?.code !== "BODY_TOO_LARGE") throw error;
+        return drainThenEnd(req, res, 413, { "content-type": "application/json" },
+          JSON.stringify({ error: "that webhook body is too large" }));
+      }
     }
 
     const settings = await readMailSettings(settingsFile);

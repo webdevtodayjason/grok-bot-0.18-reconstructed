@@ -94,7 +94,13 @@ test("the relay resolves auth.json and endpoints.json the same way, in the same 
   // that drops the override or drops the state directory is caught either way.
   const source = readFileSync(path.join(repo, "ui/server.mjs"), "utf8");
   assert.match(source, /const AUTH_FILE = process\.env\.SAND_UI_AUTH_FILE\?\.trim\(\) \|\| stateFile\("auth\.json", HERE\)/);
-  assert.match(source, /const ENDPOINTS_FILE = process\.env\.SAND_UI_ENDPOINTS_FILE\?\.trim\(\) \|\| stateFile\("endpoints\.json", HERE\)/);
+  // endpoints.json is per tenant since TENANT-5, so the shape to pin is the pair: the operator's
+  // override still wins, and every other tenant's file comes out of its own state directory.
+  assert.match(source, /const ENDPOINTS_OVERRIDE = process\.env\.SAND_UI_ENDPOINTS_FILE\?\.trim\(\) \|\| ""/);
+  assert.match(source, /endpointsFile: entry\.operator && ENDPOINTS_OVERRIDE\.length > 0 \? ENDPOINTS_OVERRIDE : file\("endpoints\.json"\)/);
+  // tenantFile is what puts the operator's own files through stateFile (the per-file override, then
+  // SAND_UI_STATE_DIR, then beside the code) and a tenant's into its own state directory.
+  assert.match(source, /const file = \(name\) => tenantFile\(entry, name, \{ here: HERE, stateFile \}\)/);
   // The job bus token is the one writable file that does NOT move: it was never beside the code, it
   // lives in the first SAND_PROFILE_DIRS entry, which is already the tenant's own profile mount.
   assert.match(source, /await writeFile\(file, JSON\.stringify\(\{ token \}\)/);

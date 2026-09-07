@@ -35,6 +35,10 @@ export const NOT_AVAILABLE = {
   // version file is served from the mounted runtime directory either way, so a host that asks gets
   // an honest refusal for the tarball instead of a truncated download.
   hostBundle: "This instance cannot build a host update of its own.",
+  // TENANT-5. A subscription is a login already sitting in the OPERATOR's own home directory (the
+  // Codex and Claude ones), so there is nothing for a customer's console to scan and nothing of
+  // theirs to adopt. Said plainly rather than answered with an empty success.
+  subscriptions: "Provider subscriptions are set up by the operator, not from this console.",
 };
 
 // The body every refusal sends. One shape, so the console can tell a refusal apart from a failure

@@ -23,6 +23,23 @@ export function jobBusTokenFile(env = process.env) {
   return dir == null ? null : path.join(dir, "job-bus.json");
 }
 
+// TENANT-5. One relay serves every tenant, so a bus token has to be read out of the profile
+// directory of the tenant it belongs to rather than out of this process's own environment. Same
+// file, same shape, same 0600; the only difference is that the directory is named by the caller.
+//
+// TITAN_JOB_TOKEN is deliberately NOT consulted here. That variable is a fact about this
+// deployment, which means the operator's own bus and nothing else: read for every tenant it would
+// hand one environment value the run of every customer's box.
+export function jobTokenInDir(profileDir) {
+  const dir = String(profileDir ?? "").trim();
+  if (dir.length === 0) return { token: "", source: null };
+  try {
+    const token = String(JSON.parse(readFileSync(path.join(dir, "job-bus.json"), "utf8"))?.token ?? "").trim();
+    if (token.length > 0) return { token, source: "file" };
+  } catch { /* absent or unreadable is simply unconfigured */ }
+  return { token: "", source: null };
+}
+
 // Env first, then the file the console writes, then unconfigured -- which /v1 answers as the same
 // 401 as a wrong token, because whether a bus exists here is not something a stranger gets to
 // learn. Resolved on every request on purpose: generating a token in Settings has to work without
