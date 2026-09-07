@@ -101,7 +101,7 @@
       enabled: false,
       domain: "titanium.bot",
       fromName: "Titanium Bot",
-      apiBase: "",
+      apiBase: "https://api.resend.com",
       catchAllAgentId: "",
       routes: {},
       apiKeySet: false,
@@ -134,11 +134,14 @@
         apiKeySet: mail.apiKeySet,
         webhookSecretSet: mail.webhookSecretSet,
         webhookUrl: `${origin}/hooks/resend`,
+        // The same normalization the relay uses (ui/mail-edge.mjs agentLocalpart), so this page
+        // shows the address that would really route.
         addresses: mail.domain
-          ? state.workers.filter((worker) => !worker.isGroup).map((worker) => ({
-            agentId: worker.id, name: worker.name,
-            address: `${String(worker.name).toLowerCase().replace(/\s+/g, "")}@${mail.domain}`,
-          }))
+          ? state.workers.filter((worker) => !worker.isGroup).map((worker) => {
+            const localpart = String(worker.name).toLowerCase()
+              .replace(/[\s-]+/g, "").replace(/[^a-z0-9._]+/g, "").replace(/^[._]+|[._]+$/g, "");
+            return { agentId: worker.id, name: worker.name, address: localpart ? `${localpart}@${mail.domain}` : "", note: "" };
+          })
           : [],
         recent: clone(mail.recent),
       };
@@ -503,7 +506,9 @@
       getMailSettings() { return Promise.resolve(mailShape()); },
       setMailSettings(partial) {
         const patch = clone(partial || {});
-        for (const field of ["enabled", "domain", "fromName", "apiBase", "catchAllAgentId", "routes"]) {
+        // apiBase is not in this list because the relay does not take one either: it reads Resend
+        // at a fixed address, so nothing a console session sends can point it somewhere else.
+        for (const field of ["enabled", "domain", "fromName", "catchAllAgentId", "routes"]) {
           if (patch[field] !== undefined) mail[field] = patch[field];
         }
         // A string sets the secret, null clears it, absent keeps it -- the relay's own rule, held

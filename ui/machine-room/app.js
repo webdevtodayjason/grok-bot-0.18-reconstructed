@@ -2618,7 +2618,14 @@
       const rows = Array.isArray(settings.addresses) ? settings.addresses : [];
       addresses.innerHTML = rows.length === 0
         ? `<p class="field-hint">Type your domain above and save, and every agent's address appears here.</p>`
-        : rows.map((row) => `<div class="mail-address-row"><span class="mail-address-name">${escapeHtml(row.name)}</span><span class="mail-address">${escapeHtml(row.address)}</span></div>`).join("");
+        // A row with a note has something the operator has to fix: two agents whose names make the
+        // same address, or a name there is no address to make from. Saying it here is the only way
+        // they find out before somebody's mail goes to the wrong agent.
+        : rows.map((row) => {
+          const note = String(row.note ?? "");
+          const said = String(row.address ?? "").length > 0 ? row.address : "no address yet";
+          return `<div class="mail-address-row"><span class="mail-address-name">${escapeHtml(row.name)}</span><span class="mail-address">${escapeHtml(said)}</span>${note.length > 0 ? `<small class="field-hint">${escapeHtml(note)}</small>` : ""}</div>`;
+        }).join("");
     }
     const rows = root.querySelector("[data-mail-rows]");
     if (rows) {

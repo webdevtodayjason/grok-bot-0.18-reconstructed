@@ -17,8 +17,18 @@
 //
 // The mutating legs need --stub, because they write this relay's real mail settings: the gate
 // stands up a tiny HTTP server of its own serving one synthetic received email and one attachment
-// list, points apiBase at it, and takes it all down again in the finally. Without --stub only the
-// non-mutating legs run, which is what a production relay that is already configured gets.
+// list. Without --stub only the non-mutating legs run, which is what a production relay that is
+// already configured gets.
+//
+// --stub is refused unless it is safe to run, and there are three rules, because this gate clears
+// both secrets on the way out and a cleared Resend signing secret cannot be got back (Resend shows
+// it once, when the webhook is made):
+//
+//   the target must be loopback         a relay somewhere else is somebody's working relay
+//   neither secret may be stored        a relay with a key in it is a relay in use
+//   the relay must already be reading   the address Resend is read at is a relay environment
+//   Resend at a loopback address        variable now, so the stub has to be where it looks:
+//                                       start the relay with GROK_BOT_MAIL_API_BASE=http://127.0.0.1:7809
 //
 //   node scripts/verify-mail.mjs --url http://127.0.0.1:7777 --stub
 //   node scripts/verify-mail.mjs --url https://console.titanium.bot
@@ -42,11 +52,13 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
     "synthetic email is delivered to the first agent and lands in the ledger, a forged signature",
     "is 401, a replay is a duplicate, and the settings are restored with both secrets cleared.",
     "",
-    "--stub runs the mutating legs against a stub Resend this gate starts locally. Without it",
-    "only the non-mutating legs run, so a configured production relay is never overwritten.",
+    "--stub runs the mutating legs against a stub Resend this gate starts locally. It is refused",
+    "unless --url is loopback, neither secret is stored on that relay, and the relay was started",
+    "with GROK_BOT_MAIL_API_BASE pointing at a loopback address, which is where the stub listens.",
+    "Without --stub only the non-mutating legs run, so a working relay is never overwritten.",
     "",
     "Env: MAIL_GATE_URL (the default for --url), SAND_HOST_GATEWAY_TOKEN or SAND_PROFILE_DIRS",
-    "     (the relay bearer), MAIL_GATE_STUB_PORT (default 7809).",
+    "     (the relay bearer). The stub's port comes from the relay's own GROK_BOT_MAIL_API_BASE.",
   ].join("\n"));
   process.exit(0);
 }
@@ -60,7 +72,9 @@ const flag = (name, fallback = null) => {
 
 const BASE = String(flag("url", process.env.MAIL_GATE_URL ?? "http://127.0.0.1:7777")).replace(/\/+$/, "");
 const STUB = process.argv.includes("--stub");
-const STUB_PORT = Number(process.env.MAIL_GATE_STUB_PORT ?? 7809);
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+const hostOf = (value) => { try { return new URL(value).hostname.toLowerCase(); } catch { return ""; } };
+const isLoopback = (value) => LOOPBACK.has(hostOf(value));
 
 const TOKEN = (() => {
   const given = flag("token", process.env.SAND_HOST_GATEWAY_TOKEN?.trim() || null);
@@ -108,7 +122,7 @@ const EMAIL_ID = `em_gate_${randomBytes(6).toString("hex")}`;
 const MESSAGE_ID = `<${randomBytes(8).toString("hex")}@gate.invalid>`;
 const BODY_LINE = `verify-mail ${randomBytes(4).toString("hex")}`;
 
-function startStub(toAddress) {
+function startStub(toAddress, port) {
   const message = {
     from: "Gate <gate@example.invalid>", to: [toAddress], subject: "verify-mail synthetic message",
     text: BODY_LINE, message_id: MESSAGE_ID, created_at: new Date().toISOString(),
@@ -128,9 +142,8 @@ function startStub(toAddress) {
     async start() {
       await new Promise((resolve, reject) => {
         server.once("error", reject);
-        server.listen(STUB_PORT, "127.0.0.1", resolve);
+        server.listen(port, "127.0.0.1", resolve);
       });
-      return `http://127.0.0.1:${STUB_PORT}`;
     },
     stop() { server.close(); },
   };
@@ -184,13 +197,38 @@ if (!STUB) {
   done();
 }
 
+// ---- may the mutating legs run here at all ------------------------------------------------------
+// They clear both secrets on the way out, and a cleared Resend signing secret is gone: Resend shows
+// it once, when the webhook is made. So this is a refusal, not a warning, and it happens before the
+// first write.
+step("is it safe to run the mutating legs against this relay");
+const refusals = [];
+if (!isLoopback(BASE)) {
+  refusals.push(`--url is ${BASE}, which is not this machine. These legs write this relay's mail `
+    + "settings and clear both secrets, so they only run against a relay on 127.0.0.1.");
+}
+if (before.body.apiKeySet === true || before.body.webhookSecretSet === true) {
+  refusals.push("this relay already has a Resend key or a signing secret saved, and clearing one is "
+    + "not something this gate can undo, because Resend shows a signing secret once. Start a scratch "
+    + "relay with no mail settings and point --url at that.");
+}
+const relayApiBase = String(before.body.apiBase ?? "");
+if (!isLoopback(relayApiBase)) {
+  refusals.push(`this relay reads Resend at ${relayApiBase || "no address at all"}, so the stub would `
+    + "never be read. The address is a relay environment variable now, not a setting: start the "
+    + "scratch relay with GROK_BOT_MAIL_API_BASE=http://127.0.0.1:7809 and run this again.");
+}
+for (const line of refusals) check(false, "the mutating legs are refused here", line);
+if (refusals.length > 0) done();
+check(true, "loopback relay, no secrets stored, reading Resend on this machine", relayApiBase);
+const STUB_PORT = Number(new URL(relayApiBase).port || 80);
+
 // ---- the hook, end to end ---------------------------------------------------------------------
 
 const restore = {
   enabled: before.body.enabled === true,
   domain: before.body.domain ?? "",
   fromName: before.body.fromName ?? "",
-  apiBase: before.body.apiBase ?? "",
   catchAllAgentId: before.body.catchAllAgentId ?? "",
   routes: before.body.routes ?? {},
   // Cleared on the way out, whatever happened: this gate wrote a secret of its own invention and
@@ -225,12 +263,14 @@ try {
     target == null ? "the roster is empty" : `${target.name} at ${target.address}`);
   if (target == null) throw Object.assign(new Error("no agent to address"), { handled: true });
   const to = `${String(target.address).split("@")[0]}@${stubDomain}`;
-  stub = startStub(to);
-  const apiBase = await stub.start();
+  // On the port the relay already reads Resend at, because that address is the relay's own
+  // environment variable and nothing this gate sends can move it.
+  stub = startStub(to, STUB_PORT);
+  await stub.start();
   const secret = `whsec_${randomBytes(24).toString("base64")}`;
   const configured = await writeSettings({
     enabled: true, domain: stubDomain, fromName: "verify-mail",
-    apiBase, apiKey: `re_gate_${randomBytes(12).toString("hex")}`, webhookSecret: secret,
+    apiKey: `re_gate_${randomBytes(12).toString("hex")}`, webhookSecret: secret,
   });
   check(configured.status === 200 && configured.body?.webhookSecretSet === true && configured.body?.apiKeySet === true,
     "the key and the signing secret are stored and reported as set", `HTTP ${configured.status}`);
