@@ -247,6 +247,21 @@ services:
       # The relay refuses to start on a reachable address with no ui/auth.json, so this line and
       # the password file in the mounted ui directory are a pair.
       SAND_UI_BIND_HOST: 0.0.0.0
+      # Where this relay's own writable files live: auth.json, endpoints.json, subscriptions.json,
+      # mail.json and mail-inbox.jsonl. Not beside the code, and that is the point.
+      #
+      # ui/ below is the SHARED release directory and every tenant's relay mounts it. Read-only
+      # stops a customer writing those files and does nothing about reading them: measured inside
+      # the demo tenant's relay 2026-09-07, running as root, /app/ui/auth.json (this console's
+      # password hash AND the cookie secret that signs its sessions), /app/ui/endpoints.json (the
+      # provider API keys) and /app/ui/subscriptions.json (the adopted provider tokens) were all
+      # readable. Pointing this instance's writes at a directory of its own makes ui/ nothing but
+      # code, which is what a customer is allowed to see.
+      #
+      # The files do not move themselves. Run deploy/r750/move-relay-state.sh on the server BEFORE
+      # pasting this file, then redeploy, then run its `clean` stage. It is two stages so the
+      # console works at every point in between and a rollback stays free.
+      SAND_UI_STATE_DIR: /state
       # By service name. Coolify's network answers the service name whatever it ends up calling
       # the container, so this is the one piece of addressing the container renaming cannot break.
       # The relay reaches the box's noVNC pages and websockify sockets through this same hostname.
@@ -322,6 +337,11 @@ services:
       # it is 0600 on the host, the relay only ever reads it, and nothing in the console's surface
       # writes it. deploy/r750/set-password.mjs is how it changes.
       - /home/sem/titanbot/ui:/app/ui
+      # This instance's own writable files, out of the shared directory above. See
+      # SAND_UI_STATE_DIR. A directory, not a single-file bind: a bind to a FILE is the Coolify
+      # storage trap at the top of this file, and the file it would read into Coolify's database is
+      # the one with the password hash in it.
+      - /home/sem/titanbot/state:/state
       # The token file the hand install wrote, and the relay's ONLY source for the gateway bearer:
       # nothing in the environment above sets it. 0600 on the host, and the relay never writes it.
       #

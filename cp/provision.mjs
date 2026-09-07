@@ -246,6 +246,12 @@ const RELAY_TENANT_ID_PLACEHOLDER = "      TENANT_ID: ${TENANT_ID}";
 const RELAY_CP_URL_PLACEHOLDER = "      CP_URL: ${CP_URL}";
 const RELAY_CP_SECRET_PLACEHOLDER = "      CP_SESSION_SECRET: ${CP_SESSION_SECRET}";
 const RELAY_UI_MOUNT_ANCHOR = "      - /home/sem/titanbot/ui:/app/ui";
+// The operator's own state directory and the variable that points at it. A tenant has its own of
+// both, written by the block below, so these two come out rather than leaving a second copy of the
+// same key: two SAND_UI_STATE_DIR lines in one environment block is a compose docker will not read,
+// and two /state mounts is a container that will not start.
+const RELAY_STATE_DIR_PLACEHOLDER = "      SAND_UI_STATE_DIR: /state";
+const RELAY_STATE_MOUNT_ANCHOR = "      - /home/sem/titanbot/state:/state";
 const RELAY_SOCKET_ANCHOR = "      - /var/run/docker.sock:/var/run/docker.sock";
 const RELAY_LAST_VOLUME_ANCHOR = "      - /home/sem/titanbot/deploy:/init:ro";
 
@@ -266,6 +272,7 @@ export function renderCompose({ slug, config, composeText = readFileSync(BASE_CO
 
   // Out first, comment and all: replaceLine takes the comment block above the line it replaces, and
   // the tenancy block below carries its own.
+  text = replaceLine(text, RELAY_STATE_DIR_PLACEHOLDER, []);
   text = replaceLine(text, RELAY_CP_SECRET_PLACEHOLDER, []);
   text = replaceLine(text, RELAY_CP_URL_PLACEHOLDER, []);
   text = replaceLine(text, RELAY_TENANT_ID_PLACEHOLDER, []);
@@ -332,9 +339,12 @@ export function renderCompose({ slug, config, composeText = readFileSync(BASE_CO
     `      #`,
   ]);
 
-  text = spliceAfter(text, RELAY_LAST_VOLUME_ANCHOR, [
-    `      # This tenant's own writable files: auth.json today, and subscriptions, the job bus and`,
-    `      # mail once the relay reads SAND_UI_STATE_DIR.`,
+  // This tenant's own state directory in place of the operator's. Replaced rather than added: the
+  // base file now mounts one of its own, and two mounts on /state is a container that will not
+  // start.
+  text = replaceLine(text, RELAY_STATE_MOUNT_ANCHOR, [
+    `      # This tenant's own writable files: auth.json, endpoints.json, subscriptions and mail.`,
+    `      # Nothing this instance writes lands in the shared release directory above.`,
     `      - ${paths.state}:/state`,
   ]);
 

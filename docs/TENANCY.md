@@ -675,6 +675,34 @@ Files written there are given the owner of the directory they land in, the same 
 already does for the files it writes beside its own code. That habit exists because the relay runs
 as root in its container, and a root-owned settings file breaks the operator's own backup.
 
+### The operator's own files go there too
+
+This is not only a tenant setting, and leaving it unset on the operator's own instance was a hole.
+Every tenant's relay mounts `/home/sem/titanbot/ui`, and the operator's `auth.json`,
+`endpoints.json` and `subscriptions.json` sat in that directory beside the code. The mount is
+read-only, which stops a customer writing them and does nothing at all about reading them. Measured
+inside the demo tenant's relay on the R750, 2026-09-07, running as root: `/app/ui/auth.json` (the
+console password hash and the cookie secret that signs every `console.titanium.bot` session),
+`/app/ui/endpoints.json` (the provider API keys) and `/app/ui/subscriptions.json` (the adopted
+provider tokens) were all readable. No console route serves those paths (`GET /auth.json` and
+`GET /machine-room/../auth.json` both answer 404), so it was one file-read bug away rather than open.
+
+The answer is that `ui/` holds nothing but code. `deploy/coolify/docker-compose.yml` now sets
+`SAND_UI_STATE_DIR: /state` on the operator's own relay and mounts `/home/sem/titanbot/state` there,
+and `deploy/r750/move-relay-state.sh` moves the files. It is two stages so that the console works at
+every point in between:
+
+    ssh dell-remote bash /home/sem/titanbot/deploy/move-relay-state.sh
+    # paste deploy/coolify/docker-compose.yml into the Coolify resource, redeploy
+    # sign in, check the model picker still lists the endpoints
+    ssh dell-remote bash /home/sem/titanbot/deploy/move-relay-state.sh clean
+
+`copy` removes nothing and changes nothing that is running. `clean` removes an original only when
+the copy in `state/` has identical bytes, so it cannot be the step that loses a password, and it
+refuses outright when the relay has been writing to one of the pair since the copy was made. A
+rollback of the compose is free until `clean` is run. `deploy/backup/snapshot.sh` backs up both
+places, so a half-migrated instance is covered either way.
+
 Unset, nothing changes. Jason's instance kept writing exactly where it was writing.
 
 This is the change that unblocks building a second instance. The old blocker was that every tenant

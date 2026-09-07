@@ -2,8 +2,9 @@
 # snapshot.sh -- one consistent copy of everything an instance is (docs/GAP-ANALYSIS.md BACKUP-1).
 #
 # An instance is five things: the four docker volumes (workspace, sand-data, box store, chrome
-# profile) and the relay side on the host (ui/auth.json, ui/endpoints.json, ui/subscriptions.json, ui/mail.json, ui/mail-inbox.jsonl,
-# profile/, credential/). Until this script there was no backup job of any kind on the R750, so a
+# profile) and the relay side on the host (state/, which holds auth.json, endpoints.json,
+# subscriptions.json, mail.json and mail-inbox.jsonl, plus the same five under ui/ on an instance
+# that has not been migrated, and profile/ and credential/). Until this script there was no backup job of any kind on the R750, so a
 # lost volume was a lost instance: every agent, every transcript, every credential.
 #
 # And SIX, since 2026-09-07: the tenant root, /data/titanbot. That is the control plane's own sqlite
@@ -217,7 +218,11 @@ done
 step "relay side"
 RELAY_ENTRIES=""
 mkdir -p "$OUT/relay"
-for rel in ui/auth.json ui/endpoints.json ui/subscriptions.json ui/mail.json ui/mail-inbox.jsonl profile credential; do
+# state/ first: since deploy/r750/move-relay-state.sh these five files live there and ui/ is code.
+# The ui/ paths stay on the list because an instance that has not been migrated yet still keeps them
+# beside the code, and a backup that only knew about the new place would silently cover nothing.
+# Whichever is absent reports "absent, skipped" and neither is a failure.
+for rel in state ui/auth.json ui/endpoints.json ui/subscriptions.json ui/mail.json ui/mail-inbox.jsonl profile credential; do
   src="$ROOT/$rel"
   if [ ! -e "$src" ]; then say "$rel absent, skipped"; continue; fi
   mkdir -p "$OUT/relay/$(dirname "$rel")"
