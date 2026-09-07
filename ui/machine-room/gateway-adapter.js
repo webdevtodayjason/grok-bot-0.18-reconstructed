@@ -1654,9 +1654,18 @@
       await reloadTrays();
       await reloadRoster();
       await reloadLiveModel();
+      // What the roster read is worth on its own. The sidebar's status pills and the header's
+      // countAgents number come from the reads above; the transcript read below is a different
+      // conversation with the host and can fail by itself. It used to take the roster with it --
+      // a tail read that threw left `rosterChanged` set and emitted nothing, so the page kept
+      // rendering a count the host had already told it was wrong until some later tick happened
+      // to succeed. The roster's own answer is published whatever the transcript read does.
+      const publishRoster = () => { if (rosterChanged) { emit("message:created", { context: state.activeContext }); rosterChanged = false; } };
       const r = record(state.activeContext);
-      if (!r) return;
-      const loaded = await loadContext(state.activeContext, r.name);
+      if (!r) { publishRoster(); return; }
+      let loaded;
+      try { loaded = await loadContext(state.activeContext, r.name); }
+      catch (error) { publishRoster(); throw error; }
       // Emit only when something the transcript shows actually changed. Every emit makes the app
       // rebuild the whole conversation, and an unconditional one on each stream event and each
       // 15 s tick is a visible flash on a long conversation.
@@ -1974,12 +1983,32 @@
       // from a request_box_help takeover, which had no button anywhere. Read back through
       // getForeverBoxStatus, whose `handoff` field is where pendingHandoff reaches the gateway.
       handBack(agentId) {
+        // handBackForeverBox ends the hand-off and THEN awaits the turn it revived
+        // (resumeAfterBoxHandoff, sand-host.ts), so its answer can be minutes away. The host has
+        // already cleared the hand-off by then, and hanging the control's disappearance on that
+        // answer left "Hand the computer back" on screen for the whole revived turn -- a button
+        // the operator has just pressed, still offering the thing it already did. So the status is
+        // polled alongside the call and the control follows the host, not the RPC.
+        let settled = false;
+        const apply = (status) => {
+          settled = true;
+          const target = state.workers.find((w) => w.id === agentId);
+          if (target) { target.handoff = status?.handoff ?? null; target.boxState = status?.state ?? target.boxState; }
+          emit("message:created", { context: state.activeContext });
+        };
+        const watch = async () => {
+          for (let attempt = 0; attempt < 20 && !settled; attempt += 1) {
+            await new Promise((resolve) => global.setTimeout(resolve, 1500));
+            if (settled) return;
+            const status = await call("getForeverBoxStatus", { id: agentId }).catch(() => null);
+            if (status != null && status.handoff == null) { apply(status); return; }
+          }
+        };
+        watch();
         return call("handBackForeverBox", { id: agentId, trigger: "button" })
           .then(() => call("getForeverBoxStatus", { id: agentId }).catch(() => null))
           .then((status) => {
-            const target = state.workers.find((w) => w.id === agentId);
-            if (target) { target.handoff = status?.handoff ?? null; target.boxState = status?.state ?? target.boxState; }
-            emit("message:created", { context: state.activeContext });
+            apply(status);
             return { pending: status?.handoff != null };
           });
       },

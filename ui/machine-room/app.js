@@ -1704,6 +1704,12 @@
   let marketplaceCatalog = null;
   let marketplaceInstalls = [];
   let marketplaceNote = null;
+  // MR-37: whether the first catalog read has ANSWERED, either way. Without it the panel drew
+  // "There is no catalog to draw" the instant it opened -- a claim about the host made before the
+  // host had been asked, and the operator's first sight of the Marketplace on every fresh page.
+  // On a loaded box that read takes seconds, and an empty catalog with one chip is what was on
+  // screen for all of them.
+  let marketplaceRead = false;
   let marketplacePluginId = null;
   let marketplaceArmedUninstall = null;
 
@@ -1734,6 +1740,7 @@
   function refreshMarketplace(live) {
     if (typeof adapter.listMarketplace !== "function" || typeof adapter.installedPlugins !== "function") {
       marketplaceNote = "This view has no gateway behind it, so there is no catalog to read.";
+      marketplaceRead = true;
       if (elements.panelDialog.open && openPluginSurface === "marketplace") paintMarketplaceBody();
       return;
     }
@@ -1745,16 +1752,25 @@
       })
       .catch((error) => { marketplaceNote = `The marketplace catalog could not be read: ${error.message}`; })
       .then(() => {
+        marketplaceRead = true;
         if (!elements.panelDialog.open || openPluginSurface !== "marketplace") return;
         if (live === true) paintMarketplaceLive(); else paintMarketplaceBody();
       });
   }
+
+  // What paintMarketplaceLive last wrote into the two live regions, so a heartbeat that changed
+  // nothing writes nothing.
+  const marketplacePainted = { strip: null, sections: null };
 
   // The operator asked for this one, so it redraws everything.
   function paintMarketplaceBody() {
     const body = elements.panelContent.querySelector("[data-marketplace-body]");
     if (!body) return;
     body.innerHTML = marketplaceBodyMarkup();
+    // Record what the full repaint just drew, so the next heartbeat compares against it and writes
+    // nothing rather than redrawing the same catalog once more.
+    marketplacePainted.strip = body.querySelector("[data-marketplace-installed]") ? marketplaceInstalledStripMarkup() : null;
+    marketplacePainted.sections = body.querySelector("[data-marketplace-sections]") ? marketplaceSectionsMarkup() : null;
     mountMarketplaceBots();
   }
 
@@ -1768,11 +1784,19 @@
     if (body.querySelector("[data-connector-editor][open]")) return;
     const typed = [...body.querySelectorAll("input[type=password], input[type=text], input:not([type]), textarea")];
     if (typed.some((field) => field.value !== "")) return;
+    // MR-37: and it must not repaint markup that did not move. Every write here throws away the
+    // catalog's <img> tiles and makes the browser decode them again, so a heartbeat that changed
+    // nothing still blinked every logo on the page -- and a tile caught mid-decode is a tile that
+    // is not drawn. The comparison is against what this function last WROTE, not against the DOM's
+    // own serialisation of it, which normalises `<img ... />` and would never compare equal.
     const strip = body.querySelector("[data-marketplace-installed]");
     const sections = body.querySelector("[data-marketplace-sections]");
-    if (strip) strip.outerHTML = marketplaceInstalledStripMarkup();
-    if (sections) sections.innerHTML = marketplaceSectionsMarkup();
-    if (!strip && !sections) { body.innerHTML = marketplaceBodyMarkup(); mountMarketplaceBots(); }
+    if (strip) { const next = marketplaceInstalledStripMarkup(); if (next !== marketplacePainted.strip) { strip.outerHTML = next; marketplacePainted.strip = next; } }
+    if (sections) { const next = marketplaceSectionsMarkup(); if (next !== marketplacePainted.sections) { sections.innerHTML = next; marketplacePainted.sections = next; } }
+    // Neither region is on the page (the plugin page or the Bots tab is open): that view has no
+    // half to update, so it is redrawn whole -- through paintMarketplaceBody, which is what keeps
+    // the cache above describing what is actually on screen.
+    if (!strip && !sections) paintMarketplaceBody();
   }
 
   function marketplaceMarkup() {
@@ -1919,6 +1943,9 @@
   function marketplaceSectionsMarkup() {
     const items = marketplaceItems().filter(marketplaceMatches);
     if (!items.length) {
+      // Until the first read answers, the honest line is that the host is being asked -- not that
+      // it serves nothing.
+      if (!marketplaceRead) return `<div class="empty-state" data-marketplace-loading>Reading the host’s catalog…</div>`;
       return marketplaceItems().length
         ? `<div class="empty-state">No plugin in this catalog matches “${escapeHtml(marketplaceQuery)}”.</div>`
         : `<div class="empty-state">There is no catalog to draw. The installed strip above is what this box is actually running.</div>`;
@@ -2049,7 +2076,7 @@
     if (!field) return;
     marketplaceQuery = field.value;
     const sections = elements.panelContent.querySelector("[data-marketplace-sections]");
-    if (sections) sections.innerHTML = marketplaceSectionsMarkup();
+    if (sections) { const next = marketplaceSectionsMarkup(); sections.innerHTML = next; marketplacePainted.sections = next; }
   }
 
   // The Marketplace, or Settings, or neither: a card control re-renders the panel it is drawn in.

@@ -183,6 +183,12 @@ const clickText = async (text) => { const loc = page.getByText(text, { exact: fa
 const openMarketplace = async () => {
   await page.keyboard.press("Escape"); await page.waitForTimeout(300);
   await page.click('[data-capability="marketplace"]'); await page.waitForTimeout(1400);
+  // The panel reads the catalog through the gateway when it opens and says so while it is reading
+  // (MR-37). The fixed wait above was a latency measurement of the box: on a loaded one the
+  // coverage checks read the panel mid-read and reported every card in the catalog missing. Wait
+  // for that read to have ANSWERED -- not for any particular answer -- so a panel that genuinely
+  // draws nothing still fails the checks below on its own numbers.
+  await until(() => page.evaluate(() => (document.querySelector("[data-marketplace-loading]") == null ? true : null)), 30_000, 500);
 };
 const openSettingsPanel = async () => {
   await page.keyboard.press("Escape"); await page.waitForTimeout(300);
@@ -1994,7 +2000,10 @@ try {
     // transcript, the outline's tool rows still weave into the tail, the evidence chips ride on
     // the row above it pages older entries in through getAgentTranscriptPage.
     check(callsTo("getAgentTranscript") === 0 && callsTo("getAgentTranscriptTail") > 0, "selecting an agent reads getAgentTranscriptTail, never getAgentTranscript", `${callsTo("getAgentTranscriptTail")} tail, ${callsTo("getAgentTranscript")} whole`);
-    const toolRowsInTail = await page.$$eval(".message-row.is-system", (els) => els.filter((e) => /^(Shell|Read|Computer|Task|Update)\b/.test(e.textContent.trim())).length);
+    // A tool row is one the adapter gave a `tool-` id. It used to be recognised by the words it
+    // started with, which SHOT-4's plain-word headlines ("Wrote notes.md", "Opened example.com")
+    // legitimately no longer begin with.
+    const toolRowsInTail = await page.$$eval('.message-row.is-system[data-message-id^="tool-"]', (els) => els.length);
     check(toolRowsInTail > 0, "outline tool rows are woven into the tail-loaded transcript", `${toolRowsInTail} row(s)`);
     check((await page.$$(".evidence-chip")).length > 0, "evidence chips render on tail-loaded entries");
     const rowsBefore = (await page.$$(".message-row")).length;
@@ -2043,7 +2052,11 @@ try {
       rows.forEach((el, i) => { if (el.classList.contains("is-user")) lastFromYou = i; });
       return rows.slice(lastFromYou + 1)
         .filter((el) => el.classList.contains("is-system") && String(el.dataset.messageId ?? "").startsWith("tool-"))
-        .map((el) => el.textContent.trim())
+        // SHOT-4 changed a summarised tool row from a <div> holding one line into a <details>
+        // whose <summary> is that line and whose <pre> is the verbatim command and output. The
+        // row's TEXT is the summary; textContent on the whole row now returns the headline with
+        // the receipt concatenated onto it, which is not what the rail draws and never was.
+        .map((el) => (el.querySelector(".tool-receipt > summary") ?? el).textContent.trim())
         .slice(-12);
     });
     const railOnScreenId = await page.evaluate(() => document.querySelector(".worker-card.is-active")?.dataset.contextId ?? null);

@@ -340,3 +340,63 @@ test("the click path keeps Add's door narrow and Settings to one open card", asy
   assert.match(section, /members\.find\(\(plugin\) => plugin\.id === selectedPluginId\) \?\? null/);
   assert.equal(section.split('class="plugin-detail"').length - 1, 1);
 });
+
+// MR-37: the panel reads the catalog through the gateway when it opens. Until that read has
+// answered it knows nothing about the host, and the sentence it used to draw in that window --
+// "There is no catalog to draw" -- is a claim about the host made before the host was asked. On a
+// loaded box that window is seconds long and it is the operator's first sight of the Marketplace.
+async function sectionsMarkup() {
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const start = source.indexOf("  function marketplaceSectionsMarkup(");
+  assert.notEqual(start, -1, "app.js no longer defines marketplaceSectionsMarkup");
+  const body = source.slice(start, source.indexOf("\n  }\n", start) + 4);
+  const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  return (items, read) => new Function(
+    "escapeHtml", "marketplaceItems", "marketplaceMatches", "marketplaceCategories",
+    "marketplaceCardMarkup", "MARKETPLACE_ALL", "marketplaceCategory", "marketplaceQuery", "marketplaceRead",
+    `${body}\nreturn marketplaceSectionsMarkup();`,
+  )(
+    escapeHtml,
+    () => items,
+    () => true,
+    () => ["All", ...new Set(items.map((i) => String(i.category ?? "")))],
+    (item) => `<div data-marketplace-card="${item.id}"></div>`,
+    "All", "All", "", read,
+  );
+}
+
+test("MR-37: the Marketplace says it is reading the host's catalog instead of that there is none", async () => {
+  const sections = await sectionsMarkup();
+  const reading = sections([], false);
+  assert.match(reading, /data-marketplace-loading/, "the read in flight is addressable, so a gate can wait for it rather than time a sleep");
+  assert.match(reading, /Reading the host’s catalog/);
+  assert.doesNotMatch(reading, /There is no catalog to draw/, "nothing is claimed about the host before the host has answered");
+  // Once the read has answered, an empty catalog IS the host's answer and the panel says so.
+  const answered = sections([], true);
+  assert.match(answered, /There is no catalog to draw/);
+  assert.doesNotMatch(answered, /data-marketplace-loading/);
+  // And an answered read with rows draws the rows, with nothing left for a gate to wait on.
+  const drawn = sections([{ id: "github", category: "Development" }], true);
+  assert.match(drawn, /data-marketplace-card="github"/);
+  assert.doesNotMatch(drawn, /data-marketplace-loading/);
+});
+
+// MR-37: a live repaint that changes nothing must write nothing. Every write to the sections
+// throws away the catalog's <img> tiles and makes the browser decode them again, so a heartbeat
+// on an untouched catalog blinked every logo on the page -- and a tile caught mid-decode is a
+// tile that is not drawn.
+test("MR-37: a live marketplace repaint compares against what it last wrote", async () => {
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const start = source.indexOf("  function paintMarketplaceLive(");
+  assert.notEqual(start, -1, "app.js no longer defines paintMarketplaceLive");
+  const body = source.slice(start, source.indexOf("\n  }\n", start) + 4);
+  assert.match(body, /next !== marketplacePainted\.sections/);
+  assert.match(body, /next !== marketplacePainted\.strip/);
+  // Against the cache, not against the DOM's own serialisation: the browser rewrites `<img ... />`
+  // as `<img ...>`, so a comparison with innerHTML would never be equal and would repaint always.
+  assert.doesNotMatch(body, /sections\.innerHTML !== /);
+  assert.doesNotMatch(body, /strip\.outerHTML !== /);
+  // A full repaint seeds the cache with what it drew, so the first heartbeat after it is a no-op.
+  const full = source.slice(source.indexOf("  function paintMarketplaceBody("));
+  assert.match(full.slice(0, full.indexOf("\n  }\n")), /marketplacePainted\.sections = body\.querySelector/);
+});

@@ -501,3 +501,55 @@ test("review: a known avatar version is carried into the next rebuild instead of
   assert.equal(after.workers.find((w) => w.id === "w2").avatarVersion, "v-w2");
   adapter.destroy();
 });
+
+// MR-36 fixer: handBackForeverBox ends the hand-off and then AWAITS the turn it revived
+// (resumeAfterBoxHandoff), so its answer can be a whole turn away. The host has already cleared
+// the hand-off by then. Hanging the control on that answer left "Hand the computer back" on
+// screen for the length of the revived turn -- a button offering the thing it had just done.
+test("GW-10: the hand-back control follows the host's status, not the RPC that revives the turn", async () => {
+  let handoff = { requestId: "r1", instruction: "log in to the portal" };
+  let release = null;
+  const { createGatewayAdapter } = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "running", handoff }),
+    // The host clears the hand-off immediately and answers only when the revived turn is done.
+    handBackForeverBox: () => { handoff = null; return new Promise((resolve) => { release = () => resolve({}); }); },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  assert.deepEqual(state.workers[0].handoff, { requestId: "r1", instruction: "log in to the portal" });
+  const answer = adapter.handBack("w1");
+  for (let i = 0; i < 200 && state.workers[0].handoff != null; i += 1) await settle(5);
+  assert.equal(state.workers[0].handoff, null, "the control cleared before handBackForeverBox answered");
+  assert.equal(release != null, true, "the RPC is still in flight");
+  release();
+  assert.deepEqual(await answer, { pending: false });
+  adapter.destroy();
+});
+
+// MR-36 fixer: the roster read and the transcript read are two different conversations with the
+// host. A tail read that threw used to take the roster's answer with it -- countAgents had come
+// back with the new number, `rosterChanged` was set, and nothing was emitted -- so the header kept
+// a count the host had already contradicted until some later tick happened to succeed.
+test("a transcript read that fails does not swallow the roster's own answer", async () => {
+  let count = 11;
+  let tailFails = false;
+  const { createGatewayAdapter } = await loadAdapter({
+    listAgents: [{ id: "w1", name: "Probe" }],
+    countAgents: () => count,
+    getAgentTranscriptTail: () => (tailFails ? new Error("the host is busy") : { entries: [] }),
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  const seen = [];
+  adapter.subscribe((event) => seen.push(event.snapshot.agentCount));
+  await adapter.refresh();
+  assert.equal(state.agentCount, 11);
+  count = 10;
+  tailFails = true;
+  await adapter.refresh().catch(() => {});
+  assert.equal(state.agentCount, 10, "the roster read still landed");
+  assert.equal(seen.at(-1), 10, "and the page was told about it, transcript read or no transcript read");
+  adapter.destroy();
+});

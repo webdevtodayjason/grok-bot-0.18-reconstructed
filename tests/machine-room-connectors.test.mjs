@@ -573,6 +573,28 @@ test("the current-run rail is this turn's tool rows, not every tool row in the w
   assert.deepEqual(steps.map((s) => s.id), ["tool-2", "tool-3"]);
 });
 
+// MR-36 fixer: SHOT-4 turned a summarised tool row into a <details> -- the plain-word headline is
+// its <summary>, the verbatim command and output its <pre>. The rail draws the headline, so the
+// two only agree while the headline is a row of its OWN in the markup. When it stopped being one,
+// reading a row's text as textContent returned the headline with the whole receipt glued onto it,
+// and the browser gate's exact rail comparison failed against a rail that was right.
+test("a summarised tool row keeps its headline as its own element, with the receipt behind it", async () => {
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const start = source.indexOf("  function messageMarkup(");
+  assert.notEqual(start, -1, "app.js no longer defines messageMarkup");
+  const body = source.slice(start, source.indexOf("\n  }\n", start) + 4);
+  const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const markup = new Function("escapeHtml", "message", `${body}\nreturn messageMarkup(message);`);
+  const row = markup(escapeHtml, { id: "tool-1", type: "system", text: "Opened example.com", detail: "Shell · box-chrome 'https://example.com'\n\nexit 0" });
+  assert.match(row, /<summary>Opened example\.com<\/summary>/, "the headline is the summary, and nothing else is");
+  assert.match(row, /<pre>Shell · box-chrome/, "the receipt is the detail behind it, never dropped");
+  assert.match(row, /class="message-bubble tool-receipt"/);
+  // A row with no detail is the plain bubble it always was.
+  const plain = markup(escapeHtml, { id: "tool-2", type: "system", text: "Read · /workspace/report.md" });
+  assert.doesNotMatch(plain, /<summary>/);
+  assert.match(plain, /class="message-bubble">Read · \/workspace\/report\.md</);
+});
+
 test("an agent that has not run a tool this turn gets no invented step", async () => {
   const rail = await currentRunRail();
   assert.deepEqual(rail({ messages: [{ id: "u1", authorId: "you", type: "text", text: "hello" }] }), []);
