@@ -203,6 +203,16 @@ neither, so it cannot honestly report on it. Check it in the console's own Email
 Each of those renders as the words "not measured" with the reason on hover. That is deliberate. A
 made-up green light is how an outage gets missed.
 
+### The three settings
+
+Nothing has to be set for the console to work. These three only fill in holes:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `CP_RELAY_URL` | `http://titanbot-relay:7777` | Where this service reaches the console, for the sign-in ledger and box health. The default is the relay's compose service name on the shared network, which Coolify keeps as a network alias, so nothing needs setting on the R750. If it is wrong, the Sign-in attempts panel says out loud that the console's own ledger could not be read, rather than quietly showing half the list. |
+| `CP_BACKUP_MANIFEST_DIR` | unset | A directory of nightly backup stamps this container can read. Fills in the backup column and the backup card. |
+| `CP_ISOLATION_REPORT` | unset | A JSON file `{at, ok, detail}` a box isolation timer writes. Fills in the isolation card. |
+
 ---
 
 ## The door
