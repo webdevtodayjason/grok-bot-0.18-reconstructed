@@ -238,13 +238,17 @@ function replaceLine(text, anchor, lines) {
 
 const BOX_ENV_ANCHOR = '      SAND_SUPERVISOR_ENABLED: "1"';
 const RELAY_ENV_ANCHOR = '      SAND_UI_PORT: "7777"';
-// The three the base compose names for an instance nobody built, so an operator can turn tenancy on
-// in Coolify without a different file. A tenant's copy carries its own values written in, so these
-// placeholders come out and the block below goes in. Removing them is not optional: two TENANT_ID
-// keys in one environment block is a compose docker will not read.
-const RELAY_TENANT_ID_PLACEHOLDER = "      TENANT_ID: ${TENANT_ID}";
+// The placeholder the base compose names for an instance nobody built, so an operator can turn the
+// account door on in Coolify without a different file. A tenant's copy carries its own value
+// written in, so this placeholder comes out and the block below goes in. Removing it is not
+// optional: two CP_URL keys in one environment block is a compose docker will not read.
+//
+// TENANT-5 removed two more that used to be here. The base compose no longer carries
+// `TENANT_ID: ${TENANT_ID}` or `CP_SESSION_SECRET: ${CP_SESSION_SECRET}` on the relay, because
+// there is one relay for the whole fleet now and neither value can mean anything to it. The
+// renderer stopped removing lines that are not there; what it still WRITES into a tenant relay is
+// unchanged, and is dead the day the tenant render becomes box-only.
 const RELAY_CP_URL_PLACEHOLDER = "      CP_URL: ${CP_URL}";
-const RELAY_CP_SECRET_PLACEHOLDER = "      CP_SESSION_SECRET: ${CP_SESSION_SECRET}";
 const RELAY_UI_MOUNT_ANCHOR = "      - /home/sem/titanbot/ui:/app/ui";
 // The operator's own state directory and the variable that points at it. A tenant has its own of
 // both, written by the block below, so these two come out rather than leaving a second copy of the
@@ -273,9 +277,7 @@ export function renderCompose({ slug, config, composeText = readFileSync(BASE_CO
   // Out first, comment and all: replaceLine takes the comment block above the line it replaces, and
   // the tenancy block below carries its own.
   text = replaceLine(text, RELAY_STATE_DIR_PLACEHOLDER, []);
-  text = replaceLine(text, RELAY_CP_SECRET_PLACEHOLDER, []);
   text = replaceLine(text, RELAY_CP_URL_PLACEHOLDER, []);
-  text = replaceLine(text, RELAY_TENANT_ID_PLACEHOLDER, []);
 
   text = spliceBefore(text, RELAY_ENV_ANCHOR, [
     `      # ---- tenancy -----------------------------------------------------------------------`,

@@ -333,6 +333,12 @@ async function main() {
       "  reaches the control plane from it. On the server: curl -s https://api.ipify.org, then",
       "  export CP_RELAY_PEERS=<that address>/32 here. Without it the login lockout counts every",
       "  customer on every instance in one bucket.",
+      "",
+      "  CP_RELAY_TOKEN is the credential the fleet's one relay reads GET /v1/relay/tenants with,",
+      "  which is how it learns which customer has which box. The SAME value goes on the console",
+      "  resource. Generate it once and keep it: rotating it stops every customer signing in until",
+      "  both sides have the new one.",
+      "    node -e \"console.log(require('node:crypto').randomBytes(32).toString('hex'))\"",
     ].join("\n"), 2);
   }
 

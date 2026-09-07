@@ -20,10 +20,21 @@
 #   no ports            Nothing is published on a server interface. Coolify's Traefik reaches this
 #                       container on the stack's own network from the Domains field, and the :7790
 #                       in that field is the CONTAINER port, not a published one.
-#   no networks         Coolify makes the network and attaches its proxy. A second network makes
-#                       Traefik pick an address non-deterministically.
-#   no traefik labels   Coolify writes the router, the certificate resolver and the redirect from
-#                       the Domains field.
+#   one extra network   TENANT-5. Coolify still makes a network per resource and attaches its proxy
+#                       to it, and this file still does not declare that one. It does declare
+#                       titanbot-net, the external network the relay and every customer's box are
+#                       on, so this service can reach a box it has just built and wait for its
+#                       gateway to answer before it calls the tenant running.
+#
+#                       A container on two networks is the trap Coolify's docs warn about:
+#                       coolify-proxy here is traefik:v3.6 with no --providers.docker.network, so
+#                       for a multi-homed container it takes the first entry of a randomised Go map
+#                       and api.titanium.bot answers 502 on about half of its refreshes. The
+#                       traefik.docker.network label below pins it. Do not remove one without the
+#                       other.
+#   no traefik ROUTER   Coolify writes the router, the certificate resolver and the redirect from
+#   labels              the Domains field. traefik.docker.network is not a router: it tells the
+#                       router Coolify wrote which of this container's addresses to use.
 #   no container_name   Coolify overwrites it with "<service>-<resource uuid>". The role label
 #                       below is how anything finds this container.
 #
@@ -49,6 +60,14 @@ services:
     # box and the relay do: Coolify renames the container and the name in a script goes stale.
     labels:
       com.titanbot.role: control-plane
+      # Which of this container's two addresses Coolify's Traefik routes to. See "one extra
+      # network" at the top of this file. The value is the network Coolify made for THIS resource,
+      # which on this server is the resource's own uuid; set TITANBOT_PROXY_NETWORK on the resource
+      # to it. Read it with:
+      #   docker inspect <the control plane container> --format '{{json .NetworkSettings.Networks}}'
+      traefik.docker.network: ${TITANBOT_PROXY_NETWORK}
+    networks:
+      - titanbot-net
     environment:
       # ---- the service itself ------------------------------------------------------------------
       CP_PORT: "7790"
@@ -150,6 +169,19 @@ services:
       # The bearer for the admin routes: adding accounts, adding tenants, adopting, stop and start.
       # It is not a customer credential and it never leaves the operator's hands.
       CP_ADMIN_TOKEN: ${CP_ADMIN_TOKEN}
+      # The bearer for ONE route, GET /v1/relay/tenants, which is how the fleet's relay learns which
+      # customer has which box. That route is the only place a gateway token or a derived session
+      # key leaves this service, so it has a credential of its own: the admin token does not open
+      # it and this token opens nothing else. Two doors, neither holding the other's key.
+      #
+      # The SAME value goes on the relay resource as CP_RELAY_TOKEN. 32 characters or more; this
+      # service refuses to start on a shorter one. Generate it once:
+      #   node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+      #
+      # Empty is safe and is the old behaviour: the route answers 401 to everyone, the relay logs
+      # that it cannot reach the registry, and it serves the operator's own instance from its own
+      # environment exactly as it does on a machine with no control plane at all.
+      CP_RELAY_TOKEN: ${CP_RELAY_TOKEN}
       # Coolify's own api, which this service calls to create, start, stop and delete a tenant's
       # service. The key is the one from Keys & Tokens; it can create and delete resources on this
       # server, so it lives here and in Coolify's own store and nowhere else.
@@ -184,4 +216,16 @@ services:
     # containers only through Coolify's api, which is an http call with a bearer. A socket here
     # would be root on the host next to the Coolify api key, for nothing.
 
-# No top-level volumes key, no networks key, no ports. See the header.
+# The shared network, created once on the host and never by a deploy:
+#
+#   docker network create titanbot-net
+#
+# external: true attaches to what exists and creates nothing. Coolify's parser leaves a top-level
+# network entry alone when the compose already declares it (read out of bootstrap/helpers/shared.php
+# on this server, 2026-09-07), so what is written here is what is deployed. If the network is not
+# there the deploy fails loudly, which is the right direction.
+networks:
+  titanbot-net:
+    external: true
+
+# No top-level volumes key, no ports. See the header.

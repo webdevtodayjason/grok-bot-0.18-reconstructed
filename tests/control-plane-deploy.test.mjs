@@ -32,6 +32,7 @@ const COMPOSE = path.join(repo, "deploy/coolify/control-plane.compose.yml");
 // something the same shape.
 const FAKE_SESSION_SECRET = randomBytes(32).toString("hex");
 const FAKE_ADMIN_TOKEN = randomBytes(24).toString("hex");
+const FAKE_RELAY_TOKEN = randomBytes(32).toString("hex");
 const FAKE_API_KEY = `${randomBytes(24).toString("base64url")}|fake`;
 const temps = [];
 function tempTree() {
@@ -231,6 +232,10 @@ const toolEnv = (url) => ({
   // The server's own outbound address: every customer's sign-in reaches the control plane from it,
   // so the address half of its lockout has to know which caller is a relay and which is a person.
   CP_RELAY_PEERS: "203.0.113.7/32",
+  // TENANT-5: the credential the one relay reads the tenant registry with. The same value is set on
+  // the console resource, and it is the only way a gateway token or a derived session key leaves
+  // this service.
+  CP_RELAY_TOKEN: FAKE_RELAY_TOKEN,
   // Not set on purpose: COOLIFY_PROJECT_UUID and COOLIFY_ENVIRONMENT_UUID are the two the tool has
   // to find for itself, which is the point of resolving the project by its name.
   COOLIFY_PROJECT_UUID: "",
@@ -323,7 +328,7 @@ test("the Coolify tool creates the service, sets the environment, sets the addre
     for (const secret of [FAKE_SESSION_SECRET, FAKE_ADMIN_TOKEN, FAKE_API_KEY, url]) {
       assert.equal(stdout.includes(secret), false, "a secret reached the terminal");
     }
-    assert.match(stdout, /18 added, 0 corrected, 0 already right/);
+    assert.match(stdout, /19 added, 0 corrected, 0 already right/);
   } finally { fake.server.close(); }
 });
 
@@ -339,13 +344,13 @@ test("a second run of the Coolify tool updates rather than duplicating, and is q
 
     assert.equal(second.filter((route) => route === "POST /api/v1/services").length, 0, "it must never create a second service");
     assert.match(stdout, /found titanbot-cp at svc-uuid/);
-    assert.match(stdout, /0 added, 0 corrected, 18 already right/, "nothing changed, so nothing was written");
+    assert.match(stdout, /0 added, 0 corrected, 19 already right/, "nothing changed, so nothing was written");
     assert.equal(fake.state.started, 2, "it still starts, because a start on a running service is how a redeploy happens");
 
     // And a changed value is corrected, not added twice.
     fake.state.envs.set("CP_BASE_DOMAIN", "wrong.example");
     const third = await run("node", [COOLIFY_TOOL], { env: toolEnv(url) });
-    assert.match(third.stdout, /0 added, 1 corrected, 17 already right/);
+    assert.match(third.stdout, /0 added, 1 corrected, 18 already right/);
     assert.equal(fake.state.envs.get("CP_BASE_DOMAIN"), "titanium.bot");
   } finally { fake.server.close(); }
 });

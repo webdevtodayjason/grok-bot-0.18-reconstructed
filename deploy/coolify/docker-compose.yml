@@ -40,15 +40,31 @@
 #                   the relay the same way. A `ports:` entry here would put the console on a
 #                   server interface with no proxy in front of it, which is the one thing this
 #                   deployment must not do.
-#   no networks     Coolify creates a network for the stack and attaches its proxy to it. Its docs
-#                   say in as many words not to declare your own: a container on two networks
-#                   makes Traefik pick an address non-deterministically, and the symptom is a site
-#                   that works after one deploy and hangs after the next.
+#   one extra       TENANT-5 changed this line, and read the paragraph under it before you touch
+#   network         either of them. Coolify still creates a network per resource and attaches its
+#                   proxy to it, and this file still does not declare that one. What it does now
+#                   declare is titanbot-net, an external network created once on the host, because
+#                   there is one relay for every customer and it has to reach every customer's box.
+#                   Coolify's own parser keeps the networks a service declares and merges its uuid
+#                   network in beside them, so both are attached.
+#
+#                   THE TRAP, and it is the one Coolify's docs are warning about. coolify-proxy on
+#                   this server is traefik:v3.6 started with --providers.docker=true and NO
+#                   --providers.docker.network. For a container on several networks Traefik with no
+#                   default network takes the FIRST entry of a Go map, and Go randomises map order
+#                   per iteration, so which address it routes to is redecided on every provider
+#                   refresh. Half of them are the box network, where nothing answers 7777. The
+#                   symptom is console.titanium.bot answering 502 at random hours after a deploy
+#                   that looked fine. The traefik.docker.network label on the relay below is what
+#                   pins it, and scripts/verify-deploy.mjs reads that label back off the running
+#                   container after every restart so a rewrite that strips it is caught by a gate
+#                   rather than by Jason's console going down.
 #   no traefik      Coolify writes the router, the certificate resolver and the http-to-https
-#   labels          redirect itself from the Domains field. Measured on this server: a Coolify
+#   ROUTER labels   redirect itself from the Domains field. Measured on this server: a Coolify
 #                   application carries traefik.http.routers.https-0-<uuid>-<service>.tls.
 #                   certresolver=letsencrypt that Coolify put there. Labels of our own would be a
-#                   second router competing with that one.
+#                   second router competing with that one. traefik.docker.network is not a router:
+#                   it tells the router Coolify wrote which of the container's addresses to use.
 #   no container    Both services carry a com.titanbot.role label instead. Coolify overwrites
 #   names           container_name with "<service>-<resource uuid>" unconditionally, so nothing
 #                   here, in init-box.sh, in ui/server.mjs or in the gate may look a container up
@@ -80,6 +96,12 @@ services:
     # resolveBoxContainer, and scripts/verify-deploy.mjs. See "no container names" above.
     labels:
       com.titanbot.role: box
+    # The operator's own box is a tenant like any other as far as the relay is concerned, so it
+    # sits on the shared network with everybody else's. No proxy label here: no router points at
+    # this service, nothing outside the host reaches it, and titanbot-net carries no traffic to it
+    # but the relay's.
+    networks:
+      - titanbot-net
     environment:
       SAND_SUPERVISOR_ENABLED: "1"
       # BOX-4: the box supervisor also "supervises" desktop seats from a registry in /tmp. After any
@@ -209,28 +231,49 @@ services:
       - titanbot-box
     labels:
       com.titanbot.role: relay
+      # Which of this container's two addresses Coolify's Traefik routes to. See "one extra
+      # network" at the top of this file: without it the choice is a randomised Go map order and
+      # the console answers 502 on about half of Traefik's provider refreshes.
+      #
+      # The value is the name of the network Coolify made for THIS resource, which on this server
+      # is the resource's own uuid. Read it once and set TITANBOT_PROXY_NETWORK on the resource:
+      #   docker inspect <the relay container> --format '{{json .NetworkSettings.Networks}}'
+      # The one that is not titanbot-net is the one to name here.
+      traefik.docker.network: ${TITANBOT_PROXY_NETWORK}
+    # The shared network, and nothing else. Coolify merges its own per-resource network in beside
+    # what a service declares (its parser keeps the declared list and adds the uuid one), so
+    # naming the Coolify network here would be naming a value this file cannot know. The relay
+    # reaches every tenant's box over titanbot-net; it reaches its OWN box over either.
+    networks:
+      - titanbot-net
     environment:
-      # ---- tenancy -------------------------------------------------------------------------
-      # Empty here, and empty is the single-instance console this has always been: one password
-      # box on the login page and nothing else. Set all three, as environment values on this
-      # resource in Coolify, and the login page also takes a Titanium Bot account. The relay reads
-      # all three or none, so a half-set instance is not a half-open door.
+      # ---- the fleet (TENANT-5) --------------------------------------------------------------
+      # This relay is the console for EVERY customer, not for one. There is one relay, one console
+      # and one login page on this server, and a tenant is a box container plus a data directory
+      # behind it. Which customer a request belongs to is decided by the session cookie, and the
+      # relay looks that customer up in a registry it reads from the control plane.
+      #
+      # So there is no TENANT_ID here any more, and no CP_SESSION_SECRET. TENANT_ID said "this
+      # whole process belongs to one customer", which is the thing that stopped being true.
+      # CP_SESSION_SECRET was one tenant's derived signing key; the relay now receives every
+      # tenant's derived key on the registry route below, over the relay credential, and the
+      # control plane's master still never leaves the control plane.
+      #
+      # Both empty, or both set. Empty is the single-instance console this has always been: one
+      # password box on the login page, one box behind it, no control plane in the request path at
+      # all. That is what a developer Mac and a single-box install get, and it is why a control
+      # plane that is down cannot take this console with it.
       #
       # They are named in this file because a compose service only sees what its own environment
       # block lists. An environment value set on the resource and not named here reaches the .env
-      # this file is read with and no further, so it never arrives in the container. That is what
-      # these three lines are for.
-      #
-      # A customer's instance is built by the control plane, which writes TENANT_ID and CP_URL into
-      # its own copy of this file. The operator's own instance is not built by anything, so it gets
-      # the same three values the same way any operator would: in Coolify.
-      #
-      # CP_SESSION_SECRET is THIS instance's own derived key, never the control plane's master.
-      # On the R750, with the master from cp.env:
-      #   node -e 'import("./ui/session-token.mjs").then(m => console.log(m.tenantSessionSecret(master, "titanium")))'
-      TENANT_ID: ${TENANT_ID}
+      # this file is read with and no further, so it never arrives in the container.
       CP_URL: ${CP_URL}
-      CP_SESSION_SECRET: ${CP_SESSION_SECRET}
+      # The credential this relay uses to read GET /v1/relay/tenants, which is the one route that
+      # returns per-tenant gateway tokens and per-tenant derived session keys. One value, set on
+      # this resource AND on the control plane resource, 32 characters or more, compared in
+      # constant time at the other end. It is not the admin token and it opens no admin route.
+      #   node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+      CP_RELAY_TOKEN: ${CP_RELAY_TOKEN}
       SAND_UI_PORT: "7777"
       # The Titan Job Bus bearer (docs/JOB-BUS.md section 10.6). Optional on purpose: with no value
       # here the relay falls back to the token file the console writes, and with neither every
@@ -266,12 +309,21 @@ services:
       # the container, so this is the one piece of addressing the container renaming cannot break.
       # The relay reaches the box's noVNC pages and websockify sockets through this same hostname.
       SAND_HOST_GATEWAY_URL: http://titanbot-box:1340
-      # Deliberately NOT SAND_BOX_CONTAINER. That variable names a container for `docker exec`, and
-      # the container is called titanbot-box-<uuid> here. ui/server.mjs falls back to the
-      # com.titanbot.role=box label when the name it holds does not exist, and its startup log says
-      # which container it settled on.
+      # TENANT-5 made this REQUIRED, and it used to be deliberately absent. The relay used to fall
+      # back to `docker ps --filter label=com.titanbot.role=box` and take the first name it got
+      # back. On a server with one box that is a convenience. On a server with twenty, every box
+      # carries that label, "the first one" is an arbitrary customer's container, and the operator's
+      # model picker, connector editor and desktop buttons would have been reaching into somebody
+      # else's sandbox. The fallback is deleted, so this names the container or nothing does.
       #
-      # And NOT SAND_HOST_GATEWAY_TOKEN either. The relay falls back to reading the token out of
+      # The value is the container Coolify made for the box service of THIS resource, which is
+      # "titanbot-box-<this service's uuid>". Read it once on the server and set it here:
+      #   docker ps --format '{{.Names}}' | grep '^titanbot-box-'
+      # If it is wrong or empty the console still comes up and still serves the roster (that goes
+      # over the gateway URL below, which the compose network answers by service name); it is the
+      # three docker-exec surfaces that say they are not available.
+      SAND_BOX_CONTAINER: ${TITANBOT_BOX_CONTAINER}
+      # NOT SAND_HOST_GATEWAY_TOKEN, though. The relay falls back to reading the token out of
       # local-docker-vm.json in the first SAND_PROFILE_DIRS entry (ui/server.mjs, tokenFromProfile),
       # which is the 0600 file mounted read-only below. Setting the env var as well would copy a
       # 64-hex root-equivalent secret into Coolify's environment store and into the output of
@@ -380,6 +432,25 @@ services:
       - |
         { sh /init/init-box.sh || echo "init-box.sh failed; the lines above say where"; } &
         exec node /app/ui/server.mjs
+
+# ---- the one network this file declares ---------------------------------------------------------
+# Created ONCE on the host, by hand or by deploy/r750/one-console-migrate.sh, and never by a
+# deploy:
+#
+#   docker network create titanbot-net
+#
+# external: true means exactly that: docker attaches to a network that already exists and creates
+# nothing. It is not the named-volume trap at the top of this file, which is about the `volumes:`
+# branch of Coolify's parser; the networks branch leaves a top-level entry the compose already
+# declares alone, so what is written here is what is deployed. Read out of the parser on this
+# server (Coolify 4.0.0, bootstrap/helpers/shared.php), 2026-09-07.
+#
+# If this network does not exist on the host the deploy FAILS, loudly, with "network titanbot-net
+# declared as external, but could not be found". That is the right direction: the alternative is a
+# fresh empty network per resource and a relay that cannot see one customer's box.
+networks:
+  titanbot-net:
+    external: true
 
 # No top-level `volumes:` key, and that is the point of the whole file. Anything named here would
 # be renamed to "{service-uuid}_{name}" by Coolify's parser and created empty, and Jason's agents
