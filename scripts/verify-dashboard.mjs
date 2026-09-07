@@ -177,6 +177,17 @@ const apiCalls = []; page.on("request", (r) => { const m = /\/api\/([A-Za-z]+)/.
 const callsTo = (method) => apiCalls.filter((m) => m === method).length;
 const userTextOf = (e) => (typeof e?.content === "string" ? e.content : Array.isArray(e?.content) ? e.content.map((c) => c?.text ?? "").join("") : "");
 const clickText = async (text) => { const loc = page.getByText(text, { exact: false }).first(); const box = await loc.boundingBox(); if (!box) throw new Error(`not visible: ${text}`); await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2); await page.waitForTimeout(1200); };
+// An agent the operator hid lives in the roster's collapsed <details>, where it has no bounding
+// box and clickText cannot reach it. Found 2026-09-07: Atera Triage is hidden on this box, so the
+// GW-03 transcript arc below sometimes measured whichever agent happened to be on screen instead,
+// and eight checks reported the wrong conversation's contents as missing. Open the group the way a
+// person does, by its own summary, before reaching for an agent by name.
+const openHiddenGroup = async () => {
+  const shut = await page.evaluate(() => { const group = document.querySelector("[data-roster-hidden]"); return group != null && !group.open; });
+  if (!shut) return;
+  await page.click("[data-roster-hidden] > summary", { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(500);
+};
 // MARKET-1: the Global capabilities panel is the Marketplace now, and the provider and chat
 // listener cards moved out of it into Settings. Two openers, so every check below says which
 // surface it means rather than clicking a word that appears on both.
@@ -570,6 +581,7 @@ try {
     check(!specValues.some((v) => blurbs.includes(v)), `no connector argv or env value in the dashboard DOM (${specValues.length} checked)`, specValues.filter((v) => blurbs.includes(v)).join(", "));
     // GW-13's disclosure is the other surface that paints raw host data. Open one and check it.
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);
+    await openHiddenGroup();
     await clickText("Atera Triage").catch(() => {});
     for (let i = 0; i < 400; i += 1) await page.mouse.wheel(0, 2000); await page.waitForTimeout(600);
     const chip = (await page.$$(".evidence-chip")).at(-1) ?? null;
@@ -1006,6 +1018,7 @@ try {
       });
       check(!!panel.island && panel.island.w <= panel.column.w + 1 && panel.island.right <= panel.viewport && (!panel.capsule || panel.capsule.w <= panel.column.w + 1), "a long endpoint name cannot widen the Agent panel past its column", JSON.stringify(panel));
       // Read somewhere else while the reply lands, so the unread is raised off screen.
+      await openHiddenGroup();
       await clickText("Atera Triage").catch(() => {});
       const spoke = await until(async () => {
         const t = await gw("getAgentTranscriptTail", { id: probeAgentId, limit: 10 });
@@ -1361,7 +1374,9 @@ try {
       const inHiddenGroup = await until(() => page.evaluate((id) => (document.querySelector(`[data-roster-hidden] [data-context-id="${id}"]`) ? true : null), probeAgentId), 15_000, 1000);
       check(inHiddenGroup === true, "a hidden agent moves to the roster's collapsed Hidden group instead of vanishing");
       if (inHiddenGroup) {
-        await page.click("[data-roster-hidden] > summary"); await page.waitForTimeout(400);
+        // Idempotent: the group may already be open from an earlier arc, and a second click on the
+        // summary would shut it and hide the very card this step is about.
+        await openHiddenGroup();
         await page.click(`[data-roster-hidden] [data-context-id="${probeAgentId}"]`); await page.waitForTimeout(1500);
         check((await page.evaluate(() => document.getElementById("room-title")?.textContent)) === renamed, "and is still reachable from that group", await page.evaluate(() => document.getElementById("room-title")?.textContent));
       }
@@ -2069,6 +2084,7 @@ try {
 
     // -- The Files view is real, and labelled as what it is.
     apiCalls.length = 0;
+    await openHiddenGroup();
     await clickText("Atera Triage"); await page.waitForTimeout(2500);
     // Loading a conversation here is two serial round trips -- getAgentTranscriptTail beside four
     // other reads, then getConversationOutline for the tool rows woven into it -- and the checks
