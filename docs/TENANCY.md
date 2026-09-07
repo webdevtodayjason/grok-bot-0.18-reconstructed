@@ -1018,6 +1018,23 @@ overwrites on the next deploy. `TITANBOT_DRY_RUN=1` changes nothing at all.
 | e | re-provision demo as one box on the shared network; stop and delete the old two-container service, keeping its data directory | stopped (45 s to reconcile), deleted with `{"confirm":"demo"}`, `/data/titanbot/demo` kept (41 MB, `credential profile state volumes`). Provisioned again: **23 seconds** from the call to `status running, boxReady true`. One container, `titanbot-box-atonqjq7zx593jsacaccpfau`, on `atonqjq7zx593jsacaccpfau` and `titanbot-net`. The dry run first, which planned `directories, secrets, compose, service, envs, start, ready` and **no urls step** |
 | f | the browser proof (two customers, two rosters, two contexts), then `verify-deploy`, `verify-one-console`, `verify-mail` | a second customer was signed up to have two: `POST /v1/signups` with `owner@northbay.test` and company `North Bay Roofing` made the account, derived the slug `north-bay-roofing` and built the box in **16 seconds**. Browser, headless Chrome, two contexts: **17 PASS 0 FAIL**, no agent id on both rosters (`c63fdce4…` and `d7df78a5…`). `verify-one-console` live, with both customers, **18 PASS 0 FAIL 8 SKIP**, and after the proof customer was retired, **17 PASS 0 FAIL 9 SKIP** with the operator standing in as the second party. `verify-deploy` **58 PASS 0 FAIL 2 inconclusive** (the two inconclusive ones want the job bus bearer, which the gate was not given; and 58 rather than the 56 this gate used to report, because the relay is on two networks now and both network-pin legs apply). `verify-mail` read-only **16 PASS 0 FAIL**. Over HTTP, three rosters from one console: demo `New Bot c63fdce4…`, north-bay `New Bot d7df78a5…`, the operator over the gateway bearer `Titan 96a720b6…, Scribe f97bfb2e…`. The proof customer was then stopped and deleted; its data directory stays |
 
+### The gates, run one at a time at the end
+
+Every one of these was run once, from this Mac, spaced at least a minute apart, because the console's
+login throttle is five failures per address per 30 seconds and several of these fill it on purpose.
+Run back to back they measure their own lockout, which is what a run reporting 49 of 58 means.
+
+| gate | where | result |
+| --- | --- | --- |
+| `npm test` | this Mac | **972 pass, 0 fail**, 31 s |
+| `verify-dashboard --offline` | this Mac | **58 PASS 0 FAIL** |
+| `verify-control-plane` | this Mac | **115 PASS 0 FAIL** |
+| `verify-one-console` | this Mac, everything it needs started by itself | **48 PASS 0 FAIL 0 SKIP** |
+| `verify-deploy --url https://console.titanium.bot` | live | **58 PASS 0 FAIL**, 2 inconclusive (no job bus bearer given) |
+| `verify-one-console --url … --cp …` | live | **17 PASS 0 FAIL 9 SKIP** |
+| `verify-one-console-browser` | live, headless Chrome | **8 PASS 0 FAIL 3 SKIP** with one customer; **17 PASS 0 FAIL** earlier with two |
+| `verify-mail --url https://console.titanium.bot` | live, read-only | **16 PASS 0 FAIL** |
+
 ### What the server looks like now
 
 Four containers, and Jason's sentence is the shape of them:
