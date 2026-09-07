@@ -20,6 +20,10 @@
 //              words are in the user half of that turn, the model is handed
 //              save_onboarding_answer, an answer typed into the modal reaches it, the strip
 //              fills, Skip closes it, and the flag reads done with the answer still in it.
+//              Then the ending: the flag goes back, the page is reloaded and the box refuses to
+//              say Titan's opening a second time, the stub calls finish_onboarding the way the
+//              recipe tells him to, the record reads done for the right reason, and the window
+//              closes with nobody pressing anything.
 //
 //   --cap      Is the 13-agent ceiling REAL? The roster is faked by moving the ceiling, not by
 //              minting twelve agents: SAND_MAX_AGENTS is set to the box's own non-group count, so
@@ -132,6 +136,14 @@ const docker = (args) => new Promise((resolve) =>
   execFile("docker", args, { maxBuffer: 32 << 20 }, (error, out) => resolve(error && !out ? "" : String(out))));
 const sh = (command) => docker(["exec", BOX, "sh", "-c", command]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// How many times the console has asked the box for Titan's opening line, counted off the
+// conversation itself. SAND_ONBOARDING_START_PROMPT is a real message from the person, so it is in
+// the transcript, and two of them means somebody's half-finished interview got restarted.
+const ONBOARDING_START_PROMPT = "Let's get set up.";
+const openingCount = (answer) => {
+  const entries = Array.isArray(answer) ? answer : Array.isArray(answer?.entries) ? answer.entries : [];
+  return JSON.stringify(entries).split(ONBOARDING_START_PROMPT).length - 1;
+};
 
 // readSandBoxSetting (source/host/sand-box-setting.ts) takes either a flat object or
 // { settings: { ... } } and PREFERS the nested one. Both helpers resolve the container the reader
@@ -559,9 +571,22 @@ function startStubModel(port, state) {
       const user = contentOf("user");
       state.requests += 1;
       if (tools.includes("save_onboarding_answer")) state.sawTool = true;
+      if (tools.includes("finish_onboarding")) state.sawFinishTool = true;
       if (state.systemPrompt === "" && system.length > 0) state.systemPrompt = system;
       if (state.userPrompt === "" && user.length > 0) state.userPrompt = user;
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      // The ending, on the gate's cue rather than on a request count. Titan calls finish_onboarding
+      // when he has finished talking, and the arm below only wants that to happen at the point it
+      // is measuring it: firing it on the first turn that offers the tool would close the interview
+      // before the person has typed anything, and the strip would have nothing to fill with.
+      const shouldFinish = state.finishWhenAsked && tools.includes("finish_onboarding") && state.finished === 0;
+      if (shouldFinish) {
+        state.finished += 1;
+        sse(res, chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call_finish_1", type: "function", function: { name: "finish_onboarding", arguments: "{}" } }] }));
+        sse(res, { ...chunk({}, "tool_calls"), usage: { prompt_tokens: 12, completion_tokens: 6, total_tokens: 18 } });
+        res.write("data: [DONE]\n\n");
+        return res.end();
+      }
       const shouldSave = tools.includes("save_onboarding_answer") && state.saved === 0;
       if (shouldSave) {
         state.saved += 1;
@@ -592,7 +617,10 @@ async function liveArm(landed) {
   if (chromium == null) { skip("every live check", "playwright-core is not installed"); return; }
 
   const STUB_ID = "probe-onboarding-stub";
-  const stubState = { requests: 0, saved: 0, sawTool: false, systemPrompt: "", userPrompt: "", answer: "Jason" };
+  const stubState = {
+    requests: 0, saved: 0, finished: 0, sawTool: false, sawFinishTool: false,
+    finishWhenAsked: false, systemPrompt: "", userPrompt: "", answer: "Jason",
+  };
   let hooksBefore;
   let hooksTouched = false;
   let stub = null;
@@ -754,6 +782,59 @@ async function liveArm(landed) {
     check(closed?.answers?.name === stubState.answer,
       "with the answer that was given kept rather than thrown away",
       JSON.stringify(closed?.answers ?? {}).slice(0, 120));
+    check(closed?.doneReason === "skipped",
+      "and the box was told it was a skip rather than a finish",
+      `doneReason ${JSON.stringify(closed?.doneReason ?? null)}`);
+
+    // THE ENDING. Everything above measures the way OUT of the dialog; this measures the way it is
+    // meant to end, which is Titan closing it himself. The record is put back to first run, the
+    // page is reloaded so the modal comes up again on the same half-finished conversation, and then
+    // the stub does what the recipe tells Titan to do at the end of section 5: call
+    // finish_onboarding. Nobody clicks anything from here on.
+    await resetOnboarding();
+    const beforeReload = await must("getAgentTranscript", { id: agentId }).catch(() => []);
+    const openingsBefore = openingCount(beforeReload);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#onboarding-dialog[open], dialog.onboarding-dialog[open]", { timeout: MODAL_TIMEOUT_MS }).catch(() => {});
+    const reopened = await page.evaluate(READ_MODAL);
+    check(reopened.present && reopened.open, "the modal comes back on a box put back to first run",
+      reopened.open ? "" : "the dialog did not reopen, so the ending cannot be measured here");
+    if (reopened.present && reopened.open) {
+      // The console asks for Titan's opening every time it opens the modal. On a conversation he has
+      // already opened, the box has to refuse to say it twice: a second "Let's get set up." dropped
+      // on a half-finished interview restarts it under the person.
+      await sleep(4000);
+      const afterReload = await must("getAgentTranscript", { id: agentId }).catch(() => []);
+      check(openingCount(afterReload) === openingsBefore,
+        "and reopening it does not start Titan over: the opening line is asked for once per box",
+        `${openingsBefore} opening line(s) before the reload, ${openingCount(afterReload)} after`);
+
+      stubState.finishWhenAsked = true;
+      await gw("sendPrompt", { agentId, clientNonce: `onboarding-gate-${Date.now()}`, prompt: "That is everything, thanks." });
+      const until = Date.now() + STRIP_TIMEOUT_MS;
+      let ended = null;
+      while (Date.now() < until) {
+        const now = await must("getOnboardingState").catch(() => null);
+        if (now?.done === true) { ended = now; break; }
+        await sleep(2000);
+      }
+      check(ended != null, "Titan closes first-time setup himself with finish_onboarding",
+        ended ? `doneReason ${JSON.stringify(ended.doneReason)}, ${stubState.finished} call(s)` : `the record still read done:false after ${STRIP_TIMEOUT_MS / 1000}s`);
+      check(stubState.sawFinishTool, "which was on offer beside the save tool for the whole interview",
+        stubState.sawFinishTool ? "" : "no turn was ever handed finish_onboarding");
+      // The reason, not just the flag: a person who sat through the whole interview must not be
+      // recorded as having skipped it. The answers are empty here only because resetOnboarding
+      // above cleared them; what they do on a real box is measured on the skip path.
+      check(ended?.doneReason === "completed",
+        "and the record says finished rather than skipped",
+        `doneReason ${JSON.stringify(ended?.doneReason ?? null)}, answers ${JSON.stringify(ended?.answers ?? {}).slice(0, 80)}`);
+      // The dialog is watching the box, so nobody has to press anything for it to go away.
+      await page.waitForTimeout(4000);
+      const gone = await page.evaluate(READ_MODAL);
+      check(!gone.present || gone.open === false,
+        "and the setup window closes on its own, with nobody pressing anything",
+        gone.open ? "the dialog is still open after the box said done" : "");
+    }
 
     // One leg this arm does NOT measure, said out loud rather than left to be assumed covered:
     // the stub answers the name only, so nothing here proves the location answer reaches

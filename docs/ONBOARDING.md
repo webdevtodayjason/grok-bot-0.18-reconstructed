@@ -9,7 +9,7 @@ thirteen agents.
 **Status, 2026-09-07: built and measured.** This document is the contract,
 `scripts/verify-onboarding.mjs` is the gate written to it, and the gate now runs against the
 product rather than against a stand-in. On this Mac, box `grok-bot-local-vm`, host bundle built
-from the gb tip: **51 passed, 0 failed, 1 not measured** across all three arms, and `npm test` 1072
+from the gb tip: **58 passed, 0 failed, 1 not measured** across all three arms, and `npm test` 1072
 passed, 0 failed. What it was before, measured here the day it was written, is worth keeping beside
 that: the box answered `unknown gateway method: getOnboardingState`, held 8 agents and 1 group,
 had no agent named Titan, carried no `userTimeZone` at all, and enforced a limit of 50. Section 9
@@ -393,7 +393,14 @@ box at a stub model on the Mac the way `verify-loop.mjs` does, opens the console
 the loop: the modal opens by itself, the console starts Titan's turn with nobody typing, **the setup
 recipe's own lines are in the user half of that turn**, the model is offered
 `save_onboarding_answer`, the typed name lights up the strip and lands in the box's own state,
-**Skip for now** closes the dialog, and the flag reads done with the answer kept.
+**Skip for now** closes the dialog, and the flag reads done with the answer kept and
+`doneReason: "skipped"`.
+
+Then it measures the ending, which is the part no button is involved in. The flag goes back to first
+run, the page is reloaded, and the box has to refuse to say Titan's opening a second time on a
+conversation that already carries it. The stub then does what the recipe tells Titan to do at the
+end of section 5 and calls `finish_onboarding`. What has to follow: the record reads `done: true`
+with `doneReason: "completed"`, and the setup window closes with nobody pressing anything.
 
 The recipe leg and the tool leg are two legs, under two labels, because they answer two questions.
 The tool is on offer whenever the box's record reads `done: false`, which is true whether or not the
@@ -419,9 +426,10 @@ built from the gb tip by `node scripts/build-host.mjs --deploy`:**
 
 | What | What it answered |
 |---|---|
-| `verify-onboarding` all three arms | **51 passed, 0 failed, 1 not measured** |
+| `verify-onboarding` all three arms | **58 passed, 0 failed, 1 not measured** |
 | the fixture arm against the real console | passes. The dialog opens below the top bar at the width of the stage, the chat behind it is dimmed, Titan's face is live at 131px and curious, the five questions are on the strip with none ticked, **Skip for now** is there, and a state reporting `done:true` opens straight into the console with no modal |
 | the box arm | passes. The flag went back to first run through `resetOnboarding`, the modal opened by itself, the console started Titan's turn with nobody typing (1 model call in 2s), that turn carried 5777 characters of user content holding the recipe's own `# First-time setup` and `Ask the five`, the turn was offered `save_onboarding_answer`, an answer typed in the dialog reached the box's own state, the strip read 1 of 5, **Skip for now** closed it, and the box read `done:true` with `doneReason:"skipped"` and the answer kept |
+| the ending, on the box | passes. Put back to first run and reloaded, the modal came back and the box refused to say Titan's opening twice (1 opening line before the reload, 1 after). The stub called `finish_onboarding` once, the record went to `done:true` with `doneReason:"completed"`, and the dialog closed with nobody pressing anything |
 | the migration rule on a used box | passes. 8 agents on this Mac and it answered `done:true`, `doneReason:"existing-box"`, at the first read. No agent was renamed and no modal opened |
 | the ceiling arm | passes. Default 13 with nothing set; a room does not spend one of the thirteen (bots 9 → 9 while `countAgents` went 9 → 10); at the ceiling `createAgent` and `duplicateAgent` both answer HTTP 409 with "This workspace holds Titan and 8 more bots. Remove one to add another."; neither refusal left a half-made agent; one place under the ceiling the same create goes through; the console shows the same sentence as a toast |
 | the location answer setting the box's time zone | **still not measured by any arm.** The box arm answers the name only, on purpose, because measuring the zone writes a real setting the scheduler on this Mac reads. The write itself is exercised by the unit tests; whoever wants it proved end to end has to say on which box |
