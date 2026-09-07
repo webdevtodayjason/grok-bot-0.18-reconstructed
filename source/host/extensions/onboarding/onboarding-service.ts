@@ -148,8 +148,16 @@ export class OnboardingService {
    * Test hook. The live arm of scripts/verify-onboarding.mjs needs a scratch box to look fresh
    * again; the gateway only routes this when SAND_TEST_HOOKS=1, so a shipped box has no command
    * that can reopen somebody's first run.
+   *
+   * `{ clear: true }` removes the record instead of resetting it, so the NEXT read runs the
+   * migration rule from scratch. That is the only way to measure what a used box decides about
+   * itself, and it is the check that keeps Jason's instance out of somebody else's first run.
    */
-  reset(): OnboardingStateView {
+  reset(args: { readonly clear?: unknown } = {}): OnboardingStateView | { readonly cleared: true } {
+    if (args.clear === true) {
+      this.deps.store.write(undefined);
+      return { cleared: true };
+    }
     const record: SandOnboardingRecord = { done: false, startedAt: this.now(), answers: {} };
     this.persist(record);
     return viewOnboardingState(record, this.deps.maxAgents());

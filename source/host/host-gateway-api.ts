@@ -1009,11 +1009,11 @@ export function createHostGatewayApi(
     completeOnboarding: (args: any) => onboarding.complete(args ?? {}),
     // Guarded, not shipped-open: the live arm of scripts/verify-onboarding.mjs needs a scratch box
     // to look fresh again, and nothing on a real box should be able to reopen a person's first run.
-    resetOnboarding: () => {
+    resetOnboarding: (args: any) => {
       if (process.env.SAND_TEST_HOOKS !== "1") {
         throw new GatewayCommandError(403, { error: "resetOnboarding needs SAND_TEST_HOOKS=1" });
       }
-      return onboarding.reset();
+      return onboarding.reset(args ?? {});
     },
     getHostSettings: () => method(settings, "getHostSettings")(),
     setHostSettings: (args: any) => {

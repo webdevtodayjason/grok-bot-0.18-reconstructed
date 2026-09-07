@@ -4915,12 +4915,23 @@
     if (!window.__machineRoomLive) simulateReply(context, clean);
   }
 
+  // The ceiling the box is actually holding to, as it reports it. Read here rather than at boot
+  // from a second command: getOnboardingState carries it on every box, first run or not, so the
+  // roster header and the Add button draw the operator's own number instead of the built-in 13.
+  function applyReportedCap(next) {
+    const cap = Number(next?.maxAgents);
+    if (!Number.isFinite(cap) || cap <= 0 || cap === state.agentCap) return;
+    state.agentCap = cap;
+    renderAgentCount();
+  }
+
   function refreshOnboardingState() {
     if (typeof adapter.getOnboardingState !== "function") return Promise.resolve(null);
     return Promise.resolve(adapter.getOnboardingState())
       .then((next) => {
         if (!next || typeof next !== "object") return null;
         onboardingState = next;
+        applyReportedCap(next);
         if (next.done === true) { closeOnboarding(); return next; }
         renderOnboarding();
         return next;
@@ -4982,7 +4993,9 @@
     if (typeof adapter.getOnboardingState !== "function") return;
     Promise.resolve(adapter.getOnboardingState())
       .then((next) => {
-        if (!next || typeof next !== "object" || next.done !== false) return;
+        if (!next || typeof next !== "object") return;
+        applyReportedCap(next);
+        if (next.done !== false) return;
         onboardingState = next;
         openOnboarding();
       })

@@ -3128,18 +3128,23 @@
       completeOnboarding(answers) {
         return call("completeOnboarding", { answers: answers ?? {} });
       },
-      // Titan's opening line. It is a normal sendPrompt carrying the onboarding marker, which is
-      // what tells the host to put the onboarding prompt on this turn (docs/ONBOARDING.md). The
-      // prompt text is the cue, not the script: the words Titan says are the host's.
-      // A host that does not know the marker forwards the send without it and Titan answers as
-      // himself, which is a plainer first turn rather than a wrong one.
+      // Titan's opening line. The host owns it: startOnboarding puts the setup recipe on that
+      // first turn as a workflow reference, so the words Titan says are the host's and this file
+      // holds no script (docs/ONBOARDING.md sections 6 and 7).
+      // A host too old to have the command answers "unknown gateway method", and then the console
+      // sends a plain first turn instead. Titan answers as himself, which is a plainer opening
+      // rather than a wrong one, and better than a dialog that waits forever on an empty
+      // conversation.
       startOnboarding(agentId) {
         const id = agentId ?? state.activeContext?.id;
         if (!id) return Promise.resolve({ started: false });
-        return call("sendPrompt", {
-          agentId: id, clientNonce: nonce(), onboarding: true,
-          prompt: "Start the first-run setup with the person who just opened this console.",
-        }).then(() => ({ started: true }));
+        return tryCall("startOnboarding", { agentId: id }).then((answer) => {
+          if (answer) return { started: true };
+          return call("sendPrompt", {
+            agentId: id, clientNonce: nonce(),
+            prompt: "Let's get set up.",
+          }).then(() => ({ started: true }));
+        });
       },
 
       startTeaching(workerId) {
