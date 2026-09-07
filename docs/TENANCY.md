@@ -511,3 +511,88 @@ which is not a pass.
 
 None of them is ever a query parameter, ever in a log line, or ever in an answer. The last leg of
 the gate is there to keep that true after the next route is added.
+
+## 15. An instance without the docker socket
+
+TENANT-2 item 4. A tenant's compose is rendered without `/var/run/docker.sock`, so its relay has no
+docker at all. Four console features reach the box with `docker exec` and therefore cannot work
+there. They are absent on purpose, and they say so.
+
+One probe decides, `dockerAvailable()` in `ui/docker-edge.mjs`. It runs `docker version --format
+{{.Server.Version}}` once, on the relay's own boot, and remembers the answer, so a cold start with
+twenty requests on it shells out once rather than twenty times. It asks for the SERVER version
+because plenty of machines carry the client and cannot reach a daemon, and "the binary is
+installed" is not the question. A relay that answers no prints one line in its log:
+
+    box  no docker on this relay, so the model picker, the connectors editor and the desktop view
+         say so rather than failing
+
+What each route does when the answer is no. Every refusal is the same body, `{"error":
+"not_available", "detail": "<a sentence>"}`, and 409 rather than 503, because nothing is
+temporarily down: the instance does not carry the feature and a retry will not change that.
+
+| route | answer | the sentence the console shows |
+| --- | --- | --- |
+| `POST /endpoints/use` | 409 | This instance cannot switch models from the console yet. |
+| `GET /box/surface`, `POST /box/launch` | 409 | The desktop view is not available on this instance yet. |
+| `GET /connectors`, `POST /connectors` | 409 | This instance cannot edit connectors from the console yet. |
+| `GET /runtime/<token>/…tgz` | 409 | This instance cannot build a host update of its own. |
+| `GET /endpoints` | 200, plus `liveNote` and `switchable: false` | This instance does not report which model is answering yet. |
+| `GET /model` | 200 with nulls, plus `note` | the same sentence |
+
+The last two answer rather than refuse on purpose. The console asks for both on every page load, and
+a refusal in that position is an error badge on a page that is working perfectly well. What they
+must not do is present an unknown live row as a configured one, which is what a bare null did.
+
+The host bundle is the one place where the split is not obvious. The version file at
+`/runtime/<token>/sand-host-bundle-latest.version` is read straight off the mounted runtime
+directory and answers on every instance. The tarball genuinely needs docker: the archive is composed
+INSIDE the box from the box's own `/home/box/sand-host`, because the in-box supervisor prunes every
+entry the archive did not carry, and a tarball built anywhere else would delete the parts of the
+bundle that come from the image. So a tenant's box does not self-upgrade its host; it gets the host
+its image was deployed with. Read `ui/host-bundle.mjs` for the layout rules behind that.
+
+The desktop pane deserves a word, because half of it would technically still work. `/vnc/<display>/`
+proxies the box's own noVNC over the compose network and needs no socket at all, so the picture
+would come through. What does not come through is putting anything ON that picture: finding a
+window, raising it and starting Chrome or a terminal are all `docker exec`. A pane showing an empty
+screen with buttons that do nothing is the failure this whole item exists to stop, so the console
+puts the sentence in the pane instead of the frame.
+
+Everything else on a tenant is unchanged. The console loads, the gateway answers, and the job bus,
+mail and subscriptions all work: none of those goes through the socket.
+
+## 16. The tenant gate
+
+    node scripts/verify-tenant.mjs
+    node scripts/verify-tenant.mjs --url https://demo.titanium.bot --cp https://api.titanium.bot
+
+With no `--url` it needs nothing at all: it starts a FAKE control plane, then three relay copies of
+its own, each with an empty directory as its `PATH` so `docker` is genuinely not findable. One copy
+is in tenant mode against the fake plane, one has no tenant environment (the control that proves the
+email field appears BECAUSE of tenant mode rather than always), and one is in tenant mode pointed at
+a dead port (the control plane that is not answering). It mints and forges its own session tokens
+with `node:crypto` from the contract's description, never by importing the module under test, so a
+signature that verifies inside the process and not on the wire fails here rather than on the day a
+customer signs in.
+
+Two suites, and `--only login` or `--only docker` runs one:
+
+- **login**: the page carries an email field in tenant mode and not otherwise; a wrong email gets
+  the plain sentence; the right email for this tenant mints a session that opens the console; the
+  right email for ANOTHER tenant is a 302 to that tenant's own host with `?sso=`, signed with THAT
+  tenant's key; the link signs in; an expired one, another tenant's one and a forged one are all
+  refused; the instance password still works; a control plane that is not answering says so and the
+  instance password still gets in; the relay called the plane for sign-in and nothing else; neither
+  password is anywhere in the relay's log; and a run of wrong emails hits the same lockout a run of
+  wrong passwords does.
+- **docker**: the table in section 15, leg by leg, plus the console answering 200 underneath the
+  refusals and the version file being served while the tarball is refused.
+
+Against a live instance, the legs that need a credential run only when one is given, in the
+environment rather than on the command line: `TENANT_GATE_EMAIL`, `TENANT_GATE_PASSWORD`,
+`TENANT_GATE_OTHER_EMAIL`, `TENANT_GATE_OTHER_PASSWORD`, `TENANT_GATE_RELAY_PASSWORD`. A leg with no
+credential prints `SKIP` with its own name and the reason, and the run says how many were not
+measured. A gate that quietly shrinks is a gate nobody reads.
+
+Exit 0 no leg failed, 1 a leg failed, 2 nothing could be measured, which is not a pass.
