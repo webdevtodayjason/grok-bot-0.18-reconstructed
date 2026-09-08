@@ -92,14 +92,14 @@ test("editing a control rewrites only its own field of the schedule", async () =
 
 // This host can deliver none of the event triggers this menu lists: it builds one Slack event
 // source and one GitHub one (createBackendRelaySources), hands its trigger hub those two and
-// nothing else, and both are polled out of Cursor's backend relay, which needs a login this box
+// nothing else, and both were polled out of a relay this product no longer has, so no box
 // does not have. A menu that offers them anyway sells a routine that saves and never fires.
 test("an event trigger with no source on this box cannot be picked, and the menu says why", async () => {
   const { triggerUnavailable, trigMenu, TRIGGER_KINDS } = await loadEditor({ editor: { menu: null, triggers: [] }, integrations: { integrations: [{ platform: "slack", isConnected: false }, { platform: "github", isConnected: false }] } });
   assert.equal(triggerUnavailable("cron"), null);
   for (const [kind] of TRIGGER_KINDS.slice(1)) assert.equal(typeof triggerUnavailable(kind), "string", `${kind} was offered with nothing to deliver it`);
-  assert.match(triggerUnavailable("slack"), /backend relay/);
-  assert.match(triggerUnavailable("linear"), /Nothing on this box delivers Linear events/);
+  assert.match(triggerUnavailable("slack"), /not wired into this workspace yet/);
+  assert.match(triggerUnavailable("linear"), /Nothing delivers Linear events to this workspace yet/);
   const menu = trigMenu();
   assert.equal((menu.match(/<button disabled/g) ?? []).length, TRIGGER_KINDS.length - 1);
   assert.ok(!/onclick="addTrigger/.test(menu), "no unserved kind may still be clickable");

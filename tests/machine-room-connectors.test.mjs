@@ -470,16 +470,16 @@ test("the connector key form is masked and carries no value in the markup", asyn
   assert.match(html, /name="API_TOKEN"/);
 });
 
-test("the listener card offers the local token form and labels the Cursor route as unusable here", async () => {
+test("the listener card offers the local token form and nothing else", async () => {
   const { listenerConnectMarkup } = await markupHelpers();
   const html = listenerConnectMarkup({ id: "slack", name: "Slack" }, { name: "Atera Triage" });
   assert.match(html, /data-connect-channel="slack"/);
   assert.match(html, /type="password"/);
   assert.equal(/\bvalue=/.test(html), false);
   assert.match(html, /Atera Triage/);
-  // The Cursor-hosted route stays reachable, and says what it is instead of pretending to work.
-  assert.match(html, /data-install-plugin="slack"/);
-  assert.match(html, /Cursor account this box does not have/);
+  // There is no second route any more: no install button, and no mention of the old vendor.
+  assert.equal(/data-install-plugin=/.test(html), false);
+  assert.equal(/cursor/i.test(html), false);
 });
 
 test("the secret request card renders a masked input instead of sending the operator elsewhere", async () => {

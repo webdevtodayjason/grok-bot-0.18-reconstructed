@@ -1,7 +1,7 @@
 // The routine editor offered seven trigger kinds. Six of them are event triggers, and this host
 // can serve none of them: it builds exactly two event sources (createBackendRelaySources, a Slack
 // one and a GitHub one), hands the trigger hub those two and nothing else, and both are polled out
-// of Cursor's backend relay, which needs a login this box does not have. A routine saved on one
+// of a relay this product no longer has. A routine saved on one
 // took the form, showed the word "trigger" where its countdown goes, and never fired.
 //
 // This pins the shipped block itself rather than a copy: if a kind quietly becomes selectable
@@ -45,9 +45,10 @@ test("every event kind is refused on a box the host reports no listeners for", a
 
 test("the reason separates a listener that is not connected from one the host cannot have at all", async () => {
   const { triggerUnavailable } = await loadAvailability([listener("slack", false), listener("github", false)]);
-  assert.match(triggerUnavailable("slack"), /backend relay/);
+  assert.match(triggerUnavailable("slack"), /not wired into this workspace yet/);
+  assert.equal(/cursor/i.test(triggerUnavailable("slack")), false);
   assert.match(triggerUnavailable("slack"), /not connected/);
-  assert.match(triggerUnavailable("linear"), /Nothing on this box delivers Linear events/);
+  assert.match(triggerUnavailable("linear"), /Nothing delivers Linear events to this workspace yet/);
 });
 
 test("a connected listener is offered, and only that one", async () => {
@@ -60,7 +61,7 @@ test("the picker disables what it cannot serve and prints the reason under the t
   const { triggerStackMarkup } = await loadEditor([]);
   const markup = triggerStackMarkup();
   assert.match(markup, /data-event-triggers-note/, "the form must say what it cannot offer");
-  assert.match(markup, /backend relay/, "and must name the reason, not just refuse");
+  assert.match(markup, /not wired into this workspace yet/, "and must name the reason, not just refuse");
   // Six kinds blocked, and the one the draft already carries is cron, which stays selected.
   assert.equal((markup.match(/ disabled>/g) ?? []).length, 6);
   assert.match(markup, /<option value="cron" selected>/);

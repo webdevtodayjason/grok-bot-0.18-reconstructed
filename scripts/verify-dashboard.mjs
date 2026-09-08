@@ -2224,16 +2224,15 @@ try {
     const slackConnected = (channels?.connections ?? []).some((c) => c.platform === "slack");
     check(channelRow.includes(onScreen) && new RegExp(slackConnected ? "connected" : "not connected").test(channelRow) && (slackConnected || !/: connected/.test(channelRow)), "the Slack listener card shows this agent's channel state from getAgentChannels", `${onScreen} → ${channelRow.slice(0, 110)}`);
     // -- CP-04: Connect on a listener opens a local token form that calls connectChannel for the
-    // agent on screen. The Cursor-hosted route stays reachable and is labelled as the account this
-    // box does not have; it used to be the ONLY route, and clicking it could only end in a dead tab.
+    // agent on screen. The old vendor-hosted route is gone: no second button, no vendor name.
     if (slackConnected) {
       check((await page.$$("[data-disconnect-plugin='slack']")).length === 1, "a connected Slack listener offers to disconnect for this agent");
     } else {
       const localForm = await page.$("[data-connect-channel='slack']");
       check(localForm != null, "Connect on the Slack listener opens a local token form, not cursor.com");
       check((await page.$$("[data-connect-channel='slack'] input[type=password]")).length === 1, "and the token field is masked");
-      const cursorNote = await page.evaluate(() => document.querySelector(".plugin-detail")?.textContent ?? "");
-      check(/Cursor-hosted route/.test(cursorNote) && /account this box does not have/.test(cursorNote), "with the Cursor route kept as a labelled secondary", cursorNote.slice(cursorNote.indexOf("Cursor"), cursorNote.indexOf("Cursor") + 110));
+      const detailText = await page.evaluate(() => document.querySelector(".plugin-detail")?.textContent ?? "");
+      check((await page.$$("[data-install-plugin='slack']")).length === 0 && !/cursor/i.test(detailText), "with no second route and no vendor name on the card", detailText.slice(0, 120));
       // Not submitted: connectChannel with a made-up token would bind a real listener on a shared
       // box. tests/machine-room-connectors.test.mjs pins the argument names against a stub.
     }
@@ -2542,7 +2541,7 @@ try {
     // -- The routines panel, and the trigger editor's honesty about event triggers. The picker
     // offered seven kinds; six of them are event triggers and this host can serve none of them.
     // It builds exactly two event sources (createBackendRelaySources: Slack and GitHub), hands the
-    // trigger hub those two and nothing else, and both are polled out of Cursor's backend relay,
+    // trigger hub those two and nothing else, and both were polled out of a relay this product no longer has,
     // which needs a login this box does not have. A routine saved on one took the form, showed the
     // word "trigger" where its countdown goes, and never fired. The read-only checks come first;
     // the AUTOMATION-3 check below is the only one that writes, and it removes what it planted.
@@ -2561,7 +2560,7 @@ try {
     // "Slack" rather than "slack" cannot make a correctly offered kind look misoffered here.
     const connectedListeners = new Set((integrations?.integrations ?? integrations ?? []).filter((p) => p.isConnected ?? p.connected)
       .map((p) => String(p.id ?? p.platform ?? p.name ?? "").toLowerCase()));
-    check(/need a listener this box has not connected/.test(triggerNote) && /backend relay/.test(triggerNote),
+    check(/need a listener this box has not connected/.test(triggerNote) && /not wired into this workspace yet/.test(triggerNote) && !/cursor/i.test(triggerNote),
       "the trigger editor says event triggers need a listener this box does not have, and names why", triggerNote.slice(0, 200));
     const kindOptions = await page.$$eval("#trigger-stack select[data-trig-field='type'] option", (els) => els.map((e) => ({ value: e.value, disabled: e.disabled, label: e.textContent.trim() })));
     const misoffered = kindOptions.filter((o) => (o.value === "cron" || connectedListeners.has(o.value) ? o.disabled : !o.disabled));

@@ -1529,7 +1529,7 @@ function trigRow(t, i) {
 
 // Which of those kinds this box can actually deliver. The host builds exactly two event sources
 // (createBackendRelaySources: one Slack, one GitHub), hands its trigger hub those two and nothing
-// else, and both are polled out of Cursor's backend relay, which needs a login this box does not
+// else, and both were polled out of a relay this product no longer has, so this box does not
 // have. So the other four have no source here at all, and those two only work while the host
 // reports that listener connected. Offering them anyway sells a routine that saves, shows a
 // countdown of nothing, and never fires -- the same reason Webhook is absent above.
@@ -1540,13 +1540,13 @@ function triggerUnavailable(kind) {
   if (kind === "cron") return null;
   const platform = TRIGGER_PLATFORM_NAMES[kind] ?? kind;
   if (!RELAY_SOURCED_TRIGGERS.includes(kind))
-    return `Nothing on this box delivers ${platform} events: the host wires its trigger hub to a Slack source and a GitHub source and to nothing else.`;
+    return `Nothing delivers ${platform} events to this workspace yet.`;
   const raw = state.integrations;
   const list = Array.isArray(raw) ? raw : Array.isArray(raw?.integrations) ? raw.integrations
     : Array.isArray(raw?.platforms) ? raw.platforms : Array.isArray(raw?.connections) ? raw.connections : [];
   const row = list.find((entry) => entry.platform === kind || entry.id === kind) ?? null;
   if (row && (row.isConnected ?? row.connected)) return null;
-  return `${platform} events reach a routine only through Cursor's backend relay, and the host reports ${row ? `its ${platform} listener not connected` : `no ${platform} listener at all`}.`;
+  return `${platform} events are not wired into this workspace yet (${row ? `the ${platform} listener is not connected` : `there is no ${platform} listener`}).`;
 }
 
 function trigMenu() {

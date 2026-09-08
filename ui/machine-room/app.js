@@ -1402,12 +1402,11 @@
   }
 
   // CP-04: the local token form. connectChannel { id, platform, token } binds the listener to the
-  // agent on screen; the Cursor-hosted route stays reachable and is labelled for what it is.
+  // agent on screen. There is no second route: the token form is the only way in.
   function listenerConnectMarkup(plugin, lead) {
     const who = lead ? escapeHtml(lead.name) : "the agent on screen";
-    const cursorRoute = `<div class="form-actions"><button class="ghost-button" type="button" data-install-plugin="${escapeHtml(plugin.id)}">Use the Cursor-hosted route instead</button></div><span class="field-hint">That route opens cursor.com's connect page. It signs in to a Cursor account this box does not have, so it cannot finish here — the form above is the route that works.</span>`;
-    if (!lead) return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>A listener binds to one agent. Open an agent's conversation first, then connect it here.</small></div></div>${cursorRoute}</div>`;
-    return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)} for ${who}</strong><small>The token goes to the host as this agent's ${escapeHtml(plugin.name)} credential and is read back from getAgentChannels. It never enters chat or model context, and this page keeps no copy.</small></div></div><form data-connect-channel="${escapeHtml(plugin.id)}"><div class="field"><label for="channel-token-${escapeHtml(plugin.id)}">${escapeHtml(plugin.name)} token</label><input id="channel-token-${escapeHtml(plugin.id)}" name="token" type="password" autocomplete="off" required placeholder="Enter securely" /></div><div class="form-actions"><button class="primary-button" type="submit">Connect for ${who}</button></div></form>${cursorRoute}</div>`;
+    if (!lead) return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)}</strong><small>A listener binds to one agent. Open an agent's conversation first, then connect it here.</small></div></div></div>`;
+    return `<div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Connect ${escapeHtml(plugin.name)} for ${who}</strong><small>The token goes to the host as this agent's ${escapeHtml(plugin.name)} credential and is read back from getAgentChannels. It never enters chat or model context, and this page keeps no copy.</small></div></div><form data-connect-channel="${escapeHtml(plugin.id)}"><div class="field"><label for="channel-token-${escapeHtml(plugin.id)}">${escapeHtml(plugin.name)} token</label><input id="channel-token-${escapeHtml(plugin.id)}" name="token" type="password" autocomplete="off" required placeholder="Enter securely" /></div><div class="form-actions"><button class="primary-button" type="submit">Connect for ${who}</button></div></form></div>`;
   }
   // CP-12: unbinding is per agent too, so the button says whose channel it drops.
   function listenerConnectedMarkup(plugin, lead) {
@@ -1569,7 +1568,7 @@
   ];
   // What can actually deliver an event on this box. The host builds exactly two event sources
   // (createBackendRelaySources: a Slack one and a GitHub one), hands those two to the trigger hub
-  // and nothing else, and both are polled out of Cursor's backend relay -- which needs a Cursor
+  // and nothing else, and both were polled out of a relay this product no longer has, so no
   // login this deployment does not have. So Linear, Sentry, PagerDuty and Teams have no source at
   // all here, and Slack and GitHub only work while the host reports that listener connected. The
   // picker used to offer all six as though they worked: the routine saved, its card showed the
@@ -1588,10 +1587,10 @@
     if (kind === "cron") return null;
     const platform = EVENT_TRIGGER_PLATFORM[kind] ?? kind;
     if (!RELAY_SOURCED_TRIGGERS.includes(kind))
-      return `Nothing on this box delivers ${platform} events. The host wires its trigger hub to a Slack source and a GitHub source and to nothing else, so a routine on this trigger would save and then wait forever.`;
+      return `Nothing delivers ${platform} events to this workspace yet, so a routine on this trigger would save and then wait forever.`;
     const row = listenerRow(kind);
     if (row && row.status === "connected") return null;
-    return `${platform} events reach a routine only through Cursor's backend relay, and the host reports ${row ? `its ${platform} listener ${row.category.toLowerCase()}` : `no ${platform} listener at all`}. Connecting one needs a Cursor login this box does not have, so a routine on this trigger would save and then wait forever.`;
+    return `${platform} events are not wired into this workspace yet (${row ? `the ${platform} listener is ${row.category.toLowerCase()}` : `there is no ${platform} listener`}), so a routine on this trigger would save and then wait forever. A schedule works today.`;
   }
 
   const GITHUB_EVENTS = [
@@ -1734,7 +1733,7 @@
     const unconnected = blocked.filter(([kind]) => RELAY_SOURCED_TRIGGERS.includes(kind)).map(([, label]) => label);
     const sentences = blocked.length === 0 ? [] : [
       `${blocked.length} of the trigger kinds below need a listener this box has not connected, so ${blocked.length === 1 ? "it is" : "they are"} listed and cannot be chosen.`,
-      "The host wires its trigger hub to one Slack event source and one GitHub event source and to nothing else, and both are polled out of Cursor\u2019s backend relay, which needs a login this box does not have.",
+      "Slack and GitHub event triggers are not wired into this workspace yet.",
       ...(unsourced.length ? [`${unsourced.join(", ")} have no event source here at all.`] : []),
       ...(unconnected.length ? [`${unconnected.join(" and ")} would work only while the host reports that listener connected, and it does not.`] : []),
       "A schedule is run by the box itself and always works.",
