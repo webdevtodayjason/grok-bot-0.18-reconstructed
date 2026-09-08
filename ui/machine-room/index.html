@@ -106,6 +106,13 @@
         </section>
 
         <aside class="context-space" aria-label="Current conversation context">
+          <!-- HANDBACK-1. Two sections above the context card, in this order and no other: the
+               amber "Needs your attention" card while the open agent has a hand-off pending, then
+               that agent's screen. Both are filled by renderHandoffRail/renderScreenTile; the
+               context card, the Now island and the desktop capsule keep their order below, and
+               the Routines block is untouched. -->
+          <section class="context-island handoff-island" id="rail-handoff" aria-label="This agent needs you" hidden></section>
+          <section class="context-island screen-island" id="rail-screen" aria-label="This agent's screen"></section>
           <section class="context-island room-island" id="context-card"></section>
 
           <!-- MR-07. Shipped dismissed and empty: the placeholder copy that used to sit here was
@@ -214,6 +221,20 @@
             <button class="dialog-close" type="button" data-close-desktop aria-label="Close desktop">×</button>
           </div>
         </header>
+        <!-- HANDBACK-1: the instruction, across the top of the screen it is about. This is the
+             third fixed row of the frame (flex:0 0 auto) so the workspace below it keeps taking
+             what is left; MR-33 was exactly this overflow, and a long model-written instruction
+             would re-open it, so the note clamps to two lines and carries the rest in its title.
+             #hand-back and #hand-back-note are the ids the footer used to hold: they moved here,
+             they did not change, and verify-dashboard's GW-10 leg still points at the real
+             control rather than going red for the wrong reason. -->
+        <div class="handoff-banner" id="handoff-banner" hidden>
+          <span class="hand-back-note" id="hand-back-note" hidden></span>
+          <div class="handoff-banner-actions">
+            <button class="secondary-button" id="handoff-skip" type="button" data-handoff-action="skip" hidden>Skip this step</button>
+            <button class="primary-button" id="hand-back" type="button" data-handoff-action="done" hidden>I&rsquo;m done, continue</button>
+          </div>
+        </div>
         <div class="desktop-workspace">
           <nav class="app-previews" id="app-previews" aria-label="Open desktop applications">
             <button class="app-preview active" data-desktop-app="browser" type="button"><span>Browser</span><small>Live view of the box</small></button>
@@ -237,9 +258,6 @@
                without this there is no pointer route to the clipboard panel underneath. -->
           <span class="desktop-paste-note" id="desktop-paste-note">⌘/Ctrl + V pastes into the box while this pane has the keyboard · ⌘/Ctrl + Shift + B shows the box’s own clipboard bar</span>
           <button class="secondary-button" id="desktop-vnc-bar" type="button">Clipboard bar</button>
-          <!-- Drawn only while the host reports a pending request_box_help hand-off for this agent. -->
-          <span class="hand-back-note" id="hand-back-note" hidden></span>
-          <button class="primary-button" id="hand-back" type="button" hidden>Hand the computer back</button>
           <button class="secondary-button" id="pause-run" type="button">Pause</button>
         </footer>
       </div>
