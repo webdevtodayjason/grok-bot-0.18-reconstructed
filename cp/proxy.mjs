@@ -170,8 +170,16 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
       // The proxy's own message, first line only and cut short. A LiteLLM error body can carry the
       // whole request back, and a request body on its way to a panel is how a key ends up on a
       // screen.
-      const said = String(parsed?.error?.message ?? parsed?.detail?.error?.message ?? parsed?.detail ?? parsed?.message ?? "")
-        .split("\n")[0].slice(0, 300);
+      // MEASURED ON THE R750 2026-09-08: LiteLLM's enterprise refusals come back as
+      // {detail: {error: "<a sentence>"}}, and this chain read `detail.error.message` (absent),
+      // then `detail` (an object), and String()'d it. Every client's spend window in the admin
+      // console said "the proxy answered 400: [object Object]", which tells the operator nothing
+      // at all and hid a real answer, that the endpoint is enterprise-only. Candidates now include
+      // the string forms, and anything that is still not a string is dropped rather than stringified.
+      const said = [
+        parsed?.error?.message, parsed?.detail?.error?.message, parsed?.detail?.error,
+        parsed?.detail?.message, parsed?.detail, parsed?.error, parsed?.message,
+      ].find((one) => typeof one === "string" && one.length > 0)?.split("\n")[0].slice(0, 300) ?? "";
       return {
         ok: false,
         status: response.status,
@@ -283,32 +291,65 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
      * the honest thing to wait on.
      */
     async spendReport({ startDay, endDay }) {
-      const answer = await call("GET", "/global/spend/report", {
-        query: { start_date: String(startDay), end_date: String(endDay), group_by: "api_key" },
-      });
+      // NOT /global/spend/report. MEASURED ON THE R750 2026-09-08 against the image we actually
+      // run: that endpoint answers 400, "/spend/report endpoint You must be a LiteLLM Enterprise
+      // user to use this feature". It is the third enterprise-gated surface this wave's design
+      // assumed, after `tags` on a mint and tag budgets, and it is the one the whole spend panel
+      // was built on: every client's two windows came back as a refusal a person could not read.
+      //
+      // /spend/logs is open, and it is better evidence anyway. It answers one row per REQUEST with
+      // the key hash, the dollars, the model and the timestamp, so the two windows and the per
+      // model breakdown are all computed from the same rows rather than from three endpoints that
+      // can disagree. The aggregation is here so cp/admin.mjs is unchanged: same shape out.
+      //
+      // Deliberately called with NO date parameters. Measured the same day: adding start_date and
+      // end_date changes the ANSWER SHAPE, from a list of requests to a per-day aggregate with one
+      // column per key hash, which is a second parser for the same numbers. The filtering is done
+      // here on startTime instead. See docs/PROXY.md for the bound this leaves unset.
+      const answer = await call("GET", "/spend/logs");
       if (!answer.ok) return answer;
-      const rows = Array.isArray(answer.body) ? answer.body
-        : Array.isArray(answer.body?.spend_per_api_key) ? answer.body.spend_per_api_key
-        : Array.isArray(answer.body?.results) ? answer.body.results
-        : [];
-      // One row per key, in the field names this service uses, with the many names LiteLLM has
-      // used for the same two numbers folded into two.
-      const keys = rows.map((row) => ({
-        keyId: String(row?.api_key ?? row?.key ?? row?.token ?? ""),
-        alias: String(row?.key_alias ?? row?.api_key_alias ?? row?.alias ?? ""),
-        dollars: pick(row, ["total_spend", "spend", "total_cost", "cost"]),
-        requests: pick(row, ["total_requests", "requests", "api_requests", "successful_requests"]),
-        // Per model, when this build reports it. The TinyFish column needs it and nothing else
-        // does, so an absent breakdown is a "not measured" on one column rather than a failure.
-        models: Array.isArray(row?.metadata?.models ?? row?.models)
-          ? (row?.metadata?.models ?? row?.models).map((entry) => ({
-            model: String(entry?.model ?? entry?.model_name ?? entry ?? ""),
-            requests: pick(entry, ["total_requests", "requests", "api_requests"]),
-            dollars: pick(entry, ["total_spend", "spend", "total_cost"]),
-          }))
-          : [],
-      })).filter((row) => row.keyId.length > 0 || row.alias.length > 0);
-      return { ok: true, keys, startDay: String(startDay), endDay: String(endDay) };
+      const rows = Array.isArray(answer.body) ? answer.body : [];
+      const from = String(startDay);
+      const to = String(endDay);
+      const byKey = new Map();
+      for (const row of rows) {
+        // The calendar day the request happened on, in UTC, which is what the windows are in.
+        const day = String(row?.startTime ?? row?.startTimeUtc ?? "").slice(0, 10);
+        if (day.length !== 10 || day < from || day > to) continue;
+        const keyId = String(row?.api_key ?? row?.key ?? row?.token ?? "");
+        if (keyId.length === 0) continue;
+        let entry = byKey.get(keyId);
+        if (entry == null) {
+          entry = { keyId, alias: "", dollars: 0, requests: 0, byModel: new Map() };
+          byKey.set(keyId, entry);
+        }
+        const dollars = Number(row?.spend ?? 0) || 0;
+        entry.dollars += dollars;
+        entry.requests += 1;
+        const alias = String(row?.key_alias ?? row?.metadata?.user_api_key_alias ?? "");
+        if (alias.length > 0) entry.alias = alias;
+        // The model as the proxy recorded it. A pass-through request records its PATH here, which
+        // is what lets the TinyFish column be counted at all.
+        const model = String(row?.model ?? row?.model_group ?? "");
+        const seen = entry.byModel.get(model) ?? { model, requests: 0, dollars: 0 };
+        seen.requests += 1;
+        seen.dollars += dollars;
+        entry.byModel.set(model, seen);
+      }
+      const keys = [...byKey.values()].map((entry) => ({
+        keyId: entry.keyId,
+        alias: entry.alias,
+        // Rounded to the cent-of-a-cent the panel prints. Summing floats over a month otherwise
+        // shows a customer a number with fifteen decimal places in it.
+        dollars: Math.round(entry.dollars * 1e6) / 1e6,
+        requests: entry.requests,
+        models: [...entry.byModel.values()].map((row) => ({
+          model: row.model,
+          requests: row.requests,
+          dollars: Math.round(row.dollars * 1e6) / 1e6,
+        })),
+      }));
+      return { ok: true, keys, startDay: from, endDay: to };
     },
 
     /**

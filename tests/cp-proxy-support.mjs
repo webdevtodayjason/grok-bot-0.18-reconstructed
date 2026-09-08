@@ -34,7 +34,10 @@ export async function startFakeProxy(options = {}) {
   ];
 
   const calls = [];
-  const keys = new Map();      // key value -> record
+  const keys = new Map();
+  // One row per request, the way LiteLLM's own /spend/logs answers.
+  const logs = [];
+  const nowIso = () => new Date().toISOString();      // key value -> record
   const byAlias = new Map();   // alias -> key value
   const failures = new Map();  // route -> queued failures
   let minted = 0;
@@ -89,6 +92,7 @@ export async function startFakeProxy(options = {}) {
       perModel.requests += 1;
       perModel.dollars += options.costPerRequest ?? 0.01;
       record.perModel.set(model, perModel);
+      logs.push({ api_key: record.keyId, key_alias: record.alias, spend: options.costPerRequest ?? 0.01, model, startTime: nowIso() });
       return send(200, { id: "chatcmpl-test", model, choices: [{ message: { role: "assistant", content: "measured" } }] });
     }
 
@@ -166,18 +170,17 @@ export async function startFakeProxy(options = {}) {
       return send(200, { key: record.key, max_budget: record.maxBudget, soft_budget: record.softBudget });
     }
 
+    // MEASURED ON THE R750 2026-09-08 against docker.litellm.ai/berriai/litellm-database:v1.100.0,
+    // which is the build this product runs: /global/spend/report is ENTERPRISE ONLY and answers 400
+    // with that sentence. This stub refuses it the same way, so nothing can be built on it again
+    // and pass here while failing on the server.
     if (route === "GET /global/spend/report") {
-      const rows = [...keys.values()].map((record) => ({
-        api_key: record.keyId,
-        key_alias: record.alias,
-        total_spend: record.spend,
-        total_requests: record.requests,
-        models: [...record.perModel.entries()].map(([model, seen]) => ({
-          model, total_requests: seen.requests, total_spend: seen.dollars,
-        })),
-      }));
-      return send(200, rows);
+      return send(400, { detail: { error: "/spend/report endpoint You must be a LiteLLM Enterprise user to use this feature." } });
     }
+
+    // What the open build does answer: one row per REQUEST, which is where both spend windows and
+    // the per model breakdown are computed from.
+    if (route === "GET /spend/logs") return send(200, logs);
 
     return send(404, { error: { message: `no route ${route} on this stub` } });
   });
@@ -203,6 +206,9 @@ export async function startFakeProxy(options = {}) {
       perModel.requests += requests;
       perModel.dollars += dollars;
       record.perModel.set(model, perModel);
+      for (let i = 0; i < requests; i += 1) {
+        logs.push({ api_key: record.keyId, key_alias: record.alias, spend: dollars / requests, model, startTime: nowIso() });
+      }
       return true;
     },
     async close() { await new Promise((resolve) => server.close(resolve)); },

@@ -471,12 +471,12 @@ test("one refresh is one pair of spend reports, not four", async () => {
       // The Spend panel and the Clients panel load together and both want the same two windows, so
       // one click on Refresh has to be one sweep.
       await Promise.all([api.spend(), api.clients()]);
-      assert.equal(proxy.callsTo("GET /global/spend/report").length, 2, "the two windows were asked for more than once");
+      assert.equal(proxy.callsTo("GET /spend/logs").length, 2, "the two windows were asked for more than once");
       // And the per key read too, which is the one that scales with the number of customers: two
       // panels times one call per customer is how a fleet's worth of calls comes out of one click.
       assert.equal(proxy.callsTo("GET /key/info").length, 1, "the key's own spend was read once per panel");
       await api.spend();
-      assert.equal(proxy.callsTo("GET /global/spend/report").length, 2, "a second refresh inside the window asked again");
+      assert.equal(proxy.callsTo("GET /spend/logs").length, 2, "a second refresh inside the window asked again");
       assert.equal(proxy.callsTo("GET /key/info").length, 1);
     } finally { await proxy.close(); }
   });

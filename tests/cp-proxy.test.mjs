@@ -356,6 +356,28 @@ test("with no proxy configured the plan step says so instead of naming a route",
 
 // ---- spend --------------------------------------------------------------------------------------
 
+test("the enterprise-only report is not what the windows are built on, and its refusal is readable", async () => {
+  // MEASURED ON THE R750 2026-09-08 on the build this product runs: /global/spend/report answers
+  // 400, "You must be a LiteLLM Enterprise user to use this feature". The whole spend panel was
+  // built on it, so every client's two windows came back as a refusal. Worse, the refusal shape is
+  // {detail: {error: "<sentence>"}} and the message extractor read past it to the object, so the
+  // operator was shown "the proxy answered 400: [object Object]" and the real reason was hidden.
+  await withProxy(async ({ proxy, config }) => {
+    await ensureProxyKey("acme", config);
+    const client = createProxyClient({ config });
+    proxy.chargeAlias("titanbot-acme", 0.5, 2);
+    await client.spendReport({ startDay: monthStartDay(Date.now()), endDay: isoDay(Date.now()) });
+    assert.equal(proxy.callsTo("GET /global/spend/report").length, 0, "the enterprise-only report was called");
+    assert.equal(proxy.callsTo("GET /spend/logs").length, 1);
+
+    // And if anything does call it, what comes back is a sentence a person can act on.
+    const refused = await client.call("GET", "/global/spend/report");
+    assert.equal(refused.ok, false);
+    assert.match(refused.why, /Enterprise/);
+    assert.equal(refused.why.includes("[object Object]"), false, "the refusal rendered as an object again");
+  });
+});
+
 test("spend lands against the tenant that spent it and against nobody else", async () => {
   await withProxy(async ({ proxy, config }) => {
     await ensureProxyKey("acme", config);
@@ -367,14 +389,16 @@ test("spend lands against the tenant that spent it and against nobody else", asy
     assert.equal(report.ok, true);
 
     const acme = report.keys.find((row) => row.alias === "titanbot-acme");
-    const beta = report.keys.find((row) => row.alias === "titanbot-beta");
     assert.equal(acme.dollars, 1.25);
     assert.equal(acme.requests, 3);
-    // The neighbour is a real zero and not a hole, and a report that mixed them up would have one
-    // customer paying for another's month.
-    assert.equal(beta.dollars, 0);
-    assert.equal(beta.requests, 0);
-    assert.notEqual(acme.keyId, beta.keyId, "two tenants got the same key id");
+    // The neighbour who spent nothing is ABSENT from the report, because it is built from the
+    // proxy's per request log and a customer who made no request has no rows. That is not a hole:
+    // the log covers the whole window, so absent means zero, and cp/admin.mjs's windowFor writes
+    // that zero out rather than leaving it to a default. What would be a real fault is the
+    // neighbour appearing with somebody else's money on it.
+    assert.equal(report.keys.some((row) => row.alias === "titanbot-beta"), false,
+      "a customer who spent nothing was given a row anyway");
+    assert.equal(report.keys.length, 1, "the report carried a row nobody spent on");
   });
 });
 
