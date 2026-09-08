@@ -381,7 +381,10 @@
       try {
         const result = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/model`, { model: select.value });
         banner(String(result.message || `${client.slug} runs on the new model from its next turn.`), true);
-        await loadClients();
+        // Both panels, because this change is made here and recorded down there. Reloading only
+        // this one leaves What changed a row short of the truth until somebody hits Refresh, and a
+        // ledger that is behind the screen it sits on is worse than no ledger.
+        await Promise.all([loadClients(), loadProviders()]);
       } catch (error) { banner(String(error.message)); }
       finally { save.disabled = false; }
     });

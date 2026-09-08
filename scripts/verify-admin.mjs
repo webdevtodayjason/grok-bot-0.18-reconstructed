@@ -1338,6 +1338,11 @@ if (!WANT_BROWSER) {
     "in the customer's name for the model and not the routing one", savedBanner.replace(/\s+/g, " ").slice(0, 70));
   check(providersFixture.ledger.some((row) => row.action === "changed one workspace's model" && row.detail === "plan-minimax"),
     "with a row under What changed naming the workspace and the model");
+  // ON THE SCREEN, not just in the answer. This change is made on the clients panel and recorded on
+  // the providers one, and reloading only the panel that was clicked left the ledger a row short of
+  // the truth until somebody pressed Refresh.
+  check(String(await page.locator("#adminLedger").textContent()).includes("changed one workspace's model"),
+    "and that row is on the screen without anybody pressing Refresh");
   clientModelInjection = null;
 
   // The name of the thing under all this appears once, for the operator, and nowhere else.
