@@ -240,12 +240,21 @@ exempt_container() {
 
 if [ "$HOST_GUARD" != off ]; then
   step "host guard: $HOST_GUARD"
-  # Coolify, by container name rather than by label: it is not our container and carries no label of
-  # ours. It SSHes into this host from inside its own container (measured: 10.0.2.5 -> 10.0.0.1:22,
-  # four live sessions), so without this exemption a drop on 22 stops every Coolify action.
-  COOLIFY_NAME="${TITANBOT_COOLIFY:-$(docker ps --format '{{.Names}}' | grep -E '^coolify$' | head -n 1)}"
-  if [ -n "$COOLIFY_NAME" ]; then exempt_container "$COOLIFY_NAME" "the hosting panel drives this host over ssh"
-  else say "no container called coolify on this host, so there is nothing to exempt for it"; fi
+  # Coolify, by container name rather than by label: they are not our containers and carry no label
+  # of ours. ALL of them, not just the one called `coolify`. It SSHes into this host from inside its
+  # own container (measured: 10.0.2.5 -> 10.0.0.1:22, four live sessions), and its sentinel polls the
+  # host's own API (measured 2026-09-08 by the shadow pass: coolify-sentinel at 10.0.0.3 opening
+  # 10.0.0.1:8000 once a minute, from the DEFAULT bridge, which is docker0 and therefore matched).
+  # That second one is why the prefix is `coolify` and not `^coolify$`: a drop set built on the
+  # obvious name alone would have taken out Coolify's monitoring and looked like a Coolify bug.
+  # This is the whole reason the shadow pass runs before the drop.
+  mapfile -t COOLIFY_NAMES < <(
+    if [ -n "${TITANBOT_COOLIFY:-}" ]; then printf '%s\n' "$TITANBOT_COOLIFY"
+    else docker ps --format '{{.Names}}' | grep -E '^coolify(-|$)' | sort; fi
+  )
+  if [ "${#COOLIFY_NAMES[@]}" -gt 0 ]; then
+    for name in "${COOLIFY_NAMES[@]}"; do exempt_container "$name" "the hosting panel and its own agents"; done
+  else say "no coolify container on this host, so there is nothing to exempt for it"; fi
   # The control plane, by our own role label. It calls Coolify's API on the host's published port to
   # build a customer's box, so it needs 8000 for the same reason a box must not have it.
   CP_NAME="${TITANBOT_CONTROL_PLANE:-$(docker ps --filter label=com.titanbot.role=control-plane --format '{{.Names}}' | head -n 1)}"
