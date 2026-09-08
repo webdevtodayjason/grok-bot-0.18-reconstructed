@@ -382,11 +382,35 @@ style, and a gate whose verdict is a model's word choice is not a gate.
 `tests/cursor-free.test.mjs` is the unit half: the pin file, the fetch fallback order, and the
 error text, ten cases, none skipped.
 
+### On the R750, after the ship
+
+Measured 2026-09-07 on the three live boxes, after `b8b0ae0` was synced, the relay restarted and
+each box took `updateHostNow`. All three swapped cleanly, the supervisor disarming its post-swap
+watch on each with `host up 60s ... (healthy)`.
+
+| | Jason's box | Richard's box | the demo box |
+| --- | --- | --- | --- |
+| gates rows | 24 | 24 | 24 |
+| reading `local pin` | 18 | 18 | 18 |
+| reading `statsig` | 0 | 0 | 0 |
+| `sand_auto_review` | false | false | false |
+| new host log lines over 330 idle seconds | 25 | 9 | 42 |
+| of those, mentioning cursor | **0** | **0** | **0** |
+| the same log before this change | 1,385 cursor lines | 1,399 | 1,875 |
+
+The three tables are identical, which is the point: no box differs from another because of a remote
+flag any more. On the demo box, the one where every Shell command had answered "Rejected: An error
+occured while classifying this action. Please review manually", a scratch turn asking for `date` and
+for the heading of `https://example.com` came back with both, a `shellToolCall` and a
+`webFetchToolCall` row in its outline, and no rejection.
+
+`scripts/verify-deploy.mjs --url https://console.titanium.bot`: 60 PASS, 0 FAIL.
+
 ## 13. Gap rows
 
-- **CURSOR-1** is this document plus the changes it records. Landed and measured on
-  grok-bot-local-vm: the gate pins and the gates line, the loops, the web tools, the box defaults,
-  and the gate itself. Still open, each named in the tables above: the shared transport, the second
+- **CURSOR-1** is this document plus the changes it records. Closed: measured on grok-bot-local-vm
+  and then on all three R750 boxes after the ship. Still open, each named in the tables above and
+  each now harmless because nothing dials out in mode none: the shared transport, the second
   marketplace transport, post-turn labeling, the `DEFAULT_CURSOR_BACKEND_URL` constant, the prompt's
   Cursor Origin section, the auto-review router inversion, the installer's placeholder credential,
   the three compose lines, the account MCP and marketplace RPCs, and the `cursor.com` links.
