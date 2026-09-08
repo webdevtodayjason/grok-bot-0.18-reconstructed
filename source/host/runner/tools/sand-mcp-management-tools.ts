@@ -6,6 +6,10 @@ import {
   formatMcpAccountLabelForPrompt,
 } from "../../../shared/mcp.js";
 import { isMcpServerId } from "../../../shared/node/mcp/mcp-server-id.js";
+import {
+  credentialPlaceholderNames,
+  localRemoteUrlRefusal,
+} from "../../extensions/mcp/local-connectors.js";
 import { defineCommunicateTool } from "./communicate-tool.js";
 import {
   readMcpInstalledListing,
@@ -77,6 +81,18 @@ export interface McpManagementDependencies {
     readonly refused?: string;
   } | void>;
   add(args: { readonly name: string; readonly configJson: string }): Promise<readonly McpInstalledServer[]>;
+  /**
+   * MARKET-6. Remove one connector THIS box owns, with the offer to clear the key it leaves behind.
+   * Optional so a host that predates the one writer keeps working through `removeServer`; the real
+   * host has it, and it is the only path that can clear a secret whose entry has already gone
+   * (CONNECT-11).
+   */
+  removeConnector?(args: { readonly server: string; readonly clearSecrets: boolean }): Promise<{
+    readonly removed: boolean;
+    readonly cleared: readonly string[];
+  }>;
+  /** One server's tools, so a status read can say what the thing actually offers. Optional. */
+  listServerTools?(serverId: string): Promise<readonly { readonly name: string; readonly description?: string; readonly enabled?: boolean }[]>;
   listInstalled(): Promise<readonly McpInstalledServer[]>;
   removeServer(serverId: string): Promise<{
     readonly removed: boolean;
@@ -113,9 +129,23 @@ export const installPluginParameters = z.object({
 });
 export const addMcpServerParameters = z.object({
   name: z.string().trim().min(1).describe('A short, unique name for the server, e.g. "superpowers".'),
-  url: z.string().trim().min(1).describe("The remote server's MCP endpoint URL (https)."),
+  url: z.string().trim().min(1).optional().describe(
+    "For a server the box connects to over the network: its MCP endpoint (https). Give this OR `command`, not both.",
+  ),
+  type: z.enum(["http", "sse"]).optional().describe(
+    'Transport for a `url` server. Leave it out for the usual one (streamable HTTP); pass "sse" only when the server\'s own docs say SSE.',
+  ),
   headers: z.record(z.string(), z.string()).optional().describe(
-    'Optional HTTP headers for the server, e.g. { "Authorization": "Bearer <token>" }. Ask the user for any secret rather than guessing.',
+    'Optional HTTP headers for a `url` server. A header that carries a key must be written as a PLACEHOLDER naming the field, e.g. { "Authorization": "Bearer ${ACME_TOKEN}" } \u2014 never the key itself. The user types the value into a masked box and the box substitutes it when it connects.',
+  ),
+  command: z.string().trim().min(1).optional().describe(
+    'For a server the box RUNS: the program, e.g. "npx". Give this OR `url`, not both.',
+  ),
+  args: z.array(z.string()).optional().describe(
+    'Arguments for `command`, e.g. ["-y", "@acme/mcp-server@1.2.3"]. Pin the version.',
+  ),
+  env: z.array(z.string()).optional().describe(
+    'Environment variable NAMES the program needs for its key, e.g. ["ACME_TOKEN"] \u2014 names only, never values. The user types each value into a masked box.',
   ),
 });
 
@@ -150,28 +180,77 @@ export function rankPluginsLexically<T extends McpPluginSummary>(plugins: readon
     .map((entry) => entry.plugin);
 }
 
+/**
+ * MARKET-6. The SAME rules the one writer holds, asked early so the model gets a sentence it can
+ * act on instead of a refusal from three layers down. It is the writer's own function, imported
+ * rather than restated, because this check drifting from the one that actually guards the file is
+ * how the reserved-name rule ended up made in four places and enforced in three.
+ *
+ * What used to be here said the URL must be http(s) "because Grok Bot only connects remote http/sse
+ * MCP servers over HTTP(S)" -- the retired product name, and the exact inverse of what is true on
+ * this box, where every connector that works is a program the box runs.
+ */
 export function validateRemoteMcpUrl(rawUrl: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    return `"${rawUrl}" is not a valid URL. Ask the user for the server's full https endpoint (e.g. https://example.com/mcp) and try again.`;
+  return localRemoteUrlRefusal(rawUrl);
+}
+
+/**
+ * MARKET-6. A credential the model typed is a credential in the transcript, so a header or an
+ * environment value that is not a `${FIELD}` placeholder is refused with the one thing the model
+ * should do instead: name the field and let the person put the value in the masked box.
+ *
+ * Headers that carry no key are left alone. A vendor's docs really do ask for
+ * `x-mcp-servers: acme` or an Accept header, and refusing those would make a documented server
+ * unaddable for no gain in custody.
+ */
+const AUTH_HEADER_PATTERN = /^(authorization|proxy-authorization|cookie|api[-_]?key|x-api-key|x-auth-token|x-access-token|x-[a-z0-9-]*-(key|token|secret))$/i;
+
+export function credentialLiteralRefusal(
+  name: string,
+  headers: Readonly<Record<string, string>> | undefined,
+  env: readonly string[] | undefined,
+): string | null {
+  for (const [header, value] of Object.entries(headers ?? {})) {
+    if (!AUTH_HEADER_PATTERN.test(header.trim())) continue;
+    if (credentialPlaceholderNames(value).length > 0) continue;
+    const field = `${name.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase()}_TOKEN`;
+    return `Don't put the key in the "${header}" header. Add the server with "${header}": "${value.trim().split(/\s+/)[0] === "Bearer" ? "Bearer " : ""}\${${field}}" instead, then tell the user to type the value into the masked box on the ${name} page \u2014 a key you type here is stored in this conversation.`;
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return `The server URL must be http(s); "${parsed.protocol}" is not supported. Grok Bot only connects remote http/sse MCP servers over HTTP(S), so ask the user for an https endpoint.`;
-  }
-  if (parsed.username.length > 0 || parsed.password.length > 0) {
-    return `Don't put credentials in the server URL \u2014 pass them as headers instead (e.g. { "Authorization": "Bearer <token>" }), so they aren't stored in plaintext in the URL. Ask the user for the token and try again with a clean URL.`;
+  for (const field of env ?? []) {
+    if (field.includes("=")) {
+      return `Send only the NAME of the environment variable, not "${field}". Pass env: ["${field.split("=")[0]}"] and tell the user to type the value into the masked box on the ${name} page \u2014 a key you type here is stored in this conversation.`;
+    }
   }
   return null;
 }
 
-export function buildServerConfigJson(args: { readonly url?: string | undefined; readonly headers?: Readonly<Record<string, string>> | undefined }): string | null {
-  if (args.url == null || args.url.length === 0) return null;
+/**
+ * MARKET-6. Both shapes, because both work here. A `url` server is one the box connects to
+ * itself; a `command` server is one it runs. Environment NAMES land with the value empty, which
+ * is how this box marks "the operator still owes a key" and what makes the masked card offer it.
+ */
+export function buildServerConfigJson(args: {
+  readonly url?: string | undefined;
+  readonly type?: string | undefined;
+  readonly headers?: Readonly<Record<string, string>> | undefined;
+  readonly command?: string | undefined;
+  readonly args?: readonly string[] | undefined;
+  readonly env?: readonly string[] | undefined;
+}): string | null {
+  if (args.url != null && args.url.length > 0) {
+    return JSON.stringify({
+      type: args.type === "sse" ? "sse" : "http",
+      url: args.url,
+      ...(args.headers != null && Object.keys(args.headers).length > 0 ? { headers: args.headers } : {}),
+    });
+  }
+  if (args.command == null || args.command.length === 0) return null;
   return JSON.stringify({
-    type: "http",
-    url: args.url,
-    ...(args.headers != null && Object.keys(args.headers).length > 0 ? { headers: args.headers } : {}),
+    command: args.command,
+    ...(args.args != null && args.args.length > 0 ? { args: [...args.args] } : {}),
+    ...(args.env != null && args.env.length > 0
+      ? { env: Object.fromEntries(args.env.map((field) => [field, ""])) }
+      : {}),
   });
 }
 
@@ -190,7 +269,12 @@ export function describeInstalled(server: McpInstalledServer): string {
       : `tools=${server.toolCount}`,
   ];
   if (server.pluginId != null) parts.push(`plugin=${server.pluginId} (remove via UninstallPlugin — removes the whole plugin)`);
-  if (server.statusDetail != null && server.statusDetail.length > 0) parts.push(`detail="${truncateOneLine(server.statusDetail, 200)}"`);
+  // MARKET-6. The host's own sentence first. The raw detail behind a failure is a Node stack with a
+  // vendor's file paths in it, and reading that to a person is how a wrong key became "MCP error
+  // -32000: Connection closed; stderr: ... at EventSource.failConnection_fn".
+  const sentence = typeof server.statusSentence === "string" ? server.statusSentence : "";
+  if (sentence.length > 0) parts.push(sentence);
+  else if (server.statusDetail != null && server.statusDetail.length > 0) parts.push(`detail="${truncateOneLine(server.statusDetail, 200)}"`);
   if (server.customInstructions.length > 0 && server.customInstructions !== getDefaultMcpCustomInstruction(server.name)) {
     parts.push(`instructions="${truncateOneLine(server.customInstructions, 120)}"`);
   }
@@ -295,6 +379,11 @@ export function emitAndDescribeAuthResult(
 }
 
 const serverIdParameters = z.object({ server_id: z.string().trim().min(1) });
+const uninstallServerParameters = serverIdParameters.extend({
+  clear_stored_values: z.boolean().optional().describe(
+    "Also clear the key the user stored for this server. Ask them first; the default keeps it, so re-adding the server needs no fresh key.",
+  ),
+});
 const statusParameters = z.object({ server_id: z.string().trim().optional() });
 const instructionsParameters = serverIdParameters.extend({ instructions: z.string() });
 const forceReauth = z.boolean().optional();
@@ -371,27 +460,62 @@ export function createMcpManagementTools(
       }),
     }),
     defineCommunicateTool(management, {
-      id: "ADD_MCP_SERVER", name: "AddMcpServer", description: "Add a remote MCP server the Marketplace doesn't carry — use this when the user gives you a link for a server SearchPlugins doesn't know. Only call this after the user agrees to add it — confirm with a question widget first, since it changes the user's account configuration and the server can reach external services on their behalf. Provide the remote server's `url` (with `headers` for any auth token). Grok Bot only supports remote http/sse MCP servers (executed on the backend); local/stdio servers are not supported. Ask the user for the exact endpoint and any secrets rather than guessing; if you only have a link, open it first (WebFetch) to find the connection details. Newly added tools become available to you on your next message.", parameters: addMcpServerParameters,
+      id: "ADD_MCP_SERVER", name: "AddMcpServer", description: "Add an MCP server the Marketplace does not carry: use this when the user gives you a link or a config block for a server SearchPlugins does not know. Only call this after the user agrees, and confirm with a question widget first, since it changes their box and the server can reach external services on their behalf. Two shapes, and you pick one: a server this box CONNECTS to (`url`, plus `headers`), or a server this box RUNS (`command`, `args`, and `env` for the NAMES of any variables it needs). Both work here. NEVER put a key in a header value or an env value: write the header as \"Bearer ${THE_FIELD}\" and pass env as names only, then tell the user to type the value into the masked box on that server\'s page, because a key you type here is stored in this conversation. A server that can only be signed into through a browser cannot be added this way; say so and stop. Ask the user for the exact endpoint or command rather than guessing, and if you only have a link, open it first (WebFetch) to find the connection details. Newly added tools become available to you on your next message.", parameters: addMcpServerParameters,
       describeActivity: (args: z.infer<typeof addMcpServerParameters>) => ({ detail: args.name }),
       execute: guardMutation(async (_ctx, args: z.infer<typeof addMcpServerParameters>, deps) => {
-        const error = validateRemoteMcpUrl(args.url);
-        if (error != null) return error;
+        if (args.url != null && args.url.length > 0 && args.command != null && args.command.length > 0) {
+          return "Give either `url` (a server the box connects to) or `command` (a server the box runs), not both. Ask the user which one their server's docs describe.";
+        }
+        if (args.url != null && args.url.length > 0) {
+          const error = validateRemoteMcpUrl(args.url);
+          if (error != null) return error;
+        }
+        const literal = credentialLiteralRefusal(args.name, args.headers, args.env);
+        if (literal != null) return literal;
         const configJson = buildServerConfigJson(args);
-        if (configJson == null) return "A remote MCP URL is required.";
+        if (configJson == null) return "A server needs either its `url` or the `command` the box runs. Ask the user which their server's docs give.";
         const before = await deps.listInstalled();
         const servers = await deps.add({ name: args.name, configJson });
         const note = emitNeedsAuthCards(before, servers);
-        return [`Added "${args.name}".`, ...(note == null ? [] : [note]), describeInstalledList(servers)].join("\n");
+        // Every placeholder and every env name is a value the person still owes, and saying which
+        // is the difference between "added" and a connector sitting at 401 with nobody told why.
+        const owed = [
+          ...Object.values(args.headers ?? {}).flatMap(credentialPlaceholderNames),
+          ...(args.env ?? []),
+        ];
+        const ask = owed.length === 0
+          ? []
+          : [`It cannot connect until the user stores ${[...new Set(owed)].join(", ")} on its page in the Marketplace. Tell them that in plain text; do not ask them for the value here.`];
+        return [`Added "${args.name}".`, ...(note == null ? [] : [note]), ...ask, describeInstalledList(servers)].join("\n");
       }),
     }),
     defineCommunicateTool(management, {
-      id: "UNINSTALL_MCP_SERVER", name: "UninstallMcpServer", description: "Remove ONE custom MCP server — a server added with AddMcpServer, not one that came from a plugin — by its server identifier. This is destructive and deletes the server with all of its accounts, so confirm with the user via a question widget first. A server the listing marks `plugin=<id>` came from a marketplace plugin: removing it would uninstall that WHOLE plugin, which this tool refuses — use UninstallPlugin for those so the confirmation can disclose the full scope." + (multiAccount ? " To remove just one account and keep the server, use RemoveMcpAccount instead." : ""), parameters: serverIdParameters,
-      execute: guardMutation(async (_ctx, args: z.infer<typeof serverIdParameters>, deps) => {
+      id: "UNINSTALL_MCP_SERVER", name: "UninstallMcpServer", description: "Remove ONE custom MCP server, meaning a server added with AddMcpServer rather than one that came from a plugin, by its server identifier. This is destructive and deletes the server with all of its accounts, so confirm with the user via a question widget first. Ask them in the same breath whether to clear the key they stored for it: pass clear_stored_values true if they say yes, and leave it out to keep the key so re-adding needs no fresh one. A server the listing marks `plugin=<id>` came from a marketplace plugin, and removing it would uninstall that WHOLE plugin, which this tool refuses: use UninstallPlugin for those so the confirmation can disclose the full scope." + (multiAccount ? " To remove just one account and keep the server, use RemoveMcpAccount instead." : ""), parameters: uninstallServerParameters,
+      execute: guardMutation(async (_ctx, args: z.infer<typeof uninstallServerParameters>, deps) => {
         const installed = await deps.listInstalled();
         const row = resolveMcpServerRowByIdentifierOrLegacyId(installed, args.server_id);
         if (row == null) return noInstalledServerMessage(args.server_id);
         if (row.pluginId != null) return `${row.name} was installed from marketplace plugin ${row.pluginId}; use UninstallPlugin.`;
         if (row.isTeamServer === true) return `${row.name} is provided by the user's team, so it can't be removed here.`;
+        // MARKET-6. The one writer, when this host has it. Removing the entry and clearing the key
+        // are two acts, and the second one used to be impossible once the first had happened: every
+        // secret command started at the entry, so an uninstalled connector's key became unreachable
+        // rather than merely kept (CONNECT-11).
+        if (deps.removeConnector != null) {
+          const outcome = await deps.removeConnector({
+            server: row.serverIdentifier,
+            clearSecrets: args.clear_stored_values === true,
+          });
+          const kept = args.clear_stored_values === true
+            ? outcome.cleared.length === 0
+              ? "There was no stored key to clear."
+              : `Cleared its stored ${outcome.cleared.join(", ")}.`
+            : "Its stored key was kept, so re-adding it needs no fresh one. Tell the user that, and that clearing it is a separate action on its page.";
+          const status = outcome.removed
+            ? `Removed MCP server ${row.name} (${row.serverIdentifier}).`
+            : `The removal request for ${row.name} completed, but it still reads as installed.`;
+          return [status, kept, describeInstalledList(await deps.listInstalled())].join("\n");
+        }
         const result = await deps.removeServer(row.id);
         const status = result.removed ? `Removed MCP server ${row.name} (${row.serverIdentifier}).` : `The removal request for ${row.name} completed, but it still reads as installed.`;
         return [status, describeInstalledList(result.servers)].join("\n");
@@ -420,7 +544,18 @@ export function createMcpManagementTools(
         const token = args.server_id?.trim();
         if (token == null || token.length === 0) return describeInstalledList(installed);
         const rows = resolveMcpServerRowsByIdentifierOrLegacyId(installed, token);
-        return rows.length === 0 ? `No installed MCP server "${token}".` : rows.map(describeInstalled).join("\n");
+        if (rows.length === 0) return `No installed MCP server "${token}".`;
+        // MARKET-6. One server asked about by name gets its TOOLS too. No new tool name is needed
+        // for this: the model already comes here to check a connector after adding it, and "it says
+        // connected" with no list is the answer that sent it round again through GetMcpTools.
+        const first = rows[0];
+        const listed = rows.length === 1 && first != null && deps.listServerTools != null
+          ? await deps.listServerTools(first.id).catch(() => [])
+          : [];
+        const tools = listed.length === 0
+          ? []
+          : [`Tools: ${listed.map((tool) => tool.name + (tool.enabled === false ? " (disabled)" : "")).join(", ")}`];
+        return [...rows.map(describeInstalled), ...tools].join("\n");
       },
     }),
     defineCommunicateTool(management, {

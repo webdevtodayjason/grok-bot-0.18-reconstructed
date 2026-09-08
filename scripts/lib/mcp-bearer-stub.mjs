@@ -8,7 +8,7 @@
 // rather than a string inside the gate: the unit test's claims about the 401, the tool list and the
 // key never appearing in an answer are claims about the server the gate actually drives.
 //
-//   MCP_STUB_KEY=<key> [MCP_STUB_HEADERS='{"X-Name":"value"}'] node mcp-bearer-stub.mjs --port <port>
+//   MCP_STUB_KEY=<key> [MCP_STUB_HEADERS='{"X-Name":"value"}'] node mcp-bearer-stub.mjs --port <port> [--host <bind>]
 //
 // The key comes from the environment and never from an argument, because a command line is readable
 // by anyone who can run ps. It prints one line, "listening <port>", when it is up, and nothing else
@@ -28,6 +28,7 @@ const argOf = (name) => {
 };
 
 const PORT = Number(argOf("port") ?? 0);
+const HOST = argOf("host") ?? "127.0.0.1";
 const KEY = process.env.MCP_STUB_KEY ?? "";
 if (KEY.length === 0) {
   process.stderr.write("MCP_STUB_KEY is required\n");
@@ -146,6 +147,11 @@ const server = createServer((req, res) => {
   });
 });
 
-server.listen(PORT, "127.0.0.1", () => {
+// MARKET-6. Loopback stays the default, so every existing caller binds exactly where it did. The
+// native-remote arm needs the other option: a connector pointed at 127.0.0.1 is refused at the door
+// now, because inside a box that address is the exec daemon on 1337 and 1338 and the host's own
+// gateway on 1340. That arm passes the box's own private address here instead, which is still only
+// reachable from inside the box's network namespace.
+server.listen(PORT, HOST, () => {
   process.stdout.write(`listening ${server.address().port}\n`);
 });

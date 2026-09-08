@@ -234,18 +234,20 @@ export class SandMcpManager {
           !BUILTIN_MCP_SERVER_NAMES.has(server.serverIdentifier),
       );
     this.instructions.migrateCustomInstructions(visible);
-    const http = visible.filter(
-        (server: any) =>
-          server.serverIdentifier != null &&
-          !server.disabledByTeamAdminPolicy &&
-          "url" in server.config,
-      ),
-      stdio = visible.filter(
-        (server: any) =>
-          server.serverIdentifier != null &&
-          !server.disabledByTeamAdminPolicy &&
-          "command" in server.config,
-      ),
+    // MARKET-6. The third place the url/command split is made, and the one that decides what this
+    // listing asks. A remote connector of this box's OWN is answered for by the box, which is
+    // connected to it; asking the Cursor backend about it throws on every Titanium Bot box, because
+    // there is no account behind that RPC -- which is how one native remote made the whole listing
+    // 500 rather than showing one broken row.
+    const boxRemote = this.definitionSource.getBoxRemoteNames();
+    const listable = (server: any) =>
+      server.serverIdentifier != null && !server.disabledByTeamAdminPolicy;
+    const isBoxRemote = (server: any) =>
+      "url" in server.config && boxRemote.has(server.serverIdentifier);
+    const http = visible.filter((server: any) =>
+        listable(server) && "url" in server.config && !isBoxRemote(server)),
+      stdio = visible.filter((server: any) =>
+        listable(server) && ("command" in server.config || isBoxRemote(server))),
       backend = http.length
         ? await this.backendMcpExec.listTools(
             http.map((server: any) => server.serverIdentifier),
@@ -288,7 +290,7 @@ export class SandMcpManager {
     for (const server of visible) {
       if (server.disabledByTeamAdminPolicy)
         servers.push(this.summaries.createAdminDisabledServerSummary(server));
-      else if (!("url" in server.config))
+      else if (!("url" in server.config) || isBoxRemote(server))
         servers.push(
           this.summaries.createBoxServerSummary(
             server,
