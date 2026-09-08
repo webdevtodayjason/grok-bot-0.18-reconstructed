@@ -26,6 +26,7 @@
 // Exit 0 every check passed, 1 a check failed. It needs no docker, no network and no box.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import http from "node:http";
@@ -52,8 +53,19 @@ export const name = "tenant";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 /** A relay that records what the CLI asked it to do to a box, and does nothing to one. */
-async function startFakeRelay(token) {
+async function startFakeRelay(token, tenantRoot = "") {
   const calls = [];
+  // What the real relay writes into a box is the key IT holds, from its own registry, which lags
+  // the control plane by a refresh. In the happy path that equals the file the mint wrote, so this
+  // stub reports the hash of that file. `staleKey` forces the lagging case the CLI has to catch.
+  let staleKey = null;
+  const keyHashFor = (slug) => {
+    if (staleKey != null) return createHash("sha256").update(staleKey, "utf8").digest("hex").slice(0, 12);
+    try {
+      const raw = readFileSync(path.join(tenantRoot, slug, "profile", "model-proxy.json"), "utf8");
+      return createHash("sha256").update(String(JSON.parse(raw).key ?? ""), "utf8").digest("hex").slice(0, 12);
+    } catch { return ""; }
+  };
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://relay.invalid");
     const chunks = [];
@@ -62,7 +74,12 @@ async function startFakeRelay(token) {
     if (chunks.length > 0) { try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { body = {}; } }
     const presented = String(request.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
     calls.push({ route: `${request.method} ${url.pathname}`, body, authorized: presented === token });
+    const slug = decodeURIComponent(url.pathname.split("/")[3] ?? "");
     const text = JSON.stringify({
+      // What it wrote, by hash prefix and never by value. The CLI compares this against the key it
+      // just minted, so a console still serving an older key is caught instead of being written
+      // into somebody's box.
+      wrote: [{ name: "SAND_OPENAI_COMPATIBLE_API_KEY", length: 25, sha256: keyHashFor(slug) }],
       // The relay's real answer shape, so this stub cannot drift from the route the CLI talks to:
       // `prefix` in, a `removed` ARRAY and a `removedCount` out, plus the absence proof.
       endpointName: "Z.AI GLM (included with your plan)",
@@ -78,6 +95,9 @@ async function startFakeRelay(token) {
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     calls,
+    /** Pretend the registry has not refreshed yet, the way it had not on the R750. */
+    serveStaleKey: (key) => { staleKey = key; },
+    serveCurrentKey: () => { staleKey = null; },
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
@@ -120,7 +140,7 @@ export async function run(context = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "proxy-leg-tenant-"));
   const proxy = await startFakeProxy();
   const coolify = await startFakeCoolify();
-  const relay = await startFakeRelay("r".repeat(32));
+  const relay = await startFakeRelay("r".repeat(32), path.join(root, "tenants"));
 
   const env = {
     CP_PORT: "0",
@@ -311,6 +331,24 @@ export async function run(context = {}) {
       // And the key it says it would reuse is still the one that was there.
       assert.ok(existsSync(tenantPaths("legacy", config).proxyKeyFile));
       return "0 relay calls";
+    });
+
+    await record("a console still serving an older key is caught, and nothing is deleted", async () => {
+      // MEASURED ON THE R750 2026-09-08. demo's key was revoked and minted again, and the migrate
+      // that followed reported "the box now answers through the plan" while writing the REVOKED key
+      // back into the box, because the relay refreshes its registry about once a minute and that is
+      // still what it held. The box answered 401 on every turn and the command that caused it had
+      // said it worked. The relay names what it wrote by hash, so the two are compared.
+      relay.serveStaleKey("sk-a-key-that-was-revoked-a-minute-ago");
+      try {
+        const before = relay.calls.filter((call) => call.route.endsWith("/forget-provider-keys")).length;
+        const answer = await runCli(["proxy", "migrate", "legacy", "--forget", "734e60c2"], { ...env, CP_PROXY_SWITCH_WAIT_MS: "1500" });
+        assert.match(answer.stdout, /still (handing out|on) an older key/);
+        assert.match(answer.stdout, /Nothing was deleted/);
+        const after = relay.calls.filter((call) => call.route.endsWith("/forget-provider-keys")).length;
+        assert.equal(after, before, "a migrate that could not confirm the key still deleted one");
+      } finally { relay.serveCurrentKey(); }
+      return "the stale key was refused and nothing was deleted";
     });
 
     await record("migrate refuses to delete a hash it was not given", async () => {

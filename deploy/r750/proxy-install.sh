@@ -229,12 +229,13 @@ cat <<'NEXT'
 
   3. Prove it is reachable from inside the bridge and published nowhere:
 
-       docker exec <the relay container> curl -sf http://titanbot-proxy:4000/health/readiness
+       # the relay image has no curl, so ask node, which it does have
+       docker exec <the relay container> node -e 'fetch("http://titanbot-proxy:4000/health/readiness").then(r=>r.text()).then(console.log)'
        docker port <the proxy container>      # must print nothing
 
   4. Open the one path a box needs, and check the rest is still shut:
 
-       sudo systemctl start titanbot-isolation.service
+       systemctl --user start titanbot-isolation.service   # a USER unit; sudo says not found
        sudo bash /home/sem/titanbot/deploy/box-isolation.sh --verify
 
   docs/PROXY.md is the same list with the reasoning.

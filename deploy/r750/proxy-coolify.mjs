@@ -540,7 +540,7 @@ async function main() {
   say(`service ${serviceUuid}`);
   say("Deploy it in Coolify yourself. Then, on the server:");
   say("  ssh dell-remote bash /home/sem/titanbot/deploy/proxy-install.sh --pin-url");
-  say("  sudo systemctl start titanbot-isolation.service");
+  say("  systemctl --user start titanbot-isolation.service   # a USER unit; sudo says not found");
   say("  sudo bash /home/sem/titanbot/deploy/box-isolation.sh --verify");
   return 0;
 }

@@ -44,6 +44,11 @@ import {
 import { createProxyClient, proxyKeyAlias } from "./proxy.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
+import { createHash } from "node:crypto";
+
+// A credential by its hash, never by its value. Everything this file prints about a key, and
+// everything it compares, goes through here.
+const sha256Of = (value) => createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 
 const config = loadConfig();
 const BASE = config.publicUrl;
@@ -438,7 +443,35 @@ async function proxyMigrate(args) {
       if (!minted.ok) { out(`  stopped: ${minted.why}`); continue; }
       out(`  key ${minted.record.alias} ${minted.minted ? "minted" : "already there"}`);
 
-      const used = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/use-included`, {});
+      // THE BOX IS WRITTEN THE KEY THE RELAY HOLDS, NOT THE ONE THIS FILE HOLDS, and the relay
+      // refreshes its registry on a sixty second cycle. Measured on the R750 2026-09-08 doing
+      // exactly this: demo's key was revoked and minted again, and the migrate that followed
+      // reported "the box now answers through the plan" while writing the REVOKED key back into
+      // the box, because that was still what the relay's cache held. The box answered 401 on every
+      // turn and the command that caused it had said it worked.
+      //
+      // The relay's answer names what it wrote by hash prefix, and this file knows the hash of the
+      // key it just minted, so the two are compared. No key travels in either direction to do it.
+      const wantHash = sha256Of(minted.record.key).slice(0, 12);
+      let used = null;
+      // Two minutes by default, which is two of the relay's refresh cycles. Shrunk by the gate so
+      // the lagging case can be measured without waiting out a real one.
+      const waitMs = Number(process.env.CP_PROXY_SWITCH_WAIT_MS ?? "120000") || 120_000;
+      const deadline = Date.now() + waitMs;
+      for (;;) {
+        used = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/use-included`, {});
+        const wroteHash = (used.wrote ?? []).find((one) => one.name === "SAND_OPENAI_COMPATIBLE_API_KEY")?.sha256 ?? "";
+        if (wroteHash === wantHash) break;
+        if (Date.now() >= deadline) {
+          out(`  STOPPED: the console is still handing out an older key for ${row.slug} (it wrote ${wroteHash || "nothing"}, this key is ${wantHash}).`);
+          out("  Nothing was deleted. The console refreshes its list about once a minute; run this again in a moment.");
+          used = null;
+          break;
+        }
+        out(`  the console is still on an older key (${wroteHash || "none"}); waiting for it to catch up`);
+        await new Promise((resolve) => setTimeout(resolve, Math.min(10_000, Math.max(200, Math.floor(waitMs / 4)))));
+      }
+      if (used == null) continue;
       out(`  the box now answers through the plan: ${String(used.endpointName ?? used.using ?? "switched")}`);
       if (used.rollbackFile) out(`  the way back is kept at ${used.rollbackFile}`);
 

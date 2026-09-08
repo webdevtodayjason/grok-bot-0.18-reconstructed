@@ -237,6 +237,33 @@ just not the thing that counts the money.
   answers `403 ... only available for LiteLLM Enterprise users: tags`. The tenant is therefore
   carried in `key_alias` and `metadata`, which is where the panel reads it from anyway — metering
   was always going to hang off the virtual key, never off tags.
+- **So is `/global/spend/report`, and it is the one the panel was built on.** Measured on the R750
+  2026-09-08: it answers `400 ... You must be a LiteLLM Enterprise user to use this feature`. Both
+  spend windows now come from `/spend/logs`, which is open and answers one row per request carrying
+  the key hash, the dollars, the model and the timestamp, so the windows and the per-model
+  breakdown are computed from the same rows. It is called with **no date parameters on purpose**:
+  adding them changes the answer shape from a list of requests to a per-day table with one column
+  per key. The filtering is done on the timestamp instead. **The bound this leaves unset:** the
+  call fetches the recent log rather than a window, so on a busy fleet this is the first thing to
+  page. `PROXY-6` owns it.
+- **A customer who spent nothing is absent from the report, not present with a zero.** The log
+  covers the whole window, so absent means zero, and the panel writes that zero out rather than
+  showing a hole.
+- **Dollars are zero for a subscription model, and that is correct.** Measured on the R750
+  2026-09-08: `plan-zai` requests record `$0` because a Z.AI coding-plan model has no per-token
+  price in LiteLLM's cost map; `plan-minimax` records real fractions of a cent. Read the
+  **requests** column as the load signal for anything on a flat subscription. The percentage a
+  customer sees is against `CP_PROXY_ALLOWANCE_USD`, which is the control plane's own number and
+  not read back from the proxy, so the chip works either way.
+- **`soft_budget` does not come back on `/key/info`.** Measured on the R750: the mint sends it and
+  LiteLLM stores it behind a `budget_id`, so the key reads back with `soft_budget: null`. Nothing
+  depends on reading it back — the panel's denominator is `CP_PROXY_ALLOWANCE_USD`.
+- **After a re-mint, the console keeps handing out the old key for up to a minute.** The relay
+  refreshes its registry on a ~60 s cycle and `use-included` writes the key the *relay* holds.
+  Measured on the R750 2026-09-08: a revoke-then-mint followed by a migrate wrote the **revoked**
+  key back into the box and reported success. `proxy migrate` now compares the hash the relay says
+  it wrote against the key it just minted, waits for the refresh, and deletes nothing until they
+  agree.
 
 ---
 
