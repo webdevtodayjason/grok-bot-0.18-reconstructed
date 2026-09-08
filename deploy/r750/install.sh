@@ -49,6 +49,10 @@ command -v curl >/dev/null || die "curl is not on PATH (needed for the readiness
 # writes it beside the bundle, so its absence means an old sync.sh put that bundle there.
 [ -f "$ROOT/runtime/sand-host-bundle-latest.version" ] || die "$ROOT/runtime/sand-host-bundle-latest.version is missing -- run deploy/r750/sync.sh from the Mac (it stages the version beside the bundle)"
 [ -f "$ROOT/runtime/box-exec-daemon/main.cjs" ] || die "$ROOT/runtime/box-exec-daemon/main.cjs is missing -- run deploy/r750/sync.sh from the Mac"
+# BROWSER-1: the browser driver reaches a box through this same runtime mount, so a box installed
+# without it has browser tools that cannot start. Checked here rather than discovered on the first
+# page a person asks for.
+[ -f "$ROOT/runtime/browser-driver/cli.mjs" ] || die "$ROOT/runtime/browser-driver/cli.mjs is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/deploy/apply-start-window-fix.sh" ] || die "$ROOT/deploy/apply-start-window-fix.sh is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/ui/server.mjs" ] || die "$ROOT/ui/server.mjs is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/ui/auth.mjs" ] || die "$ROOT/ui/auth.mjs is missing -- run deploy/r750/sync.sh from the Mac"

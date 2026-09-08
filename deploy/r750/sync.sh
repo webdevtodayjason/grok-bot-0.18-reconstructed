@@ -83,7 +83,22 @@ rsync -a "$BUNDLE" "$HOST:$ROOT/runtime/host-main.cjs"
 rsync -a "$VERSION_FILE" "$HOST:$ROOT/runtime/sand-host-bundle-latest.version"
 # The DIRECTORY is what the box bind-mounts, so ship it as one and delete anything stale in it.
 rsync -a --delete "$BUILD/box-exec-daemon/" "$HOST:$ROOT/runtime/box-exec-daemon/"
-say "runtime/host-main.cjs, runtime/sand-host-bundle-latest.version and runtime/box-exec-daemon/"
+# BROWSER-1. The browser driver, straight from the repo rather than out of $BUILD: it is six plain
+# .mjs files with no dependencies and no build step, which is the whole reason it is written that
+# way. There is no npm install inside a box and no node_modules under the mount, so anything the
+# driver needed would have to be vendored; instead it needs nothing, including a WebSocket, which it
+# implements itself because the box's node 20 keeps the global one behind a flag.
+#
+# Nothing new has to be mounted for this to arrive. Every box already bind-mounts this whole
+# directory read-only at /opt/titanbot-runtime (deploy/r750/install.sh, and the same line in
+# deploy/coolify/box.compose.yml and docker-compose.yml), so these files land inside the box at
+# /opt/titanbot-runtime/browser-driver/ and the tools run them from there. Read-only is correct:
+# the driver writes nothing next to itself, only under /tmp/.titanbot-browser.
+#
+# --delete, like the daemon above, because a stale module left behind by an older ship is a file
+# node will happily import.
+rsync -a --delete "$REPO/runtime/browser-driver/" "$HOST:$ROOT/runtime/browser-driver/"
+say "runtime/host-main.cjs, runtime/sand-host-bundle-latest.version, runtime/box-exec-daemon/ and runtime/browser-driver/"
 
 step "ship the relay"
 # Named files, never the ui/ directory. That is the whole protection: ui/endpoints.json (API keys)
