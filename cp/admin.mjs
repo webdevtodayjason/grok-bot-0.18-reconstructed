@@ -1418,7 +1418,13 @@ export function createAdminApi({
     const planModels = [];
     for (const [alias, rows] of byAlias) {
       if (!isPlanModel(alias)) continue;
-      const first = rows[0];
+      // THE ROW THAT CARRIES THE PRODUCT'S OWN FACTS. During the move off a file-configured proxy
+      // the same alias has file deployments and database ones, and only the database ones carry
+      // customerName, customerLabel and the rest: a file row has none of it. Reading rows[0] meant
+      // the panel showed every plan model with no customer name, every one therefore counted as not
+      // shown to customers, and push-label pushed an empty label into a box. The database row is the
+      // one that knows, and rows[0] is only a fallback for an install that has not been seeded.
+      const first = rows.find((row) => row.fromDb === true) ?? rows[0];
       const ran = ranAlias(sweep, alias);
       const fallback = await askProxy(`/fallback/${alias}`, () => proxy.getFallback(alias));
       planModels.push({
@@ -2123,9 +2129,12 @@ export function createAdminApi({
       if (!models.ok) { json(response, 502, { error: "proxy", message: models.why }); return true; }
       const rows = models.rows.filter((row) => row.alias === alias);
       if (rows.length === 0) { json(response, 404, { error: "not_found", message: `The proxy serves nothing called ${alias}.` }); return true; }
+      // The same rule as the panel's own read: only a database row carries this product's facts
+      // about an alias, so it is the one every sentence below is written from.
+      const known = rows.find((row) => row.fromDb === true) ?? rows[0];
 
       if (action === "update") {
-        const provider = providerById(String(body?.provider ?? rows[0].provider)) ?? { kind: "openai", baseUrl: "" };
+        const provider = providerById(String(body?.provider ?? known.provider)) ?? { kind: "openai", baseUrl: "" };
         const vendorModel = body?.vendorModel === undefined ? "" : prefixedModel(provider, body.vendorModel);
         const info = {};
         if (body?.customerName !== undefined) info[TB.customerName] = String(body.customerName);
@@ -2142,9 +2151,9 @@ export function createAdminApi({
         }
         // The rule that keeps a routing target off a customer's page holds on an EDIT too: a row
         // cannot be made visible without the two words that name it.
-        const wouldBeVisible = body?.customerVisible === undefined ? rows[0].customerVisible : body.customerVisible === true;
-        const wouldHaveLabel = String(body?.customerLabel ?? rows[0].customerLabel ?? "").length > 0;
-        const wouldHaveName = String(body?.customerName ?? rows[0].customerName ?? "").length > 0;
+        const wouldBeVisible = body?.customerVisible === undefined ? known.customerVisible : body.customerVisible === true;
+        const wouldHaveLabel = String(body?.customerLabel ?? known.customerLabel ?? "").length > 0;
+        const wouldHaveName = String(body?.customerName ?? known.customerName ?? "").length > 0;
         if (wouldBeVisible && !(wouldHaveLabel && wouldHaveName)) {
           json(response, 400, { error: "bad_request", message: "A model a customer can see needs the words on their card and the name their Titan says it runs." });
           return true;
@@ -2152,7 +2161,7 @@ export function createAdminApi({
         const ledger = beginAction(guard, request, {
           action: "plan-model.update",
           target: alias,
-          detail: vendorModel.length > 0 ? `${alias} from ${rows[0].vendorModel} to ${vendorModel}` : `${alias}: ${Object.keys(info).join(", ")}`,
+          detail: vendorModel.length > 0 ? `${alias} from ${known.vendorModel} to ${vendorModel}` : `${alias}: ${Object.keys(info).join(", ")}`,
         });
         // ONLY WHAT THIS ROUTE CAN ACTUALLY EDIT. While an install is moving off a file-configured
         // proxy the same alias has file deployments and database ones, and LiteLLM refuses the file
@@ -2266,7 +2275,7 @@ export function createAdminApi({
           });
           return true;
         }
-        const ledger = beginAction(guard, request, { action: "plan-model.push-label", target: alias, detail: `pushing ${rows[0].customerLabel || alias} into ${targets.join(", ")}` });
+        const ledger = beginAction(guard, request, { action: "plan-model.push-label", target: alias, detail: `pushing ${known.customerLabel || alias} into ${targets.join(", ")}` });
         const pushed = [];
         for (const slug of targets) {
           if (store.getTenant(slug) == null) { pushed.push({ slug, ok: false, why: "there is no workspace by that name" }); continue; }
@@ -2280,12 +2289,12 @@ export function createAdminApi({
           });
         }
         const landed = pushed.filter((row) => row.ok).length;
-        ledger.done(`${landed} of ${targets.length} workspace(s) told it runs ${rows[0].customerLabel || alias}`);
+        ledger.done(`${landed} of ${targets.length} workspace(s) told it runs ${known.customerLabel || alias}`);
         json(response, 200, {
           alias,
-          label: rows[0].customerLabel,
+          label: known.customerLabel,
           workspaces: pushed,
-          message: `${landed} workspace(s) updated. Each one's Titan says ${rows[0].customerLabel || alias} from its next message, because the host re-reads that file every turn.`,
+          message: `${landed} workspace(s) updated. Each one's Titan says ${known.customerLabel || alias} from its next message, because the host re-reads that file every turn.`,
         });
         return true;
       }
