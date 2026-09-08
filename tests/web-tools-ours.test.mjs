@@ -64,12 +64,18 @@ function fakeTinyFish({ page, results = [], fail = false } = {}) {
   };
 }
 
+// TOOLS-FETCH-4. Every read resolves the hostname before it connects, so the cases below say what
+// the name lands on rather than asking this machine's resolver. Nothing here touches the network.
+const PUBLIC = async () => ["93.184.216.34"];
+const LOOPBACK = async () => ["127.0.0.1"];
+
 const PLAIN_PAGE = "<html><head><title>Example Domain</title></head><body><h1>Example</h1><p>Hello there.</p></body></html>";
 
 test("a page this machine can read is read here, and the backup is never asked", async () => {
   const tinyfish = fakeTinyFish({ page: "should not be used" });
   const requests = [];
   const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => tinyfish.fallback,
     fetchImpl: async (url, init) => { requests.push({ url, init }); return reply({ body: PLAIN_PAGE }); },
   });
@@ -79,7 +85,7 @@ test("a page this machine can read is read here, and the backup is never asked",
   assert.equal(result.content, "# Example\n\nHello there.");
   assert.equal(tinyfish.calls.length, 0, "the backup must not be touched when the direct read worked");
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].init.redirect, "follow", "redirects are followed");
+  assert.equal(requests[0].init.redirect, "manual", "redirects are followed here, one hop at a time, so each hop is checked");
   assert.equal(requests[0].init.headers["user-agent"], webTools.BROWSER_USER_AGENT);
   assert.match(requests[0].init.headers["user-agent"], /Mozilla\/5\.0/, "a browser-like User-Agent, not node's");
 });
@@ -87,6 +93,7 @@ test("a page this machine can read is read here, and the backup is never asked",
 test("a 403 falls through to the backup, and the backup's page is what comes back", async () => {
   const tinyfish = fakeTinyFish({ page: "# Members only\n\nThe real text." });
   const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => tinyfish.fallback,
     fetchImpl: async () => reply({ status: 403, body: "Forbidden" }),
   });
@@ -99,6 +106,7 @@ test("a 429 and a 5xx fall through the same way", async () => {
   for (const status of [401, 429, 503]) {
     const tinyfish = fakeTinyFish({ page: `read anyway after ${status}` });
     const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
       resolveFallback: () => tinyfish.fallback,
       fetchImpl: async () => reply({ status, body: "no" }),
     });
@@ -110,6 +118,7 @@ test("a 429 and a 5xx fall through the same way", async () => {
 test("a JavaScript-only page reads as empty and falls through", async () => {
   const tinyfish = fakeTinyFish({ page: "rendered by the backup" });
   const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => tinyfish.fallback,
     fetchImpl: async () => reply({ body: "<html><head></head><body><div id=\"root\"></div><script>boot()</script></body></html>" }),
   });
@@ -125,6 +134,7 @@ test("a JavaScript shell that leaves only its title behind goes to the backup, a
   const SHELL = `<html><head><title>Instagram</title></head><body><div id="mount"></div><script>${"x".repeat(200_000)}</script></body></html>`;
   const good = fakeTinyFish({ page: "the profile, rendered by the backup" });
   const viaBackup = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => good.fallback,
     fetchImpl: async () => reply({ body: SHELL }),
   });
@@ -133,6 +143,7 @@ test("a JavaScript shell that leaves only its title behind goes to the backup, a
 
   const broken = fakeTinyFish({ fail: true });
   const kept = await webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => broken.fallback,
     fetchImpl: async () => reply({ body: SHELL }),
   })(null, "https://www.instagram.com/titaniumcomputing/");
@@ -145,12 +156,123 @@ test("a JavaScript shell that leaves only its title behind goes to the backup, a
   assert.equal(webTools.looksLikeShell("# A big page\n\nwith three lines of words", 300_000), true);
 });
 
+test("a page whose whole content is its own title goes to the backup, however small the page is", async () => {
+  // TOOLS-FETCH-3. htmlToText puts the title on top of whatever the body left behind, so a shell
+  // with a <title> -- nearly every real page -- never reduced to the empty string and the empty
+  // branch could not be reached for one. Measured 2026-09-07: reddit.com/r/smallbusiness came back
+  // as "# Reddit" and nothing else, and the person was told the page was empty.
+  const SHELL = "<html><head><title>Reddit - Dive into anything</title></head><body><div id=\"root\"></div><script>boot()</script></body></html>";
+  const good = fakeTinyFish({ page: "THE REAL ARTICLE TEXT FROM THE BACKUP" });
+  const viaBackup = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
+    resolveFallback: () => good.fallback,
+    fetchImpl: async () => reply({ body: SHELL }),
+  });
+  assert.equal((await viaBackup(null, "https://www.reddit.com/r/smallbusiness/")).content, "THE REAL ARTICLE TEXT FROM THE BACKUP");
+  assert.equal(good.calls[0].kind, "fetch", "the backup is asked, which is what never happened before");
+
+  // The title is still better than an error when the backup cannot beat it.
+  const broken = fakeTinyFish({ fail: true });
+  const kept = await webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
+    resolveFallback: () => broken.fallback,
+    fetchImpl: async () => reply({ body: SHELL }),
+  })(null, "https://www.reddit.com/r/smallbusiness/");
+  assert.equal(kept.error, undefined);
+  assert.match(kept.content, /Reddit/);
+
+  assert.equal(webTools.looksLikeTitleOnly("# Instagram"), true);
+  assert.equal(webTools.looksLikeTitleOnly("# Example\n\nHello there."), false);
+  assert.equal(webTools.looksLikeTitleOnly(""), false);
+});
+
+/* ---------------------------------------------------------------- *
+ * Where a fetch may go.
+ * ---------------------------------------------------------------- */
+
+test("a public name that resolves to loopback is refused, and the backup is not asked either", async () => {
+  // Measured on this Mac 2026-09-08 against the production module: http://127.0.0.1:<port>/internal
+  // was refused by the tool's own precheck and http://localtest.me:<port>/internal was not, because
+  // that precheck is a hostname string test. localtest.me is a public name that resolves to
+  // loopback, and the tool returned the box's own internal page.
+  const tinyfish = fakeTinyFish({ page: "the backup must not be asked to read this either" });
+  let dialled = 0;
+  const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: LOOPBACK,
+    resolveFallback: () => tinyfish.fallback,
+    fetchImpl: async () => { dialled += 1; return reply({ body: "<html><body><p>SECRET-INTERNAL-PAGE</p></body></html>" }); },
+  });
+  const result = await fetchPage(null, "http://localtest.me:7777/internal");
+  assert.equal(result.content, undefined);
+  assert.match(result.error, /is on this machine or on the private network/);
+  assert.match(result.error, /localtest\.me:7777/);
+  assert.equal(dialled, 0, "the address is refused before anything is dialled");
+  assert.equal(tinyfish.calls.length, 0);
+});
+
+test("a redirect into the box is refused, which fetch's own follow could never see", async () => {
+  // The 302 hop is the half a hostname test cannot cover: readPageDirectly used redirect:"follow",
+  // so a public name answering 302 to http://127.0.0.1/ handed back the box's own page.
+  const seen = [];
+  const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: async (host) => (host === "127.0.0.1" ? ["127.0.0.1"] : ["93.184.216.34"]),
+    resolveFallback: () => null,
+    fetchImpl: async (url) => {
+      seen.push(url);
+      if (url === "https://redirector.example/go") {
+        return { ok: false, status: 302, headers: { get: (name) => (name.toLowerCase() === "location" ? "http://127.0.0.1:7777/internal" : null) }, text: async () => "" };
+      }
+      return reply({ body: "<html><body><p>SECRET-INTERNAL-PAGE</p></body></html>" });
+    },
+  });
+  const result = await fetchPage(null, "https://redirector.example/go");
+  assert.match(result.error, /is on this machine or on the private network/);
+  assert.deepEqual(seen, ["https://redirector.example/go"], "the second hop is never dialled");
+});
+
+test("a redirect to another public page is still followed, and the page that answers is the one read", async () => {
+  const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
+    resolveFallback: () => null,
+    fetchImpl: async (url) => url === "https://short.example/x"
+      ? { ok: false, status: 301, headers: { get: (name) => (name.toLowerCase() === "location" ? "/article" : null) }, text: async () => "" }
+      : reply({ body: "<html><body><h1>The article</h1><p>Words.</p></body></html>" }),
+  });
+  assert.equal((await fetchPage(null, "https://short.example/x")).content, "# The article\n\nWords.");
+});
+
+test("the names the box answers to are refused whatever they resolve to", async () => {
+  for (const host of ["localhost", "host.docker.internal", "gateway.docker.internal", "box.internal", "app.localhost"]) {
+    assert.equal(webTools.isPrivateWebHostName(host), true, host);
+  }
+  assert.equal(webTools.isPrivateWebHostName("example.com"), false);
+  assert.equal(webTools.isPrivateWebHostName("localtest.me"), false, "a public name is only caught by resolving it");
+  for (const address of ["127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1"]) {
+    assert.equal(webTools.isPrivateWebAddress(address), true, address);
+  }
+  assert.equal(webTools.isPrivateWebAddress("93.184.216.34"), false);
+  assert.equal(webTools.isPrivateWebAddress("example.com"), false, "a name is not an address");
+});
+
+test("a page that redirects forever is given up on rather than followed forever", async () => {
+  let hops = 0;
+  const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
+    resolveFallback: () => null,
+    fetchImpl: async () => { hops += 1; return { ok: false, status: 302, headers: { get: (name) => (name.toLowerCase() === "location" ? "https://loop.example/again" : null) }, text: async () => "" }; },
+  });
+  const result = await fetchPage(null, "https://loop.example/start");
+  assert.match(result.error, /Could not read that page/);
+  assert.equal(hops, webTools.MAX_WEB_FETCH_REDIRECTS + 1);
+});
+
 test("a 200 that is really a sign-in wall goes to the backup, and the wall is kept if the backup cannot beat it", async () => {
   // Measured 2026-09-07 from this Mac: https://www.linkedin.com/feed/ answers 200 with 792
   // characters that are entirely a sign-in form. A status code alone never catches that.
   const WALL = "<html><head><title>LinkedIn Login, Sign in</title></head><body><h2>Sign in</h2><p>New to LinkedIn? Join now</p></body></html>";
   const good = fakeTinyFish({ page: "the real feed" });
   const viaBackup = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => good.fallback,
     fetchImpl: async () => reply({ body: WALL }),
   });
@@ -159,6 +281,7 @@ test("a 200 that is really a sign-in wall goes to the backup, and the wall is ke
 
   const broken = fakeTinyFish({ fail: true });
   const viaWall = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => broken.fallback,
     fetchImpl: async () => reply({ body: WALL }),
   });
@@ -177,6 +300,7 @@ test("the wall detector needs both halves, so a long article that mentions signi
 
 test("a page over the 25 MB cap is not read into memory whole", async () => {
   const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => null,
     fetchImpl: async () => reply({ contentLength: webTools.MAX_WEB_FETCH_BYTES + 1, body: "x" }),
   });
@@ -189,6 +313,7 @@ test("a page over the 25 MB cap is not read into memory whole", async () => {
 test("when the site refuses and the backup cannot reach it either, the text says so and names the next step", async () => {
   const tinyfish = fakeTinyFish({ fail: true });
   const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => tinyfish.fallback,
     fetchImpl: async () => reply({ status: 403, body: "no" }),
   });
@@ -201,6 +326,7 @@ test("when the site refuses and the backup cannot reach it either, the text says
 
 test("with no backup set up at all, the text says that rather than blaming the site alone", async () => {
   const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => null,
     fetchImpl: async () => reply({ status: 403, body: "no" }),
   });
@@ -211,6 +337,7 @@ test("with no backup set up at all, the text says that rather than blaming the s
 
 test("a resolveFallback that throws is the same as having none, never a crash", async () => {
   const fetchPage = webTools.createSandWebFetchService({
+    resolveAddresses: PUBLIC,
     resolveFallback: () => { throw new Error("connectors.json is unreadable"); },
     fetchImpl: async () => reply({ status: 403, body: "no" }),
   });
@@ -254,6 +381,10 @@ test("the web-fetch tool shell no longer claims to run from somebody else's serv
   // The localhost and private-IP refusals stay, and matter more now that the fetch runs here.
   assert.match(text, /Cannot fetch from localhost/);
   assert.match(text, /Cannot fetch from private IP/);
+  // TOOLS-FETCH-4. The cheap precheck also knows the names the box itself answers to. b66aa1f
+  // measured host.docker.internal:7777 as the operator console, readable from inside the box.
+  assert.match(withoutComments, /host\.docker\.internal/);
+  assert.match(withoutComments, /\.internal/);
 });
 
 test("web search maps the backup's results into the tool's document shape", async () => {

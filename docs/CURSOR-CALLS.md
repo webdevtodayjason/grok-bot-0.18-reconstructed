@@ -17,9 +17,12 @@ The machines named below:
 
 ## The short version
 
-A box we ship talks to `https://api2.cursor.sh` because that is the last-resort value of one
-constant, and because all three of our install paths set `SAND_BACKEND_URL` to it explicitly. That
-host is not dead. Measured from inside the box on grok-bot-local-vm: `GET https://api2.cursor.sh/`
+A box we ship talked to `https://api2.cursor.sh` because that is the last-resort value of one
+constant, and because all three of our install paths set `SAND_BACKEND_URL` to it explicitly. They
+no longer do (CURSOR-4): the reader takes the container environment before `sand-host-settings.json`,
+so setting it there made the file switch inert on every box, and the URL the clients actually dial
+was read from `process.env` alone and never from the file at all. Both halves are closed, so the
+file is the switch and one value answers both questions. That host is not dead. Measured from inside the box on grok-bot-local-vm: `GET https://api2.cursor.sh/`
 answers HTTP 200 in 0.20 seconds, and `POST aiserver.v1.DashboardService/GetUserPrivacyMode`
 answers HTTP 401. The boxes were not failing to reach a broken server. They were authenticating
 against somebody else's product and being turned away, once per turn, forever.
@@ -39,13 +42,21 @@ recreating a live instance, and `docker restart` re-reads the bundle but not the
 compose-only switch would mean "recreate the box to change your mind". A settings file write plus a
 relay restart moves a running box instead.
 
+`getConfiguredBackendUrl` -- the URL every client dials -- now reads the same setting through the
+same resolver. It used to read `process.env` only, which is how a box could answer "ours" to the
+mode question and still dial the last-resort constant. A box created before CURSOR-4 still carries
+`SAND_BACKEND_URL` in its environment, and on those boxes the file cannot win until the container is
+recreated; the gate reads the value back through the same resolver and says which one decided.
+
 ## What landed here, and what is still owned elsewhere
 
 | Landed in this change | Still owned by another row |
 | --- | --- |
-| Local gate pins with the product's defaults baked in, plus `gates.json` for the operator | The shared RPC transport rejecting in mode none |
+| Local gate pins with the product's defaults baked in, plus `gates.json` for the operator | The shared RPC transport rejecting in mode none, for the fifteen modules that build on `createSandCursorBackendClient` |
 | The Statsig bootstrap, its poll, and its last egress path, all off | The `DEFAULT_CURSOR_BACKEND_URL` constant itself |
-| The privacy-mode lookup off | The compose files and the installer placeholder |
+| The privacy-mode lookup off | The installer placeholder credential |
+| The second transport, `createDashboardClient`, refusing in mode none (CURSOR-3) | |
+| `SAND_BACKEND_URL` out of the three install paths, and the URL every client dials read from the settings file (CURSOR-4) | |
 | The credential renewer off | The Cursor Origin section of the system prompt |
 | Codebase telemetry off above the capability check | The auto-review router inversion |
 | Host tracing, structured logs and product analytics off | The account MCP, marketplace, automations and cloud-agent RPCs |
@@ -63,7 +74,7 @@ nobody reads this file and concludes the work is finished.
 | --- | --- | --- | --- | --- |
 | `source/shared/node/cursor-backend/cursor-inference.ts`, `createSandBackendTransport` / `createSandCursorBackendClient` / `createSandInferenceInterceptor` | The single Connect RPC client factory the host uses. Stamps `authorization`, `x-cursor-checksum`, `x-cursor-client-type`, `x-cursor-client-version`, `x-sand-box-namespace`, `x-ghost-mode`, `x-request-id`. Fifteen host modules build clients on it. | Whenever any of those modules calls a method. | Every call answers 401. Callers wait out a request timeout first. | **Replace**, and still open. In mode none it should hand back a client whose every method rejects with `SandBackendDisabledError`, so callers fail fast and locally. Not done here: the blast radius covers connectors and backend MCP, and this change was scoped to the loops. Every loop that used it is switched off at its own call site instead, so nothing dials out today. |
 | Same file, the RPC method names reachable through it | `getUserPrivacyMode`, `classifySandAutoReview`, `runWebSearch`, `runWebFetch`, `runGenerateImage`, `recordSandAuditEvents`, `getMe`, `availableModels`, `getSignedUrlForAttachedMedia`, `getEffectiveUserPlugins`, `installUserPlugin`, `publishPlugin`, `unpublishPlugin`, `getTeams`, `getAvailableMcpServers`, `getMcpConfig`, `listSandMcpTools`, `executeSandMcpTool`, `checkHttpMcpStatus`, `completeMcpOAuth`, `deleteMcpOAuthAccount`, `deleteMcpOAuthToken`, `renameMcpOAuthAccount`, `validateMcpOAuthTokens`, `getScmConnectionStatus`, `getSlackInstallUrl`, `getSlackUserSettings`, `createAutomation`, `updateAutomation`, `deleteAutomation`, `listSandAutomations`, `recordPostTurnLabeling`, `recordAgentPostTurnLabeling`, `recordFollowupClassification`, `recordAgentFollowupClassification`. Plus `BootstrapStatsig` over plain fetch and the fourteen `BackgroundComposerService` methods. | Per feature. | Each fails in its own way. The ones a person meets are the web tools and the classifier, below. | **Replace** as above. Listed in full so nobody has to rediscover the surface. |
-| `source/shared/node/marketplace/cursor-marketplace-client.ts` and `source/host/extensions/managed-setup/production.ts` | A **second**, independent Connect transport. `createDashboardClient` calls `createConnectTransport` directly with its own checksum interceptor, not through `createSandCursorBackendClient`. Fetches managed skills, marketplace plugins and team rules. | On first credential and on every renewal. | Nothing visible. The fetch fails and the seeded skills are used. | **Switch off**, still open. Name it here because any claim that "we removed the Cursor client" that only touches `createSandCursorBackendClient` misses this one. |
+| `source/shared/node/marketplace/cursor-marketplace-client.ts` and `source/host/extensions/managed-setup/production.ts` | A **second**, independent Connect transport. `createDashboardClient` calls `createConnectTransport` directly with its own checksum interceptor, not through `createSandCursorBackendClient`. Fetches managed skills, marketplace plugins and team rules. | `teamRules.start()` at managed-setup start, so **every host boot**, and again on every renewal. | Nothing visible, and that was the problem. Measured on grok-bot-local-vm 2026-09-08 with api2.cursor.sh pointed at 127.0.0.1 and a listener on 443: two boots, two TLS ClientHellos with `sni=api2.cursor.sh`, and not one line in `/tmp/sand-host.log` for either, because the only error path is a telemetry report that mode none has already switched off. | **Switched off** (CURSOR-3). The interceptor throws `SandBackendDisabledError` before `next`, so no socket is opened, and all three callers already treat a throw as "the backend did not answer". |
 | `source/host/extensions/inference/sand-labeling.ts` | Post-turn labeling. Sends the turn's transcript to `InferenceService` for classification and prompt-quality collection. | After every turn, unless skipped. | Nothing. It does not run today, and only because of a provider early return two lines away. | **Switch off**, still open. Of everything in this sweep this is the one a business owner would object to hardest: their conversations sent to a third party for that company's model quality work. It is luck, not a decision, that it is quiet. |
 
 ### Where those methods are called from
@@ -71,6 +82,12 @@ nobody reads this file and concludes the work is finished.
 The method list above is a surface. This is where the product reaches for it, so nobody has to
 rediscover it. None of these dials out today, because in mode none every loop that would have is
 switched off at its own call site, but each one is still built and still points at the wrong place.
+
+That sentence was written before it was measured, and it was false for one row: `getTeams` through
+the second transport ran on every host boot and opened a real connection. What made it invisible is
+worth keeping in mind for the rows still marked open -- a caller whose only failure path is
+telemetry cannot be checked by reading the host log, because mode none switches telemetry off. The
+gate now watches for a connection as well as for a log line.
 
 | Locator | Method | What a person meets | Decision |
 | --- | --- | --- | --- |
@@ -135,6 +152,18 @@ Precedence, highest first:
 The product's decisions sit below the operator layers on purpose. A pin nobody can move is a
 rollout with our name on it, and that is the thing being fixed. They sit above Statsig so that no
 two boxes on one bundle can ever differ because of a remote flag.
+
+CURSOR-5 adds the one exception, and it is the case that cost a customer the product: for a gate
+the table in row 4 **names**, rows 2 and 3 are skipped, so the order for those gates is `gates.json`
+and then the table. The override file is a file on disk, anything holding the gateway token can
+rewrite it, and the Mac box carries a stale one right now. A `sand_auto_review` entry in it would
+put that box back to refusing every Shell command, and two boxes on one bundle back to disagreeing.
+`gates.json` still moves any of them, which is what keeps the pins from being our own rollout:
+that file is the operator's own and it does not appear on a box by accident.
+
+`replaceFeatureFlagOverrides` also gained the capability check the other four writers already had.
+It is the one reachable from outside: `setHostSettings` is a gateway command, and its
+`featureFlagOverrides` field is handed straight to it through the settings listener.
 
 ### The gates, their bundled defaults, and what the product pins
 

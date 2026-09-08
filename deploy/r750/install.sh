@@ -151,6 +151,12 @@ exec /usr/local/bin/start-sand-box'
 # The published ports are on the server's own loopback. Nothing needs them (the relay reaches the
 # gateway as http://titanbot-box:1340 over the titanbot network) but they make `ssh -L` debugging
 # and the VNC desktop reachable without recreating the container.
+# CURSOR-4. No --env SAND_BACKEND_URL. It used to be https://api2.cursor.sh/ here, and because
+# readSandBoxSetting reads the container environment before sand-host-settings.json, that made
+# the file switch inert on every box: an operator could write a URL into the file and nothing
+# read it. BOX-6 forbids recreating a live instance and docker restart does not re-read the
+# environment, so the file has to be the switch. Unset is mode none, which is what a box with
+# no backend of ours should be.
 docker run --detach --name "$BOX" \
   --network "$NET" \
   --restart unless-stopped \
@@ -168,7 +174,6 @@ docker run --detach --name "$BOX" \
   --env SAND_BOX_STORE_SYNC=1 \
   --env SAND_BOX_STORE_LOCAL_DIR=/var/lib/sand-box-store \
   --env SAND_DEV_INFERENCE_TOKEN_FILE=/run/grok-bot/inference.json \
-  --env SAND_BACKEND_URL=https://api2.cursor.sh/ \
   --publish 127.0.0.1:1337:1337 \
   --publish 127.0.0.1:1339:1339 \
   --publish 127.0.0.1:1340:1340 \

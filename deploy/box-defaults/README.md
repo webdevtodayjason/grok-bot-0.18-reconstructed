@@ -63,10 +63,17 @@ Empty means we have no backend of our own, and nothing tries to reach one. Empty
 the same (`readSandBoxSetting` ignores an empty value), so the key is in the template mostly so an
 operator can see the switch exists and type a URL into it.
 
-The key matters most on a box that already exists. The same value is also a compose environment
-variable, and `docker restart` does not re-read the environment, so changing an existing box that
-way needs a container recreate, which BOX-6 forbids on a live instance. Written here it takes
-effect on a file write plus a relay restart.
+The key matters most on a box that already exists. `docker restart` re-reads the bundle but not the
+environment, so a compose-only switch would mean "recreate the box to change your mind", which
+BOX-6 forbids on a live instance. Written here it takes effect on a file write plus a relay restart.
+
+That only holds because nothing sets `SAND_BACKEND_URL` in the environment any more. It used to be
+`https://api2.cursor.sh/` in both compose files and in `deploy/r750/install.sh`, and the reader
+takes the container environment before this file, so this key was inert on every box we shipped: an
+operator could type a URL into it and nothing read it, and the gate's own settings cut did nothing.
+The three install paths no longer pass it. A box created before that still carries the variable, and
+on those the file cannot win until the container is recreated -- `verify-cursor-free.mjs` reads the
+value back the way the host resolves it and says so rather than passing on a cut that never took.
 
 ## If the pin reader lands as one file instead of two
 

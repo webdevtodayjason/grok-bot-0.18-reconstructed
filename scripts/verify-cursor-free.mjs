@@ -39,6 +39,13 @@
 //   (Q) the host log gains no cursor line while all of that happens, and none since the host
 //       started if the host has been up long enough to say.
 //
+// The log is not the whole answer, and CURSOR-3 is why. A caller whose only failure path is a
+// telemetry report leaves no host log line at all, because mode none switches telemetry off -- so
+// `teamRules.start()` opened a TLS connection to api2.cursor.sh on every host boot through the run
+// that reported "0 lines mentioning cursor" on all three boxes. The boot arm watches the socket
+// instead: it blackholes the Cursor hosts, listens where the blackhole points, proves the listener
+// is armed, restarts the host, and fails on any connection at all.
+//
 // The five-minute window is its own mode. A 300 second wait does not fit beside two real turns
 // under a 240 second command timeout, and a gate that has to be run without one is a gate nobody
 // runs. So the default mode measures the window it actually covers and reports the length, and
@@ -57,10 +64,16 @@
 //
 //   timeout 240 node scripts/verify-cursor-free.mjs            the turns, and the window they cover
 //   timeout 330 node scripts/verify-cursor-free.mjs --quiet    five idle minutes, nothing else
+//   timeout 240 node scripts/verify-cursor-free.mjs --boot     one host restart, watched at the socket
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const QUIET_ONLY = process.argv.includes("--quiet");
+// CURSOR-3. The boot arm. The log-line arms below cannot see a call whose only failure path is
+// telemetry, because mode none switches telemetry off -- which is exactly how a TLS connection to
+// api2.cursor.sh on every host boot survived a run that reported "0 lines mentioning cursor". This
+// one watches the socket instead of the log, and it needs a boot, so it restarts the host.
+const BOOT_ONLY = process.argv.includes("--boot");
 
 const GATEWAY = process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:1340";
 const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
@@ -99,6 +112,12 @@ const TURN_TIMEOUT_MS = 80_000;
 const SETTLE_TIMEOUT_MS = 25_000;
 const QUIET_WINDOW_MS = 300_000;
 const HOST_UPTIME_FOR_QUIET_S = 300;
+// How long the boot arm waits for the host to come back and print its gates line, and how long it
+// then watches the sink before reading it.
+const BOOT_TIMEOUT_MS = 120_000;
+const BOOT_WATCH_MS = 20_000;
+const SINK_LOG = "/tmp/cursor-sink.log";
+const SINK_SCRIPT = "/tmp/cursor-sink.cjs";
 
 // The person and the model must never be handed either of these. The first tells the model to
 // retry a call that can never succeed, so the agent loops; the second is the classifier refusing
@@ -207,6 +226,25 @@ const writeSetting = async (name, value) => {
     + `${mutate}fs.writeFileSync(p,JSON.stringify(d),{mode:0o600});`]);
 };
 
+/**
+ * CURSOR-4. What the host will actually resolve for a setting, and which layer decided it.
+ * `readSandBoxSetting` takes the container environment first and `sand-host-settings.json` second,
+ * and every box created before CURSOR-4 carries `SAND_BACKEND_URL=https://api2.cursor.sh/` in that
+ * environment. So writing the file is not the same as changing the box, and this gate used to print
+ * `SAND_BACKEND_URL=http://127.0.0.1:9/` while the box was still resolving the value from the
+ * environment. A cut nobody reads back is a cut nobody has.
+ */
+const resolveSetting = async (name) => {
+  const raw = await docker(["exec", BOX, "node", "-e",
+    `const fs=require('fs');const n=${JSON.stringify(name)};`
+    + `const env=(process.env[n]??'').trim();let file='';`
+    + `try{const p=JSON.parse(fs.readFileSync(${JSON.stringify(SETTINGS)},'utf8'));`
+    + `const c=(p&&typeof p.settings==='object'&&p.settings!=null&&!Array.isArray(p.settings))?p.settings:p;`
+    + `file=(typeof c[n]==='string'?c[n]:'').trim();}catch{}`
+    + `console.log(JSON.stringify({value:env.length>0?env:file,source:env.length>0?'container env':file.length>0?'settings file':'unset'}));`]);
+  try { return JSON.parse(raw.trim()); } catch { return { value: "", source: "unset" }; }
+};
+
 const hostLogLines = async () =>
   Number.parseInt((await sh(`wc -l < ${HOST_LOG} 2>/dev/null || echo 0`)).trim(), 10) || 0;
 const linesSince = async (from) =>
@@ -217,11 +255,22 @@ const linesSince = async (from) =>
  * image may not have. Returns null when it cannot be read, and the five-minute arm then reports
  * itself not reached rather than passing on a window it never measured.
  */
+// The name is passed in the environment, never written into the command. `for p in /proc/[0-9]*`
+// expands before the loop body runs, so the only process in that list that can carry the needle in
+// its own cmdline is this shell -- and a shell whose pid sorts before the host's (2974 before 474,
+// because the glob sorts as text) then matches itself. Measured 2026-09-08: the boot arm below
+// found "the host", killed it, and killed its own shell, then reported a clean boot that never
+// happened. The uptime arm had the same bug and was reporting the age of a shell.
+const HOST_PROCESS_SCAN =
+  'pid=""; for p in /proc/[0-9]*; do grep -qa "$SAND_HOST_NEEDLE" "$p/cmdline" 2>/dev/null'
+  + ' && { pid=${p#/proc/}; break; }; done; ';
+const inBox = (script) =>
+  docker(["exec", "-e", "SAND_HOST_NEEDLE=host-main.cjs", BOX, "sh", "-c", script]);
+
 const hostUptimeSeconds = async () => {
   try {
-    const raw = (await sh(
-      "pid=''; for p in /proc/[0-9]*; do "
-      + "grep -qa host-main.cjs \"$p/cmdline\" 2>/dev/null && { pid=${p#/proc/}; break; }; done; "
+    const raw = (await inBox(
+      HOST_PROCESS_SCAN
       + "[ -n \"$pid\" ] || exit 0; "
       + "start=$(awk '{print $22}' /proc/$pid/stat 2>/dev/null); "
       + "up=$(cut -d' ' -f1 /proc/uptime 2>/dev/null); "
@@ -246,6 +295,125 @@ const reportWindow = (name, lines, windowLabel) => {
   for (const line of dirty.slice(0, 8)) console.log(`      ${line.slice(0, 220)}`);
   if (dirty.length > 8) console.log(`      … ${dirty.length - 8} more`);
 };
+
+// ---- the boot mode -------------------------------------------------------------------------
+
+// Listens where the blackhole points and writes a line per connection. Anything that reaches it has
+// dialled a Cursor host by name, whatever the host log says. It records the first bytes' length and
+// the SNI when it can read one, so a hit names the caller's own handshake rather than a bare count.
+const SINK_SOURCE = `
+const net = require("node:net");
+const fs = require("node:fs");
+const note = (line) => { try { fs.appendFileSync(${JSON.stringify(SINK_LOG)}, line + "\\n"); } catch {} };
+const sniOf = (chunk) => {
+  const text = chunk.toString("latin1");
+  const match = /([a-z0-9-]+\\.)+(cursor\\.sh|cursor\\.com|cursorapi\\.com|anysphere\\.co)/.exec(text);
+  return match == null ? "" : match[0];
+};
+for (const port of [80, 443]) {
+  const server = net.createServer((socket) => {
+    note("CONNECT " + new Date().toISOString() + " port=" + port);
+    socket.setTimeout(5000, () => socket.destroy());
+    socket.once("data", (chunk) => {
+      note("HELLO port=" + port + " bytes=" + chunk.length + " sni=" + sniOf(chunk));
+      socket.destroy();
+    });
+    socket.on("error", () => {});
+  });
+  server.on("error", (error) => note("LISTEN-FAILED port=" + port + " " + error.code));
+  server.listen(port, "127.0.0.1");
+}
+`;
+
+const startSink = async () => {
+  const encoded = Buffer.from(SINK_SOURCE, "utf8").toString("base64");
+  await rootSh(`rm -f ${SINK_LOG} ${SINK_SCRIPT}; printf %s '${encoded}' | base64 -d > ${SINK_SCRIPT}`);
+  await rootSh(`setsid /exec-daemon/node ${SINK_SCRIPT} > /tmp/cursor-sink.err 2>&1 < /dev/null &`);
+  await sleep(1500);
+};
+
+const sinkLines = async () => (await sh(`cat ${SINK_LOG} 2>/dev/null || true`)).split("\n").filter(Boolean);
+
+const stopSink = async () => {
+  await rootSh(`pkill -f ${SINK_SCRIPT} 2>/dev/null; rm -f ${SINK_SCRIPT} ${SINK_LOG} /tmp/cursor-sink.err`).catch(() => {});
+};
+
+const hostPid = async () => (await inBox(`${HOST_PROCESS_SCAN}echo "$pid"`)).trim();
+
+const gatesLineCount = async () =>
+  Number.parseInt((await sh(`grep -ac '\[sand\]\[gates\] ' ${HOST_LOG} 2>/dev/null || echo 0`)).trim(), 10) || 0;
+
+if (BOOT_ONLY) {
+  let cutForBoot = false;
+  try {
+    const blackhole = CURSOR_HOSTS.map((host) => `127.0.0.1 ${host} ${HOSTS_MARKER}`).join("\\n");
+    await rootSh(`printf '%b\\n' '${blackhole}' >> ${HOSTS_FILE}`);
+    cutForBoot = true;
+    await startSink();
+
+    // Prove the sink is listening before anything is measured against it. A gate that reports zero
+    // because it was not watching is worse than no gate: it is the same clean line either way.
+    const probe = (await docker(["exec", BOX, "node", "-e",
+      "const s=require('net').connect(443,'127.0.0.1',()=>{s.write('probe');setTimeout(()=>{console.log('up');process.exit(0)},200)});"
+      + "s.on('error',()=>{console.log('down');process.exit(0)});"])).trim();
+    if (probe !== "up") fatal(`nothing is listening on 127.0.0.1:443 in the box (${JSON.stringify(probe)}), so a clean result would mean nothing`);
+    const seenByProbe = await sinkLines();
+    verdict(seenByProbe.length > 0, "the connection watcher is armed", `${seenByProbe.length} line(s) from the probe`);
+    await rootSh(`: > ${SINK_LOG}`);
+
+    const before = await hostPid();
+    const fromLine = await hostLogLines();
+    const gatesBefore = await gatesLineCount();
+    info(`host pid ${before || "unknown"}, restarting it so a boot is measured`);
+    if (before.length === 0) fatal("no host-main.cjs process to restart");
+    await sh(`kill ${before} 2>/dev/null || true`);
+
+    const by = Date.now() + BOOT_TIMEOUT_MS;
+    let after = "";
+    while (Date.now() < by) {
+      await sleep(2000);
+      after = await hostPid();
+      if (after.length > 0 && after !== before) break;
+    }
+    if (after.length === 0 || after === before) fatal(`the host did not come back within ${BOOT_TIMEOUT_MS / 1000}s`);
+    info(`host came back as pid ${after}`);
+
+    // Counted, not read off a line offset: box-bounded-log trims the host log from the front, so a
+    // line number taken before a restart can land past the end of the file afterwards.
+    let booted = false;
+    const gatesBy = Date.now() + BOOT_TIMEOUT_MS;
+    while (Date.now() < gatesBy) {
+      if (await gatesLineCount() > gatesBefore) { booted = true; break; }
+      await sleep(2000);
+    }
+    verdict(booted, "the host finished starting after the restart",
+      booted ? "a fresh [sand][gates] line is in the log" : "no [sand][gates] line appeared, so the boot may not have finished");
+
+    await sleep(BOOT_WATCH_MS);
+    const hits = await sinkLines();
+    verdict(hits.length === 0,
+      "nothing dials a Cursor host while the box boots",
+      hits.length === 0
+        ? `no connection reached 127.0.0.1:443 or :80 over the boot and ${BOOT_WATCH_MS / 1000}s after it`
+        : `${hits.length} line(s) at the blackhole. A caller whose only failure path is telemetry leaves no host log line, `
+          + "which is how this survived a run that reported zero");
+    for (const line of hits.slice(0, 8)) console.log(`      ${line.slice(0, 220)}`);
+
+    reportWindow("the host log gains no cursor line over the boot", await linesSince(fromLine), "one restart");
+  } catch (error) {
+    console.error(`\nSTOPPED (${elapsed()}): ${error.message}`);
+    process.exitCode = 1;
+  } finally {
+    await stopSink();
+    if (cutForBoot) {
+      await rootSh(`grep -v '${HOSTS_MARKER}' ${HOSTS_FILE} > /tmp/hosts.restore && cat /tmp/hosts.restore > ${HOSTS_FILE} && rm -f /tmp/hosts.restore`).catch(() => {});
+    }
+    const failed = checks.filter((check) => check.status === "FAIL").length;
+    const passed = checks.filter((check) => check.status === "PASS").length;
+    console.log(`\n${passed} PASS / ${failed} FAIL (${elapsed()})`);
+    process.exit(failed === 0 && process.exitCode !== 1 ? 0 : 1);
+  }
+}
 
 // ---- the quiet mode ------------------------------------------------------------------------
 
@@ -396,12 +564,34 @@ try {
   const resolved = (await docker(["exec", BOX, "node", "-e",
     "require('node:dns').lookup('api2.cursor.sh', (error, address) => console.log(error ? `error ${error.code}` : address))"])).trim();
   const cut = resolved === "127.0.0.1";
+  const backend = await resolveSetting(BACKEND_SETTING);
   verdict(cut,
     "the box cannot reach Cursor while this gate runs",
     cut
-      ? `api2.cursor.sh resolves to ${resolved}, ${BACKEND_SETTING}=${DEAD_BACKEND}`
+      ? `api2.cursor.sh resolves to ${resolved}, and the host resolves ${BACKEND_SETTING}=${JSON.stringify(backend.value)} from the ${backend.source}`
       : `api2.cursor.sh resolves to ${JSON.stringify(resolved)}; everything below would be measuring a box that can still dial out`);
   if (!cut) fatal("the cut did not take, so nothing below would mean anything");
+
+  // The second half of "two ways at once, because either one alone can be argued with". It is a
+  // separate row rather than a detail on the row above, because this gate spent a whole run
+  // printing the value it had written while the box resolved a different one.
+  //
+  // A box created before CURSOR-4 carries SAND_BACKEND_URL in its container environment, which wins
+  // over the settings file; only a recreate clears it and BOX-6 forbids that on a live instance. So
+  // that case is reported as not reached rather than failed -- it is a fact about the box, not a
+  // defect in the product, and a gate that has to be red on every existing box is a gate somebody
+  // switches off. Anything else is a failure: the write went somewhere the host does not read.
+  const cutRow = `the ${BACKEND_SETTING} half of the cut takes on this box`;
+  if (backend.value === DEAD_BACKEND) {
+    pass(cutRow, `the host resolves ${DEAD_BACKEND} from the settings file, so both halves of the cut are real`);
+  } else if (backend.source === "container env") {
+    skip(cutRow, `the container environment pins ${BACKEND_SETTING}=${JSON.stringify(backend.value)}, which wins over the `
+      + "settings file. Only a container recreate clears it and BOX-6 forbids that on a live instance, so on this box the "
+      + "/etc/hosts blackhole is the cut and this run is one cut, not two");
+  } else {
+    fail(cutRow, `the host resolves ${BACKEND_SETTING}=${JSON.stringify(backend.value)} from the ${backend.source} after `
+      + "this gate wrote the settings file, so the write went somewhere the host does not read");
+  }
 
   const from = await hostLogLines();
   const windowOpenedAt = Date.now();

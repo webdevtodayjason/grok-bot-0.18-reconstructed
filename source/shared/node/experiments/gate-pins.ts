@@ -25,6 +25,12 @@
  * The product's decisions sit BELOW the operator layers on purpose: a pin nobody can move is a
  * rollout with our name on it, and that is the thing being fixed. They sit ABOVE Statsig so that no
  * box can ever differ from another because of a remote flag.
+ *
+ * CURSOR-5, the one exception: for a gate NAMED in the table below, the override store and the
+ * environment are skipped entirely, so the order for those gates is gates.json, then this table.
+ * The override file is a file on disk, it is rewritten by anything holding the gateway token, and a
+ * stale one sat on grok-bot-local-vm for six days. A pin the product treats as a safety decision
+ * cannot be movable by that. `gates.json` is still the operator's way past every row here.
  */
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";

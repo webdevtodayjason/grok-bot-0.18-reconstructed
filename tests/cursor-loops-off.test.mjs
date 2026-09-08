@@ -47,6 +47,7 @@ const load = async (relative, name) => {
 const mode = await load("source/shared/node/backend-mode.ts", "backend-mode");
 const statsig = await load("source/shared/node/experiments/statsig-bootstrap.ts", "statsig");
 const auth = await load("source/host/extensions/auth/auth-service.ts", "auth-service");
+const token = await load("source/shared/node/cursor-token.ts", "cursor-token");
 
 // Pinned per case, not once at import: tests/index.js loads every suite into one process before any
 // of them run, and another suite points SAND_DATA_ROOT at its own root.
@@ -161,6 +162,55 @@ test("the renewer still runs when the backend IS ours", async () => {
   assert.equal(renewals, 1);
   assert.equal(service.peekAccessToken(), "token");
   service.dispose();
+});
+
+test("the second transport refuses before it opens a socket when the backend is not ours", async () => {
+  // CURSOR-3. This is the one that was still dialling after CURSOR-1 closed. Measured on
+  // grok-bot-local-vm 2026-09-08 with api2.cursor.sh pointed at 127.0.0.1 in the box's /etc/hosts
+  // and a listener on 443: every host boot sent a TLS ClientHello with sni=api2.cursor.sh, and
+  // nothing appeared in /tmp/sand-host.log for it. The caller is teamRules.start(), which runs at
+  // managed-setup start before anything asks whether this box has a backend, and its only error
+  // path is a telemetry report that mode none has already switched off. So the host log said zero
+  // and the box dialled anyway.
+  const marketplace = await load("source/shared/node/marketplace/cursor-marketplace-client.ts", "marketplace");
+  const header = { values: {}, set(name, value) { this.values[name] = value; } };
+  let dialled = 0;
+  const next = async () => { dialled += 1; return {}; };
+
+  const refusing = marketplace.createMarketplaceInterceptor(async () => null, undefined, { isBackendOurs: () => false })(next);
+  await assert.rejects(() => refusing({ header }), (error) => {
+    assert.equal(error.name, "SandBackendDisabledError");
+    return true;
+  });
+  assert.equal(dialled, 0, "nothing may be sent, so no socket is opened");
+  assert.deepEqual(header.values, {}, "not even the headers are stamped");
+
+  // With a backend of ours it still works exactly as before.
+  const allowed = marketplace.createMarketplaceInterceptor(async () => "token", undefined, {
+    isBackendOurs: () => true,
+    uuid: () => "request-id",
+  })(next);
+  await allowed({ header });
+  assert.equal(dialled, 1);
+  assert.equal(header.values.authorization, "Bearer token");
+  assert.equal(header.values["x-ghost-mode"], "true");
+});
+
+test("the backend the clients dial is the same one the mode is read from", () => {
+  // CURSOR-4. getSandBackendMode reads SAND_BACKEND_URL through readSandBoxSetting, which falls
+  // back to sand-host-settings.json; getConfiguredBackendUrl read process.env only. So an operator
+  // could point a running box at their own backend in the file, the box would answer "ours", and
+  // every client would still dial the last-resort constant.
+  writeSettings({ SAND_BACKEND_URL: "https://console.titanium.bot/" });
+  delete process.env.SAND_BACKEND_URL;
+  assert.equal(token.getConfiguredBackendUrl({}), "https://console.titanium.bot/");
+  assert.equal(mode.getSandBackendMode(), "ours", "the two answers come from one value");
+  // The environment still wins where it is set, and an empty value is ignored rather than parsed.
+  assert.equal(token.getConfiguredBackendUrl({ SAND_BACKEND_URL: "https://elsewhere.example/" }), "https://elsewhere.example/");
+  assert.equal(token.getConfiguredBackendUrl({ SAND_BACKEND_URL: "  " }), "https://console.titanium.bot/");
+  writeSettings({ SAND_BACKEND_URL: "" });
+  assert.equal(token.getConfiguredBackendUrl({}), `${token.DEFAULT_CURSOR_BACKEND_URL}/`,
+    "an unfilled switch falls back to the constant rather than throwing");
 });
 
 test("the privacy lookup makes no call and prints no line when the backend is not ours", async () => {

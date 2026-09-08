@@ -68,11 +68,20 @@ export class SandExperimentService {
    * operator's word cannot be overturned by a rollout; the product's own table sits below the
    * operator layers but above Statsig, so no two boxes on one bundle can differ because of a
    * remote flag.
+   *
+   * CURSOR-5. With one exception, and it is the one that cost a customer the product. A gate the
+   * product pins is a decision the product made about what a box does, and the override store is a
+   * file on disk that anything with the gateway token can rewrite. grok-bot-local-vm carries such
+   * a file today. If the entry is `sand_auto_review`, a stale file puts the box back to refusing
+   * every Shell command through a classifier we cannot call, and two boxes on one bundle disagree
+   * again -- which is the whole thing the pins exist to stop. So an override is ignored for a gate
+   * the product pins. `gates.json` still moves it: that file is read above everything, it is the
+   * operator's own, and it does not turn up on a box by accident.
    */
   resolveFeatureGate(name: FeatureFlagName): FeatureGateResolution {
     const pinned = readGatePin(name, this.options.getCacheDir());
     if (pinned !== undefined) return { value: pinned, source: "local pin", pin: "file" };
-    const local = this.overrideStore.read(name);
+    const local = PRODUCT_GATE_PINS[name] === undefined ? this.overrideStore.read(name) : undefined;
     if (local != null) return { value: local, source: "override store" };
     const environment = this.canUseFeatureFlagOverrides() ? envGateOverride(name, this.options.env) : undefined;
     if (environment != null) return { value: environment, source: "env" };
@@ -95,7 +104,10 @@ export class SandExperimentService {
   clearFeatureFlagOverride(name: FeatureFlagName): void { if (this.canUseFeatureFlagOverrides() && this.overrideStore.clear(name)) this.persistAndBroadcastOverrides(); }
   clearAllFeatureFlagOverrides(): void { if (!this.canUseFeatureFlagOverrides() || this.overrideStore.size === 0) return; this.overrideStore.clearAll(); this.persistAndBroadcastOverrides(); }
   setAllFeatureFlagOverridesToBundledValues(): void { if (!this.canUseFeatureFlagOverrides()) return; this.overrideStore.setAllToBundledDefaults(); this.persistAndBroadcastOverrides(); }
-  replaceFeatureFlagOverrides(overrides: Record<string, boolean>): void { this.overrideStore.replaceAll(overrides); this.persistAndBroadcastOverrides(); }
+  // CURSOR-5. It skipped the capability check the other four writers carry, and it is the one
+  // reachable from outside: setHostSettings is a gateway command, and its featureFlagOverrides
+  // field is handed straight to this method through the settings listener.
+  replaceFeatureFlagOverrides(overrides: Record<string, boolean>): void { if (!this.canUseFeatureFlagOverrides()) return; this.overrideStore.replaceAll(overrides); this.persistAndBroadcastOverrides(); }
   getFeatureFlagOverridesRecord(): Partial<Record<FeatureFlagName, boolean>> { return this.overrideStore.activeRecord(); }
   applyFeatureFlagOverrideCommand(command: { kind: "set"; name: string; value: boolean } | { kind: "clear"; name: string } | { kind: "clear-all" } | { kind: "set-all-bundled" }): void { if (command.kind === "set" && isFlagName(command.name)) this.setFeatureFlagOverride(command.name, command.value); else if (command.kind === "clear" && isFlagName(command.name)) this.clearFeatureFlagOverride(command.name); else if (command.kind === "clear-all") this.clearAllFeatureFlagOverrides(); else if (command.kind === "set-all-bundled") this.setAllFeatureFlagOverridesToBundledValues(); }
   private persistAndBroadcastOverrides(): void { void this.overrideStore.persist(); this.refreshSnapshot(); }

@@ -98,7 +98,12 @@ export interface SandWebToolsOptions {
   readonly maxBytes?: number;
   /** Wraps a failure so the tool layer can show one text to the person and another to the model. */
   readonly createError?: (fields: ToolErrorFields) => Error;
+  /** Injected by the tests; production resolves the name through this machine's own resolver. */
+  readonly resolveAddresses?: HostResolver;
 }
+
+/** Every address a name lands on. Never throws: a name that will not resolve reaches nothing. */
+export type HostResolver = (host: string) => Promise<readonly string[]>;
 
 /* ------------------------------------------------------------------ *
  * The words a failure ends in.
@@ -117,7 +122,7 @@ const NEXT_STEP_PAGE = "Open the page in your browser and read it from there.";
 const NEXT_STEP_SEARCH = "Search for it in your browser instead.";
 const NO_RETRY = "Trying again will not help.";
 
-export type DirectFailure = "refused" | "unreachable" | "empty" | "not-text";
+export type DirectFailure = "refused" | "unreachable" | "empty" | "not-text" | "private";
 
 function describeDirectRead(why: DirectFailure): string {
   switch (why) {
@@ -125,7 +130,19 @@ function describeDirectRead(why: DirectFailure): string {
     case "unreachable": return "This machine could not reach the site";
     case "empty": return "The page came back empty, which usually means it only draws itself in a browser";
     case "not-text": return "The page is not text";
+    case "private": return "That address is not on the public web";
   }
+}
+
+/**
+ * BROWSER-1 wrote this refusal for the browser; TOOLS-FETCH-4 owes it to the fetch. Before CURSOR-1
+ * this tool ran on somebody else's servers and could not reach the box at all. It runs here now, so
+ * a page the model was told to read is one address away from the operator console, another agent's
+ * Chrome, or anything else on the network this box sits on.
+ */
+export function webFetchPrivateAddressMessage(where: string): string {
+  return `Could not read that page. ${where} is on this machine or on the private network this machine `
+    + `sits on, and this reads pages on the public web. ${NO_RETRY} ${NEXT_STEP_PAGE}`;
 }
 
 export function webFetchFailureMessage(args: {
@@ -193,8 +210,8 @@ function decodeEntities(value: string): string {
  * HTML reduced to something a model can read. Not a renderer: headings keep their level as markdown
  * hashes, list items keep a dash, links keep their text, and everything a page uses to draw itself
  * (script, style, svg, template, head) is dropped before any of that. A page that leaves nothing
- * behind is reported as empty, which is how a JavaScript-only page is detected and handed to the
- * backup.
+ * behind is reported as empty; a page that leaves only its own title behind reads as a shell, which
+ * is `looksLikeTitleOnly` above rather than the empty branch, because the title is prepended here.
  */
 export function htmlToText(html: string): string {
   const title = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim();
@@ -268,6 +285,79 @@ export function looksLikeShell(text: string, bodyBytes: number): boolean {
   return bodyBytes >= SHELL_MIN_BODY_BYTES && text.length < SHELL_MAX_CHARS;
 }
 
+/**
+ * TOOLS-FETCH-3. A page whose whole readable content is its own title line. `htmlToText` puts the title on top of
+ * whatever the body left behind, so a shell with a <title> -- which is nearly every real page --
+ * never reduced to the empty string, and the empty branch below could not be reached for one.
+ * Measured 2026-09-07: https://www.reddit.com/r/smallbusiness/ came back as "# Reddit" and nothing
+ * else, and the person was told the page was empty rather than handed the article. Judged on what
+ * is left after the title rather than on the body's size, so a small app shell is caught too.
+ */
+export function looksLikeTitleOnly(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith("# ") && !trimmed.slice(2).includes("\n");
+}
+
+/* ------------------------------------------------------------------ *
+ * Where a fetch may go.
+ * ------------------------------------------------------------------ */
+
+/**
+ * TOOLS-FETCH-4, the sibling of BROWSER-1's `assertBrowsableUrl`. The address in a WebFetch comes
+ * from the model, and the model is told things by the pages it reads and by text a person pasted.
+ * Measured on this Mac 2026-09-08 against the production module: `http://127.0.0.1:<port>/internal`
+ * was refused by the tool's own precheck, and `http://localtest.me:<port>/internal` -- a public name
+ * that resolves to loopback -- was allowed and returned the page. A 302 from that name to
+ * 127.0.0.1 returned it too, because the read followed redirects without looking again.
+ *
+ * So the check is on the name, on every literal address the name lands on, and on every redirect
+ * hop. The window between resolving a name and connecting to it is not closed here (nothing short
+ * of a pinned socket closes it), and it is the same window the browser driver lives with.
+ */
+const PRIVATE_WEB_HOST_NAMES = new Set([
+  "localhost", "ip6-localhost", "ip6-loopback", "host.docker.internal", "gateway.docker.internal",
+]);
+
+export function isPrivateWebHostName(host: string): boolean {
+  return PRIVATE_WEB_HOST_NAMES.has(host) || host.endsWith(".localhost") || host.endsWith(".internal");
+}
+
+/** True only for a literal address. A name is not an address and answers false. */
+export function isPrivateWebAddress(host: string): boolean {
+  if (host.includes(":")) {
+    const plain = host.split("%")[0] ?? "";
+    if (plain === "::" || plain === "::1") return true;
+    const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(plain);
+    if (mapped != null) return isPrivateWebAddress(mapped[1] ?? "");
+    return /^(fe8|fe9|fea|feb|fc|fd)/.test(plain);
+  }
+  const parts = host.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) return false;
+  const [a, b] = parts as [number, number];
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && (b === 168 || b === 0)) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return a >= 224;
+}
+
+/**
+ * The default resolver. It never throws: a name this machine cannot resolve is a name the fetch
+ * below cannot reach either, so an empty answer means "nothing private found" rather than a
+ * failure, and the fetch decides.
+ */
+const lookupHostAddresses: HostResolver = async (host: string) => {
+  try {
+    const dns = await import("node:dns");
+    const found = await dns.promises.lookup(host, { all: true, verbatim: true });
+    return found.map((entry) => entry.address);
+  } catch { return []; }
+};
+
+/** How many hops a redirect chain may take before it is treated as a site that will not settle. */
+export const MAX_WEB_FETCH_REDIRECTS = 5;
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message || error.name : String(error);
 }
@@ -301,17 +391,45 @@ async function readBodyCapped(response: WebResponseLike, maxBytes: number): Prom
 
 export async function readPageDirectly(
   url: string,
-  options: { readonly fetchImpl: FetchLike; readonly timeoutMs: number; readonly maxBytes: number },
+  options: {
+    readonly fetchImpl: FetchLike;
+    readonly timeoutMs: number;
+    readonly maxBytes: number;
+    readonly resolveAddresses?: HostResolver;
+  },
 ): Promise<DirectRead> {
+  const resolveAddresses = options.resolveAddresses ?? lookupHostAddresses;
+  // Redirects are followed here rather than by fetch, because fetch's own follow re-checks nothing:
+  // a public name that answers 302 to http://127.0.0.1/ handed back the box's own page.
+  let target = url;
   let response: WebResponseLike;
-  try {
-    response = await options.fetchImpl(url, {
-      redirect: "follow",
-      headers: { ...BROWSER_HEADERS },
-      signal: AbortSignal.timeout(options.timeoutMs),
-    });
-  } catch (error) {
-    return { ok: false, why: "unreachable", detail: errorText(error) };
+  for (let hop = 0; ; hop += 1) {
+    let parsed: URL;
+    try { parsed = new URL(target); }
+    catch { return { ok: false, why: "unreachable", detail: "that is not a web address" }; }
+    const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    const where = parsed.port.length > 0 ? `${host}:${parsed.port}` : host;
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return { ok: false, why: "private", detail: where };
+    if (host.length === 0 || isPrivateWebHostName(host) || isPrivateWebAddress(host)) {
+      return { ok: false, why: "private", detail: where };
+    }
+    if ((await resolveAddresses(host)).some(isPrivateWebAddress)) return { ok: false, why: "private", detail: where };
+    try {
+      response = await options.fetchImpl(target, {
+        redirect: "manual",
+        headers: { ...BROWSER_HEADERS },
+        signal: AbortSignal.timeout(options.timeoutMs),
+      });
+    } catch (error) {
+      return { ok: false, why: "unreachable", detail: errorText(error) };
+    }
+    const location = response.status >= 300 && response.status < 400 ? response.headers.get("location") : null;
+    if (location == null || location.length === 0) break;
+    if (hop >= MAX_WEB_FETCH_REDIRECTS) {
+      return { ok: false, why: "unreachable", detail: `the site redirected more than ${MAX_WEB_FETCH_REDIRECTS} times` };
+    }
+    try { target = new URL(location, target).toString(); }
+    catch { return { ok: false, why: "unreachable", detail: "the site redirected to something that is not a web address" }; }
   }
   // Anything that is not a 2xx is the site declining to hand this machine the page: 403 and 429
   // are the measured ones, a login wall is usually a 401 or a redirect that lands on one, and a
@@ -329,7 +447,11 @@ export async function readPageDirectly(
     ? htmlToText(body)
     : body.trim();
   if (text.length === 0) return { ok: false, why: "empty", detail: "no readable text" };
-  return { ok: true, text, wall: looksLikeWall(text) || looksLikeShell(text, body.length) };
+  return {
+    ok: true,
+    text,
+    wall: looksLikeWall(text) || looksLikeShell(text, body.length) || looksLikeTitleOnly(text),
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -349,9 +471,13 @@ export function createSandWebFetchService(options: SandWebToolsOptions) {
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   const timeoutMs = options.timeoutMs ?? WEB_FETCH_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? MAX_WEB_FETCH_BYTES;
+  const resolveAddresses = options.resolveAddresses ?? lookupHostAddresses;
   return async (_context: unknown, url: string): Promise<WebFetchOutcome> => {
-    const direct = await readPageDirectly(url, { fetchImpl, timeoutMs, maxBytes });
+    const direct = await readPageDirectly(url, { fetchImpl, timeoutMs, maxBytes, resolveAddresses });
     if (direct.ok && !direct.wall) return { content: direct.text };
+    // An address on this machine or this network is not a page the backup should be asked to read
+    // on our behalf either. It is refused here, and the person is told which address was refused.
+    if (!direct.ok && direct.why === "private") return { error: webFetchPrivateAddressMessage(direct.detail) };
     const fallback = await resolveFallbackSafely(options);
     if (fallback != null) {
       try {

@@ -61,13 +61,22 @@ function truncateContent(content: string): string {
   return `${content.slice(0, MAX_CONTENT_SIZE)}\n\n...[${lines} line${lines === 1 ? "" : "s"} truncated]`;
 }
 
+// TOOLS-FETCH-4. The names the box itself answers to. `host.docker.internal` is the one that was
+// measured: it is the operator console from inside the box, and BROWSER-1 found the browser could
+// read it. A hostname test alone can never be the whole guard -- a public name is free to point at
+// loopback -- so the read itself resolves the name and re-checks every redirect hop. This stays as
+// the cheap refusal, which is what lets the model be told what it did wrong in its own arguments.
+const PRIVATE_FETCH_HOST_NAMES = new Set([
+  "localhost", "ip6-localhost", "ip6-loopback", "host.docker.internal", "gateway.docker.internal",
+]);
+
 function localNetworkRejection(url: URL): string | undefined {
   const host = url.hostname.toLowerCase();
   const display = url.port.length > 0 ? `${host}:${url.port}` : host;
   // CURSOR-1. The refusal stays and now matters more, because the fetch runs on this machine
   // rather than on somebody else's server: a request to localhost would reach services inside the
   // box itself, and one to a private address would reach the network the box sits on.
-  if (host === "localhost" || host.endsWith(".localhost") || isLoopbackIpHost(host)) return `Cannot fetch from localhost (${display}) because this tool reads public web pages, not services running on this machine.`;
+  if (PRIVATE_FETCH_HOST_NAMES.has(host) || host.endsWith(".localhost") || host.endsWith(".internal") || isLoopbackIpHost(host)) return `Cannot fetch from localhost (${display}) because this tool reads public web pages, not services running on this machine.`;
   if (isPrivateIpHost(host)) return `Cannot fetch from private IP (${display}) because this tool reads public web pages, not addresses on a private network.`;
   return undefined;
 }

@@ -150,7 +150,13 @@ services:
       SAND_BOX_STORE_SYNC: "1"
       SAND_BOX_STORE_LOCAL_DIR: /var/lib/sand-box-store
       SAND_DEV_INFERENCE_TOKEN_FILE: /run/grok-bot/inference.json
-      SAND_BACKEND_URL: https://api2.cursor.sh/
+      # CURSOR-4. SAND_BACKEND_URL is deliberately NOT set here. It used to be set to
+      # https://api2.cursor.sh/, and because readSandBoxSetting reads the container
+      # environment before sand-host-settings.json, that made the settings file inert on
+      # every box we ship: an operator could write a URL into the file and nothing read it.
+      # BOX-6 forbids recreating a live instance, and docker restart re-reads the bundle
+      # but not the environment, so the file has to be the switch. Unset is mode none,
+      # which is what a box with no backend of ours should be.
     volumes:
       # ---- the four data mounts ------------------------------------------------------------
       # These are the docker volumes titanbot-box-{workspace,data,store,chrome}, addressed by the

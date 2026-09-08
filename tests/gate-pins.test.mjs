@@ -21,7 +21,7 @@
 //    true with an expiry that had lapsed six days earlier, so a deliberate decision had turned
 //    itself off with the clock and nothing said so.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -194,6 +194,47 @@ test("an override the operator wrote is read back on a box that is not a dev bui
   assert.equal(resolved.value, true);
   assert.equal(resolved.source, "override store");
   rmSync(path.join(dataRoot, "sand-feature-flag-overrides.json"), { force: true });
+});
+
+test("a stale override file cannot put a gate the product pins back on", () => {
+  // CURSOR-5. The override store sat above the product's table, so a file on disk outranked the
+  // product's own safety decisions. grok-bot-local-vm carries such a file today. If the entry is
+  // sand_auto_review the box goes back to refusing every Shell command through a classifier we
+  // cannot call, and two boxes on one bundle disagree again -- which is what the pins exist to stop.
+  const aYearAgo = Date.now() - 365 * 24 * 60 * 60 * 1_000;
+  writeFileSync(path.join(dataRoot, "sand-feature-flag-overrides.json"), JSON.stringify({
+    overrides: {
+      sand_auto_review: { value: true, expiresAtMs: aYearAgo },
+      sand_agent_network: { value: true },
+    },
+  }));
+  const resolved = service().resolveFeatureGate("sand_auto_review");
+  assert.equal(resolved.value, false, "the product's decision stands");
+  assert.equal(resolved.source, "local pin");
+  assert.equal(resolved.pin, "host");
+  // A gate the product has no opinion about is still the operator's to override.
+  assert.equal(service().resolveFeatureGate("sand_agent_network").source, "override store");
+  // And gates.json still moves a pinned gate, because that file is the operator's own.
+  writePins({ sand_auto_review: true });
+  assert.equal(service().resolveFeatureGate("sand_auto_review").value, true);
+  clearPins();
+  rmSync(path.join(dataRoot, "sand-feature-flag-overrides.json"), { force: true });
+});
+
+test("a gateway client cannot write overrides onto a packaged box", () => {
+  // replaceFeatureFlagOverrides skipped the capability check the other four writers carry, and it
+  // is the one reachable from outside: setHostSettings is a gateway command and its
+  // featureFlagOverrides field is handed straight to it through the settings listener.
+  const packaged = new experiments.SandExperimentService({
+    getAccessToken: async () => { throw new Error("no backend in a unit test"); },
+    getMachineId: async () => "machine",
+    getCacheDir: () => dataRoot,
+    isDevBuild: false,
+    env: {},
+  });
+  packaged.replaceFeatureFlagOverrides({ sand_agent_network: true });
+  assert.equal(packaged.getFeatureFlagOverrides().size, 0, "the write is refused, as it is for setFeatureFlagOverride");
+  assert.equal(existsSync(path.join(dataRoot, "sand-feature-flag-overrides.json")), false, "and nothing is persisted");
 });
 
 test("checkFeatureGate and resolveFeatureGate never disagree", () => {
