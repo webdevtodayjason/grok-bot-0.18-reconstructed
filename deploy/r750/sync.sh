@@ -149,6 +149,13 @@ rsync -a "$REPO/deploy/r750/common.sh" "$REPO/deploy/r750/install.sh" \
   "$REPO/deploy/r750/control-plane-install.sh" \
   "$REPO/deploy/r750/proxy-install.sh" "$HOST:$ROOT/deploy/"
 rsync -a "$REPO/scripts/box-patches/apply-start-window-fix.sh" "$HOST:$ROOT/deploy/"
+# TENANT-8. The settings a box starts with, and the one-off that adds them to a tenant provisioned
+# before the provisioner wrote them. Both go to the server because the tenant trees are there:
+# /data/titanbot/<slug>/volumes/data is the host side of each box's /home/box/sand-data. The
+# backfill adds only what is missing, restarts nothing and recreates nothing, so it is safe to have
+# sitting on the host between runs.
+rsync -a --delete "$REPO/deploy/box-defaults/" "$HOST:$ROOT/deploy/box-defaults/"
+rsync -a "$REPO/scripts/backfill-box-defaults.mjs" "$HOST:$ROOT/deploy/"
 # The Coolify stack's init service runs this from the same directory, bind-mounted read-only. It
 # lives here rather than under deploy/coolify on the server because that is the directory the
 # compose file mounts and the only one the container can see.
@@ -157,7 +164,7 @@ rsync -a "$REPO/deploy/coolify/init-box.sh" "$HOST:$ROOT/deploy/"
 # ~/.config/systemd/user. A directory, because the units name paths inside it.
 ssh "$HOST" "mkdir -p '$ROOT/deploy/backup'"
 rsync -a --delete "$REPO/deploy/backup/" "$HOST:$ROOT/deploy/backup/"
-say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,one-console-migrate.sh,box-isolation.sh,titanbot-isolation.{service,timer},control-plane-install.sh,proxy-install.sh,apply-start-window-fix.sh,init-box.sh,backup/}"
+say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,one-console-migrate.sh,box-isolation.sh,titanbot-isolation.{service,timer},control-plane-install.sh,proxy-install.sh,apply-start-window-fix.sh,init-box.sh,backfill-box-defaults.mjs,box-defaults/,backup/}"
 
 step "ship the control plane"
 # TENANT-1. docs/TENANCY.md section 9 tells the operator to run this script and then build the
