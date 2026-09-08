@@ -298,6 +298,43 @@ repointing an alias and back, a catalog refresh, per-key spend and the ledger ro
 section and come with the proxy and console items of this wave.** Nothing above is a measured number;
 it is what the panel is for.
 
+**MEASURED ON THE R750 2026-09-08, 19:33Z to 20:00Z**, every one of these from this console's own
+routes with the admin token, from inside `titanbot-cp`:
+
+| what was done | what came back |
+| --- | --- |
+| a second key added to the MiniMax pool | `minimax-2`, pool of two. The value is the SAME SUBSCRIPTION as `minimax-1`, because only one MiniMax subscription exists: two entries, one subscription behind them. It proves the mechanism, not the redundancy |
+| a Z.AI key rolled | **0.26 s**, the slot's mask moved to the other subscription's mask and back, the pool never changed shape, and a request every 500 ms through that pool recorded **zero failures** |
+| `plan-zai` repointed to `glm-4.7` and back | the proxy's own request log: `glm-5.3` 19:52:06, `glm-4.7` 19:53:22, `glm-5.3` 19:53:37, same deployment ids. Next request, and next request literally, because `--num_workers 1` is pinned |
+| the Z.AI catalog refreshed | **live**, ten names, through a pass-through that carries the vendor key so this container never holds one. Names and nothing else: no context window, no vision flag, which the page says in those words |
+| per-key spend read | 51 requests on `zai-1`, 42 on `zai-2` — the pool sharing load |
+| the vision check on `plan-zai` | it took an image part, through the database's own fallback map after the file stopped declaring one |
+| the ledger read | 15 rows, one per change, each with actor, time, address and outcome including the roll that failed, and **no key value in any of them**: a key is named by its length and a sha256 prefix |
+
+**The custody path held.** A provider key crosses the browser once, in a POST body, and comes back
+out of nothing: no GET answers it, no ledger row holds it, no log line prints it, and the field is
+cleared on success. `tests/cp-server.test.mjs` plants a real-shaped key through the panel's own route
+and then sweeps every GET route in the file for its bytes; `scripts/verify-admin.mjs` plants two
+through the masked field in a real browser and 20 checks confirm neither reaches a response body, a
+DOM node, or the control plane's log.
+
+## What changed, and how long it is kept
+
+`admin_actions` is a table of its own in the control plane's sqlite, created by `db.exec(SCHEMA)` on
+the next open, so it appeared on the R750's existing database with no migration and no ALTER. A row
+is written BEFORE the proxy is called and finished after, so a change that half succeeds is still on
+the record — the failed roll above is in the ledger as `failed`, which is the point. Each row carries
+the time, who (the signed-in super admin's address, or `the operator token` when the CLI did it),
+where from, what, which one, a detail, and the outcome.
+
+**These rows are never pruned.** Not at thirty days, not ever. "Who changed the plan model in March"
+is a question asked in June, and the sign-in ledger's thirty-day prune is the wrong home for it: that
+table has fixed columns, a validated hash and a coerced `via`. This one is a different thing and
+lives on its own.
+
+**No key value ever reaches a detail.** A test asserts it: a planted key is POSTed through the panel
+and the whole ledger is swept for its bytes.
+
 ---
 
 ## What is not measured, and what would fix each one

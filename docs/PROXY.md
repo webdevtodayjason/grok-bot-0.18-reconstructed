@@ -112,34 +112,83 @@ pass-through does, so one key ships and the pool is filed as `PROXY-3` rather th
 
 ---
 
-## 3. How to add a provider
+## 3. How to add a provider, a key, or a plan model
 
-Three edits, all in `deploy/`, none in a box.
+**None of it is an edit to this file any more, and none of it is a restart.** It is the Providers
+panel at `api.titanium.bot/admin`, or `cp/cli.mjs` if you would rather type. If you find yourself
+opening `config.yaml` to add a model, stop: this file declares no model at all now.
 
-1. One `model_list` entry in `config.yaml` with a `model_name` a box will name, and
-   `api_key: os.environ/PROXY_<THING>_KEY`.
-2. One env name on the proxy service, carried from `~/.api_keys` by the Mac-side script the way
-   `COOLIFY_API_KEY` already is.
-3. One line in the installer naming it, so a fresh install fills it too.
+**Add a provider.** Providers panel, *Add a provider*. The short name is what every key on it will
+be called after (`zai` gives `zai-1`, `zai-2`) and it is on every spend row from then on, so it is
+typed rather than guessed from the display name. The model list path is where that vendor publishes
+what it serves; leave it empty and the Refresh button stays off and the list stays the one we keep
+ourselves. Z.AI, MiniMax and Alibaba are already there as presets and need no registering.
 
-Then the model name goes in the mint's `models` list, or the key cannot use it.
+**Add a key.** The provider's card, *Add this key*. The value crosses the browser once and comes
+back out of nothing: no GET answers it, no ledger row holds it, no log line prints it. What you see
+afterwards is the proxy's own mask (`c2****fj`). The first key a provider gets also wires its
+catalog door, so Refresh starts working the moment there is something to refresh with.
 
-## 4. How to add a second subscription to a pool
+**Add a second, third or fourth key to the same plan.** Add it to the provider, then edit the plan
+model and select it as well: a plan model is one deployment per key, all sharing the alias, and that
+is what makes a second subscription carry load and a rate limit on one key survivable. MEASURED on
+the R750 2026-09-08 with two Z.AI subscriptions on `plan-zai`: 51 requests through `zai-1` and 42
+through `zai-2` in the same window.
 
-**A second `model_list` entry with the SAME `model_name` and the other key.** That is the whole
-mechanism, and it is also MARKET-5's answer: two subscriptions of one provider have exactly one
-home, here, and the console side needs no second key field because the second key never reaches it.
+**Roll a key.** The key's row, *Roll*. The credential is patched in place under a name that does not
+change, so no deployment is touched and the pool never has a hole in it. MEASURED on the R750
+2026-09-08: **0.26 s**, the slot's mask moved to the other key's mask and back, and the load loop
+running one request every 500 ms through that pool recorded **zero failures**. Nothing is written
+into any box and the customer sees nothing: the alias did not change and neither did the label.
 
-```yaml
-model_list:
-  - model_name: plan-zai
-    litellm_params: {model: openai/glm-5.3, api_key: os.environ/PROXY_ZAI_KEY_1, api_base: https://api.z.ai/api/coding/paas/v4}
-  - model_name: plan-zai
-    litellm_params: {model: openai/glm-5.3, api_key: os.environ/PROXY_ZAI_KEY_2, api_base: https://api.z.ai/api/coding/paas/v4}
+**Repoint an alias when a vendor retires a model.** Edit the plan model, pick the new vendor model.
+The alias is a contract with every box already pointed at it and can never be renamed; the vendor
+model behind it is the thing that changes. MEASURED on the R750 2026-09-08 out of the proxy's own
+request log: `openai/glm-5.3` at 19:52:06, `openai/glm-4.7` at 19:53:22 after the change, and
+`openai/glm-5.3` again at 19:53:37 after the change back, on the same deployment ids. That is the
+next request, and it is literally the next request because `--num_workers 1` is pinned at
+`deploy/coolify/proxy.compose.yml:78`, so there is no second worker to converge.
+
+**Three clocks, and the page says which.** The proxy uses a change on the next request and a box
+picks it up on its next turn. A NEW plan model reaches a customer's list within one registry cycle
+*and* only after *Give every workspace access to this model*, which widens every tenant key's model
+scope and writes nothing into a box. A customer's open page updates the next time that page loads,
+because nothing pushes to it. There is no fourth clock and there is no bare "takes effect
+immediately" anywhere on that page.
+
+**What the customer's Titan says it runs** lives inside each box, and nothing reports it back, so
+changing the label is one edit and pushing it is a separate, named action carrying the count of
+workspaces. MEASURED on the R750 2026-09-08: before this wave no box carried
+`SAND_OPENAI_COMPATIBLE_MODEL_LABEL` at all, so demo's Titan said `plan-zai`; after
+*Update what their Titan calls it* the demo box carries `GLM-5.3` and says it.
+
+---
+
+## 4. This file, and what is left in it
+
+After PROVIDERS-1 `config.yaml` carries `general_settings` (no `allowed_routes`), `router_settings`
+(no `fallbacks`), the TinyFish pass-throughs and `mcp_servers`. Beside it sits `bootstrap.json`,
+which describes the providers, credential slots, plan models and fallback map a **fresh** install
+seeds, by `os.environ` NAME only and holding no value. An install that already has rows is never
+re-seeded. `config.stage1.yaml` is kept beside both: it is the one that still carries `model_list`,
+and it is what a rollback reinstalls.
+
+**Seeding a fresh install**, once, after the proxy is up with `store_model_in_db` on:
+
+```
+docker exec titanbot-cp node cp/cli.mjs proxy seed
 ```
 
-`routing_strategy: simple-shuffle` with `num_retries: 2`, `allowed_fails: 3` and
-`cooldown_time: 30`, so a dead key drains to the other rather than failing the customer.
+It reads what is really at the proxy first and skips every provider, slot and alias already there,
+so a second run changes nothing and a run after somebody edited a model in the panel does not put
+the file's version back. A slot whose environment name this container does not carry is named and
+skipped, not invented: that key goes in through the panel.
+
+**Rollback.** Anything wrong in the code is `git revert`, sync, and a control-plane rebuild, with no
+proxy restart, because the proxy keeps serving from its database rows. Going back to a
+file-configured proxy is a third restart and is an incident, not a plan: reinstall
+`config.stage1.yaml`, which carries `model_list`, and turn `store_model_in_db` off in the same edit.
+The database rows then go inert rather than causing an outage.
 
 ---
 
