@@ -270,7 +270,30 @@ export function createApp(options = {}) {
       const token = adoption.profileDir
         ? readTokenFromDirectory(adoption.profileDir)
         : readGatewayToken(row.slug, config);
-      if (!token) { skipped.push({ slug: row.slug, what: "tenant", why: "this workspace has no gateway token on this server" }); continue; }
+      if (!token) {
+        skipped.push({ slug: row.slug, what: "tenant", why: "this workspace has no gateway token on this server" });
+        // PROXY-1, MEASURED ON THE R750 2026-09-08. The operator's own workspace is adopted and
+        // this service holds no gateway token for it, by design: the relay seeds that entry from
+        // its own environment so Jason's console keeps working when this service is down. But the
+        // whole row was dropped here, and the virtual key rides ON that row, so `proxy migrate
+        // titanium` minted his key and then failed forever with "no included set for titanium"
+        // while demo and richard-avery went through. His box would have been the one box left
+        // holding the copied operator key: the exact thing this wave exists to end, surviving in
+        // the one place nobody would look.
+        //
+        // So an ADOPTED tenant that has a plan key still gets a row, carrying its slug and its
+        // included set AND NOTHING ELSE. The relay drops every other field of the operator's row
+        // already (box, token, sessionKey and both directories come from its own environment and
+        // from nowhere else), and merges only this one, so a row shaped like this is exactly what
+        // it is built to read. Narrow to adopted on purpose: a normal customer whose token file is
+        // missing stays skipped, because a row with no token would have the relay calling that
+        // customer's gateway with an empty bearer instead of saying the workspace is not available.
+        if (wasAdopted(row.slug, row)) {
+          const adoptedIncluded = includedFor(row.slug, profileDir);
+          if (adoptedIncluded.row) tenants.push({ slug: row.slug, included: adoptedIncluded.row });
+        }
+        continue;
+      }
       // PROXY-1. What this customer's plan includes, if anything.
       //
       // Two rules, and both of them are about not lying to the relay. The whole object is OMITTED

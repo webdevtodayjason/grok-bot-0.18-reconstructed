@@ -225,6 +225,50 @@ test("the operator's own adopted workspace reads its plan key from the directory
   } finally { await proxy.close(); }
 });
 
+test("an adopted workspace with no gateway token here still carries its plan, and a customer without one does not", async () => {
+  // MEASURED ON THE R750 2026-09-08. Jason's own workspace is adopted and this service holds no
+  // gateway token for it on purpose: the relay seeds that entry from its own environment so his
+  // console survives this service being down. The whole row was therefore dropped here, and the
+  // virtual key rides ON that row, so `proxy migrate titanium` minted his key and then failed
+  // forever with "no included set for titanium" while the two customers went through. His box
+  // would have been the one left holding the copied operator key.
+  const proxy = await startFakeProxy();
+  try {
+    await withPlane(async (plane) => {
+      // Adopted the way the live one was: a box and a host, and NO directories, so there is no
+      // token to read anywhere.
+      const adopted = await plane.admin("POST", "/v1/tenants/titanium/adopt", {
+        coolifyServiceUuid: "svc-operator", host: "console.titanium.bot", boxContainer: "titanbot-box-operator",
+      });
+      assert.equal(adopted.status, 200, adopted.text);
+      const minted = await ensureProxyKey("titanium", plane.config, {
+        file: proxyKeyFileIn(tenantProfileDir("titanium", plane.config, plane.store.listSteps("titanium"))),
+      });
+      assert.equal(minted.ok, true, minted.why);
+
+      const answer = await asRelay(plane);
+      const row = answer.body.tenants.find((one) => one.slug === "titanium");
+      assert.ok(row, "the operator's workspace was dropped, so its plan key had no route to the relay");
+      assert.equal(row.included.key, minted.record.key);
+      // Its slug and its plan, and NOTHING else. The relay takes box, token, sessionKey and both
+      // directories from its own environment for this one entry and merges only `included`, so
+      // sending anything more would be sending a field that is ignored at best and wrong at worst.
+      assert.deepEqual(Object.keys(row).sort(), ["included", "slug"]);
+      // The skipped note stays, because the reason the rest of the row is absent has not changed.
+      assert.ok((answer.body.skipped ?? []).some((one) => one.slug === "titanium" && one.what === "tenant"));
+
+      // And the narrowness is the point: an ordinary customer whose token is missing is still
+      // skipped outright. A row with no token would have the relay calling that customer's gateway
+      // with an empty bearer forever instead of saying the workspace is not available.
+      await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme" });
+      rmSync(tenantPaths("acme", plane.config).profileTokenFile, { force: true });
+      const second = await asRelay(plane);
+      assert.equal(second.body.tenants.some((one) => one.slug === "acme"), false,
+        "a customer with no gateway token was served a row with no token in it");
+    }, { env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); }
+});
+
 test("a workspace with no plan key is served without one, and the reason is named", async () => {
   const proxy = await startFakeProxy();
   try {
