@@ -69,7 +69,7 @@ import {
   createSandBrowserTools,
   type BrowserDriverDependencies,
 } from "./sand-browser-tools.js";
-import { createSandDirectBrowserTools } from "./sand-browser-direct-tools.js";
+import { createSandDirectBrowserTools, DIRECT_BROWSER_TOOL_NAMES } from "./sand-browser-direct-tools.js";
 import {
   createFileTransferTools,
   type FileTransferController,
@@ -1733,14 +1733,19 @@ export function buildTurnTools(
    * Computer tool, a browserUse subagent has the fifteen page-level ones, and both would otherwise
    * be handed a second, overlapping way to drive the same tab.
    */
-  if (
-    !host.isSubagentRunner
-    && host.remoteBoxHasDesktop
-    && host.getRemoteBoxAvailable()
-    && host.isBrowserToolsEnabled?.() !== false
-  ) {
-    const browserDirect = factories.browserDirect?.();
-    if (browserDirect !== undefined) tools.push(...browserDirect);
+  {
+    const browserDirectAllowed = !host.isSubagentRunner
+      && host.remoteBoxHasDesktop
+      && host.getRemoteBoxAvailable();
+    if (browserDirectAllowed && host.isBrowserToolsEnabled?.() !== false) {
+      const browserDirect = factories.browserDirect?.();
+      if (browserDirect !== undefined) tools.push(...browserDirect);
+    } else if (browserDirectAllowed) {
+      // Withheld by the operator's switch, not by the shape of the turn. Named here with the
+      // reason, because "the tool is absent" and "the tool was turned off" look identical to
+      // someone reading a toolset line, and only one of them is a bug.
+      for (const tool of DIRECT_BROWSER_TOOL_NAMES) withheld.push({ tool, reason: "browser_tools_off" });
+    }
   }
   if (
     !host.isSubagentRunner

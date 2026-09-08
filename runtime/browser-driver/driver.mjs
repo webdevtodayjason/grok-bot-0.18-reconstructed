@@ -183,27 +183,21 @@ export class BrowserDriver {
   }
 
   /** The tab this driver owns, made once and remembered, so repeat calls do not pile up tabs. */
-  async #ownTab() {
-    if (this.#targetId !== null && this.#sessionId !== null) return this.#targetId;
+  /** Make a tab of our own in the window already on screen, and remember it. */
+  async #newTab() {
+    // newWindow is false on purpose: the desktop view shows one browser window and it has to stay
+    // one browser window.
+    const created = await this.#browserSend(
+      "Target.createTarget",
+      { url: "about:blank", newWindow: false, background: false },
+      { timeoutMs: 15000 },
+    );
+    writeState(this.#port, { targetId: created.targetId, at: new Date().toISOString() }, this.#env);
+    return created.targetId;
+  }
 
-    const targets = await this.#pageTargets();
-    const remembered = readState(this.#port, this.#env);
-    let targetId = remembered !== null && targets.some((target) => target.targetId === remembered.targetId)
-      ? remembered.targetId
-      : null;
-
-    if (targetId === null) {
-      // A tab in the window that is already on screen. newWindow is false on purpose: the desktop
-      // view shows one browser window and it has to stay one browser window.
-      const created = await this.#browserSend(
-        "Target.createTarget",
-        { url: "about:blank", newWindow: false, background: false },
-        { timeoutMs: 15000 },
-      );
-      targetId = created.targetId;
-      writeState(this.#port, { targetId, at: new Date().toISOString() }, this.#env);
-    }
-
+  /** Attach to one tab and turn on the two domains every action needs. Throws if it will not answer. */
+  async #attach(targetId) {
     const attached = await this.#browserSend("Target.attachToTarget", { targetId, flatten: true }, { timeoutMs: 15000 });
     this.#sessionId = attached.sessionId;
     this.#targetId = targetId;
@@ -214,11 +208,45 @@ export class BrowserDriver {
       this.#statusByFrame.set(params.frameId, params.response?.status ?? 0);
     });
 
-    await this.#send("Page.enable", {}, { timeoutMs: 10000 });
-    await this.#send("Network.enable", {}, { timeoutMs: 10000 });
-    const tree = await this.#send("Page.getFrameTree", {}, { timeoutMs: 10000 });
+    // 25 seconds, not 10. These are answered by the tab's own renderer, and a renderer busy with a
+    // heavy page answers late: measured on grok-bot-local-vm 2026-09-07, a tab left on a YouTube
+    // channel could not answer Page.enable inside 10 s, and every action after it failed on a tab
+    // that was in fact fine.
+    await this.#send("Page.enable", {}, { timeoutMs: 25000 });
+    await this.#send("Network.enable", {}, { timeoutMs: 25000 });
+    const tree = await this.#send("Page.getFrameTree", {}, { timeoutMs: 15000 });
     this.#mainFrameId = tree?.frameTree?.frame?.id ?? null;
-    return targetId;
+  }
+
+  async #ownTab() {
+    if (this.#targetId !== null && this.#sessionId !== null) return this.#targetId;
+
+    const targets = await this.#pageTargets();
+    const remembered = readState(this.#port, this.#env);
+    const reuse = remembered !== null && targets.some((target) => target.targetId === remembered.targetId)
+      ? remembered.targetId
+      : null;
+
+    if (reuse === null) {
+      const made = await this.#newTab();
+      await this.#attach(made);
+      return made;
+    }
+
+    try {
+      await this.#attach(reuse);
+      return reuse;
+    } catch (error) {
+      // The tab we remembered is there but will not talk: a wedged renderer, a crashed tab, a
+      // page that never finished. Losing our note costs one new tab; keeping it costs every
+      // action from here on, which is what actually happened before this catch existed.
+      this.#sessionId = null;
+      this.#targetId = null;
+      forgetState(this.#port, this.#env);
+      const made = await this.#newTab();
+      await this.#attach(made);
+      return made;
+    }
   }
 
   async #evaluate(expression, options = {}) {

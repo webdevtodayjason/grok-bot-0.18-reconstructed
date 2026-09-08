@@ -51,7 +51,7 @@
 // Exit 0 nothing failed, 1 something failed, 2 nothing could be measured.
 import { execFile } from "node:child_process";
 import http from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync } from "node:fs";
 
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:7777";
 const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
@@ -322,22 +322,52 @@ function startStub(port, plan, state) {
   // image parts that came with it arrive as the user message immediately after it, so they belong
   // to the tool result they follow.
   const readResults = (messages) => {
+    // Which tool each call id belongs to, taken from the assistant messages that made the calls.
+    // The tool message's own `name` field is optional in the OpenAI shape and the host does not
+    // send it, so counting on it made this stub replay step one forever: measured on
+    // grok-bot-local-vm 2026-09-07, browser_open on example.com succeeded and was dispatched
+    // again 100 times, because zero results were ever counted. The call id is the thing both
+    // sides always agree on.
+    const toolOfCallId = new Map();
+    for (const message of messages ?? []) {
+      for (const call of message?.tool_calls ?? []) {
+        const name = call?.function?.name ?? call?.name;
+        if (call?.id != null && name != null) toolOfCallId.set(String(call.id), String(name));
+      }
+    }
     const seen = [];
     for (const message of messages ?? []) {
       if (message?.role === "tool") {
         let parsed = null;
         try { parsed = JSON.parse(String(message.content ?? "")); } catch {}
+        const callId = String(message.tool_call_id ?? "");
+        // Third way to learn which tool answered: the wrapper the host puts round every tool
+        // result names it. `source="browser_open"`.
+        const fromWrapper = String(message.content ?? "").match(/<cursor_untrusted_data_\d+[^>]*\bsource="([^"]+)"/)?.[1];
         seen.push({
-          name: String(message.name ?? ""),
-          callId: String(message.tool_call_id ?? ""),
+          name: String(message.name ?? toolOfCallId.get(callId) ?? fromWrapper ?? ""),
+          callId,
           raw: String(message.content ?? ""),
           parsed,
           followingImages: 0,
+          images: [],
         });
         continue;
       }
       if (message?.role === "user" && Array.isArray(message.content) && seen.length > 0) {
-        seen.at(-1).followingImages += message.content.filter((p) => p?.type === "image_url").length;
+        // The bytes, not just the count. This host sends a tool's screenshot as the user message
+        // right after the tool result, as a data: URL, and the mime type and the JPEG itself can
+        // only be checked from the URL. Counting them and asserting on a placeholder is how this
+        // gate reported "0 bytes, no start-of-frame marker" about seven real JPEGs.
+        for (const part of message.content) {
+          if (part?.type !== "image_url") continue;
+          const url = String(part.image_url?.url ?? "");
+          const match = url.match(/^data:([^;,]+);base64,(.*)$/);
+          seen.at(-1).followingImages += 1;
+          seen.at(-1).images.push(match == null
+            ? { type: "image", mimeType: "", data: "" }
+            : { type: "image", mimeType: match[1], data: match[2] });
+        }
       }
     }
     return seen;
@@ -376,6 +406,12 @@ function startStub(port, plan, state) {
       if (state.systemPrompt === "" && system.length > 0) state.systemPrompt = system;
       if (state.offered.length === 0) state.offered = offered;
 
+      // BROWSER_GATE_DUMP=<file> writes every request the host sent here, one JSON per line. The
+      // shape of a tool result on the wire is the one thing this gate cannot guess right, and
+      // guessing it wrong makes the gate report "no text" about a tool that answered perfectly.
+      if (process.env.BROWSER_GATE_DUMP) {
+        try { appendFileSync(process.env.BROWSER_GATE_DUMP, `${JSON.stringify(parsed.messages ?? [])}\n`); } catch {}
+      }
       state.results = readResults(parsed.messages);
       const at = state.results.filter((r) => r.name.startsWith("browser_")).length;
       const next = plan[at];
@@ -463,10 +499,37 @@ const resultsFor = (label) => {
   const result = stubState.results.filter((r) => r.name.startsWith("browser_"))[at] ?? null;
   return result != null && result.name === PLAN[at].tool ? result : null;
 };
-// The text the model was shown, out of the agent-core result shape.
-const textOf = (result) => (result?.parsed?.content ?? [])
-  .filter((part) => part?.type === "text").map((part) => String(part.text ?? "")).join("\n");
-const imagesOf = (result) => (result?.parsed?.content ?? []).filter((part) => part?.type === "image");
+// The text the model was shown.
+//
+// Measured on grok-bot-local-vm 2026-09-07, a tool result arrives on the wire as a PLAIN STRING
+// wrapped in an untrusted-data tag, not as a JSON envelope of typed parts:
+//
+//   { role: "tool", tool_call_id: "call_browser_1", content:
+//     "<cursor_untrusted_data_1337 source=\"browser_open\">Opened the page...</cursor_untrusted_data_1337>" }
+//
+// Reading it as `parsed.content[]` found nothing and reported NO TEXT about tools that had
+// answered perfectly. Both shapes are read here, because the string is what this host sends and
+// the parts array is what the OpenAI shape allows.
+const UNTRUSTED_WRAPPER = /^\s*<cursor_untrusted_data_\d+[^>]*>\n?([\s\S]*?)\n?<\/cursor_untrusted_data_\d+>\s*$/;
+const textOf = (result) => {
+  const parts = result?.parsed?.content;
+  if (Array.isArray(parts)) {
+    const joined = parts.filter((part) => part?.type === "text").map((part) => String(part.text ?? "")).join("\n");
+    if (joined.length > 0) return joined;
+  }
+  if (typeof result?.parsed?.text === "string") return result.parsed.text;
+  const raw = String(result?.raw ?? "");
+  return raw.match(UNTRUSTED_WRAPPER)?.[1] ?? raw;
+};
+// The images the model was shown. This host never puts them in the tool message: it sends them as
+// the user message right after it, which is what `followingImages` counts. The parts array is read
+// too, for a host that one day does.
+const imagesOf = (result) => {
+  const parts = result?.parsed?.content;
+  const inline = Array.isArray(parts) ? parts.filter((part) => part?.type === "image") : [];
+  if (inline.length > 0) return inline;
+  return result?.images ?? [];
+};
 
 // ---------------------------------------------------------------- --dry-run
 //
@@ -626,6 +689,17 @@ try {
   if (stubReachable !== "200") bail("the box cannot reach the stub model on this Mac");
 
   const endpointsBefore = await relay("/endpoints");
+  // A run that was killed between the pin and the restore leaves the box answering through a stub
+  // that is no longer listening. Starting again on top of that would record the DEAD STUB as the
+  // endpoint to put back, and the box would be left broken by a gate that reported green. Refuse,
+  // and say which endpoint an operator has to pin by hand first.
+  if (endpointsBefore.live?.model === STUB_MODEL) {
+    const candidates = (endpointsBefore.endpoints ?? [])
+      .filter((e) => e.id !== STUB_ID && e.health?.serves === true).map((e) => e.id);
+    bail("the box is still pointed at this gate's stub model from an earlier run that did not finish."
+      + " Pin it back to a real endpoint before running this again"
+      + (candidates.length > 0 ? `, for example: curl -s -X POST ${GATEWAY}/endpoints/use -H 'content-type: application/json' -d '{"id":"${candidates[0]}"}'` : ""));
+  }
   previousEndpoint = (endpointsBefore.endpoints ?? [])
     .find((e) => e.baseUrl === endpointsBefore.live?.baseUrl && e.model === endpointsBefore.live?.model)?.id ?? null;
   if (previousEndpoint == null) bail("the live endpoint could not be identified, so it will not be repinned blindly");
@@ -661,8 +735,18 @@ try {
     wire ??= (await wireLinesSince(from))
       .find((line) => line.conversationId === agentId && (line.tools ?? []).includes("browser_open")) ?? null;
     const browserResults = stubState.results.filter((r) => r.name.startsWith("browser_"));
+    if (browserResults.length >= PLAN.length) break;
+  }
+  // The plan is what this gate measures, and it is spent. Waiting for the agent to stop as WELL as
+  // finish the plan is what hung this gate: measured on grok-bot-local-vm 2026-09-07, all eight
+  // steps ran and the agent still read as running afterwards, because the stub's closing sentence
+  // is plain text and the turn's own reminder asks for a SendMessage tool call it will never make.
+  // So: a short grace for the turn to settle, then read the results either way.
+  const settleBy = Date.now() + 20_000;
+  while (Date.now() < settleBy) {
     const running = (await gw("listAgents").catch(() => [])).find((a) => a.id === agentId)?.isRunning === true;
-    if (browserResults.length >= PLAN.length && !running) break;
+    if (!running) break;
+    await sleep(3000);
   }
   info(`the stub answered ${stubState.requests} request(s) and dispatched: ${stubState.dispatched.join(", ") || "(nothing)"}`);
 
@@ -711,14 +795,25 @@ try {
       "and to delegate a long, multi-step job to the desktop subagent");
     check(/sign in/i.test(prompt) && /(desktop view|desktop)/i.test(prompt),
       "it tells him to hand a login back through the desktop view");
-    // The ladder. fetch before TinyFish before the browser: the browser is the expensive last read.
-    const fetchAt = prompt.search(/WebFetch|web fetch/i);
-    const tinyfishAt = prompt.search(/TinyFish/i);
-    const browserAt = prompt.search(/browser/i);
+    // The ladder: fetch, then TinyFish, then the browser, because the browser is the expensive read.
+    //
+    // Measured INSIDE the rule that states it, not across the whole prompt. A whole-prompt word
+    // search reports the first place each word appears anywhere, and this prompt names the browser
+    // early, in the escalation ladder, thousands of characters before the reading rule -- so the
+    // check failed (fetch 991, TinyFish 88478, browser 23818) on a prompt whose reading rule is in
+    // exactly the right order. What has to be in order is one rule, and this reads that rule.
+    const READING_RULE = /Read the web in this order[\s\S]{0,900}/i;
+    const rule = prompt.match(READING_RULE)?.[0] ?? "";
+    check(rule.length > 0, "the prompt carries one rule that states the reading order",
+      rule.length > 0 ? `${rule.length} chars` : "no sentence starting \"Read the web in this order\" is in the prompt");
+    const where = rule.length > 0 ? rule : prompt;
+    const fetchAt = where.search(/WebFetch|web fetch|fetch the page/i);
+    const tinyfishAt = where.search(/TinyFish/i);
+    const browserAt = where.search(/browser/i);
     check(fetchAt >= 0 && browserAt >= 0 && fetchAt < browserAt,
       "the reading ladder puts fetch before the browser",
       `fetch at ${fetchAt}, TinyFish at ${tinyfishAt}, browser at ${browserAt}`);
-    if (tinyfishAt < 0) skip("TinyFish sits between them in the ladder", "the prompt never names TinyFish (CURSOR-1 owns that half)");
+    if (tinyfishAt < 0) skip("TinyFish sits between them in the ladder", "the rule never names TinyFish (CURSOR-1 owns that half)");
     else check(fetchAt < tinyfishAt && tinyfishAt < browserAt, "TinyFish sits between them in the ladder",
       `fetch ${fetchAt}, TinyFish ${tinyfishAt}, browser ${browserAt}`);
   }
@@ -738,7 +833,11 @@ try {
     info(`example.com: ${oneLine(exampleText)}`);
     check(/example domain/i.test(exampleText), "example.com comes back as its own words",
       exampleText.length === 0 ? "the result carried no text at all" : "");
-    check(/illustrative examples/i.test(exampleText), "including the sentence in its body, not just the title");
+    // Its body, not its title. The exact wording is the page's to change and it has changed once
+    // already ("illustrative examples in documents" became "documentation examples without needing
+    // permission"), so what is pinned is the part that has been on that page for years.
+    check(/for use in [a-z ]*examples/i.test(exampleText), "including the sentence in its body, not just the title",
+      oneLine(exampleText, 120));
 
     const youtube = resultsFor("the YouTube channel");
     const youtubeText = textOf(youtube);

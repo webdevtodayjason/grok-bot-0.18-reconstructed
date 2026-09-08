@@ -351,8 +351,11 @@ export class SandBrowserDriver<Context = unknown> {
       toolCallId: `sand-browser-${input.op}-${sanitizeForBoxPath(input.toolCallId)}`,
     });
     if (shell.case !== "success") {
+      // Whatever the shell layer knows about the failure, in the message. "failed (failure)" was
+      // all a person or a gate could see before, and it named no cause at all.
+      const why = (shell.stderr ?? "").trim().slice(0, 300);
       throw new SandBrowserDriverError(
-        `Browser driver shell failed (${shell.case || "unknown"})`,
+        `The browser could not be reached on the box (${shell.case || "unknown"})${why.length > 0 ? `: ${why}` : ""}`,
       );
     }
 

@@ -105,12 +105,21 @@ async function run(request) {
   }
 }
 
-// The host's own watchdog is 30 seconds per action and the driver's is the same, so this one only
-// catches a hang below both of them. It still has to print a line.
+// A hard budget for the WHOLE call, attaching included.
+//
+// The driver's own deadline is 30 seconds per action, but attaching is not an action: on an agent's
+// first page the browser may still be starting, and that is outside it. The shell that runs this
+// has a budget of its own, and when it runs out it kills the process -- which is the one failure
+// nobody can be told anything about. Measured on grok-bot-local-vm 2026-09-07, that is exactly what
+// a person saw: "Browser driver shell failed (failure)", no cause, no page.
+//
+// So: finish first, in plain words, with time to spare. 55 seconds covers a cold Chrome (about 45)
+// plus an action, and still answers well inside any shell budget.
+const BUDGET_MS = Number.parseInt(process.env.TITANBOT_BROWSER_BUDGET_MS ?? "55000", 10);
 const watchdog = setTimeout(() => {
-  emit({ ok: false, error: "the browser did not answer in time and the action was given up on" });
+  emit({ ok: false, error: "the browser is taking too long to answer. It may still be starting up on this computer; ask me again in a moment." });
   process.exit(0);
-}, 100_000);
+}, BUDGET_MS);
 watchdog.unref?.();
 
 let result;

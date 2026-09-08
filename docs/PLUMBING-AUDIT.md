@@ -110,6 +110,42 @@ M3 other open ports: 1234 (silent), 3400 (TCU academy), 5000 (not OpenAI-shaped)
 
 ## 3. Session ledger (what shipped, newest first)
 
+- **2026-09-07 (BROWSER-1: Titan drives a browser himself).** Jason the same evening: "Titan
+  should be able to use a browser. If that's been taken away from Titan, it needs to be given back
+  as a tool." It had been: the fifteen page-level `browser_*` tools worked, but `turn-toolset.ts`
+  offered them only to a browserUse subagent, and that subagent sits behind a Statsig gate this
+  deployment reads as false. Chief toolset before: 30 tools, zero `browser_*`.
+  **What landed.** Four tools on the chief's own turn (`browser_open`, `browser_click`,
+  `browser_type`, `browser_screenshot`), behind `SAND_BROWSER_TOOLS`, default on, read live from
+  the settings file; a dependency-free CDP driver shipped in the runtime mount at
+  `/opt/titanbot-runtime/browser-driver` that attaches to the Chrome the box already runs on the
+  person's profile and display, in a tab of its own; readable main text capped at 40k with an
+  innerText fallback; best-effort `needsLogin` and `blocked`; one JPEG resized to 1280 wide as
+  exactly one image part; one `browser_navigation` audit row per open; and the prompt rule that
+  decides between doing it himself, delegating a long job, and handing a sign-in back through the
+  desktop view.
+  **The seam was the work.** Three builders each did their half and none owned the join: the tools
+  sent op `open` to the driver the host uploads, which has no such op, so a person would have been
+  told "Unknown op: open". `runtime/browser-driver/host-op.mjs` is the box end of one tool call --
+  same base64 request, same marked result line the host already parses -- and a spec flag
+  (`usesRuntimeDriver`) chooses which driver runs, so the fifteen subagent tools did not move.
+  **Four real bugs found by running it, each fixed.** The tool factory stamped `image/png` on every
+  screenshot, which became a lie the moment the driver took a JPEG. A tab whose renderer wedged was
+  reused forever: after a YouTube page, `Page.enable` would not answer inside 10 s and every later
+  action failed on a tab that was fine; the driver now forgets a tab that will not talk and makes a
+  new one, and gives the renderer 25 s. A shell failure reached the model as "Browser driver shell
+  failed (failure)", a sentence with no fact in it; the reason travels now. And the driver could be
+  killed by the shell's own budget before it said anything at all, so it answers inside 55 s in
+  plain words instead.
+  **Measured on `grok-bot-local-vm` 2026-09-07:** `verify-browser-tools.mjs` 86 PASS 0 FAIL; chief
+  offered 34 tools with four `browser_*` on its own line and all 34 on the wire; example.com and the
+  Titanium Computing YouTube channel back as words; a login wall and a 403 reported in plain words;
+  typing and clicking changed the gate's own page; 8 results, 8 image parts in history and 8 on the
+  wire, every one `image/jpeg` 1280x656; 5 opens, 5 audit rows with url and title; no second Chrome
+  and no doubled window count; the switch off withholds the four and says `browser_tools_off`.
+  `verify-toolset` PASS at 34. `npm test` 1197/1197. The gate takes about six minutes against a box
+  and does not fit a 290 s budget. Design: [docs/BROWSER.md](BROWSER.md).
+
 - **2026-09-06 (AVATAR-1: the agents are the Titan crew, and they move).** Jason's brief the same
   night: "that blue canvas mascot is how we're going to make our first bot. Titan will always be
   the first one for everybody, and we will use all the other bot characters. Inside the dashboard I

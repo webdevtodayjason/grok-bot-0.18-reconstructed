@@ -168,10 +168,15 @@ const readPromptReport = async (id) => {
 // with a hello, back to /local-exec/responses. With the daemon down (or before its stream has
 // reconnected after a host restart) nothing answers, and the five are withheld.
 const HOST_MACHINE_TOOLS = ["ExternalShell", "ExternalRead", "AwaitExternalShell", "CopyToBox", "CopyFromBox"];
-// Exact counts, not a range: with a computer announced the chief is offered 35 tools, without one
-// 30, and anything else is a tool that appeared or vanished for some other reason.
-const CHIEF_TOOL_COUNT_WITH_COMPUTER = 35;
-const CHIEF_TOOL_COUNT_WITHOUT_COMPUTER = 30;
+// Exact counts, not a range: with a computer announced the chief is offered 39 tools, without one
+// 34, and anything else is a tool that appeared or vanished for some other reason.
+//
+// Both went up by four on 2026-09-07, when BROWSER-1 gave the main agent its own browser:
+// browser_open, browser_click, browser_type, browser_screenshot. They are offered on the same
+// predicate as Screenshot and request_box_help -- a chief, a box with a desktop, the box up -- and
+// withheld with the reason `browser_tools_off` when SAND_BROWSER_TOOLS is set to 0.
+const CHIEF_TOOL_COUNT_WITH_COMPUTER = 39;
+const CHIEF_TOOL_COUNT_WITHOUT_COMPUTER = 34;
 
 const spoken = (entries) => entries.filter((entry) => entry.kind === "send-message");
 

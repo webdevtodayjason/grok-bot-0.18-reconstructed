@@ -341,7 +341,13 @@ export function createHostBrowserDriverDependencies<Context = unknown>(
           exitCode: result.result.value.exitCode,
         };
       }
-      return { case: result.result.case ?? "" };
+      // BROWSER-1. Carry WHY. This threw away everything but the case name, so a browser tool that
+      // was killed or refused could only tell the model "Browser driver shell failed (failure)" --
+      // a sentence with no fact in it, which is the worst thing to hand someone debugging a live
+      // box. The failure's own message travels on stderr now.
+      const failure = result.result.value as { readonly message?: unknown } | undefined;
+      const detail = typeof failure?.message === "string" ? failure.message : "";
+      return { case: result.result.case ?? "", ...(detail.length > 0 ? { stderr: detail } : {}) };
     },
     ...(input.getPersistImage === undefined ? {} : { getPersistImage: input.getPersistImage }),
     ...(input.recordNavigation === undefined ? {} : { recordNavigation: input.recordNavigation }),

@@ -155,7 +155,8 @@ export function buildSandBaseSystemPrompt(options2: SandBaseSystemPromptOptions)
     // TOOLS-16. The two sentences that lived here told the model to reach for a GenerateImage tool
     // it is never offered: the turn toolset only adds that tool when a provider implements
     // createGenerateImageToolInputs, and nothing in this build does, so the wire carries no
-    // GenerateImage among its tools (30 of them with no computer connected, 35 with one). This
+    // GenerateImage among its tools (34 of them with no computer connected, 39 with one, since
+    // BROWSER-1 added the four browser tools). This
     // prompt still cannot condition on the offered set -- it is built from a couple of deployment
     // facts, with no view of the turn's toolset -- so the honest fix is to stop naming the tool.
     // Restore both sentences the day a provider wires the tool up.

@@ -89,9 +89,12 @@ once: a second Chrome comes up on a different profile with no debug port, and th
 one browser while Titan drives another. The gate counts the running profiles and the windows on
 every display, before and after, and fails if either grew.
 
-**Nothing is installed in the box.** `playwright-core` is already at
-`/usr/local/lib/node_modules` in the box image and is reached through a `createRequire`, not a
-bare import. The driver's own files are plain `.mjs` with no dependencies, shipped as source.
+**Nothing is installed in the box, and nothing is imported that the mount does not carry.** The
+driver is seven plain `.mjs` files with no dependencies at all, shipped as source. It speaks the
+Chrome DevTools Protocol over a WebSocket it implements itself, because the box's node 20 keeps the
+global `WebSocket` behind a flag and there is no npm inside a box to install one. A test walks every
+file in the directory and fails if any of them imports anything but a sibling or a `node:` builtin,
+so the ship cannot silently start needing something the box does not have.
 
 **The screenshot** is one JPEG, resized to 1280 wide, and it reaches the model as exactly one image
 part beside the text. Not two, not zero. There is history here: the browser tools used to return
@@ -128,15 +131,20 @@ is off, which is the shipping default.
 | Where | What |
 |---|---|
 | `runtime/browser-driver/` | The driver. Ships in the runtime mount, read-only in every box, at `/opt/titanbot-runtime/browser-driver`. |
-| `runtime/browser-driver/page-text.mjs` | The judgements that need no browser: readable text, the cap, the login-wall test, the blocked test, the sign-in sentence. Pure functions, unit-tested on a Mac with no box. |
-| `source/host/runner/tools/sand-browser-tools.ts` | The tool definitions and their schemas. |
+| `runtime/browser-driver/host-op.mjs` | The box end of one tool call: it takes the request the host sends, drives the driver, and prints the one result line the host reads back. |
+| `runtime/browser-driver/cli.mjs` | The same driver from a command line, for an operator checking a box by hand. |
+| `source/host/runner/tools/sand-browser-direct-tools.ts` | Titan's four tools: their names, their arguments, and the descriptions that tell the model when to reach for them. |
+| `runtime/browser-driver/page-text.mjs` | The judgements that need no browser: readable text, the cap, the login-wall test, the blocked test. Pure functions over an HTML string, unit-tested on a Mac with no box. |
+| `source/host/runner/tools/sand-browser-tools.ts` | The shared machinery under both sets of tools: the shell call into the box, the auto-review preflight, the screenshot pulled back, the audit row. |
 | `source/host/runner/tools/turn-toolset.ts` | The one predicate that decides whether Titan is offered them. |
 | `source/host/runner/bot-block-detection.ts` | The 21-signature table for challenge pages. Unchanged by this wave, and still the authority. |
 | `source/host/sand-box-setting.ts` | `SAND_BROWSER_TOOLS`, resolved live. |
 | `deploy/r750/sync.sh` | Ships `runtime/browser-driver/` as a directory. |
 | `scripts/build-host.mjs --deploy` | The same thing for the local Mac box. |
 | `scripts/verify-browser-tools.mjs` | The gate. |
-| `tests/browser-tools.test.mjs` | The unit tests. |
+| `tests/browser-driver-extraction.test.mjs` | The unit tests for reading a page: the article, the cap, the innerText fallback, the login wall, the challenge page. |
+| `tests/browser-tools.test.mjs` | The unit tests for the seam: what the driver catches that the host-side classifier cannot, and the shape of a tool result. |
+| `tests/browser-direct-tools.test.mjs` | The unit tests for the four tools: one image, one audit row, plain words for a wall. |
 
 ### Two detectors, on purpose
 
@@ -220,14 +228,26 @@ and `SAND_BROWSER_TOOLS` back the way it found them whatever happened.
 
 Kept apart on purpose. A number with no machine behind it is a plan.
 
-**Measured, on this Mac, 2026-09-07.**
+**Measured, on `grok-bot-local-vm` (this Mac), 2026-09-07.**
 
 | What | Result |
 |---|---|
+| `node scripts/verify-browser-tools.mjs` **against the box** | **86 PASS, 0 FAIL.** All eleven groups above, on a real turn with a real Chrome |
+| `https://example.com` | Opened, title "Example Domain", its own body text back, one JPEG 1280x656, 14,764 bytes |
+| `https://www.youtube.com/@TitaniumComputing` | Opened, title "Titanium Computing - YouTube", channel text back, one JPEG 1280x656, 70,204 bytes |
+| the login wall | `needsLogin`, reported in plain words with no flag name and no tool name in the sentence |
+| the 403 page | `blocked`, reported in plain words |
+| typing and clicking | `browser_type` into `input#note` then `browser_click` on "Save note"; the page's own text changed to say both landed |
+| the toolset | chief offered 34 tools, 4 of them `browser_*`, `isSubagentRunner=false`; the request that left carried all 34 |
+| images | 8 results, 8 image parts in the turn history and 8 in the request that left, every one `image/jpeg` 1280 wide |
+| the audit ledger | 5 opens, 5 `browser_navigation` rows, every row with its url and its title |
+| the desktop view | no second Chrome, no display's window count doubled |
+| the switch off | the four withheld, and the toolset line says `browser_tools_off` |
 | `node scripts/verify-browser-tools.mjs --dry-run` | 29 of 29 PASS, no box, no gateway token, under a second |
-| `node --test tests/browser-tools.test.mjs` | 16 of 19 PASS. The 3 that fail are 16, 17 and 19, which pin the four tool definitions and the result's mime type; they go green when the toolset half lands and are written to fail loudly until it does |
-| `node --test tests/deploy-sync-ships-relay-modules.test.mjs` | 3 of 3 PASS, including the new one that pins `runtime/browser-driver/` into the ship |
-| `node --test tests/*.test.mjs` | 1104 tests, 1101 PASS, the same 3 failures and no others |
+| `node --test tests/*.test.mjs` | 1197 tests, 1197 PASS, 0 FAIL, 32 s |
+
+**How long it takes.** About six minutes against a box, because eight of those steps are real page
+loads in a real browser. It does not fit a 290-second budget: run it detached and read its log.
 
 Landing the unit tests turned up something that had nothing to do with the browser and mattered
 more: `tests/index.js`, which is what `node --test tests/` loads, listed 79 of the 101 suites, so
@@ -236,7 +256,13 @@ would have been the 23rd file it silently skipped. The list is complete now and
 `tests/test-index-covers-the-suite.test.mjs` fails the suite if it drifts again. TESTS-1 in
 [docs/GAP-ANALYSIS.md](GAP-ANALYSIS.md) has the whole measurement and the two residuals.
 
-**Not measured.** `scripts/verify-browser-tools.mjs` has never been run against a box. Every one of
-the eleven assertions above is a statement of what the gate checks, not a result. Nothing in this
-document should be read as saying Titan has opened a page on a real box until that run exists and
-its counts are written into the BROWSER-1 row in [docs/GAP-ANALYSIS.md](GAP-ANALYSIS.md).
+**Not measured.** Two things, named so nobody reads the table above as covering them.
+
+The R750 has had the ship but not this gate: the gate needs a stub model on the machine running it,
+so what was measured there is one real turn on the demo box, written into the BROWSER-1 row in
+[docs/GAP-ANALYSIS.md](GAP-ANALYSIS.md), not these 86 checks.
+
+And the login hand-off in section 3 has never been done end to end by a person: the gate proves the
+page is *reported* as needing a sign-in, not that signing in through the desktop view and asking
+Titan to carry on works. BROWSER-2 already says the login would not survive a recreate on Titan's
+own seat, which is the harder half of the same problem.
