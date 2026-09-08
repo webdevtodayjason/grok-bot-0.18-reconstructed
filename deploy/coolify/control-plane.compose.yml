@@ -187,6 +187,20 @@ services:
       # the mint plus a /key/update sweep set max_budget, and a customer over their allowance is
       # stopped rather than counted. Arming it is not part of this wave.
       CP_PROXY_ENFORCE: ${CP_PROXY_ENFORCE}
+      # Requests a minute per workspace, applied at the proxy on that tenant's own virtual key.
+      #
+      # THIS IS THE ONLY CEILING THAT EXISTS while CP_PROXY_ENFORCE is empty. soft_budget is
+      # advisory by LiteLLM's own definition and refuses nothing, so without this one number
+      # nothing at the proxy stops one customer consuming the whole pooled subscription. MEASURED
+      # ON THE R750 2026-09-08, out of the proxy's Postgres: max_budget, tpm_limit, rpm_limit and
+      # max_parallel_requests were NULL on all three tenant keys, and this name was not set here.
+      #
+      # It is an operator-set ceiling, not a share of the plan: Z.AI's coding plan is metered in
+      # prompts per five hours, which is not an RPM and cannot be divided by a tenant count. Its
+      # job is to stop one runaway agent loop eating the subscription before anybody notices.
+      # A key that already exists does not pick up a change to this; run
+      # `node cp/cli.mjs proxy limits --all` inside this container afterwards.
+      CP_PROXY_RPM_LIMIT: ${CP_PROXY_RPM_LIMIT}
 
       # ---- who may sign themselves up -------------------------------------------------------------
       # Off unless this is 1, and off is the shape the product is in today: the operator adds a
