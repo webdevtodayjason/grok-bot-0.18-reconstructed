@@ -983,6 +983,25 @@
     return `<div class="message-side">${face}<small class="message-who">${escapeHtml(who)}</small></div>`;
   }
 
+  // A subagent at work draws one "Computer · running" row per step, and a tab-reading job drew
+  // seventeen of them in a column (Jason, 2026-09-07 22:11: "It could just be one badge ... add a
+  // count"). Consecutive system rows that say the same thing and carry no receipt fold into one row
+  // that says how many. A row with a receipt (a shell command and its output) stays its own row,
+  // because folding it would hide a receipt; so does a peer exchange.
+  function foldRepeatedRows(messages) {
+    const out = [];
+    for (const message of messages) {
+      const last = out[out.length - 1];
+      const foldable = message.type === "system" && !message.detail && !message.exchange;
+      if (foldable && last && last.type === "system" && !last.detail && !last.exchange && last.text === message.text) {
+        out[out.length - 1] = { ...message, count: (last.count ?? 1) + 1 };
+      } else {
+        out.push(message);
+      }
+    }
+    return out;
+  }
+
   function messageMarkup(message) {
     if (message.type === "system") {
       // SHOT-4: a tool row the adapter summarised in words carries the verbatim command and output
@@ -990,7 +1009,7 @@
       if (message.detail) {
         return `<article class="message-row is-system" data-message-id="${escapeHtml(message.id)}"><details class="message-bubble tool-receipt"><summary>${escapeHtml(message.text)}</summary><pre>${escapeHtml(message.detail)}</pre></details></article>`;
       }
-      return `<article class="message-row is-system${message.exchange ? " is-exchange" : ""}" data-message-id="${escapeHtml(message.id)}"${message.exchange ? ' data-exchange="1" role="button" tabindex="0"' : ""}><div class="message-bubble">${escapeHtml(message.text)}</div></article>`;
+      return `<article class="message-row is-system${message.exchange ? " is-exchange" : ""}" data-message-id="${escapeHtml(message.id)}"${message.exchange ? ' data-exchange="1" role="button" tabindex="0"' : ""}><div class="message-bubble">${escapeHtml(message.count > 1 ? `${message.text} · ${message.count} steps` : message.text)}</div></article>`;
     }
     const isUser = message.authorId === "you";
     const author = workerById(message.authorId);
@@ -1008,7 +1027,7 @@
     const older = record?.hasOlder && typeof adapter.loadOlderMessages === "function"
       ? `<div class="transcript-older"><button class="ghost-button" type="button" data-load-older>Show earlier messages</button></div>`
       : "";
-    return older + contextMessages().map(messageMarkup).join("");
+    return older + foldRepeatedRows(contextMessages()).map(messageMarkup).join("");
   }
 
   // A row just revealed (a search hit) holds the reader on it: a refresh that lands in the next

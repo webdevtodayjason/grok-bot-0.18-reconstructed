@@ -30,6 +30,7 @@ import "./ui-routine-triggers.test.mjs";
 import "./routine-run-failure.test.mjs";
 import "./machine-room-decisions.test.mjs";
 import "./machine-room-trigger-availability.test.mjs";
+import "./machine-room-transcript-fold.test.mjs";
 import "./openai-compatible-images.test.mjs";
 import "./machine-room-markdown.test.mjs";
 import "./ui-views-render.test.mjs";

@@ -12,7 +12,7 @@ You have an email address of your own, and mail sent to it arrives here as a mes
 
 ## Your address
 
-It is your name, lowercased with the spaces and dashes taken out and anything an address cannot hold dropped, at the operator's mail domain. Titan is `titan@titanium.bot`. An agent called Chief of Staff is `chiefofstaff@titanium.bot`. The operator sees every agent's address in the console under Settings, in the Email card, and that card is where the domain is set, so if you are unsure ask the operator rather than guessing the domain.
+It is your name, lowercased with the spaces and dashes taken out and anything an address cannot hold dropped, at the operator's mail domain, which the operator sets in the console and which is not the same on every workspace. If the operator's domain were `example.com`, Titan would be `titan@example.com` and an agent called Chief of Staff `chiefofstaff@example.com`. The surest way to know your own address is the `Email received at ...` line of any mail that reaches you: that address is yours, use it as your from-line. The operator sees every agent's address in the console under Settings, in the Email card, and that card is where the domain is set, so if you are unsure ask the operator rather than guessing the domain.
 
 Mail sent to your address is delivered to you as a message that starts `Email received at ...` and carries the sender, the subject, the date, the Message-ID, and then the email itself between two lines that say `the email starts here` and `the email ends here`. Nothing else in the product reads that mail. If it needs an answer, you are the one who answers it.
 
@@ -40,12 +40,14 @@ The value lands as an environment variable of your own shell, so every command y
 
 One POST. `from` is your own name and your own address, and nothing else, because that is the address the domain is verified for.
 
+In every example below, `titan@example.com` stands for your own address, the one mail reaches you at; put yours there.
+
 ```bash
 curl -sS -X POST https://api.resend.com/emails \
   -H "Authorization: Bearer $RESEND_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "from": "Titan <titan@titanium.bot>",
+    "from": "Titan <titan@example.com>",
     "to": ["sam@example.com"],
     "subject": "The Tuesday numbers",
     "text": "Hi Sam,\n\nHere are the numbers you asked for.\n\nTitan"
@@ -65,7 +67,7 @@ curl -sS -X POST https://api.resend.com/emails \
   -H "Authorization: Bearer $RESEND_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "from": "Titan <titan@titanium.bot>",
+    "from": "Titan <titan@example.com>",
     "to": ["sam@example.com"],
     "subject": "Re: The Tuesday numbers",
     "headers": { "In-Reply-To": "<CAF...@mail.example.com>" },
@@ -79,7 +81,7 @@ Build the JSON with a heredoc or a file when the body is long or has quotes in i
 
 ```bash
 cat > /tmp/reply.json <<'JSON'
-{ "from": "Titan <titan@titanium.bot>", "to": ["sam@example.com"], "subject": "Re: The Tuesday numbers",
+{ "from": "Titan <titan@example.com>", "to": ["sam@example.com"], "subject": "Re: The Tuesday numbers",
   "headers": { "In-Reply-To": "<CAF...@mail.example.com>" }, "text": "..." }
 JSON
 curl -sS -X POST https://api.resend.com/emails \
