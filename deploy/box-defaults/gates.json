@@ -1,0 +1,20 @@
+{
+  "sand_auto_review": false,
+  "sand_browser_use_subagent": true,
+  "grok_bot_dynamic_tools": false,
+  "sand_product_analytics": false,
+  "sand_codebase_telemetry": false,
+  "codebase_telemetry_v2": false,
+  "codebase_telemetry_v2_git_history": false,
+  "codebase_telemetry_v2_agent_dot_dirs": false,
+  "sand_action_audit_logs": false,
+  "sand_notify_bus": false,
+  "sand_notify_safety_poll": false,
+  "sand_enable_pressure_cpu_profiler": false,
+  "sand_box_egress_tunnel": false,
+  "sand_auto_update_when_idle": false,
+  "sand_multitask": true,
+  "sand_spotlight": true,
+  "sand_global_search": true,
+  "sand_computer_use_playwright": true
+}
