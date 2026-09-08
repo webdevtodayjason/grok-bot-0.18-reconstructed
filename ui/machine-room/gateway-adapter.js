@@ -187,6 +187,25 @@
     return null;
   }
 
+  // HANDBACK-1. request_box_help parks the agent and the host writes the instruction as an ordinary
+  // send-message, stamping the SAME entry with boxRequestId + boxInstruction and, when the hand-off
+  // ends, boxResolution. So the durable half of a hand-off is one transcript entry, and this is the
+  // only place that reads it. `handoff` in this file already means the operator-supplied Machine
+  // Room frontend handoff (see the header), so every symbol this wave adds is prefixed boxHandoff.
+  //
+  // Resolution vocabulary: the host writes handed_back and dismissed from now on. Rows already on
+  // disk carry completed and cancelled from the path that wrote a skip and a done identically, so
+  // both are aliased read-side rather than rewritten -- a migration is risk for no gain.
+  function boxHandoffOf(entry) {
+    const requestId = entry?.boxRequestId;
+    if (typeof requestId !== "string" || requestId === "") return null;
+    return {
+      requestId,
+      instruction: typeof entry.boxInstruction === "string" ? entry.boxInstruction : "",
+      resolution: typeof entry.boxResolution === "string" && entry.boxResolution !== "" ? entry.boxResolution : null,
+    };
+  }
+
   // The transcript never records tool calls; the conversation outline (the model's own turn state,
   // no timestamps, rewritten by compaction) does. Weave the outline's tool rows into the durable
   // transcript so a claim sits next to its receipt, the way the upstream desktop shows it. A row is
@@ -337,6 +356,11 @@
         if (e.kind === "agent-exchange") return { id: e.id, type: "system", text: `${e.count} message${e.count === 1 ? "" : "s"} with ${e.peer}`, peer: e.peer, self: e.self, exchange: e.exchange };
         const mine = e.kind !== "send-message";
         const card = mine ? null : cardOf(e);
+        // HANDBACK-1: the instruction IS this entry's own send-message text. Drawing the card and
+        // the text bubble both is the person reading the same sentence twice, so a box entry gets
+        // the card and no text. The agent's own lead-in ("handing you the computer now") is a
+        // different entry and is untouched.
+        const boxHandoff = mine || card ? null : boxHandoffOf(e);
         const attachment = isAttachmentEntry(e)
           ? attachmentOf(e.kind === "user-attachment" ? e.file_path : (e.message.url ?? e.message.file_path), e.kind === "user-attachment" ? e.file_name : e.message.file_name)
           : null;
@@ -348,10 +372,11 @@
           id: e.id ?? `entry-${i}`,
           authorId: mine ? "you" : (e.author?.id ?? "agent"),
           authorName: mine ? "You" : (e.author?.name ?? fallbackName),
-          type: card ? "decision" : attachment ? "attachment" : "text",
+          type: card ? "decision" : boxHandoff ? "handoff" : attachment ? "attachment" : "text",
           ...(card ? { card } : {}),
+          ...(boxHandoff ? { handoff: boxHandoff } : {}),
           ...(attachment ? { attachment } : {}),
-          text: String(text).trim(),
+          text: boxHandoff ? "" : String(text).trim(),
           time: timeOf(Number(e.timestampMs ?? e.createdAt)),
           ...(e.evidence ? { evidence: e.evidence } : {}),
         };
@@ -361,7 +386,9 @@
       // the view draws it as a chip inside that reply's row. It used to be synthesized here as a
       // separate system line reading "Evidence: unsupported · <url> in no tool result this attempt",
       // which an operator read as an error under a reply that had in fact been delivered.
-      .filter((m) => m.text || m.card || m.attachment);
+      // A hand-off card carries no text by construction (above), so the trailing filter has to
+      // keep it or the only row that says a person is needed would be dropped on the floor.
+      .filter((m) => m.text || m.card || m.attachment || m.handoff);
   }
 
   // Agents the host is currently raising an error tray for. Rebuilt each pass, never accumulated:
@@ -1666,6 +1693,15 @@
       .reduce((n, e) => Math.max(n, Number(e.timestampMs) || 0), 0);
     return { messages: messagesOf(held.entries, name, outline, partial), latestAgentMs, files: filesOf(held.entries), hasOlder: partial };
   }
+  // The token in a noVNC URL is the display number. The host names its own loopback in that URL
+  // (127.0.0.1:6081), which is the viewer's machine through the relay and the bug VNC-2 closed, so
+  // only the number is taken from it -- the frame URL is always built on the page's own origin.
+  function displayOfVncUrl(url) {
+    const s = String(url ?? "");
+    const token = /token%3D(\d+)/i.exec(s)?.[1] ?? /token=(\d+)/i.exec(s)?.[1] ?? null;
+    return token ? Number(token) : null;
+  }
+
   async function loadContext(context, name) {
     const [tail, automations, workflows, channels, box] = await Promise.all([
       call("getAgentTranscriptTail", { id: context.id, limit: TAIL_LIMIT }).catch(() => null),
@@ -1693,6 +1729,11 @@
       channels: channels == null ? null : channelsOf(channels),
       handoff: box?.handoff ?? null,
       boxState: box?.state ?? null,
+      // HANDBACK-1: the display the thumbnail is read from. getForeverBoxStatus is already in
+      // flight above, and its vncUrl carries the websockify token, which IS the display number.
+      // ensureForeverBox would answer the same question and ALLOCATE a seat doing it (measured
+      // 16,277 ms cold on grok-bot-local-vm), so a picture must never be what calls it.
+      boxDisplay: displayOfVncUrl(box?.vncUrl),
     };
   }
 
@@ -1706,6 +1747,7 @@
     if (loaded.channels != null) r.channels = loaded.channels;
     r.handoff = loaded.handoff;
     r.boxState = loaded.boxState;
+    r.boxDisplay = loaded.boxDisplay ?? null;
   }
   // The part of a record that reloadActive compares to decide whether the app must redraw. Every
   // emit rebuilds the whole conversation, so this has to name everything the views show and
@@ -1716,6 +1758,14 @@
     (r.skills ?? []).map((s) => `${s.id}:${s.enabled ? 1 : 0}:${s.name}`).join(","),
     (r.channels ?? []).map((c) => `${c.platform}:${c.connected ? 1 : 0}`).join(","),
     r.handoff?.requestId ?? "", r.boxState ?? "",
+    // HANDBACK-1. requestId and boxState alone could not see a hand-off end: the pending-to-done
+    // flip keeps the same requestId and changes a field INSIDE an existing message, and a host
+    // restart with no live hand-off moves neither. So the instruction, the display the thumbnail
+    // is read from, and a digest of every message's own hand-off state ride here too. Without the
+    // last one the card never repaints and the person is left looking at Action needed on a step
+    // they have already finished.
+    r.handoff?.instruction ?? "", r.boxDisplay ?? "",
+    (r.messages ?? []).filter((m) => m.handoff).map((m) => `${m.handoff.requestId}:${m.handoff.resolution ?? ""}`).join(","),
     r.composer?.state ?? "", r.composer?.nonce ?? "",
   ].join("|");
 
@@ -1825,7 +1875,7 @@
       // Filled by loadContext for the context on screen: the agent's skills, the chat platforms
       // it holds a token for, the box's pending hand-off, and whether the transcript window has
       // older entries the host can page in. Null channels means "not read yet", not "none".
-      skills: [], channels: null, handoff: null, boxState: null, hasOlder: false,
+      skills: [], channels: null, handoff: null, boxState: null, boxDisplay: null, hasOlder: false,
       // The composer's last send, as the host's acceptance ledger reports it.
       composer: null,
       lastActivityAt: a.lastActivityAt ?? 0,
@@ -2243,7 +2293,7 @@
         const r = record(context);
         if (!r) return Promise.resolve({ loaded: 0, more: false });
         return loadOlder(context.id).then((page) => {
-          applyLoaded(r, { ...shapeWindow(context.id, r.name, outlineCache.get(context.id)?.outline ?? null), skills: r.skills, channels: null, handoff: r.handoff, boxState: r.boxState });
+          applyLoaded(r, { ...shapeWindow(context.id, r.name, outlineCache.get(context.id)?.outline ?? null), skills: r.skills, channels: null, handoff: r.handoff, boxState: r.boxState, boxDisplay: r.boxDisplay });
           applyAwaiting(context, r, 0);
           emit("transcript:older", { context, loaded: page.loaded, more: page.more });
           return page;
@@ -2475,9 +2525,13 @@
           .then((outcome) => { emit("settings:skills", { agentId }); return outcome; });
       },
 
-      // -- The box (GW-10). handBackForeverBox { id, trigger } -> session.endHandoff: the exit
-      // from a request_box_help takeover, which had no button anywhere. Read back through
-      // getForeverBoxStatus, whose `handoff` field is where pendingHandoff reaches the gateway.
+      // -- The box (GW-10, superseded by HANDBACK-1). handBackForeverBox { id, trigger } ->
+      // session.endHandoff: the exit from a request_box_help takeover, which had no button
+      // anywhere. Read back through getForeverBoxStatus, whose `handoff` field is where
+      // pendingHandoff reaches the gateway -- {requestId, instruction, startedAt, snapshotAt?} and
+      // no image, since forwarding the snapshot took the status from 284 B to 10 KB on a blank
+      // screen and it was stale besides. Any trigger except cancel/dismissed resolves the entry
+      // handed_back, which is what makes "button" the done path and skipHandoff the other one.
       handBack(agentId) {
         // handBackForeverBox ends the hand-off and THEN awaits the turn it revived
         // (resumeAfterBoxHandoff, sand-host.ts), so its answer can be minutes away. The host has
@@ -2489,7 +2543,11 @@
         const apply = (status) => {
           settled = true;
           const target = state.workers.find((w) => w.id === agentId);
-          if (target) { target.handoff = status?.handoff ?? null; target.boxState = status?.state ?? target.boxState; }
+          if (target) {
+            target.handoff = status?.handoff ?? null;
+            target.boxState = status?.state ?? target.boxState;
+            target.boxDisplay = displayOfVncUrl(status?.vncUrl) ?? target.boxDisplay ?? null;
+          }
           emit("message:created", { context: state.activeContext });
         };
         const watch = async () => {
@@ -2507,6 +2565,32 @@
             apply(status);
             return { pending: status?.handoff != null };
           });
+      },
+
+      // HANDBACK-1: the person hands the computer back WITHOUT doing the step. skipBoxHandoff is a
+      // new command; a host too old to know it answers "unknown gateway method", and the answer is
+      // {supported:false} so every Skip control simply is not drawn.
+      //
+      // The tempting fallback is handBackForeverBox {trigger:"dismissed"} -- it reaches the declined
+      // resume prompt on an old host, but stamps the entry "completed", so the card would then read
+      // Done on a step nobody did. A control that lies about what happened is worse than a control
+      // that is not there, so this never falls back.
+      skipHandoff(agentId) {
+        if (commandMissing("skipBoxHandoff")) return Promise.resolve({ supported: false });
+        return tryCall("skipBoxHandoff", { id: agentId }).then((answer) => {
+          if (answer == null) return { supported: false };
+          // Same rule as handBack: the host, not the RPC, says whether the hand-off is over.
+          return call("getForeverBoxStatus", { id: agentId }).catch(() => null).then((status) => {
+            const target = state.workers.find((w) => w.id === agentId);
+            if (target) {
+              target.handoff = status?.handoff ?? null;
+              target.boxState = status?.state ?? target.boxState;
+              target.boxDisplay = displayOfVncUrl(status?.vncUrl) ?? target.boxDisplay ?? null;
+            }
+            emit("message:created", { context: state.activeContext });
+            return { supported: true, pending: status?.handoff != null };
+          });
+        });
       },
       // getHostStatus: the host bundle's version state, plus busy and capabilities.
       getHostStatus() {
@@ -3017,7 +3101,7 @@
           return step(pages - 1);
         };
         return step(8).then((found) => {
-          applyLoaded(r, { ...shapeWindow(context.id, r.name, outlineCache.get(context.id)?.outline ?? null), skills: r.skills, channels: null, handoff: r.handoff, boxState: r.boxState });
+          applyLoaded(r, { ...shapeWindow(context.id, r.name, outlineCache.get(context.id)?.outline ?? null), skills: r.skills, channels: null, handoff: r.handoff, boxState: r.boxState, boxDisplay: r.boxDisplay });
           applyAwaiting(context, r, 0);
           emit("transcript:reveal", { context, entryId, found });
           return found;

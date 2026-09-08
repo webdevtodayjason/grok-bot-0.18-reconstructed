@@ -3806,3 +3806,314 @@ body[data-composer-drop="1"] .composer {
 .mail-table th { color: var(--text-tertiary); font-size: 9px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
 .mail-table tr:last-child td { border-bottom: 0; }
 .mail-cell { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+
+/* -- HANDBACK-1: the computer hand-off ---------------------------------------------------------
+   Three surfaces, one vocabulary. The amber is the one the needs-you pill already uses
+   (rgba(231,162,60,…) over --amber-500), the green is .status-pill.success, and the card itself is
+   an .inline-card with its --card-accent set per state, so nothing new is invented for a state the
+   console can already draw. */
+
+.handoff-card {
+  display: grid;
+  gap: 10px;
+}
+
+.handoff-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.handoff-card-head strong {
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+/* The pill's own dot is the working spinner the roster already runs, so "Action needed" reads as
+   something in flight rather than a static label. */
+.handoff-card [data-handoff-pill] .status-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.handoff-instruction {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Fixed, in both directions, and it clips. The thumbnail lands seconds after the card is drawn and
+   a plate that grew to fit it would reflow the transcript under the reader's eye. */
+.handoff-thumb-frame {
+  position: relative;
+  display: grid;
+  place-items: center;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: 12px;
+  background: rgba(7, 16, 20, 0.5);
+}
+
+.handoff-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 11px;
+  object-fit: cover;
+}
+
+.handoff-thumb-plate {
+  position: absolute;
+  padding: 0 14px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* The image sits in the markup from the first draw, hidden, so the reader has somewhere to put a
+   frame the moment one arrives. [hidden] loses to a display rule, and this one has to win. */
+.handoff-thumb[hidden] {
+  display: none;
+}
+
+.handoff-card-actions {
+  align-items: center;
+}
+
+/* Skip is a text button on the right, the way the original draws it: the two things that finish
+   the step come first, and the way out of it is quieter and apart from them. */
+.handoff-skip-link {
+  margin-left: auto;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-tertiary);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.handoff-skip-link:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* The rail is a grid column of the stage row, and a grid row is sized by its tallest column with
+   items stretched to it. Adding two sections to that column grew it past the row: measured in a
+   real browser on this Mac at 1500x1000, the rail went from 653px to 1061px and the transcript's
+   own box went with it, from a foot at 858 (clear of the control shelf at 876) to 1171 -- behind
+   the shelf and past the bottom of the window, with the newest message unreachable.
+
+   A rail with more in it than fits scrolls on its own; it does not move the conversation. Written
+   as a rule of this wave's rather than an edit to .context-space, and scoped to a rail carrying
+   these sections. min-height:0 is the half that matters: a grid item's default is min-height:auto,
+   which is its content, and that is what let the column push the row. */
+.context-space:has(#rail-screen) {
+  /* align-self is `center` on this column, so with no definite height it simply takes its content
+     and spills out of the row at both ends -- min-height:0 alone left the rail 1061px tall in an
+     808px row and the desktop capsule under the bottom of the window. Stretching gives it the
+     row's height to scroll inside; `safe center` keeps a short rail centred exactly as it was,
+     and falls back to start when it overflows so the top of it can still be scrolled to. */
+  align-self: stretch;
+  align-content: safe center;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* -- the rail's two new islands -- */
+
+/* [hidden] loses to a display rule, and .context-island sets one -- so the amber card kept
+   painting as an empty bordered box at the top of the rail after the hand-off ended. Seen in a
+   browser; `card.hidden === true` was already true and could not see it. Same trap the
+   .icon-button[hidden] rule further up this file exists for. */
+.handoff-island[hidden] {
+  display: none;
+}
+
+.handoff-island {
+  display: grid;
+  gap: 9px;
+  border-color: rgba(231, 162, 60, 0.34);
+  background: rgba(231, 162, 60, 0.09);
+}
+
+.rail-handoff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rail-handoff-actions .card-action {
+  flex: 1 1 auto;
+  justify-content: center;
+}
+
+.screen-island {
+  display: grid;
+  gap: 7px;
+}
+
+.rail-screen-button {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  /* 390x244 is 16:10, the shape of the box's own framebuffer; the tile keeps it so a frame drawn
+     into it is never letterboxed or stretched. */
+  aspect-ratio: 390 / 244;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: 12px;
+  background: rgba(7, 16, 20, 0.5);
+  cursor: pointer;
+}
+
+.rail-screen-button:hover {
+  border-color: var(--teal-300);
+}
+
+.rail-screen-button img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.rail-screen-plate {
+  padding: 0 12px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-align: center;
+}
+
+.rail-screen-caption,
+.rail-screen-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+/* -- the takeover view -- */
+
+/* A third fixed row of the desktop frame. flex:0 0 auto beside .desktop-header and
+   .desktop-footer, so .desktop-workspace keeps its flex:1 1 auto and min-height:0 and the grid
+   below stays bounded by the frame rather than by its tallest column (MR-33). */
+.handoff-banner {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 54px;
+  padding: 10px 20px;
+  border-bottom: 1px solid rgba(231, 162, 60, 0.28);
+  background: rgba(231, 162, 60, 0.12);
+}
+
+.handoff-banner .hand-back-note {
+  display: -webkit-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--amber-500);
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.handoff-banner-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+}
+
+/* Full window, and only under takeover: Take over sets data-takeover, the rail capsule and Open
+   computer do not, so the centred dialog every other route opens is exactly what it was. The
+   dialog's own backdrop is already rgba(5,13,17,0.62), which is the app dimmed behind it. */
+.desktop-dialog[data-takeover="1"] {
+  width: 100vw;
+  max-width: 100vw;
+  max-height: 100dvh;
+  margin: 0;
+  border-radius: 0;
+}
+
+.desktop-dialog[data-takeover="1"] .desktop-frame {
+  height: 100dvh;
+  border-radius: 0;
+}
+
+[data-theme="mist"] .handoff-thumb-frame,
+[data-theme="mist"] .rail-screen-button {
+  border-color: rgba(16, 32, 40, 0.16);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+/* The amber has to sit ON the island's light glass, not replace it: a bare 14% wash over the
+   page's own dark ground gave a dark panel carrying mist's dark text, and the instruction on it
+   was barely legible. Measured in a browser -- the rail card came back rgba(231,162,60,0.14) with
+   nothing beneath while the context card beside it had rgba(239,240,235,0.7). Two layers, the way
+   the mist .inline-card rule mixes its accent into a light ground. */
+[data-theme="mist"] .handoff-island {
+  border-color: rgba(184, 118, 24, 0.32);
+  background:
+    linear-gradient(rgba(231, 162, 60, 0.16), rgba(231, 162, 60, 0.16)),
+    var(--glass-medium);
+}
+
+[data-theme="mist"] .handoff-banner {
+  border-bottom-color: rgba(184, 118, 24, 0.3);
+  background: rgba(231, 162, 60, 0.18);
+}
+
+[data-theme="mist"] .handoff-banner .hand-back-note {
+  color: #8a5a10;
+}
+
+[data-theme="mist"] .handoff-skip-link:hover {
+  background: rgba(16, 32, 40, 0.06);
+}
+
+/* .card-action and .secondary-button paint a dark ground and take --text-secondary for the label,
+   and neither has a mist twin -- the note above the .inline-card rule says as much ("the button is
+   the card's own and is left alone"). In the light theme that is dark text on a dark pill, and
+   seen in a browser the rail's "Skip this step" was an unreadable slab. That is true of this
+   console's existing card buttons too, which is a wider condition reported with this wave rather
+   than repainted here across three other waves' surfaces mid-flight. These are the hand-off's own
+   controls, in the same vocabulary mist already uses for .ghost-button and .icon-button. */
+[data-theme="mist"] .handoff-card .card-action,
+[data-theme="mist"] .handoff-card .handoff-skip-link,
+[data-theme="mist"] .handoff-island .card-action,
+[data-theme="mist"] .handoff-banner .secondary-button {
+  border-color: rgba(30, 39, 43, 0.16);
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+[data-theme="mist"] .handoff-card .card-action:hover,
+[data-theme="mist"] .handoff-island .card-action:hover,
+[data-theme="mist"] .handoff-banner .secondary-button:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+/* The primary is a 0.52-alpha teal with pale text, which on the card's light ground is the same
+   problem one step quieter. On mist it is solid, with the light label it was drawn for. */
+[data-theme="mist"] .handoff-card .card-action.primary,
+[data-theme="mist"] .handoff-island .card-action.primary,
+[data-theme="mist"] .handoff-banner .primary-button {
+  border-color: rgba(16, 74, 78, 0.6);
+  color: #f1fbfa;
+  background: rgba(16, 94, 98, 0.94);
+}

@@ -920,8 +920,86 @@
     return `<figure class="message-attachment" data-attachment="${escapeHtml(a.path)}" data-attachment-kind="${escapeHtml(a.kind)}" data-attachment-name="${escapeHtml(a.name)}"><figcaption><span class="tag">▱ ${escapeHtml(a.name)}</span></figcaption>${body}</figure>`;
   }
 
+  // ---- HANDBACK-1: the computer hand-off ------------------------------------------------------
+  // request_box_help parks the agent and asks a person to do one thing on its screen. The durable
+  // half is one transcript entry (boxRequestId / boxInstruction / boxResolution); the live half is
+  // the host's pending record, which reaches this page as the open agent's `handoff`. The card
+  // trusts neither alone, because they disagree in the two cases that matter: a host restart loses
+  // the live record while the entry is still unresolved, and a second request silently resolves the
+  // first entry as dismissed. So the state is f(resolution, live), and there are four of them.
+  //
+  //   live hand-off with this entry's requestId          -> pending  "Action needed"
+  //   no live match, resolution handed_back | completed  -> done     "Done"
+  //   no live match, resolution dismissed  | cancelled   -> skipped  "Skipped"
+  //   no live match, no resolution, or a word nobody set -> closed   "No longer waiting"
+  //
+  // completed and cancelled are the words the old code path wrote for a done and a skip that were
+  // indistinguishable; they are aliased here rather than migrated on disk. The fourth state is not
+  // decoration: without it the card either offers buttons aimed at a host that has forgotten the
+  // request, or reads Done on a step nobody did.
+  function boxHandoffState(handoff, live) {
+    if (!handoff) return "closed";
+    if (live && live.requestId === handoff.requestId) return "pending";
+    const resolution = handoff.resolution;
+    if (resolution === "handed_back" || resolution === "completed") return "done";
+    if (resolution === "dismissed" || resolution === "cancelled") return "skipped";
+    return "closed";
+  }
+
+  // Fixed 390x244 -- the plate is the same size whether or not a frame has landed, so a thumbnail
+  // arriving three seconds into a read cannot reflow the transcript under the reader.
+  const BOX_HANDOFF_THUMB_W = 390;
+  const BOX_HANDOFF_THUMB_H = 244;
+
+  // escapeHtml and the flags come in as arguments so this stays testable on its own: the harness
+  // slices the function out of this file and evals it in a bare Function. `skipSupported` is false
+  // on a host that does not know skipBoxHandoff, where no Skip control is drawn at all rather than
+  // one that would lie. `view` is what only the live page can answer: {live} the open agent's
+  // pending hand-off or null, {frame} the newest thumbnail data URL or "", {agentId} whose screen
+  // this is, {hasScreen} false only when the box has told us it has none.
+  function handoffCardMarkup(message, escapeHtml, skipSupported, view = {}) {
+    const handoff = message.handoff ?? {};
+    const state = boxHandoffState(handoff, view.live ?? null);
+    const requestId = handoff.requestId ?? "";
+    const agentId = view.agentId ?? "";
+    const frame = view.frame ?? "";
+    const instruction = handoff.instruction || "It did not say what it needs done.";
+    const pill = state === "pending"
+      ? '<span class="status-pill attention" data-handoff-pill><span class="status-dot working"></span>Action needed</span>'
+      : state === "done"
+        ? '<span class="status-pill success" data-handoff-pill>Done</span>'
+        : state === "skipped"
+          ? '<span class="status-pill muted" data-handoff-pill>Skipped</span>'
+          : '<span class="status-pill muted" data-handoff-pill>No longer waiting</span>';
+    const attrs = `data-agent-id="${escapeHtml(agentId)}" data-request-id="${escapeHtml(requestId)}"`;
+    // The image is ALWAYS in the markup, hidden until a frame lands, with the plate behind it --
+    // exactly the shape the rail tile uses. Drawing the plate alone until the first frame meant the
+    // reader had nowhere to put that frame: it writes into the img and there was none, so the card
+    // stayed empty until some unrelated redraw happened to rebuild it. Measured on
+    // grok-bot-local-vm: the picture reached the rail tile in seconds and the card not at all
+    // inside a minute, then late on a heartbeat.
+    //
+    // The plate says which of the two "no picture" cases this is. A box with no screen allocated is
+    // not a slow screen, and telling a person to wait for something that is not coming is the kind
+    // of line that gets read as a fault in the product.
+    const plate = `<span class="handoff-thumb-plate" data-handoff-thumb-plate${frame ? " hidden" : ""}>${escapeHtml(view.hasScreen === false ? "This computer has no screen to show" : "Bringing the screen up")}</span>`
+      + `<img class="handoff-thumb" data-handoff-thumb data-agent-id="${escapeHtml(agentId)}" data-request-id="${escapeHtml(requestId)}" width="${BOX_HANDOFF_THUMB_W}" height="${BOX_HANDOFF_THUMB_H}"${frame ? ` src="${escapeHtml(frame)}"` : ""}${frame ? "" : " hidden"} alt="What is on this agent's screen right now" />`;
+    const actions = state === "pending"
+      ? `<button class="card-action primary" type="button" data-handoff-action="take-over" ${attrs}>Take over</button>`
+        + `<button class="card-action" type="button" data-handoff-action="done" ${attrs}>I'm done</button>`
+        + (skipSupported ? `<button class="handoff-skip-link" type="button" data-handoff-action="skip" ${attrs}>Skip</button>` : "")
+      : `<button class="card-action" type="button" data-handoff-action="open" ${attrs}><span aria-hidden="true">&#9635;</span> Open computer</button>`;
+    return `<div class="inline-card handoff-card" data-handoff-card data-state="${escapeHtml(state)}" data-request-id="${escapeHtml(requestId)}" data-agent-id="${escapeHtml(agentId)}" style="--card-accent:${state === "pending" ? "var(--amber-500)" : state === "done" ? "var(--green-500)" : "var(--stone-500)"}">`
+      + `<div class="handoff-card-head"><strong>Computer</strong>${pill}</div>`
+      + `<p class="handoff-instruction" data-handoff-instruction>${escapeHtml(instruction)}</p>`
+      + `<div class="handoff-thumb-frame" style="width:${BOX_HANDOFF_THUMB_W}px;height:${BOX_HANDOFF_THUMB_H}px">${plate}</div>`
+      + `<div class="inline-card-actions handoff-card-actions">${actions}</div>`
+      + `</div>`;
+  }
+
   function specialMessageMarkup(message) {
     if (message.type === "decision") return decisionMarkup(message);
+    if (message.type === "handoff") return handoffCardMarkup(message, escapeHtml, boxHandoffSkipSupported(), boxHandoffView(message));
     if (message.type === "skill") return `<div class="inline-card" style="--card-accent:var(--violet-500)"><div class="inline-card-header"><span class="inline-card-icon">✦</span><span class="inline-card-copy"><strong>${escapeHtml(message.title)}</strong><small>${escapeHtml(message.description)}</small></span></div><div class="tag-list"><span class="tag">skill draft</span><span class="tag">recording attached</span><span class="tag">review required</span></div></div>`;
     return "";
   }
@@ -1187,6 +1265,7 @@
     renderRoster();
     renderConversationHeader();
     renderContextCard();
+    renderBoxHandoffSurfaces();
     renderTranscript(keepScroll, pinToRevealed);
     renderComposerStatus();
     renderWorkspaces();
@@ -3403,6 +3482,303 @@
       });
   }
 
+  // ---- HANDBACK-1: the thumbnail engine, the rail, and the one click funnel --------------------
+  // The picture in the card and in the rail tile is the box's own screen, read through the relay.
+  // The relay proxies the box's noVNC at /vnc/<display>/, so a frame there is SAME ORIGIN as this
+  // page and its canvas is untainted -- which is the whole reason this works without a screenshot
+  // command. Measured on grok-bot-local-vm: 1,350 ms to a painted framebuffer, 5 ms and about 7 KB
+  // per 390x244 webp at q0.6, 5.8% of one core for a live client, and a display:none client keeps
+  // painting.
+  //
+  // Three rules this engine exists to keep:
+  //   1. It never mounts inside the transcript. transcriptMarkup rebuilds the whole list and noVNC
+  //      re-runs its handshake whenever its element is replaced -- the exact scar mountBoxSurface
+  //      already carries. So one hidden client lives off-screen on the page and the card holds a
+  //      plain <img> that this writes into.
+  //   2. It has its OWN 3 s timer. Never the render path, never the 15 s heartbeat, never the
+  //      900 ms SSE debounce. A picture that repaints the page is a picture that fights the reader.
+  //   3. It never allocates a seat. ensureForeverBox measured 16,277 ms cold and hands out a
+  //      display; Take over is what should cost that, not a thumbnail. No display means no frame
+  //      and a plate that says so.
+  let boxHandoffThumb = null;
+  const boxHandoffFrames = new Map();
+  const BOX_HANDOFF_FRAME_PREFIX = "mr-box-handoff-frame:";
+  const BOX_HANDOFF_FRAME_INDEX = "mr-box-handoff-frames";
+  const BOX_HANDOFF_FRAME_KEEP = 8;
+  const boxHandoffFrameKey = (agentId, requestId) => `${agentId}::${requestId}`;
+
+  // A host that does not know skipBoxHandoff gets no Skip control anywhere -- not a control that
+  // would fall back to the hand-back command and stamp the step "done" when nobody did it.
+  let boxHandoffSkipMissing = false;
+  function boxHandoffSkipSupported() {
+    return typeof adapter.skipHandoff === "function" && !boxHandoffSkipMissing;
+  }
+
+  // The frozen frame. Kept in memory and mirrored to this origin's storage so a reload still shows
+  // the last thing the screen looked like rather than an empty plate; every read and write is
+  // wrapped, because a browser with site data blocked throws on the accessor itself.
+  function boxHandoffFrame(agentId, requestId) {
+    if (!agentId || !requestId) return "";
+    const key = boxHandoffFrameKey(agentId, requestId);
+    const held = boxHandoffFrames.get(key);
+    if (held) return held;
+    try {
+      const stored = window.localStorage.getItem(BOX_HANDOFF_FRAME_PREFIX + key);
+      if (stored) { boxHandoffFrames.set(key, stored); return stored; }
+    } catch { /* no storage: a live frame lands in a few seconds anyway */ }
+    return "";
+  }
+
+  function rememberBoxHandoffFrame(agentId, requestId, dataUrl) {
+    const key = boxHandoffFrameKey(agentId, requestId);
+    boxHandoffFrames.set(key, dataUrl);
+    try {
+      const store = window.localStorage;
+      store.setItem(BOX_HANDOFF_FRAME_PREFIX + key, dataUrl);
+      // Newest eight, in an index of our own: storage has no ordering to read. About 7 KB each, so
+      // an unbounded set would fill the origin's quota with pictures of steps nobody will reopen.
+      let order = [];
+      try { order = JSON.parse(store.getItem(BOX_HANDOFF_FRAME_INDEX) ?? "[]"); } catch { order = []; }
+      order = [key, ...(Array.isArray(order) ? order : []).filter((k) => k !== key)];
+      order.slice(BOX_HANDOFF_FRAME_KEEP).forEach((old) => { try { store.removeItem(BOX_HANDOFF_FRAME_PREFIX + old); } catch { /* nothing to do */ } });
+      order = order.slice(0, BOX_HANDOFF_FRAME_KEEP);
+      store.setItem(BOX_HANDOFF_FRAME_INDEX, JSON.stringify(order));
+    } catch { /* the in-memory copy is still the frame this session draws */ }
+  }
+
+  // What only the live page can answer, handed to handoffCardMarkup so that function stays pure.
+  function boxHandoffView(message) {
+    const lead = contextLead();
+    const agentId = lead?.id ?? "";
+    const requestId = message?.handoff?.requestId ?? "";
+    return {
+      live: lead?.handoff ?? null,
+      agentId,
+      frame: boxHandoffFrame(agentId, requestId),
+      // Only ever false when the box has told us it has no screen: an unread box is not a box
+      // without one, and saying "no screen to show" about a screen that is coming is a lie the
+      // person cannot check.
+      hasScreen: lead && lead.boxState != null && lead.boxDisplay == null ? false : true,
+    };
+  }
+
+  function boxHandoffTeardown() {
+    if (!boxHandoffThumb) return;
+    window.clearInterval(boxHandoffThumb.timer);
+    boxHandoffThumb.frame?.remove();
+    boxHandoffThumb = null;
+  }
+
+  function boxHandoffEnsureThumb(agentId, requestId, display) {
+    if (boxHandoffThumb
+      && boxHandoffThumb.agentId === agentId
+      && boxHandoffThumb.requestId === requestId
+      && boxHandoffThumb.display === display) return;
+    boxHandoffTeardown();
+    const frame = document.createElement("iframe");
+    frame.setAttribute("aria-hidden", "true");
+    frame.setAttribute("data-box-handoff-thumb-source", "1");
+    frame.tabIndex = -1;
+    frame.title = "Off-screen reader for this agent's screen";
+    // Off-screen rather than display:none, and a real framebuffer size: noVNC scales what it is
+    // given, and a 1px client would hand back a 1px picture.
+    frame.style.cssText = "position:fixed;left:-10000px;top:0;width:1280px;height:800px;border:0;pointer-events:none;opacity:0;";
+    // view_only: this client must never take a keystroke from anywhere. The URL is built on the
+    // PAGE's origin, never the host's own 127.0.0.1 form -- that address is the viewer's machine
+    // through the relay, which is the bug VNC-2 closed. vnc.html and not vnc_lite, because the
+    // lite client ignores resize=scale and paints the top-left corner of the screen only.
+    frame.src = `${window.location.origin}/vnc/${display}/vnc.html`
+      + `?path=${encodeURIComponent(`/vnc/${display}/websockify`)}`
+      + "&autoconnect=1&resize=scale&reconnect=1&bell=0&view_only=1";
+    document.body.appendChild(frame);
+    boxHandoffThumb = { agentId, requestId, display, frame, timer: window.setInterval(boxHandoffTick, 3000) };
+  }
+
+  function boxHandoffTick() {
+    const held = boxHandoffThumb;
+    if (!held) return;
+    // The person is looking at the real thing; reading a second copy of it every three seconds is
+    // work for nobody.
+    if (elements.desktopDialog.open) return;
+    let source = null;
+    try { source = held.frame.contentDocument?.querySelector("canvas") ?? null; } catch { source = null; }
+    if (!source || !source.width || !source.height) return;
+    let dataUrl = "";
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = BOX_HANDOFF_THUMB_W;
+      canvas.height = BOX_HANDOFF_THUMB_H;
+      canvas.getContext("2d").drawImage(source, 0, 0, source.width, source.height, 0, 0, canvas.width, canvas.height);
+      dataUrl = canvas.toDataURL("image/webp", 0.6);
+    } catch { return; }
+    // A browser without webp encoding answers a PNG data URL, which is still a picture; only an
+    // empty answer is nothing worth writing.
+    if (!dataUrl || dataUrl.length < 64) return;
+    rememberBoxHandoffFrame(held.agentId, held.requestId, dataUrl);
+    paintBoxHandoffFrame(held.agentId, held.requestId, dataUrl);
+  }
+
+  // Straight into the elements, never through a render: rebuilding the transcript to show a new
+  // frame would throw the reader back to the bottom every three seconds.
+  function paintBoxHandoffFrame(agentId, requestId, dataUrl) {
+    if (!agentId || !requestId) return;
+    document
+      .querySelectorAll(`img[data-handoff-thumb][data-agent-id="${CSS.escape(agentId)}"][data-request-id="${CSS.escape(requestId)}"]`)
+      .forEach((img) => {
+        img.src = dataUrl;
+        img.hidden = false;
+        const plate = img.parentElement?.querySelector("[data-handoff-thumb-plate]");
+        if (plate) plate.hidden = true;
+      });
+    const tile = document.querySelector("img[data-rail-screen]");
+    if (tile && tile.dataset.agentId === agentId) {
+      tile.src = dataUrl;
+      tile.hidden = false;
+      const plate = document.querySelector("#rail-screen [data-rail-screen-plate]");
+      if (plate) plate.hidden = true;
+    }
+  }
+
+  // The amber card at the top of the rail, drawn only while the host reports a pending hand-off
+  // for the agent whose conversation is open. record.handoff is null for every other agent, so
+  // this is per-conversation by construction -- the roster pill and the header pill keep running
+  // off awaitingUserResponse, which is the only cross-agent signal there is.
+  function renderHandoffRail() {
+    const card = document.getElementById("rail-handoff");
+    if (!card) return;
+    const lead = activeContext()?.kind === "worker" ? contextRecord() : null;
+    const live = lead?.handoff ?? null;
+    card.hidden = !live;
+    if (!live) { card.innerHTML = ""; return; }
+    const attrs = `data-agent-id="${escapeHtml(lead.id)}" data-request-id="${escapeHtml(live.requestId ?? "")}"`;
+    const skip = boxHandoffSkipSupported()
+      ? `<button class="card-action" type="button" data-handoff-action="skip" ${attrs}>Skip this step</button>`
+      : "";
+    card.innerHTML = `<div class="island-heading"><div><span class="status-dot attention"></span><strong>Needs your attention</strong></div></div>`
+      + `<p class="handoff-instruction" data-handoff-instruction>${escapeHtml(live.instruction || "It did not say what it needs done.")}</p>`
+      + `<div class="rail-handoff-actions">${skip}<button class="card-action primary" type="button" data-handoff-action="done" ${attrs}>I'm done, continue</button></div>`;
+  }
+
+  // The screen tile under it. Live while a hand-off is pending, the frozen last frame otherwise,
+  // and a plate in plain words when there is no picture yet. Clicking it opens the desktop view.
+  function renderScreenTile() {
+    const tile = document.getElementById("rail-screen");
+    if (!tile) return;
+    const context = activeContext();
+    if (context?.kind !== "worker") {
+      // A room has no screen of its own. Borrowing a member's here would invent an ownership the
+      // host does not have, and the caption would then be a lie about whose screen this is.
+      tile.innerHTML = `<p class="rail-screen-note">A room has no screen of its own — open a member's conversation to see theirs.</p>`;
+      return;
+    }
+    const lead = contextRecord();
+    if (!lead) { tile.innerHTML = ""; return; }
+    const live = lead.handoff ?? null;
+    const frame = boxHandoffFrame(lead.id, live?.requestId ?? boxHandoffLastRequestId(lead) ?? "");
+    // "Connecting" only where something really is coming: a hand-off in flight, or a seat the box
+    // has already allocated. A permanent "Connecting" on an idle agent reads as a broken product.
+    const waiting = Boolean(live) || lead.boxDisplay != null;
+    const plate = waiting ? "Connecting" : "Click to open this computer's screen";
+    tile.innerHTML = `<button class="rail-screen-button" type="button" data-handoff-action="open" data-agent-id="${escapeHtml(lead.id)}" data-request-id="${escapeHtml(live?.requestId ?? "")}">`
+      + `<span class="rail-screen-plate" data-rail-screen-plate${frame ? " hidden" : ""}>${escapeHtml(plate)}</span>`
+      + `<img data-rail-screen data-agent-id="${escapeHtml(lead.id)}" alt="${escapeHtml(lead.name)}'s screen"${frame ? ` src="${escapeHtml(frame)}"` : ""}${frame ? "" : " hidden"} />`
+      + `</button>`
+      + `<small class="rail-screen-caption" id="rail-screen-caption">${escapeHtml(lead.name)}'s screen</small>`;
+  }
+
+  // The newest hand-off this conversation has on screen, so a finished step still shows its own
+  // frozen frame in the rail once the live record is gone.
+  function boxHandoffLastRequestId(record) {
+    const rows = Array.isArray(record?.messages) ? record.messages : [];
+    for (let i = rows.length - 1; i >= 0; i -= 1) if (rows[i].handoff) return rows[i].handoff.requestId;
+    return null;
+  }
+
+  // One pass, called where renderContextCard is called. It also owns the engine's life: a pending
+  // hand-off with a display starts the hidden client, and anything else stops it.
+  function renderBoxHandoffSurfaces() {
+    const lead = activeContext()?.kind === "worker" ? contextRecord() : null;
+    const live = lead?.handoff ?? null;
+    const openId = lead?.id ?? null;
+    const display = Number(lead?.boxDisplay);
+    if (live && Number.isFinite(display) && display > 0) boxHandoffEnsureThumb(openId, live.requestId, display);
+    // A render that happens to carry no display is NOT the hand-off ending. The roster is rebuilt
+    // from listAgents and the box status is a separate read, so the record is briefly without a
+    // display between the two -- and tearing the reader down there restarted noVNC's 1.3 s
+    // handshake on every heartbeat. Measured on grok-bot-local-vm before this: 33 s to the first
+    // frame on a box that hands one over in about 1.4 s. Only the hand-off ending, or the
+    // conversation moving to another agent, stops the reader.
+    else if (!live || (boxHandoffThumb && boxHandoffThumb.agentId !== openId)) boxHandoffTeardown();
+    renderHandoffRail();
+    renderScreenTile();
+  }
+
+  // Every hand-off control on the page goes through here -- the transcript card, the rail card and
+  // the takeover banner all carry [data-handoff-action], so there is one place that decides what a
+  // click means and one place to read to know.
+  function handleBoxHandoffAction(event) {
+    const button = event.target.closest?.("[data-handoff-action]");
+    if (!button) return;
+    const action = button.dataset.handoffAction;
+    const agentId = button.dataset.agentId || contextLead()?.id || "";
+    if (!agentId) return;
+    if (action === "take-over") { openDesktop("browser", true); return; }
+    if (action === "open") { openDesktop("browser", false); return; }
+    // Captured now, and the dialog is closed on the click rather than on the answer: handBack ends
+    // the hand-off on the host before it returns, so hanging the view's disappearance on the RPC
+    // left the person staring at a banner offering the thing they had just done.
+    if (action === "done") { boxHandoffDone(agentId, button); return; }
+    if (action === "skip") { boxHandoffSkip(agentId, button); return; }
+  }
+
+  function boxHandoffDone(agentId, button) {
+    if (typeof adapter.handBack !== "function") return;
+    if (elements.desktopDialog.open) elements.desktopDialog.close();
+    if (button) button.disabled = true;
+    Promise.resolve(adapter.handBack(agentId))
+      .then((result) => { showToast(result?.pending ? "The computer still lists this as waiting on you" : "Handed back — the agent picks it up from here"); })
+      // An RPC rejection is not evidence the hand-off failed: the host clears it before it answers,
+      // and the status poll running alongside is what actually settles this. So the person is told
+      // what is known, never that something went wrong that may well have worked.
+      .catch(() => showToast("Handed back — waiting for the computer to confirm"))
+      .finally(() => { if (button) button.disabled = false; settleBoxHandoff(); });
+  }
+
+  function boxHandoffSkip(agentId, button) {
+    if (typeof adapter.skipHandoff !== "function") return;
+    if (elements.desktopDialog.open) elements.desktopDialog.close();
+    if (button) button.disabled = true;
+    Promise.resolve(adapter.skipHandoff(agentId))
+      .then((result) => {
+        if (result && result.supported === false) {
+          boxHandoffSkipMissing = true;
+          // The rail and the banner are redrawn by settleBoxHandoff below, but the card lives in
+          // the transcript and nothing here rebuilds that: measured on grok-bot-local-vm, two of
+          // the three Skip controls went and the card's stayed, still offering a command the host
+          // had just said it does not have. The whole page is redrawn, keeping the scroll.
+          renderAll(true);
+          showToast("This computer's software is too old to skip a step. Update it, or do the step and press I'm done.");
+          return;
+        }
+        showToast("Skipped — the agent has been told the step was not done");
+      })
+      .catch(() => showToast("Skipped — waiting for the computer to confirm"))
+      .finally(() => { if (button) button.disabled = false; settleBoxHandoff(); });
+  }
+
+  // The half of a hand-off's end that only the transcript carries. The host stamps the entry's
+  // resolution when the hand-off ends, but the conversation is otherwise only re-read on the 15 s
+  // heartbeat -- so between the click and that tick the card had a cleared live record and an
+  // unstamped entry, which is the fourth state, and it read "No longer waiting" on a step the
+  // person had just finished. Measured on grok-bot-local-vm 2026-09-08: still saying it nine
+  // seconds after the click. One read closes the gap, and it is the host's own answer, not a
+  // guess made on this page.
+  function settleBoxHandoff() {
+    renderHandBack();
+    renderBoxHandoffSurfaces();
+    if (typeof adapter.refresh === "function") Promise.resolve(adapter.refresh()).catch(() => {});
+  }
+
   // -- qol/vnc-paste: the operator's clipboard, into the box ------------------------------------
   // The pane is an iframe onto the box's own noVNC and the relay appends a small bridge to that
   // page on the way through (ui/vnc-bridge.mjs, which also hides noVNC's control bar). This is the
@@ -3589,26 +3965,46 @@
     renderHandBack();
   }
 
-  // GW-10: a request_box_help takeover parks the agent until the operator hands the computer
-  // back, and nothing here could. The control exists only while the host reports a pending
-  // hand-off for the agent whose screen this is, and says what the agent asked for.
+  // GW-10, superseded by HANDBACK-1: a request_box_help takeover parks the agent until the person
+  // hands the computer back. The control keeps its exact contract -- #hand-back hidden unless a
+  // hand-off is pending, dataset.handBack carrying the agent id, #hand-back-note carrying the
+  // instruction -- because that pair is what verify-dashboard's GW-10 leg looks for. What changed
+  // is where they live: they are the right-hand end of the amber banner across the top of the
+  // takeover view now, not two controls in the footer 719 px from the screen they are about. The
+  // same call drives the rail card and the card in the transcript, so all three follow one state.
   function renderHandBack() {
     const button = document.getElementById("hand-back");
     const note = document.getElementById("hand-back-note");
+    const banner = document.getElementById("handoff-banner");
+    const skip = document.getElementById("handoff-skip");
     if (!button) return;
     const lead = contextLead();
     const handoff = lead?.handoff ?? null;
     const canHandBack = handoff && typeof adapter.handBack === "function";
     button.hidden = !canHandBack;
     button.dataset.handBack = canHandBack ? lead.id : "";
+    if (canHandBack) button.dataset.agentId = lead.id; else delete button.dataset.agentId;
     if (note) {
       note.hidden = !handoff;
+      // The full sentence is in the title: a model writes this text and a long one would push the
+      // banner into the desktop it is describing (MR-33 was exactly that overflow, once).
+      note.title = handoff ? handoff.instruction || "" : "";
       note.textContent = handoff ? `${lead.name} handed you the computer: ${handoff.instruction || "no instruction given"}` : "";
     }
+    if (skip) {
+      skip.hidden = !(canHandBack && boxHandoffSkipSupported());
+      if (canHandBack) skip.dataset.agentId = lead.id; else delete skip.dataset.agentId;
+    }
+    if (banner) banner.hidden = !handoff;
   }
 
-  function openDesktop(appName) {
+  // takeover is Take over, and only Take over: the view goes full window with the app dimmed
+  // behind it and the banner across the top. The rail capsule and Open computer keep the centred
+  // dialog the rest of the console has always had, so nothing regresses for ordinary use.
+  function openDesktop(appName, takeover = false) {
     closeOpenDialogs(elements.desktopDialog);
+    if (takeover) elements.desktopDialog.dataset.takeover = "1";
+    else delete elements.desktopDialog.dataset.takeover;
     renderDesktop(appName);
     if (!elements.desktopDialog.open) elements.desktopDialog.showModal();
   }
@@ -4714,7 +5110,7 @@
   adapter.subscribe((event) => {
     state = event.snapshot;
     // An older page is the one transcript change that must not move the reader.
-    if (event.type === "transcript:older") { renderTranscriptKeepingOffset(); renderContextCard(); return; }
+    if (event.type === "transcript:older") { renderTranscriptKeepingOffset(); renderContextCard(); renderBoxHandoffSurfaces(); return; }
     // A revealed entry: the window may have grown backwards; redraw, then scroll to and flash it.
     if (event.type === "transcript:reveal") {
       // Redrawn without the bottom scroll, and flashed on the next frame, after the redraw has
@@ -4742,7 +5138,7 @@
     // whole job is to say what is actually answering.
     if ((event.type.startsWith("plugin:") || event.type === "settings:model") && elements.panelDialog.open && openPluginSurface === "settings") fillEndpoints();
     if (event.type === "desktop:pause") renderDesktop();
-    // Not renderDesktop: that remounts the VNC frame. Only the hand-back control follows state.
+    // Not renderDesktop: that remounts the VNC frame. Only the hand-off banner follows state.
     else if (elements.desktopDialog.open) renderHandBack();
   });
 
@@ -5282,17 +5678,12 @@
   document.getElementById("teach-button").addEventListener("click", (event) => openTeachMode(event.currentTarget));
   document.getElementById("finish-teach").addEventListener("click", () => stopTeachMode(true));
   document.getElementById("discard-teach").addEventListener("click", () => stopTeachMode(false));
-  document.getElementById("hand-back").addEventListener("click", (event) => {
-    // Captured now: currentTarget is null once dispatch ends, and the .finally below runs after.
-    const button = event.currentTarget;
-    const agentId = button.dataset.handBack;
-    if (!agentId || typeof adapter.handBack !== "function") return;
-    button.disabled = true;
-    adapter.handBack(agentId)
-      .then((result) => { showToast(result.pending ? "The host still reports the hand-off as pending" : "Handed back — the agent resumes on its own"); })
-      .catch((error) => showToast(`Could not hand the computer back: ${error.message}`))
-      .finally(() => { button.disabled = false; renderHandBack(); });
-  });
+  // HANDBACK-1: one delegated funnel for every hand-off control on the page -- the transcript
+  // card, the rail card and the banner's own pair. #hand-back and #handoff-skip carry
+  // data-handoff-action like the rest, so they are handled here rather than by a listener of their
+  // own, and the element is captured out of the event before any await for the same reason the
+  // old listener captured currentTarget: dispatch is over by the time .finally runs.
+  document.addEventListener("click", handleBoxHandoffAction);
   document.getElementById("pause-run").addEventListener("click", () => {
     adapter.setRunPaused(!state.desktop.paused);
     showToast(state.desktop.paused ? "Desktop view paused — the worker keeps running" : "Desktop view resumed");

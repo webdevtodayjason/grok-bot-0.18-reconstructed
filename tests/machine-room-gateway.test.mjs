@@ -6,7 +6,10 @@
 //   getAgentTranscriptTail {id,limit}            -> { entries, nextBeforeSeq? }
 //   getAgentTranscriptPage {id,beforeSeq,untilMs,limit} -> { entries, nextBeforeSeq? }
 //   promptAcceptanceStatus {accountSlot,clientNonce} -> { outcome:"found", record:{status,rejectionCode} } | { outcome:"not-found" }
-//   getForeverBoxStatus {id}                     -> { agentId, state, handoff: null | { requestId, instruction } }
+//   getForeverBoxStatus {id}                     -> { agentId, state, vncUrl, handoff: null | { requestId, instruction, startedAt, snapshotAt? } }
+//   skipBoxHandoff {id}                          -> {} (HANDBACK-1; an older host answers "unknown gateway method")
+// HANDBACK-1 changed that `handoff` shape: it used to forward the whole PendingHandoff including
+// snapshotDataUrl, which put a base64 screenshot on every 15 s heartbeat. It carries no image now.
 //   getAgentWorkflows {id}                       -> WorkflowRecord[] (shared/workflow-model.ts)
 //   getAgentChannels {id}                        -> { manifests:[{platform}], connections:[{platform,...}] }
 import assert from "node:assert/strict";
@@ -26,7 +29,7 @@ async function loadAdapter(answers = {}) {
   const body = source.slice(source.indexOf("(function attachGatewayAdapter"));
   const exposed = body.replace(
     "  global.__bootMachineRoom =",
-    "  global.__test = { createGatewayAdapter, messagesOf, weaveToolRows, skillsOf, channelsOf, describeAcceptance };\n  global.__bootMachineRoom =",
+    "  global.__test = { createGatewayAdapter, messagesOf, weaveToolRows, skillsOf, channelsOf, describeAcceptance, boxHandoffOf, displayOfVncUrl, recordSig };\n  global.__bootMachineRoom =",
   );
   const calls = [];
   const window = {
@@ -62,7 +65,7 @@ async function loadAdapter(answers = {}) {
 const seed = () => ({
   activeContext: { kind: "worker", id: "w1" },
   openContexts: [{ kind: "worker", id: "w1" }],
-  workers: [{ id: "w1", name: "Probe", status: "ready", statusText: "Ready", messages: [], files: [], skills: [], channels: null, handoff: null, boxState: null, hasOlder: false, composer: null }],
+  workers: [{ id: "w1", name: "Probe", status: "ready", statusText: "Ready", messages: [], files: [], skills: [], channels: null, handoff: null, boxState: null, boxDisplay: null, hasOlder: false, composer: null }],
   rooms: [], routines: [], plugins: [], models: { default: "d", available: [] },
   settings: { autoReview: { enabled: false, allow: [], block: [] }, localToolPermission: null, reachable: true },
   desktop: { paused: false, timeline: [] }, teaching: { active: false, workerId: null, startedAt: null },
@@ -551,5 +554,131 @@ test("a transcript read that fails does not swallow the roster's own answer", as
   await adapter.refresh().catch(() => {});
   assert.equal(state.agentCount, 10, "the roster read still landed");
   assert.equal(seen.at(-1), 10, "and the page was told about it, transcript read or no transcript read");
+  adapter.destroy();
+});
+
+// ---- HANDBACK-1 ------------------------------------------------------------------------------
+// The host writes the instruction as an ORDINARY send-message and stamps the box fields on that
+// same entry. Before this, messagesOf threw all three away: the instruction landed as a plain
+// agent bubble and the only control anywhere was a button in the footer of a centred dialog.
+
+const boxEntry = (id, text, ms, box) => ({
+  kind: "send-message", id, message: { type: "text", content: text }, timestampMs: ms, ...box,
+});
+
+test("HANDBACK-1: a box entry becomes ONE hand-off row, with no duplicate text bubble", async () => {
+  const { messagesOf } = await loadAdapter();
+  const rows = messagesOf([
+    entry("a1", "agent", "On it, handing you the computer now.", 1),
+    boxEntry("a2", "Sign in to clientsync.dev as super_admin, then hand back", 2, {
+      boxRequestId: "req-7", boxInstruction: "Sign in to clientsync.dev as super_admin, then hand back",
+    }),
+  ], "Probe", null);
+  assert.equal(rows.length, 2, "the lead-in and the card, and nothing else");
+  assert.equal(rows[0].type, "text");
+  assert.equal(rows[1].type, "handoff");
+  assert.deepEqual(rows[1].handoff, {
+    requestId: "req-7", instruction: "Sign in to clientsync.dev as super_admin, then hand back", resolution: null,
+  });
+  // The instruction IS this entry's own send-message text. Drawing the card AND the bubble is the
+  // person reading the same sentence twice.
+  assert.equal(rows[1].text, "");
+});
+
+test("HANDBACK-1: the trailing filter keeps a row that has a card and no text", async () => {
+  const { messagesOf } = await loadAdapter();
+  const rows = messagesOf([boxEntry("a1", "do the thing", 1, { boxRequestId: "r1", boxInstruction: "do the thing" })], "Probe", null);
+  assert.equal(rows.length, 1, "the only row saying a person is needed must not be dropped");
+});
+
+test("HANDBACK-1: the entry carries its resolution, and an unstamped entry carries null", async () => {
+  const { boxHandoffOf } = await loadAdapter();
+  assert.deepEqual(boxHandoffOf({ boxRequestId: "r1", boxInstruction: "sign in", boxResolution: "handed_back" }),
+    { requestId: "r1", instruction: "sign in", resolution: "handed_back" });
+  assert.equal(boxHandoffOf({ boxRequestId: "r1", boxInstruction: "sign in", boxResolution: "" }).resolution, null);
+  assert.equal(boxHandoffOf({ message: { type: "text", content: "hello" } }), null);
+  assert.equal(boxHandoffOf({ boxRequestId: "" }), null);
+});
+
+// The display the thumbnail is read from. ensureForeverBox would answer the same question and
+// ALLOCATE a seat doing it (measured 16,277 ms cold on grok-bot-local-vm), so the number is taken
+// off the status the adapter already reads -- and only the number, because the URL names the
+// host's own loopback, which through the relay is the viewer's machine (VNC-2).
+test("HANDBACK-1: the display is parsed from the status, and nothing allocates a seat for a picture", async () => {
+  const { displayOfVncUrl, createGatewayAdapter, calls } = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "running", vncUrl: "http://127.0.0.1:6081/vnc.html?path=websockify%3Ftoken%3D4", handoff: { requestId: "r1", instruction: "sign in" } }),
+    getAgentTranscriptTail: { entries: [] },
+  });
+  assert.equal(displayOfVncUrl("http://127.0.0.1:6081/vnc.html?path=websockify%3Ftoken%3D4"), 4);
+  assert.equal(displayOfVncUrl("http://127.0.0.1:6081/vnc.html?token=11"), 11);
+  assert.equal(displayOfVncUrl(null), null);
+  assert.equal(displayOfVncUrl("http://127.0.0.1:6081/vnc.html"), null, "a shared seat has no token; guessing 1 here would name the wrong screen");
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  assert.equal(state.workers[0].boxDisplay, 4);
+  assert.equal(only(calls, "ensureForeverBox").length, 0, "reading a display must never be what hands one out");
+  adapter.destroy();
+});
+
+// The single highest-value line in the console half. recordSig is what reloadActive compares to
+// decide whether the app redraws; the pending-to-done flip keeps the SAME requestId and changes a
+// field inside an existing message, so nothing in the old signature moved and the card never
+// repainted -- the person was left looking at Action needed on a step they had finished.
+test("HANDBACK-1: the signature moves when a resolution flips under the same request id", async () => {
+  const { recordSig } = await loadAdapter();
+  const base = { messages: [{ id: "m1", type: "handoff", handoff: { requestId: "r1", instruction: "sign in", resolution: null } }] };
+  const pending = recordSig({ ...base, handoff: { requestId: "r1", instruction: "sign in" }, boxState: "running", boxDisplay: 4 });
+  const done = recordSig({
+    messages: [{ id: "m1", type: "handoff", handoff: { requestId: "r1", instruction: "sign in", resolution: "handed_back" } }],
+    handoff: null, boxState: "running", boxDisplay: 4,
+  });
+  assert.notEqual(pending, done, "the flip must move the signature or the card never repaints");
+  // The instruction changing is a second request with the same everything else.
+  assert.notEqual(
+    recordSig({ ...base, handoff: { requestId: "r1", instruction: "sign in" }, boxState: "running", boxDisplay: 4 }),
+    recordSig({ ...base, handoff: { requestId: "r1", instruction: "sign in to the OTHER site" }, boxState: "running", boxDisplay: 4 }),
+  );
+  // And the display, because the thumbnail is read from it.
+  assert.notEqual(pending, recordSig({ ...base, handoff: { requestId: "r1", instruction: "sign in" }, boxState: "running", boxDisplay: 5 }));
+});
+
+test("HANDBACK-1: skipHandoff calls skipBoxHandoff {id} and reads the box back", async () => {
+  let handoff = { requestId: "r1", instruction: "sign in" };
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "running", handoff }),
+    skipBoxHandoff: () => { handoff = null; return {}; },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  const result = await adapter.skipHandoff("w1");
+  assert.deepEqual(only(calls, "skipBoxHandoff")[0].args, { id: "w1" });
+  assert.deepEqual(result, { supported: true, pending: false });
+  assert.equal(state.workers[0].handoff, null);
+  adapter.destroy();
+});
+
+// The tempting fallback is handBackForeverBox {trigger:"dismissed"}: it reaches the declined resume
+// prompt on an old host, but stamps the entry "completed", so the card would then read Done on a
+// step nobody did. A control that lies about what happened is worse than one that is not drawn.
+test("HANDBACK-1: an un-upgraded host reports unsupported and is never handed a hand-back instead", async () => {
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "running", handoff: { requestId: "r1", instruction: "sign in" } }),
+    skipBoxHandoff: () => new Error("unknown gateway method: skipBoxHandoff"),
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  assert.deepEqual(await adapter.skipHandoff("w1"), { supported: false });
+  assert.equal(only(calls, "handBackForeverBox").length, 0, "a skip must never become a hand-back");
+  assert.deepEqual(state.workers[0].handoff, { requestId: "r1", instruction: "sign in" }, "nothing was skipped, so nothing changed");
+  // Asked once. A card that re-asks every tick would put an unknown-command round trip on every
+  // heartbeat for the life of the page.
+  const before = only(calls, "skipBoxHandoff").length;
+  assert.deepEqual(await adapter.skipHandoff("w1"), { supported: false });
+  assert.equal(only(calls, "skipBoxHandoff").length, before);
   adapter.destroy();
 });

@@ -143,3 +143,6 @@ import "./relay-tenant-login.test.mjs";
 import "./relay-tenant-registry.test.mjs";
 import "./session-token.test.mjs";
 import "./test-index-covers-the-suite.test.mjs";
+
+// HANDBACK-1: the computer hand-off card, the rail and the takeover banner.
+import "./machine-room-handoff.test.mjs";
