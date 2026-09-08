@@ -95,10 +95,26 @@ let passes = 0;
 let notReachedCount = 0;
 const check = (ok, label, detail = "") => { console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`); if (ok) passes += 1; else failures += 1; };
 const notReached = (why, ...labels) => { for (const label of labels) { console.log(`  SKIP  ${label} — not reached: ${why}`); notReachedCount += 1; } };
-const relay = async (route, body) => { const res = await fetch(`${GATEWAY}${route}`, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}); return res.json(); };
+// Every call to the relay is bounded. Without this a single gateway method that never answers
+// stops the whole gate forever, with no failure and no line: measured on this Mac 2026-09-07, a
+// run sat at 174 PASS 0 FAIL for twenty minutes on a `deleteConnectorSecret` that never came back,
+// and there was nothing in the log to say so. A gate that hangs is worse than a gate that fails,
+// because a failure names itself. 60 seconds is far longer than any of these calls needs.
+const RELAY_TIMEOUT_MS = Number.parseInt(process.env.DASHBOARD_RELAY_TIMEOUT_MS ?? "60000", 10);
+const relayFetch = async (url, init, label) => {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(RELAY_TIMEOUT_MS) });
+  } catch (error) {
+    const why = error?.name === "TimeoutError" || error?.name === "AbortError"
+      ? `did not answer within ${Math.round(RELAY_TIMEOUT_MS / 1000)}s`
+      : (error?.message ?? String(error));
+    throw new Error(`${label} ${why}`);
+  }
+};
+const relay = async (route, body) => { const res = await relayFetch(`${GATEWAY}${route}`, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}, route); return res.json(); };
 // The relay holds the gateway token and adds it upstream, so a gate call needs no credential.
 const gw = async (method, args = {}) => {
-  const res = await fetch(`${GATEWAY}/api/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args) });
+  const res = await relayFetch(`${GATEWAY}/api/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args) }, method);
   const text = await res.text();
   if (!res.ok) throw new Error(`${method} failed (${res.status}): ${text.slice(0, 200)}`);
   return text.length ? JSON.parse(text) : null;
