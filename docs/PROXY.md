@@ -131,9 +131,11 @@ catalog door, so Refresh starts working the moment there is something to refresh
 
 **Add a second, third or fourth key to the same plan.** Add it to the provider, then edit the plan
 model and select it as well: a plan model is one deployment per key, all sharing the alias, and that
-is what makes a second subscription carry load and a rate limit on one key survivable. MEASURED on
-the R750 2026-09-08 with two Z.AI subscriptions on `plan-zai`: 51 requests through `zai-1` and 42
-through `zai-2` in the same window.
+is what makes a second subscription carry load and a rate limit on one key survivable. The new
+deployment goes in before any old one comes out, so the pool is never short a key, and a change that
+would leave the alias with nothing to run on is refused. MEASURED on the R750 2026-09-08 with two
+Z.AI subscriptions on `plan-zai`: 51 requests through `zai-1` and 42 through `zai-2` in the same
+window; and `plan-minimax` moved onto a second slot and back with the pool reported each way.
 
 **Roll a key.** The key's row, *Roll*. The credential is patched in place under a name that does not
 change, so no deployment is touched and the pool never has a hole in it. MEASURED on the R750
