@@ -1,8 +1,11 @@
 # The Providers panel's route contract (PROVIDERS-1, item B)
 
-This file is published **first**, before the code it describes, so the page (item C) is not blocked
-on the control plane. It is the contract between `cp/admin.mjs` and `cp/admin/admin.js`: field
-names, shapes, and what each write actually does at the proxy.
+This file was published **first**, before the code it describes, so the page (item C) was not
+blocked on the control plane. It is the contract between `cp/admin.mjs` and `cp/admin/admin.js`:
+field names, shapes, and what each write actually does at the proxy.
+
+**It has been revised once, after the code landed**, and every change is additive except the two
+marked CHANGED in §9. Read §9 first if you have already built against the first version.
 
 Everything below is under `/v1/admin/`, needs a super admin, and answers JSON. The browser talks to
 the control plane and **never** to the proxy: the admin page's CSP is `connect-src 'self'` and the
@@ -131,6 +134,11 @@ reconstructs.
 | `POST /v1/admin/providers/<id>/keys/<slot>/park` | `{parked: true\|false}` | takes the slot out of service by removing the deployments that reference it, keeping the credential. Refused when it would leave an alias with no deployment, naming the aliases |
 | `POST /v1/admin/providers/<id>/keys/<slot>/remove` | `{confirm: "<slot>"}` | typed confirm. Refused while any deployment references it, naming them. Then `DELETE /credentials/<slot>` |
 | `POST /v1/admin/providers/<id>/catalog/refresh` | `{}` | reads the vendor's own `/models` through a LiteLLM pass-through (`/catalog/<id>`), so the control plane gets a live list holding no vendor key. Falls back to the curated list, and says which it is |
+| `POST /v1/admin/providers/<id>/keys/<slot>/quota` | `{total, unit, window?, resetAt?}` | the vendor's plan window for this subscription, read off the vendor's own page and typed in once. See §10 |
+
+**Unparking is the same route as parking**, with `{parked: false}`. Parking writes the deployments it
+removes into the control plane's own settings first, so unparking rebuilds exactly what was taken
+away rather than something reconstructed from a sibling.
 
 **`apiKey` is write-only, end to end.** It arrives in a POST body and in nothing else: never a URL,
 never a query string, never a GET response, never a ledger row, never a log line. The page clears
@@ -160,7 +168,7 @@ vision flag in it, which is why those two are fields a person fills in.
 | `POST /v1/admin/plan-models/<alias>/update` | any of the above | `POST /model/update` for a vendor-model change (it merges, keeping the credential and every `tb_*`); `PATCH /model/<id>/update` for a label, window or visibility change, because POST refuses a `model_info`-only edit with 400 |
 | `POST /v1/admin/plan-models/<alias>/vision-check` | `{}` | sends a 1x1 PNG part through the alias with the master key and records the answer and its time. A catalog refresh can never infer this, and PROXY-10 was a fleet-wide screenshot outage |
 | `POST /v1/admin/plan-models/<alias>/apply` | `{}` | the `/key/update` sweep that widens every tenant key's `models` scope to include this alias. Writes **nothing** into a box. On the page: *"Give every workspace access to this model."* |
-| `POST /v1/admin/plan-models/<alias>/push-label` | `{}` | pushes `customerLabel` into the boxes running this alias, through the relay's existing door. Carries the workspace count, because the label lives in each box |
+| `POST /v1/admin/plan-models/<alias>/push-label` | `{slugs: [...]}` or `{all: true}` | pushes `customerLabel` into the workspaces NAMED, through the relay's `use-included` door. **With neither it answers 409 and changes nothing**, listing the candidates. See §9 |
 | `POST /v1/admin/plan-models/<alias>/remove` | `{confirm: "<alias>"}` | typed confirm. **Refused while any box runs it**, naming them |
 
 **Three clocks, and the copy has to say which.** A vendor-model change takes effect on the *next
@@ -255,3 +263,101 @@ Every route answers the control plane's usual shape. A proxy that is down is
 (that regression is held by a test). HTTP: `400` a bad body, `404` no such provider, slot, alias or
 workspace, `409` a refusal with a reason (removing a slot a deployment still uses, removing an alias
 a box still runs, demoting the last of something), `502` the proxy said no.
+
+---
+
+## 9. What changed after the code was measured
+
+Two CHANGED, and both because the first version would have been wrong in a way a page could not
+recover from.
+
+**CHANGED: `push-label` will not act on a workspace nobody named.** The relay door it drives,
+`POST /admin/tenants/<slug>/use-included`, writes the base url, the model, the endpoint name, the
+served-by line, the context window AND the label in ONE write. There is no label-only door. So a
+push aimed at a box that is running something else would MOVE that customer onto this model without
+being asked, and on the R750 one of those boxes is a real customer. The route therefore takes
+`{slugs: [...]}`, or `{all: true}` meaning the workspaces measured to have run this alias, and with
+neither it answers `409 {error: "name_them", candidates: [...]}` and does nothing. The page should
+show the candidates and make the operator tick them.
+
+**CHANGED: `workspaces` is a measurement, and `labelBehind` is null.** What a box actually runs
+lives in its own `box-secrets.json`, which only the relay can read and which it has no route to
+report. So `workspaces` counts the workspaces whose key RAN this alias inside the current spend
+window, `workspaceSlugs` names them, and `workspacesWhy` says that in words. `labelBehind` is
+`null` with `labelBehindWhy` saying why: nothing reports a box's label back, so the page must not
+draw a number there. Push it to be sure.
+
+Additive, and safe to ignore until the page wants them:
+
+- every plan model carries **`shownToCustomers`**, which is the one rule that keeps a routing alias
+  off a customer's Settings page: `customerVisible` true AND a customer label AND a customer name.
+  The same rule runs inside `includedModelRows`, so a row the panel shows as not-shown is a row a
+  customer really does not have. `plan-zai-vision` is the case it was written for.
+- every plan model carries **`deployments[].fromDb`**, so the page can show which rows came from the
+  database and which the proxy still reads out of its config file. During the ship plan's stage 1
+  both are served at once, deliberately, and this is how that window is visible rather than
+  confusing.
+- every key carries **`backsCatalog`**, true for the slot whose key is in the `/catalog/<id>`
+  pass-through. Rolling that slot re-registers the pass-through in the same action.
+- every provider's catalog carries **`ready`** (there is an address and a path to read) and
+  **`wired`** (a pass-through is actually registered), so a Refresh button can be disabled with a
+  reason rather than failing.
+- `GET /v1/admin/providers` carries **`window.month`**, the spend window the per-key numbers and the
+  quota bars are measured over.
+- `POST /v1/admin/clients/<slug>/model` answers with **`wrote`**, the relay's own evidence: names,
+  lengths and sha256 prefixes of what was written into that box. No value comes back.
+
+---
+
+## 10. The vendor's plan window, per subscription key
+
+Jason, 2026-09-08, over a screenshot of Alibaba Model Studio's Token Plan Usage page showing
+"Remaining 42.9% of Total 40,000, resets 2026-09-09 22:37": *"WE need to be tracking this. and
+tracking per account."*
+
+Two facts are being asked for and they come from different places, so the answer keeps them apart.
+
+**What we count is ours and it is exact.** `quota.used` comes from the proxy's per-key request log,
+filtered to the deployments this key slot serves, in the vendor's own unit: tokens for a token plan,
+prompts or requests for the others. `quota.byWorkspace` is the same number split per customer,
+which is the "per account" half, and it is why `spendReport` groups by `model_id` as well as by
+`api_key`.
+
+**What the vendor allows is theirs, and this build cannot read it.** MEASURED on this Mac 2026-09-08
+with the real keys from `~/.api_keys`, values never printed:
+
+| probe | answer |
+| --- | --- |
+| `GET https://api.z.ai/api/coding/paas/v4/usage` | 404 `{"error":"Not Found","path":"/v4/usage"}` |
+| `GET https://api.z.ai/api/coding/paas/v4/subscription` | 404, the same shape |
+| `GET https://api.z.ai/api/monitoring/v1/usage` | 200 carrying `{"code":500,"msg":"404 NOT_FOUND"}` |
+| `GET https://api.minimax.io/v1/usage` | 404 `404 page not found` |
+| `GET .../models` on both | **200**, so the keys are live and the paths are not there |
+
+Alibaba was not probed: Jason has rotated that key and the new one is not synced yet.
+
+So `total`, `window` and `resetAt` are typed in once by the operator off the vendor's own page,
+through `POST /v1/admin/providers/<id>/keys/<slot>/quota`, and stored in the control plane. The bar
+is drawn from our count against their total, `quota.live` is **false**, and `quota.why` says so in
+words wherever it is drawn. It raises the same 80 percent chip the allowance uses, through
+`quota.warn`. When a vendor endpoint is found, filling in `usagePath` in `PROVIDER_QUOTA`
+(`cp/proxy.mjs`) is the whole change and the bar becomes the vendor's own number.
+
+```jsonc
+"quota": {
+  "unit": "thousands of tokens",
+  "window": "7 days",
+  "used": 17140,
+  "total": 40000,
+  "remaining": 22860,
+  "pct": 43,
+  "resetAt": "2026-09-09T22:37:00Z",
+  "warn": false,
+  "live": false,               // never true on this build, and it is a field so the page needs no edit
+  "why": "Our own count of what went through this key, ...",
+  "byWorkspace": [ { "slug": "demo", "requests": 412, "tokens": 17140, "dollars": 0.12 } ]
+}
+```
+
+With nothing set, `total` is `null`, `pct` is `null` and `why` tells the operator to read the total
+and the reset off the vendor's page. The page should draw no bar at all rather than a bar at zero.

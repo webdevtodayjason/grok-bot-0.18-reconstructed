@@ -200,6 +200,42 @@ CREATE TABLE IF NOT EXISTS retired_slugs (
   retired_at INTEGER NOT NULL,
   accounts   INTEGER NOT NULL DEFAULT 0
 );
+-- PROVIDERS-1. What a super admin CHANGED, as opposed to who tried to sign in.
+--
+-- There was no such record before this wave. Seven tables and not one of them could answer "who
+-- changed the plan model, and when". login_attempts is the wrong home for it and deliberately so:
+-- its columns are fixed around a sign-in (a validated hash, a coerced via), and it is pruned to
+-- thirty days. "Who repointed plan-zai in March" is a question asked in June, so this table is
+-- NEVER PRUNED. Nothing in this file deletes from it and nothing should be added that does. It is
+-- a few hundred bytes a change on a system where changes are rare, and it is the only record that
+-- a provider key was rolled at all.
+--
+-- The row is written BEFORE the proxy call it describes and finished after, so a change that half
+-- succeeded is still on the record with outcome 'started'. See recordAdminAction / finishAdminAction.
+--
+-- NO KEY VALUE EVER REACHES THE detail COLUMN. Callers put a name, a length and a sha256 prefix there and
+-- nothing else, and tests/cp-store asserts a planted value does not appear.
+CREATE TABLE IF NOT EXISTS admin_actions (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  at      INTEGER NOT NULL,
+  actor   TEXT NOT NULL DEFAULT '',
+  via     TEXT NOT NULL DEFAULT '',
+  ip      TEXT NOT NULL DEFAULT '',
+  action  TEXT NOT NULL DEFAULT '',
+  target  TEXT NOT NULL DEFAULT '',
+  detail  TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL DEFAULT 'started'
+);
+CREATE INDEX IF NOT EXISTS admin_actions_at ON admin_actions (at);
+-- The handful of settings the console owns that are not a tenant's and not an account's. One row
+-- today: the plan model a NEW workspace gets. A table rather than a column on something else,
+-- because the next one (a default allowance, a default label) has no other home either.
+CREATE TABLE IF NOT EXISTS admin_settings (
+  name  TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT '',
+  at    INTEGER NOT NULL,
+  actor TEXT NOT NULL DEFAULT ''
+);
 `;
 
 const accountRow = (row) => (row == null ? null : {
@@ -322,6 +358,21 @@ export function openStore(options = {}) {
   const selectAttemptsByOutcome = statement("SELECT * FROM login_attempts WHERE at >= ? AND outcome = ? ORDER BY at DESC, id DESC LIMIT ?");
   const deleteOldAttempts = statement("DELETE FROM login_attempts WHERE at < ?");
   const countAttemptsRow = statement("SELECT COUNT(*) AS n FROM login_attempts WHERE at >= ?");
+
+  // PROVIDERS-1. The change record and the console's own settings.
+  //
+  // No TENANT_MIGRATIONS entry for either, and that is not an omission: db.exec(SCHEMA) runs on
+  // every open and CREATE TABLE IF NOT EXISTS makes a table that is not there. A new TABLE needs no
+  // ALTER; only a new COLUMN on an existing table does, which is what that list is for.
+  const insertAction = statement("INSERT INTO admin_actions (at, actor, via, ip, action, target, detail, outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  // The finish APPENDS rather than replaces. What was attempted and what happened are two different
+  // facts and a row that kept only the second one could not answer "what was this trying to do".
+  const finishActionRow = statement("UPDATE admin_actions SET outcome = ?, detail = CASE WHEN ? = '' THEN detail WHEN detail = '' THEN ? ELSE detail || '; ' || ? END WHERE id = ?");
+  const selectActions = statement("SELECT * FROM admin_actions WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?");
+  const countActionsRow = statement("SELECT COUNT(*) AS n FROM admin_actions");
+  const selectSetting = statement("SELECT * FROM admin_settings WHERE name = ?");
+  const upsertSetting = statement("INSERT INTO admin_settings (name, value, at, actor) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, at = excluded.at, actor = excluded.actor");
+  const selectSettings = statement("SELECT * FROM admin_settings ORDER BY name");
 
   const insertFailure = statement("INSERT INTO login_failures (email, ip, at) VALUES (?, ?, ?)");
   const countFailuresByEmail = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM login_failures WHERE email = ? AND at >= ?");
@@ -496,6 +547,67 @@ export function openStore(options = {}) {
     // short enough that the table does not become a permanent record of everybody who ever mistyped
     // their own password.
     pruneLoginAttempts(before) { deleteOldAttempts.run(Number(before)); },
+
+    // ---- what a super admin changed (PROVIDERS-1) ------------------------------------------------
+    //
+    // Two calls rather than one, and the pair is the point. The row goes down BEFORE the proxy is
+    // asked, carrying outcome 'started'; the second call finishes it with what happened. A change
+    // that timed out half way through, or a process that was killed between the two, therefore
+    // leaves a row saying a change was STARTED and never says it succeeded, which is the honest
+    // record and is exactly the state an operator needs to see. A single write after the fact
+    // would leave no trace at all of the one case worth investigating.
+
+    /** Written before the change. Answers the row id, which finishAdminAction takes. */
+    recordAdminAction({ at = now(), actor = "", via = "console", ip = "", action = "", target = "", detail = "", outcome = "started" }) {
+      insertAction.run(
+        Number(at), String(actor ?? ""), String(via ?? ""), String(ip ?? ""),
+        String(action ?? ""), String(target ?? ""),
+        // A caller that hands an object gets it written as JSON rather than as [object Object].
+        typeof detail === "string" ? detail : JSON.stringify(detail ?? ""),
+        String(outcome ?? "started"),
+      );
+      return Number(db.prepare("SELECT last_insert_rowid() AS id").get()?.id ?? 0);
+    },
+
+    /** The same row, finished. `detail` is left as it was when nothing new is passed. */
+    finishAdminAction(id, outcome, detail = "") {
+      const text = typeof detail === "string" ? detail : JSON.stringify(detail ?? "");
+      finishActionRow.run(String(outcome ?? "ok"), text, text, text, Number(id));
+    },
+
+    listAdminActions({ sinceMs = 0, limit = 200 } = {}) {
+      const cap = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.min(Number(limit), 5000) : 200;
+      return selectActions.all(Number(sinceMs) || 0, cap).map((row) => ({
+        id: Number(row.id),
+        at: Number(row.at),
+        actor: row.actor ?? "",
+        via: row.via ?? "",
+        ip: row.ip ?? "",
+        action: row.action ?? "",
+        target: row.target ?? "",
+        detail: row.detail ?? "",
+        outcome: row.outcome ?? "",
+      }));
+    },
+
+    countAdminActions() { return Number(countActionsRow.get()?.n ?? 0); },
+
+    // ---- the console's own settings (PROVIDERS-1) ------------------------------------------------
+
+    getSetting(name, fallback = "") {
+      const row = selectSetting.get(String(name));
+      return row == null ? fallback : String(row.value ?? "");
+    },
+    setSetting(name, value, actor = "") {
+      upsertSetting.run(String(name), String(value ?? ""), now(), String(actor ?? ""));
+      const row = selectSetting.get(String(name));
+      return { name: String(name), value: String(row?.value ?? ""), at: Number(row?.at ?? 0), actor: String(row?.actor ?? "") };
+    },
+    listSettings() {
+      return selectSettings.all().map((row) => ({
+        name: row.name, value: row.value ?? "", at: Number(row.at), actor: row.actor ?? "",
+      }));
+    },
 
     // ---- tenants -----------------------------------------------------------------------------
 

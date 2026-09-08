@@ -45,7 +45,17 @@ import path from "node:path";
 // widens the other's blast radius.
 import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.mjs";
 import { normalizeEmail } from "./store.mjs";
-import { isoDay, monthStartDay, proxyKeyAlias } from "./proxy.mjs";
+import {
+  PROVIDER_PRESETS,
+  PROVIDER_QUOTA,
+  TB,
+  TENANT_ALLOWED_ROUTES,
+  isPlanModel,
+  isoDay,
+  monthStartDay,
+  proxyKeyAlias,
+  servedPlanModels,
+} from "./proxy.mjs";
 
 export const ADMIN_SALT_NAME = "login-attempt-salt";
 
@@ -488,6 +498,12 @@ export function stuckProvisioning(store, { at = Date.now(), afterMs = 15 * 60 * 
   return stuck;
 }
 
+// One transparent pixel, base64. What the vision check sends through a candidate model, because
+// "does this model take an image" cannot be read out of any catalog and getting it wrong is a
+// fleet-wide screenshot outage: MEASURED 2026-09-08, glm-5.3 refuses an image part with code 1210
+// while glm-5.3-flash answers, and every Titan conversation carries screenshots.
+const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
 // ---- the api -----------------------------------------------------------------------------------
 
 /**
@@ -509,6 +525,11 @@ export function createAdminApi({
   // are: one of each in this process.
   proxy = null,
   proxyKeyOf = () => null,
+  // PROVIDERS-1. The address a change came from, worked out by cp/server.mjs, which is the only
+  // thing in this process that knows which peers are trusted proxies and which are boxes. Without
+  // it an admin_actions row could say who and when and not where. The default is a sentence rather
+  // than an empty string, so a row written by a caller that did not pass one reads as unmeasured.
+  clientOf = () => "not measured",
 } = {}) {
   // Made on the first refused sign-in rather than at boot, so a data directory that is not writable
   // yet cannot stop the service from starting.
@@ -792,11 +813,23 @@ export function createAdminApi({
       const handle = { alias: record.alias, keyId: record.keyId };
       const thisMonth = windowFor(sweep.month, handle);
       const today = windowFor(sweep.day, handle);
-      // The spend LiteLLM itself compares a budget against, which is not the same as the sum of a
-      // report window: the report is a calendar month and the key's own counter resets on the
-      // budget duration. The chip has to read the number that will actually stop a request.
-      const info = await askProxy("/key/info", () => proxy.keyInfo(record.key));
-      const spendToDate = info.ok ? info.spend : null;
+      // PROXY-8's half of the fix, and it is a DELETION rather than a guard.
+      //
+      // This used to be `proxy.keyInfo(record.key)`, and it was the only caller of /key/info in the
+      // product. That one call is why /key/info had to stay in the proxy's global door list, and
+      // that list is one list for everybody: it cannot tell the operator from a tenant, so leaving
+      // /key/info open for this panel left it open to every box on the bridge, where any virtual
+      // key could read any other key's record. The boundary moves to the key (allowed_routes at
+      // mint, see TENANT_ALLOWED_ROUTES), and this call goes away entirely.
+      //
+      // What is lost, said out loud rather than papered over: /key/info reported the counter
+      // LiteLLM itself compares a budget against, which resets on the budget duration, while this
+      // number is the calendar month out of the request log. On an install with no budget duration
+      // set they are the same window. Where they differ, the request log is the better evidence
+      // anyway: it is one row per request, it is what the two windows beside it already come from,
+      // and one aggregator with two groupings is what stops this panel and the Providers panel
+      // disagreeing by a batch write.
+      const spendToDate = thisMonth.dollars;
       // TinyFish is counted in REQUESTS and never in dollars. Its pass-through is priced as a flat
       // cost per request on our side and an agent run's real credits vary, so a dollar figure here
       // would be a number that looks precise and is not.
@@ -813,7 +846,7 @@ export function createAdminApi({
         enforced: record.enforced === true,
         pct: allowance != null && spendToDate != null ? Math.round((spendToDate / allowance) * 100) : null,
         spendToDate,
-        spendToDateWhy: info.ok ? "" : info.why,
+        spendToDateWhy: thisMonth.why,
         thisMonth: { requests: thisMonth.requests, dollars: thisMonth.dollars, why: thisMonth.why },
         today: { requests: today.requests, dollars: today.dollars, why: today.why },
         tinyfish: models.length === 0
@@ -984,6 +1017,554 @@ export function createAdminApi({
     };
   }
 
+  // ---- PROVIDERS-1: providers, their keys, and the plan models they serve -----------------------
+  //
+  // Jason, 2026-09-08: "say I have to roll a key, or I want to add a provider or add a third,
+  // second, or fourth key on a specific model plan... the mechanism for both me and the AI agent
+  // needs to be able to do this on our own."
+  //
+  // Until this wave all of that was a text file on the R750 plus a proxy restart, which is a hand
+  // operation on the product. Everything below is that operation as a route. The CONTROL PLANE is
+  // the only thing in the product that talks to the proxy's admin API: the admin page's CSP is
+  // connect-src 'self' and the proxy has no published port, so the browser could not reach it and
+  // a browser that could would be the proxy on the internet.
+  //
+  // TWO RULES THAT ARE TESTED RATHER THAN TRUSTED.
+  //
+  //   A key value arrives in a POST body and leaves through nothing. Not a GET, not a URL, not a
+  //   query string, not a ledger row, not a log line. tests/cp-server sweeps every route for a
+  //   planted one and tests/cp-store sweeps the ledger.
+  //
+  //   Every change writes an admin_actions row BEFORE the proxy call and finishes it after. A
+  //   change that half succeeded is on the record as 'started', which is the only state worth
+  //   investigating and the one a single write-after-the-fact would lose.
+
+  const SETTING_DEFAULT_MODEL = "default_plan_model";
+  const SETTING_PROVIDERS = "providers";
+  const catalogSetting = (id) => `catalog:${id}`;
+  const catalogSlotSetting = (id) => `catalog_slot:${id}`;
+  const quotaSetting = (slot) => `quota:${slot}`;
+  // How far back "a box has run this model" looks. Thirty days rather than the spend panel's
+  // calendar month, because "nobody has used this since the 2nd" on the 3rd of the month is not
+  // evidence that a model is unused.
+  const USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+  // The chip the allowance already uses, applied to a vendor plan window as well.
+  const QUOTA_WARN_PCT = 80;
+
+  /** A credential proved without being carried: how long it is and the first bytes of its digest. */
+  const keyEvidence = (value) => `${String(value ?? "").length} characters, sha256 ${createHash("sha256").update(String(value ?? ""), "utf8").digest("hex").slice(0, 8)}`;
+
+  const readJsonSetting = (name, fallback) => {
+    const raw = store.getSetting(name, "");
+    if (raw.length === 0) return fallback;
+    try { return JSON.parse(raw); } catch { return fallback; }
+  };
+  const writeJsonSetting = (name, value, actor) => store.setSetting(name, JSON.stringify(value), actor);
+
+  /**
+   * The providers this console offers, which is the presets plus whatever the operator has added.
+   *
+   * The presets are a starting point and never a ceiling: an id the operator registered overrides
+   * the preset of the same name field for field, and an id nobody has ever heard of is theirs. The
+   * order is stable so the panel does not reshuffle under a click.
+   */
+  function providerList() {
+    const added = readJsonSetting(SETTING_PROVIDERS, []);
+    const byId = new Map();
+    for (const [id, preset] of Object.entries(PROVIDER_PRESETS)) {
+      byId.set(id, { id, ...preset, curated: [...preset.curated], bootstrapEnv: [...preset.bootstrapEnv], fromPreset: true });
+    }
+    for (const row of Array.isArray(added) ? added : []) {
+      const id = String(row?.id ?? "").trim();
+      if (id.length === 0) continue;
+      const existing = byId.get(id) ?? { id, fromPreset: false };
+      byId.set(id, {
+        ...existing,
+        id,
+        name: String(row?.name ?? existing.name ?? id),
+        kind: String(row?.kind ?? existing.kind ?? "openai"),
+        baseUrl: String(row?.baseUrl ?? existing.baseUrl ?? ""),
+        catalogBaseUrl: String(row?.catalogBaseUrl ?? existing.catalogBaseUrl ?? ""),
+        catalogPath: String(row?.catalogPath ?? existing.catalogPath ?? ""),
+        curated: Array.isArray(row?.curated) ? row.curated.map(String) : (existing.curated ?? []),
+        bootstrapEnv: Array.isArray(existing.bootstrapEnv) ? existing.bootstrapEnv : [],
+        fromPreset: existing.fromPreset === true,
+      });
+    }
+    return [...byId.values()];
+  }
+  const providerById = (id) => providerList().find((row) => row.id === String(id));
+
+  /** Where a provider's catalog is read from. Its own address when it has one, its base url when not. */
+  const catalogTargetOf = (provider) => String(provider?.catalogBaseUrl ?? "") || String(provider?.baseUrl ?? "");
+
+  /**
+   * The next free slot name for a provider's pool: zai-1, zai-2, and so on.
+   *
+   * The NAME is the handle for every write after this one -- the roll, the park, the removal -- so
+   * it has to be stable and it has to be readable in a ledger row six months later. Numbers are
+   * never reused: a slot that was removed leaves its number spent, because a spend row pointing at
+   * `zai-2` has to keep meaning the subscription it meant when it was written.
+   */
+  function nextSlot(providerId, taken) {
+    const prefix = `${providerId}-`;
+    let highest = 0;
+    for (const name of taken) {
+      if (!name.startsWith(prefix)) continue;
+      const number = Number(name.slice(prefix.length));
+      if (Number.isInteger(number) && number > highest) highest = number;
+    }
+    return `${prefix}${highest + 1}`;
+  }
+
+  /** The deployment id this product gives one alias on one key slot. Ours, tracked, and readable. */
+  const deploymentIdFor = (alias, slot) => `tb-${String(alias)}-${String(slot)}`.replace(/[^a-zA-Z0-9._-]/g, "-");
+
+  /** The vendor model with its LiteLLM provider prefix, added when the operator did not type one. */
+  function prefixedModel(provider, vendorModel) {
+    const wanted = String(vendorModel ?? "").trim();
+    if (wanted.length === 0) return "";
+    if (wanted.includes("/")) return wanted;
+    const kind = String(provider?.kind ?? "openai");
+    return `${kind}/${wanted}`;
+  }
+
+  /**
+   * One change, on the record, before it happens.
+   *
+   * Handed back as a pair of closures so a route reads as begin, do the thing, say how it went. The
+   * detail string is written by the caller and is never allowed a key value: keyEvidence above is
+   * what a caller uses to say WHICH key without saying what it is.
+   */
+  // Where a change came from, which is a fact about the CALLER and not about the route. cp/cli.mjs
+  // sets this header so a change made without a browser is on the same record and can be told
+  // apart; the console sends nothing and reads as "console". Nothing is trusted from it beyond the
+  // one word, and the word is chosen from a fixed set rather than echoed.
+  const viaOf = (request) => (String(request?.headers?.["x-titanbot-via"] ?? "").toLowerCase() === "cli" ? "cli" : "console");
+
+  function beginAction(guard, request, { action, target = "", detail = "", via = "" }) {
+    const id = store.recordAdminAction({
+      at: now(),
+      actor: guard?.account?.email ?? "the operator token",
+      via: via || viaOf(request),
+      ip: clientOf(request),
+      action, target, detail,
+      outcome: "started",
+    });
+    return {
+      id,
+      done: (detailAfter = "") => store.finishAdminAction(id, "ok", detailAfter),
+      failed: (why) => store.finishAdminAction(id, `failed: ${String(why ?? "").split("\n")[0].slice(0, 300)}`),
+    };
+  }
+
+  /**
+   * The proxy's whole shape, read once per request that needs it.
+   *
+   * Four reads, in parallel, and NOT cached: this is the page an operator refreshes after making a
+   * change, and a cached answer would show them the state before their own edit. The spend sweep it
+   * joins against IS cached, and that is the right way round -- spend moves on a batch write and
+   * configuration moves on a click.
+   */
+  async function proxyShape() {
+    const [db, deployments, credentials, health, passThrough] = await Promise.all([
+      askProxy("/model/info (db flag)", () => proxy.storeModelInDb()),
+      askProxy("/model/info", () => proxy.listModels()),
+      askProxy("/credentials", () => proxy.listCredentials()),
+      askProxy("/health/latest", () => proxy.healthLatest()),
+      askProxy("/config/pass_through_endpoint", () => proxy.listPassThrough()),
+    ]);
+    return { db, deployments, credentials, health, passThrough };
+  }
+
+  /**
+   * Which workspaces have actually RUN an alias, measured out of the proxy's own request log.
+   *
+   * There is no other honest source. What a box runs lives in its own box-secrets.json, which only
+   * the relay can read and which it has no route to report; this service's stored per tenant record
+   * lists what is INCLUDED in a plan and not which one is selected. So "three workspaces run this"
+   * is a measurement of requests, over a named window, and every answer that carries it says so.
+   */
+  function ranAlias(sweep, alias) {
+    if (!sweep?.month?.ok) return { slugs: [], why: sweep?.month?.why ?? "the proxy's request log could not be read", measured: false };
+    const slugs = [];
+    for (const row of sweep.month.keys) {
+      const alias_ = String(row.alias ?? "");
+      if (!alias_.startsWith("titanbot-")) continue;
+      if (!row.models.some((one) => String(one.model) === String(alias))) continue;
+      slugs.push(alias_.slice("titanbot-".length));
+    }
+    return { slugs, why: "", measured: true };
+  }
+
+  /**
+   * A vendor plan window for one key slot, in the vendor's own unit.
+   *
+   * WHAT IS OURS AND WHAT IS THEIRS, kept apart on purpose. The USED figure is ours: it is counted
+   * out of the proxy's per-key request log, so it is exact for traffic that went through this
+   * product and blind to anything the same subscription is spending elsewhere. The TOTAL and the
+   * RESET are the vendor's, and this build has no endpoint that reports either (see PROVIDER_QUOTA
+   * in cp/proxy.mjs for the four probes and their 404s), so they are typed in once by the operator
+   * off the vendor's own page and stored here.
+   *
+   * That makes the bar an ESTIMATE and it is labelled one everywhere it is drawn. It is still the
+   * thing Jason asked for: the Alibaba plan that ran to 42.9 percent remaining is a plan nobody was
+   * watching, and a bar that says "our count, calibrated against their page on the 8th" is the
+   * difference between noticing at 80 percent and noticing at zero.
+   */
+  function quotaFor(slot, provider, share) {
+    const stored = readJsonSetting(quotaSetting(slot), null);
+    const known = PROVIDER_QUOTA[String(provider?.id ?? "")] ?? null;
+    const unit = String(stored?.unit ?? known?.unit ?? "requests");
+    const used = unit === "thousands of tokens"
+      ? Math.round(share.tokens / 1000)
+      : (unit === "prompts" || unit === "requests" ? share.requests : Math.round(share.dollars * 100) / 100);
+    const total = Number(stored?.total) > 0 ? Number(stored.total) : null;
+    const resetAt = String(stored?.resetAt ?? "");
+    const pct = total != null && total > 0 ? Math.round((used / total) * 100) : null;
+    return {
+      unit,
+      window: String(stored?.window ?? known?.windows?.[0] ?? ""),
+      used,
+      total,
+      remaining: total != null ? Math.max(0, total - used) : null,
+      pct,
+      resetAt,
+      warn: pct != null && pct >= QUOTA_WARN_PCT,
+      // Never true on this build, and it is a field rather than a comment so the page does not have
+      // to be edited on the day a vendor endpoint is found.
+      live: false,
+      why: total == null
+        ? `Nothing is set for this subscription's plan size yet, so there is no bar to draw. Read the total and the reset off ${provider?.name ?? "the vendor"}'s own page and set them here; what we count against it is ${used} ${unit} through this key.`
+        : `Our own count of what went through this key, ${used} of ${total} ${unit}. ${known?.why ?? ""} Set against ${provider?.name ?? "the vendor"}'s page on ${new Date(Number(stored?.at ?? 0)).toISOString().slice(0, 10)}.`.trim(),
+      // WHICH CUSTOMER used it, inside the same window. The second half of what Jason asked for.
+      byWorkspace: share.byWorkspace,
+    };
+  }
+
+  /** One key slot's share of a window, and each workspace's share of that. */
+  function slotShare(sweep, deploymentIds) {
+    const ids = new Set(deploymentIds.map(String));
+    const empty = { requests: 0, tokens: 0, dollars: 0, byWorkspace: [], measured: false, why: "" };
+    if (!sweep?.month?.ok) return { ...empty, why: sweep?.month?.why ?? "the proxy's request log could not be read" };
+    let requests = 0;
+    let tokens = 0;
+    let dollars = 0;
+    for (const row of sweep.month.deployments ?? []) {
+      if (!ids.has(String(row.id))) continue;
+      requests += row.requests;
+      tokens += row.tokens;
+      dollars += row.dollars;
+    }
+    const byWorkspace = [];
+    for (const key of sweep.month.keys ?? []) {
+      const alias = String(key.alias ?? "");
+      if (!alias.startsWith("titanbot-")) continue;
+      let theirs = { requests: 0, tokens: 0, dollars: 0 };
+      for (const row of key.deployments ?? []) {
+        if (!ids.has(String(row.id))) continue;
+        theirs = {
+          requests: theirs.requests + row.requests,
+          tokens: theirs.tokens + row.tokens,
+          dollars: Math.round((theirs.dollars + row.dollars) * 1e6) / 1e6,
+        };
+      }
+      if (theirs.requests === 0 && theirs.tokens === 0) continue;
+      byWorkspace.push({ slug: alias.slice("titanbot-".length), ...theirs });
+    }
+    byWorkspace.sort((a, b) => b.requests - a.requests);
+    return { requests, tokens, dollars: Math.round(dollars * 1e6) / 1e6, byWorkspace, measured: true, why: "" };
+  }
+
+  /**
+   * THE WHOLE PANEL IN ONE FETCH.
+   *
+   * One call renders the page: providers, their pools, the plan models, the defaults and the ten
+   * most recent changes. It is one fetch rather than six because six would be six chances for the
+   * page to render half a state, and because the joins between them (which slot serves which alias,
+   * which workspace spent inside which key's window) can only be done where all of it is in hand.
+   */
+  async function providersAnswer() {
+    const off = proxyOff();
+    const at = now();
+    const actions = store.listAdminActions({ limit: 10 }).map((row) => ({ ...row, at: new Date(row.at).toISOString() }));
+    const defaults = {
+      planModel: store.getSetting(SETTING_DEFAULT_MODEL, ""),
+      why: store.getSetting(SETTING_DEFAULT_MODEL, "").length === 0
+        ? "No default is set, so a new workspace is scoped to every plan model the proxy serves and its console picks the first one."
+        : "",
+    };
+    if (off) {
+      return {
+        configured: false, why: off,
+        db: { on: null, why: off },
+        providers: [], planModels: [], defaults, actions,
+        measuredAt: new Date(at).toISOString(),
+      };
+    }
+    const [shape, sweep] = await Promise.all([proxyShape(), askProxySpend()]);
+    const deployments = shape.deployments.ok ? shape.deployments.rows : [];
+    const credentials = shape.credentials.ok ? shape.credentials.rows : [];
+    const healthRows = shape.health.ok ? shape.health.rows : [];
+    const healthById = new Map(healthRows.map((row) => [row.id, row]));
+    const passThroughPaths = new Set((shape.passThrough.ok ? shape.passThrough.rows : []).map((row) => row.path));
+
+    // ---- the pools -----------------------------------------------------------------------------
+    const providers = [];
+    for (const provider of providerList()) {
+      const mine = credentials.filter((row) => row.provider === provider.id || row.name.startsWith(`${provider.id}-`));
+      const catalog = readJsonSetting(catalogSetting(provider.id), null);
+      const keys = mine.map((credential) => {
+        const serving = deployments.filter((row) => row.keySlot === credential.name);
+        const share = slotShare(sweep, serving.map((row) => row.id));
+        const lastError = serving
+          .map((row) => healthById.get(row.id))
+          .filter((row) => row != null && String(row.status ?? "").toLowerCase() !== "healthy")
+          .map((row) => ({ at: row.at, why: row.why }))[0] ?? null;
+        return {
+          slot: credential.name,
+          label: credential.label,
+          order: credential.order ?? 0,
+          // THE PROXY'S OWN MASK, passed through as it came. Never something this side computed: a
+          // mask built here would be a mask this file could get wrong, and a wrong mask on a key
+          // page is how somebody concludes the wrong key is in the slot.
+          masked: credential.masked,
+          parked: credential.parked,
+          spend: { month: share.dollars, requests: share.requests, why: share.why },
+          quota: quotaFor(credential.name, provider, share),
+          lastError,
+          serves: [...new Set(serving.map((row) => row.alias))],
+          backsCatalog: store.getSetting(catalogSlotSetting(provider.id), "") === credential.name,
+        };
+      }).sort((a, b) => (a.order - b.order) || a.slot.localeCompare(b.slot));
+      providers.push({
+        id: provider.id,
+        name: provider.name,
+        kind: provider.kind,
+        baseUrl: provider.baseUrl,
+        fromPreset: provider.fromPreset === true,
+        bootstrapEnv: provider.bootstrapEnv ?? [],
+        health: keys.length === 0
+          ? { reachable: null, why: "no key here yet, so there is nothing to reach", checkedAt: "" }
+          : { reachable: keys.every((row) => row.lastError == null), why: keys.find((row) => row.lastError != null)?.lastError?.why ?? "", checkedAt: new Date(at).toISOString() },
+        catalog: {
+          models: Array.isArray(catalog?.models) ? catalog.models : [...(provider.curated ?? [])],
+          live: catalog?.live === true,
+          readAt: String(catalog?.readAt ?? ""),
+          why: catalog?.live === true ? "" : String(catalog?.why ?? "This is the short list this product has actually run. Refresh reads the vendor's own list once a key is in."),
+          // Said on the page in these words, because a refresh CANNOT infer either of them.
+          note: "This is a list of names. The context window and whether a model takes an image are things you set.",
+          ready: catalogTargetOf(provider).length > 0 && String(provider.catalogPath ?? "").length > 0,
+          wired: passThroughPaths.has(`/catalog/${provider.id}`),
+        },
+        keys,
+      });
+    }
+
+    // ---- the plan models -----------------------------------------------------------------------
+    const byAlias = new Map();
+    for (const row of deployments) {
+      const list = byAlias.get(row.alias) ?? [];
+      list.push(row);
+      byAlias.set(row.alias, list);
+    }
+    const planModels = [];
+    for (const [alias, rows] of byAlias) {
+      if (!isPlanModel(alias)) continue;
+      const first = rows[0];
+      const ran = ranAlias(sweep, alias);
+      const fallback = await askProxy(`/fallback/${alias}`, () => proxy.getFallback(alias));
+      planModels.push({
+        alias,
+        provider: first.provider,
+        vendorModel: first.vendorModel,
+        customerName: first.customerName,
+        customerLabel: first.customerLabel,
+        servedBy: first.servedBy,
+        contextWindow: first.contextWindow,
+        supportsVision: rows.some((row) => row.supportsVision),
+        visionFallback: fallback.ok ? (fallback.fallbacks[0] ?? "") : first.visionFallback,
+        vision: { ok: first.visionOk, at: first.visionAt, why: first.visionAt ? "" : "this model has never been asked whether it takes an image" },
+        plans: first.plans,
+        customerVisible: first.customerVisible,
+        // The one rule that keeps a routing target off a customer's page, said on the operator's
+        // page too so the reason a row is missing from Settings is visible here.
+        shownToCustomers: first.customerVisible === true && String(first.customerLabel ?? "").length > 0 && String(first.customerName ?? "").length > 0,
+        deployments: rows.map((row) => ({
+          id: row.id,
+          keySlot: row.keySlot,
+          fromDb: row.fromDb,
+          healthy: String(healthById.get(row.id)?.status ?? "").toLowerCase() === "healthy" ? true : (healthById.has(row.id) ? false : null),
+          why: healthById.get(row.id)?.why ?? "",
+        })),
+        workspaces: ran.slugs.length,
+        workspaceSlugs: ran.slugs,
+        workspacesWhy: ran.measured
+          ? "workspaces whose key ran this model inside the current spend window. What a box is pointed at lives in its own file, which this service cannot read."
+          : ran.why,
+        // NOT MEASURABLE FROM HERE, and named rather than left as a zero. The label lives in each
+        // box's box-secrets.json; nothing reports it back. Pushing it is safe at any time and only
+        // touches the workspaces the operator names.
+        labelBehind: null,
+        labelBehindWhy: "the label a customer's Titan says lives inside each box, and nothing reports it back to this service. Push it to be sure.",
+      });
+    }
+    planModels.sort((a, b) => a.alias.localeCompare(b.alias));
+
+    return {
+      configured: true,
+      why: "",
+      db: { on: shape.db.ok ? shape.db.on : null, why: shape.db.ok ? shape.db.why : shape.db.why },
+      providers,
+      planModels,
+      defaults,
+      actions,
+      window: sweep.month.ok ? { month: `${sweep.monthStart} to ${sweep.today}` } : { month: "", why: sweep.month.why },
+      measuredAt: new Date(at).toISOString(),
+    };
+  }
+
+  /**
+   * The vendor's own model list, read THROUGH the proxy so this container holds no vendor key.
+   *
+   * The pass-through carries the key on its far side and the master key on ours. When there is no
+   * pass-through for this provider, or the vendor did not answer, the curated list is the answer and
+   * `live` says which of the two the operator is looking at. A refresh that quietly fell back would
+   * be a page showing yesterday's names as though they were today's.
+   */
+  async function refreshCatalog(provider, actor) {
+    const target = catalogTargetOf(provider);
+    const pathname = String(provider.catalogPath ?? "");
+    const curated = { models: [...(provider.curated ?? [])], live: false, readAt: new Date(now()).toISOString() };
+    if (target.length === 0 || pathname.length === 0) {
+      const answer = { ...curated, why: `${provider.name} has no model list to read, so this is the short list this product has run.` };
+      writeJsonSetting(catalogSetting(provider.id), answer, actor);
+      return answer;
+    }
+    const read = await askProxy(`/catalog/${provider.id}`, () => proxy.catalog(provider.id, { pathname }));
+    if (!read.ok || read.models.length === 0) {
+      // A FAILED REFRESH DOES NOT THROW AWAY A LIST THAT WAS ONCE REAL. Falling back to the curated
+      // six when the vendor was briefly unreachable would quietly delete names the operator had
+      // read from the vendor an hour ago, and the page would look like the vendor had retired them.
+      // The last live list is kept, dated, and marked stale instead.
+      const last = readJsonSetting(catalogSetting(provider.id), null);
+      const answer = last?.live === true
+        ? {
+          models: last.models,
+          live: false,
+          readAt: String(last.readAt ?? ""),
+          why: `${provider.name}'s own list could not be read just now (${read.ok ? "it answered with no models" : read.why}). These are the names it gave on ${String(last.readAt ?? "an earlier refresh").slice(0, 10)}.`,
+        }
+        : {
+          ...curated,
+          why: read.ok
+            ? `${provider.name} answered with no models, so this is the short list this product has run.`
+            : `${provider.name}'s own list could not be read (${read.why}), so this is the short list this product has run.`,
+        };
+      writeJsonSetting(catalogSetting(provider.id), answer, actor);
+      return answer;
+    }
+    const answer = { models: read.models, live: true, readAt: new Date(now()).toISOString(), why: "" };
+    writeJsonSetting(catalogSetting(provider.id), answer, actor);
+    return answer;
+  }
+
+  /**
+   * The catalog door, pointed at whichever key is backing it.
+   *
+   * Registered on the first key a provider gets and re-registered when that key is rolled, because
+   * the key rides in the pass-through's header rather than in a credential. It is the one place in
+   * this file that puts a key ANYWHERE other than /credentials, and it is why listPassThrough drops
+   * the header values before anything can render them: unlike /credentials, LiteLLM returns a
+   * pass-through's headers in the clear.
+   */
+  async function wireCatalog(provider, apiKey, slot) {
+    const target = catalogTargetOf(provider);
+    if (target.length === 0 || String(provider.catalogPath ?? "").length === 0) {
+      return { ok: true, wired: false, why: `${provider.name} has no model list to read` };
+    }
+    const path_ = `/catalog/${provider.id}`;
+    const existing = await askProxy("/config/pass_through_endpoint", () => proxy.listPassThrough());
+    if (existing.ok) {
+      for (const row of existing.rows.filter((one) => one.path === path_)) {
+        await askProxy("/config/pass_through_endpoint delete", () => proxy.deletePassThrough(row.id));
+      }
+    }
+    const added = await askProxy("/config/pass_through_endpoint add", () => proxy.addPassThrough({
+      path: path_,
+      target,
+      headers: { authorization: `Bearer ${apiKey}` },
+      includeSubpath: true,
+    }));
+    if (!added.ok) return { ok: false, wired: false, why: added.why };
+    store.setSetting(catalogSlotSetting(provider.id), slot, "");
+    return { ok: true, wired: true, why: "" };
+  }
+
+  /** Every plan alias the proxy serves right now, which is what a tenant key is scoped to. */
+  async function servedAliases() {
+    const listed = await askProxy("/model/info", () => proxy.listModels());
+    if (!listed.ok) return { ok: false, why: listed.why, aliases: [] };
+    return { ok: true, why: "", aliases: servedPlanModels({ deployments: listed.rows }) };
+  }
+
+  /**
+   * The sweep that widens every tenant key's model scope to include a new alias.
+   *
+   * IT WRITES NOTHING INTO A BOX. /key/update takes the same key value the box already holds, so
+   * there is no re-mint, no new credential in anybody's file and none of the registry hazard that
+   * wrote a REVOKED key back into a box on 2026-09-08. On the page it is one button reading "Give
+   * every workspace access to this model", and it is safe to press twice.
+   */
+  async function applyToEveryKey() {
+    const served = await servedAliases();
+    if (!served.ok) return { ok: false, why: served.why, rows: [] };
+    const rows = [];
+    for (const tenant of store.listTenants()) {
+      const record = proxyKeyOf(tenant.slug);
+      if (record == null) { rows.push({ slug: tenant.slug, ok: false, why: "this workspace has no plan key yet" }); continue; }
+      const answer = await askProxy("/key/update", () => proxy.updateKey({
+        key: record.key,
+        models: served.aliases,
+        allowedRoutes: TENANT_ALLOWED_ROUTES,
+      }));
+      rows.push({ slug: tenant.slug, ok: answer.ok === true, why: answer.ok ? "" : answer.why });
+    }
+    return { ok: rows.some((row) => row.ok), why: "", rows, models: served.aliases };
+  }
+
+  /** The relay's box door, which is the only thing that can write inside a customer's box. */
+  async function askRelayPost(pathname, body) {
+    if (relayBase.length === 0 || String(config.relayToken ?? "").length === 0) {
+      return { ok: false, why: "this control plane has no relay configured (CP_RELAY_URL and CP_RELAY_TOKEN), and only the relay can write inside a box" };
+    }
+    try {
+      const response = await fetchImpl(`${relayBase}${pathname}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${config.relayToken}`, accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+        signal: AbortSignal.timeout(relayTimeoutMs),
+      });
+      const text = await response.text();
+      let parsed = null;
+      if (text.length > 0) { try { parsed = JSON.parse(text); } catch { parsed = null; } }
+      if (!response.ok) return { ok: false, why: `the relay answered ${response.status}${parsed?.message ? `: ${String(parsed.message).split("\n")[0].slice(0, 200)}` : ""}` };
+      return { ok: true, body: parsed ?? {} };
+    } catch (error) {
+      return { ok: false, why: error?.name === "TimeoutError" ? "the relay did not answer in time" : `the relay did not answer (${notMeasured(error)})` };
+    }
+  }
+
+  /**
+   * One workspace pointed at one plan model, label and all.
+   *
+   * The relay's use-included door writes the base url, the model, the endpoint name, the served-by
+   * line, the context window AND the label in one write, which is why setting a workspace's model
+   * and pushing a label are the same call with a different reason for making it. It takes effect on
+   * that box's next message, because the host re-reads box-secrets.json every turn.
+   */
+  const pointWorkspaceAt = (slug, alias) => askRelayPost(`/admin/tenants/${encodeURIComponent(slug)}/use-included`, { model: alias });
+
   // ---- the static page -------------------------------------------------------------------------
   //
   // The page shell is public and everything it SHOWS is not. That is not a compromise, it is the
@@ -1104,6 +1685,590 @@ export function createAdminApi({
       return true;
     }
 
+    // ---- PROVIDERS-1: the providers panel --------------------------------------------------------
+
+    if (rest.length === 1 && rest[0] === "providers" && method === "GET") {
+      json(response, 200, await providersAnswer());
+      return true;
+    }
+
+    if (rest.length === 1 && rest[0] === "actions" && method === "GET") {
+      const sinceMs = Number(url.searchParams.get("sinceMs") ?? 0);
+      json(response, 200, {
+        rows: store.listAdminActions({
+          sinceMs: Number.isFinite(sinceMs) ? sinceMs : 0,
+          limit: Number(url.searchParams.get("limit") ?? 200),
+        }).map((row) => ({ ...row, at: new Date(row.at).toISOString() })),
+        total: store.countAdminActions(),
+        // Said here as well as in docs/ADMIN.md, because the retention of a record is part of what
+        // the record means. "Who changed the plan model in March" is a question asked in June.
+        retention: "these rows are never pruned",
+        measuredAt: new Date(now()).toISOString(),
+      });
+      return true;
+    }
+
+    // A provider registered. No proxy call: a provider is a label until it has a key.
+    if (rest.length === 1 && rest[0] === "providers" && method === "POST") {
+      const id = String(body?.id ?? "").trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(id)) {
+        json(response, 400, { error: "bad_request", message: "A provider needs a short name in lower case letters, numbers and dashes." });
+        return true;
+      }
+      const ledger = beginAction(guard, request, { action: "provider.add", target: id, detail: `${String(body?.name ?? id)} at ${String(body?.baseUrl ?? "no base url")}` });
+      const added = readJsonSetting(SETTING_PROVIDERS, []);
+      const rows = (Array.isArray(added) ? added : []).filter((row) => String(row?.id ?? "") !== id);
+      rows.push({
+        id,
+        name: String(body?.name ?? id),
+        kind: String(body?.kind ?? "openai"),
+        baseUrl: String(body?.baseUrl ?? ""),
+        catalogBaseUrl: String(body?.catalogBaseUrl ?? ""),
+        catalogPath: String(body?.catalogPath ?? ""),
+        curated: Array.isArray(body?.curated) ? body.curated.map(String) : [],
+      });
+      writeJsonSetting(SETTING_PROVIDERS, rows, guard.account?.email ?? "the operator token");
+      ledger.done();
+      json(response, 200, { provider: providerById(id), message: `${String(body?.name ?? id)} is registered. Add a key to it and it can serve a plan model.` });
+      return true;
+    }
+
+    // A key added to a pool. THE VALUE ARRIVES HERE AND LEAVES THROUGH NOTHING.
+    if (rest.length === 3 && rest[0] === "providers" && rest[2] === "keys" && method === "POST") {
+      const provider = providerById(decodeURIComponent(rest[1]));
+      if (provider == null) { json(response, 404, { error: "not_found", message: "There is no provider by that name." }); return true; }
+      const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
+      if (apiKey.length < 8) {
+        json(response, 400, { error: "bad_request", message: "Paste the key. Nothing was stored." });
+        return true;
+      }
+      const existing = await askProxy("/credentials", () => proxy.listCredentials());
+      if (!existing.ok) { json(response, 502, { error: "proxy", message: existing.why }); return true; }
+      const slot = String(body?.slot ?? "").trim() || nextSlot(provider.id, existing.rows.map((row) => row.name));
+      if (existing.rows.some((row) => row.name === slot)) {
+        json(response, 409, { error: "exists", message: `There is already a key in slot ${slot}. Roll it if you are replacing it.` });
+        return true;
+      }
+      const label = String(body?.label ?? `subscription ${slot.split("-").pop()}`);
+      const order = Number(body?.order) > 0 ? Number(body.order) : existing.rows.filter((row) => row.provider === provider.id).length + 1;
+      const ledger = beginAction(guard, request, {
+        action: "provider.key.add",
+        target: `${provider.id}/${slot}`,
+        // The key is proved and not carried. This string is what a ledger row holds forever.
+        detail: `added a key to slot ${slot} (${keyEvidence(apiKey)})`,
+      });
+      const added = await askProxy("/credentials", () => proxy.addCredential({
+        name: slot,
+        apiKey,
+        baseUrl: provider.baseUrl,
+        info: { [TB.provider]: provider.id, [TB.keyLabel]: label, [TB.keyOrder]: order, tb_parked: false },
+      }));
+      if (!added.ok) { ledger.failed(added.why); json(response, 502, { error: "proxy", message: added.why }); return true; }
+      // The catalog door goes on the FIRST key a provider gets, so a Refresh works the moment there
+      // is something to refresh with.
+      let wired = { wired: false, why: "" };
+      if (store.getSetting(catalogSlotSetting(provider.id), "").length === 0) {
+        wired = await wireCatalog(provider, apiKey, slot);
+      }
+      ledger.done(`slot ${slot} now holds a key (${keyEvidence(apiKey)})${wired.wired ? ", and the model list reads through it" : ""}`);
+      json(response, 200, {
+        slot,
+        label,
+        catalog: wired,
+        message: `The key is in slot ${slot}. It serves nothing until a plan model is pointed at it.`,
+        // NOT the key. The mask is read back from the proxy on the next panel load.
+        evidence: keyEvidence(apiKey),
+      });
+      return true;
+    }
+
+    if (rest.length === 5 && rest[0] === "providers" && rest[2] === "keys" && method === "POST") {
+      const provider = providerById(decodeURIComponent(rest[1]));
+      if (provider == null) { json(response, 404, { error: "not_found", message: "There is no provider by that name." }); return true; }
+      const slot = decodeURIComponent(rest[3]);
+      const action = rest[4];
+      const credentials = await askProxy("/credentials", () => proxy.listCredentials());
+      if (!credentials.ok) { json(response, 502, { error: "proxy", message: credentials.why }); return true; }
+      const credential = credentials.rows.find((row) => row.name === slot);
+      if (credential == null) { json(response, 404, { error: "not_found", message: `There is no key in slot ${slot}.` }); return true; }
+      const models = await askProxy("/model/info", () => proxy.listModels());
+      if (!models.ok) { json(response, 502, { error: "proxy", message: models.why }); return true; }
+      const serving = models.rows.filter((row) => row.keySlot === slot);
+
+      // THE ZERO-GAP ROLL. The credential is patched IN PLACE under a name that does not change, so
+      // no deployment is touched and no request can land between two states. Measured at 0.033 s on
+      // this Mac against the real image.
+      if (action === "roll") {
+        const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
+        if (apiKey.length < 8) { json(response, 400, { error: "bad_request", message: "Paste the new key. Nothing was changed." }); return true; }
+        const ledger = beginAction(guard, request, {
+          action: "provider.key.roll",
+          target: `${provider.id}/${slot}`,
+          detail: `rolling the key in slot ${slot} (${keyEvidence(apiKey)})`,
+        });
+        const rolled = await askProxy("/credentials patch", () => proxy.patchCredential({ name: slot, apiKey }));
+        if (!rolled.ok) { ledger.failed(rolled.why); json(response, 502, { error: "proxy", message: rolled.why }); return true; }
+        let wired = { wired: false, why: "" };
+        if (store.getSetting(catalogSlotSetting(provider.id), "") === slot) wired = await wireCatalog(provider, apiKey, slot);
+        ledger.done(`slot ${slot} now holds a different key (${keyEvidence(apiKey)})`);
+        json(response, 200, {
+          slot,
+          catalog: wired,
+          message: `Slot ${slot} holds the new key. The pool never changed shape, so nothing was taken out of service and requests in flight kept working. The proxy caches a key for up to its cache window, so a request already under way may finish on the old one.`,
+          evidence: keyEvidence(apiKey),
+        });
+        return true;
+      }
+
+      // Parked means stored and serving nothing. The deployments that reference it are removed and
+      // written down here, so unparking rebuilds exactly what was taken away.
+      if (action === "park") {
+        const parked = body?.parked !== false;
+        if (parked) {
+          const orphaned = [...new Set(serving
+            .filter((row) => !models.rows.some((other) => other.alias === row.alias && other.keySlot !== slot))
+            .map((row) => row.alias))];
+          if (orphaned.length > 0) {
+            json(response, 409, {
+              error: "last_key",
+              message: `Parking ${slot} would leave ${orphaned.join(", ")} with nothing to run on. Add another key to this provider first.`,
+            });
+            return true;
+          }
+          const ledger = beginAction(guard, request, { action: "provider.key.park", target: `${provider.id}/${slot}`, detail: `parking ${slot}, which serves ${serving.length} deployment(s)` });
+          const snapshot = [];
+          for (const row of serving) {
+            snapshot.push({ alias: row.alias, vendorModel: row.vendorModel, id: row.id, contextWindow: row.contextWindow, supportsVision: row.supportsVision, customerName: row.customerName, customerLabel: row.customerLabel, servedBy: row.servedBy, customerVisible: row.customerVisible, visionFallback: row.visionFallback, plans: row.plans, keyLabel: row.keyLabel, keyOrder: row.keyOrder });
+            const removed = await askProxy("/model/delete", () => proxy.deleteModel(row.id));
+            if (!removed.ok) { ledger.failed(removed.why); json(response, 502, { error: "proxy", message: removed.why }); return true; }
+          }
+          writeJsonSetting(`parked:${slot}`, snapshot, guard.account?.email ?? "the operator token");
+          await askProxy("/credentials patch", () => proxy.patchCredential({ name: slot, info: { [TB.provider]: provider.id, [TB.keyLabel]: credential.label, [TB.keyOrder]: credential.order, tb_parked: true } }));
+          ledger.done(`${slot} is parked; ${snapshot.length} deployment(s) taken out of service`);
+          json(response, 200, { slot, parked: true, removed: snapshot.length, message: `${slot} is parked. The key is still stored and it serves nothing. Traffic is on the rest of the pool from the next request.` });
+          return true;
+        }
+        const snapshot = readJsonSetting(`parked:${slot}`, []);
+        const ledger = beginAction(guard, request, { action: "provider.key.unpark", target: `${provider.id}/${slot}`, detail: `putting ${slot} back into service` });
+        const back = [];
+        for (const row of Array.isArray(snapshot) ? snapshot : []) {
+          const added = await askProxy("/model/new", () => proxy.addModel({
+            alias: row.alias,
+            vendorModel: row.vendorModel,
+            credentialName: slot,
+            id: row.id,
+            params: provider.baseUrl ? { api_base: provider.baseUrl } : {},
+            info: {
+              ...(row.contextWindow ? { max_input_tokens: row.contextWindow } : {}),
+              supports_vision: row.supportsVision === true,
+              [TB.provider]: provider.id,
+              [TB.keySlot]: slot,
+              [TB.keyLabel]: row.keyLabel ?? credential.label,
+              [TB.keyOrder]: row.keyOrder ?? credential.order,
+              [TB.customerName]: row.customerName ?? "",
+              [TB.customerLabel]: row.customerLabel ?? "",
+              [TB.servedBy]: row.servedBy ?? "",
+              [TB.customerVisible]: row.customerVisible === true,
+              [TB.visionFallback]: row.visionFallback ?? "",
+              [TB.plans]: row.plans ?? [],
+            },
+          }));
+          back.push({ alias: row.alias, ok: added.ok === true, why: added.ok ? "" : added.why });
+        }
+        await askProxy("/credentials patch", () => proxy.patchCredential({ name: slot, info: { [TB.provider]: provider.id, [TB.keyLabel]: credential.label, [TB.keyOrder]: credential.order, tb_parked: false } }));
+        ledger.done(`${slot} is back in service on ${back.filter((row) => row.ok).length} deployment(s)`);
+        json(response, 200, { slot, parked: false, restored: back, message: `${slot} is serving again from the next request.` });
+        return true;
+      }
+
+      if (action === "remove") {
+        if (String(body?.confirm ?? "") !== slot) {
+          json(response, 400, { error: "confirm", message: `Type ${slot} to remove it. Nothing was changed.` });
+          return true;
+        }
+        if (serving.length > 0) {
+          json(response, 409, {
+            error: "in_use",
+            message: `${slot} is still serving ${[...new Set(serving.map((row) => row.alias))].join(", ")}. Park it or point those at another key first.`,
+          });
+          return true;
+        }
+        const ledger = beginAction(guard, request, { action: "provider.key.remove", target: `${provider.id}/${slot}`, detail: `removing slot ${slot}` });
+        const removed = await askProxy("/credentials delete", () => proxy.deleteCredential(slot));
+        if (!removed.ok) { ledger.failed(removed.why); json(response, 502, { error: "proxy", message: removed.why }); return true; }
+        ledger.done(`slot ${slot} removed`);
+        json(response, 200, { slot, message: `${slot} is gone. Its number is not reused, so old spend rows still mean what they said.` });
+        return true;
+      }
+
+      // The vendor's own plan window, typed in once off their page. See quotaFor: the USED figure
+      // is ours and exact, the total and the reset are theirs and are not on any endpoint this
+      // build could find.
+      if (action === "quota") {
+        const total = Number(body?.total);
+        const ledger = beginAction(guard, request, {
+          action: "provider.key.quota",
+          target: `${provider.id}/${slot}`,
+          detail: `plan window set to ${Number.isFinite(total) ? total : "nothing"} ${String(body?.unit ?? "")}`,
+        });
+        writeJsonSetting(quotaSetting(slot), {
+          total: Number.isFinite(total) && total > 0 ? total : null,
+          unit: String(body?.unit ?? PROVIDER_QUOTA[provider.id]?.unit ?? "requests"),
+          window: String(body?.window ?? PROVIDER_QUOTA[provider.id]?.windows?.[0] ?? ""),
+          resetAt: String(body?.resetAt ?? ""),
+          at: now(),
+        }, guard.account?.email ?? "the operator token");
+        ledger.done();
+        json(response, 200, {
+          slot,
+          message: `Recorded. The bar is this product's own count against the total you read off ${provider.name}'s page, and it says so wherever it is drawn.`,
+        });
+        return true;
+      }
+
+      json(response, 404, { error: "not_found" });
+      return true;
+    }
+
+    if (rest.length === 4 && rest[0] === "providers" && rest[2] === "catalog" && rest[3] === "refresh" && method === "POST") {
+      const provider = providerById(decodeURIComponent(rest[1]));
+      if (provider == null) { json(response, 404, { error: "not_found", message: "There is no provider by that name." }); return true; }
+      const ledger = beginAction(guard, request, { action: "provider.catalog.refresh", target: provider.id, detail: `reading ${provider.name}'s model list` });
+      const answer = await refreshCatalog(provider, guard.account?.email ?? "the operator token");
+      ledger.done(`${answer.models.length} name(s), ${answer.live ? "read from the vendor" : "the curated list"}`);
+      json(response, 200, {
+        provider: provider.id,
+        ...answer,
+        note: "This is a list of names. The context window and whether a model takes an image are things you set.",
+      });
+      return true;
+    }
+
+    // ---- plan models -----------------------------------------------------------------------------
+
+    if (rest.length === 1 && rest[0] === "plan-models" && method === "POST") {
+      const alias = String(body?.alias ?? "").trim();
+      if (!isPlanModel(alias) || alias.length < 6) {
+        json(response, 400, { error: "bad_request", message: "A plan model's name starts with plan- and is a contract with every box pointed at it. It is created once and never renamed." });
+        return true;
+      }
+      const provider = providerById(String(body?.provider ?? ""));
+      if (provider == null) { json(response, 404, { error: "not_found", message: "There is no provider by that name." }); return true; }
+      const vendorModel = prefixedModel(provider, body?.vendorModel);
+      if (vendorModel.length === 0) { json(response, 400, { error: "bad_request", message: "Pick the vendor's model this runs on." }); return true; }
+      const customerVisible = body?.customerVisible !== false;
+      const customerName = String(body?.customerName ?? "").trim();
+      const customerLabel = String(body?.customerLabel ?? "").trim();
+      if (customerVisible && (customerName.length === 0 || customerLabel.length === 0)) {
+        json(response, 400, {
+          error: "bad_request",
+          message: "A model a customer can see needs the words on their card and the name their Titan says it runs. Without both it would show up as its routing alias, which is the failure this panel exists to end.",
+        });
+        return true;
+      }
+      const visionFallback = String(body?.visionFallback ?? "").trim();
+      const supportsVision = body?.supportsVision === true;
+      if (customerVisible && !supportsVision && visionFallback.length === 0) {
+        json(response, 400, {
+          error: "bad_request",
+          message: "Every Titan conversation carries screenshots. Either this model takes an image, or name the model a request carrying one falls back to. A plan model that refuses images is a fleet-wide screenshot outage, which is what PROXY-10 cost.",
+        });
+        return true;
+      }
+      const db = await askProxy("/model/info (db flag)", () => proxy.storeModelInDb());
+      if (db.ok && db.on === false) {
+        json(response, 409, { error: "db_off", message: db.why });
+        return true;
+      }
+      const [credentials, models] = await Promise.all([
+        askProxy("/credentials", () => proxy.listCredentials()),
+        askProxy("/model/info", () => proxy.listModels()),
+      ]);
+      if (!credentials.ok) { json(response, 502, { error: "proxy", message: credentials.why }); return true; }
+      if (!models.ok) { json(response, 502, { error: "proxy", message: models.why }); return true; }
+      if (models.rows.some((row) => row.alias === alias)) {
+        json(response, 409, { error: "exists", message: `${alias} already exists. Change it instead: the name is what every box already points at.` });
+        return true;
+      }
+      const wanted = Array.isArray(body?.keySlots) && body.keySlots.length > 0
+        ? body.keySlots.map(String)
+        : credentials.rows.filter((row) => (row.provider === provider.id || row.name.startsWith(`${provider.id}-`)) && !row.parked).map((row) => row.name);
+      if (wanted.length === 0) {
+        json(response, 409, { error: "no_keys", message: `${provider.name} has no key to run this on. Add one first.` });
+        return true;
+      }
+      const ledger = beginAction(guard, request, {
+        action: "plan-model.add",
+        target: alias,
+        detail: `${alias} on ${vendorModel} across ${wanted.length} key(s): ${wanted.join(", ")}`,
+      });
+      const made = [];
+      for (const slot of wanted) {
+        const credential = credentials.rows.find((row) => row.name === slot);
+        if (credential == null) { made.push({ slot, ok: false, why: `there is no key in slot ${slot}` }); continue; }
+        const id = deploymentIdFor(alias, slot);
+        // Create only, and the id is ours. A duplicate id answers 500 rather than upserting, so a
+        // timed-out add is checked against what is really there before anything is retried.
+        if (models.rows.some((row) => row.id === id)) { made.push({ slot, ok: false, why: `${id} is already at the proxy` }); continue; }
+        const added = await askProxy("/model/new", () => proxy.addModel({
+          alias,
+          vendorModel,
+          credentialName: slot,
+          id,
+          params: provider.baseUrl ? { api_base: provider.baseUrl } : {},
+          info: {
+            ...(Number(body?.contextWindow) > 0 ? { max_input_tokens: Number(body.contextWindow) } : {}),
+            supports_vision: supportsVision,
+            [TB.provider]: provider.id,
+            [TB.keySlot]: slot,
+            [TB.keyLabel]: credential.label,
+            [TB.keyOrder]: credential.order ?? 0,
+            [TB.customerName]: customerName,
+            [TB.customerLabel]: customerLabel,
+            [TB.servedBy]: String(body?.servedBy ?? customerLabel),
+            [TB.customerVisible]: customerVisible,
+            [TB.visionFallback]: visionFallback,
+            [TB.plans]: Array.isArray(body?.plans) ? body.plans.map(String) : ["included"],
+          },
+        }));
+        made.push({ slot, id, ok: added.ok === true, why: added.ok ? "" : added.why });
+      }
+      let fallback = { ok: true, why: "" };
+      if (visionFallback.length > 0) {
+        // AFTER the deployments, because POST /fallback validates that the target exists and
+        // answers 400 listing what is available when it does not.
+        fallback = await askProxy("/fallback", () => proxy.setFallback({ alias, fallbacks: [visionFallback] }));
+      }
+      const landed = made.filter((row) => row.ok).length;
+      if (landed === 0) {
+        ledger.failed(made.map((row) => row.why).join("; "));
+        // THE HALF-STATE, named. With store_model_in_db off the credential half answered 200 and
+        // really persisted while this half refused, so the operator has a key in a slot and no
+        // model on it and nothing on the page would say why. 409 rather than 502, because the proxy
+        // is not broken: it is configured to ignore this.
+        const dbOff = made.some((row) => /STORE_MODEL_IN_DB/i.test(String(row.why ?? "")));
+        json(response, dbOff ? 409 : 502, {
+          error: dbOff ? "db_off" : "proxy",
+          message: made.find((row) => !row.ok)?.why ?? "nothing was created",
+          deployments: made,
+        });
+        return true;
+      }
+      ledger.done(`${alias} created on ${landed} of ${wanted.length} key(s)`);
+      json(response, 200, {
+        alias,
+        deployments: made,
+        fallback: fallback.ok ? { model: visionFallback } : { model: visionFallback, why: fallback.why },
+        message: `${alias} answers on the next request. It reaches a customer's plan card within one registry cycle, and only after you give every workspace access to it.`,
+      });
+      return true;
+    }
+
+    if (rest.length === 3 && rest[0] === "plan-models" && method === "POST") {
+      const alias = decodeURIComponent(rest[1]);
+      const action = rest[2];
+      const models = await askProxy("/model/info", () => proxy.listModels());
+      if (!models.ok) { json(response, 502, { error: "proxy", message: models.why }); return true; }
+      const rows = models.rows.filter((row) => row.alias === alias);
+      if (rows.length === 0) { json(response, 404, { error: "not_found", message: `The proxy serves nothing called ${alias}.` }); return true; }
+
+      if (action === "update") {
+        const provider = providerById(String(body?.provider ?? rows[0].provider)) ?? { kind: "openai", baseUrl: "" };
+        const vendorModel = body?.vendorModel === undefined ? "" : prefixedModel(provider, body.vendorModel);
+        const info = {};
+        if (body?.customerName !== undefined) info[TB.customerName] = String(body.customerName);
+        if (body?.customerLabel !== undefined) info[TB.customerLabel] = String(body.customerLabel);
+        if (body?.servedBy !== undefined) info[TB.servedBy] = String(body.servedBy);
+        if (body?.customerVisible !== undefined) info[TB.customerVisible] = body.customerVisible === true;
+        if (body?.plans !== undefined) info[TB.plans] = Array.isArray(body.plans) ? body.plans.map(String) : [];
+        if (body?.visionFallback !== undefined) info[TB.visionFallback] = String(body.visionFallback);
+        if (Number(body?.contextWindow) > 0) info.max_input_tokens = Number(body.contextWindow);
+        if (body?.supportsVision !== undefined) info.supports_vision = body.supportsVision === true;
+        if (vendorModel.length === 0 && Object.keys(info).length === 0) {
+          json(response, 400, { error: "bad_request", message: "Nothing to change." });
+          return true;
+        }
+        // The rule that keeps a routing target off a customer's page holds on an EDIT too: a row
+        // cannot be made visible without the two words that name it.
+        const wouldBeVisible = body?.customerVisible === undefined ? rows[0].customerVisible : body.customerVisible === true;
+        const wouldHaveLabel = String(body?.customerLabel ?? rows[0].customerLabel ?? "").length > 0;
+        const wouldHaveName = String(body?.customerName ?? rows[0].customerName ?? "").length > 0;
+        if (wouldBeVisible && !(wouldHaveLabel && wouldHaveName)) {
+          json(response, 400, { error: "bad_request", message: "A model a customer can see needs the words on their card and the name their Titan says it runs." });
+          return true;
+        }
+        const ledger = beginAction(guard, request, {
+          action: "plan-model.update",
+          target: alias,
+          detail: vendorModel.length > 0 ? `${alias} from ${rows[0].vendorModel} to ${vendorModel}` : `${alias}: ${Object.keys(info).join(", ")}`,
+        });
+        const changed = [];
+        for (const row of rows) {
+          // POST /model/update MERGES and keeps the credential and every tb_ key; it REFUSES a
+          // model_info-only edit with 400, which is why the label path is a PATCH.
+          const answer = vendorModel.length > 0
+            ? await askProxy("/model/update", () => proxy.updateModel({ id: row.id, vendorModel, info }))
+            : await askProxy("/model/{id}/update", () => proxy.patchModel({ id: row.id, info }));
+          changed.push({ id: row.id, ok: answer.ok === true, why: answer.ok ? "" : answer.why });
+        }
+        let fallback = null;
+        if (body?.visionFallback !== undefined) {
+          fallback = String(body.visionFallback).length > 0
+            ? await askProxy("/fallback", () => proxy.setFallback({ alias, fallbacks: [String(body.visionFallback)] }))
+            : await askProxy("/fallback delete", () => proxy.deleteFallback(alias));
+        }
+        const landed = changed.filter((row) => row.ok).length;
+        if (landed === 0) { ledger.failed(changed[0]?.why ?? "nothing changed"); json(response, 502, { error: "proxy", message: changed[0]?.why ?? "nothing changed", deployments: changed }); return true; }
+        ledger.done(`${landed} of ${rows.length} deployment(s) changed`);
+        const ran = ranAlias(await askProxySpend(), alias);
+        json(response, 200, {
+          alias,
+          deployments: changed,
+          ...(fallback == null ? {} : { fallback: { ok: fallback.ok, why: fallback.ok ? "" : fallback.why } }),
+          message: vendorModel.length > 0
+            ? `${alias} runs on ${vendorModel} from the very next request, and a box picks it up on its next turn. ${ran.slugs.length > 0 ? `${ran.slugs.length} workspace(s) have run this model: their Titan keeps saying the old name until you push the new one.` : "No workspace has run this model inside the current window."}`
+            : `Changed. A customer's plan card follows within one registry cycle; their open page updates on its next load.`,
+        });
+        return true;
+      }
+
+      // A catalog refresh can never infer this, and PROXY-10 was a fleet-wide screenshot outage.
+      if (action === "vision-check") {
+        const ledger = beginAction(guard, request, { action: "plan-model.vision-check", target: alias, detail: `sending an image part through ${alias}` });
+        const answer = await askProxy("/v1/chat/completions", () => proxy.call("POST", "/v1/chat/completions", {
+          body: {
+            model: alias,
+            max_tokens: 16,
+            messages: [{
+              role: "user",
+              content: [
+                { type: "text", text: "Answer with the single word yes." },
+                // One transparent pixel. The smallest thing that is unambiguously an image part.
+                { type: "image_url", image_url: { url: `data:image/png;base64,${ONE_PIXEL_PNG}` } },
+              ],
+            }],
+          },
+        }));
+        const at = new Date(now()).toISOString();
+        for (const row of rows) {
+          await askProxy("/model/{id}/update", () => proxy.patchModel({ id: row.id, info: { [TB.visionOk]: answer.ok === true, [TB.visionAt]: at } }));
+        }
+        ledger.done(answer.ok ? "it took the image" : `it refused the image: ${answer.why}`);
+        json(response, 200, {
+          alias,
+          vision: { ok: answer.ok === true, at, why: answer.ok ? "" : answer.why },
+          message: answer.ok
+            ? `${alias} took an image part. Recorded against every deployment behind it.`
+            : `${alias} refused an image part (${answer.why}). It needs a vision fallback, or every screenshot a customer's Titan takes is a failed turn.`,
+        });
+        return true;
+      }
+
+      if (action === "apply") {
+        const ledger = beginAction(guard, request, { action: "plan-model.apply", target: alias, detail: `widening every workspace key to include ${alias}` });
+        const swept = await applyToEveryKey();
+        if (!swept.ok) { ledger.failed(swept.why || "no key could be updated"); json(response, 502, { error: "proxy", message: swept.why || "no key could be updated", rows: swept.rows }); return true; }
+        ledger.done(`${swept.rows.filter((row) => row.ok).length} of ${swept.rows.length} workspace key(s) updated`);
+        json(response, 200, {
+          alias,
+          rows: swept.rows,
+          models: swept.models,
+          message: "Every workspace key is now scoped to every plan model the proxy serves. Nothing was written into a box: the key value did not change. A customer's plan card follows within one registry cycle.",
+        });
+        return true;
+      }
+
+      // The label lives inside each box, so pushing it WRITES INTO A BOX and this route will not do
+      // that to a workspace nobody named. Without slugs it answers with the candidates and changes
+      // nothing, because the door it drives sets the model as well as the label: pushed at a box
+      // running something else, it would move that customer onto this model without being asked.
+      if (action === "push-label") {
+        const ran = ranAlias(await askProxySpend(), alias);
+        const named = Array.isArray(body?.slugs) ? body.slugs.map(String) : [];
+        const targets = named.length > 0 ? named : (body?.all === true ? ran.slugs : []);
+        if (targets.length === 0) {
+          json(response, 409, {
+            error: "name_them",
+            candidates: ran.slugs,
+            message: ran.slugs.length > 0
+              ? `Say which workspaces. These have run ${alias} inside the current window: ${ran.slugs.join(", ")}. This writes inside a box and it sets the model as well as the label, so it is never done to a workspace nobody named.`
+              : `No workspace has run ${alias} inside the current window, so there is nothing to push. Name the workspaces if you know better.`,
+          });
+          return true;
+        }
+        const ledger = beginAction(guard, request, { action: "plan-model.push-label", target: alias, detail: `pushing ${rows[0].customerLabel || alias} into ${targets.join(", ")}` });
+        const pushed = [];
+        for (const slug of targets) {
+          if (store.getTenant(slug) == null) { pushed.push({ slug, ok: false, why: "there is no workspace by that name" }); continue; }
+          const answer = await pointWorkspaceAt(slug, alias);
+          pushed.push({
+            slug,
+            ok: answer.ok === true,
+            why: answer.ok ? "" : answer.why,
+            // The relay's own evidence: names, lengths and hash prefixes. No value comes back.
+            wrote: answer.ok ? (answer.body?.wrote ?? []) : [],
+          });
+        }
+        const landed = pushed.filter((row) => row.ok).length;
+        ledger.done(`${landed} of ${targets.length} workspace(s) told it runs ${rows[0].customerLabel || alias}`);
+        json(response, 200, {
+          alias,
+          label: rows[0].customerLabel,
+          workspaces: pushed,
+          message: `${landed} workspace(s) updated. Each one's Titan says ${rows[0].customerLabel || alias} from its next message, because the host re-reads that file every turn.`,
+        });
+        return true;
+      }
+
+      if (action === "remove") {
+        if (String(body?.confirm ?? "") !== alias) { json(response, 400, { error: "confirm", message: `Type ${alias} to remove it. Nothing was changed.` }); return true; }
+        const ran = ranAlias(await askProxySpend(), alias);
+        if (ran.slugs.length > 0) {
+          json(response, 409, {
+            error: "in_use",
+            workspaces: ran.slugs,
+            message: `${ran.slugs.join(", ")} ran ${alias} inside the current window. Move them first: a box pointed at a model that is gone fails every turn.`,
+          });
+          return true;
+        }
+        const ledger = beginAction(guard, request, { action: "plan-model.remove", target: alias, detail: `removing ${alias} and its ${rows.length} deployment(s)` });
+        const gone = [];
+        for (const row of rows) {
+          const answer = await askProxy("/model/delete", () => proxy.deleteModel(row.id));
+          gone.push({ id: row.id, ok: answer.ok === true, why: answer.ok ? "" : answer.why });
+        }
+        await askProxy("/fallback delete", () => proxy.deleteFallback(alias));
+        ledger.done(`${gone.filter((row) => row.ok).length} of ${rows.length} deployment(s) removed`);
+        json(response, 200, {
+          alias,
+          deployments: gone,
+          message: `${alias} is gone from the next request. It is off every customer's plan card within one registry cycle. No box was written to.`,
+        });
+        return true;
+      }
+
+      json(response, 404, { error: "not_found" });
+      return true;
+    }
+
+    if (rest.length === 1 && rest[0] === "defaults" && method === "POST") {
+      const planModel = String(body?.planModel ?? "").trim();
+      if (planModel.length > 0 && !isPlanModel(planModel)) {
+        json(response, 400, { error: "bad_request", message: "A default has to be one of the plan models." });
+        return true;
+      }
+      const ledger = beginAction(guard, request, { action: "defaults.plan-model", target: planModel || "(none)", detail: `new workspaces get ${planModel || "whatever the proxy serves"}` });
+      store.setSetting(SETTING_DEFAULT_MODEL, planModel, guard.account?.email ?? "the operator token");
+      ledger.done();
+      json(response, 200, {
+        planModel,
+        message: planModel.length > 0
+          ? `A new workspace gets ${planModel}. Workspaces that already exist keep what they are on.`
+          : "Cleared. A new workspace gets whatever the proxy serves and its console picks the first one.",
+      });
+      return true;
+    }
+
     // ---- the six actions -------------------------------------------------------------------------
 
     if (rest.length === 3 && rest[0] === "clients" && method === "POST") {
@@ -1112,6 +2277,31 @@ export function createAdminApi({
       if (store.getTenant(slug) == null) { json(response, 404, { error: "not_found" }); return true; }
       if (["stop", "start", "restart"].includes(action)) { await tenantPower(response, slug, action); return true; }
       if (action === "provision") { await tenantProvision(response, slug, body ?? {}); return true; }
+      // PROVIDERS-1. One workspace moved onto one plan model, from its own row.
+      //
+      // The relay's use-included door writes the base url, the model, the endpoint name, the
+      // served-by line, the context window and the LABEL in one write, so the name this customer's
+      // Titan says follows the model automatically and cannot be left behind. It takes effect on
+      // that box's next message; nothing is restarted and nothing is recreated.
+      if (action === "model") {
+        const planModel = String(body?.planModel ?? "").trim();
+        if (!isPlanModel(planModel)) {
+          json(response, 400, { error: "bad_request", message: "Name the plan model this workspace should run." });
+          return true;
+        }
+        const ledger = beginAction(guard, request, { action: "client.model", target: slug, detail: `${slug} onto ${planModel}` });
+        const answer = await pointWorkspaceAt(slug, planModel);
+        if (!answer.ok) { ledger.failed(answer.why); json(response, 502, { error: "relay", message: answer.why }); return true; }
+        ledger.done(`${slug} is on ${planModel}`);
+        json(response, 200, {
+          slug,
+          planModel,
+          // Names, lengths and hash prefixes, out of the relay's own answer. No value comes back.
+          wrote: answer.body?.wrote ?? [],
+          message: `${slug} runs ${planModel} from its next message, and its Titan says the name that goes with it. Their open page shows the change on its next load.`,
+        });
+        return true;
+      }
       json(response, 404, { error: "not_found" });
       return true;
     }
@@ -1193,5 +2383,5 @@ export function createAdminApi({
     store.pruneLoginAttempts(at - ATTEMPT_RETENTION_MS);
   }
 
-  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend };
+  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer };
 }

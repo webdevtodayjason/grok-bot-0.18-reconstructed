@@ -370,15 +370,24 @@ test("the enterprise-only report is not what the windows are built on, and its r
     assert.equal(proxy.callsTo("GET /global/spend/report").length, 0, "the enterprise-only report was called");
     assert.equal(proxy.callsTo("GET /spend/logs").length, 1);
 
-    // And if anything does call it, it does not even reach the enterprise gate any more: the
-    // proxy's own allowed_routes list refuses it first, to every caller including the master key.
-    // MEASURED ON THE R750 2026-09-08, the reason that list exists: without it a customer's virtual
-    // key could call GET /health, which makes a live call to every provider deployment on the
-    // operator's subscriptions -- free to the tenant, charged to the operator, attributed to
-    // nobody. Closing it means closing everything the product does not call, this route included.
+    // PROVIDERS-1 MOVED THE DOOR FROM THE FILE TO THE KEY, and this assertion moved with it.
+    //
+    // It used to read "not allowed", because one global allowed_routes list in the proxy's config
+    // refused this route to every caller including the master key. That list is gone: it is checked
+    // before the key is looked up, so it could not tell the operator from a tenant, and two of the
+    // Providers panel's central mechanisms are path-parameter routes an exact-match list cannot
+    // express. So the OPERATOR now reaches the enterprise gate and reads its own refusal, which is
+    // the honest answer to "why can I not have this report".
     const refused = await client.call("GET", "/global/spend/report");
     assert.equal(refused.ok, false);
-    assert.match(refused.why, /not allowed/);
+    assert.match(refused.why, /Enterprise/);
+
+    // And a TENANT is refused before any of that, by the list on its own key. Same route, different
+    // caller, different reason, which is exactly what one global list could never do.
+    const tenantKey = proxy.keyByAlias("titanbot-acme").key;
+    const byTenant = await fetch(`${proxy.url}/global/spend/report`, { headers: { authorization: `Bearer ${tenantKey}` } });
+    assert.equal(byTenant.status, 403, "a tenant's key reached an admin route");
+    assert.match(String((await byTenant.json())?.error?.message ?? ""), /not allowed to call this route/);
 
     // The refusal SHAPE, which is the other half of what this case was written for. LiteLLM's
     // enterprise refusals arrive as {detail: {error: "<sentence>"}}; the extractor read past that

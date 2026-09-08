@@ -45,7 +45,7 @@ import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, 
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
-import { createProxyClient } from "./proxy.mjs";
+import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
   NEW_TENANTS_BLOCKED,
   adoptionDirs,
@@ -256,7 +256,7 @@ export function createApp(options = {}) {
   // an adoption row holds neither a token nor directories to seed it from anyway. An adopted row IS
   // returned when the adoption was given the box container name and the directories to read, which
   // is what `tenant adopt --box` writes.
-  function relayRegistry() {
+  async function relayRegistry() {
     const tenants = [];
     const skipped = [];
     for (const row of store.listTenants()) {
@@ -289,7 +289,7 @@ export function createApp(options = {}) {
         // missing stays skipped, because a row with no token would have the relay calling that
         // customer's gateway with an empty bearer instead of saying the workspace is not available.
         if (wasAdopted(row.slug, row)) {
-          const adoptedIncluded = includedFor(row.slug, profileDir);
+          const adoptedIncluded = await includedFor(row.slug, profileDir);
           if (adoptedIncluded.row) tenants.push({ slug: row.slug, included: adoptedIncluded.row });
         }
         continue;
@@ -303,7 +303,7 @@ export function createApp(options = {}) {
       // being off is the normal state of every install that has not had it turned on, and a
       // registry answer that grew a per tenant complaint on every read would be noise the day
       // somebody needs to read it.
-      const included = includedFor(row.slug, profileDir);
+      const included = await includedFor(row.slug, profileDir);
       if (included.why) skipped.push({ slug: row.slug, what: "included", why: included.why });
       tenants.push({
         ...(included.row ? { included: included.row } : {}),
@@ -341,23 +341,78 @@ export function createApp(options = {}) {
    * An adopted tenant reads from the profile directory the adoption named, the same way its
    * gateway token does, so the operator's own workspace works through the identical path.
    */
-  function includedFor(slug, profileDir) {
+  async function includedFor(slug, profileDir) {
     if (String(config.proxyUrl ?? "").length === 0) return { row: null, why: "" };
     const file = proxyKeyFileIn(profileDir);
     const record = readProxyKey(slug, config, { file });
     if (record == null) {
       return { row: null, why: `this workspace has no plan key yet, so nothing is included with its plan (mint one with cp/cli.mjs proxy mint ${slug})` };
     }
+    // PROVIDERS-1. The rows are computed from what the proxy serves RIGHT NOW, not from the
+    // snapshot the mint wrote.
+    //
+    // MEASURED ON THE R750 2026-09-08: all three tenants carried a two-row array written at mint
+    // with modelLabel undefined, and nothing re-writes it -- cp/provision.mjs returns an existing
+    // record untouched, by design, because re-minting is what wrote a REVOKED key back into a box.
+    // So a name changed in the Providers panel would have reached nobody, and the whole panel would
+    // have been a page that edits a database no customer reads.
+    //
+    // Reading them here instead means a label or a vendor-model change reaches the fleet inside one
+    // registry cycle with no re-mint, no box write and none of that hazard. The stored array stays
+    // as LAST KNOWN GOOD: a proxy that is down leaves every customer's plan card as it was rather
+    // than emptying it, which is the difference between a slow minute and a fleet-wide "your plan
+    // includes nothing".
+    const live = await planModelRows();
+    const models = live.rows ?? (Array.isArray(record.models) ? record.models : []);
     return {
-      why: "",
+      why: live.why,
       row: {
         baseUrl: `${config.proxyUrl}/v1`,
         key: record.key,
         keyId: record.keyId,
-        models: record.models,
+        models,
         enforced: record.enforced,
       },
     };
+  }
+
+  /**
+   * What the proxy serves, as customer-facing rows, cached for a few seconds and joined in flight.
+   *
+   * The same shape as the admin console's box sweep and for the same reason: every relay on this
+   * server polls the registry, and without the join that is one proxy read per relay per poll for
+   * an answer that changes when an operator clicks something. With it, a burst of polls is one
+   * read. The window is short because the whole point of this wave is that a change takes effect
+   * without a restart.
+   *
+   * A FAILED READ IS NOT CACHED. It answers {rows: null} with the reason, the caller falls back to
+   * the stored array, and the next poll asks again rather than sitting on a hole for the window.
+   */
+  const PLAN_ROWS_CACHE_MS = 5_000;
+  let planRowsCache = { at: 0, answer: null, inFlight: null };
+  function planModelRows() {
+    if (proxy == null || proxy.configured !== true) {
+      return Promise.resolve({ rows: null, why: "" });
+    }
+    if (planRowsCache.answer != null && Date.now() - planRowsCache.at < PLAN_ROWS_CACHE_MS) {
+      return Promise.resolve(planRowsCache.answer);
+    }
+    if (planRowsCache.inFlight != null) return planRowsCache.inFlight;
+    const pending = proxy.listModels().then(
+      (answer) => {
+        const result = answer.ok
+          ? { rows: includedModelRows({ deployments: answer.rows }), why: "" }
+          : { rows: null, why: `the proxy could not be asked what it serves (${answer.why}), so this workspace's plan card is the last one that was measured` };
+        planRowsCache = answer.ok ? { at: Date.now(), answer: result, inFlight: null } : { at: 0, answer: null, inFlight: null };
+        return result;
+      },
+      (error) => {
+        planRowsCache = { at: 0, answer: null, inFlight: null };
+        return { rows: null, why: `the proxy could not be asked what it serves (${String(error?.message ?? error).split("\n")[0]})` };
+      },
+    );
+    planRowsCache = { ...planRowsCache, inFlight: pending };
+    return pending;
   }
 
   // The extra facts an adoption was given, read back out of the ledger step it wrote. An adopted
@@ -456,6 +511,11 @@ export function createApp(options = {}) {
     config, store, client, now, fetchImpl, proxy,
     json, noContent, publicAccount, publicTenant, tenantView, tenantPower, tenantProvision,
     currentSession, version: CP_VERSION,
+    // PROVIDERS-1. The address a change came from, so an admin_actions row can say WHERE as well as
+    // who and when. This function is the only thing in the process that knows which peers are
+    // trusted proxies, which are Cloudflare and which are boxes, and the admin API had no way to
+    // ask before this wave.
+    clientOf,
     // PROXY-1. One tenant's plan key, read off the disk through the same adoption-aware path the
     // registry uses, so the operator's own workspace is read the same way a customer's is.
     //
@@ -735,7 +795,7 @@ export function createApp(options = {}) {
     if (segments[1] === "relay" && segments[2] === "tenants" && segments.length === 3) {
       if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       if (!requireRelay(request, response)) return undefined;
-      return json(response, 200, relayRegistry());
+      return json(response, 200, await relayRegistry());
     }
 
     if (segments[1] === "sessions" && segments[2] === "current" && segments.length === 3) {
