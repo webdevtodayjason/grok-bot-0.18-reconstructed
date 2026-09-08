@@ -15,11 +15,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
-import { boxContainerName, tenantPaths } from "../cp/provision.mjs";
+import {
+  boxContainerName,
+  ensureProxyKey,
+  proxyKeyFileIn,
+  readProxyKey,
+  tenantPaths,
+  tenantProfileDir,
+} from "../cp/provision.mjs";
 import { tenantSessionSecret } from "../cp/session.mjs";
 import { startControlPlane, startFakeCoolify } from "./cp-support.mjs";
+import { startFakeProxy } from "./cp-proxy-support.mjs";
 
 const PASSWORD = "a-good-tenant-password";
 const RELAY_TOKEN = randomBytes(32).toString("hex");
@@ -142,6 +151,98 @@ test("the registry carries what the relay needs to serve one customer, and no mo
     assert.equal(row.profileDir, paths.profile);
     assert.deepEqual(answer.body.skipped, []);
   });
+});
+
+// ---- what a plan includes (PROXY-1) -------------------------------------------------------------
+
+test("with no proxy on this server the registry answers exactly as it did before", async () => {
+  // CP_PROXY_URL unset is the state of every install that has not turned the feature on, including
+  // Jason's own console today. The word for what that answer has to look like is "identical": no
+  // included object, and no per tenant complaint in skipped either, because a registry that grew a
+  // line per customer per read would be noise on the day somebody needs to read it.
+  await withPlane(async (plane) => {
+    await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme" });
+    const row = (await asRelay(plane)).body.tenants[0];
+    assert.equal(Object.hasOwn(row, "included"), false);
+    assert.deepEqual((await asRelay(plane)).body.skipped, []);
+  });
+});
+
+test("the included object is pinned field for field, and its id is its model", async () => {
+  const proxy = await startFakeProxy();
+  try {
+    await withPlane(async (plane) => {
+      await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme" });
+      const row = (await asRelay(plane)).body.tenants[0];
+      // These names are read by the relay. A rename on either side is the failure cp-relay-pair
+      // exists to catch, and this is the control plane's own half of the same pin.
+      assert.deepEqual(Object.keys(row.included).sort(), ["baseUrl", "enforced", "key", "keyId", "models"]);
+      assert.equal(row.included.baseUrl, `${proxy.url}/v1`);
+      // The key off the disk, not one this answer invented, and the same one the box will present.
+      assert.equal(row.included.key, readProxyKey("acme", plane.config).key);
+      assert.equal(row.included.enforced, false, "observe mode is the default this wave ships");
+      for (const model of row.included.models) {
+        assert.deepEqual(Object.keys(model).sort(), ["contextWindow", "id", "model", "name", "servedBy"]);
+        assert.equal(model.id, model.model, "id and model have to be one string");
+        // The plan- prefix is how the console tells an included row from a customer's own row, so a
+        // row that lost it would be indistinguishable from one the customer can edit.
+        assert.match(model.id, /^plan-/);
+        assert.notEqual(model.servedBy, "", "without servedBy a customer's agent names a container");
+      }
+    }, { env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); }
+});
+
+test("the operator's own adopted workspace reads its plan key from the directory it was adopted with", async () => {
+  // Tenant "titanium" is Jason's own instance: adopted, no directory under the tenant root, and its
+  // profile is wherever the operator already had it. It is also the ONLY workspace `proxy mint`
+  // exists for, because tenantProvision refuses a non-dry-run provision on an adopted row. A key
+  // written under the tenant root instead would be a mint that reported success and left his
+  // console with nothing included in his plan, with no error anywhere.
+  const proxy = await startFakeProxy();
+  try {
+    await withPlane(async (plane) => {
+      const elsewhere = path.join(plane.root, "release", "profile");
+      mkdirSync(elsewhere, { recursive: true });
+      writeFileSync(path.join(elsewhere, "local-docker-vm.json"), JSON.stringify({ token: "the-operators-own-gateway-token" }), { mode: 0o600 });
+      const adopted = await plane.admin("POST", "/v1/tenants/titanium/adopt", {
+        coolifyServiceUuid: "svc-operator", host: "console.titanium.bot",
+        boxContainer: "titanbot-box-operator", profileDir: elsewhere, stateDir: path.join(plane.root, "release", "state"),
+      });
+      assert.equal(adopted.status, 200, adopted.text);
+
+      // Minted the way the CLI mints it: into the directory the adoption named.
+      const minted = await ensureProxyKey("titanium", plane.config, {
+        file: proxyKeyFileIn(tenantProfileDir("titanium", plane.config, plane.store.listSteps("titanium"))),
+      });
+      assert.equal(minted.ok, true, minted.why);
+      assert.equal(existsSync(path.join(elsewhere, "model-proxy.json")), true, "the key went somewhere else entirely");
+      assert.equal(existsSync(tenantPaths("titanium", plane.config).proxyKeyFile), false, "a second copy was written under the tenant root");
+
+      const row = (await asRelay(plane)).body.tenants.find((one) => one.slug === "titanium");
+      assert.equal(row.included.key, minted.record.key, "the registry read a different file from the one the mint wrote");
+    }, { env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); }
+});
+
+test("a workspace with no plan key is served without one, and the reason is named", async () => {
+  const proxy = await startFakeProxy();
+  try {
+    await withPlane(async (plane) => {
+      await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme" });
+      // The file removed the way `proxy revoke` removes it. The customer still has a workspace and
+      // still signs in; what they do not have is anything included with their plan, and the whole
+      // object is left out rather than sent half filled, because a card with no key behind it is a
+      // customer clicking Use this one and getting a 401.
+      rmSync(tenantPaths("acme", plane.config).proxyKeyFile, { force: true });
+      const answer = await asRelay(plane);
+      assert.equal(answer.body.tenants.length, 1, "the customer was dropped over a missing plan key");
+      assert.equal(Object.hasOwn(answer.body.tenants[0], "included"), false);
+      const named = answer.body.skipped.find((one) => one.slug === "acme");
+      assert.equal(named.what, "included", "a note about a plan must not read like a dropped workspace");
+      assert.match(named.why, /proxy mint acme/);
+    }, { env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); }
 });
 
 test("the registry hands over per-tenant keys and never the master", async () => {

@@ -21,9 +21,10 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 
 import { createApp, createHttpServer } from "../cp/server.mjs";
-import { loadConfig, tenantPaths } from "../cp/provision.mjs";
+import { ensureProxyKey, loadConfig, tenantPaths } from "../cp/provision.mjs";
 import { openStore } from "../cp/store.mjs";
 import { startRelay } from "./relay-tenant-support.mjs";
+import { startFakeProxy } from "./cp-proxy-support.mjs";
 
 const SLUG = "acme";
 const ACCOUNT = "owner@acme.test";
@@ -42,11 +43,14 @@ function dockerStub(names) {
   return `${dir}:/usr/bin:/bin`;
 }
 
-async function startPair({ extraTenant = null } = {}) {
+async function startPair({ extraTenant = null, withProxy = false } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "cp-relay-pair-"));
   const master = randomBytes(32).toString("hex");
   const relayToken = randomBytes(32).toString("hex");
   const adminToken = randomBytes(24).toString("hex");
+  // PROXY-1. Off unless a test asks for it, so every assertion in this file that predates the proxy
+  // is measured on a control plane shaped exactly as it was.
+  const proxy = withProxy ? await startFakeProxy() : null;
   const config = loadConfig({
     CP_PORT: "0", CP_DATA_DIR: path.join(root, "data"),
     CP_SESSION_SECRET: master, CP_ADMIN_TOKEN: adminToken, CP_RELAY_TOKEN: relayToken,
@@ -54,6 +58,7 @@ async function startPair({ extraTenant = null } = {}) {
     CP_RELEASE_ROOT: path.join(root, "release"), CP_PUBLIC_URL: "https://api.titanium.bot",
     COOLIFY_URL: "", COOLIFY_API_KEY: "", COOLIFY_PROJECT_UUID: "p", COOLIFY_SERVER_UUID: "s",
     COOLIFY_ENVIRONMENT_NAME: "production", CP_ALLOW_NEW_TENANTS: "1",
+    ...(proxy ? { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } : {}),
   });
   const store = openStore({ dataDir: config.dataDir });
   const app = createApp({ config, store, probeImpl: () => { throw new Error("there is no docker network in a test"); } });
@@ -68,6 +73,14 @@ async function startPair({ extraTenant = null } = {}) {
   mkdirSync(paths.profile, { recursive: true });
   mkdirSync(paths.state, { recursive: true });
   writeFileSync(paths.profileTokenFile, `${JSON.stringify({ token: GATEWAY_TOKEN })}\n`, { mode: 0o600 });
+  // The key a finished proxy-key step leaves behind, minted through the real code path rather than
+  // written by hand, so what crosses is what a real mint produces.
+  let proxyKey = "";
+  if (proxy) {
+    const minted = await ensureProxyKey(SLUG, config, { box: BOX });
+    assert.equal(minted.ok, true, `the plan key could not be minted: ${minted.why ?? ""}`);
+    proxyKey = minted.record.key;
+  }
 
   const ask = (method, pathname, { body, token } = {}) => {
     const init = { method, headers: { accept: "application/json" } };
@@ -94,7 +107,10 @@ async function startPair({ extraTenant = null } = {}) {
     { CP_URL: cp, CP_RELAY_TOKEN: relayToken, SAND_BOX_CONTAINER: "titanbot-box-operator" },
     { prefix: "pair-relay-", pathValue: dockerStub([BOX, "titanbot-box-operator"]) },
   );
-  return { cp, ask, relay, master, relayToken, adminToken, stop: () => { relay.stop(); server.close(); } };
+  return {
+    cp, ask, relay, master, relayToken, adminToken, proxyKey,
+    stop: () => { relay.stop(); server.close(); if (proxy) void proxy.close(); },
+  };
 }
 
 test("what the control plane puts on the registry route is what the relay reads off it", async () => {
@@ -116,6 +132,40 @@ test("what the control plane puts on the registry route is what the relay reads 
     assert.equal(row.gateway, `http://${BOX}:1340`, "the gateway is that container on the box port");
     assert.equal(row.token, GATEWAY_TOKEN, "the token is the one on the disk, not a new one");
     assert.equal(JSON.stringify(body).includes(pair.master), false, "the master's bytes were in the answer");
+  } finally { pair.stop(); }
+});
+
+test("the included object the control plane writes is the one the relay reads, field for field", async () => {
+  // PROXY-1's half of what this file exists for. The relay renders `included` as read-only cards in
+  // a customer's Settings and points their box at `included.baseUrl` with `included.key`. Every one
+  // of these names could have been spelled differently on the two sides and every other test in the
+  // tree would still be green, which is exactly the failure this suite was written to catch.
+  //
+  // The pin, and it does not move:
+  //   included = {baseUrl, key, keyId, models: [{id, model, name, contextWindow, servedBy}], enforced}
+  const pair = await startPair({ withProxy: true });
+  try {
+    const body = await (await pair.ask("GET", "/v1/relay/tenants", { token: pair.relayToken })).json();
+    const row = body.tenants.find((tenant) => tenant.slug === SLUG);
+    assert.ok(row?.included, `the customer got no included object: ${JSON.stringify(body.skipped)}`);
+    assert.deepEqual(Object.keys(row.included).sort(), ["baseUrl", "enforced", "key", "keyId", "models"]);
+    assert.equal(typeof row.included.baseUrl, "string");
+    // Plain http to a private name on the docker bridge. That is precisely what the relay's tenant
+    // endpoint guard refuses, and the guard is NOT relaxed for it: these rows never enter a
+    // customer's endpoints.json, the relay computes them from this answer.
+    assert.match(row.included.baseUrl, /^http:\/\/[^/]+\/v1$/);
+    assert.notEqual(row.included.key, "", "the relay was handed no key to use");
+    assert.equal(typeof row.included.enforced, "boolean");
+    assert.ok(Array.isArray(row.included.models) && row.included.models.length > 0);
+    for (const model of row.included.models) {
+      assert.deepEqual(Object.keys(model).sort(), ["contextWindow", "id", "model", "name", "servedBy"]);
+      assert.equal(model.id, model.model, "the relay keys a row by id and points the box at model");
+      // A plan id must never be able to collide with a row a customer made themselves, because the
+      // console drops plan- rows out of anything a customer posts back.
+      assert.match(model.id, /^plan-/);
+    }
+    // And the key that crossed is the one on the disk, not a second one this answer minted.
+    assert.equal(row.included.key, pair.proxyKey);
   } finally { pair.stop(); }
 });
 

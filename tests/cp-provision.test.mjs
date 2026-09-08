@@ -4,7 +4,7 @@
 // up at the step that failed instead of building a second half-instance.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -17,6 +17,7 @@ import {
   deriveSlug,
   loadConfig,
   readCoolifyState,
+  readProxyKey,
   provisionTenant,
   renderBoxCompose,
   slugFromCompany,
@@ -27,6 +28,7 @@ import {
 } from "../cp/provision.mjs";
 import { openStore } from "../cp/store.mjs";
 import { makeTempRoot, startFakeCoolify } from "./cp-support.mjs";
+import { startFakeProxy } from "./cp-proxy-support.mjs";
 
 const SESSION_SECRET = randomBytes(32).toString("hex");
 
@@ -308,8 +310,11 @@ test("a dry run reads and renders everything and creates nothing", async () => {
       const result = await provisionTenant({ store, config, slug: "acme", name: "Acme Roofing", dryRun: true });
       assert.equal(result.ok, true);
       assert.equal(result.dryRun, true);
-      // No urls step. A tenant has no hostname of its own any more.
-      assert.deepEqual(result.plan.steps.map((step) => step.name), ["directories", "secrets", "compose", "service", "envs", "start", "ready"]);
+      // No urls step. A tenant has no hostname of its own any more. proxy-key is the eighth,
+      // added by PROXY-1 and sitting between envs and start, and it is a step of its own because
+      // completedSteps skips one that is already ok: demo and richard-avery have all seven of the
+      // others marked ok on the R750, so anything folded into an existing step never runs for them.
+      assert.deepEqual(result.plan.steps.map((step) => step.name), ["directories", "secrets", "compose", "service", "envs", "proxy-key", "start", "ready"]);
       assert.equal(result.plan.steps[3].method, "POST");
       assert.equal(result.plan.steps[3].path, "/services");
       assert.equal(result.plan.steps[3].bodyPreview.name, "titanbot-acme");
@@ -355,7 +360,14 @@ test("provisioning walks the steps and calls Coolify the way the openapi documen
       store.createTenant({ slug: "acme", name: "Acme Roofing", host: "console.titanium.bot" });
       const result = await provisionTenant({ store, config, slug: "acme", name: "Acme Roofing", probeImpl: noGateway });
       assert.equal(result.ok, true, result.error);
+      // proxy-key is not in `ran` because this world has no CP_PROXY_URL, which is every install
+      // that has not turned the proxy on. It is recorded as skipped rather than ok, so the day one
+      // is configured the next run actually mints instead of thinking it already had.
       assert.deepEqual(result.ran, ["directories", "secrets", "compose", "service", "envs", "start", "ready"]);
+      const proxyStep = store.listSteps("acme").find((step) => step.step === "proxy-key");
+      assert.equal(proxyStep.status, "skipped");
+      assert.match(proxyStep.detail, /CP_PROXY_URL/);
+      assert.equal(store.completedSteps("acme").has("proxy-key"), false, "a skipped step must not count as done");
 
       // One POST that answers 409 and one PATCH behind it. Coolify makes an empty field for every
       // ${VAR} the compose names as soon as the service exists, so the field this key goes in is
@@ -406,7 +418,7 @@ test("provisioning walks the steps and calls Coolify the way the openapi documen
       assert.equal(tenant.host, "console.titanium.bot");
       assert.equal(tenant.lastError, null);
       assert.deepEqual(store.listSteps("acme").map((step) => `${step.step}:${step.status}`), [
-        "directories:ok", "secrets:ok", "compose:ok", "service:ok", "envs:ok", "start:ok", "ready:ok",
+        "directories:ok", "secrets:ok", "compose:ok", "service:ok", "envs:ok", "proxy-key:skipped", "start:ok", "ready:ok",
       ]);
       assert.equal(JSON.parse(store.listSteps("acme").at(-1).detail).how, "coolify");
     }, { coolify });
@@ -678,4 +690,69 @@ test("nothing in a tenant's provisioning asks Coolify for a hostname", async () 
       assert.deepEqual(stored.urls, [], "a customer's box is never published");
     }, { coolify });
   } finally { await coolify.close(); }
+});
+
+// ---- the eighth step, PROXY-1 -------------------------------------------------------------------
+
+test("the proxy key step runs for a workspace whose other seven steps are already done", async () => {
+  // This is the shape both live customers are in on the R750: built before the proxy existed, so
+  // every older step is marked ok and completedSteps skips all of them. If proxy-key were not a
+  // step of its own it would never run for demo or richard-avery, and the migration would have
+  // nothing to point their boxes at.
+  const coolify = await startFakeCoolify();
+  const proxy = await startFakeProxy();
+  try {
+    await withWorld(async ({ config, store }) => {
+      store.createTenant({ slug: "acme", name: "Acme", host: "console.titanium.bot" });
+      // The directories and the gateway token this workspace already has, because a workspace that
+      // was built before the proxy existed has both on the disk.
+      for (const directory of tenantDirectoryList("acme", config)) mkdirSync(directory, { recursive: true, mode: 0o700 });
+      for (const step of ["directories", "secrets", "compose", "service", "envs", "start", "ready"]) {
+        store.recordStep({ slug: "acme", step, status: "ok", detail: "{}" });
+      }
+      store.updateTenant("acme", { coolifyServiceUuid: "svc-acme", boxContainer: "titanbot-box-svc-acme" });
+
+      const result = await provisionTenant({ store, config, slug: "acme", name: "Acme", probeImpl: noGateway });
+      assert.equal(result.ok, true, result.error);
+      assert.deepEqual(result.ran, ["proxy-key"], "the only step left to run was the new one");
+      assert.equal(proxy.callsTo("POST /key/generate").length, 1);
+
+      // What the ledger keeps is the alias, the id and the file. Never the key.
+      const step = store.listSteps("acme").find((one) => one.step === "proxy-key" && one.status === "ok");
+      const record = readProxyKey("acme", config);
+      assert.equal(JSON.parse(step.detail).alias, "titanbot-acme");
+      assert.equal(step.detail.includes(record.key), false, "the provisioning ledger carried a live key");
+
+      // And the retry is a READ. A second key would leave the box on the first one and the registry
+      // handing out the second, which is a 401 with nothing anywhere to explain it.
+      store.recordStep({ slug: "acme", step: "proxy-key", status: "failed", detail: "pretend it failed" });
+      const again = await provisionTenant({ store, config, slug: "acme", name: "Acme", probeImpl: noGateway });
+      assert.equal(again.ok, true, again.error);
+      assert.equal(proxy.callsTo("POST /key/generate").length, 1, "a retry minted a second key");
+      assert.equal(readProxyKey("acme", config).key, record.key);
+    }, { coolify, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); await coolify.close(); }
+});
+
+test("a proxy that will not mint fails the workspace at that step and leaves the rest standing", async () => {
+  const coolify = await startFakeCoolify();
+  const proxy = await startFakeProxy();
+  try {
+    await withWorld(async ({ config, store }) => {
+      store.createTenant({ slug: "acme", name: "Acme", host: "console.titanium.bot" });
+      proxy.failOnce("POST /key/generate", 503, "the proxy database is not up");
+      const result = await provisionTenant({ store, config, slug: "acme", name: "Acme", probeImpl: noGateway });
+      assert.equal(result.ok, false);
+      assert.equal(result.step, "proxy-key");
+      // A workspace whose agents cannot reach a model is not a workspace, so this is a stop and not
+      // a warning. The container and the directories are already built, so the retry is cheap.
+      assert.equal(store.getTenant("acme").status, "failed");
+      assert.equal(store.completedSteps("acme").has("service"), true, "the earlier steps were thrown away");
+
+      const retried = await provisionTenant({ store, config, slug: "acme", name: "Acme", probeImpl: noGateway });
+      assert.equal(retried.ok, true, retried.error);
+      assert.deepEqual(retried.ran, ["proxy-key", "start", "ready"]);
+      assert.equal(coolify.callsTo("POST /services").length, 1, "the retry built a second box");
+    }, { coolify, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); await coolify.close(); }
 });

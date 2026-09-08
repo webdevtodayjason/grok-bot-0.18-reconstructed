@@ -289,6 +289,45 @@
 
   // ---- panel 2: clients and users --------------------------------------------------------------
 
+  // The two numbers on this screen that are money, formatted once. A null is never a zero: it goes
+  // through `measured` below and comes out as the reason it could not be read.
+  const dollars = (value) => (Number.isFinite(Number(value)) ? `$${Number(value).toFixed(2)}` : null);
+
+  // WHERE 80 AND 100 ARE DECIDED, and they are decided here rather than by the proxy, because until
+  // CP_PROXY_ENFORCE is set the proxy does not fail anything: observe mode mints a soft budget,
+  // which produces the number and never the refusal. So this chip is the whole of the warning today
+  // and the wording has to be the wording a customer's own agent will use on the day it is armed.
+  const ALLOWANCE_WARN_PCT = 80;
+
+  function allowanceChips(spend) {
+    const nodes = [];
+    if (spend == null) return nodes;
+    if (spend.minted !== true) {
+      const chip = el("span", "quiet", "no plan key");
+      chip.title = String(spend.why || "this workspace has no key at the proxy");
+      nodes.push(chip);
+      return nodes;
+    }
+    if (spend.pct === null || spend.pct === undefined) {
+      const chip = el("span", "quiet", "allowance not measured");
+      chip.title = String(spend.spendToDateWhy || spend.why || (spend.allowance == null ? "no allowance is set on this server (CP_PROXY_ALLOWANCE_USD)" : "the proxy did not answer"));
+      nodes.push(chip);
+      return nodes;
+    }
+    const pct = Number(spend.pct);
+    const chip = el("span", pct >= 100 ? "chip attack" : pct >= ALLOWANCE_WARN_PCT ? "chip locked" : "chip ok",
+      `${pct}% of the plan`);
+    // The sentence, in the customer's words rather than ours. At 100 it is what their Titan tells
+    // them; below it, it is what this number means.
+    chip.title = pct >= 100
+      ? (spend.enforced
+        ? "They have used everything their plan includes this month. Their agent is telling them: You have used everything your plan includes this month. Add your own key under Settings and I will keep going, or ask for more."
+        : "They are past what their plan includes. Nothing is being stopped, because this server is in observe mode (CP_PROXY_ENFORCE is not set).")
+      : `${dollars(spend.spendToDate) ?? "not measured"} of ${dollars(spend.allowance) ?? "not measured"} this month`;
+    nodes.push(chip);
+    return nodes;
+  }
+
   async function loadClients() {
     const answer = await api("GET", "/v1/admin/clients");
     const host = $("clients");
@@ -304,7 +343,11 @@
       head.appendChild(el("span", "quiet", client.slug));
       head.appendChild(el("span", "chip", client.status));
       head.appendChild(el("span", "quiet", `Coolify says ${client.coolify && client.coolify.reachable ? client.coolify.status : "not measured"}`));
-      head.appendChild(el("span", "quiet", `plan: ${client.plan}`));
+      // PROXY-1. What this customer's plan includes, and how close to it they are. The chip is the
+      // only thing on this card that is ever red, and the words on it are the words their own agent
+      // will say to them, so an operator reading the console and a customer reading their screen
+      // are looking at the same fact.
+      for (const node of allowanceChips(client.spend)) head.appendChild(node);
 
       const actions = el("div", "actions");
       for (const action of ["stop", "start", "restart", "provision"]) {
@@ -534,6 +577,59 @@
     $("version").textContent = `control plane ${answer.version} - measured ${when(answer.measuredAt)}`;
   }
 
+  // ---- panel 5: spend --------------------------------------------------------------------------
+
+  async function loadSpend() {
+    const answer = await api("GET", "/v1/admin/spend");
+    const body = document.querySelector("#spend tbody");
+    clear(body);
+    $("spendNote").textContent = answer.configured
+      ? `${answer.note} Month is ${answer.window.month} UTC.${answer.enforced ? "" : " This server is in observe mode, so an allowance is recorded and nothing is stopped."}`
+      : `Not measured: ${answer.why}`;
+    if (answer.clients.length === 0) {
+      body.appendChild(rowSpanning(6, "No customers yet."));
+      return;
+    }
+    for (const client of answer.clients) {
+      const tr = document.createElement("tr");
+      const who = document.createElement("td");
+      who.appendChild(el("strong", null, client.name || client.slug));
+      who.appendChild(el("div", "quiet", client.slug));
+      tr.appendChild(who);
+
+      const window = (one) => {
+        const cell = document.createElement("td");
+        cell.appendChild(measured(dollars(one.dollars), one.why || client.why));
+        cell.appendChild(el("div", "quiet", one.requests === null || one.requests === undefined
+          ? "requests not measured"
+          : `${one.requests} request${one.requests === 1 ? "" : "s"}`));
+        return cell;
+      };
+      tr.appendChild(window(client.thisMonth));
+      tr.appendChild(window(client.today));
+
+      const against = document.createElement("td");
+      for (const node of allowanceChips(client)) against.appendChild(node);
+      if (client.allowance != null) against.appendChild(el("div", "quiet", `plan includes ${dollars(client.allowance)} a month`));
+      tr.appendChild(against);
+
+      // Requests and never dollars. The web tools are priced per request on our side and an agent
+      // run's real credits vary, so a dollar figure here would look precise and would not be.
+      const web = document.createElement("td");
+      web.appendChild(measured(client.tinyfish.requests, client.tinyfish.why, (value) => `${value} request${value === 1 ? "" : "s"}`));
+      tr.appendChild(web);
+
+      const key = document.createElement("td");
+      key.appendChild(el("div", "mono", client.alias || "not minted"));
+      // The alias and the key id. Never the key: it is a live credential for that customer's box,
+      // and this page is a browser.
+      if (client.keyId) key.appendChild(el("div", "quiet mono", `${String(client.keyId).slice(0, 12)}...`));
+      if (client.mintedAt) key.appendChild(el("div", "quiet", `minted ${ago(client.mintedAt)}`));
+      tr.appendChild(key);
+      body.appendChild(tr);
+    }
+  }
+
   // ---- everything at once ----------------------------------------------------------------------
 
   async function loadAll() {
@@ -542,7 +638,7 @@
     button.disabled = true;
     // Each panel loads on its own and reports its own failure into its own space, so one route
     // being down does not blank the other four. `allSettled`, deliberately.
-    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem()]);
+    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend()]);
     button.disabled = false;
     const broken = results.filter((result) => result.status === "rejected" && String(result.reason?.message) !== "unauthorized");
     if (broken.length > 0) banner(`${broken.length} panel${broken.length === 1 ? "" : "s"} could not be loaded: ${broken.map((row) => row.reason.message).join("; ")}`);
