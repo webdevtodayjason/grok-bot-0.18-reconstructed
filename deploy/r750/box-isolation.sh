@@ -148,8 +148,19 @@ if [ -z "$HOST_GUARD" ] && [ -r "$HOST_GUARD_MODE_FILE" ]; then
 fi
 HOST_GUARD="${HOST_GUARD:-shadow}"
 case "$HOST_GUARD" in off|shadow|drop) ;; *) echo "TITANBOT_HOST_GUARD must be off, shadow or drop (got '$HOST_GUARD')" >&2; exit 64 ;; esac
-DROP_PORTS="${TITANBOT_HOST_GUARD_DROP_PORTS:-22,47291,8000}"
-WATCH_PORTS="${TITANBOT_HOST_GUARD_WATCH_PORTS:-2049,445,11434,5000,80,443}"
+# 2049, 445 and 11434 joined the drop set on 2026-09-08 and not before, on the rule this file set
+# for itself: their shadow counters read zero. Measured on the R750 over a 31 minute accumulating
+# window with all three tenant boxes running -- NFS, Samba and ollama each counted 0 packets from
+# any non-exempt docker bridge, while the exempt rule counted 71. Nothing on this host needs a
+# customer's agent to reach its file exports or its local model server.
+#
+# 80, 443 and 5000 stay watch-only, and that is a decision rather than an oversight. 80 and 443 on
+# the host are Coolify's own proxy, which is how everything published on this machine is served, and
+# taking those away from a container is a bigger blast radius than this row is about. 5000 is a
+# python service nobody has identified yet; its counter is zero too, and it can join the set the day
+# somebody can say what it is.
+DROP_PORTS="${TITANBOT_HOST_GUARD_DROP_PORTS:-22,47291,8000,2049,445,11434}"
+WATCH_PORTS="${TITANBOT_HOST_GUARD_WATCH_PORTS:-5000,80,443}"
 
 MODE=apply
 case "${1:-}" in

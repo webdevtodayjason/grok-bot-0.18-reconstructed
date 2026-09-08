@@ -359,7 +359,13 @@ sudo bash /home/sem/titanbot/deploy/box-isolation.sh --verify    # probe box to 
 
 **Shadow first, and read the counters before you drop anything.** In `shadow` the same rules are
 installed with counters and no verdict, so nothing is taken away and you can see what a real day
-looks like. Leave it for at least half an hour with the boxes doing their normal work, then:
+looks like. The rules also log in shadow, rate limited, so `journalctl -k | grep titanbot-host-guard`
+names the source address of anything that hits them — a number tells you a port was used, and what
+you need to know is which container will break.
+
+The counters accumulate: a re-apply that would change nothing leaves them running, and only a real
+change to the policy resets them. Leave it for at least half an hour with the boxes doing their
+normal work, then:
 
 ```sh
 sudo bash /home/sem/titanbot/deploy/box-isolation.sh --counters
@@ -370,12 +376,31 @@ its own container, so its traffic must be counted on the `accept` rule and not o
 is on the 22 rule, the exemption did not resolve and turning on drop would take the hosting panel's
 hands off the machine, every sixty seconds, until you turned it back.
 
+**Coolify is more than one container, and the shadow pass is how we learned it.** Measured
+2026-09-08: port 8000 counted one packet a minute from something that was neither `coolify` nor the
+control plane, and the log named it — `coolify-sentinel` at `10.0.0.3`, polling the host's own API
+from the default bridge. Every container whose name begins with `coolify` is exempt now, which on
+that host is 23 addresses across six containers. If you add a Coolify component, it is exempt by
+name on the next tick; if you add something of your own that needs the host, it is not, and the
+shadow counters are where you will see it.
+
+**What that host read after the exemptions were right**, over an accumulating window with all three
+tenant boxes running: `22` **0**, `47291` **0**, `8000` **0**, and every watch-only port — 2049,
+445, 11434, 5000, 80, 443 — **0**, while the exempt rule counted Coolify's own traffic steadily.
+Nothing that is not exempt touches a guarded port on this host today.
+
 To turn on the drop:
 
 ```sh
+sudo mkdir -p /etc/titanbot
 echo drop | sudo tee /etc/titanbot/host-guard.mode
 sudo bash /home/sem/titanbot/deploy/box-isolation.sh
 ```
+
+`mkdir -p` because `/etc/titanbot` does not exist on a host that has never been told a mode, and
+`tee` into a missing directory fails while `box-isolation.sh` carries on in shadow — which reads as
+"the drop did not work" and is really "the mode was never written". Check the line it prints: it
+says which mode it applied.
 
 The mode file is what the 60-second timer reads, so this survives the next tick. The way back is one
 word and the same command:
@@ -384,6 +409,10 @@ word and the same command:
 echo shadow | sudo tee /etc/titanbot/host-guard.mode
 sudo bash /home/sem/titanbot/deploy/box-isolation.sh
 ```
+
+Or, if you cannot wait for the tick and want it gone this second:
+`sudo nft delete table inet titanbot_host`. The timer puts it back in whatever the mode file says
+within sixty seconds, so change the file first.
 
 `2049`, `445`, `11434`, `5000`, `80` and `443` are counted and never dropped until you add them to
 `TITANBOT_HOST_GUARD_DROP_PORTS`, and the rule for that is their counter reading zero over a real
