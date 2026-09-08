@@ -6,6 +6,7 @@ import {
   pushShellEnvSecretsToBox,
   writeShellEnvSecret
 } from "./extensions/shell-tools/shell-secrets.js";
+import { createBoxConnectorToolCaller } from "./extensions/inference/box-connector-tools.js";
 import { getSandRootDir } from "./host-paths.js";
 import {
   commandErrorReportToTelemetry,
@@ -581,6 +582,15 @@ export class SandHost {
         if (optionalMethod(management, "isLocalConnector")?.(args.server) !== true) return null;
         return await optionalMethod(management, "setConnectorSecret")?.(args) ?? null;
       }
+    );
+    // CURSOR-1. WebFetch and WebSearch read a page from this machine first and hand it to the
+    // backup web service only when the site refuses. That backup runs through a connector the box
+    // already holds the credential for, so the host needs the box's own MCP client. It cannot be a
+    // declared peer of the inference extension: telemetry depends on inference, so the edge would
+    // close a cycle. Handing it over here, once every extension has started, is the same shape as
+    // the two secret sinks below and lands well before any turn can call a tool.
+    optionalMethod(extensions.api("inference"), "setConnectorToolCaller")?.(
+      createBoxConnectorToolCaller(extensions.api("forever-box").box)
     );
     // SECRET-1. The other destination an inline secret card can name: the agent's OWN box shell.
     // Same shape as the connector sink and set from the same place, because the transcript layer
