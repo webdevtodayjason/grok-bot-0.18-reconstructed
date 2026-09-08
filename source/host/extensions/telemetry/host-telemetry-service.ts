@@ -29,7 +29,8 @@ import {
   type HostCrashMarkerStore,
 } from "./host-crash-marker.js";
 import { HostLifecycleProgress } from "./host-lifecycle-progress.js";
-import { initSandHostTracing, type HostTracing } from "./host-tracing.js";
+import { isSandTelemetryEnabled } from "../../../shared/node/backend-mode.js";
+import { initSandHostTracing, NOOP_HOST_TRACING, type HostTracing } from "./host-tracing.js";
 import { createModelExperimentExposureLatch } from "./model-experiment-exposure.js";
 import { createPressureCpuProfiler } from "./pressure-cpu-profiler.js";
 import {
@@ -156,13 +157,24 @@ export class HostTelemetryService {
   private lastForwardedDesktopHealthRevision: number | null = null;
   private lastForwardedDesktopHealthAtMs: number | null = null;
   constructor(private readonly options: HostTelemetryOptions) {
+    /**
+     * CURSOR-1, and an ordering bug this fixes. The OTLP span exporter was constructed HERE, in
+     * the constructor, and SAND_DISABLE_TELEMETRY was only consulted in `start()` further down --
+     * so the disable switch never stopped the tracer being built and registered as the global
+     * provider, and its export failures were swallowed by a try/catch. The exporter posts to
+     * `${backendUrl}/v1/traces` with `x-ghost-mode: false`, which tells the receiving end this
+     * box's traces may be retained. The check now runs before the constructor, and covers backend
+     * mode too: an exporter pointed at a host that refuses us is a retry loop, not telemetry.
+     */
     this.tracing =
       options.tracing ??
-      initSandHostTracing({
-        getToken: options.auth.peekAccessToken.bind(options.auth),
-        backendUrl: getSandInferenceBackendUrl(),
-        serviceVersion: getSandClientVersion(),
-      });
+      (isSandTelemetryEnabled()
+        ? initSandHostTracing({
+          getToken: options.auth.peekAccessToken.bind(options.auth),
+          backendUrl: getSandInferenceBackendUrl(),
+          serviceVersion: getSandClientVersion(),
+        })
+        : NOOP_HOST_TRACING);
     this.logs =
       options.logs ??
       new SandStructuredLogTelemetry({
@@ -215,7 +227,7 @@ export class HostTelemetryService {
       unsubscribeRenewal();
       unsubscribeModelExperiment();
     };
-    const telemetryEnabled = process.env.SAND_DISABLE_TELEMETRY !== "1";
+    const telemetryEnabled = isSandTelemetryEnabled();
     if (telemetryEnabled) {
       this.pressureProfiler = createPressureCpuProfiler({
         overrides: () =>

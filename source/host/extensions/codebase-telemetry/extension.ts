@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { getSandBackendMode } from "../../../shared/node/backend-mode.js";
 import { createCursorChecksum, getSandInferenceBackendUrl } from "../../../shared/node/cursor-backend/cursor-inference.js";
 import { getSandBackendClientHeaders } from "../../../shared/node/sand-client-metadata.js";
 import { createDeadlinePolicy, createRealPollingPolicy, createRealRetryPolicy, realClock } from "../../../internal/scheduling.js";
@@ -25,6 +26,19 @@ export const codebaseTelemetryExtension = defineHostExtension({
     const host = context.host as CodebaseTelemetryHost;
     const deps = context.deps as { auth: Parameters<typeof createCodebaseTelemetryService>[0]["auth"] & { getMachineId(): Promise<string> }; experiments: Parameters<typeof createCodebaseTelemetryService>[0]["experiments"] };
     const logger = createSandCodebaseTelemetryLogger(host.log);
+    /**
+     * CURSOR-1. This extension ships snapshots of the customer's code to
+     * `getSandInferenceBackendUrl()` on a 5 minute upload poll, with a second privacy-mode loader
+     * on its own 5 minute poll, stamped x-cursor-checksum and x-ghost-mode: false. It was off here
+     * only by two accidents: `sand_codebase_telemetry` defaults false, and the image carries no
+     * csnaps binary. Neither is a decision, and both would come back the day somebody added the
+     * binary to the image. The decision is here, above the capability check, and the four gates
+     * are pinned off besides (shared/node/experiments/gate-pins.ts).
+     */
+    if (getSandBackendMode() !== "ours") {
+      logger.info("codebase telemetry is off: this box has no backend of ours configured, so no snapshot of your code is taken or uploaded");
+      return { async flushPendingUploads(): Promise<void> {} };
+    }
     const capability = resolveCsnapsCapability();
     if (!capability.available) {
       logger.warn(

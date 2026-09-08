@@ -2,7 +2,9 @@ import { LogEventCompressionMode, StatsigClient, type StatsigUser } from "@stats
 import { createDeadlinePolicy, createPollingPolicy, DeadlineExceededError, realClock, type PollingPolicy } from "../../../internal/scheduling.js";
 import { errorLogTag } from "../../errors.js";
 import { getConfiguredBackendUrl } from "../cursor-token.js";
+import { getSandBackendMode } from "../backend-mode.js";
 import { DYNAMIC_CONFIGS, EXPERIMENTS, FLAGS, type DynamicConfigName, type ExperimentName, type FeatureFlagName } from "./experiment-config.gen.js";
+import { PRODUCT_GATE_PINS, readGatePin, type GatePinOrigin } from "./gate-pins.js";
 import { SandFeatureFlagOverrideStore, isFlagName } from "./feature-flag-overrides.js";
 import { MutableGateProperty } from "./gate-property.js";
 import { reportExperimentsDiagnostic } from "./experiments-diagnostics.js";
@@ -17,6 +19,15 @@ export function envGateOverride(name: string, env: NodeJS.ProcessEnv = process.e
 export function jitteredSandExperimentPollIntervalMs(isDevBuild: boolean, random = Math.random): number { const base = isDevBuild ? MIN_POLL_INTERVAL_MS : Math.max(BASE_POLL_INTERVAL_MS, MIN_POLL_INTERVAL_MS); return Math.floor(base * (1 + random() * POLL_JITTER_FRACTION)); }
 
 type Trigger = "startup" | "poll" | "auth_change" | "manual";
+/**
+ * CURSOR-1. Where a gate's value actually came from. The boot-time table used to label every row
+ * it could not explain "bundled default", which is how the R750's demo box printed
+ * `"sand_auto_review":{"value":true,"source":"bundled default"}` when the bundled default is false:
+ * the value came from a StatsigClient hydrated off a cached bootstrap file, and the label had no
+ * word for that. Every layer now names itself.
+ */
+export type FeatureGateSource = "local pin" | "override store" | "env" | "statsig" | "bundled default";
+export interface FeatureGateResolution { readonly value: boolean; readonly source: FeatureGateSource; readonly pin?: GatePinOrigin }
 type Snapshot = { isInitialized: boolean; featureGates: Record<string, boolean>; experiments: Record<string, Record<string, unknown>>; dynamicConfigs: Record<string, Record<string, unknown>>; sandModelExperiment?: unknown; sandModelFilterAllowedIds?: string[]; featureFlags?: unknown };
 export class SandExperimentService {
   private client: StatsigClient | null = null; private isInitialized = false; private isRefreshing = false; private pendingRefreshTrigger: Trigger | null = null; private isDisposed = false; private pollHandle: ReturnType<PollingPolicy["start"]> | undefined; private hasStartupTickRun = false; private currentRefresh: Promise<void> | null = null;
@@ -27,21 +38,58 @@ export class SandExperimentService {
   constructor(private readonly options: { getAccessToken(options: { backendUrl: string }): Promise<string>; getMachineId(): Promise<string>; getCacheDir(): string; isDevBuild?: boolean; bootstrapTimeoutMs?: number; pollIntervalMs?: number; env?: NodeJS.ProcessEnv }) {
     this.bootstrapDeadline = createDeadlinePolicy(realClock, { name: "sand-experiments-bootstrap", timeoutMs: options.bootstrapTimeoutMs ?? BOOTSTRAP_TIMEOUT_MS });
     this.refreshPoll = createPollingPolicy(realClock, { name: "sand-experiments-refresh-poll", intervalMs: options.pollIntervalMs ?? jitteredSandExperimentPollIntervalMs(options.isDevBuild === true) });
-    this.overrideStore = new SandFeatureFlagOverrideStore(options.getCacheDir); if (this.canUseFeatureFlagOverrides()) this.overrideStore.hydrateFromDisk(); this.snapshot = this.computeSnapshot();
+    // CURSOR-1. Hydrated unconditionally now. Reads used to be gated on isDevBuild-or-Anysphere,
+    // so an operator's overrides existed on disk and were ignored on the box they were written for.
+    this.overrideStore = new SandFeatureFlagOverrideStore(options.getCacheDir); this.overrideStore.hydrateFromDisk(); this.snapshot = this.computeSnapshot();
   }
-  start(): void { const cached = loadCachedBootstrap(this.options.getCacheDir()); if (cached != null) { try { this.hydrate(cached.config); this.flagsFetchedAtMs = cached.fetchedAtMs; } catch (error) { reportExperimentsDiagnostic({ kind: "bootstrap_cache_hydrate_failed", errorClass: errorLogTag(error) }); } } this.refreshSnapshot(); this.pollHandle = this.refreshPoll.start(() => { const trigger = this.hasStartupTickRun ? "poll" : "startup"; this.hasStartupTickRun = true; return this.refresh(trigger); }); }
-  handleAuthChange(): void { this.authRevision += 1; void this.refresh("auth_change"); }
+  /**
+   * CURSOR-1. Nothing here starts unless the box has a backend of ours.
+   *
+   * `loadCachedBootstrap` is the part that surprised us: it hydrates a StatsigClient from
+   * sand-statsig-bootstrap.json BEFORE any network call, so a box that once had a Cursor login kept
+   * evaluating that rollout offline forever, and two boxes on one bundle disagreed. The poll is the
+   * other part: SAND_PACKAGED is unset on our boxes, so every one of them was on the 30 s cadence,
+   * posting to a backend that answers 403.
+   */
+  start(): void {
+    if (getSandBackendMode() !== "ours") { this.refreshSnapshot(); return; }
+    const cached = loadCachedBootstrap(this.options.getCacheDir()); if (cached != null) { try { this.hydrate(cached.config); this.flagsFetchedAtMs = cached.fetchedAtMs; } catch (error) { reportExperimentsDiagnostic({ kind: "bootstrap_cache_hydrate_failed", errorClass: errorLogTag(error) }); } } this.refreshSnapshot(); this.pollHandle = this.refreshPoll.start(() => { const trigger = this.hasStartupTickRun ? "poll" : "startup"; this.hasStartupTickRun = true; return this.refresh(trigger); });
+  }
+  handleAuthChange(): void { if (getSandBackendMode() !== "ours") return; this.authRevision += 1; void this.refresh("auth_change"); }
   async refreshNow(): Promise<void> { await this.refresh("manual"); }
   subscribe(listener: (snapshot: Snapshot) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   getSnapshot(): Snapshot { return this.snapshot; }
   getFeatureGateProperty(name: FeatureFlagName): MutableGateProperty { let property = this.gateProperties.get(name); if (property == null) { property = new MutableGateProperty(this.checkFeatureGate(name)); this.gateProperties.set(name, property); } return property; }
   pinGateOnAuthenticatedBootstrap(name: FeatureFlagName, pin: (value: boolean) => void): void { if (this.hasAuthenticatedNetworkBootstrap) { pin(this.checkFeatureGate(name)); return; } const unsubscribe = this.subscribe(() => { if (!this.hasAuthenticatedNetworkBootstrap) return; unsubscribe(); pin(this.checkFeatureGate(name)); }); }
-  checkFeatureGate(name: FeatureFlagName): boolean { const local = this.overrideStore.read(name); if (local != null) return local; const environment = this.canUseFeatureFlagOverrides() ? envGateOverride(name, this.options.env) : undefined; if (environment != null) return environment; if (this.client == null) return FLAGS[name]?.default ?? false; try { return this.client.checkGate(name, READ_OPTIONS); } catch { return FLAGS[name]?.default ?? false; } }
+  checkFeatureGate(name: FeatureFlagName): boolean { return this.resolveFeatureGate(name).value; }
+  /**
+   * CURSOR-1. The one place a gate is decided, and it says which layer decided it. The pin file is
+   * read before the override store, before the environment and before any live evaluation, so an
+   * operator's word cannot be overturned by a rollout; the product's own table sits below the
+   * operator layers but above Statsig, so no two boxes on one bundle can differ because of a
+   * remote flag.
+   */
+  resolveFeatureGate(name: FeatureFlagName): FeatureGateResolution {
+    const pinned = readGatePin(name, this.options.getCacheDir());
+    if (pinned !== undefined) return { value: pinned, source: "local pin", pin: "file" };
+    const local = this.overrideStore.read(name);
+    if (local != null) return { value: local, source: "override store" };
+    const environment = this.canUseFeatureFlagOverrides() ? envGateOverride(name, this.options.env) : undefined;
+    if (environment != null) return { value: environment, source: "env" };
+    const product = PRODUCT_GATE_PINS[name];
+    if (product !== undefined) return { value: product, source: "local pin", pin: "host" };
+    if (this.client == null) return { value: FLAGS[name]?.default ?? false, source: "bundled default" };
+    try { return { value: this.client.checkGate(name, READ_OPTIONS), source: "statsig" }; }
+    catch { return { value: FLAGS[name]?.default ?? false, source: "bundled default" }; }
+  }
   hasAuthenticatedStatsigBootstrap(): boolean { return this.hasAuthenticatedNetworkBootstrap; }
   hasLiveStatsigBootstrap(): boolean { return this.hasLiveNetworkBootstrap; }
   getFlagsAgeMs(): number | undefined { return this.flagsFetchedAtMs == null ? undefined : Math.max(0, Date.now() - this.flagsFetchedAtMs); }
   canUseFeatureFlagOverrides(): boolean { return this.options.isDevBuild === true || this.isAnysphereUser; }
-  setIsAnysphereUser(value: boolean): void { if (this.isAnysphereUser === value) return; const before = this.canUseFeatureFlagOverrides(); this.isAnysphereUser = value; const after = this.canUseFeatureFlagOverrides(); if (before === after) return; if (after) this.overrideStore.hydrateFromDisk(); else this.overrideStore.clearAll(); this.refreshSnapshot(); }
+  // CURSOR-1. This used to clear the whole override store when the account lost the capability,
+  // which now that reads are ungated would silently drop an operator's pins mid-session. The
+  // capability still governs WRITES; it no longer decides whether existing overrides are read.
+  setIsAnysphereUser(value: boolean): void { if (this.isAnysphereUser === value) return; const before = this.canUseFeatureFlagOverrides(); this.isAnysphereUser = value; if (before === this.canUseFeatureFlagOverrides()) return; this.refreshSnapshot(); }
   getFeatureFlagOverrides(): Map<FeatureFlagName, boolean> { return this.overrideStore.activeOverrides(); }
   setFeatureFlagOverride(name: string, value: boolean): void { if (this.canUseFeatureFlagOverrides() && this.overrideStore.set(name, value)) this.persistAndBroadcastOverrides(); }
   clearFeatureFlagOverride(name: FeatureFlagName): void { if (this.canUseFeatureFlagOverrides() && this.overrideStore.clear(name)) this.persistAndBroadcastOverrides(); }
@@ -68,7 +116,9 @@ export class SandExperimentService {
   getComputerUseModelOverride(): Record<string, unknown> | undefined { return this.checkFeatureGate("sand_computer_use_playwright") ? this.getDynamicConfig("sand_computer_use_playwright_config") : undefined; }
   getBrowserUseModelOverride(): Record<string, unknown> | undefined { return this.checkFeatureGate("sand_browser_use_subagent") ? this.getDynamicConfig("sand_browser_use_model") : undefined; }
   async dispose(): Promise<void> { this.isDisposed = true; this.pollHandle?.dispose(); this.pollHandle = undefined; this.resolveHydratedUserIdReady?.(false); this.resolveHydratedUserIdReady = null; this.hydratedUserIdReady = null; this.hasAuthenticatedNetworkBootstrap = false; this.listeners.clear(); for (const property of this.gateProperties.values()) property.clearListeners(); const client = this.client; this.client = null; try { await client?.shutdown(); } catch (error) { reportExperimentsDiagnostic({ kind: "shutdown_failed", errorClass: errorLogTag(error) }); } }
-  private refresh(trigger: Trigger): Promise<void> { if (this.isDisposed) return Promise.resolve(); if (this.isRefreshing) { this.pendingRefreshTrigger = trigger; return this.currentRefresh ?? Promise.resolve(); } this.isRefreshing = true; const work = this.runRefresh(trigger); this.currentRefresh = work; return work; }
+  // The last door. `refreshNow()` is a public method and `handleAuthChange` is wired to a renewal
+  // listener, so the guard cannot live only at the call sites.
+  private refresh(trigger: Trigger): Promise<void> { if (this.isDisposed || getSandBackendMode() !== "ours") return Promise.resolve(); if (this.isRefreshing) { this.pendingRefreshTrigger = trigger; return this.currentRefresh ?? Promise.resolve(); } this.isRefreshing = true; const work = this.runRefresh(trigger); this.currentRefresh = work; return work; }
   private async waitOutRateLimit(): Promise<void> { if (this.rateLimitedUntilMs == null) return; const remaining = Math.max(0, this.rateLimitedUntilMs - realClock.now()); if (remaining <= 0) return; await new Promise<void>((resolve) => { realClock.schedule(remaining, resolve); }); }
   private async runRefresh(trigger: Trigger): Promise<void> { try { if (trigger === "auth_change") this.rateLimitedUntilMs = undefined; else { await this.waitOutRateLimit(); if (this.isDisposed) return; } const revision = this.authRevision; const result = await fetchStatsigBootstrap({ backendUrl: getConfiguredBackendUrl(this.options.env), deadline: this.bootstrapDeadline, getAccessToken: this.options.getAccessToken, getMachineId: this.options.getMachineId, env: this.options.env }); if (this.isDisposed) return; if (result.config == null) { if (result.retryAfterMs != null && result.retryAfterMs > 0) this.rateLimitedUntilMs = realClock.now() + result.retryAfterMs; return; } this.rateLimitedUntilMs = undefined; if (revision !== this.authRevision) { reportExperimentsDiagnostic({ kind: "bootstrap_discarded_auth_changed", stage: trigger }); return; } const userId = readStatsigBootstrapUserId(result.config); this.hydrate(result.config); this.flagsFetchedAtMs = Date.now(); this.hasLiveNetworkBootstrap = true; this.hasAuthenticatedNetworkBootstrap = userId != null && userId.length > 0; await saveCachedBootstrap(this.options.getCacheDir(), { config: result.config, userId, fetchedAtMs: this.flagsFetchedAtMs }); this.refreshSnapshot(); reportExperimentsDiagnostic({ kind: "bootstrap_resolved", stage: trigger, authenticated: this.hasAuthenticatedNetworkBootstrap, gatesOnCount: Object.values(this.snapshot.featureGates).filter(Boolean).length }); } catch (error) { reportExperimentsDiagnostic({ kind: "bootstrap_failed", stage: trigger, errorClass: errorLogTag(error) }); } finally { this.isRefreshing = false; const pending = this.pendingRefreshTrigger; this.pendingRefreshTrigger = null; if (pending != null && !this.isDisposed) void this.refresh(pending); } }
   private settleHydratedUserIdReady(): void { if (!this.hasHydratedStatsigUserId()) return; this.resolveHydratedUserIdReady?.(true); this.resolveHydratedUserIdReady = null; this.hydratedUserIdReady = null; }

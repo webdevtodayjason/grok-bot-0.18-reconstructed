@@ -32,6 +32,39 @@ const withControlPlane = {
 
 const rowsOn = (relay) => readLedgerFile(path.join(relay.dir, LEDGER_NAME));
 
+/**
+ * Every ledger row is appended AFTER its own response has gone back on the wire, so reading the
+ * ledger the instant a response lands is a race. Both cases below hit it: they passed when the file
+ * ran alone and failed under `npm test`, where a dozen suites share the machine. These two helpers
+ * wait for the row the case is actually about, up to a bounded time, and then hand back whatever
+ * arrived so the assertion still reports a real regression as a real regression rather than as a
+ * timeout.
+ */
+const settleWait = async (read, done, timeoutMs = 5_000) => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (done(value) || Date.now() >= deadline) return value;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+};
+
+const rowsOnceLocked = (relay) => settleWait(
+  () => rowsOn(relay),
+  (rows) => rows.some((row) => row.outcome === "locked"),
+);
+
+// The admin route's body, once its rows carry what the case is about. The 200 is asserted on every
+// poll, so a route that starts refusing fails here rather than after the wait.
+const waitForRows = (fetchBody, done) => settleWait(
+  async () => {
+    const response = await fetchBody();
+    assert.equal(response.status, 200);
+    return await response.json();
+  },
+  (body) => done(body.rows ?? []),
+);
+
 // Everything the relay wrote into its own directory, as one string. This is the "grep the data
 // directory for the password" check, done in process.
 function everythingWritten(relay) {
@@ -57,9 +90,15 @@ test("only CP_RELAY_TOKEN opens the ledger, and what it opens holds no password"
     await fetch(`${relay.base}/login`, form({ password: TRIED }));
     await fetch(`${relay.base}/login`, form({ password: RELAY_PASSWORD }));
 
-    const response = await read({ headers: { authorization: `Bearer ${RELAY_TOKEN}` } });
-    assert.equal(response.status, 200);
-    const body = await response.json();
+    // Both rows are appended after their /login response has already gone back on the wire, so
+    // reading the route once is a race: this case passed alone and failed under `npm test`, where a
+    // dozen suites share the machine. Wait for the two rows this case is about, and let the
+    // assertions below report what did arrive when the wait runs out.
+    const body = await waitForRows(
+      () => read({ headers: { authorization: `Bearer ${RELAY_TOKEN}` } }),
+      (rows) => rows.some((row) => row.outcome === "refused" && row.door === "instance")
+        && rows.some((row) => row.outcome === "ok"),
+    );
     assert.equal(body.source, "relay");
     assert.match(body.measuredAt, /^\d{4}-\d\d-\d\dT/, "every number carries when it was measured");
 
@@ -90,7 +129,7 @@ test("a lockout is a row of its own, and five wrong passwords are five digests",
 
     // Read off disk rather than through the route: this address is locked out of that door too,
     // which is itself the point -- the control plane reads from its own address on titanbot-net.
-    const rows = await rowsOn(relay);
+    const rows = await rowsOnceLocked(relay);
     const lockRow = rows.find((row) => row.outcome === "locked");
     assert.notEqual(lockRow, undefined, `no locked row in ${JSON.stringify(rows)}`);
     assert.equal(lockRow.ip.length > 0, true);

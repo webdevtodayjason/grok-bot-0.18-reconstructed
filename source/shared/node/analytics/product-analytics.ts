@@ -1,5 +1,6 @@
 import { AnalyticsService } from "../../../packages/proto/generated/aiserver/v1/analytics_connect.js";
 import type { TrackEventsRequest } from "../../../packages/proto/generated/aiserver/v1/analytics_pb.js";
+import { isSandTelemetryEnabled } from "../backend-mode.js";
 import { createSandCursorBackendClient, getSandInferenceBackendUrl } from "../cursor-backend/cursor-inference.js";
 import { getSandClientVersion } from "../sand-client-metadata.js";
 import { getSandVariant } from "../sand-variant.js";
@@ -15,8 +16,14 @@ import {
 const SAND_PRODUCT_ANALYTICS_GATE = "sand_product_analytics";
 const MAX_DEFERRED_EVENTS = 256;
 
+/**
+ * CURSOR-1. Product analytics posts to a third party's AnalyticsService. Opted out whenever
+ * telemetry is off, when analytics is off on its own, or when the box has no backend of ours --
+ * which is every box we ship. `sand_product_analytics` is pinned off besides, but a gate is a
+ * value and this is the wire.
+ */
 function isAnalyticsOptedOut(): boolean {
-  return process.env.SAND_DISABLE_TELEMETRY === "1" || process.env.SAND_DISABLE_ANALYTICS === "1";
+  return !isSandTelemetryEnabled() || process.env.SAND_DISABLE_ANALYTICS === "1";
 }
 
 function isAnalyticsDebug(): boolean {

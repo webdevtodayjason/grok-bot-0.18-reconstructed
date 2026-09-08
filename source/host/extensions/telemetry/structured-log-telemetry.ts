@@ -1,3 +1,4 @@
+import { isSandTelemetryEnabled } from "../../../shared/node/backend-mode.js";
 import { autoReviewApprovalTelemetry } from "./auto-review-approval-telemetry.js";
 import {
   automationFireDroppedTelemetry,
@@ -302,7 +303,10 @@ export class SandStructuredLogTelemetry {
         polling: options.flushPolling,
         submitDeadline: options.submitDeadline,
         holdForIdentity: options.holdFlushForHostBundleIdentity === true,
-        disabled: process.env.SAND_DISABLE_TELEMETRY === "1",
+        // CURSOR-1. The transport's flush poll builds an AnalyticsService client on the Cursor
+        // backend. Disabled now whenever telemetry is off OR the box has no backend of ours, so
+        // the poll never runs against a host that answers 401.
+        disabled: !isSandTelemetryEnabled(),
         ...(options.identityHoldExpiry === undefined
           ? {}
           : { identityHoldExpiry: options.identityHoldExpiry }),
