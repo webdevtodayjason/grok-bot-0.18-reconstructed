@@ -32,9 +32,16 @@
 //               the same password does not, and the merged list carries both ledgers
 //   panels      GET /v1/admin/{overview,sign-ins,clients,boxes,system} answer, and the facts this
 //               container cannot read say "not measured" rather than zero
-//   page        headless Chrome signs in at /admin and all five panels render from the fixture
+//   contract    GET /v1/admin/providers, when this tree has it, answers the shape the page is
+//               written against. When it does not, that is SKIP with the reason, not a fail
+//   page        headless Chrome signs in at /admin and all six panels render from the fixture
+//   providers   the sixth panel, driven through a real browser: a key typed into the masked field
+//               reaches no response body and no node of the DOM, a roll takes the pool from two to
+//               three to two with no key on screen, a plan model with no screenshot route is
+//               refused in a sentence a person reads, a remove with nothing typed is refused, and
+//               each of those writes a ledger row with an actor and a time and no key in it
 //   leak        no response body in the whole run carries the session secret, the admin token, the
-//               relay token or any password
+//               relay token, any password, or either key planted through the providers panel
 //
 // Exit status: 0 every leg passed, 1 a leg failed, 2 nothing was measured (the control plane could
 // not be started, or the browser leg could not resolve playwright).
@@ -69,7 +76,9 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
     "Starts cp/server.mjs on a free port with a throwaway data dir, a fake Coolify and a fake relay",
     "serving a built-in login-attempts fixture, then walks the super admin console: promote and",
     "demote, the admin door against a normal account, the sign-in ledger and its keyed hash, the",
-    "attack rule, the five read routes, and the page itself in headless Chrome. It kills every",
+    "attack rule, the read routes, and the page itself in headless Chrome, including the providers",
+    "panel: a key typed into its masked field, a key rolled with no gap, a plan model refused for",
+    "having nowhere to send a screenshot, and the ledger rows all three of those wrote. It kills every",
     "server and deletes every temp directory on the way out.",
     "",
     "Exit 0 every leg passed, 1 a leg failed, 2 nothing was measured.",
@@ -205,6 +214,248 @@ const fixtureBoxes = [{
   gatewayAnswering: true, gatewayStatus: 200, gatewayMs: 14, gatewayWhy: "",
   measuredAt: new Date().toISOString(),
 }];
+
+// ---- the providers fixture ---------------------------------------------------------------------
+//
+// PROVIDERS-1. The sixth panel is driven by routes that belong to a different item of this wave, so
+// until those land this gate serves them itself, through Playwright's own network layer. The page
+// is untouched by that: it makes the same same-origin fetch it makes in production, its CSP still
+// says connect-src 'self', and nothing about the browser leg is special-cased. What the fixture
+// buys is determinism, which is the whole reason the write legs stay on it even after the real
+// routes exist: an add, a roll and a remove against a live proxy are not things a gate on a laptop
+// can repeat. The contract leg below checks the real route's SHAPE when this tree has it, so a
+// route that drifts from what the page reads is a failure and not a surprise on the R750.
+//
+// The two key values below are planted on purpose and are registered with the leak sweep at the
+// end of the run. They are what makes "no key reaches a response body or a node of the DOM" a
+// measurement rather than a claim.
+
+const PLANTED_KEY_ADD = `sk-planted-add-${randomBytes(10).toString("hex")}`;
+const PLANTED_KEY_ROLL = `sk-planted-roll-${randomBytes(10).toString("hex")}`;
+
+const nowIso = () => new Date().toISOString();
+// The mask a real credential store reports: the shape of the key and its last four characters, and
+// nothing else. Never enough to use, and it is what the panel draws.
+const maskOf = (value) => `sk-****${String(value).slice(-4)}`;
+const shortHash = (value) => createHmac("sha256", "gate").update(String(value)).digest("hex").slice(0, 12);
+
+const providersFixture = {
+  configured: true,
+  why: "",
+  storeModelInDb: true,
+  storeModelInDbWhy: "",
+  measuredAt: nowIso(),
+  providers: [
+    {
+      id: "zai", name: "Z.AI", kind: "openai", baseUrl: "https://api.z.ai/api/coding/paas/v4",
+      reachable: true, reachableWhy: "", checkedAt: nowIso(),
+      catalog: {
+        source: "provider",
+        models: ["glm-5.3", "glm-5.3-flash", "glm-5", "glm-4.7", "glm-4.6", "glm-4.6v"],
+        readAt: nowIso(),
+        why: "",
+      },
+      keys: [
+        { name: "zai-1", label: "Z.AI subscription one", order: 1, mask: "sk-****4f2a", parked: false, usedBy: ["plan-zai", "plan-zai-vision"], spend: { month: 12.41, monthWhy: "", today: 0.62, todayWhy: "" }, lastError: "", lastErrorAt: null },
+        { name: "zai-2", label: "Z.AI subscription two", order: 2, mask: "sk-****9c11", parked: false, usedBy: ["plan-zai", "plan-zai-vision"], spend: { month: 11.08, monthWhy: "", today: 0.55, todayWhy: "" }, lastError: "", lastErrorAt: null },
+      ],
+    },
+    {
+      id: "minimax", name: "MiniMax", kind: "openai", baseUrl: "https://api.minimax.io/v1",
+      reachable: null, reachableWhy: "this provider has not been asked since the last restart", checkedAt: null,
+      catalog: { source: "curated", models: ["MiniMax-M3", "MiniMax-M2"], readAt: nowIso(), why: "MiniMax does not publish a model list, so this is our own" },
+      keys: [
+        { name: "minimax-1", label: "MiniMax subscription", order: 1, mask: "sk-****77ab", parked: false, usedBy: ["plan-minimax"], spend: { month: null, monthWhy: "the proxy reported this key with no numbers on it", today: null, todayWhy: "the proxy reported this key with no numbers on it" }, lastError: "", lastErrorAt: null },
+      ],
+    },
+  ],
+  planModels: [
+    {
+      id: "pm-zai", alias: "plan-zai", provider: "zai", vendorModel: "openai/glm-5.3", keyName: "zai-1",
+      customerName: "GLM-5.3", customerLabel: "GLM-5.3", customerVisible: true,
+      visionFallback: "plan-zai-vision", contextWindow: 200_000, supportsVision: false,
+      plans: ["included"], workspaces: 3, workspacesWhy: "", parked: false,
+    },
+    {
+      id: "pm-zai-vision", alias: "plan-zai-vision", provider: "zai", vendorModel: "openai/glm-5.3-flash", keyName: "zai-1",
+      customerName: "", customerLabel: "", customerVisible: false,
+      visionFallback: "", contextWindow: 128_000, supportsVision: true,
+      plans: ["included"], workspaces: 3, workspacesWhy: "", parked: false,
+    },
+    {
+      id: "pm-minimax", alias: "plan-minimax", provider: "minimax", vendorModel: "openai/MiniMax-M3", keyName: "minimax-1",
+      customerName: "MiniMax-M3", customerLabel: "MiniMax-M3", customerVisible: true,
+      visionFallback: "plan-zai-vision", contextWindow: 200_000, supportsVision: false,
+      plans: ["included"], workspaces: 0, workspacesWhy: "", parked: false,
+    },
+  ],
+  defaults: { newWorkspaceModel: "plan-zai", why: "" },
+  ledger: [],
+};
+
+// Every mutation appends the pool size AFTER it, per provider. A roll that never leaves a gap reads
+// 2, 3, 2 in that order: the new key was in before the old one came out. A delete-then-add would
+// read 2, 1, 2, and there is no way to tell those apart from the answer alone.
+const poolHistory = { zai: [], minimax: [] };
+const recordPool = (id) => {
+  const provider = providersFixture.providers.find((one) => one.id === id);
+  if (provider) (poolHistory[id] ??= []).push(provider.keys.length);
+};
+
+const fixtureLedger = (action, target, detail, outcome = "ok") => {
+  providersFixture.ledger.unshift({
+    at: nowIso(), actor: BOSS_EMAIL, via: "console", ip: "127.0.0.1", action, target, detail, outcome,
+  });
+};
+
+// The bodies the fixture served, so the leak sweep covers them the same way it covers the control
+// plane's. A fixture that leaked a key would otherwise be invisible to the leg that exists to
+// notice exactly that.
+const fixtureBodiesSeen = [];
+
+/**
+ * The whole fixture as one Playwright route handler. Returns [status, body] for a request, or null
+ * when this is not a route the fixture owns.
+ */
+function providersFixtureAnswer(method, pathname, body) {
+  const parts = pathname.split("/").filter((one) => one.length > 0); // v1 admin ...
+  const at = parts.slice(2);
+  const find = (id) => providersFixture.providers.find((one) => one.id === id);
+
+  if (method === "GET" && pathname === "/v1/admin/providers") {
+    providersFixture.measuredAt = nowIso();
+    return [200, providersFixture];
+  }
+  if (method === "POST" && pathname === "/v1/admin/providers") {
+    const id = String(body?.name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    providersFixture.providers.push({
+      id, name: String(body?.name ?? ""), kind: String(body?.kind ?? "openai"), baseUrl: String(body?.baseUrl ?? ""),
+      reachable: null, reachableWhy: "this provider has not been asked yet", checkedAt: null,
+      catalog: { source: "none", models: [], readAt: null, why: "nobody has read this provider's model list yet" },
+      keys: [],
+    });
+    fixtureLedger("added a provider", id, `${body?.kind ?? "openai"} at ${body?.baseUrl ?? ""}`);
+    return [200, { ok: true, message: `${body?.name} was added. Add a key to it before pointing a plan model at it.` }];
+  }
+  // /v1/admin/providers/:id/...
+  if (at[0] === "providers" && at.length >= 2) {
+    const provider = find(at[1]);
+    if (provider == null) return [404, { message: "no provider by that name" }];
+    if (method === "POST" && at[2] === "catalog" && at[3] === "refresh") {
+      provider.catalog.readAt = nowIso();
+      fixtureLedger("read a provider's model list", provider.id, `${provider.catalog.models.length} names, and names are all a model list carries`);
+      return [200, { ok: true, message: `${provider.name} lists ${provider.catalog.models.length} models. That is names and nothing else: the context window and whether it takes a screenshot are yours to set.` }];
+    }
+    if (method === "POST" && at[2] === "keys" && at.length === 3) {
+      const value = String(body?.key ?? "");
+      if (value.length === 0) return [400, { message: "a key was not sent" }];
+      recordPool(provider.id); // the size before, so the history reads as a sequence and not a result
+      provider.keys.push({
+        name: `${provider.id}-${provider.keys.length + 1}`,
+        label: String(body?.label ?? "") || `${provider.name} key ${provider.keys.length + 1}`,
+        order: provider.keys.length + 1,
+        mask: maskOf(value),
+        parked: false, usedBy: [], lastError: "", lastErrorAt: null,
+        spend: { month: 0, monthWhy: "", today: 0, todayWhy: "" },
+      });
+      recordPool(provider.id);
+      fixtureLedger("added a key", `${provider.id}/${provider.keys[provider.keys.length - 1].name}`, `${value.length} characters, ${shortHash(value)}`);
+      return [200, { ok: true, message: `A key was added to ${provider.name} as ${provider.keys[provider.keys.length - 1].name} (${shortHash(value)}). The proxy uses it on the next request.` }];
+    }
+    if (method === "POST" && at[2] === "keys" && at.length >= 5) {
+      const key = provider.keys.find((one) => one.name === decodeURIComponent(at[3]));
+      if (key == null) return [404, { message: "no key by that name" }];
+      if (at[4] === "roll") {
+        const value = String(body?.key ?? "");
+        if (value.length === 0) return [400, { message: "a key was not sent" }];
+        // IN FIRST, THEN OUT. The pool history is what proves there was never a moment with fewer
+        // keys than it started with: it reads two, three, two. A delete-then-add would read two,
+        // one, two, and from the answer alone the two are indistinguishable.
+        recordPool(provider.id);
+        const replacement = { ...key, name: `${key.name}-new`, mask: maskOf(value), order: provider.keys.length + 1 };
+        provider.keys.push(replacement);
+        recordPool(provider.id);
+        provider.keys = provider.keys.filter((one) => one.name !== key.name);
+        replacement.name = key.name;
+        replacement.order = key.order;
+        provider.keys.sort((a, b) => a.order - b.order);
+        recordPool(provider.id);
+        fixtureLedger("rolled a key", `${provider.id}/${key.name}`, `${value.length} characters, ${shortHash(value)}, the old one came out after the new one answered`);
+        return [200, { ok: true, message: `${key.label} was replaced (${shortHash(value)}). The new key went in beside the old one and the old one came out after it answered, so nothing failed in between.` }];
+      }
+      if (at[4] === "park") {
+        key.parked = body?.parked === true;
+        fixtureLedger(key.parked ? "parked a key" : "put a key back in use", `${provider.id}/${key.name}`, "");
+        return [200, { ok: true, message: key.parked ? `${key.label} is parked and takes no more requests.` : `${key.label} is back in use from the next request.` }];
+      }
+      if (at[4] === "remove") {
+        if (String(body?.confirm ?? "") !== provider.name) {
+          fixtureLedger("tried to remove a key", `${provider.id}/${key.name}`, "the confirmation did not match", "refused");
+          return [400, { message: `Type ${provider.name} to confirm. Nothing was removed.` }];
+        }
+        provider.keys = provider.keys.filter((one) => one.name !== key.name);
+        recordPool(provider.id);
+        fixtureLedger("removed a key", `${provider.id}/${key.name}`, "the value is gone and cannot be read back");
+        return [200, { ok: true, message: `${key.label} is gone. The proxy stops using it on the next request.` }];
+      }
+    }
+  }
+  if (method === "POST" && pathname === "/v1/admin/plan-models") {
+    const alias = String(body?.alias ?? "");
+    if (alias.length === 0) return [400, { message: "a plan model needs a routing name" }];
+    if (String(body?.visionFallback ?? "").length === 0 && body?.supportsVision !== true) {
+      return [400, { message: "a plan model needs somewhere for a screenshot to go" }];
+    }
+    const existing = providersFixture.planModels.find((one) => one.alias === alias);
+    const row = {
+      id: existing?.id ?? `pm-${alias}`,
+      alias,
+      provider: String(body?.provider ?? ""),
+      vendorModel: String(body?.vendorModel ?? ""),
+      keyName: String(body?.keyName ?? ""),
+      customerName: String(body?.customerName ?? ""),
+      customerLabel: String(body?.customerLabel ?? ""),
+      customerVisible: body?.customerVisible !== false,
+      visionFallback: String(body?.visionFallback ?? ""),
+      contextWindow: body?.contextWindow ?? null,
+      supportsVision: body?.supportsVision === true,
+      plans: Array.isArray(body?.plans) ? body.plans : [],
+      workspaces: existing?.workspaces ?? 0,
+      workspacesWhy: "",
+      parked: false,
+    };
+    if (existing) Object.assign(existing, row);
+    else providersFixture.planModels.push(row);
+    fixtureLedger(existing ? "changed a plan model" : "added a plan model", alias, `${row.vendorModel} on ${row.keyName}`);
+    return [200, { ok: true, message: `${row.customerName || alias} is saved. The proxy uses it on the next request and a workspace picks it up on its next turn.` }];
+  }
+  if (method === "POST" && at[0] === "plan-models" && at[2] === "grant-all") {
+    const alias = decodeURIComponent(at[1]);
+    fixtureLedger("gave every workspace access to a model", alias, "");
+    return [200, { ok: true, message: `Every workspace can reach ${alias} now. It shows up in their own list within a minute.` }];
+  }
+  if (method === "POST" && at[0] === "plan-models" && at[2] === "push-label") {
+    const alias = decodeURIComponent(at[1]);
+    const row = providersFixture.planModels.find((one) => one.alias === alias);
+    fixtureLedger("pushed a model label to the workspaces running it", alias, String(row?.customerLabel ?? ""));
+    return [200, { ok: true, message: `${row?.workspaces ?? 0} workspaces will call it ${row?.customerLabel ?? ""} from their next turn.` }];
+  }
+  if (method === "POST" && pathname === "/v1/admin/defaults") {
+    providersFixture.defaults.newWorkspaceModel = String(body?.newWorkspaceModel ?? "");
+    fixtureLedger("changed what a new workspace starts on", providersFixture.defaults.newWorkspaceModel, "");
+    return [200, { ok: true, message: `A workspace made from now on starts on ${providersFixture.defaults.newWorkspaceModel}.` }];
+  }
+  if (method === "POST" && at[0] === "clients" && at[2] === "model") {
+    const slug = decodeURIComponent(at[1]);
+    const alias = String(body?.model ?? "");
+    // The banner a person reads names the model the way a person names it. The alias belongs in the
+    // ledger row, where the operator is looking at plumbing on purpose, and nowhere else.
+    const named = providersFixture.planModels.find((one) => one.alias === alias);
+    fixtureLedger("changed one workspace's model", slug, alias);
+    return [200, { ok: true, message: `${slug} runs on ${named?.customerName || alias} from its next turn.` }];
+  }
+  return null;
+}
 
 // ---- the fake Coolify --------------------------------------------------------------------------
 const coolifyCalls = [];
@@ -649,7 +900,18 @@ step("the five panels' data");
   check(clients.status === 200 && client != null, "clients answers", `status ${clients.status}`);
   check(client?.slug === TENANT_SLUG, "with the workspace", String(client?.slug));
   check((client?.users ?? []).length === 2, "and the people who can sign in to it", String((client?.users ?? []).length));
-  check(client?.plan === "none", "and a plan of none, said out loud rather than left blank");
+  // PROXY-1 replaced the `plan: "none"` placeholder with the real allowance object, and this leg
+  // was still asserting the placeholder, so the no-browser run was red on a correct tree. What it
+  // asks now is the thing that actually matters on this card: the allowance is a named object and
+  // never a blank, and with no proxy configured in this fixture every number in it reads as the
+  // reason it could not be measured rather than as a zero.
+  check(client?.spend != null, "and an allowance object on the row rather than a blank");
+  check(client?.spend?.minted === false, "which says this workspace has no plan key at the proxy", String(client?.spend?.minted));
+  check(String(client?.spend?.why ?? "").length > 0, "and says why in plain words", String(client?.spend?.why ?? "").slice(0, 60));
+  check(client?.spend?.thisMonth?.dollars === null && client?.spend?.today?.dollars === null,
+    "with no dollar figure invented for a proxy that was never asked");
+  check(clients.json?.proxy?.configured === false && String(clients.json?.proxy?.why ?? "").length > 0,
+    "and the panel carries the reason the proxy is not configured", String(clients.json?.proxy?.why ?? "").slice(0, 60));
   check((client?.users ?? []).some((row) => row.lastSignInAt != null), "and a last sign-in for somebody who has signed in");
   check(client?.coolify?.reachable === true && client?.coolify?.status === "running", "and what Coolify says right now", String(client?.coolify?.status));
 
@@ -708,6 +970,55 @@ step("the five panels' data");
   check(!again.text.includes(temporary), "and is not readable anywhere afterwards");
 }
 
+// ---- the route contract ------------------------------------------------------------------------
+//
+// PROVIDERS-1. The panel is written against one GET, and the route behind it belongs to a different
+// item of this wave. Two things have to be true and they are measured separately: the page must
+// render whatever the route answers, which is the fixture leg below, and the route must answer the
+// shape the page reads, which is this one. Until the route exists this is a SKIP carrying the
+// reason, because a gate that went red on a route its own item does not own would be red all day
+// for something nobody reading it could act on. The moment cp/admin.mjs serves it this turns into
+// real checks with no edit here, and a route that drifts from the contract is then a failure on
+// this Mac rather than a surprise on the R750.
+step("the providers route contract");
+{
+  const answer = await call("GET", "/v1/admin/providers", { token: bossToken });
+  if (answer.status === 404) {
+    console.log("  SKIP  this tree does not serve GET /v1/admin/providers yet, so the shape was not measured");
+    console.log("        the page leg below drives the panel against the gate's own fixture instead");
+  } else {
+    check(answer.status === 200, "GET /v1/admin/providers answers the super admin", `status ${answer.status}`);
+    const body = answer.json ?? {};
+    check(Array.isArray(body.providers), "it carries a list of providers");
+    check(Array.isArray(body.planModels), "and a list of plan models");
+    check(Array.isArray(body.ledger), "and the ledger the panel draws under What changed");
+    check(body.defaults != null && typeof body.defaults === "object", "and the defaults block");
+    const provider = (body.providers ?? [])[0];
+    if (provider != null) {
+      for (const field of ["id", "name", "kind", "baseUrl", "keys", "catalog"]) {
+        check(field in provider, `a provider carries ${field}`);
+      }
+      const key = (provider.keys ?? [])[0];
+      if (key != null) {
+        for (const field of ["name", "label", "order", "mask", "spend"]) {
+          check(field in key, `a key carries ${field}`);
+        }
+        // The one field that must NOT be there. A route that answered with a key value would put it
+        // on the screen, into a browser's memory and into this run's leak sweep, and nothing
+        // downstream would notice, because the page renders whatever it is handed.
+        check(!/"(key|apiKey|value|secret)"\s*:\s*"[^"]{12,}"/.test(JSON.stringify(key)),
+          "and no key value, which is the whole reason the panel can only ever draw a mask");
+      }
+    }
+    const model = (body.planModels ?? [])[0];
+    if (model != null) {
+      for (const field of ["alias", "provider", "vendorModel", "customerName", "customerLabel", "customerVisible", "visionFallback", "contextWindow"]) {
+        check(field in model, `a plan model carries ${field}`);
+      }
+    }
+  }
+}
+
 // ---- the page --------------------------------------------------------------------------------------
 step("the page");
 if (!WANT_BROWSER) {
@@ -735,12 +1046,60 @@ if (!WANT_BROWSER) {
     die("the page could not be opened");
   }
 
+  // What the clients route says this workspace runs on. null leaves the real answer alone, which is
+  // the state this tree is in and the state the panel has to say "not measured" about.
+  let clientModelInjection = null;
+
   browser = await playwright.chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
   page.on("console", (message) => { if (message.type() === "error") pageErrors.push(message.text()); });
 
+  // THE PROVIDERS FIXTURE, SERVED INTO THE BROWSER. The routes the sixth panel reads and writes
+  // belong to another item of this wave, so this gate answers them itself. Nothing about the page
+  // is special-cased for it: the page makes the same same-origin fetch it makes in production, its
+  // CSP still says connect-src 'self', and every request this handler does not own is passed
+  // straight through to the control plane that is actually running. What the fixture buys is a
+  // write path a gate on a laptop can repeat: an add, a roll and a remove against a live proxy are
+  // not things that can be run twice, and the checks below are exactly the ones that have to be.
+  //
+  // One route is not answered but ADDED TO: GET /v1/admin/clients is the real control plane's, and
+  // `clientModelInjection` merges a model block into the workspace it answers with. That block has
+  // three states the panel draws differently and only one of them is the control plane's today, so
+  // this is the only way to see the other two before the route that carries them exists. Set to
+  // null it changes nothing and the real answer goes through untouched.
+  await page.route("**/v1/admin/**", async (route) => {
+    const request = route.request();
+    let body = null;
+    const posted = request.postData();
+    if (posted) { try { body = JSON.parse(posted); } catch { body = null; } }
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === "GET" && pathname === "/v1/admin/clients" && clientModelInjection != null) {
+      const real = await route.fetch();
+      const answer = await real.json().catch(() => null);
+      if (answer?.clients?.[0]) answer.clients[0].model = clientModelInjection;
+      await route.fulfill({ status: real.status(), contentType: "application/json", body: JSON.stringify(answer) });
+      return;
+    }
+    const answer = providersFixtureAnswer(request.method(), pathname, body);
+    if (answer == null) { await route.continue(); return; }
+    const [status, payload] = answer;
+    const text = JSON.stringify(payload);
+    // Into the same list the control plane's own bodies go into, so the leak sweep at the end of
+    // this run covers what the fixture said as well. A fixture that leaked a key would otherwise be
+    // invisible to the one leg that exists to notice exactly that.
+    fixtureBodiesSeen.push(text);
+    await route.fulfill({ status, contentType: "application/json", body: text });
+  });
+
+  // THE PAGE LEG CANNOT KILL THE RUN. A locator that never resolves throws a TimeoutError, and
+  // until now that threw straight out of the top level: the process died mid leg and the two legs
+  // after this one, the leak sweep and the em dash check, had not run since PROXY-1 renamed a
+  // panel. A gate whose last checks can be skipped by an unrelated failure is not measuring them.
+  // So the whole page leg is one try now: a throw is a FAIL with the message on it, and the run
+  // carries on to the legs that have to happen whatever the browser did.
+  try {
   await page.goto(`${BASE}/admin`, { waitUntil: "domcontentloaded" });
   check(await page.locator("#door").isVisible(), "the console opens on a sign-in form and nothing else");
   check(!(await page.locator("#console").isVisible()), "and the panels are not on screen before anyone signs in");
@@ -762,11 +1121,12 @@ if (!WANT_BROWSER) {
   const live = await page.evaluate(() => window.__adminLive ?? null);
   check(live != null, "the super admin gets in and the page finishes loading", live ? `${live.panels} panels at ${live.at}` : "no readiness flag");
 
-  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-payments"];
+  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-spend", "panel-providers"];
   for (const id of panels) {
     check(await page.locator(`#${id}`).isVisible(), `the ${id.replace("panel-", "")} panel renders`);
   }
-  check((await page.locator(".panel").count()) === 5, "five panels and no more", String(await page.locator(".panel").count()));
+  check((await page.locator(".panel").count()) === 6, "six panels and no more", String(await page.locator(".panel").count()));
+  check(live?.panels === 6, "and the readiness flag says six", String(live?.panels));
 
   const attackChips = await page.locator("#addresses .chip.attack").count();
   check(attackChips === 1, "one Attack chip, on the address that earned it", String(attackChips));
@@ -790,18 +1150,245 @@ if (!WANT_BROWSER) {
 
   const systemText = await page.locator("#system").textContent();
   check(String(systemText).includes("not measured"), "and says 'not measured' for what it cannot read, rather than a zero");
-  const payments = await page.locator("#panel-payments .placeholder").textContent();
-  check(String(payments).trim() === "Not connected yet. Plan and billing appear here when Stripe is wired in.",
-    "the payments panel says exactly what it was asked to say", String(payments).trim().slice(0, 60));
+  // The panel was renamed panel-payments -> panel-spend by PROXY-1 and its placeholder was
+  // rewritten, and this leg still waited on the old id, so it threw an uncaught TimeoutError that
+  // killed the process here: everything below this line, the leak sweep and the em dash check
+  // included, had not run since. The wait is bounded now as well as correct, so a future rename is
+  // a FAIL with the reason on it rather than a dead gate.
+  const spendPlaceholder = await page.locator("#panel-spend .placeholder").textContent({ timeout: 10_000 })
+    .catch((error) => `NOT FOUND: ${String(error?.message ?? error).split("\n")[0]}`);
+  check(String(spendPlaceholder).replace(/\s+/g, " ").trim()
+    === "Taking the money is not connected yet. Plan pricing and invoices appear here when Stripe is wired in.",
+  "the spend panel says exactly what it was asked to say", String(spendPlaceholder).replace(/\s+/g, " ").trim().slice(0, 70));
+
+  // ---- the sixth panel, driven -----------------------------------------------------------------
+  //
+  // PROVIDERS-1. Everything below is done the way Jason does it: a value typed into a field on the
+  // screen and a button clicked. The two key values are planted, they are registered with the leak
+  // sweep at the end of this run, and between them they turn "the panel never renders a key" from
+  // a claim into a measurement.
+  const providerCards = await page.locator("#providers .provider").count();
+  check(providerCards === 2, "the providers panel drew both providers", String(providerCards));
+  const modelCards = await page.locator("#planModels .planModel").count();
+  check(modelCards === 3, "and every plan model", String(modelCards));
+
+  // THE ALIAS IS NOT THE NAME. A plan model that has a customer name shows that name at the top and
+  // the routing alias only on its own captioned line underneath. This is the check that stops the
+  // panel doing to the operator what the Settings card was doing to the customer.
+  const named = await page.locator('#planModels .planModel[data-alias="plan-zai"] .head').textContent();
+  check(!String(named).includes("plan-zai"), "a plan model with a label leads with the label and not the routing name",
+    String(named).replace(/\s+/g, " ").slice(0, 70));
+  const aliasLines = await page.locator("#planModels .aliasLine").count();
+  check(aliasLines === 3, "and each one says what the routing calls it, captioned as that", String(aliasLines));
+  const aliasLine = await page.locator('#planModels .planModel[data-alias="plan-zai"] .aliasLine').textContent();
+  check(String(aliasLine).includes("what the routing calls it") && String(aliasLine).includes("plan-zai"),
+    "on a line an operator can read without guessing what it is", String(aliasLine).replace(/\s+/g, " ").slice(0, 60));
+
+  // THE WARNING HAS TO BE TRUE OR IT IS FURNITURE. plan-zai-vision is the model every other one
+  // falls back TO: it has no fallback of its own and never will. The form already knew that and let
+  // it save; the card did not, and shouted "no screenshot route ... fails on its next turn" at it on
+  // every single load. An operator who learns that this panel cries wolf about the vision model is
+  // an operator who scrolls past the day it is a real text-only model saying the same thing. The
+  // other half of the rule, that a model with nowhere to fall back to is refused, is measured on the
+  // form below rather than on a card, because this API will not save such a model in the first place.
+  const visionSelf = await page.locator('#planModels .planModel[data-alias="plan-zai-vision"]').textContent();
+  check(!String(visionSelf).includes("no screenshot route"),
+    "the model everything falls back to is not warned that it has nowhere to fall back to",
+    String(visionSelf).replace(/\s+/g, " ").slice(0, 80));
+  check(String(visionSelf).includes("takes screenshots itself"),
+    "it says why instead", String(visionSelf).replace(/\s+/g, " ").slice(0, 80));
+  const visionFlagship = await page.locator('#planModels .planModel[data-alias="plan-zai"]').textContent();
+  check(String(visionFlagship).includes("a screenshot falls back to"),
+    "and a model that does fall back somewhere names where");
+
+  // NOTHING DANGEROUS IS OPEN BEFORE IT IS ASKED FOR. This is here because the first build of this
+  // panel drew a roll form and a remove form under every key on load: the code set hidden, and a
+  // class setting `display: flex` beat the browser's own rule for it. Every check in this leg still
+  // passed, because a field that is on screen by mistake is a field Playwright can type into. Only
+  // a person looking at the page caught it, so the fix is a CSS rule and these three checks.
+  const drawnAnyway = await page.locator("#panel-providers [hidden]:visible").count();
+  check(drawnAnyway === 0, "nothing this panel marked hidden is drawn anyway", `${drawnAnyway} were`);
+  check(!(await page.locator("#addProviderForm").isVisible()) && !(await page.locator("#planModelForm").isVisible()),
+    "the add forms are closed until somebody asks for them");
+  await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] .rollKey').click();
+  check(await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] + tr .keyForm:not(.danger)').isVisible(),
+    "and Roll opens the one under that key");
+  await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] .rollKey').click();
+  check(!(await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] + tr .keyForm:not(.danger)').isVisible()),
+    "and closes it again");
+
+  // ADD A KEY, through the masked field, with a real value.
+  const minimax = page.locator('.provider[data-provider="minimax"]');
+  check(await minimax.locator(".addKeyForm .keyValue").getAttribute("type") === "password",
+    "the field a key is typed into is a password field");
+  await minimax.locator(".addKeyForm .keyLabel").fill("MiniMax subscription two");
+  await minimax.locator(".addKeyForm .keyValue").fill(PLANTED_KEY_ADD);
+  await minimax.locator(".addKeyForm button[type=submit]").click();
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("was added") === true, null, { timeout: 15_000 })
+    .catch(() => {});
+  const addBanner = await page.locator("#banner").textContent();
+  check(String(addBanner).includes("A key was added"), "a second key on the same provider goes in from the panel",
+    String(addBanner).replace(/\s+/g, " ").slice(0, 80));
+  check(!String(addBanner).includes(PLANTED_KEY_ADD), "and the banner names the slot and a hash, never the value");
+  const minimaxKeys = await page.locator('.provider[data-provider="minimax"] tbody tr[data-key]').count();
+  check(minimaxKeys === 2, "the pool is two keys deep now", String(minimaxKeys));
+  check(JSON.stringify(poolHistory.minimax) === "[1,2]", "and it went one to two", JSON.stringify(poolHistory.minimax));
+  const addFieldAfter = await page.locator('.provider[data-provider="minimax"] .addKeyForm .keyValue').inputValue();
+  check(addFieldAfter === "", "the field it was typed into is empty afterwards and is never written back into");
+
+  // ROLL A KEY. The one that has to leave no gap, and the pool history is how that is measured
+  // rather than believed: two, then three while both are in, then two again.
+  const zai = page.locator('.provider[data-provider="zai"]');
+  await zai.locator('tr[data-key="zai-1"] .rollKey').click();
+  await zai.locator('tr[data-key="zai-1"] + tr .keyForm:not(.danger) .keyValue').fill(PLANTED_KEY_ROLL);
+  await zai.locator('tr[data-key="zai-1"] + tr .keyForm:not(.danger) button[type=submit]').click();
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("was replaced") === true, null, { timeout: 15_000 })
+    .catch(() => {});
+  const rollBanner = await page.locator("#banner").textContent();
+  check(String(rollBanner).includes("was replaced"), "a key rolls from the panel", String(rollBanner).replace(/\s+/g, " ").slice(0, 80));
+  check(!String(rollBanner).includes(PLANTED_KEY_ROLL), "and that banner carries no fragment of the new key either");
+  check(JSON.stringify(poolHistory.zai) === "[2,3,2]", "the pool went two, three, two, so the new key was in before the old one came out",
+    JSON.stringify(poolHistory.zai));
+  const zaiKeys = await page.locator('.provider[data-provider="zai"] tbody tr[data-key]').count();
+  check(zaiKeys === 2, "and the pool is the size it started at", String(zaiKeys));
+
+  // A PLAN MODEL WITH NOWHERE FOR A SCREENSHOT TO GO IS REFUSED, in a sentence a person reads.
+  // This is PROXY-10 as a form rule: every conversation on this product carries screenshots.
+  await page.locator('#planModels .planModel[data-alias="plan-minimax"] .actions button', { hasText: "Edit" }).first().click();
+  await page.selectOption("#pmVision", "");
+  await page.uncheck("#pmSelfVision");
+  const modelWritesBefore = providersFixture.ledger.filter((row) => String(row.action).includes("plan model")).length;
+  await page.click("#planModelSave");
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("screenshot") === true, null, { timeout: 10_000 })
+    .catch(() => {});
+  const visionBanner = await page.locator("#banner").textContent();
+  check(String(visionBanner).startsWith("Pick where a screenshot falls back to"),
+    "a plan model with no screenshot route is refused in words a person reads", String(visionBanner).replace(/\s+/g, " ").slice(0, 90));
+  check(providersFixture.ledger.filter((row) => String(row.action).includes("plan model")).length === modelWritesBefore,
+    "and nothing was written, so the refusal is a refusal and not a warning");
+  check(!(await page.locator("#planModelForm").isHidden()), "the form stays open on what was typed");
+  // Put the route back and save it properly, so the panel's happy path is measured too.
+  await page.selectOption("#pmVision", "plan-zai-vision");
+  await page.click("#planModelSave");
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("is saved") === true, null, { timeout: 15_000 })
+    .catch(() => {});
+  check(String(await page.locator("#banner").textContent()).includes("is saved"),
+    "with a screenshot route it saves", String(await page.locator("#banner").textContent()).replace(/\s+/g, " ").slice(0, 80));
+
+  // REMOVE, WITHOUT TYPING THE CONFIRMATION. The one destructive control on this page.
+  await zai.locator('tr[data-key="zai-2"] .removeKey').click();
+  await zai.locator('tr[data-key="zai-2"] + tr .keyForm.danger button[type=submit]').click();
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("Nothing was removed") === true, null, { timeout: 10_000 })
+    .catch(() => {});
+  const removeBanner = await page.locator("#banner").textContent();
+  check(String(removeBanner).includes("Nothing was removed"), "a remove with nothing typed in the box is refused",
+    String(removeBanner).replace(/\s+/g, " ").slice(0, 80));
+  check((await page.locator('.provider[data-provider="zai"] tbody tr[data-key]').count()) === 2,
+    "and the pool is untouched");
+
+  // THE MODEL LIST SAYS WHAT IT IS. Names, and nothing else, because that is all a vendor's own
+  // list carries and an operator picking one needs to know the rest is theirs to set.
+  await zai.locator(".actions button", { hasText: "Refresh the model list" }).click();
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("lists") === true, null, { timeout: 15_000 })
+    .catch(() => {});
+  const catalogBanner = await page.locator("#banner").textContent();
+  check(String(catalogBanner).includes("names and nothing else"), "a catalog refresh says it returned names and nothing else",
+    String(catalogBanner).replace(/\s+/g, " ").slice(0, 90));
+
+  // WHAT CHANGED. One row per change, with who and when on it, and no key value in any of them.
+  const ledgerRows = await page.locator("#adminLedger tbody tr").count();
+  check(ledgerRows >= 4, "every change wrote a row under What changed", String(ledgerRows));
+  const ledgerText = await page.locator("#adminLedger").textContent();
+  check(String(ledgerText).includes(BOSS_EMAIL), "each carrying who made it");
+  check(String(ledgerText).includes("added a key") && String(ledgerText).includes("rolled a key"),
+    "and what they did, in the words the operator used");
+  check(!String(ledgerText).includes(PLANTED_KEY_ADD) && !String(ledgerText).includes(PLANTED_KEY_ROLL),
+    "and no key value in any row");
+  const firstRow = await page.locator("#adminLedger tbody tr").first().textContent();
+  check(/ago|just now/.test(String(firstRow)), "with a time on it", String(firstRow).replace(/\s+/g, " ").slice(0, 60));
+
+  // THE WHOLE DOCUMENT, not just what is painted: attributes, hidden nodes, input values and all.
+  // This is the check that would have caught a key written back into a field by a reload.
+  const html = await page.content();
+  check(!html.includes(PLANTED_KEY_ADD), "the key that was added is in no node of the page");
+  check(!html.includes(PLANTED_KEY_ROLL), "and neither is the one it was rolled to");
+  const fieldValues = await page.evaluate(() => Array.from(document.querySelectorAll("input")).map((one) => one.value).join(" "));
+  check(!fieldValues.includes(PLANTED_KEY_ADD) && !fieldValues.includes(PLANTED_KEY_ROLL),
+    "and no field on the page is still holding one");
+
+  // ONE WORKSPACE'S OWN MODEL, on its own row under the customer, in all three of its states. The
+  // control plane in this tree reports none of them yet, so the first is what it actually answers
+  // and the other two are injected into that same answer. The middle one is the one that matters:
+  // a workspace whose model is pinned in its own environment must SAY so, because a picker that
+  // saves a value the box will never read is a control that lies about having worked.
+  const modelRow = page.locator(".client .modelRow");
+  check((await modelRow.count()) === 1, "the customer's row says what that workspace runs on");
+  check(String(await modelRow.textContent()).includes("not measured"),
+    "and says not measured while nothing reports it, rather than inventing a model",
+    String(await modelRow.textContent()).replace(/\s+/g, " ").slice(0, 60));
+
+  clientModelInjection = { current: "plan-zai", label: "GLM-5.3", pinned: true, why: "This workspace's model is fixed in its own environment." };
+  await page.click("#refresh");
+  await page.waitForFunction(() => document.querySelector(".client .modelRow .chip.locked") != null, null, { timeout: 15_000 }).catch(() => {});
+  const pinnedRow = String(await modelRow.textContent());
+  check(pinnedRow.includes("GLM-5.3") && pinnedRow.includes("pinned"), "a pinned workspace says pinned and names what it is on",
+    pinnedRow.replace(/\s+/g, " ").slice(0, 60));
+  check((await modelRow.locator("select").count()) === 0,
+    "and offers no picker, because saving one would record a change the workspace never sees");
+
+  clientModelInjection = {
+    current: "plan-zai", label: "GLM-5.3", pinned: false,
+    choices: [{ alias: "plan-zai", name: "GLM-5.3" }, { alias: "plan-minimax", name: "MiniMax-M3" }],
+  };
+  await page.click("#refresh");
+  await page.waitForFunction(() => document.querySelector(".client .modelRow select") != null, null, { timeout: 15_000 }).catch(() => {});
+  const options = await modelRow.locator("select option").allTextContents();
+  check(options.join(" ") === "GLM-5.3 MiniMax-M3", "a workspace that can be moved gets a picker of what a customer would see",
+    options.join(" "));
+  check(!options.join(" ").includes("plan-"), "and the routing names are not in it");
+  await modelRow.locator("select").selectOption("plan-minimax");
+  await modelRow.locator("button", { hasText: "Save" }).click();
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("from its next turn") === true, null, { timeout: 15_000 }).catch(() => {});
+  const savedBanner = String(await page.locator("#banner").textContent());
+  check(savedBanner.includes("from its next turn"), "and saving it says which turn it lands on", savedBanner.replace(/\s+/g, " ").slice(0, 70));
+  check(savedBanner.includes("MiniMax-M3") && !savedBanner.includes("plan-"),
+    "in the customer's name for the model and not the routing one", savedBanner.replace(/\s+/g, " ").slice(0, 70));
+  check(providersFixture.ledger.some((row) => row.action === "changed one workspace's model" && row.detail === "plan-minimax"),
+    "with a row under What changed naming the workspace and the model");
+  // ON THE SCREEN, not just in the answer. This change is made on the clients panel and recorded on
+  // the providers one, and reloading only the panel that was clicked left the ledger a row short of
+  // the truth until somebody pressed Refresh.
+  check(String(await page.locator("#adminLedger").textContent()).includes("changed one workspace's model"),
+    "and that row is on the screen without anybody pressing Refresh");
+  clientModelInjection = null;
+
+  // The name of the thing under all this appears once, for the operator, and nowhere else.
+  const wholePage = await page.evaluate(() => document.body.innerText);
+  check((wholePage.match(/LiteLLM/g) ?? []).length <= 1, "the proxy's own name appears at most once on this page, in a footnote",
+    String((wholePage.match(/LiteLLM/g) ?? []).length));
+
+  // A picture of the panel, when somebody asked for one. A gate that says a page renders and a
+  // person looking at that page are not the same evidence, and the second one is what a report
+  // carries. Off unless CP_GATE_SHOT_DIR is set, so the default run writes nothing anywhere.
+  if (process.env.CP_GATE_SHOT_DIR) {
+    const shot = path.join(process.env.CP_GATE_SHOT_DIR, "providers-panel.png");
+    await page.locator("#panel-providers").screenshot({ path: shot }).catch(() => {});
+    const whole = path.join(process.env.CP_GATE_SHOT_DIR, "admin-console.png");
+    await page.screenshot({ path: whole, fullPage: true }).catch(() => {});
+    console.log(`  shot   ${shot}`);
+    console.log(`  shot   ${whole}`);
+  }
 
   // No em dashes anywhere on the screen. Jason's rule, and the panel is copy a business owner reads.
   const visible = await page.evaluate(() => document.body.innerText);
   check(!visible.includes("—"), "no em dash on the whole screen");
 
   check(pageErrors.length === 0, "and the page threw nothing", pageErrors.slice(0, 2).join(" | "));
-
-  await browser.close();
-  browser = null;
+  } catch (error) {
+    check(false, "the page leg ran to the end", String(error?.message ?? error).split("\n")[0]);
+  } finally {
+    if (browser) { try { await browser.close(); } catch { /* already gone */ } browser = null; }
+  }
 }
 
 // ---- leak -----------------------------------------------------------------------------------------
@@ -816,8 +1403,14 @@ step("nothing leaked");
     ["the customer's password", USER_PASSWORD],
     ["the password that was tried", TRIED_PASSWORD],
     ["the relay's ledger salt", RELAY_SALT],
+    // PROVIDERS-1. The two values typed into the panel's masked fields in this run. Before this
+    // wave nothing had ever put a secret INTO this console and there was nothing here to plant.
+    ["the key added through the providers panel", PLANTED_KEY_ADD],
+    ["the key rolled to through the providers panel", PLANTED_KEY_ROLL],
   ];
-  const haystack = bodiesSeen.join("\n");
+  // The fixture's own answers go into the same haystack. It is the thing that served the writes,
+  // so a key coming back out of one of them is exactly the failure this leg exists to catch.
+  const haystack = bodiesSeen.concat(fixtureBodiesSeen).join("\n");
   for (const [label, secret] of secrets) {
     check(!haystack.includes(secret), `no response body in this run carried ${label}`);
   }
@@ -830,7 +1423,7 @@ step("nothing leaked");
 // ---- out ------------------------------------------------------------------------------------------
 console.log("");
 if (failures === 0) {
-  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule and the five panels.");
+  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, the six panels, and a provider key that goes in through the screen and comes back out nowhere.");
 } else {
   console.log(`FAIL  ${failures} check${failures === 1 ? "" : "s"} did not hold.`);
   if (childLog.length > 0) {

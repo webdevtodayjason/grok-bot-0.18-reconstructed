@@ -169,6 +169,58 @@ td.num { text-align: right; }
 .client .head strong { font-size: 15px; }
 .client .actions { margin-left: auto; display: flex; gap: 6px; }
 .client .users { margin-top: 10px; }
+/* PROVIDERS-1. The model this one workspace runs on, under the customer's name. */
+.modelRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.modelRow select { padding: 5px 9px; font-size: 13px; }
+.modelRow .clock { flex-basis: 100%; margin-top: 0; }
+
+/* ---- providers, keys and plan models ------------------------------------------------------ */
+/* PROVIDERS-1. Two stacks of cards and one form that is reused for adding and for editing.
+   Nothing here is a new visual language: the same card, the same ghost button, the same chip. */
+
+/* HIDDEN HAS TO WIN. Everything below sets a display, and a class selector setting `display: flex`
+   beats the browser's own `[hidden] { display: none }` at the same specificity, so a form the code
+   had marked hidden was drawn anyway: the first render of this panel put a roll form and a remove
+   form under every single key. The page LOOKED like it worked, and the gate agreed, because
+   Playwright will happily type into a field that was never meant to be on screen. So this rule
+   comes first and it is the one place hidden is decided for this panel. */
+.providers [hidden], .planModels [hidden], #panel-providers form[hidden], #panel-providers label[hidden] { display: none; }
+
+.providers, .planModels { display: grid; gap: 12px; }
+.provider, .planModel {
+  border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px; background: #0C131C;
+}
+.provider .head, .planModel .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.provider .head strong, .planModel .name { font-size: 15px; font-weight: 600; }
+.provider .actions, .planModel .actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* The routing alias. The operator needs it and a customer never sees it, so it is quiet, it is
+   monospaced, and it carries its own caption saying what it is. */
+.alias { font-family: var(--mono); font-size: 12px; color: var(--quiet); }
+.aliasLine { margin-top: 4px; font-size: 12px; color: var(--quiet); }
+
+.clock { display: block; margin-top: 6px; font-size: 12px; color: var(--quiet); white-space: normal; }
+
+/* The forms. `stack` is the panel-level form; `fields` is the grid inside it. Both use the same
+   inputs the door does, so a key field looks like a password field because it is one. */
+form.stack { display: grid; gap: 10px; margin: 10px 0 4px; padding: 13px 15px; background: #0C131C; border: 1px solid var(--line); border-radius: 8px; }
+form.stack .fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin: 0; }
+form.stack label { display: grid; gap: 4px; }
+form.stack label.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--quiet); }
+form.stack label.check input { margin: 0; }
+form.stack input, form.stack select { padding: 7px 10px; font-size: 13px; }
+form.stack p { margin: 0; white-space: normal; }
+form.stack .controls { margin: 0; }
+
+/* The inline forms that live inside one key row: add, roll, and the typed confirmation for remove. */
+.keyForm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.keyForm input { padding: 6px 9px; font-size: 13px; min-width: 210px; }
+.keyForm .why { flex-basis: 100%; font-size: 12px; color: var(--quiet); white-space: normal; }
+.keyForm.danger input { border-color: #57303A; }
+
+.defaults { display: grid; gap: 10px; }
+.defaults .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.defaults select { padding: 6px 10px; font-size: 13px; }
 
 /* ---- system ----------------------------------------------------------------------------- */
 

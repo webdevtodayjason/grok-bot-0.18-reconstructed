@@ -1,9 +1,24 @@
 // cp/admin/admin.js -- the super admin console's whole behaviour. ADMIN-1.
 //
-// No framework and no build step. It fetches five routes, renders five panels, and offers six
-// actions. The session token lives in sessionStorage and nowhere else: it dies with the tab, it is
-// never in a URL, and it is never written into a cookie, so nothing carries it to a route that did
-// not ask for it.
+// No framework and no build step. It fetches six routes, renders six panels, and offers the named
+// actions below. The session token lives in sessionStorage and nowhere else: it dies with the tab,
+// it is never in a URL, and it is never written into a cookie, so nothing carries it to a route
+// that did not ask for it.
+//
+// PROVIDERS-1 ADDED THE ONE THING THIS PAGE HAD NEVER DONE: it takes a secret IN. Every panel
+// before it was read-only plus seven actions that carried no value, and the only secret that ever
+// moved was a temporary password coming back out once in a banner. A provider key is different. It
+// is typed here, it crosses this page, and it must not stop anywhere on the way. So:
+//
+//   a key field is type=password, it is cleared the moment the request comes back, and nothing
+//   ever writes a value back into one. No route on this service answers with a key, and if one
+//   ever did, this page would still not have anywhere to put it.
+//
+//   the banner after a key action names the slot and the short hash the service reports, never a
+//   fragment of the value.
+//
+//   the pass-through headers the proxy holds are NOT rendered here at all. That route answers with
+//   them in the clear, unlike the credential list, so the only safe thing to draw is nothing.
 //
 // Two rules the rendering follows everywhere, and they are the two that make the screen worth
 // having:
@@ -328,6 +343,56 @@
     return nodes;
   }
 
+  /**
+   * One workspace's model, on its own row under the customer.
+   *
+   * Three honest states and no fourth. Not reported at all, which reads as not measured with the
+   * reason on it. Pinned in that workspace's own environment, which reads as pinned and offers no
+   * control, because the control would not do anything. Or settable, which is a picker built from
+   * the plan models a customer can actually be put on, showing the name they would see and never
+   * the routing alias.
+   */
+  function clientModelRow(client) {
+    const row = el("div", "row modelRow");
+    row.appendChild(el("span", "quiet", "Runs on"));
+    const model = client.model;
+    if (model == null) {
+      row.appendChild(measured(null, "this control plane did not report a model for this workspace"));
+      return row;
+    }
+    const label = String(model.label ?? "").length > 0 ? model.label : String(model.current ?? "");
+    if (model.pinned === true) {
+      row.appendChild(el("strong", null, label || "not measured"));
+      row.appendChild(el("span", "chip locked", "pinned"));
+      row.appendChild(el("span", "clock", model.why
+        || "This workspace's model is fixed in its own environment, so changing it here would record a different answer and change nothing the customer sees. Change it where it is pinned, or unpin it first."));
+      return row;
+    }
+    const select = document.createElement("select");
+    select.className = "clientModel";
+    const options = (model.choices ?? []).map((one) => ({ value: one.alias, label: one.name || one.alias }));
+    if (options.length === 0) options.push({ value: String(model.current ?? ""), label: label || "not measured" });
+    fill(select, options, model.current ?? "");
+    row.appendChild(select);
+    const save = el("button", "ghost small", "Save");
+    save.type = "button";
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        const result = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/model`, { model: select.value });
+        banner(String(result.message || `${client.slug} runs on the new model from its next turn.`), true);
+        // Both panels, because this change is made here and recorded down there. Reloading only
+        // this one leaves What changed a row short of the truth until somebody hits Refresh, and a
+        // ledger that is behind the screen it sits on is worse than no ledger.
+        await Promise.all([loadClients(), loadProviders()]);
+      } catch (error) { banner(String(error.message)); }
+      finally { save.disabled = false; }
+    });
+    row.appendChild(save);
+    row.appendChild(el("span", "clock", CLOCK.proxy));
+    return row;
+  }
+
   async function loadClients() {
     const answer = await api("GET", "/v1/admin/clients");
     const host = $("clients");
@@ -368,6 +433,14 @@
       card.appendChild(head);
 
       if (client.lastError) card.appendChild(el("p", "quiet", `last error: ${client.lastError}`));
+
+      // PROVIDERS-1. What this one workspace runs on, and the way to change it.
+      //
+      // A workspace can have its model PINNED in its own environment, and when it is, saving a
+      // different one here changes a record and changes nothing a customer would notice. That case
+      // gets said out loud rather than a select that appears to work: a control that silently does
+      // nothing is worse than no control.
+      card.appendChild(clientModelRow(client));
 
       const wrap = el("div", "scroll users");
       const table = document.createElement("table");
@@ -630,6 +703,572 @@
     }
   }
 
+  // ---- panel 6: providers, keys and plan models ------------------------------------------------
+  //
+  // THE ROUTE CONTRACT THIS PANEL IS WRITTEN AGAINST. PROVIDERS-1, version 1. The whole panel is
+  // one GET, because every part of it is read together and a page that fired six requests would
+  // render in six stages on a bad connection.
+  //
+  //   GET /v1/admin/providers
+  //     { configured, why, storeModelInDb, storeModelInDbWhy, measuredAt,
+  //       providers: [{ id, name, kind, baseUrl, reachable, reachableWhy, checkedAt,
+  //                     catalog: { source: "provider"|"curated"|"none", models: [id], readAt, why },
+  //                     keys: [{ name, label, order, mask, parked, lastError, lastErrorAt,
+  //                              usedBy: [alias],
+  //                              spend: { month, monthWhy, today, todayWhy } }] }],
+  //       planModels: [{ id, alias, provider, vendorModel, keyName, customerName, customerLabel,
+  //                      customerVisible, visionFallback, contextWindow, supportsVision, plans,
+  //                      workspaces, workspacesWhy, parked }],
+  //       defaults: { newWorkspaceModel, why },
+  //       ledger: [{ at, actor, via, ip, action, target, detail, outcome }] }
+  //
+  //   POST /v1/admin/providers                                   { name, kind, baseUrl }
+  //   POST /v1/admin/providers/:id/keys                          { label, key }
+  //   POST /v1/admin/providers/:id/keys/:name/roll               { key }
+  //   POST /v1/admin/providers/:id/keys/:name/park               { parked }
+  //   POST /v1/admin/providers/:id/keys/:name/remove             { confirm }
+  //   POST /v1/admin/providers/:id/catalog/refresh               {}
+  //   POST /v1/admin/plan-models                                 { alias, provider, keyName,
+  //                                                                vendorModel, customerName,
+  //                                                                customerLabel, customerVisible,
+  //                                                                visionFallback, contextWindow,
+  //                                                                plans }
+  //   POST /v1/admin/plan-models/:alias/grant-all                {}
+  //   POST /v1/admin/plan-models/:alias/push-label               {}
+  //   POST /v1/admin/defaults                                    { newWorkspaceModel }
+  //   POST /v1/admin/clients/:slug/model                         { model }
+  //
+  // Every write answers { ok: true, message } and never a key value.
+
+  // The three clocks, in the words the operator reads. There is no fourth, and there is no bare
+  // "takes effect immediately" anywhere on this page: the proxy, a box and a customer's open tab
+  // each pick a change up at a different moment and saying otherwise is how PROXY-10 cost a day.
+  const CLOCK = {
+    proxy: "The proxy uses this on the next request. A workspace picks it up on its next turn.",
+    label: "A workspace picks this up on its next turn, once you push it. A customer's open page shows it the next time that page loads.",
+    added: "A new model reaches a customer's list within a minute, and only once every workspace has been given access to it.",
+    customerPage: "A customer's open page shows this the next time that page loads.",
+  };
+
+  // What the panel holds between renders. Only the answer: no key value is ever kept here, and no
+  // form value survives a reload of the panel.
+  let providersAnswer = { providers: [], planModels: [], defaults: {}, ledger: [] };
+  let editingAlias = "";
+
+  // The one wrapper every action on this panel goes through: disabled in flight, a banner either
+  // way, the panel reloaded, and the button put back in a finally. Exactly the shape the client
+  // and user actions above already use.
+  const act = async (button, run) => {
+    button.disabled = true;
+    try {
+      const result = await run();
+      banner(String(result?.message ?? "Done."), true);
+      await loadProviders();
+    } catch (error) {
+      banner(String(error.message));
+    } finally {
+      button.disabled = false;
+    }
+  };
+
+  const option = (value, label) => {
+    const node = document.createElement("option");
+    node.value = String(value ?? "");
+    node.appendChild(text(label ?? value));
+    return node;
+  };
+  const fill = (select, options, selected) => {
+    clear(select);
+    for (const one of options) select.appendChild(option(one.value, one.label));
+    select.value = String(selected ?? "");
+    if (select.value !== String(selected ?? "") && select.options.length > 0) select.selectedIndex = 0;
+  };
+
+  // A count that might not have been measured. Never a zero standing in for "nobody asked".
+  const countWord = (value, one, many) => (value === 1 ? one : many.replace("{n}", String(value)));
+
+  /** The quiet line under a plan model that names the routing alias, captioned so it reads as one. */
+  const aliasLine = (alias) => {
+    const line = el("div", "aliasLine");
+    line.appendChild(text("what the routing calls it: "));
+    line.appendChild(el("span", "alias", alias));
+    return line;
+  };
+
+  function renderProviderCard(provider) {
+    const card = el("div", "provider");
+    card.dataset.provider = provider.id;
+
+    const head = el("div", "head");
+    head.appendChild(el("strong", null, provider.name || provider.id));
+    head.appendChild(el("span", "quiet", provider.kind || "kind not recorded"));
+    head.appendChild(el("span", "quiet mono", provider.baseUrl || "no address recorded"));
+    if (provider.reachable === true) head.appendChild(el("span", "chip ok", "answering"));
+    else if (provider.reachable === false) {
+      const chip = el("span", "chip refused", "not answering");
+      chip.title = String(provider.reachableWhy || "");
+      head.appendChild(chip);
+    } else {
+      const chip = el("span", "quiet", "not measured");
+      chip.title = String(provider.reachableWhy || "this provider has not been asked yet");
+      head.appendChild(chip);
+    }
+
+    const actions = el("div", "actions");
+    const refresh = el("button", "ghost small", "Refresh the model list");
+    refresh.type = "button";
+    refresh.addEventListener("click", () => act(refresh, () => api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/catalog/refresh`, {})));
+    actions.appendChild(refresh);
+    head.appendChild(actions);
+    card.appendChild(head);
+
+    // WHERE THE MODEL LIST CAME FROM, in those words, because the two are not the same thing and
+    // an operator picking a vendor model needs to know which one they are looking at.
+    const catalog = provider.catalog ?? {};
+    const models = Array.isArray(catalog.models) ? catalog.models : [];
+    const where = catalog.source === "provider"
+      ? `${models.length} model${models.length === 1 ? "" : "s"}, read from the provider ${catalog.readAt ? ago(catalog.readAt) : "at some point"}`
+      : catalog.source === "curated"
+        ? `${models.length} model${models.length === 1 ? "" : "s"}, from our own list, because this provider does not publish one`
+        : "no model list yet";
+    const line = el("p", "quiet", where);
+    if (catalog.why) line.title = String(catalog.why);
+    card.appendChild(line);
+    card.appendChild(el("p", "quiet", "A model list is names and nothing else. The context window, whether it takes a screenshot and what a customer sees it called are set by you on the plan model below."));
+
+    const wrap = el("div", "scroll");
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const label of ["Key", "Order", "Value", "Used by", "This month", "Today", "Last error", ""]) headRow.appendChild(el("th", null, label));
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const body = document.createElement("tbody");
+    const keys = Array.isArray(provider.keys) ? provider.keys : [];
+    if (keys.length === 0) body.appendChild(rowSpanning(8, "This provider has no key yet, so nothing can run on it."));
+    for (const key of keys) {
+      const tr = document.createElement("tr");
+      tr.dataset.key = key.name;
+      const name = document.createElement("td");
+      name.appendChild(el("div", null, key.label || key.name));
+      name.appendChild(el("div", "quiet mono", key.name));
+      if (key.parked) name.appendChild(el("span", "chip locked", "parked"));
+      tr.appendChild(name);
+      tr.appendChild(el("td", "num", key.order ?? "-"));
+      // The mask the service reported and nothing else. This page never sees a key value.
+      tr.appendChild(el("td", "mono", key.mask || "not shown"));
+      tr.appendChild(el("td", null, (key.usedBy ?? []).length === 0 ? "nothing yet" : (key.usedBy ?? []).join(", ")));
+      const month = el("td", "num");
+      month.appendChild(measured(dollars(key.spend?.month), key.spend?.monthWhy));
+      tr.appendChild(month);
+      const today = el("td", "num");
+      today.appendChild(measured(dollars(key.spend?.today), key.spend?.todayWhy));
+      tr.appendChild(today);
+      const error = document.createElement("td");
+      if (String(key.lastError ?? "").length > 0) {
+        const chip = el("span", "chip refused", "an error");
+        chip.title = `${key.lastError}${key.lastErrorAt ? ` (${when(key.lastErrorAt)})` : ""}`;
+        error.appendChild(chip);
+      } else {
+        error.appendChild(el("span", "quiet", "none"));
+      }
+      tr.appendChild(error);
+
+      const cell = document.createElement("td");
+      const roll = el("button", "ghost small", "Roll");
+      roll.type = "button";
+      roll.className = "ghost small rollKey";
+      const park = el("button", "ghost small", key.parked ? "Use again" : "Park");
+      park.type = "button";
+      park.className = "ghost small parkKey";
+      park.addEventListener("click", () => act(park, () => api(
+        "POST",
+        `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.name)}/park`,
+        { parked: !key.parked },
+      )));
+      const remove = el("button", "ghost small", "Remove");
+      remove.type = "button";
+      remove.className = "ghost small removeKey";
+      cell.appendChild(roll);
+      cell.appendChild(park);
+      cell.appendChild(remove);
+      tr.appendChild(cell);
+      body.appendChild(tr);
+
+      // The roll. One row below the key, revealed by the button above it, and the value in it never
+      // comes back: the field is cleared whether the roll worked or not.
+      //
+      // The row itself is hidden until one of the two forms in it is open, or every key on the
+      // screen sits above an empty stripe the height of a row. `showRow` below is what keeps the
+      // two in step, because either form can be the one that is open.
+      const rollRow = document.createElement("tr");
+      rollRow.hidden = true;
+      const rollCell = document.createElement("td");
+      rollCell.colSpan = 8;
+      const rollForm = el("form", "keyForm");
+      rollForm.hidden = true;
+      const rollField = document.createElement("input");
+      rollField.type = "password";
+      rollField.autocomplete = "off";
+      rollField.placeholder = "the new key";
+      rollField.className = "keyValue";
+      const rollGo = el("button", "ghost small", "Replace this key");
+      rollGo.type = "submit";
+      rollForm.appendChild(rollField);
+      rollForm.appendChild(rollGo);
+      rollForm.appendChild(el("span", "why", `The new key goes in beside the old one, the old one comes out once the new one has answered, and nothing in between fails. ${CLOCK.proxy}`));
+      rollForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const value = rollField.value;
+        if (value.length === 0) { banner("Type the new key first. Rolling to an empty key would take every workspace on this provider down."); return; }
+        rollField.value = "";
+        await act(rollGo, () => api(
+          "POST",
+          `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.name)}/roll`,
+          { key: value },
+        ));
+      });
+      rollCell.appendChild(rollForm);
+
+      // The remove. The one destructive control on this page, and the only one anywhere in this
+      // console that takes a typed confirmation: one stray click here takes every workspace on this
+      // provider off the air, and there is no undo because the value is gone.
+      const removeForm = el("form", "keyForm danger");
+      removeForm.hidden = true;
+      const confirmField = document.createElement("input");
+      confirmField.type = "text";
+      confirmField.autocomplete = "off";
+      confirmField.placeholder = provider.name || provider.id;
+      confirmField.className = "confirmField";
+      const removeGo = el("button", "ghost small", "Remove this key for good");
+      removeGo.type = "submit";
+      removeForm.appendChild(confirmField);
+      removeForm.appendChild(removeGo);
+      removeForm.appendChild(el("span", "why", `Type ${provider.name || provider.id} to confirm. The key value is gone after this and cannot be read back from anywhere, so if it is the last key on this provider every workspace using it stops on the next request.`));
+      removeForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const typed = confirmField.value.trim();
+        if (typed !== String(provider.name || provider.id)) {
+          banner(`Type ${provider.name || provider.id} in the box to remove this key. Nothing was removed.`);
+          return;
+        }
+        confirmField.value = "";
+        await act(removeGo, () => api(
+          "POST",
+          `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.name)}/remove`,
+          { confirm: typed },
+        ));
+      });
+      rollCell.appendChild(removeForm);
+      rollRow.appendChild(rollCell);
+      body.appendChild(rollRow);
+
+      // The one place the row and the two forms inside it are kept in step. Opening either closes
+      // the other, because a key row with a roll field and a delete confirmation open at once is
+      // two ways to type into the wrong one.
+      const showRow = () => { rollRow.hidden = rollForm.hidden && removeForm.hidden; };
+      roll.addEventListener("click", () => {
+        rollForm.hidden = !rollForm.hidden;
+        if (!rollForm.hidden) removeForm.hidden = true;
+        showRow();
+        if (!rollForm.hidden) rollField.focus();
+      });
+      remove.addEventListener("click", () => {
+        removeForm.hidden = !removeForm.hidden;
+        if (!removeForm.hidden) rollForm.hidden = true;
+        showRow();
+        if (!removeForm.hidden) confirmField.focus();
+      });
+    }
+    table.appendChild(body);
+    wrap.appendChild(table);
+    card.appendChild(wrap);
+
+    // Add a key to this provider. Same masked field, same rule: it goes out once and is cleared.
+    const addForm = el("form", "keyForm addKeyForm");
+    const addLabel = document.createElement("input");
+    addLabel.type = "text";
+    addLabel.autocomplete = "off";
+    addLabel.placeholder = "what to call this key";
+    addLabel.className = "keyLabel";
+    const addValue = document.createElement("input");
+    addValue.type = "password";
+    addValue.autocomplete = "off";
+    addValue.placeholder = "the key itself";
+    addValue.className = "keyValue";
+    const addGo = el("button", "ghost small", "Add this key");
+    addGo.type = "submit";
+    addForm.appendChild(addLabel);
+    addForm.appendChild(addValue);
+    addForm.appendChild(addGo);
+    addForm.appendChild(el("span", "why", `A second, third or fourth key on the same provider shares the load and covers the others when one is rate limited. ${CLOCK.proxy}`));
+    addForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const value = addValue.value;
+      const label = addLabel.value.trim();
+      if (value.length === 0) { banner("Type the key before adding it."); return; }
+      addValue.value = "";
+      addLabel.value = "";
+      await act(addGo, () => api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys`, { label, key: value }));
+    });
+    card.appendChild(addForm);
+    return card;
+  }
+
+  function renderPlanModelCard(model, answer) {
+    const card = el("div", "planModel");
+    card.dataset.alias = model.alias;
+    const head = el("div", "head");
+    // The customer's name for it is the prominent one. The routing alias is below, captioned.
+    head.appendChild(el("span", "name", model.customerName || model.alias));
+    head.appendChild(el("span", "quiet", model.provider || "no provider"));
+    head.appendChild(el("span", "quiet mono", model.vendorModel || "no vendor model"));
+    if (model.customerVisible === false) head.appendChild(el("span", "chip locked", "not shown to customers"));
+    if (model.parked) head.appendChild(el("span", "chip locked", "parked"));
+
+    const actions = el("div", "actions");
+    const edit = el("button", "ghost small", "Edit");
+    edit.type = "button";
+    edit.addEventListener("click", () => openPlanModelForm(model));
+    actions.appendChild(edit);
+
+    const running = model.workspaces;
+    const known = Number.isFinite(Number(running));
+    const grant = el("button", "ghost small", known
+      ? `Give all ${running} workspace${running === 1 ? "" : "s"} access to this model`
+      : "Give every workspace access to this model");
+    grant.type = "button";
+    grant.title = CLOCK.added;
+    grant.addEventListener("click", () => act(grant, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/grant-all`, {})));
+    actions.appendChild(grant);
+
+    const push = el("button", "ghost small", known
+      ? `Update what ${running} workspace${running === 1 ? "" : "s"} call it`
+      : "Update what their Titan calls it");
+    push.type = "button";
+    push.title = CLOCK.label;
+    push.addEventListener("click", () => act(push, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/push-label`, {})));
+    actions.appendChild(push);
+    head.appendChild(actions);
+    card.appendChild(head);
+
+    card.appendChild(aliasLine(model.alias));
+
+    const facts = [];
+    facts.push(`their Titan says it runs ${model.customerLabel || "nothing, because no label is set"}`);
+    facts.push(model.contextWindow ? `${Number(model.contextWindow).toLocaleString()} tokens of context` : "no context window set");
+    facts.push(`key ${model.keyName || "not set"}`);
+    facts.push((model.plans ?? []).length > 0 ? `part of ${(model.plans ?? []).join(", ")}` : "no plan named");
+    card.appendChild(el("p", "quiet", facts.join(" . ")));
+
+    const visionName = (answer.planModels ?? []).find((one) => one.alias === model.visionFallback);
+    const vision = el("p", "quiet");
+    // Three states, and the middle one is the reason this is not a two-branch check. The model every
+    // other one falls back TO has no fallback of its own and never will, so a bare "is there a
+    // fallback" test shouts an outage warning at the one model that is working exactly as designed,
+    // on every load, forever. The save handler already knows the difference; the screen has to as
+    // well, or the operator learns to read the warning as furniture and misses the real one.
+    if (String(model.visionFallback ?? "").length > 0) {
+      vision.appendChild(text(`a screenshot falls back to ${visionName?.customerName || model.visionFallback}`));
+    } else if (model.supportsVision === true) {
+      vision.appendChild(text("this one takes screenshots itself, so nothing falls back"));
+    } else {
+      vision.appendChild(el("span", "chip off", "no screenshot route"));
+      vision.appendChild(text(" Every Titan conversation carries screenshots, so a workspace on this model fails on its next turn."));
+    }
+    card.appendChild(vision);
+
+    const runs = el("p", "quiet");
+    runs.appendChild(text("running this right now: "));
+    runs.appendChild(measured(known ? running : null, model.workspacesWhy, (value) => countWord(Number(value), "one workspace", "{n} workspaces")));
+    card.appendChild(runs);
+    return card;
+  }
+
+  function openPlanModelForm(model) {
+    const form = $("planModelForm");
+    const answer = providersAnswer;
+    editingAlias = String(model?.alias ?? "");
+    $("planModelWhich").textContent = editingAlias
+      ? `Editing ${model.customerName || editingAlias}. The routing name cannot change: every workspace already on it names it.`
+      : "A new plan model. Pick the routing name carefully, because it is the one field that can never change afterwards.";
+    $("pmCustomerName").value = String(model?.customerName ?? "");
+    $("pmCustomerLabel").value = String(model?.customerLabel ?? "");
+    $("pmContext").value = model?.contextWindow ? String(model.contextWindow) : "";
+    $("pmPlans").value = (model?.plans ?? []).join(", ");
+    $("pmAlias").value = editingAlias;
+    $("pmAlias").readOnly = editingAlias.length > 0;
+    $("pmVisible").checked = model ? model.customerVisible !== false : true;
+    $("pmSelfVision").checked = model ? model.supportsVision === true : false;
+
+    const providers = answer.providers ?? [];
+    fill($("pmProvider"), providers.map((one) => ({ value: one.id, label: one.name || one.id })), model?.provider ?? providers[0]?.id ?? "");
+    const refreshKeys = () => {
+      const chosen = providers.find((one) => one.id === $("pmProvider").value);
+      fill($("pmKey"), (chosen?.keys ?? []).map((one) => ({ value: one.name, label: one.label || one.name })), model?.keyName ?? "");
+      const catalogModels = Array.isArray(chosen?.catalog?.models) ? chosen.catalog.models : [];
+      const options = catalogModels.map((one) => ({ value: one, label: one }));
+      options.push({ value: "__other__", label: "something else, typed in" });
+      const current = String(model?.vendorModel ?? "");
+      const inList = catalogModels.includes(current);
+      fill($("pmVendorModel"), options, inList ? current : (current.length > 0 ? "__other__" : options[0]?.value ?? ""));
+      $("pmVendorOther").value = inList ? "" : current;
+      $("pmVendorOtherWrap").hidden = $("pmVendorModel").value !== "__other__";
+    };
+    refreshKeys();
+    $("pmProvider").onchange = refreshKeys;
+    $("pmVendorModel").onchange = () => { $("pmVendorOtherWrap").hidden = $("pmVendorModel").value !== "__other__"; };
+
+    // The screenshot route. Every plan model the panel knows about is a candidate except this one,
+    // because a model cannot fall back to itself.
+    const visionOptions = [{ value: "", label: "nothing, this model has no screenshot route" }];
+    for (const one of answer.planModels ?? []) {
+      if (one.alias === editingAlias) continue;
+      visionOptions.push({ value: one.alias, label: one.customerName || one.alias });
+    }
+    fill($("pmVision"), visionOptions, model?.visionFallback ?? "");
+
+    form.hidden = false;
+    $("pmCustomerName").focus();
+  }
+
+  $("addPlanModelShow").addEventListener("click", () => openPlanModelForm(null));
+  $("planModelCancel").addEventListener("click", () => { $("planModelForm").hidden = true; editingAlias = ""; });
+  $("addProviderShow").addEventListener("click", () => { $("addProviderForm").hidden = false; $("providerName").focus(); });
+  $("addProviderCancel").addEventListener("click", () => { $("addProviderForm").hidden = true; });
+
+  $("addProviderForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = $("providerName").value.trim();
+    const kind = $("providerKind").value.trim();
+    const baseUrl = $("providerBase").value.trim();
+    if (name.length === 0 || baseUrl.length === 0) { banner("A provider needs a name and an address."); return; }
+    const button = $("addProviderSave");
+    await act(button, () => api("POST", "/v1/admin/providers", { name, kind, baseUrl }));
+    $("providerName").value = "";
+    $("providerKind").value = "";
+    $("providerBase").value = "";
+    $("addProviderForm").hidden = true;
+  });
+
+  $("planModelForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const alias = $("pmAlias").value.trim();
+    const visionFallback = $("pmVision").value;
+    const vendorModel = $("pmVendorModel").value === "__other__" ? $("pmVendorOther").value.trim() : $("pmVendorModel").value;
+    const supportsVision = $("pmSelfVision").checked;
+    // THE ONE FIELD THIS FORM WILL NOT LET THROUGH. A plan model with no screenshot route is a
+    // fleet-wide outage on the next turn, not a missing nicety: every Titan conversation carries
+    // screenshots and the flagship models refuse them. The refusal says that, in those words.
+    //
+    // The one model that legitimately has no route is the one everything else falls back TO, which
+    // is why the box beside it exists. Making the route flatly mandatory would make that model
+    // unsaveable and would push somebody into pointing it at itself, which is worse than the hole
+    // it was meant to close.
+    if (visionFallback.length === 0 && !supportsVision) {
+      banner("Pick where a screenshot falls back to before saving. Every conversation on this product carries screenshots, and a plan model that cannot take one fails the next turn for every workspace on it.");
+      return;
+    }
+    if (alias.length === 0) { banner("A plan model needs a routing name."); return; }
+    if (vendorModel.length === 0) { banner("Pick the vendor model this points at, or type one in."); return; }
+    const body = {
+      alias,
+      provider: $("pmProvider").value,
+      keyName: $("pmKey").value,
+      vendorModel,
+      customerName: $("pmCustomerName").value.trim(),
+      customerLabel: $("pmCustomerLabel").value.trim(),
+      customerVisible: $("pmVisible").checked,
+      supportsVision,
+      visionFallback,
+      contextWindow: $("pmContext").value.trim().length > 0 ? Number($("pmContext").value) : null,
+      plans: $("pmPlans").value.split(",").map((one) => one.trim()).filter((one) => one.length > 0),
+    };
+    const button = $("planModelSave");
+    await act(button, () => api("POST", "/v1/admin/plan-models", body));
+    $("planModelForm").hidden = true;
+    editingAlias = "";
+  });
+
+  function renderDefaults(answer) {
+    const host = $("providerDefaults");
+    clear(host);
+    const row = el("div", "row");
+    row.appendChild(el("span", "quiet", "A new workspace starts on"));
+    const select = document.createElement("select");
+    select.id = "defaultModel";
+    const options = (answer.planModels ?? []).map((one) => ({ value: one.alias, label: one.customerName || one.alias }));
+    if (options.length === 0) options.push({ value: "", label: "nothing, because there is no plan model yet" });
+    fill(select, options, answer.defaults?.newWorkspaceModel ?? "");
+    row.appendChild(select);
+    const save = el("button", "ghost small", "Save");
+    save.type = "button";
+    save.id = "defaultModelSave";
+    save.addEventListener("click", () => act(save, () => api("POST", "/v1/admin/defaults", { newWorkspaceModel: select.value })));
+    row.appendChild(save);
+    host.appendChild(row);
+    const note = el("p", "quiet", `This is what a workspace provisioned from now on runs on. It changes nothing about a workspace that already exists: those are set one at a time on their own row under Clients and users. ${CLOCK.customerPage}`);
+    if (answer.defaults?.why) note.title = String(answer.defaults.why);
+    host.appendChild(note);
+  }
+
+  function renderLedger(rows) {
+    const body = $("adminLedger").querySelector("tbody");
+    clear(body);
+    if (rows.length === 0) {
+      body.appendChild(rowSpanning(7, "Nothing has been changed from this console yet."));
+      return;
+    }
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      const at = el("td", null, ago(row.at));
+      at.title = when(row.at);
+      tr.appendChild(at);
+      tr.appendChild(el("td", "mono", row.actor || "the operator token"));
+      tr.appendChild(row.via === "relay" ? el("td", null, "through the console") : el("td", "mono", row.ip || "not recorded"));
+      tr.appendChild(el("td", null, row.action || "-"));
+      tr.appendChild(el("td", "mono", row.target || "-"));
+      tr.appendChild(el("td", null, row.detail || ""));
+      const outcome = document.createElement("td");
+      outcome.appendChild(el("span", `chip ${row.outcome === "ok" ? "ok" : "refused"}`, row.outcome === "ok" ? "done" : String(row.outcome || "failed")));
+      tr.appendChild(outcome);
+      body.appendChild(tr);
+    }
+  }
+
+  async function loadProviders() {
+    const answer = await api("GET", "/v1/admin/providers");
+    providersAnswer = answer;
+
+    const note = [];
+    if (answer.configured === false) {
+      note.push(`Not measured: ${answer.why}`);
+    } else {
+      note.push(`${(answer.providers ?? []).length} provider${(answer.providers ?? []).length === 1 ? "" : "s"}`);
+      note.push(`${(answer.planModels ?? []).length} plan model${(answer.planModels ?? []).length === 1 ? "" : "s"}`);
+      note.push(`measured ${when(answer.measuredAt)}`);
+      if (answer.storeModelInDb === false) {
+        note.push(`the proxy is still reading its models out of its own file, so a change made here will not stick: ${answer.storeModelInDbWhy || "store_model_in_db is off"}`);
+      }
+    }
+    $("providersNote").textContent = note.join(" - ");
+
+    const host = $("providers");
+    clear(host);
+    const providers = answer.providers ?? [];
+    if (providers.length === 0) host.appendChild(el("p", "empty", "No provider yet. Add one, add a key to it, then point a plan model at that key."));
+    for (const provider of providers) host.appendChild(renderProviderCard(provider));
+
+    const models = $("planModels");
+    clear(models);
+    const planModels = answer.planModels ?? [];
+    if (planModels.length === 0) models.appendChild(el("p", "empty", "No plan model yet, so no workspace has anything to run on."));
+    for (const model of planModels) models.appendChild(renderPlanModelCard(model, answer));
+
+    renderDefaults(answer);
+    renderLedger(answer.ledger ?? []);
+  }
+
   // ---- everything at once ----------------------------------------------------------------------
 
   async function loadAll() {
@@ -638,13 +1277,13 @@
     button.disabled = true;
     // Each panel loads on its own and reports its own failure into its own space, so one route
     // being down does not blank the other four. `allSettled`, deliberately.
-    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend()]);
+    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend(), loadProviders()]);
     button.disabled = false;
     const broken = results.filter((result) => result.status === "rejected" && String(result.reason?.message) !== "unauthorized");
     if (broken.length > 0) banner(`${broken.length} panel${broken.length === 1 ? "" : "s"} could not be loaded: ${broken.map((row) => row.reason.message).join("; ")}`);
     // The one flag a browser gate waits on, rather than a fixed sleep. It says the render finished,
     // not that everything in it succeeded, which is exactly what a gate wants to inspect.
-    window.__adminLive = { panels: 5, at: new Date().toISOString() };
+    window.__adminLive = { panels: 6, at: new Date().toISOString() };
     document.body.setAttribute("data-admin-loaded", "true");
   }
 
