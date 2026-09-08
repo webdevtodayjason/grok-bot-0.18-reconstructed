@@ -69,6 +69,7 @@ import {
   createSandBrowserTools,
   type BrowserDriverDependencies,
 } from "./sand-browser-tools.js";
+import { createSandDirectBrowserTools } from "./sand-browser-direct-tools.js";
 import {
   createFileTransferTools,
   type FileTransferController,
@@ -584,6 +585,8 @@ export interface TurnToolFactories {
   fileTransfer?(): readonly TurnTool[];
   computer?(): TurnTool;
   browser?(): readonly TurnTool[];
+  /** BROWSER-1: the four tools the main agent holds (browser_open/click/type/screenshot). */
+  browserDirect?(): readonly TurnTool[];
   screenshot?(): TurnTool;
   requestBoxHelp?(): TurnTool;
   mcpMeta?(dynamicToolRegistry?: DynamicToolRegistry): readonly TurnTool[];
@@ -1082,6 +1085,29 @@ export function createTurnBrowserToolFactory(
   }) as unknown as TurnTool);
 }
 
+/**
+ * BROWSER-1. The main agent's four browser tools, wrapped exactly like the fifteen: the model gets
+ * the driver's text and, when the driver captured one, that action's single screenshot as an image
+ * part. Same input as the browser factory, because it is the same driver on the same box.
+ */
+export function createTurnDirectBrowserToolFactory(
+  input: TurnBrowserToolFactoryInput,
+): () => readonly TurnTool[] {
+  return () => createSandDirectBrowserTools(input.dependencies).map((tool) => defineCommunicateTool({}, {
+    id: tool.id,
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters as never,
+    execute: async (ctx, args: Record<string, unknown>, deps) => {
+      const output = await tool.execute(ctx as never, args, { toolCallId: deps.toolCallId });
+      if (output.isError === true) throw new Error(output.text);
+      return output.imageB64 != null && output.imageB64.length > 0
+        ? { text: output.text, imageB64: output.imageB64, mimeType: "image/png" }
+        : output.text;
+    },
+  }) as unknown as TurnTool);
+}
+
 export function createTurnFileTransferToolFactory(
   input: TurnFileTransferToolFactoryInput,
 ): () => readonly TurnTool[] {
@@ -1214,7 +1240,7 @@ export function createTurnToolsetFactories(
   input: TurnToolsetFactoryInputs,
 ): Pick<
   TurnToolFactories,
-  "task" | "mcpMeta" | "computer" | "browser" | "screenshot"
+  "task" | "mcpMeta" | "computer" | "browser" | "browserDirect" | "screenshot"
   | "fileTransfer" | "requestBoxHelp" | "generateImage" | "webSearch" | "webFetch" | "externalAwait"
   | "boxAwait" | "externalShell" | "externalRead" | "boxShell" | "boxRead"
   | "sendMessage" | "sendToAgent" | "reaction" | "createAgent" | "updateAgent" | "updateState"
@@ -1236,7 +1262,13 @@ export function createTurnToolsetFactories(
       : { computer: createTurnComputerToolFactory(input.computer) }),
     ...(input.browser === undefined
       ? {}
-      : { browser: createTurnBrowserToolFactory(input.browser) }),
+      : {
+        browser: createTurnBrowserToolFactory(input.browser),
+        // BROWSER-1. Both sets are built from the one browser input the host already supplies per
+        // turn; which of them a runner is offered is decided by the predicates in buildTurnTools,
+        // never by which factory exists.
+        browserDirect: createTurnDirectBrowserToolFactory(input.browser),
+      }),
     ...(input.screenshot === undefined
       ? {}
       : { screenshot: createTurnScreenshotToolFactory(input.screenshot) }),
@@ -1439,6 +1471,12 @@ export interface TurnToolsetHost {
   isDynamicToolsEnabled?(): boolean;
   isMultitaskEnabled?(): boolean;
   isSharedRoomBoxToolsEnabled?(): boolean;
+  /**
+   * BROWSER-1: whether the main agent is offered browser_open / browser_click / browser_type /
+   * browser_screenshot. Default ON -- undefined means offered -- so only an operator writing
+   * SAND_BROWSER_TOOLS=0 into the host settings file takes Titan's browser away.
+   */
+  isBrowserToolsEnabled?(): boolean;
   recordModelToolName?(toolCallId: string, name: string): void;
   toolExecutionTimeoutMs?(toolName: string): number;
   /**
@@ -1681,6 +1719,21 @@ export function buildTurnTools(
     const browser = factories.browser?.();
     if (browser !== undefined) tools.push(...browser);
   }
+  /**
+   * BROWSER-1. The same predicate that gives the main agent Screenshot and request_box_help, plus
+   * the operator's kill switch. A subagent never gets these four: a computerUse subagent has the
+   * Computer tool, a browserUse subagent has the fifteen page-level ones, and both would otherwise
+   * be handed a second, overlapping way to drive the same tab.
+   */
+  if (
+    !host.isSubagentRunner
+    && host.remoteBoxHasDesktop
+    && host.getRemoteBoxAvailable()
+    && host.isBrowserToolsEnabled?.() !== false
+  ) {
+    const browserDirect = factories.browserDirect?.();
+    if (browserDirect !== undefined) tools.push(...browserDirect);
+  }
   if (
     !host.isSubagentRunner
     && host.remoteBoxHasDesktop
@@ -1769,6 +1822,9 @@ export function buildTurnTools(
       sharedRoomBoxTools: host.isSharedRoomRunner
         ? host.isSharedRoomBoxToolsEnabled?.() !== false
         : null,
+      // BROWSER-1. Whether Titan's four browser tools were offered this build, so a trace that
+      // came back without them says which of the two reasons it was: switched off, or no box.
+      browserTools: host.isBrowserToolsEnabled?.() !== false,
       subagentTypes: (turn.subagentConfigs ?? []).map(subagentConfigName),
       count: guarded.length,
       tools: guarded.map(tool => tool.name),

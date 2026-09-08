@@ -6,6 +6,8 @@ import {
   isSandBoxSettingEnabled,
   isSandOverrideTruthy,
   readSandBoxSetting,
+  resolveBrowserToolsEnabled,
+  SAND_BROWSER_TOOLS_SETTING,
   SAND_LOCAL_MACHINE_SETTING,
   SAND_SHARED_ROOM_BOX_TOOLS_SETTING,
   SAND_TOOL_TRACE_SETTING,
@@ -1105,6 +1107,14 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
      * host setting per tool build, which is also the only way the text-only room can be driven on a
      * running box: the gate behind the kill switch cannot bootstrap without a Cursor login.
      */
+    /**
+     * BROWSER-1. Whether Titan holds his own four browser tools this turn. Read per tool build and
+     * per prompt render from the host settings file, so an operator can take the browser away on a
+     * live box without a recreate, and so the offered tools and the prompt paragraph that teaches
+     * them are always the same answer. Default on: there is no Statsig gate behind these tools.
+     */
+    const browserToolsEnabled = (): boolean =>
+      resolveBrowserToolsEnabled(readSandBoxSetting(SAND_BROWSER_TOOLS_SETTING));
     const sharedRoomBoxToolsEnabled = (): boolean =>
       !Boolean(method(experiments, "checkFeatureGate")?.(
         "sand_shared_room_box_tools_kill_switch"
@@ -1569,6 +1579,9 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             ? {}
             : { readVideoAttachmentBytes: readVideoAttachment }),
           isSpotlightEnabled: () => method(experiments, "isSpotlightEnabled")?.() ?? false,
+          // BROWSER-1: the same reader the toolset gate uses, so the prompt never teaches a tool
+          // the model was not handed (and never withholds the paragraph for a tool it was).
+          isBrowserToolsEnabled: browserToolsEnabled,
           uploadAttachmentsIntoBox: async paths =>
             new Map(await method(attachments, "stageIntoBox")?.(session.id, paths) ?? []),
           getRemoteBoxAvailable: () => method(remoteBox, "isAvailable")?.() !== false,
@@ -2559,6 +2572,21 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             ...(persistImageForTurn === undefined
               ? {}
               : { getPersistImage: () => persistImageForTurn }),
+            /**
+             * BROWSER-1. One `browser_navigation` row per page Titan opens, written straight from
+             * the tool call. The polling probe that produces these rows for a subagent only runs
+             * while a box-scoped subagent holds the screen, so without this a main-agent
+             * browser_open left the ledger empty and the page visit had no receipt at all.
+             */
+            recordNavigation: ({ url, title }) => {
+              evidenceRegistry.noteReceipt(session.id, "browser");
+              method(actionAuditor as DynamicApi, "record")?.({
+                agentId: session.id,
+                occurredAtMs: Date.now(),
+                ...evidenceRegistry.receiptFields(session.id),
+                action: { kind: "browserNavigation", url, pageTitle: title },
+              });
+            },
           }) as unknown as TurnBrowserToolFactoryInput["dependencies"],
         };
       },
@@ -3030,6 +3058,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         isDynamicToolsEnabled: () => method(experiments, "isDynamicToolsEnabled")?.() ?? false,
         isMultitaskEnabled: () => method(experiments, "isMultitaskEnabled")?.() ?? false,
         isSharedRoomBoxToolsEnabled: sharedRoomBoxToolsEnabled,
+        isBrowserToolsEnabled: browserToolsEnabled,
         ...(projectedLocalToolPermission === undefined
           ? {}
           : { localToolPermission: projectedLocalToolPermission }),

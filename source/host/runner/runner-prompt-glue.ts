@@ -30,6 +30,8 @@ export interface RunnerPromptGlueOwner {
   readonly agentProfileProvider?: () => AgentProfileIdentity;
   readonly readVideoAttachmentBytes?: (path: string) => Promise<Uint8Array | null>;
   readonly isBrowserUseSubagentEnabled?: () => boolean;
+  /** BROWSER-1: whether the main agent holds the four browser tools this turn. */
+  readonly isBrowserToolsEnabled?: () => boolean;
   readonly isSpotlightEnabled?: () => boolean;
   readonly uploadAttachmentsIntoBox?: (paths: readonly string[]) => Promise<ReadonlyMap<string, string>>;
   readonly getRemoteBoxAvailable?: () => boolean;
@@ -62,6 +64,7 @@ export function createRunnerPromptGlue(owner: RunnerPromptGlueOwner) {
     get agentProfileProvider() { return owner.agentProfileProvider; },
     get readVideoAttachmentBytes() { return owner.readVideoAttachmentBytes; },
     get isBrowserUseSubagentEnabled() { return owner.isBrowserUseSubagentEnabled; },
+    get isBrowserToolsEnabled() { return owner.isBrowserToolsEnabled; },
     get isSpotlightEnabled() { return owner.isSpotlightEnabled; },
     get uploadAttachmentsIntoBox() { return owner.uploadAttachmentsIntoBox; },
     get getRemoteBoxAvailable() { return owner.getRemoteBoxAvailable; },

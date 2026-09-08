@@ -72,6 +72,8 @@ export interface HostBrowserDriverProjectionInput<Context = unknown> {
   readonly getDefaultViewId: () => string;
   readonly executeShell: HostShellExecutor;
   readonly getPersistImage?: BrowserDriverDependencies<Context>["getPersistImage"];
+  /** BROWSER-1: writes one browser_navigation audit row per page the main agent opens. */
+  readonly recordNavigation?: BrowserDriverDependencies<Context>["recordNavigation"];
   readonly autoReview?: SandBrowserAutoReviewOptions;
 }
 
@@ -342,6 +344,7 @@ export function createHostBrowserDriverDependencies<Context = unknown>(
       return { case: result.result.case ?? "" };
     },
     ...(input.getPersistImage === undefined ? {} : { getPersistImage: input.getPersistImage }),
+    ...(input.recordNavigation === undefined ? {} : { recordNavigation: input.recordNavigation }),
     ...(input.autoReview === undefined ? {} : { autoReview: input.autoReview }),
   };
 }
