@@ -207,6 +207,15 @@
         <label>If a screenshot is sent, fall back to<select id="pmVision"></select></label>
         <label>Context window<input id="pmContext" type="number" min="0" step="1000" autocomplete="off"></label>
         <label>Plans that include it<input id="pmPlans" type="text" autocomplete="off" placeholder="included"></label>
+        <!--
+          WHAT A REQUEST COSTS. Without these two every dollar figure on this console is zero for a
+          model that has run hundreds of thousands of tokens, because the proxy bills from these and
+          it carries no built-in price for a Z.AI or Alibaba model id. Leave them blank for a
+          subscription with no per-token price and the pages say "not priced" rather than "$0.00" --
+          the two look identical on a screen and mean opposite things.
+        -->
+        <label>Cost per input token<input id="pmInputCost" type="number" min="0" step="0.0000001" autocomplete="off" placeholder="leave blank if the plan has no per-token price"></label>
+        <label>Cost per output token<input id="pmOutputCost" type="number" min="0" step="0.0000001" autocomplete="off" placeholder="leave blank if the plan has no per-token price"></label>
         <label>Routing name<input id="pmAlias" type="text" autocomplete="off" placeholder="plan-something"></label>
       </div>
       <p class="quiet" id="pmAliasNote">The routing name is what a workspace is pointed at. It is

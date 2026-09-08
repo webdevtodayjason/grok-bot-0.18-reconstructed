@@ -126,8 +126,33 @@ ourselves. Z.AI, MiniMax and Alibaba are already there as presets and need no re
 
 **Add a key.** The provider's card, *Add this key*. The value crosses the browser once and comes
 back out of nothing: no GET answers it, no ledger row holds it, no log line prints it. What you see
-afterwards is the proxy's own mask (`c2****fj`). The first key a provider gets also wires its
-catalog door, so Refresh starts working the moment there is something to refresh with.
+afterwards is the proxy's own mask (`c2****fj`).
+
+**The key is proved with the vendor before it is stored, and a refusal stores nothing.** The same
+request that proves it reads that vendor's model list, so adding a key and refreshing its catalog
+are one hop. If the vendor says no you get the vendor's own sentence back and the pool is exactly as
+it was. This is not decoration: MEASURED on the R750 2026-09-08 with a throwaway slot carrying no
+plan alias and no tenant, patching a credential to a junk value answered 200, the next chat
+completion **401'd 0.3 s later**, and the three after that got **429 "No deployments available,
+cooldown_list=[...]"** for the router's 30 second cooldown. The old value is overwritten in place,
+so there is nothing to undo it with. On a one-key pool an unchecked paste is an outage of that plan
+model that outlasts the operator's next click.
+
+**Where the vendor key is held, and for how long.** For the length of that one request and nowhere
+else. This service stores no vendor key at all; the encrypted copy in the proxy's credentials table
+is the only one. An earlier shape of this read the catalog through a LiteLLM pass-through carrying
+the key as a header, on the reasoning that the key then lived at the proxy rather than here.
+MEASURED on the R750 2026-09-08 that was worse, not better: the header sat in
+`LiteLLM_Config.general_settings` in **cleartext**, with none of the encryption
+`LiteLLM_CredentialsTable` gets under `PROXY_SALT_KEY`, and `GET /config/pass_through_endpoint`
+handed it back **unmasked** to anything holding the master key. Two rows were live, and the MiniMax
+one had been persisted for a catalog that had never been read once. Those doors are removed the
+first time a key is added, rolled or a catalog refreshed on an install that still has them.
+
+**Refresh the model list.** The provider's card, *Refresh the model list*. Paste the key beside it
+and it reads the vendor live; leave it blank and it shows the names last read, with the date, and
+says so. It cannot silently be live, because a page showing yesterday's names as though they were
+today's is how a retired model gets picked.
 
 **Add a second, third or fourth key to the same plan.** Add it to the provider, then edit the plan
 model and select it as well: a plan model is one deployment per key, all sharing the alias, and that
@@ -137,11 +162,15 @@ would leave the alias with nothing to run on is refused. MEASURED on the R750 20
 Z.AI subscriptions on `plan-zai`: 51 requests through `zai-1` and 42 through `zai-2` in the same
 window; and `plan-minimax` moved onto a second slot and back with the pool reported each way.
 
-**Roll a key.** The key's row, *Roll*. The credential is patched in place under a name that does not
-change, so no deployment is touched and the pool never has a hole in it. MEASURED on the R750
-2026-09-08: **0.26 s**, the slot's mask moved to the other key's mask and back, and the load loop
-running one request every 500 ms through that pool recorded **zero failures**. Nothing is written
-into any box and the customer sees nothing: the alias did not change and neither did the label.
+**Roll a key.** The key's row, *Roll*. The candidate is proved against the vendor FIRST and the
+serving slot is only patched once it answers; a refusal changes nothing and says what the vendor
+said. Then the credential is patched in place under a name that does not change, so no deployment is
+touched and the pool never has a hole in it. MEASURED on the R750 2026-09-08: **0.26 s**, the slot's
+mask moved to the other key's mask and back, and the load loop running one request every 500 ms
+through that pool recorded **zero failures**. Nothing is written into any box and the customer sees
+nothing: the alias did not change and neither did the label. **There is no grace period on the old
+value** — the measurement under *Add a key* above is the same swap, and the new value serves the
+very next request.
 
 **Repoint an alias when a vendor retires a model.** Edit the plan model, pick the new vendor model.
 The alias is a contract with every box already pointed at it and can never be renamed; the vendor
@@ -151,6 +180,23 @@ request log: `openai/glm-5.3` at 19:52:06, `openai/glm-4.7` at 19:53:22 after th
 next request, and it is literally the next request because `--num_workers 1` is pinned at
 `deploy/coolify/proxy.compose.yml:78`, so there is no second worker to converge.
 
+**Put a price on it, or the money columns are zeros.** The plan model form takes a cost per input
+token and a cost per output token, and they are written into the deployment's `litellm_params`,
+which is what the proxy bills from. LiteLLM carries no built-in price for a Z.AI or an Alibaba model
+id, so nobody else supplies one: MEASURED on the R750 2026-09-08, 654 Z.AI spend rows all carried
+`spend 0.000000` and a customer at 665,915 tokens read **$0.00**. Leave them blank for a
+subscription that genuinely has no per-token price and every page says **not priced** instead of
+drawing a zero — the two look identical on a screen and mean opposite things. A repoint keeps the
+price, because `POST /model/update` merges.
+
+**Whether a provider is well.** The chip on a provider's card has three states and they are three
+different claims. *not checked* means nothing has checked — this install runs no background health
+sweep on purpose, since a sweep a tenant can trigger spends the operator's money. *not answering*
+means requests on that provider's own deployments really failed inside the window, counted out of
+the proxy's request log, with the vendor's last message on the chip. *answering* means requests went
+through and none failed, or somebody pressed *Check now*, which makes one real request per
+deployment and costs the vendor one each time.
+
 **Three clocks, and the page says which.** The proxy uses a change on the next request and a box
 picks it up on its next turn. A NEW plan model reaches a customer's list within one registry cycle
 *and* only after *Give every workspace access to this model*, which widens every tenant key's model
@@ -158,33 +204,62 @@ scope and writes nothing into a box. A customer's open page updates the next tim
 because nothing pushes to it. There is no fourth clock and there is no bare "takes effect
 immediately" anywhere on that page.
 
-**What the customer's Titan says it runs** lives inside each box, and nothing reports it back, so
-changing the label is one edit and pushing it is a separate, named action carrying the count of
-workspaces. MEASURED on the R750 2026-09-08: before this wave no box carried
-`SAND_OPENAI_COMPATIBLE_MODEL_LABEL` at all, so demo's Titan said `plan-zai`; after
-*Update what their Titan calls it* the demo box carries `GLM-5.3` and says it.
+**What the customer's Titan says it runs** lives inside each box, and the panel now READS it: the
+control plane has `/data/titanbot` mounted, so it opens each tenant's `box-secrets.json` and counts
+the boxes whose label is not the one the plan model carries. A model with boxes behind it wears a
+red *N behind on the name* chip. MEASURED on the R750 2026-09-08: before this wave no box carried
+`SAND_OPENAI_COMPATIBLE_MODEL_LABEL` at all, so every Titan said `plan-zai`; demo was fixed first
+and richard-avery and titanium were still behind when the panel started reporting it.
+
+**Pushing a label writes inside a customer's box, so it always asks first.** The button sends an
+empty request; the route answers with the workspaces it WOULD touch and changes nothing; you tick
+the ones you mean. The boxes actually behind are ticked for you. That ceremony is not caution for
+its own sake: the relay door this drives writes the base url, the key, the model, the endpoint name,
+the served-by line, the context window and the label in one call, so it does not merely correct a
+name — it MOVES that workspace onto this plan model. A customer who was deliberately put on
+something else would otherwise be moved back by one click.
 
 ---
 
 ## 4. This file, and what is left in it
 
 After PROVIDERS-1 `config.yaml` carries `general_settings` (no `allowed_routes`), `router_settings`
-(no `fallbacks`), the TinyFish pass-throughs and `mcp_servers`. Beside it sits `bootstrap.json`,
+(no `fallbacks`), the TinyFish pass-throughs and `mcp_servers`. **A pass-through declared here whose
+`os.environ` name is unset does not reach a customer.** MEASURED on the R750 2026-09-08:
+`PROXY_TINYFISH_KEY_1` is a bare newline, so `/tinyfish/fetch` and `/tinyfish/search` were serving
+with `x-api-key: ""` while every tenant key carried both paths — every box able to call a door that
+could only fail upstream, booking a metered request at `cost_per_request 0.0001` each time. The
+paths stay declared (they are where PROXY-7's key drops in) and the control plane decides: a mint,
+and `node cp/cli.mjs proxy limits --all`, leave a path off a key while its credential header is
+empty, and put it back the moment the key is really set, with no edit here and no restart. Beside it sits `bootstrap.json`,
 which describes the providers, credential slots, plan models and fallback map a **fresh** install
 seeds, by `os.environ` NAME only and holding no value. An install that already has rows is never
 re-seeded. `config.stage1.yaml` is kept beside both: it is the one that still carries `model_list`,
 and it is what a rollback reinstalls.
 
-**Seeding a fresh install**, once, after the proxy is up with `store_model_in_db` on:
+**Seeding a fresh install is TWO PASSES with the panel in between, and that is by design.** The
+credential slots in `bootstrap.json` are named by their `os.environ` NAME, those variables live on
+the **proxy** service, and this command runs inside the **control plane**, which deliberately
+carries no vendor key at all — that is the whole point of the Providers panel. So on a genuinely
+fresh install the first pass registers the providers and stops. Run it, put the keys in, run it
+again:
 
 ```
-docker exec titanbot-cp node cp/cli.mjs proxy seed
+docker exec titanbot-cp node cp/cli.mjs proxy seed        # pass one: providers registered,
+                                                          # every keyless plan model named and skipped
+# then, at api.titanium.bot/admin -> Providers, add each key. It is proved with the vendor as it goes in.
+docker exec titanbot-cp node cp/cli.mjs proxy seed        # pass two: the plan models and the fallback map
 ```
 
-It reads what is really at the proxy first and skips every provider, slot and alias already there,
-so a second run changes nothing and a run after somebody edited a model in the panel does not put
-the file's version back. A slot whose environment name this container does not carry is named and
-skipped, not invented: that key goes in through the panel.
+The first pass ends by naming exactly which plan models it could not create and why. It does not
+fail: it used to, because every deployment create answered 502 for want of a key and the CLI turned
+that into a die, which left a proxy serving no plan model — and a proxy serving no plan model also
+refuses to mint the first tenant ("the proxy serves no plan models, so there is nothing to mint a
+key against"). Until pass two runs, that refusal is what a `tenant add` will say.
+
+Both passes read what is really at the proxy first and skip every provider, slot and alias already
+there, so a third run changes nothing and a run after somebody edited a model in the panel does not
+put the file's version back.
 
 **Rollback.** Anything wrong in the code is `git revert`, sync, and a control-plane rebuild, with no
 proxy restart, because the proxy keeps serving from its database rows. Going back to a

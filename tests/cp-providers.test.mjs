@@ -23,7 +23,7 @@ import { rm } from "node:fs/promises";
 import { openStore } from "../cp/store.mjs";
 import { createAdminApi } from "../cp/admin.mjs";
 import { loadConfig } from "../cp/provision.mjs";
-import { createProxyClient, includedModelRows, servedPlanModels, TB } from "../cp/proxy.mjs";
+import { createProxyClient, includedModelRows, servedPlanModels, tenantRoutesFor, TB } from "../cp/proxy.mjs";
 import { createApp } from "../cp/server.mjs";
 import { makeTempRoot } from "./cp-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
@@ -42,6 +42,17 @@ async function withPanel(run, { models, storeModelInDb } = {}) {
   const proxy = await startFakeProxy({ models: models ?? [], storeModelInDb });
   const keys = new Map();
   const relayCalls = [];
+  // The VENDOR, which this file now talks to directly. The catalog used to be read through a
+  // LiteLLM pass-through carrying the key as a header; that header was measured on the R750 sitting
+  // in the proxy's Postgres in cleartext and coming back unmasked from GET
+  // /config/pass_through_endpoint, so the read moved here and the key is held for one request.
+  // Recorded separately from the relay because "did this write inside a box" and "did this ask the
+  // vendor" are different questions and one list could not answer both.
+  const vendorCalls = [];
+  const readCalls = [];
+  // What each box would say it is running, keyed by slug. Empty means the fixture has no such box.
+  const boxes = new Map();
+  const vendor = { status: 200, models: ["glm-5.3", "glm-5.3-flash", "glm-4.6v"], body: null };
   const config = {
     dataDir: root, tenantRoot: root,
     proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey,
@@ -53,6 +64,26 @@ async function withPanel(run, { models, storeModelInDb } = {}) {
   // does: names, lengths and hash prefixes, never a value.
   const fetchImpl = async (address, init = {}) => {
     const url = new URL(String(address));
+    if (url.hostname !== "relay.invalid") {
+      vendorCalls.push({ url: String(address), method: String(init.method ?? "GET"), authorization: String(init.headers?.authorization ?? "") });
+      if (vendor.status !== 200) {
+        return new Response(JSON.stringify(vendor.body ?? { error: { message: "token expired or incorrect" } }), { status: vendor.status, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ data: vendor.models.map((id) => ({ id, object: "model" })) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    // GET /admin/tenants/<slug>/running is a READ. It is what the panel asks to find out what each
+    // box is really pointed at and what its Titan says it runs, because the control plane cannot
+    // read box-secrets.json itself: measured from inside titanbot-cp on the R750 2026-09-08, that
+    // file answers EACCES for a normal tenant (0600, owned by the box user) and ENOENT for an
+    // adopted one. It is recorded separately from the writes, or a leg asserting "this wrote
+    // nothing into a box" would fail on a read.
+    const running = /^\/admin\/tenants\/([^/]+)\/running$/.exec(url.pathname);
+    if (running) {
+      const slug = decodeURIComponent(running[1]);
+      readCalls.push({ path: url.pathname });
+      return new Response(JSON.stringify({ slug, ...(boxes.get(slug) ?? { read: false, why: "no such box in this fixture", model: "", modelLabel: "" }) }),
+        { status: 200, headers: { "content-type": "application/json" } });
+    }
     relayCalls.push({ path: url.pathname, body: init.body ? JSON.parse(init.body) : {} });
     return new Response(JSON.stringify({
       slug: url.pathname.split("/")[3],
@@ -87,7 +118,7 @@ async function withPanel(run, { models, storeModelInDb } = {}) {
     return response;
   };
 
-  try { await run({ store, proxy, api, call, keys, relayCalls, config, root }); }
+  try { await run({ store, proxy, api, call, keys, relayCalls, readCalls, vendorCalls, vendor, boxes, config, root }); }
   finally { await proxy.close(); store.close(); await rm(root, { recursive: true, force: true }); }
 }
 
@@ -319,38 +350,97 @@ test("parking a key takes it out of service, and unparking rebuilds exactly what
   });
 });
 
-test("the catalog is read from the vendor through the proxy, and says so when it is not", async () => {
-  await withPanel(async ({ call, proxy }) => {
+test("the catalog is read from the vendor directly, holding the key for one request and storing none", async () => {
+  await withPanel(async ({ call, proxy, vendorCalls, vendor }) => {
     await seedZai(call);
-    // The pass-through went on with the first key, carrying the vendor key on its FAR side. This
-    // container holds nothing.
-    const wired = proxy.passThrough().find((row) => row.path === "/catalog/zai");
-    assert.equal(wired.include_subpath, true);
-    assert.equal(String(wired.headers.authorization).includes(PLANTED), true, "the key did not ride on the pass-through");
+    // NO CLEARTEXT DOOR. The first shape of this feature registered /catalog/zai as a LiteLLM
+    // pass-through carrying `authorization: Bearer <the key>`, and that header was measured on the
+    // R750 2026-09-08 sitting UNENCRYPTED in the proxy's Postgres and coming back unmasked from GET
+    // /config/pass_through_endpoint -- a weaker place for a key than the encrypted credentials
+    // table the arrangement existed to avoid using.
+    assert.equal(proxy.passThrough().some((row) => row.path === "/catalog/zai"), false, "a cleartext catalog door was registered");
+    // The read that DID happen went straight to the vendor, carrying the key on that one request.
+    const read = vendorCalls.find((row) => row.url.includes("/models"));
+    assert.equal(read.authorization.includes(PLANTED), true, "the key did not reach the vendor");
+    assert.equal(proxy.passThrough().length, 0);
 
-    const live = await call("POST", "/v1/admin/providers/zai/catalog/refresh", {});
-    assert.equal(live.status, 200);
+    // A refresh with no key in hand is NOT a live read and does not claim to be one: this service
+    // deliberately keeps no copy of a vendor key.
+    const stored = await call("POST", "/v1/admin/providers/zai/catalog/refresh", {});
+    assert.equal(stored.status, 200);
+    assert.equal(stored.body.live, false);
+    assert.deepEqual(stored.body.models, ["glm-5.3", "glm-5.3-flash", "glm-4.6v"], "the names read at add time were thrown away");
+    assert.match(stored.body.why, /paste the key/);
+
+    // With the key pasted it is live again, and the answer says which of the two it is.
+    vendor.models = ["glm-5.3", "glm-6"];
+    const live = await call("POST", "/v1/admin/providers/zai/catalog/refresh", { apiKey: PLANTED });
     assert.equal(live.body.live, true);
-    assert.deepEqual(live.body.models, ["glm-5.3", "glm-5.3-flash", "glm-4.6v"]);
+    assert.deepEqual(live.body.models, ["glm-5.3", "glm-6"]);
     // NAMES ONLY, and the page says it in these words, because a refresh cannot infer either fact.
     assert.match(live.body.note, /context window and whether a model takes an image are things you set/);
 
-    // MiniMax has no key here, so no pass-through, so the curated list -- and the answer says which
-    // of the two it is rather than showing yesterday's names as though they were today's.
+    // MiniMax has no key here, so the curated list -- and the answer says which of the two it is
+    // rather than showing yesterday's names as though they were today's.
     const curated = await call("POST", "/v1/admin/providers/minimax/catalog/refresh", {});
     assert.equal(curated.status, 200);
     assert.equal(curated.body.live, false);
     assert.deepEqual(curated.body.models, ["MiniMax-M3"]);
-    assert.match(curated.body.why, /could not be read|has run/);
 
     // A REFRESH THAT FAILS DOES NOT DELETE A LIST THAT WAS ONCE REAL. Falling back to the curated
     // six when the vendor is briefly unreachable would look on the page exactly like the vendor
     // having retired the names it just gave.
-    proxy.failOnce("GET /catalog/zai/models", 503, "the vendor is not answering");
-    const stale = await call("POST", "/v1/admin/providers/zai/catalog/refresh", {});
+    vendor.status = 503;
+    const stale = await call("POST", "/v1/admin/providers/zai/catalog/refresh", { apiKey: PLANTED });
     assert.equal(stale.body.live, false);
-    assert.deepEqual(stale.body.models, ["glm-5.3", "glm-5.3-flash", "glm-4.6v"], "a failed refresh threw away the vendor's own list");
+    assert.deepEqual(stale.body.models, ["glm-5.3", "glm-6"], "a failed refresh threw away the vendor's own list");
     assert.match(stale.body.why, /could not be read just now/);
+  });
+});
+
+test("a key is proved with the vendor before it is stored, and before a serving slot is patched", async () => {
+  await withPanel(async ({ call, proxy, vendor, vendorCalls }) => {
+    const slot = await seedZai(call);
+    const before = proxy.credentials().find((row) => row.credential_name === slot).credential_values.api_key;
+
+    // ADD. A key the vendor refuses never reaches the proxy at all.
+    vendor.status = 401;
+    vendor.body = { error: { message: "token expired or incorrect" } };
+    const refusedAdd = await call("POST", "/v1/admin/providers/zai/keys", { apiKey: "sk-zai-this-one-is-wrong-0000000000" });
+    assert.equal(refusedAdd.status, 409, JSON.stringify(refusedAdd.body));
+    assert.match(refusedAdd.body.message, /token expired or incorrect/);
+    assert.equal(proxy.credentials().some((row) => row.credential_name === "zai-2"), false, "a refused key was stored anyway");
+
+    // ROLL. MEASURED ON THE R750 2026-09-08 with a throwaway slot: patching a credential to a junk
+    // value 401s on the very next request 0.3 s later and then puts the deployment in a 30 s router
+    // cooldown, with the old value overwritten in place and nothing to undo it with. So the
+    // candidate is proved first and a refusal leaves the pool exactly as it was.
+    const refusedRoll = await call("POST", "/v1/admin/providers/zai/keys/zai-1/roll", { apiKey: "sk-zai-also-wrong-1111111111111111" });
+    assert.equal(refusedRoll.status, 409, JSON.stringify(refusedRoll.body));
+    assert.match(refusedRoll.body.message, /was NOT changed/);
+    assert.equal(proxy.credentials().find((row) => row.credential_name === slot).credential_values.api_key, before, "a refused roll changed the serving key");
+
+    // And a good one goes through, checked, with the vendor asked before the swap.
+    vendor.status = 200;
+    const calls = vendorCalls.length;
+    const rolled = await call("POST", "/v1/admin/providers/zai/keys/zai-1/roll", { apiKey: "sk-zai-2222222222222222222222222222" });
+    assert.equal(rolled.status, 200, JSON.stringify(rolled.body));
+    assert.equal(vendorCalls.length > calls, true, "the roll did not ask the vendor");
+    assert.equal(rolled.body.provable, true);
+    // The old copy promised a grace period the measurement says does not exist.
+    assert.match(rolled.body.message, /no grace period/);
+    assert.equal(proxy.credentials().find((row) => row.credential_name === slot).credential_values.api_key.includes("2222"), true);
+  });
+});
+
+test("a catalog door left behind by an older install is taken down", async () => {
+  await withPanel(async ({ call, proxy }) => {
+    // What the R750 was carrying: /catalog/zai with a 56 character authorization header, and
+    // /catalog/minimax with a 132 character one for a catalog that had never once been read.
+    await proxy.addPassThroughRow({ path: "/catalog/zai", target: "https://api.z.ai", headers: { authorization: `Bearer ${PLANTED}` } });
+    assert.equal(proxy.passThrough().length, 1);
+    await seedZai(call);
+    assert.equal(proxy.passThrough().some((row) => row.path === "/catalog/zai"), false, "the cleartext door survived");
   });
 });
 
@@ -657,4 +747,238 @@ test("a proxy that is down leaves the map alone and says why", async () => {
     assert.equal(answer.ok, false);
     assert.match(answer.why, /could not be asked what it serves/);
   }, { models: zaiPair() });
+});
+
+/**
+ * THE BLOCKER, in the shape it was really in on the R750.
+ *
+ * The spend log records the VENDOR model, so a panel that decided "which workspaces run this alias"
+ * by matching the alias against that string saw almost nothing: 596 rows said openai/glm-5.3 and
+ * three said plan-zai. On 2026-09-08 the live panel therefore reported plan-zai as run by demo
+ * alone while richard-avery -- a paying customer -- and titanium were both on it, and that list is
+ * the INPUT TO THE REMOVE GUARD. Removing the alias would have been allowed and would have failed
+ * every turn in two live boxes.
+ */
+test("which workspaces run a model is joined on the deployment id, not on the vendor model name", async () => {
+  await withPanel(async ({ call, proxy, store, keys }) => {
+    for (const slug of ["demo", "richard-avery"]) store.createTenant({ slug, name: slug, status: "running" });
+    await seedZai(call);
+    const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+    for (const slug of ["demo", "richard-avery"]) {
+      const minted = await client.mintKey({ slug, models: ["plan-zai"] });
+      keys.set(slug, { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] });
+    }
+    // What the log really looks like: the vendor model in `model`, the deployment in `model_id`.
+    proxy.chargeAlias("titanbot-demo", 0, 3, "plan-zai", { recordedModel: "openai/glm-5.3" });
+    proxy.chargeAlias("titanbot-richard-avery", 0, 5, "plan-zai", { recordedModel: "openai/glm-5.3" });
+
+    const answer = await call("GET", "/v1/admin/providers");
+    const plan = answer.body.planModels.find((row) => row.alias === "plan-zai");
+    assert.deepEqual(plan.workspaceSlugs.sort(), ["demo", "richard-avery"], "a workspace running this model was invisible to the panel");
+    assert.equal(plan.workspaces, 2);
+
+    // And the guard that consumes it refuses, naming the customer.
+    const removed = await call("POST", "/v1/admin/plan-models/plan-zai/remove", { confirm: "plan-zai" });
+    assert.equal(removed.status, 409, JSON.stringify(removed.body));
+    assert.deepEqual(removed.body.workspaces.sort(), ["demo", "richard-avery"]);
+    assert.equal(proxy.deployments().some((row) => row.model_name === "plan-zai"), true, "the model was deleted while customers were on it");
+  });
+});
+
+/**
+ * The label a customer's Titan says lives in that box's own file, and the panel used to report it as
+ * `labelBehind: null` for every model forever. On the R750 that hid a live defect for two days:
+ * richard-avery's box-secrets.json carried SAND_OPENAI_COMPATIBLE_MODEL plan-zai and NO
+ * SAND_OPENAI_COMPATIBLE_MODEL_LABEL, so his Titan answered with the routing alias while his own
+ * console said GLM-5.3.
+ */
+test("a box that is behind on its label is counted, out of the box's own file", async () => {
+  await withPanel(async ({ call, store, boxes, relayCalls }) => {
+    for (const slug of ["demo", "richard-avery"]) store.createTenant({ slug, name: slug, status: "running" });
+    // Exactly the live state on the R750 2026-09-08: both boxes point at plan-zai, demo was pushed
+    // the label and richard-avery was not, so his Titan answered with the routing alias while his
+    // own console said GLM-5.3.
+    boxes.set("demo", { read: true, why: "", model: "plan-zai", modelLabel: "GLM-5.3" });
+    boxes.set("richard-avery", { read: true, why: "", model: "plan-zai", modelLabel: "" });
+    await seedZai(call);
+
+    const answer = await call("GET", "/v1/admin/providers");
+    const plan = answer.body.planModels.find((row) => row.alias === "plan-zai");
+    assert.deepEqual(plan.runningHere.sort(), ["demo", "richard-avery"]);
+    assert.equal(plan.labelBehind, 1, "a box with no label was counted as up to date");
+    assert.deepEqual(plan.labelBehindSlugs, ["richard-avery"]);
+    assert.match(plan.labelBehindWhy, /richard-avery/);
+
+    // And that box is a push-label candidate even though it has never sent a request.
+    const refused = await call("POST", "/v1/admin/plan-models/plan-zai/push-label", {});
+    assert.equal(refused.status, 409);
+    assert.deepEqual(refused.body.candidates.sort(), ["demo", "richard-avery"]);
+    assert.equal(relayCalls.length, 0, "reading what a box runs wrote inside one");
+  });
+});
+
+/**
+ * A box that could not be read is UNKNOWN, not up to date. The two send an operator to different
+ * places, and reporting the first as the second is how a panel shows a green count over a box
+ * nobody checked -- which is the failure mode the whole of this file's header is about.
+ */
+test("a box the relay cannot read is named, not counted as fine", async () => {
+  await withPanel(async ({ call, store, boxes }) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    boxes.set("demo", { read: false, why: "this relay has no docker under it, so it cannot read inside a box", model: "", modelLabel: "" });
+    await seedZai(call);
+    const answer = await call("GET", "/v1/admin/providers");
+    const plan = answer.body.planModels.find((row) => row.alias === "plan-zai");
+    assert.deepEqual(plan.runningHere, [], "a box that could not be read was counted as running this model");
+    assert.equal(plan.labelBehind, 0);
+    assert.match(plan.labelBehindWhy, /could not be read/);
+    assert.match(plan.labelBehindWhy, /demo/);
+  });
+});
+
+/**
+ * Provider health used to be `keys.every(row => row.lastError == null)` stamped with now(), and
+ * nothing on this install ever writes a health result: background_health_checks is off and GET
+ * /health/latest answered `{"latest_health_checks":{},"total_models":0}` on the R750. So the light
+ * was green, always, including for a provider whose catalog had never been read once.
+ */
+test("provider health says not checked until something has checked, and goes red on real failures", async () => {
+  await withPanel(async ({ call }) => {
+    await seedZai(call);
+    const quiet = await call("GET", "/v1/admin/providers");
+    const zai = quiet.body.providers.find((row) => row.id === "zai");
+    assert.equal(zai.health.reachable, null, "an unchecked provider drew a green light");
+    assert.match(zai.health.why, /nothing has run|no check/);
+    assert.equal(zai.health.checkedAt, "", "an unchecked provider carried a fresh timestamp");
+  });
+
+  // A failed request is the only evidence this install has, and it is real evidence. Its own panel,
+  // because the spend sweep is cached for a few seconds and a second read inside that window would
+  // be the state before the failures rather than after them.
+  await withPanel(async ({ call, proxy, store, keys }) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    await seedZai(call);
+    const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+    const minted = await client.mintKey({ slug: "demo", models: ["plan-zai"] });
+    keys.set("demo", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] });
+    proxy.chargeAlias("titanbot-demo", 0, 2, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure" });
+    const sick = await call("GET", "/v1/admin/providers");
+    const red = sick.body.providers.find((row) => row.id === "zai");
+    assert.equal(red.health.reachable, false, JSON.stringify(red.health));
+    assert.match(red.health.why, /2 of 2 request/);
+    assert.equal(red.health.checkedAt.length > 0, true);
+  });
+
+  // And the operator-triggered check, which is the only thing on this install that makes a real
+  // request to the vendor on purpose. Every check costs money, which is why it is a button.
+  await withPanel(async ({ call, proxy }) => {
+    await seedZai(call);
+    const checked = await call("POST", "/v1/admin/providers/zai/health", {});
+    assert.equal(checked.status, 200, JSON.stringify(checked.body));
+    assert.equal(checked.body.reachable, true);
+    const after = await call("GET", "/v1/admin/providers");
+    const zai = after.body.providers.find((row) => row.id === "zai");
+    assert.equal(zai.health.reachable, true);
+    assert.equal(zai.health.how, "a check you asked for");
+    assert.equal(proxy.callsTo("GET /health").length > 0, true, "the check asked nothing");
+  });
+});
+
+/**
+ * Every dollar on the panel and on the client rows was zero for the plan every customer runs,
+ * because the deployments were created with no price and LiteLLM has no price for a Z.AI model id.
+ * $0.00 and "nobody set a price" look identical on a screen and mean opposite things.
+ */
+test("a model with no price says not priced rather than drawing a zero", async () => {
+  await withPanel(async ({ call, proxy }) => {
+    await seedZai(call);
+    const bare = await call("GET", "/v1/admin/providers");
+    const plan = bare.body.planModels.find((row) => row.alias === "plan-zai");
+    assert.equal(plan.priced, false);
+    assert.match(plan.pricedWhy, /zero until a cost per token is set/);
+    assert.deepEqual(bare.body.pricing.unpriced.sort(), ["plan-zai", "plan-zai-vision"]);
+    assert.equal(bare.body.providers.find((row) => row.id === "zai").keys[0].spend.priced, false);
+
+    // A price set from the panel lands in litellm_params, where the proxy bills from.
+    const priced = await call("POST", "/v1/admin/plan-models/plan-zai/update", { inputCostPerToken: 0.0000006, outputCostPerToken: 0.0000022 });
+    assert.equal(priced.status, 200, JSON.stringify(priced.body));
+    const row = proxy.deployments().find((one) => one.model_name === "plan-zai");
+    assert.equal(row.litellm_params.input_cost_per_token, 0.0000006);
+    assert.equal(row.litellm_params.output_cost_per_token, 0.0000022);
+    const after = await call("GET", "/v1/admin/providers");
+    assert.equal(after.body.planModels.find((one) => one.alias === "plan-zai").priced, true);
+
+    // And a REPOINT keeps it, because POST /model/update merges.
+    await call("POST", "/v1/admin/plan-models/plan-zai/update", { vendorModel: "glm-4.7" });
+    assert.equal(proxy.deployments().find((one) => one.model_name === "plan-zai").litellm_params.input_cost_per_token, 0.0000006);
+  });
+});
+
+/**
+ * plan-minimax shipped customer-visible, naming ITSELF as its screenshot fallback, never once asked
+ * whether it takes an image, and with GET /fallback/plan-minimax answering 404. Any workspace moved
+ * onto it takes PROXY-10 again on its first screenshot turn.
+ */
+test("a model cannot be its own screenshot fallback on a promise, and a refused fallback is not a success", async () => {
+  await withPanel(async ({ call, proxy }) => {
+    await call("POST", "/v1/admin/providers/zai/keys", { apiKey: PLANTED, label: "subscription one" });
+    const naming = await call("POST", "/v1/admin/plan-models", {
+      alias: "plan-self", provider: "zai", vendorModel: "glm-5.3",
+      customerName: "Self", customerLabel: "Self", supportsVision: true, visionFallback: "plan-self",
+    });
+    assert.equal(naming.status, 409, JSON.stringify(naming.body));
+    assert.equal(naming.body.error, "vision_unproved");
+    assert.equal(proxy.deployments().some((row) => row.model_name === "plan-self"), false);
+
+    // A fallback the proxy refuses is a refusal, not a 200 with the reason in a field nobody reads,
+    // and the model is kept OFF every customer's card rather than shipped without a screenshot route.
+    const dangling = await call("POST", "/v1/admin/plan-models", {
+      alias: "plan-dangling", provider: "zai", vendorModel: "glm-5.3",
+      customerName: "Dangling", customerLabel: "Dangling", visionFallback: "plan-nothing-serves-this",
+    });
+    assert.equal(dangling.status, 409, JSON.stringify(dangling.body));
+    assert.equal(dangling.body.error, "fallback_refused");
+    const made = proxy.deployments().filter((row) => row.model_name === "plan-dangling");
+    assert.equal(made.length > 0, true, "the deployment was rolled back, which loses the operator's work");
+    assert.equal(made.every((row) => row.model_info.tb_customer_visible === false), true, "a model with no screenshot route stayed on customers' cards");
+  });
+});
+
+/**
+ * A DOOR WITH NO KEY BEHIND IT IS NOT A FEATURE, it is a 401 the customer pays for.
+ *
+ * MEASURED ON THE R750 2026-09-08: PROXY_TINYFISH_KEY_1 on the proxy service is a bare newline, so
+ * /tinyfish/fetch and /tinyfish/search were live with `x-api-key: ""` while every tenant key
+ * carried both paths on its allow list. Each call could only fail upstream and each one booked a
+ * metered request at cost_per_request 0.0001. config.yaml's own note on the RESERVED second pair
+ * says exactly this about shipping a pass-through with no key -- "an unauthenticated request
+ * wearing a costume" -- and the first pair shipped anyway.
+ */
+test("a tenant key is not given a pass-through whose key is not set", async () => {
+  await withPanel(async ({ call, proxy, store, config }) => {
+    await proxy.addPassThroughRow({ path: "/tinyfish/fetch", target: "https://api.fetch.tinyfish.ai", headers: { "x-api-key": "", "content-type": "application/json" } });
+    await proxy.addPassThroughRow({ path: "/tinyfish/search", target: "https://api.search.tinyfish.ai", headers: { "x-api-key": "", "content-type": "application/json" } });
+    await seedZai(call);
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+
+    // The mint asks the proxy for itself, because cp/provision.mjs names no list.
+    const minted = await client.mintKey({ slug: "demo", models: ["plan-zai"] });
+    const record = proxy.keyByAlias("titanbot-demo");
+    assert.equal(record.allowedRoutes.includes("/v1/chat/completions"), true, "the key cannot run inference");
+    assert.equal(record.allowedRoutes.includes("/tinyfish/fetch"), false, "a door with no key behind it was handed to a customer");
+    assert.equal(record.allowedRoutes.includes("/tinyfish/search"), false);
+    assert.ok(minted.key.length > 0);
+
+    // The MCP mount goes with them, because it takes its credential from the SAME environment name
+    // the two doors do (config.yaml's mcp_servers.tinyfish), so an empty pair means an empty mount.
+    assert.equal(record.allowedRoutes.includes("/mcp/"), false, "the MCP mount was handed out with no credential behind it");
+
+    // And the moment the key is really there, the same mint puts them all back with no code change.
+    await proxy.addPassThroughRow({ path: "/tinyfish/fetch", target: "https://api.fetch.tinyfish.ai", headers: { "x-api-key": "tf-a-real-key-0123456789" } });
+    const routes = tenantRoutesFor(await client.listPassThrough());
+    assert.equal(routes.includes("/tinyfish/fetch"), true, "the door stayed shut after the key went in");
+    assert.equal(routes.includes("/mcp/"), true, "the MCP mount stayed shut after the key went in");
+    assert.ok(config != null);
+  });
 });

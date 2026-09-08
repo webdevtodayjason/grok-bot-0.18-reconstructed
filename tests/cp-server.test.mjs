@@ -14,6 +14,34 @@ import { startControlPlane, startFakeCoolify } from "./cp-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
 
 const PASSWORD = "a-good-tenant-password";
+// The relay's own credential, which opens GET /v1/relay/tenants and nothing else on this service.
+const RELAY_TOKEN = "relay-token-for-a-test-0123456789";
+
+/**
+ * A vendor that answers a model list, so a key can be proved without leaving this machine.
+ *
+ * PROVIDERS-1 stopped storing a vendor key on a LiteLLM pass-through (it sat in the proxy's
+ * Postgres in cleartext, measured on the R750 2026-09-08) and reads the vendor DIRECTLY at the two
+ * moments the operator has just handed us the key. The add-key route proves the value with that
+ * same call before it stores anything, which means a suite that plants a key has to give it
+ * somewhere real to be proved against -- otherwise the test reaches the actual vendor over the
+ * internet, which it did once and got a 401 back.
+ */
+async function startStubVendor() {
+  const { createServer } = await import("node:http");
+  const seen = [];
+  const server = createServer((request, response) => {
+    seen.push({ url: request.url, authorization: String(request.headers.authorization ?? "") });
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ data: [{ id: "glm-5.3", object: "model" }, { id: "glm-5.3-flash", object: "model" }] }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    seen,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
 
 async function withPlane(run, options = {}) {
   const coolify = options.withCoolify ? await startFakeCoolify({ existing: options.existingServices ?? [] }) : null;
@@ -430,10 +458,20 @@ test("no route on this service ever answers with a hash, the session secret or t
       // is really POSTed here, through the real route, before the sweep runs -- which makes the
       // assertion measured rather than a claim about a value nothing ever handled.
       const planted = "sk-zai-9f4c1d2e6b8a0357192a4c6e8d0f2b41";
-      const stored = await plane.admin("POST", "/v1/admin/providers/zai/keys", { apiKey: planted, label: "subscription one" });
-      assert.equal(stored.status, 200, stored.text);
-      assert.equal(stored.text.includes(planted), false, "the route that takes a key answered with it");
-      await sweepForSecrets(plane, coolify, account, [proxy.masterKey, minted.key, planted]);
+      // The key is PROVED against the vendor before it is stored, so the provider is pointed at a
+      // stub on this machine. Without it this test would reach api.z.ai over the internet.
+      const vendorStub = await startStubVendor();
+      try {
+        await plane.admin("POST", "/v1/admin/providers", { id: "zai", name: "Z.AI", kind: "openai", baseUrl: vendorStub.url, catalogPath: "/models", curated: ["glm-5.3"] });
+        const stored = await plane.admin("POST", "/v1/admin/providers/zai/keys", { apiKey: planted, label: "subscription one" });
+        assert.equal(stored.status, 200, stored.text);
+        assert.equal(stored.text.includes(planted), false, "the route that takes a key answered with it");
+        // The vendor really was asked, and it was asked with the key. That is the one hop the value
+        // takes outside this process, and it takes it once.
+        assert.equal(vendorStub.seen.length >= 1, true, "the key was stored without being proved");
+        assert.equal(vendorStub.seen.every((row) => row.authorization.includes(planted)), true);
+        await sweepForSecrets(plane, coolify, account, [proxy.masterKey, minted.key, planted]);
+      } finally { await vendorStub.close(); }
     }, { withCoolify: true, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
   } finally { await proxy.close(); }
 });
@@ -478,6 +516,59 @@ test("a proxy that will not revoke does not strand the operator, it names the co
       assert.match(answer.body.message, /could NOT be revoked/);
       assert.match(answer.body.message, /cp\/cli\.mjs proxy revoke roofing/);
     }, { withCoolify: true, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); }
+});
+
+/**
+ * THE ONE ROUTE ON THIS SERVICE THAT IS SUPPOSED TO CARRY CREDENTIALS, named and pinned.
+ *
+ * GET /v1/relay/tenants hands the one console relay everything it needs to serve one customer's
+ * request: that box's gateway token, a per-tenant session key derived from this service's own
+ * secret, and -- since PROXY-1 -- that tenant's virtual key at the proxy. All three are supposed to
+ * be there. The problem found in review was not the contents, it was that nothing said so: the
+ * planted-key sweep covers /v1/admin only, cp/PROVIDERS-ROUTES.md describes a different file, and
+ * a key-bearing surface nobody has written down is a surface that quietly grows a second reader, a
+ * log line or a debug echo.
+ *
+ * So the shape is pinned rather than the absence. The named fields may carry a credential; every
+ * other string in the answer may not; and the secrets that belong to the SERVICE rather than to one
+ * tenant -- the proxy master key, the operator token, the session secret -- must never appear at
+ * all, because a relay holding one of those could act as the operator against every customer.
+ */
+test("the relay registry is allowed to carry per-tenant credentials and nothing else", async () => {
+  const proxy = await startFakeProxy();
+  try {
+    await withPlane(async (plane) => {
+      await plane.admin("POST", "/v1/tenants/acme/adopt", { coolifyServiceUuid: "svc-a", host: "acme.titanium.bot" });
+      await plane.admin("POST", "/v1/tenants", { slug: "roofing", name: "Roofing" });
+      const minted = readProxyKey("roofing", plane.config);
+      assert.ok(minted != null, "the workspace was built with no plan key, so this pin proves nothing");
+      const paths = tenantPaths("roofing", plane.config);
+      const gatewayToken = JSON.parse(readFileSync(paths.profileTokenFile, "utf8")).token;
+
+      const answer = await plane.request("GET", "/v1/relay/tenants", { token: RELAY_TOKEN });
+      assert.equal(answer.status, 200, answer.text);
+      const row = answer.body.tenants.find((one) => one.slug === "roofing");
+      assert.ok(row != null, "the relay was not given the workspace it has to serve");
+
+      // The three that are SUPPOSED to be here, each in its own named field.
+      assert.equal(row.token, gatewayToken);
+      assert.equal(row.included.key, minted.key);
+      assert.equal(typeof row.sessionKey === "string" && row.sessionKey.length > 0, true);
+
+      // And nothing else in the whole answer is one of them. Every string of 20 characters or more
+      // outside those three fields is checked, which is what catches a second reader or a debug
+      // echo rather than a field somebody remembered to look at.
+      const stripped = JSON.stringify(answer.body.tenants.map((one) => ({ ...one, token: "", sessionKey: "", included: { ...(one.included ?? {}), key: "" } })));
+      for (const secret of [gatewayToken, minted.key, proxy.masterKey, plane.config.adminToken, plane.config.sessionSecret]) {
+        assert.equal(stripped.includes(secret), false, "a credential appeared outside the field that is allowed to carry it");
+      }
+      // The service's own secrets are never in this answer, in any field. A relay that could read
+      // one of these could act as the operator against every customer on the machine.
+      for (const secret of [proxy.masterKey, plane.config.adminToken, plane.config.sessionSecret]) {
+        assert.equal(answer.text.includes(secret), false, "the relay registry carried a service-wide secret");
+      }
+    }, { withCoolify: true, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey, CP_RELAY_TOKEN: RELAY_TOKEN } });
   } finally { await proxy.close(); }
 });
 
@@ -541,6 +632,7 @@ async function sweepForSecrets(plane, coolify, account, extraSecrets) {
       await plane.admin("GET", "/v1/admin/providers"),
       await plane.admin("GET", "/v1/admin/actions"),
       await plane.admin("POST", "/v1/admin/providers/zai/catalog/refresh", {}),
+      await plane.admin("POST", "/v1/admin/providers/zai/health", {}),
       await plane.admin("POST", "/v1/admin/providers/zai/keys/zai-1/quota", { total: 40000, unit: "thousands of tokens" }),
       await plane.admin("POST", "/v1/admin/plan-models", { alias: "plan-nothing", provider: "zai", vendorModel: "glm-5" }),
       await plane.admin("POST", "/v1/admin/providers/zai/keys/zai-1/remove", { confirm: "wrong" }),

@@ -259,6 +259,46 @@ export const TENANT_ALLOWED_ROUTES = Object.freeze([
   "/mcp/",
 ]);
 
+/** The TinyFish half of the list above, which is the half that depends on a key existing. */
+export const TINYFISH_ROUTES = Object.freeze(["/tinyfish/fetch", "/tinyfish/search", "/mcp", "/mcp/"]);
+
+/**
+ * The door list a tenant key is really minted with, given what the proxy is really carrying.
+ *
+ * A DOOR WITHOUT A KEY BEHIND IT IS NOT A FEATURE, it is a 401 the customer pays for. MEASURED ON
+ * THE R750 2026-09-08: PROXY_TINYFISH_KEY_1 is a bare newline, so /tinyfish/fetch and
+ * /tinyfish/search were serving with `x-api-key: ""` -- an unauthenticated request wearing a
+ * costume, in config.yaml's own words about the second pair it deliberately did NOT ship for
+ * exactly this reason. Every tenant key carried both paths anyway, and each call booked a metered
+ * request on its way to failing.
+ *
+ * So the TinyFish routes go on a key when the proxy's own pass-through rows say the header holds
+ * something, and not before. The moment PROXY-7's key is set the next mint (and `proxy limits
+ * --all`) puts them back with no code change. When the pass-through list cannot be read at all the
+ * routes are LEFT ON: a proxy that will not answer this question is not evidence that a working
+ * door should be taken away from a customer mid-turn.
+ */
+export function tenantRoutesFor(passThrough) {
+  if (passThrough?.ok !== true) return [...TENANT_ALLOWED_ROUTES];
+  const rows = Array.isArray(passThrough.rows) ? passThrough.rows : [];
+  const carries = (row) => Object.entries(row?.headerSet ?? {})
+    // content-type is not a credential, which is why a row holding only that one fails this.
+    .some(([name, has]) => has === true && String(name).toLowerCase() !== "content-type");
+  const usable = new Set(rows.filter(carries).map((row) => String(row.path)));
+  // The MCP mount is NOT a pass-through: it is `mcp_servers.tinyfish` in config.yaml, and it takes
+  // its credential from the SAME environment name the two TinyFish pass-throughs do. So the
+  // pass-throughs are the readable proxy for whether that name is set, and the mount is dropped
+  // only when TinyFish doors exist and every one of them is empty. When there are none at all --
+  // a proxy configured some other way -- nothing is inferred and the mount stays.
+  const tinyfish = rows.filter((row) => String(row.path ?? "").startsWith("/tinyfish/"));
+  const tinyfishDead = tinyfish.length > 0 && !tinyfish.some(carries);
+  return TENANT_ALLOWED_ROUTES.filter((route) => {
+    if (!TINYFISH_ROUTES.includes(route)) return true;
+    if (route.startsWith("/mcp")) return !tinyfishDead;
+    return usable.has(route);
+  });
+}
+
 // The model_info keys this product writes on a deployment, and the reason they can be written at
 // all: MEASURED ON THIS MAC 2026-09-08, model_info accepts arbitrary keys and round-trips them
 // byte for byte through /model/new, /model/update and /model/info. So everything the product needs
@@ -334,6 +374,14 @@ export function normalizeDeployment(row) {
     vendorModel: String(params?.model ?? ""),
     credentialName: String(params?.litellm_credential_name ?? ""),
     baseUrl: String(params?.api_base ?? ""),
+    // PROVIDERS-1. What a request on this deployment COSTS, which decides whether any dollar figure
+    // downstream means anything. MEASURED ON THE R750 2026-09-08: every Z.AI deployment was created
+    // with no price at all and LiteLLM has no built-in price for a Z.AI model id, so 654 spend rows
+    // carried spend 0.000000 and the panel drew $0.00 for a customer at 665,915 tokens. A missing
+    // price is reported as null here so the pages above can say "not priced" instead of "$0.00" --
+    // the two look identical on a screen and mean opposite things.
+    inputCostPerToken: numberOrNull(params?.input_cost_per_token),
+    outputCostPerToken: numberOrNull(params?.output_cost_per_token),
     fromDb: info?.db_model === true,
     contextWindow: numberOrNull(info?.max_input_tokens),
     supportsVision: info?.supports_vision === true,
@@ -475,6 +523,35 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
     return { ok: true, status: response.status, body: parsed ?? {} };
   }
 
+  async function listPassThrough() {
+    const answer = await call("GET", "/config/pass_through_endpoint");
+    if (!answer.ok) return answer;
+    const rows = Array.isArray(answer.body?.endpoints) ? answer.body.endpoints : [];
+    return {
+      ok: true,
+      rows: rows.map((row) => ({
+        id: String(row?.id ?? ""),
+        path: String(row?.path ?? ""),
+        target: String(row?.target ?? ""),
+        includeSubpath: row?.include_subpath === true,
+        costPerRequest: numberOrNull(row?.cost_per_request),
+        fromConfig: row?.is_from_config === true,
+        // The NAMES of the headers it carries and never their values, so the panel can say "this
+        // one carries a key" without being the thing that shows it.
+        headerNames: Object.keys(row?.headers ?? {}).map(String),
+        // WHETHER EACH HEADER ACTUALLY HOLDS SOMETHING, which is a different question from
+        // whether it exists, and it is the one that decides whether a door works.
+        //
+        // MEASURED ON THE R750 2026-09-08: /tinyfish/fetch and /tinyfish/search were live with
+        // `x-api-key: ""` -- PROXY_TINYFISH_KEY_1 on the proxy service is a bare newline -- and
+        // every tenant key carried both paths on its allow list. So every box could call a door
+        // that could only ever fail upstream, and each attempt booked a metered request at
+        // cost_per_request 0.0001. A boolean is safe to carry where the value is not.
+        headerSet: Object.fromEntries(Object.entries(row?.headers ?? {}).map(([name, value]) => [String(name), String(value ?? "").trim().length > 0])),
+      })),
+    };
+  }
+
   return {
     base,
     configured,
@@ -489,15 +566,21 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
      * sends max_budget, which does fail the request, and the box turns that into the plain
      * sentence about the plan being spent. Arming it is a separate decision from shipping this.
      */
-    async mintKey({ slug, models = [], allowanceUsd = 0, enforce = false, rpmLimit = 0, box = "", allowedRoutes = TENANT_ALLOWED_ROUTES }) {
+    async mintKey({ slug, models = [], allowanceUsd = 0, enforce = false, rpmLimit = 0, box = "", allowedRoutes = null }) {
       const alias = proxyKeyAlias(slug);
+      // WHEN THE CALLER DID NOT SAY, ASK THE PROXY. The list is the full one minus any pass-through
+      // whose credential header is empty: on the R750 2026-09-08 the two TinyFish doors were live
+      // with `x-api-key: ""` and every tenant key carried them, so every box could call a door that
+      // could only fail upstream while booking a metered request. cp/provision.mjs mints without
+      // naming a list, so this default is what a new customer actually gets.
+      const routes = Array.isArray(allowedRoutes) ? allowedRoutes : tenantRoutesFor(await listPassThrough());
       const body = {
         key_alias: alias,
         models: [...models],
         metadata: { slug: String(slug), box: String(box ?? "") },
         // PROXY-8's half of the fix, applied at mint. See TENANT_ALLOWED_ROUTES above for the
         // measurement and for why the ordering against the global list is load bearing.
-        allowed_routes: [...allowedRoutes],
+        allowed_routes: [...routes],
         // The MCP grant. Measured at integration on 2026-09-08 against the real
         // docker.litellm.ai/berriai/litellm-database:v1.100.0: a key minted WITHOUT this sees an
         // EMPTY tool list over the /mcp/ mount and gets HTTP 200 while doing it, so a customer's
@@ -669,13 +752,31 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         if (deploymentId.length === 0) continue;
         let target = byDeployment.get(deploymentId);
         if (target == null) {
-          target = { id: deploymentId, alias: model, dollars: 0, requests: 0, rows: 0, tokens: 0 };
+          target = { id: deploymentId, alias: model, dollars: 0, requests: 0, rows: 0, tokens: 0, failures: 0, lastFailureAt: "", lastFailureWhy: "" };
           byDeployment.set(deploymentId, target);
         }
         target.dollars += dollars;
         target.requests += requests;
         target.rows += 1;
         target.tokens += tokens;
+        // PROVIDERS-1, the honest half of provider health. A spend row carries the outcome of the
+        // request it records, and a failed one is the only evidence this install HAS that a key or a
+        // vendor is unwell: background_health_checks is off and GET /health/latest answers an empty
+        // object (measured on the R750 2026-09-08, and 26 failure rows were in the log at the same
+        // moment). Counted per deployment, which is per key slot, because that is the grain the
+        // Providers panel draws.
+        if (String(row?.status ?? "").toLowerCase() === "failure") {
+          target.failures += 1;
+          const at = String(row?.startTime ?? row?.startTimeUtc ?? "");
+          if (at > target.lastFailureAt) {
+            target.lastFailureAt = at;
+            target.lastFailureWhy = String(
+              row?.metadata?.error_information?.error_message
+              ?? row?.metadata?.error_information?.error_class
+              ?? row?.metadata?.status ?? "",
+            ).split("\n")[0].slice(0, 200);
+          }
+        }
         // The SAME request counted a third way: this customer, on this deployment. It is what
         // answers "how much of the Z.AI plan window did demo use", which is the question Jason
         // asked over the Alibaba screenshot and which neither of the other two groupings can
@@ -715,6 +816,9 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         requests: entry.requests,
         rows: entry.rows,
         tokens: entry.tokens,
+        failures: entry.failures,
+        lastFailureAt: entry.lastFailureAt,
+        lastFailureWhy: entry.lastFailureWhy,
       }));
       return { ok: true, keys, deployments, startDay: from, endDay: to };
     },
@@ -989,25 +1093,7 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
      * So this method drops them before anything above it can put one on a screen, and the raw shape
      * is not reachable from here at all.
      */
-    async listPassThrough() {
-      const answer = await call("GET", "/config/pass_through_endpoint");
-      if (!answer.ok) return answer;
-      const rows = Array.isArray(answer.body?.endpoints) ? answer.body.endpoints : [];
-      return {
-        ok: true,
-        rows: rows.map((row) => ({
-          id: String(row?.id ?? ""),
-          path: String(row?.path ?? ""),
-          target: String(row?.target ?? ""),
-          includeSubpath: row?.include_subpath === true,
-          costPerRequest: numberOrNull(row?.cost_per_request),
-          fromConfig: row?.is_from_config === true,
-          // The NAMES of the headers it carries and never their values, so the panel can say "this
-          // one carries a key" without being the thing that shows it.
-          headerNames: Object.keys(row?.headers ?? {}).map(String),
-        })),
-      };
-    },
+    listPassThrough,
 
     async addPassThrough({ path: pathname, target, headers = {}, includeSubpath = false, costPerRequest = null }) {
       const body = {
@@ -1036,28 +1122,13 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
       return { ok: true, id: String(id) };
     },
 
-    /**
-     * A vendor's own model list, read THROUGH the proxy.
-     *
-     * The whole point: the control plane gets a live catalog while holding no vendor key. The key
-     * is on the pass-through's far side, the master key is on ours.
-     *
-     * MEASURED ON THIS MAC 2026-09-08: with a pass-through registered at /catalog/zai and
-     * include_subpath true, GET /catalog/zai/models reached Z.AI and came back with Z.AI's OWN
-     * 401 body on a throwaway key, so the hop is real. And the answer is NAMES ONLY: id, object,
-     * created, owned_by. There is no context window and no vision flag in it. That is why those two
-     * are things a person sets and why the panel says so in those words.
-     */
-    async catalog(provider, { pathname = "/models" } = {}) {
-      const answer = await call("GET", `/catalog/${encodeURIComponent(String(provider))}${pathname}`);
-      if (!answer.ok) return answer;
-      const body = answer.body;
-      const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body?.models) ? body.models : []);
-      const models = rows
-        .map((row) => String(typeof row === "string" ? row : (row?.id ?? row?.name ?? "")))
-        .filter((id) => id.length > 0);
-      return { ok: true, provider: String(provider), models: [...new Set(models)] };
-    },
+    // A vendor catalog used to be read THROUGH the proxy here, over a pass-through registered at
+    // /catalog/<provider>. That method is gone with the pass-through: MEASURED ON THE R750
+    // 2026-09-08, the pass-through stored the vendor key in the proxy's Postgres in CLEARTEXT and
+    // handed it back unmasked to GET /config/pass_through_endpoint, which is a weaker place for a
+    // key than the encrypted credentials table it was invented to avoid using. cp/admin.mjs reads
+    // the vendor directly now, at the two moments the operator has just handed it the key, and
+    // stores names only. deletePassThrough above is what takes the old doors down.
 
     /** One deployment asked whether it answers, right now. Used by the panel's health column. */
     async deploymentHealth(id) {

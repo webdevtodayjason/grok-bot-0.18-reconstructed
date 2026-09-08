@@ -30,6 +30,7 @@
 import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { tenantRoutesFor } from "../../../cp/proxy.mjs";
 import { call, fingerprint, repoRoot, secret, sleep } from "./harness.mjs";
 import { createStubCatalog, createStubProxy, createStubUpstream } from "./stub-proxy.mjs";
 
@@ -431,6 +432,41 @@ async function legs({ report, base, masterKey, oneWorker, upstreams, apiBases, c
         "the stub's cache ttl is zero, so there is no window to outlast; the R750 run measures this one");
     }
 
+    // ---- 3b. WHY A KEY IS PROVED BEFORE IT IS SWAPPED ----------------------------------------------
+    //
+    // The roll above is the good case. This is the bad one, and it is the measurement that decides
+    // whether the control plane has to ask the vendor first. MEASURED ON THE R750 2026-09-08 with a
+    // throwaway slot and deployment, no plan- alias and no tenant on it: PATCH /credentials to a
+    // junk value answered 200; the next chat completion 401'd 0.3 s later; the three after that got
+    // 429 "No deployments available, cooldown_list=[...]" for 30 s. The old value is overwritten in
+    // place, so there is nothing to undo it with, and on a one-key pool that is an outage of the
+    // plan model that outlasts the operator's next click.
+    //
+    // It runs on the THIRD key's own deployment, which the removal below takes away anyway, so no
+    // pool this gate leaves behind is ever short a key.
+    step("a key rolled to a bad value bites on the very next request, which is why the route proves first");
+    const junkSlot = `${alias}-key-3`;
+    const junkDeployment = `${alias}-dep-3`;
+    const junked = await call(`${base}/credentials/${encodeURIComponent(junkSlot)}`, {
+      method: "PATCH", ...M,
+      body: { credential_name: junkSlot, credential_values: { api_key: `${MARK}-not-a-real-key-${suffix}` } },
+    });
+    check(junked.status === 200,
+      "PATCH /credentials accepts a junk value with no opinion about it at all",
+      `status ${junked.status}`);
+    const straightAfter = await call(`${base}/v1/chat/completions`, {
+      method: "POST", token: tenantKey, body: { model: planName, messages: [], metadata: { model_id: junkDeployment } },
+    });
+    note(`the next request on that pool answered ${straightAfter.status}: a swap has no grace period`);
+    // Put it back before anything else runs, so the pool this leg carries forward is whole.
+    const restored = await call(`${base}/credentials/${encodeURIComponent(junkSlot)}`, {
+      method: "PATCH", ...M,
+      body: { credential_name: junkSlot, credential_values: { api_key: values?.KEY_THREE ?? values?.KEY_ONE ?? "" } },
+    });
+    check(restored.status === 200, "and putting the good value back is the same one call", `status ${restored.status}`);
+    note("cp/admin.mjs therefore proves a candidate against the vendor BEFORE it patches a serving slot;");
+    note("tests/cp-providers.test.mjs holds the refusal, and a refused roll leaves the pool untouched.");
+
     // ---- 4. a key removed, add first ---------------------------------------------------------------
     step("removing a key, add first and delete second");
     const before = (await call(`${base}/model/info`, M)).json?.data ?? [];
@@ -579,6 +615,40 @@ async function legs({ report, base, masterKey, oneWorker, upstreams, apiBases, c
       // config-declared entry's RESOLVED key. The panel must never render them.
       note("GET /config/pass_through_endpoint returns headers UNMASKED and resolves a config entry's");
       note("os.environ reference to the real key. The panel never renders these; tests/cp-server.test.mjs asserts it.");
+
+      // AND THE TWO RULES THAT CAME OUT OF READING WHAT WAS REALLY IN THAT ROW ON THE R750.
+      //
+      // The product used to register /catalog/<provider> LIVE with `authorization: Bearer <the
+      // vendor key>` -- not the os.environ reference this leg uses -- which put a 56 character Z.AI
+      // key and a 132 character MiniMax key into LiteLLM_Config in cleartext, unencrypted, and
+      // handed both back unmasked to anything holding the master key. The control plane reads a
+      // vendor's model list directly now and stores names, so a /catalog/ row registered by the
+      // PRODUCT is a defect wherever it is found.
+      const doors = (await call(`${base}/config/pass_through_endpoint`, M)).json?.endpoints ?? [];
+      const productCatalog = doors.filter((one) => String(one.path ?? "").startsWith("/catalog/") && !String(one.path ?? "").includes(MARK));
+      check(productCatalog.length === 0,
+        "no /catalog/ pass-through is registered by the product: a vendor key is never persisted on this route",
+        productCatalog.map((one) => one.path).join(", ") || "none");
+      const cleartext = doors.filter((one) => Object.values(one.headers ?? {}).some((value) => /^(Bearer |sk-)/.test(String(value)) && !String(value).includes("os.environ/")));
+      check(cleartext.length === 0,
+        "and no pass-through carries a cleartext credential where an os.environ reference belongs",
+        cleartext.map((one) => one.path).join(", ") || "none");
+
+      // The other half: a door whose credential header is EMPTY. On the R750 2026-09-08 both
+      // TinyFish paths were serving with `x-api-key: ""` while every tenant key carried them, so
+      // every box could call a door that could only fail upstream and book a metered request doing
+      // it. cp/proxy.mjs `tenantRoutesFor` reads this same list back and leaves such a path off a
+      // key until the key is really there.
+      const hollow = doors.filter((one) => Object.entries(one.headers ?? {})
+        .filter(([name]) => String(name).toLowerCase() !== "content-type")
+        .every(([, value]) => String(value ?? "").trim().length === 0) && Object.keys(one.headers ?? {}).length > 0);
+      const wouldGive = tenantRoutesFor({ ok: true, rows: doors.map((one) => ({
+        path: String(one.path ?? ""),
+        headerSet: Object.fromEntries(Object.entries(one.headers ?? {}).map(([name, value]) => [String(name), String(value ?? "").trim().length > 0])),
+      })) });
+      check(hollow.every((one) => !wouldGive.includes(String(one.path))),
+        "a pass-through with an empty credential header is left off every tenant key's door list",
+        hollow.length === 0 ? "no hollow doors on this proxy" : `${hollow.map((one) => one.path).join(", ")} left off`);
     }
 
     // ---- 8. per-deployment spend --------------------------------------------------------------------

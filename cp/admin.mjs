@@ -50,6 +50,7 @@ import {
   PROVIDER_QUOTA,
   TB,
   TENANT_ALLOWED_ROUTES,
+  tenantRoutesFor,
   isPlanModel,
   isoDay,
   monthStartDay,
@@ -789,6 +790,22 @@ export function createAdminApi({
 
     const sweep = await askProxySpend();
     const allowance = Number(config.proxyAllowanceUsd) > 0 ? Number(config.proxyAllowanceUsd) : null;
+    // WHICH VENDOR MODELS HAVE A PRICE. Without this every row below prints $0.00 for a customer
+    // who ran hundreds of thousands of tokens, because a deployment created with no cost per token
+    // bills at zero and LiteLLM carries no price for a Z.AI or Alibaba model id. Measured on the
+    // R750 2026-09-08: 654 Z.AI spend rows, all spend 0.000000. One /model/info read, joined on the
+    // vendor model string the spend rows already carry.
+    const deploymentPrices = await askProxy("/model/info", () => proxy.listModels());
+    const pricedModels = new Set(
+      (deploymentPrices.ok ? deploymentPrices.rows : [])
+        .filter((row) => row.inputCostPerToken != null || row.outputCostPerToken != null)
+        .map((row) => String(row.vendorModel)),
+    );
+    const unpricedModels = new Set(
+      (deploymentPrices.ok ? deploymentPrices.rows : [])
+        .filter((row) => row.inputCostPerToken == null && row.outputCostPerToken == null)
+        .map((row) => String(row.vendorModel)),
+    );
     const rows = [];
     for (const tenant of store.listTenants()) {
       const record = proxyKeyOf(tenant.slug);
@@ -847,6 +864,16 @@ export function createAdminApi({
         pct: allowance != null && spendToDate != null ? Math.round((spendToDate / allowance) * 100) : null,
         spendToDate,
         spendToDateWhy: thisMonth.why,
+        // null when nothing is known, false when this customer ran something with no price on it.
+        // The page prints "not priced" for false rather than a dollar sign in front of a zero.
+        spendPriced: !deploymentPrices.ok
+          ? null
+          : (models.length === 0
+            ? null
+            : !models.some((row) => unpricedModels.has(String(row.model)) || (!pricedModels.has(String(row.model)) && !String(row.model).toLowerCase().includes(TINYFISH_MODEL_MARK)))),
+        spendPricedWhy: deploymentPrices.ok
+          ? "A dollar figure only means something for a model that has a cost per token set on it in the Providers panel."
+          : deploymentPrices.why,
         thisMonth: { requests: thisMonth.requests, dollars: thisMonth.dollars, why: thisMonth.why },
         today: { requests: today.requests, dollars: today.dollars, why: today.why },
         tinyfish: models.length === 0
@@ -1091,6 +1118,10 @@ export function createAdminApi({
   const catalogSetting = (id) => `catalog:${id}`;
   const catalogSlotSetting = (id) => `catalog_slot:${id}`;
   const quotaSetting = (slot) => `quota:${slot}`;
+  const healthSetting = (id) => `health:${id}`;
+  // How long an operator-triggered check is worth showing before the request log is the better
+  // evidence again. Five minutes: long enough to still be on the page after the click that made it.
+  const HEALTH_PROBE_TTL_MS = 5 * 60 * 1000;
   // How far back "a box has run this model" looks. Thirty days rather than the spend panel's
   // calendar month, because "nobody has used this since the 2nd" on the 3rd of the month is not
   // evidence that a model is unused.
@@ -1164,6 +1195,22 @@ export function createAdminApi({
     return `${prefix}${highest + 1}`;
   }
 
+  /**
+   * The two prices, read off a request body and shaped for litellm_params.
+   *
+   * A blank field is NOT zero and is not sent: sending zero would write a real price of nothing,
+   * which reads on every page as "$0.00 spent" and is exactly the confusion this exists to end.
+   * Sending nothing leaves whatever is there, because POST /model/update merges.
+   */
+  function priceOf(body) {
+    const params = {};
+    const input = Number(body?.inputCostPerToken);
+    const output = Number(body?.outputCostPerToken);
+    if (Number.isFinite(input) && input >= 0 && String(body?.inputCostPerToken ?? "").length > 0) params.input_cost_per_token = input;
+    if (Number.isFinite(output) && output >= 0 && String(body?.outputCostPerToken ?? "").length > 0) params.output_cost_per_token = output;
+    return params;
+  }
+
   /** The deployment id this product gives one alias on one key slot. Ours, tracked, and readable. */
   const deploymentIdFor = (alias, slot) => `tb-${String(alias)}-${String(slot)}`.replace(/[^a-zA-Z0-9._-]/g, "-");
 
@@ -1227,21 +1274,96 @@ export function createAdminApi({
   /**
    * Which workspaces have actually RUN an alias, measured out of the proxy's own request log.
    *
-   * There is no other honest source. What a box runs lives in its own box-secrets.json, which only
-   * the relay can read and which it has no route to report; this service's stored per tenant record
-   * lists what is INCLUDED in a plan and not which one is selected. So "three workspaces run this"
-   * is a measurement of requests, over a named window, and every answer that carries it says so.
+   * There is no other honest source for the REQUEST half. What a box is pointed at lives in its own
+   * box-secrets.json, which boxLabels() below reads directly off the disk; this list is the
+   * complementary fact, which workspaces actually sent traffic through the alias inside a named
+   * window, and every answer that carries it says so.
+   *
+   * IT JOINS ON THE DEPLOYMENT ID, NOT ON THE MODEL NAME, and that is a correction rather than a
+   * preference. A spend row's `model` is what the VENDOR was asked for -- on the R750 2026-09-08,
+   * `select model,count(*) from "LiteLLM_SpendLogs"` answered openai/glm-5.3 596, openai/glm-4.7 40
+   * and the alias `plan-zai` three times in the whole log. Matching the alias against that string
+   * therefore said plan-zai was run by demo alone while richard-avery and titanium were on it, and
+   * that wrong list is what the remove guard consumes: deleting the alias would have been allowed
+   * and would have failed every turn in two live boxes, one of them a paying customer's. The
+   * deployment id IS ours (`tb-<alias>-<slot>`), the spend row carries it as model_id, and slotShare
+   * already joins on exactly that.
+   *
+   * The model-name match is KEPT as a union rather than replaced, because a row whose model_id the
+   * upstream did not record still names the alias in `model` on the three rows above, and for a
+   * guard that refuses a destructive change a false positive is the safe direction.
    */
-  function ranAlias(sweep, alias) {
+  function ranAlias(sweep, alias, deploymentIds = []) {
     if (!sweep?.month?.ok) return { slugs: [], why: sweep?.month?.why ?? "the proxy's request log could not be read", measured: false };
+    const ids = new Set((deploymentIds ?? []).map(String));
     const slugs = [];
     for (const row of sweep.month.keys) {
       const alias_ = String(row.alias ?? "");
       if (!alias_.startsWith("titanbot-")) continue;
-      if (!row.models.some((one) => String(one.model) === String(alias))) continue;
+      const byDeployment = (row.deployments ?? []).some((one) => ids.has(String(one.id)));
+      const byName = row.models.some((one) => String(one.model) === String(alias));
+      if (!byDeployment && !byName) continue;
       slugs.push(alias_.slice("titanbot-".length));
     }
     return { slugs, why: "", measured: true };
+  }
+
+  /**
+   * WHAT EACH BOX IS ACTUALLY RUNNING, read off the disk rather than assumed.
+   *
+   * The label a customer's Titan says lives in that box's own box-secrets.json, and until this pass
+   * nothing reported it back: the panel printed `labelBehind: null` for every model and a box that
+   * had never been given SAND_OPENAI_COMPATIBLE_MODEL_LABEL looked the same as one that had. That
+   * is not an unknowable. This container has /data/titanbot bind mounted -- it is where it writes
+   * every tenant's directory -- so the file is one read away, and a read is what it gets.
+   *
+   * MEASURED ON THE R750 2026-09-08: richard-avery's file carried SAND_OPENAI_COMPATIBLE_MODEL
+   * plan-zai and NO label, so his Titan answered with the routing alias while his own registry row
+   * said GLM-5.3; demo's carried the label. Neither box carried a container-env override, so the
+   * file is authoritative for both.
+   *
+   * IT IS ASKED OF THE RELAY, NOT READ OFF THE DISK, and that is a measurement rather than a
+   * preference. The first shape of this opened /data/titanbot/<slug>/volumes/data/box-secrets.json
+   * directly, which this container does mount. MEASURED FROM INSIDE titanbot-cp 2026-09-08: demo
+   * and richard-avery answer EACCES (the file is 0600 and owned by the box user, which is the whole
+   * point of SECRET-3) and the adopted titanium answers ENOENT, because an adopted workspace's
+   * directories are not under the tenant root at all. The relay has the docker socket and reads
+   * that file through the box already, for the model picker, so it is the one that can answer.
+   *
+   * A box that could not be read is reported as unknown, never as up to date: a green count
+   * computed over a box nobody checked is the made-up green light this file's header refuses to
+   * ship. The answers are cached for the same few seconds the box sweep uses, because one panel
+   * load asks once per plan model.
+   */
+  let boxLabelCache = { at: 0, rows: null, inFlight: null };
+  async function boxLabels() {
+    if (boxLabelCache.rows != null && now() - boxLabelCache.at < BOXES_CACHE_MS) return boxLabelCache.rows;
+    if (boxLabelCache.inFlight != null) return boxLabelCache.inFlight;
+    const pending = (async () => {
+      const rows = [];
+      for (const tenant of store.listTenants()) {
+        const answer = await askRelay(`/admin/tenants/${encodeURIComponent(tenant.slug)}/running`, "");
+        if (!answer.ok) {
+          rows.push({ slug: tenant.slug, model: "", label: "", read: false, why: answer.why });
+          continue;
+        }
+        const body = answer.body ?? {};
+        rows.push({
+          slug: tenant.slug,
+          model: String(body.model ?? ""),
+          label: String(body.modelLabel ?? ""),
+          read: body.read === true,
+          pinned: body.pinned === true,
+          why: body.read === true ? "" : String(body.why ?? "that workspace did not answer"),
+        });
+      }
+      return rows;
+    })();
+    boxLabelCache = { ...boxLabelCache, inFlight: pending };
+    return pending.then(
+      (rows) => { boxLabelCache = { at: now(), rows, inFlight: null }; return rows; },
+      (error) => { boxLabelCache = { at: 0, rows: null, inFlight: null }; throw error; },
+    );
   }
 
   /**
@@ -1287,6 +1409,61 @@ export function createAdminApi({
       // WHICH CUSTOMER used it, inside the same window. The second half of what Jason asked for.
       byWorkspace: share.byWorkspace,
     };
+  }
+
+  /**
+   * Whether a provider is well, said only as far as something actually checked.
+   *
+   * Three states and they are different claims. `null` means nothing has checked -- no health run,
+   * no failed request, no successful one either -- and the page says "not checked" rather than
+   * drawing a light. `false` means requests on this provider's own deployments really did fail
+   * inside the window, with the count and the vendor's own last message. `true` means requests went
+   * through and none failed, which is the strongest thing this install can honestly say without a
+   * live probe.
+   *
+   * checkedAt is stamped from the EVIDENCE, not from now(). The old code stamped a fresh timestamp
+   * on a value nothing had measured, which is what made an unchecked provider look freshly green.
+   */
+  function providerHealth(provider, keys, sweep, deployments, at) {
+    if (keys.length === 0) return { reachable: null, why: "no key here yet, so there is nothing to reach", checkedAt: "", requests: 0, failures: 0 };
+    if (!sweep?.month?.ok) return { reachable: null, why: sweep?.month?.why ?? "the proxy's request log could not be read, so nothing here has been checked", checkedAt: "", requests: 0, failures: 0 };
+    const mine = new Set(deployments.filter((row) => String(row.provider ?? "") === provider.id).map((row) => String(row.id)));
+    let requests = 0;
+    let failures = 0;
+    let lastAt = "";
+    let lastWhy = "";
+    for (const row of sweep.month.deployments ?? []) {
+      if (!mine.has(String(row.id))) continue;
+      requests += row.requests;
+      failures += Number(row.failures ?? 0);
+      if (String(row.lastFailureAt ?? "") > lastAt) { lastAt = String(row.lastFailureAt ?? ""); lastWhy = String(row.lastFailureWhy ?? ""); }
+    }
+    // A live check the operator asked for beats the log, when there is one on record.
+    const probe = readJsonSetting(healthSetting(provider.id), null);
+    if (probe != null && Number(probe.at) > 0 && Number(probe.at) > at - HEALTH_PROBE_TTL_MS) {
+      return {
+        reachable: probe.ok === true,
+        why: probe.ok === true ? "" : String(probe.why ?? ""),
+        checkedAt: new Date(Number(probe.at)).toISOString(),
+        how: "a check you asked for",
+        requests,
+        failures,
+      };
+    }
+    if (requests === 0) {
+      return { reachable: null, why: `nothing has run on ${provider.name} inside this window and no check has been made, so there is nothing to report`, checkedAt: "", requests, failures };
+    }
+    if (failures > 0) {
+      return {
+        reachable: false,
+        why: `${failures} of ${requests} request(s) on ${provider.name} failed inside this window${lastWhy ? `; the last one said: ${lastWhy}` : ""}`,
+        checkedAt: lastAt,
+        how: "the proxy's own request log",
+        requests,
+        failures,
+      };
+    }
+    return { reachable: true, why: "", checkedAt: new Date(at).toISOString(), how: `${requests} request(s) went through inside this window and none failed`, requests, failures };
   }
 
   /** One key slot's share of a window, and each workspace's share of that. */
@@ -1350,6 +1527,8 @@ export function createAdminApi({
       };
     }
     const [shape, sweep] = await Promise.all([proxyShape(), askProxySpend()]);
+    // One sweep per panel load, shared by every plan model row below.
+    const boxes = await boxLabels();
     const deployments = shape.deployments.ok ? shape.deployments.rows : [];
     const credentials = shape.credentials.ok ? shape.credentials.rows : [];
     const healthRows = shape.health.ok ? shape.health.rows : [];
@@ -1377,11 +1556,22 @@ export function createAdminApi({
           // page is how somebody concludes the wrong key is in the slot.
           masked: credential.masked,
           parked: credential.parked,
-          spend: { month: share.dollars, requests: share.requests, why: share.why },
+          // `priced` decides whether the dollar column is a NUMBER or the words "not priced". A
+          // deployment created with no input/output cost per token bills every request at zero, so
+          // $0.00 here can mean "spent nothing" or "nobody set a price", and those are opposite
+          // facts about a customer.
+          spend: {
+            month: share.dollars,
+            requests: share.requests,
+            tokens: share.tokens,
+            priced: serving.length > 0 && serving.every((row) => row.inputCostPerToken != null || row.outputCostPerToken != null),
+            why: share.why || (serving.length > 0 && serving.some((row) => row.inputCostPerToken == null && row.outputCostPerToken == null)
+              ? "no price is set on this key's deployment(s), so what went through it cannot be turned into money. Set a cost per token on the plan model."
+              : ""),
+          },
           quota: quotaFor(credential.name, provider, share),
           lastError,
           serves: [...new Set(serving.map((row) => row.alias))],
-          backsCatalog: store.getSetting(catalogSlotSetting(provider.id), "") === credential.name,
         };
       }).sort((a, b) => (a.order - b.order) || a.slot.localeCompare(b.slot));
       providers.push({
@@ -1391,9 +1581,20 @@ export function createAdminApi({
         baseUrl: provider.baseUrl,
         fromPreset: provider.fromPreset === true,
         bootstrapEnv: provider.bootstrapEnv ?? [],
-        health: keys.length === 0
-          ? { reachable: null, why: "no key here yet, so there is nothing to reach", checkedAt: "" }
-          : { reachable: keys.every((row) => row.lastError == null), why: keys.find((row) => row.lastError != null)?.lastError?.why ?? "", checkedAt: new Date(at).toISOString() },
+        // WHAT IS ACTUALLY KNOWN ABOUT THIS PROVIDER, which on this install is usually "nothing".
+        //
+        // This used to read `reachable: keys.every(row => row.lastError == null)` with checkedAt
+        // stamped from now(). lastError comes only from GET /health/latest, config.yaml sets
+        // background_health_checks false and nothing calls /health, so MEASURED ON THE R750
+        // 2026-09-08 that endpoint answers `{"latest_health_checks":{},"total_models":0}` -- every
+        // key's lastError is null forever and the panel drew a green light with a fresh timestamp on
+        // it for a provider whose catalog had never once been read. A health signal that cannot go
+        // red is worse than none: it is the made-up green light this file's header refuses to ship.
+        //
+        // So: null and "not checked" while nothing has checked, and a real signal derived from data
+        // already in hand -- the failures the spend sweep counted on this provider's own deployments
+        // inside the window. Those are requests that really did fail, for real customers.
+        health: providerHealth(provider, keys, sweep, deployments, at),
         catalog: {
           models: Array.isArray(catalog?.models) ? catalog.models : [...(provider.curated ?? [])],
           live: catalog?.live === true,
@@ -1402,7 +1603,13 @@ export function createAdminApi({
           // Said on the page in these words, because a refresh CANNOT infer either of them.
           note: "This is a list of names. The context window and whether a model takes an image are things you set.",
           ready: catalogTargetOf(provider).length > 0 && String(provider.catalogPath ?? "").length > 0,
-          wired: passThroughPaths.has(`/catalog/${provider.id}`),
+          // A LIVE read needs the key, which this service does not keep. Said here so the page can
+          // ask for it rather than offering a Refresh button that can only ever return the stored
+          // list. `leftoverDoor` is the cleartext pass-through the first shape of this feature used
+          // to register; it should always be false and it is shown so an install that still has one
+          // is visible rather than silent.
+          liveNeedsKey: true,
+          leftoverDoor: passThroughPaths.has(`/catalog/${provider.id}`),
         },
         keys,
       });
@@ -1425,8 +1632,15 @@ export function createAdminApi({
       // shown to customers, and push-label pushed an empty label into a box. The database row is the
       // one that knows, and rows[0] is only a fallback for an install that has not been seeded.
       const first = rows.find((row) => row.fromDb === true) ?? rows[0];
-      const ran = ranAlias(sweep, alias);
+      const ran = ranAlias(sweep, alias, rows.map((row) => row.id));
       const fallback = await askProxy(`/fallback/${alias}`, () => proxy.getFallback(alias));
+      // WHICH BOXES ARE BEHIND, out of the files themselves. A box counts as behind when it is
+      // pointed at this alias and the label it would say back is not the label this row carries --
+      // including the empty label, which is the case that had richard-avery's Titan calling itself
+      // plan-zai for two days while his console said GLM-5.3.
+      const onThis = boxes.filter((row) => row.read && row.model === alias);
+      const behind = onThis.filter((row) => row.label !== String(first.customerLabel ?? ""));
+      const unread = boxes.filter((row) => !row.read);
       planModels.push({
         alias,
         provider: first.provider,
@@ -1435,6 +1649,12 @@ export function createAdminApi({
         customerLabel: first.customerLabel,
         servedBy: first.servedBy,
         contextWindow: first.contextWindow,
+        inputCostPerToken: first.inputCostPerToken,
+        outputCostPerToken: first.outputCostPerToken,
+        priced: rows.every((row) => row.inputCostPerToken != null || row.outputCostPerToken != null),
+        pricedWhy: rows.every((row) => row.inputCostPerToken != null || row.outputCostPerToken != null)
+          ? ""
+          : "Every dollar figure for this model is zero until a cost per token is set on it, and a zero reads as 'they have not spent anything'.",
         supportsVision: rows.some((row) => row.supportsVision),
         visionFallback: fallback.ok ? (fallback.fallbacks[0] ?? "") : first.visionFallback,
         vision: { ok: first.visionOk, at: first.visionAt, why: first.visionAt ? "" : "this model has never been asked whether it takes an image" },
@@ -1453,13 +1673,17 @@ export function createAdminApi({
         workspaces: ran.slugs.length,
         workspaceSlugs: ran.slugs,
         workspacesWhy: ran.measured
-          ? "workspaces whose key ran this model inside the current spend window. What a box is pointed at lives in its own file, which this service cannot read."
+          ? "workspaces whose traffic ran on one of this model's deployments inside the current spend window, joined on the deployment id rather than on the vendor model name."
           : ran.why,
-        // NOT MEASURABLE FROM HERE, and named rather than left as a zero. The label lives in each
-        // box's box-secrets.json; nothing reports it back. Pushing it is safe at any time and only
-        // touches the workspaces the operator names.
-        labelBehind: null,
-        labelBehindWhy: "the label a customer's Titan says lives inside each box, and nothing reports it back to this service. Push it to be sure.",
+        // MEASURED NOW, out of each box's own box-secrets.json. See boxLabels().
+        runningHere: onThis.map((row) => row.slug),
+        labelBehind: behind.length,
+        labelBehindSlugs: behind.map((row) => row.slug),
+        labelBehindWhy: unread.length > 0
+          ? `${unread.length} workspace file(s) could not be read, so this count is of the ones that could: ${unread.map((row) => row.slug).join(", ")}.`
+          : (behind.length === 0
+            ? ""
+            : `${behind.map((row) => row.slug).join(", ")} ${behind.length === 1 ? "is" : "are"} pointed at ${alias} and ${behind.length === 1 ? "says" : "say"} something else. Push the label to fix what their Titan calls itself.`),
       });
     }
     planModels.sort((a, b) => a.alias.localeCompare(b.alias));
@@ -1472,20 +1696,119 @@ export function createAdminApi({
       planModels,
       defaults,
       actions,
+      pricing: {
+        unpriced: planModels.filter((row) => row.priced !== true).map((row) => row.alias),
+        why: planModels.some((row) => row.priced !== true)
+          ? "Some plan models carry no cost per token. Every dollar figure that touches them is zero, on this page and on the client rows, and a zero there is not evidence that nothing was spent."
+          : "",
+      },
       window: sweep.month.ok ? { month: `${sweep.monthStart} to ${sweep.today}` } : { month: "", why: sweep.month.why },
       measuredAt: new Date(at).toISOString(),
     };
   }
 
   /**
-   * The vendor's own model list, read THROUGH the proxy so this container holds no vendor key.
+   * The vendor's own model list and the vendor's own opinion of a key, in ONE outbound request.
    *
-   * The pass-through carries the key on its far side and the master key on ours. When there is no
-   * pass-through for this provider, or the vendor did not answer, the curated list is the answer and
-   * `live` says which of the two the operator is looking at. A refresh that quietly fell back would
-   * be a page showing yesterday's names as though they were today's.
+   * WHY THIS IS NOT A PASS-THROUGH ANY MORE. The first shape of this read registered a LiteLLM
+   * pass-through at /catalog/<provider> carrying `authorization: Bearer <the key>` so the control
+   * plane could refresh a catalog while holding no vendor key. MEASURED ON THE R750 2026-09-08, that
+   * header is stored in the proxy's Postgres in CLEARTEXT, in LiteLLM_Config.general_settings, with
+   * none of the encryption the credentials table gets under PROXY_SALT_KEY, and GET
+   * /config/pass_through_endpoint hands it back UNMASKED to anything holding the master key. Two
+   * rows were live: /catalog/zai with a 56 character authorization and /catalog/minimax with a 132
+   * character one, and the minimax row had never served a single read. So the arrangement that was
+   * supposed to keep a key out of this container's reach was instead making a second, weaker copy of
+   * it -- and deploy/coolify/proxy-config/config.yaml's own comment said the control plane never put
+   * a cleartext key through that route.
+   *
+   * The honest shape is the plain one: read the vendor DIRECTLY, at the two moments the operator has
+   * legitimately just handed us the key (adding it and rolling it), hold it for that one request,
+   * and store the NAMES. Nothing is persisted anywhere but the name list that was already stored.
+   *
+   * The same request is the key's PROOF. A key that cannot fetch a model list is a key that will
+   * fail the next customer turn, and finding that out before the value reaches a serving pool is
+   * the whole of finding 4.
    */
-  async function refreshCatalog(provider, actor) {
+  async function readVendorCatalog(provider, apiKey) {
+    const target = catalogTargetOf(provider);
+    const pathname = String(provider.catalogPath ?? "");
+    if (target.length === 0 || pathname.length === 0) return { ok: false, models: [], why: `${provider.name} has no model list to read`, none: true };
+    try {
+      const response = await fetchImpl(`${target.replace(/\/$/, "")}${pathname}`, {
+        method: "GET",
+        headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
+        signal: AbortSignal.timeout(relayTimeoutMs),
+      });
+      const text = await response.text();
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { parsed = null; }
+      if (!response.ok) {
+        // The VENDOR'S OWN SENTENCE, trimmed, because "401" on its own tells an operator nothing
+        // about whether they pasted the wrong key or the subscription lapsed.
+        const said = String(parsed?.error?.message ?? parsed?.message ?? parsed?.msg ?? text ?? "").split("\n")[0].slice(0, 200);
+        return { ok: false, models: [], why: `${provider.name} answered ${response.status}${said ? `: ${said}` : ""}`, status: response.status };
+      }
+      const rows = Array.isArray(parsed?.data) ? parsed.data : (Array.isArray(parsed) ? parsed : []);
+      const models = rows.map((row) => String(row?.id ?? row?.model ?? "")).filter((one) => one.length > 0);
+      return { ok: true, models, why: "" };
+    } catch (error) {
+      return { ok: false, models: [], why: error?.name === "TimeoutError" ? `${provider.name} did not answer in time` : `${provider.name} could not be reached (${notMeasured(error)})` };
+    }
+  }
+
+  /**
+   * Does this key work. Asked BEFORE it is stored and BEFORE a serving slot is patched.
+   *
+   * MEASURED ON THE R750 2026-09-08 with a throwaway slot: patching a credential to a junk value
+   * made the very next request 401 in 0.3 s, and three requests later the router put the deployment
+   * in a 30 s cooldown answering "No deployments available". On a one-key pool that is an outage of
+   * that plan model, started by a click, lasting longer than the operator's next click, and with the
+   * old value overwritten in place there is nothing to undo it with. So the value is proved first.
+   *
+   * The proof is the vendor's own model list where there is one, and a one-token completion where
+   * there is not. A provider with neither cannot be proved, and that is reported rather than
+   * assumed: `provable: false` lets the add through with the fact attached and makes a roll ask for
+   * `force`, because refusing a key nobody can check would make such a provider unusable.
+   */
+  async function proveKey(provider, apiKey) {
+    const listed = await readVendorCatalog(provider, apiKey);
+    if (listed.none !== true) {
+      return { ok: listed.ok === true, provable: true, why: listed.why, how: `${provider.name}'s own model list`, models: listed.models };
+    }
+    const base = String(provider.baseUrl ?? "");
+    if (base.length === 0) return { ok: true, provable: false, why: "", how: `${provider.name} has no model list and no base url here, so this key could not be checked before it was stored`, models: [] };
+    try {
+      const response = await fetchImpl(`${base.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ model: String(provider.curated?.[0] ?? ""), max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+        signal: AbortSignal.timeout(relayTimeoutMs),
+      });
+      const text = await response.text();
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { parsed = null; }
+      if (response.ok) return { ok: true, provable: true, why: "", how: `a one token completion on ${provider.name}`, models: [] };
+      // 400 and 404 are the MODEL being wrong, not the key. The key got far enough to be read.
+      if (response.status === 400 || response.status === 404) {
+        return { ok: true, provable: true, why: "", how: `${provider.name} accepted this key and refused the probe model, which is the key answering`, models: [] };
+      }
+      const said = String(parsed?.error?.message ?? parsed?.message ?? text ?? "").split("\n")[0].slice(0, 200);
+      return { ok: false, provable: true, why: `${provider.name} answered ${response.status}${said ? `: ${said}` : ""}`, how: "a one token completion", models: [] };
+    } catch (error) {
+      return { ok: false, provable: true, why: error?.name === "TimeoutError" ? `${provider.name} did not answer in time` : `${provider.name} could not be reached (${notMeasured(error)})`, how: "a one token completion", models: [] };
+    }
+  }
+
+  /**
+   * The stored catalog, refreshed live only when the operator has just handed us the key.
+   *
+   * A Refresh with no key in hand is NOT a live read and does not pretend to be one: the last live
+   * list is returned with the date it was read and a sentence saying what would make it live again.
+   * A refresh that quietly fell back would be a page showing yesterday's names as though they were
+   * today's, and one that lied about where they came from would be worse.
+   */
+  async function refreshCatalog(provider, actor, apiKey = "") {
     const target = catalogTargetOf(provider);
     const pathname = String(provider.catalogPath ?? "");
     const curated = { models: [...(provider.curated ?? [])], live: false, readAt: new Date(now()).toISOString() };
@@ -1494,7 +1817,15 @@ export function createAdminApi({
       writeJsonSetting(catalogSetting(provider.id), answer, actor);
       return answer;
     }
-    const read = await askProxy(`/catalog/${provider.id}`, () => proxy.catalog(provider.id, { pathname }));
+    if (String(apiKey ?? "").length === 0) {
+      const last = readJsonSetting(catalogSetting(provider.id), null);
+      const answer = last?.live === true
+        ? { models: last.models, live: false, readAt: String(last.readAt ?? ""), why: `These are the names ${provider.name} gave on ${String(last.readAt ?? "an earlier refresh").slice(0, 10)}. A live read goes through the vendor with the key, and this service keeps no copy of one: paste the key to read the list again.` }
+        : { ...curated, why: `This is the short list this product has run. A live read goes through ${provider.name} with the key, and this service keeps no copy of one: paste the key to read their list.` };
+      writeJsonSetting(catalogSetting(provider.id), answer, actor);
+      return answer;
+    }
+    const read = await readVendorCatalog(provider, apiKey);
     if (!read.ok || read.models.length === 0) {
       // A FAILED REFRESH DOES NOT THROW AWAY A LIST THAT WAS ONCE REAL. Falling back to the curated
       // six when the vendor was briefly unreachable would quietly delete names the operator had
@@ -1523,35 +1854,33 @@ export function createAdminApi({
   }
 
   /**
-   * The catalog door, pointed at whichever key is backing it.
+   * THE OPPOSITE OF WHAT USED TO BE HERE: it takes the catalog door DOWN.
    *
-   * Registered on the first key a provider gets and re-registered when that key is rolled, because
-   * the key rides in the pass-through's header rather than in a credential. It is the one place in
-   * this file that puts a key ANYWHERE other than /credentials, and it is why listPassThrough drops
-   * the header values before anything can render them: unlike /credentials, LiteLLM returns a
-   * pass-through's headers in the clear.
+   * There was a wireCatalog that registered /catalog/<provider> as a LiteLLM pass-through carrying
+   * the vendor key as a cleartext header. See readVendorCatalog above for what that turned out to
+   * be. This runs wherever that one used to, so an install that already has those rows loses them
+   * the first time a key is added, rolled or a catalog is refreshed, and a fresh install never gets
+   * them. It is safe to call when there is nothing to remove.
+   *
+   * The delete wants the ROW ID the POST answered with; DELETE by path answers 400 and removes
+   * nothing (measured, and written down in deploy/coolify/proxy-config/config.yaml). So the rows are
+   * listed first and each one is removed by its own id, and the outcome is reported rather than
+   * assumed.
    */
-  async function wireCatalog(provider, apiKey, slot) {
-    const target = catalogTargetOf(provider);
-    if (target.length === 0 || String(provider.catalogPath ?? "").length === 0) {
-      return { ok: true, wired: false, why: `${provider.name} has no model list to read` };
-    }
+  async function unwireCatalog(provider) {
     const path_ = `/catalog/${provider.id}`;
     const existing = await askProxy("/config/pass_through_endpoint", () => proxy.listPassThrough());
-    if (existing.ok) {
-      for (const row of existing.rows.filter((one) => one.path === path_)) {
-        await askProxy("/config/pass_through_endpoint delete", () => proxy.deletePassThrough(row.id));
-      }
+    if (!existing.ok) return { removed: 0, why: existing.why };
+    const mine = existing.rows.filter((one) => one.path === path_);
+    let removed = 0;
+    let why = "";
+    for (const row of mine) {
+      const gone = await askProxy("/config/pass_through_endpoint delete", () => proxy.deletePassThrough(row.id));
+      if (gone.ok) removed += 1;
+      else why = gone.why;
     }
-    const added = await askProxy("/config/pass_through_endpoint add", () => proxy.addPassThrough({
-      path: path_,
-      target,
-      headers: { authorization: `Bearer ${apiKey}` },
-      includeSubpath: true,
-    }));
-    if (!added.ok) return { ok: false, wired: false, why: added.why };
-    store.setSetting(catalogSlotSetting(provider.id), slot, "");
-    return { ok: true, wired: true, why: "" };
+    if (removed > 0) store.setSetting(catalogSlotSetting(provider.id), "", "");
+    return { removed, why };
   }
 
   /** Every plan alias the proxy serves right now, which is what a tenant key is scoped to. */
@@ -1572,6 +1901,10 @@ export function createAdminApi({
   async function applyToEveryKey() {
     const served = await servedAliases();
     if (!served.ok) return { ok: false, why: served.why, rows: [] };
+    // The door list as the proxy really is, not as the constant hopes. A pass-through whose
+    // credential header is empty is not a door a customer should be able to book a metered request
+    // against: measured on the R750 2026-09-08, both TinyFish paths were live with `x-api-key: ""`.
+    const routes = tenantRoutesFor(await proxy.listPassThrough());
     const rows = [];
     for (const tenant of store.listTenants()) {
       const record = proxyKeyOf(tenant.slug);
@@ -1579,11 +1912,11 @@ export function createAdminApi({
       const answer = await askProxy("/key/update", () => proxy.updateKey({
         key: record.key,
         models: served.aliases,
-        allowedRoutes: TENANT_ALLOWED_ROUTES,
+        allowedRoutes: routes,
       }));
       rows.push({ slug: tenant.slug, ok: answer.ok === true, why: answer.ok ? "" : answer.why });
     }
-    return { ok: rows.some((row) => row.ok), why: "", rows, models: served.aliases };
+    return { ok: rows.some((row) => row.ok), why: "", rows, models: served.aliases, routes };
   }
 
   /** The relay's box door, which is the only thing that can write inside a customer's box. */
@@ -1804,6 +2137,17 @@ export function createAdminApi({
       }
       const label = String(body?.label ?? `subscription ${slot.split("-").pop()}`);
       const order = Number(body?.order) > 0 ? Number(body.order) : existing.rows.filter((row) => row.provider === provider.id).length + 1;
+      // PROVED BEFORE IT IS STORED. A mistyped or expired value used to be live on the very next
+      // request with the operator told nothing but "the key is in slot zai-3".
+      const proof = await proveKey(provider, apiKey);
+      if (!proof.ok) {
+        json(response, 409, {
+          error: "key_refused",
+          message: `${provider.name} would not accept that key, so nothing was stored. ${proof.why}`,
+          checkedWith: proof.how,
+        });
+        return true;
+      }
       const ledger = beginAction(guard, request, {
         action: "provider.key.add",
         target: `${provider.id}/${slot}`,
@@ -1817,18 +2161,22 @@ export function createAdminApi({
         info: { [TB.provider]: provider.id, [TB.keyLabel]: label, [TB.keyOrder]: order, tb_parked: false },
       }));
       if (!added.ok) { ledger.failed(added.why); json(response, 502, { error: "proxy", message: added.why }); return true; }
-      // The catalog door goes on the FIRST key a provider gets, so a Refresh works the moment there
-      // is something to refresh with.
-      let wired = { wired: false, why: "" };
-      if (store.getSetting(catalogSlotSetting(provider.id), "").length === 0) {
-        wired = await wireCatalog(provider, apiKey, slot);
-      }
-      ledger.done(`slot ${slot} now holds a key (${keyEvidence(apiKey)})${wired.wired ? ", and the model list reads through it" : ""}`);
+      // The one moment the model list can honestly be read live: the key is in hand for this
+      // request and for no other. Nothing about it is persisted here or at the proxy.
+      const catalog = await refreshCatalog(provider, guard.account?.email ?? "the operator token", apiKey);
+      // And the cleartext pass-through this route used to leave behind comes down.
+      const unwired = await unwireCatalog(provider);
+      ledger.done(`slot ${slot} now holds a key (${keyEvidence(apiKey)}), checked against ${proof.how}`);
       json(response, 200, {
         slot,
         label,
-        catalog: wired,
-        message: `The key is in slot ${slot}. It serves nothing until a plan model is pointed at it.`,
+        checkedWith: proof.how,
+        provable: proof.provable !== false,
+        catalog: { models: catalog.models, live: catalog.live === true, readAt: catalog.readAt, why: catalog.why },
+        ...(unwired.removed > 0 ? { removedPassThroughs: unwired.removed } : {}),
+        message: proof.provable === false
+          ? `The key is in slot ${slot}. ${proof.how}, so it is stored unchecked. It serves nothing until a plan model is pointed at it.`
+          : `The key is in slot ${slot} and ${provider.name} accepted it. It serves nothing until a plan model is pointed at it.`,
         // NOT the key. The mask is read back from the proxy on the next panel load.
         evidence: keyEvidence(apiKey),
       });
@@ -1854,20 +2202,44 @@ export function createAdminApi({
       if (action === "roll") {
         const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
         if (apiKey.length < 8) { json(response, 400, { error: "bad_request", message: "Paste the new key. Nothing was changed." }); return true; }
+        // THE CANDIDATE IS PROVED BEFORE THE SERVING SLOT IS TOUCHED.
+        //
+        // MEASURED ON THE R750 2026-09-08 with a throwaway slot and deployment, no plan alias and no
+        // tenant on it: PATCH /credentials to a junk value answered 200; the next chat completion
+        // 401'd 0.3 s later; the three after that got 429 "No deployments available,
+        // cooldown_list=['review-roll-probe-1']" for 30 s. There is no undo -- the old value is
+        // overwritten in place -- so a bad paste on a one-key pool is an outage of that plan model
+        // that outlasts the operator's next click. Proving first costs one request to the vendor.
+        const proof = await proveKey(provider, apiKey);
+        if (!proof.ok && body?.force !== true) {
+          json(response, 409, {
+            error: "key_refused",
+            message: `${provider.name} would not accept that key, so slot ${slot} was NOT changed and the pool is still serving on the key it had. ${proof.why}`,
+            checkedWith: proof.how,
+          });
+          return true;
+        }
         const ledger = beginAction(guard, request, {
           action: "provider.key.roll",
           target: `${provider.id}/${slot}`,
-          detail: `rolling the key in slot ${slot} (${keyEvidence(apiKey)})`,
+          detail: `rolling the key in slot ${slot} (${keyEvidence(apiKey)}), checked against ${proof.how}${proof.ok ? "" : " and forced past its refusal"}`,
         });
         const rolled = await askProxy("/credentials patch", () => proxy.patchCredential({ name: slot, apiKey }));
         if (!rolled.ok) { ledger.failed(rolled.why); json(response, 502, { error: "proxy", message: rolled.why }); return true; }
-        let wired = { wired: false, why: "" };
-        if (store.getSetting(catalogSlotSetting(provider.id), "") === slot) wired = await wireCatalog(provider, apiKey, slot);
+        const catalog = await refreshCatalog(provider, guard.account?.email ?? "the operator token", apiKey);
+        const unwired = await unwireCatalog(provider);
         ledger.done(`slot ${slot} now holds a different key (${keyEvidence(apiKey)})`);
         json(response, 200, {
           slot,
-          catalog: wired,
-          message: `Slot ${slot} holds the new key. The pool never changed shape, so nothing was taken out of service and requests in flight kept working. The proxy caches a key for up to its cache window, so a request already under way may finish on the old one.`,
+          checkedWith: proof.how,
+          provable: proof.provable !== false,
+          catalog: { models: catalog.models, live: catalog.live === true, readAt: catalog.readAt, why: catalog.why },
+          ...(unwired.removed > 0 ? { removedPassThroughs: unwired.removed } : {}),
+          // The old copy said a request already under way may finish on the old key. The
+          // measurement above says the opposite: the new value bites on the very next request. A
+          // reassuring sentence that is not true is how an operator rolls a key at 09:00 on a
+          // Monday believing there is a grace period.
+          message: `Slot ${slot} holds the new key, and ${provider.name} accepted it before the swap. The pool never changed shape, so nothing was taken out of service. The new value serves the very next request; there is no grace period on the old one.`,
           evidence: keyEvidence(apiKey),
         });
         return true;
@@ -1891,7 +2263,7 @@ export function createAdminApi({
           const ledger = beginAction(guard, request, { action: "provider.key.park", target: `${provider.id}/${slot}`, detail: `parking ${slot}, which serves ${serving.length} deployment(s)` });
           const snapshot = [];
           for (const row of serving) {
-            snapshot.push({ alias: row.alias, vendorModel: row.vendorModel, id: row.id, contextWindow: row.contextWindow, supportsVision: row.supportsVision, customerName: row.customerName, customerLabel: row.customerLabel, servedBy: row.servedBy, customerVisible: row.customerVisible, visionFallback: row.visionFallback, plans: row.plans, keyLabel: row.keyLabel, keyOrder: row.keyOrder });
+            snapshot.push({ alias: row.alias, vendorModel: row.vendorModel, id: row.id, contextWindow: row.contextWindow, supportsVision: row.supportsVision, inputCostPerToken: row.inputCostPerToken, outputCostPerToken: row.outputCostPerToken, customerName: row.customerName, customerLabel: row.customerLabel, servedBy: row.servedBy, customerVisible: row.customerVisible, visionFallback: row.visionFallback, plans: row.plans, keyLabel: row.keyLabel, keyOrder: row.keyOrder });
             const removed = await askProxy("/model/delete", () => proxy.deleteModel(row.id));
             if (!removed.ok) { ledger.failed(removed.why); json(response, 502, { error: "proxy", message: removed.why }); return true; }
           }
@@ -1910,7 +2282,11 @@ export function createAdminApi({
             vendorModel: row.vendorModel,
             credentialName: slot,
             id: row.id,
-            params: provider.baseUrl ? { api_base: provider.baseUrl } : {},
+            params: {
+              ...(provider.baseUrl ? { api_base: provider.baseUrl } : {}),
+              ...(row.inputCostPerToken != null ? { input_cost_per_token: row.inputCostPerToken } : {}),
+              ...(row.outputCostPerToken != null ? { output_cost_per_token: row.outputCostPerToken } : {}),
+            },
             info: {
               ...(row.contextWindow ? { max_input_tokens: row.contextWindow } : {}),
               supports_vision: row.supportsVision === true,
@@ -1983,12 +2359,60 @@ export function createAdminApi({
       return true;
     }
 
+    // A LIVE CHECK, because the operator asked for one. Nothing on this install runs health in the
+    // background (config.yaml sets background_health_checks false, deliberately: a sweep the tenants
+    // can trigger spends the operator's money), so this is the only way a provider light goes green
+    // on purpose rather than by inference from the request log.
+    if (rest.length === 3 && rest[0] === "providers" && rest[2] === "health" && method === "POST") {
+      const provider = providerById(decodeURIComponent(rest[1]));
+      if (provider == null) { json(response, 404, { error: "not_found", message: "There is no provider by that name." }); return true; }
+      const models = await askProxy("/model/info", () => proxy.listModels());
+      if (!models.ok) { json(response, 502, { error: "proxy", message: models.why }); return true; }
+      const mine = models.rows.filter((row) => String(row.provider ?? "") === provider.id);
+      if (mine.length === 0) {
+        json(response, 409, { error: "nothing_to_check", message: `${provider.name} serves no model here yet, so there is nothing to check. Add a key and a plan model first.` });
+        return true;
+      }
+      const ledger = beginAction(guard, request, { action: "provider.health", target: provider.id, detail: `checking ${mine.length} deployment(s) on ${provider.name}` });
+      const checked = [];
+      for (const row of mine) {
+        const answer = await askProxy("/health", () => proxy.deploymentHealth(row.id));
+        checked.push({ id: row.id, alias: row.alias, keySlot: row.keySlot, ok: answer.ok === true && answer.healthy === true, why: answer.ok ? answer.why : answer.why });
+      }
+      const bad = checked.filter((row) => !row.ok);
+      writeJsonSetting(healthSetting(provider.id), {
+        ok: bad.length === 0,
+        why: bad.length === 0 ? "" : `${bad.length} of ${checked.length} deployment(s) did not answer${bad[0]?.why ? `; the first said: ${bad[0].why}` : ""}`,
+        at: now(),
+      }, guard.account?.email ?? "the operator token");
+      ledger.done(`${checked.length - bad.length} of ${checked.length} deployment(s) answered`);
+      json(response, 200, {
+        provider: provider.id,
+        deployments: checked,
+        reachable: bad.length === 0,
+        // Every check costs the vendor a request, which is why this is a button and not a timer.
+        message: bad.length === 0
+          ? `${provider.name} answered on all ${checked.length} deployment(s). This is a real request to the vendor, made just now.`
+          : `${bad.length} of ${checked.length} deployment(s) on ${provider.name} did not answer${bad[0]?.why ? `: ${bad[0].why}` : "."}`,
+      });
+      return true;
+    }
+
     if (rest.length === 4 && rest[0] === "providers" && rest[2] === "catalog" && rest[3] === "refresh" && method === "POST") {
       const provider = providerById(decodeURIComponent(rest[1]));
       if (provider == null) { json(response, 404, { error: "not_found", message: "There is no provider by that name." }); return true; }
-      const ledger = beginAction(guard, request, { action: "provider.catalog.refresh", target: provider.id, detail: `reading ${provider.name}'s model list` });
-      const answer = await refreshCatalog(provider, guard.account?.email ?? "the operator token");
-      ledger.done(`${answer.models.length} name(s), ${answer.live ? "read from the vendor" : "the curated list"}`);
+      // A key MAY be pasted to make this a live read. It is used for the one outbound request and
+      // stored nowhere: this service deliberately keeps no copy of a vendor key, which is why a
+      // Refresh without one returns the last live list with its date rather than a fresh claim.
+      const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
+      const ledger = beginAction(guard, request, {
+        action: "provider.catalog.refresh",
+        target: provider.id,
+        detail: apiKey.length > 0 ? `reading ${provider.name}'s model list with a pasted key (${keyEvidence(apiKey)})` : `reading ${provider.name}'s stored model list`,
+      });
+      const answer = await refreshCatalog(provider, guard.account?.email ?? "the operator token", apiKey);
+      await unwireCatalog(provider);
+      ledger.done(`${answer.models.length} name(s), ${answer.live ? "read from the vendor" : "the stored list"}`);
       json(response, 200, {
         provider: provider.id,
         ...answer,
@@ -2021,10 +2445,30 @@ export function createAdminApi({
       }
       const visionFallback = String(body?.visionFallback ?? "").trim();
       const supportsVision = body?.supportsVision === true;
+      // WHAT A REQUEST COSTS. Without it every dollar on every page is a zero, and a zero on a spend
+      // column is indistinguishable from a customer who has not spent anything: on the R750
+      // 2026-09-08 richard-avery read $0.00 at 665,915 tokens. LiteLLM has no price for a Z.AI or
+      // Alibaba model id, so nobody else is going to supply one. Optional, because a subscription
+      // plan genuinely has no per-token price and pretending one would be worse -- but then the
+      // pages say "not priced" rather than drawing a zero.
+      const priceParams = priceOf(body);
       if (customerVisible && !supportsVision && visionFallback.length === 0) {
         json(response, 400, {
           error: "bad_request",
           message: "Every Titan conversation carries screenshots. Either this model takes an image, or name the model a request carrying one falls back to. A plan model that refuses images is a fleet-wide screenshot outage, which is what PROXY-10 cost.",
+        });
+        return true;
+      }
+      // A MODEL CANNOT BE ITS OWN FALLBACK ON A PROMISE. Naming yourself satisfies the guard above
+      // while registering nothing, and that is exactly the state plan-minimax shipped in: customer
+      // visible, visionFallback plan-minimax, never once asked whether it takes an image, and GET
+      // /fallback/plan-minimax answering 404. Any workspace moved onto it takes PROXY-10 again on
+      // its first screenshot turn. So self-naming is allowed only where the vision check has
+      // actually passed on record.
+      if (visionFallback.length > 0 && visionFallback === alias && !(supportsVision && body?.visionOk === true)) {
+        json(response, 409, {
+          error: "vision_unproved",
+          message: `${alias} cannot be its own screenshot fallback until it has been asked whether it takes an image and answered yes. Create it, run Check screenshots on it, then set the fallback -- or name a different model.`,
         });
         return true;
       }
@@ -2073,7 +2517,7 @@ export function createAdminApi({
           vendorModel,
           credentialName: slot,
           id,
-          params: provider.baseUrl ? { api_base: provider.baseUrl } : {},
+          params: { ...(provider.baseUrl ? { api_base: provider.baseUrl } : {}), ...priceParams },
           info: {
             ...(Number(body?.contextWindow) > 0 ? { max_input_tokens: Number(body.contextWindow) } : {}),
             supports_vision: supportsVision,
@@ -2112,6 +2556,25 @@ export function createAdminApi({
         });
         return true;
       }
+      // A FALLBACK THAT DID NOT REGISTER IS NOT A SUCCESS. This used to answer 200 with the proxy's
+      // refusal tucked into a `why` field nobody reads, so a model could go customer-visible with no
+      // screenshot route at all and the page would show it as done. It is a 409 with the proxy's own
+      // sentence now, and the model stays hidden until the operator fixes it.
+      if (!fallback.ok && customerVisible) {
+        const hidden = [];
+        for (const row of made.filter((one) => one.ok)) {
+          const patched = await askProxy("/model/{id}/update", () => proxy.patchModel({ id: row.id, info: { [TB.customerVisible]: false } }));
+          hidden.push({ id: row.id, ok: patched.ok === true });
+        }
+        ledger.failed(`the screenshot fallback did not register: ${fallback.why}`);
+        json(response, 409, {
+          error: "fallback_refused",
+          message: `${alias} was created on ${landed} key(s) but its screenshot fallback did not register, so it is kept OFF every customer's card. The proxy said: ${fallback.why}`,
+          deployments: made,
+          hidden,
+        });
+        return true;
+      }
       ledger.done(`${alias} created on ${landed} of ${wanted.length} key(s)`);
       json(response, 200, {
         alias,
@@ -2145,7 +2608,10 @@ export function createAdminApi({
         if (body?.visionFallback !== undefined) info[TB.visionFallback] = String(body.visionFallback);
         if (Number(body?.contextWindow) > 0) info.max_input_tokens = Number(body.contextWindow);
         if (body?.supportsVision !== undefined) info.supports_vision = body.supportsVision === true;
-        if (vendorModel.length === 0 && Object.keys(info).length === 0) {
+        // POST /model/update MERGES litellm_params, so a repoint keeps a price that is already
+        // there and this only has to carry one when the operator changed it.
+        const priceParams = priceOf(body);
+        if (vendorModel.length === 0 && Object.keys(info).length === 0 && Object.keys(priceParams).length === 0) {
           json(response, 400, { error: "bad_request", message: "Nothing to change." });
           return true;
         }
@@ -2156,6 +2622,17 @@ export function createAdminApi({
         const wouldHaveName = String(body?.customerName ?? known.customerName ?? "").length > 0;
         if (wouldBeVisible && !(wouldHaveLabel && wouldHaveName)) {
           json(response, 400, { error: "bad_request", message: "A model a customer can see needs the words on their card and the name their Titan says it runs." });
+          return true;
+        }
+        // The same self-fallback rule as the create route, on the edit too: a model that names
+        // itself has to have passed the screenshot check.
+        const wouldFallBackTo = String(body?.visionFallback ?? known.visionFallback ?? "");
+        const wouldTakeImages = body?.supportsVision === undefined ? known.supportsVision === true : body.supportsVision === true;
+        if (wouldFallBackTo === alias && !(wouldTakeImages && known.visionOk === true)) {
+          json(response, 409, {
+            error: "vision_unproved",
+            message: `${alias} cannot be its own screenshot fallback until Check screenshots has passed on it. Run that first, or name a different model.`,
+          });
           return true;
         }
         const ledger = beginAction(guard, request, {
@@ -2184,8 +2661,8 @@ export function createAdminApi({
           // POST /model/update MERGES and keeps the credential and every tb_ key; it REFUSES a
           // model_info-only edit with 400, which is why the label path is a PATCH.
           const answer = vendorModel.length > 0
-            ? await askProxy("/model/update", () => proxy.updateModel({ id: row.id, vendorModel, info }))
-            : await askProxy("/model/{id}/update", () => proxy.patchModel({ id: row.id, info }));
+            ? await askProxy("/model/update", () => proxy.updateModel({ id: row.id, vendorModel, info, params: priceParams }))
+            : await askProxy("/model/{id}/update", () => proxy.patchModel({ id: row.id, info, params: priceParams }));
           changed.push({ id: row.id, ok: answer.ok === true, why: answer.ok ? "" : answer.why });
         }
         let fallback = null;
@@ -2196,8 +2673,20 @@ export function createAdminApi({
         }
         const landed = changed.filter((row) => row.ok).length;
         if (landed === 0) { ledger.failed(changed[0]?.why ?? "nothing changed"); json(response, 502, { error: "proxy", message: changed[0]?.why ?? "nothing changed", deployments: changed }); return true; }
+        // A screenshot fallback that the proxy refused is reported as a refusal, not as a field in
+        // a 200. The model itself changed; the fallback did not, and a customer-visible model with
+        // no screenshot route is PROXY-10 waiting to happen.
+        if (fallback != null && !fallback.ok && wouldBeVisible) {
+          ledger.failed(`the screenshot fallback did not register: ${fallback.why}`);
+          json(response, 409, {
+            error: "fallback_refused",
+            message: `${alias} changed, but its screenshot fallback did not register and this model is on customers' cards. The proxy said: ${fallback.why}`,
+            deployments: changed,
+          });
+          return true;
+        }
         ledger.done(`${landed} of ${editable.length} deployment(s) changed${fromFile > 0 ? `, and ${fromFile} more are declared in the proxy's file and were left alone` : ""}`);
-        const ran = ranAlias(await askProxySpend(), alias);
+        const ran = ranAlias(await askProxySpend(), alias, rows.map((row) => row.id));
         json(response, 200, {
           alias,
           deployments: changed,
@@ -2249,7 +2738,13 @@ export function createAdminApi({
             vendorModel: known.vendorModel,
             credentialName: slot,
             id,
-            params: provider.baseUrl ? { api_base: provider.baseUrl } : {},
+            params: {
+              ...(provider.baseUrl ? { api_base: provider.baseUrl } : {}),
+              // The price too, or the pool's new key would bill at zero while its siblings billed
+              // correctly and the per-key column would be nonsense.
+              ...(known.inputCostPerToken != null ? { input_cost_per_token: known.inputCostPerToken } : {}),
+              ...(known.outputCostPerToken != null ? { output_cost_per_token: known.outputCostPerToken } : {}),
+            },
             // The same facts the other deployments behind this alias carry, so a pool stays one
             // thing rather than becoming two rows that disagree about what a customer is told.
             info: {
@@ -2345,7 +2840,12 @@ export function createAdminApi({
       // nothing, because the door it drives sets the model as well as the label: pushed at a box
       // running something else, it would move that customer onto this model without being asked.
       if (action === "push-label") {
-        const ran = ranAlias(await askProxySpend(), alias);
+        // Candidates are the boxes actually POINTED at the alias plus the ones whose traffic ran on
+        // it, and the first list is the one that matters: a box on the alias with a stale label is
+        // exactly what this route exists to repair, and it may not have sent a request this month.
+        const ran = ranAlias(await askProxySpend(), alias, rows.map((row) => row.id));
+        const pointed = (await boxLabels()).filter((row) => row.read && row.model === alias).map((row) => row.slug);
+        ran.slugs = [...new Set([...pointed, ...ran.slugs])];
         const named = Array.isArray(body?.slugs) ? body.slugs.map(String) : [];
         const targets = named.length > 0 ? named : (body?.all === true ? ran.slugs : []);
         if (targets.length === 0) {
@@ -2384,7 +2884,8 @@ export function createAdminApi({
 
       if (action === "remove") {
         if (String(body?.confirm ?? "") !== alias) { json(response, 400, { error: "confirm", message: `Type ${alias} to remove it. Nothing was changed.` }); return true; }
-        const ran = ranAlias(await askProxySpend(), alias);
+        const ran = ranAlias(await askProxySpend(), alias, rows.map((row) => row.id));
+        ran.slugs = [...new Set([...(await boxLabels()).filter((row) => row.read && row.model === alias).map((row) => row.slug), ...ran.slugs])];
         if (ran.slugs.length > 0) {
           json(response, 409, {
             error: "in_use",

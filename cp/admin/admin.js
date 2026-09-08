@@ -118,6 +118,10 @@
     if (!response.ok) {
       const error = new Error(String(parsed?.message ?? parsed?.error ?? `that request answered ${response.status}`));
       error.status = response.status;
+      // The refusal's own body, carried through. Some refusals are a QUESTION -- push-label answers
+      // 409 with the workspaces it would touch and changes nothing -- and a caller that only got
+      // the sentence could not draw the list the operator has to choose from.
+      error.body = parsed ?? {};
       throw error;
     }
     return parsed ?? {};
@@ -705,49 +709,60 @@
 
   // ---- panel 6: providers, keys and plan models ------------------------------------------------
   //
-  // THE ROUTE CONTRACT THIS PANEL IS WRITTEN AGAINST. PROVIDERS-1, version 1. The whole panel is
+  // THE ROUTE CONTRACT THIS PANEL IS WRITTEN AGAINST. PROVIDERS-1, version 2. The whole panel is
   // one GET, because every part of it is read together and a page that fired six requests would
   // render in six stages on a bad connection.
   //
   //   GET /v1/admin/providers
   //     { configured, why, db: { on, why }, measuredAt,
   //       providers: [{ id, name, kind, baseUrl, fromPreset, bootstrapEnv,
-  //                     health: { reachable, why, checkedAt },
-  //                     catalog: { models: [id], live, readAt, why, note, ready, wired },
-  //                     keys: [{ slot, label, order, masked, parked, backsCatalog,
+  //                     health: { reachable, why, checkedAt, how, requests, failures },
+  //                     catalog: { models: [id], live, readAt, why, note, ready, liveNeedsKey,
+  //                                leftoverDoor },
+  //                     keys: [{ slot, label, order, masked, parked,
   //                              serves: [alias], lastError: { at, why } | null,
-  //                              spend: { month, requests, why },
+  //                              spend: { month, requests, tokens, priced, why },
   //                              quota: { unit, window, used, total, remaining, pct, resetAt,
   //                                       warn, live, why, byWorkspace: [{ slug, requests,
   //                                       tokens, dollars }] } }] }],
   //       planModels: [{ alias, provider, vendorModel, customerName, customerLabel, servedBy,
-  //                      contextWindow, supportsVision, visionFallback, vision: { ok, at, why },
+  //                      contextWindow, inputCostPerToken, outputCostPerToken, priced, pricedWhy,
+  //                      supportsVision, visionFallback, vision: { ok, at, why },
   //                      plans, customerVisible, shownToCustomers,
   //                      deployments: [{ id, keySlot, fromDb, healthy, why }],
-  //                      workspaces, workspaceSlugs, workspacesWhy, labelBehind,
-  //                      labelBehindWhy }],
+  //                      workspaces, workspaceSlugs, workspacesWhy, runningHere,
+  //                      labelBehind, labelBehindSlugs, labelBehindWhy }],
+  //       pricing: { unpriced: [alias], why },
   //       defaults: { planModel, why },
   //       actions: [{ at, actor, via, ip, action, target, detail, outcome }] }
   //
   //   POST /v1/admin/providers                                   { id, name, kind, baseUrl,
   //                                                                catalogBaseUrl?, catalogPath? }
   //   POST /v1/admin/providers/:id/keys                          { label, apiKey, slot?, order? }
-  //   POST /v1/admin/providers/:id/keys/:slot/roll               { apiKey }
+  //   POST /v1/admin/providers/:id/keys/:slot/roll               { apiKey, force? }
   //   POST /v1/admin/providers/:id/keys/:slot/park               { parked }
   //   POST /v1/admin/providers/:id/keys/:slot/remove             { confirm: "<slot>" }
   //   POST /v1/admin/providers/:id/keys/:slot/quota              { total, unit, window, resetAt }
-  //   POST /v1/admin/providers/:id/catalog/refresh               {}
+  //   POST /v1/admin/providers/:id/catalog/refresh               { apiKey? }
+  //   POST /v1/admin/providers/:id/health                        {}
   //   POST /v1/admin/plan-models                                 { alias, provider, keySlots: [],
   //                                                                vendorModel, customerName,
   //                                                                customerLabel, servedBy,
   //                                                                customerVisible, supportsVision,
   //                                                                visionFallback, contextWindow,
-  //                                                                plans }
+  //                                                                inputCostPerToken?,
+  //                                                                outputCostPerToken?, plans }
   //   POST /v1/admin/plan-models/:alias/update                   any of the above but alias
   //   POST /v1/admin/plan-models/:alias/keys                     { keySlots: [] }
   //   POST /v1/admin/plan-models/:alias/vision-check             {}
   //   POST /v1/admin/plan-models/:alias/apply                    {}
-  //   POST /v1/admin/plan-models/:alias/push-label               { all: true } or { slugs: [] }
+  //   POST /v1/admin/plan-models/:alias/push-label               { slugs: [] }; an empty body
+  //                                                                answers 409 with `candidates`
+  //                                                                and changes nothing, and this
+  //                                                                page always sends the empty one
+  //                                                                first. { all: true } exists for
+  //                                                                cp/cli.mjs, where the operator
+  //                                                                has typed the alias.
   //   POST /v1/admin/defaults                                    { planModel }
   //   POST /v1/admin/clients/:slug/model                         { planModel, pushLabel? }
   //
@@ -858,22 +873,48 @@
     head.appendChild(el("span", "quiet", provider.kind || "kind not recorded"));
     head.appendChild(el("span", "quiet mono", provider.baseUrl || "no address recorded"));
     const health = provider.health ?? {};
-    if (health.reachable === true) head.appendChild(el("span", "chip ok", "answering"));
-    else if (health.reachable === false) {
+    if (health.reachable === true) {
+      const chip = el("span", "chip ok", "answering");
+      // WHERE THE GREEN CAME FROM, on the chip itself. Nothing on this install checks health in the
+      // background, so "answering" means either requests went through and none failed, or somebody
+      // pressed the button beside it. A green light with no source behind it is worse than none.
+      chip.title = String(health.how || health.why || "");
+      head.appendChild(chip);
+    } else if (health.reachable === false) {
       const chip = el("span", "chip refused", "not answering");
       chip.title = String(health.why || "");
       head.appendChild(chip);
     } else {
-      const chip = el("span", "quiet", "not measured");
-      chip.title = String(health.why || "this provider has not been asked yet");
+      const chip = el("span", "quiet", "not checked");
+      chip.title = String(health.why || "nothing has checked this provider, so there is nothing to report");
       head.appendChild(chip);
     }
 
     const actions = el("div", "actions");
+    // A LIVE MODEL LIST NEEDS THE KEY, and this console keeps no copy of one: the key is held for
+    // the one request that reads the vendor and stored nowhere. Left blank, Refresh returns the
+    // names last read with the date they were read on, and says so.
+    const catalogKey = document.createElement("input");
+    catalogKey.type = "password";
+    catalogKey.className = "catalogKey";
+    catalogKey.autocomplete = "off";
+    catalogKey.placeholder = "paste the key to read their live list";
+    catalogKey.title = "Optional. With a key this reads the vendor's own model list right now; without one it shows the names last read and when. Nothing is stored either way.";
+    actions.appendChild(catalogKey);
     const refresh = el("button", "ghost small", "Refresh the model list");
     refresh.type = "button";
-    refresh.addEventListener("click", () => act(refresh, () => api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/catalog/refresh`, {})));
+    refresh.addEventListener("click", () => act(refresh, async () => {
+      const value = catalogKey.value.trim();
+      const answer = await api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/catalog/refresh`, value.length > 0 ? { apiKey: value } : {});
+      catalogKey.value = "";
+      return answer;
+    }));
     actions.appendChild(refresh);
+    const check = el("button", "ghost small", "Check now");
+    check.type = "button";
+    check.title = "Sends one real request to this provider on every model it serves, and records what came back. It costs the vendor a request, which is why it is a button and not a timer.";
+    check.addEventListener("click", () => act(check, () => api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/health`, {})));
+    actions.appendChild(check);
     head.appendChild(actions);
     card.appendChild(head);
 
@@ -915,18 +956,22 @@
       name.appendChild(el("div", null, key.label || key.slot));
       name.appendChild(el("div", "quiet mono", key.slot));
       if (key.parked) name.appendChild(el("span", "chip locked", "parked"));
-      if (key.backsCatalog) {
-        const chip = el("span", "chip ok", "reads the model list");
-        chip.title = "The provider's own model list is read through this key. Rolling it keeps working; removing it takes the Refresh button with it.";
-        name.appendChild(chip);
-      }
       tr.appendChild(name);
       tr.appendChild(el("td", "num", key.order ?? "-"));
       // The mask the service reported and nothing else. This page never sees a key value.
       tr.appendChild(el("td", "mono", key.masked || "not shown"));
       tr.appendChild(el("td", null, (key.serves ?? []).length === 0 ? "nothing yet" : (key.serves ?? []).join(", ")));
       const month = el("td", "num");
-      month.appendChild(measured(dollars(key.spend?.month), key.spend?.why));
+      // "not priced" and "$0.00" look identical to a reader and mean opposite things: one is a model
+      // nobody has given a cost per token, the other is a customer who has spent nothing. On the
+      // R750 2026-09-08 every Z.AI row was the first while the page drew the second.
+      if (key.spend?.priced === false) {
+        const chip = el("span", "quiet", "not priced");
+        chip.title = String(key.spend?.why || "No cost per token is set on this key's deployments, so what ran through it cannot be turned into money.");
+        month.appendChild(chip);
+      } else {
+        month.appendChild(measured(dollars(key.spend?.month), key.spend?.why));
+      }
       tr.appendChild(month);
       const requests = el("td", "num");
       requests.appendChild(measured(key.spend?.requests, key.spend?.why));
@@ -1148,6 +1193,17 @@
     // shownToCustomers is the route's own answer to the one question that keeps a routing target
     // off a customer's Settings card: visible AND named on both sides. A row that fails it is drawn
     // here plainly, because the operator's page is where the reason has to be visible.
+    const stale = Number(model.labelBehind);
+    if (Number.isFinite(stale) && stale > 0) {
+      const chip = el("span", "chip refused", `${stale} behind on the name`);
+      chip.title = String(model.labelBehindWhy || "");
+      head.appendChild(chip);
+    }
+    if (model.priced === false) {
+      const chip = el("span", "chip locked", "not priced");
+      chip.title = String(model.pricedWhy || "");
+      head.appendChild(chip);
+    }
     if (model.shownToCustomers === false) {
       const chip = el("span", "chip locked", "not shown to customers");
       chip.title = model.customerVisible === false
@@ -1172,14 +1228,30 @@
     grant.addEventListener("click", () => act(grant, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/apply`, {})));
     actions.appendChild(grant);
 
-    const push = el("button", "ghost small", known
-      ? `Update what ${running} workspace${running === 1 ? "" : "s"} call it`
-      : "Update what their Titan calls it");
+    const behind = Number(model.labelBehind);
+    const push = el("button", "ghost small", Number.isFinite(behind) && behind > 0
+      ? `Fix what ${behind} workspace${behind === 1 ? "" : "s"} call it`
+      : (known ? `Update what ${running} workspace${running === 1 ? "" : "s"} call it` : "Update what their Titan calls it"));
     push.type = "button";
     push.title = CLOCK.label;
-    // { all: true }, because the route refuses a push that names nobody: it writes INSIDE a box
-    // and it sets the model as well as the label, so an empty body answers 409 with the candidates.
-    push.addEventListener("click", () => act(push, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/push-label`, { all: true })));
+    // AN EMPTY BODY FIRST, ALWAYS. This used to send { all: true } on one click, which is exactly
+    // the safety the route was rewritten to add and this page defeating it: `all` resolves to every
+    // workspace that ran the alias inside the month window, the door it drives sets the MODEL as
+    // well as the label, and so a customer moved onto another plan model earlier in the same month
+    // would have been silently moved back. The route answers 409 with the candidates and changes
+    // nothing; the operator ticks the ones they mean.
+    push.addEventListener("click", async () => {
+      push.disabled = true;
+      try {
+        const done = await api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/push-label`, {});
+        banner(String(done?.message ?? "Done."), true);
+        await loadProviders();
+      } catch (error) {
+        const candidates = Array.isArray(error?.body?.candidates) ? error.body.candidates : [];
+        if (error?.status === 409 && candidates.length > 0) askWhichWorkspaces(card, model, candidates, String(error.message));
+        else banner(String(error.message));
+      } finally { push.disabled = false; }
+    });
     actions.appendChild(push);
 
     // Whether this model takes an image is the one fact a model list can never tell us, and getting
@@ -1231,6 +1303,55 @@
     return card;
   }
 
+  /**
+   * The workspaces a label push would touch, ticked one at a time.
+   *
+   * This exists because the push writes INSIDE a customer's box and the relay door it drives writes
+   * the base url, the key, the model, the endpoint name, the served-by line, the context window and
+   * the label in one call. So it does not just correct what a Titan calls itself: it MOVES that
+   * workspace onto this plan model. Doing that to a list the operator never saw is how a customer
+   * who was deliberately put on something else gets quietly moved back.
+   *
+   * The boxes that are actually behind are ticked to start with; a box already saying the right
+   * thing is left unticked, because pushing at it is a write into a customer's box for no change.
+   */
+  function askWhichWorkspaces(card, model, candidates, why) {
+    const existing = card.querySelector(".pushPicker");
+    if (existing) existing.remove();
+    const box = el("div", "pushPicker");
+    box.appendChild(el("p", "quiet", why));
+    const behind = new Set(Array.isArray(model.labelBehindSlugs) ? model.labelBehindSlugs.map(String) : []);
+    const list = el("div", "row");
+    const inputs = [];
+    for (const slug of candidates) {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = String(slug);
+      input.checked = behind.size === 0 || behind.has(String(slug));
+      label.appendChild(input);
+      label.appendChild(text(behind.has(String(slug)) ? `${slug} (behind)` : String(slug)));
+      list.appendChild(label);
+      inputs.push(input);
+    }
+    box.appendChild(list);
+    const go = el("button", "ghost small", "Update the ticked workspaces");
+    go.type = "button";
+    go.addEventListener("click", () => act(go, () => {
+      const slugs = inputs.filter((one) => one.checked).map((one) => one.value);
+      if (slugs.length === 0) throw new Error("Tick at least one workspace, or cancel. Nothing was changed.");
+      return api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/push-label`, { slugs });
+    }));
+    const stop = el("button", "ghost small", "Cancel");
+    stop.type = "button";
+    stop.addEventListener("click", () => box.remove());
+    const buttons = el("div", "actions");
+    buttons.appendChild(go);
+    buttons.appendChild(stop);
+    box.appendChild(buttons);
+    card.appendChild(box);
+  }
+
   function openPlanModelForm(model) {
     const form = $("planModelForm");
     const answer = providersAnswer;
@@ -1241,6 +1362,8 @@
     $("pmCustomerName").value = String(model?.customerName ?? "");
     $("pmCustomerLabel").value = String(model?.customerLabel ?? "");
     $("pmContext").value = model?.contextWindow ? String(model.contextWindow) : "";
+    $("pmInputCost").value = model?.inputCostPerToken != null ? String(model.inputCostPerToken) : "";
+    $("pmOutputCost").value = model?.outputCostPerToken != null ? String(model.outputCostPerToken) : "";
     $("pmPlans").value = (model?.plans ?? []).join(", ");
     $("pmAlias").value = editingAlias;
     $("pmAlias").readOnly = editingAlias.length > 0;
@@ -1359,6 +1482,10 @@
       supportsVision,
       visionFallback,
       contextWindow: $("pmContext").value.trim().length > 0 ? Number($("pmContext").value) : null,
+      // Sent only when typed. A blank field is NOT zero: writing zero would be a real price of
+      // nothing, which reads on every page as "spent nothing".
+      ...($("pmInputCost").value.trim().length > 0 ? { inputCostPerToken: $("pmInputCost").value.trim() } : {}),
+      ...($("pmOutputCost").value.trim().length > 0 ? { outputCostPerToken: $("pmOutputCost").value.trim() } : {}),
       plans: $("pmPlans").value.split(",").map((one) => one.trim()).filter((one) => one.length > 0),
     };
     const button = $("planModelSave");

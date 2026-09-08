@@ -545,6 +545,19 @@ export async function startFakeProxy(options = {}) {
     credentials: () => [...credentials.values()].map((row) => ({ ...row })),
     fallbacks: () => Object.fromEntries(fallbacks),
     passThrough: () => [...passThrough.values()].map((row) => ({ ...row })),
+    /**
+     * A pass-through planted directly, so a test can start from the state the R750 was really in.
+     *
+     * MEASURED THERE 2026-09-08: /catalog/zai and /catalog/minimax were both live with a cleartext
+     * `authorization` header in LiteLLM_Config, and the minimax one had never served a read. An
+     * install that already carries those has to lose them, and that can only be tested from a
+     * starting state the panel itself will no longer create.
+     */
+    addPassThroughRow({ path: pathname, target, headers = {}, includeSubpath = true }) {
+      const id = randomUUID();
+      passThrough.set(id, { id, path: String(pathname), target: String(target), headers: { ...headers }, include_subpath: includeSubpath === true, cost_per_request: null, is_from_config: false });
+      return id;
+    },
     /** The flag, which is what makes the half-state testable rather than a story. */
     setStoreModelInDb: (on) => { storeModelInDb = on !== false; },
     /** One deployment marked sick, so the panel's health column has something true to show. */
@@ -557,8 +570,18 @@ export async function startFakeProxy(options = {}) {
       const row = credentials.get(name);
       return row == null ? "" : createHash("sha256").update(String(row.credential_values.api_key), "utf8").digest("hex");
     },
-    /** Spend put on a key without a request, for the panel assertions. */
-    chargeAlias(alias, dollars, requests = 1, model = "plan-zai") {
+    /**
+     * Spend put on a key without a request, for the panel assertions.
+     *
+     * `recordedModel` is what the LOG says, which on a real install is the VENDOR model and not the
+     * alias: on the R750 2026-09-08 `select model,count(*) from "LiteLLM_SpendLogs"` answered
+     * openai/glm-5.3 596 times and the alias plan-zai three times in the whole log. The panel used
+     * to decide which workspaces ran an alias by matching that string, so it believed plan-zai was
+     * run by one workspace while three were on it -- and that list is what the remove guard reads.
+     * `status` is the outcome of the request, which is the only evidence this install has that a
+     * provider is unwell.
+     */
+    chargeAlias(alias, dollars, requests = 1, model = "plan-zai", { recordedModel = "", status = "success" } = {}) {
       const record = keys.get(byAlias.get(alias));
       if (record == null) return false;
       record.spend += dollars;
@@ -570,8 +593,10 @@ export async function startFakeProxy(options = {}) {
       const behind = deployments.find((row) => row.model_name === model);
       for (let i = 0; i < requests; i += 1) {
         logs.push({
-          api_key: record.keyId, key_alias: record.alias, spend: dollars / requests, model, startTime: nowIso(),
+          api_key: record.keyId, key_alias: record.alias, spend: dollars / requests,
+          model: recordedModel || model, startTime: nowIso(), status,
           model_id: behind?.model_info?.id ?? "", prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+          ...(status === "failure" ? { metadata: { error_information: { error_message: "the vendor refused this request" } } } : {}),
         });
       }
       return true;

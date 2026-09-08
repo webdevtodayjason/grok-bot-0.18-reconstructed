@@ -194,6 +194,28 @@ general_settings:
   # (`sk****AA`); this does not. So a pass-through's key is kept where the file's os.environ
   # indirection holds it, the panel never renders these headers, and the control plane never puts a
   # cleartext key through this route.
+  #
+  # THAT LAST SENTENCE WAS FALSE FOR ONE WAVE AND IS TRUE AGAIN. PROVIDERS-1 shipped a catalog read
+  # that registered /catalog/<provider> LIVE with `authorization: Bearer <the vendor key>`, on the
+  # reasoning that the key then lived at the proxy rather than in the control plane. MEASURED ON THE
+  # R750 2026-09-08, that put a 56 character Z.AI key and a 132 character MiniMax key into
+  # LiteLLM_Config.general_settings in CLEARTEXT -- no os.environ indirection, none of the
+  # encryption LiteLLM_CredentialsTable gets under PROXY_SALT_KEY -- and GET
+  # /config/pass_through_endpoint handed both back unmasked. The MiniMax one was persisted for a
+  # catalog that had never been read once. So the control plane reads a vendor's model list
+  # DIRECTLY now, at the two moments the operator has just handed it the key (adding one and rolling
+  # one), holds it for that request and stores the names. cp/admin.mjs `unwireCatalog` removes any
+  # /catalog/* row an older install still carries.
+  #
+  # A PASS-THROUGH WITH AN EMPTY KEY IS NOT SHIPPED EITHER, and the two below are the reason this
+  # paragraph exists. MEASURED ON THE R750 2026-09-08: PROXY_TINYFISH_KEY_1 is a bare newline, so
+  # both paths were serving with `x-api-key: ""` while every tenant key carried them on its allow
+  # list -- every box able to call a door that could only fail upstream, booking a metered request
+  # at 0.0001 each time. The doors stay declared here (they are what PROXY-7's key drops into), and
+  # the CONTROL PLANE now decides whether a tenant key is given them: cp/proxy.mjs `tenantRoutesFor`
+  # reads this list back and leaves a path off a key while its credential header is empty. The
+  # moment the key is set the next mint, and `node cp/cli.mjs proxy limits --all`, put them back
+  # with no edit here and no restart.
   pass_through_endpoints:
     - path: /tinyfish/fetch
       target: https://api.fetch.tinyfish.ai
