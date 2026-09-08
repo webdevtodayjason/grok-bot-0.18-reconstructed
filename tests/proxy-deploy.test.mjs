@@ -30,6 +30,8 @@ const INSTALL = path.join(repo, "deploy/r750/proxy-install.sh");
 const COOLIFY_TOOL = path.join(repo, "deploy/r750/proxy-coolify.mjs");
 const COMPOSE = path.join(repo, "deploy/coolify/proxy.compose.yml");
 const CONFIG = path.join(repo, "deploy/coolify/proxy-config/config.yaml");
+const CONFIG_STAGE1 = path.join(repo, "deploy/coolify/proxy-config/config.stage1.yaml");
+const BOOTSTRAP = path.join(repo, "deploy/coolify/proxy-config/bootstrap.json");
 const ISOLATION = path.join(repo, "deploy/r750/box-isolation.sh");
 const SYNC = path.join(repo, "deploy/r750/sync.sh");
 
@@ -144,21 +146,212 @@ test("the image is pinned to a bare version, because the -stable suffix is a 404
   assert.match(image, /:v\d+\.\d+\.\d+$/, "pinned to an exact version, with no -stable suffix and no floating tag");
 });
 
-test("the config file it mounts holds no key at all, only os.environ references", () => {
-  // This is why config.yaml can live in git and sit readable in the bind mount, and it is the
-  // difference between this design and the box-secrets.json copies it replaces.
-  const configText = readFileSync(CONFIG, "utf8");
-  const apiKeys = [...configText.matchAll(/^\s*api_key:\s*(\S+)/gm)].map((m) => m[1]);
-  assert.ok(apiKeys.length >= 3, `expected the model keys, found ${apiKeys.length}`);
-  for (const value of apiKeys) assert.match(value, /^os\.environ\/[A-Z0-9_]+$/, `${value} is a literal key in a file in git`);
-  // And every name it refers to is one the compose supplies, or the container gets a model with no
-  // credential that 401s on a customer's turn.
-  const referenced = new Set([...configText.matchAll(/os\.environ\/([A-Z0-9_]+)/g)]
-    .filter((m) => !/^\s*#/.test(configText.slice(configText.lastIndexOf("\n", m.index) + 1, m.index)))
-    .map((m) => m[1]));
-  for (const name of referenced) {
-    assert.ok(composeCode.includes(`${name}: \${${name}}`), `config.yaml wants ${name} and the compose does not supply it`);
+test("neither config file holds a key at all, only os.environ references", () => {
+  // This is why these files can live in git and sit readable in the bind mount, and it is the
+  // difference between this design and the box-secrets.json copies they replace.
+  for (const [label, file] of [["config.yaml", CONFIG], ["config.stage1.yaml", CONFIG_STAGE1]]) {
+    const configText = readFileSync(file, "utf8");
+    const apiKeys = [...configText.matchAll(/^\s*api_key:\s*(\S+)/gm)].map((m) => m[1]);
+    for (const value of apiKeys) assert.match(value, /^os\.environ\/[A-Z0-9_]+$/, `${label}: ${value} is a literal key in a file in git`);
+    // And every name it refers to is one the compose supplies, or the container gets a model with no
+    // credential that 401s on a customer's turn.
+    const referenced = new Set([...configText.matchAll(/os\.environ\/([A-Z0-9_]+)/g)]
+      .filter((m) => !/^\s*#/.test(configText.slice(configText.lastIndexOf("\n", m.index) + 1, m.index)))
+      .map((m) => m[1]));
+    for (const name of referenced) {
+      assert.ok(composeCode.includes(`${name}: \${${name}}`), `${label} wants ${name} and the compose does not supply it`);
+    }
   }
+  // Stage one is the file that still carries the pool, so it is the one that must still carry keys.
+  const stage1 = readFileSync(CONFIG_STAGE1, "utf8");
+  assert.ok([...stage1.matchAll(/^\s*api_key:\s*(\S+)/gm)].length >= 3,
+    "config.stage1.yaml is what carries the fleet across the first restart and must still declare its subscriptions");
+});
+
+// ---- PROVIDERS-1: the file is a bootstrap now, and there are two staged forms ----------------------
+
+test("both staged config files parse as YAML", async () => {
+  // A real parse, not a regex. An indentation slip in these files is not an error at startup, it is
+  // SILENCE -- LiteLLM ignores a key it does not recognise -- so the parse is worth its own check.
+  // Measured separately and more strongly on this Mac 2026-09-08: both files were booted in a real
+  // docker.litellm.ai/berriai/litellm-database:v1.100.0 against a non-empty Postgres, stage two in
+  // 11.9 s and stage one in 16.4 s, and both answered /health/readiness 200 and served a turn.
+  for (const file of [CONFIG, CONFIG_STAGE1]) {
+    const parsed = await run("python3", ["-c",
+      "import sys,yaml,json;d=yaml.safe_load(open(sys.argv[1]));print(json.dumps(sorted(d.keys())))", file]);
+    const keys = JSON.parse(parsed.stdout.trim());
+    assert.ok(keys.includes("general_settings"), `${path.basename(file)} has no general_settings`);
+    assert.ok(keys.includes("mcp_servers"), `${path.basename(file)} has no mcp_servers`);
+  }
+});
+
+test("the shipped config.yaml declares no model_list and no router fallbacks, because those are database rows now", async () => {
+  const parsed = await run("python3", ["-c",
+    "import sys,yaml,json;d=yaml.safe_load(open(sys.argv[1]));"
+    + "print(json.dumps({'model_list':d.get('model_list'),'fallbacks':(d.get('router_settings') or {}).get('fallbacks'),"
+    + "'store':(d.get('general_settings') or {}).get('store_model_in_db'),"
+    + "'reload':(d.get('general_settings') or {}).get('proxy_config_reload_interval_seconds'),"
+    + "'errors':(d.get('general_settings') or {}).get('disable_error_logs')}))", CONFIG]);
+  const shipped = JSON.parse(parsed.stdout.trim());
+  assert.ok(shipped.model_list == null, "config.yaml still declares a model_list, which would win over the panel");
+  assert.ok(shipped.fallbacks == null, "config.yaml still declares router fallbacks, which the panel can no longer require");
+  assert.equal(shipped.store, true, "store_model_in_db is the line PROVIDERS-1 turns on");
+  assert.equal(shipped.reload, 10, "the reload interval is pinned, so a future second worker is bounded");
+  // NOT set, deliberately. It is read in exactly one place, _should_track_errors_in_db(), and
+  // turning it on stops a FAILED request being written to the spend log at all -- which would make
+  // "zero failed requests during the key roll" true because nothing could ever be written rather
+  // than because nothing failed. A gate that cannot fail is not a gate.
+  assert.ok(shipped.errors == null, "disable_error_logs must stay unset or a failed request can never be counted");
+
+  // Stage one is the opposite: it is what carries the fleet across the first restart.
+  const stage1Parsed = await run("python3", ["-c",
+    "import sys,yaml,json;d=yaml.safe_load(open(sys.argv[1]));"
+    + "print(json.dumps({'names':sorted({m['model_name'] for m in d.get('model_list') or []}),"
+    + "'fallbacks':(d.get('router_settings') or {}).get('fallbacks'),"
+    + "'store':(d.get('general_settings') or {}).get('store_model_in_db')}))", CONFIG_STAGE1]);
+  const stage1 = JSON.parse(stage1Parsed.stdout.trim());
+  assert.ok(stage1.names.includes("plan-zai"), "config.stage1.yaml must still serve plan-zai across the first restart");
+  assert.ok(stage1.names.includes("plan-zai-vision"), "and the vision pool, or every screenshot-carrying turn fails");
+  assert.ok(Array.isArray(stage1.fallbacks) && stage1.fallbacks.length > 0,
+    "and must still declare the vision fallback, so the fleet is covered before the seed runs");
+  assert.equal(stage1.store, true, "stage one is the restart that turns store_model_in_db on");
+});
+
+test("neither config declares allowed_routes, because the boundary moved to each key", async () => {
+  // The global door list is an EXACT STRING MATCH with no wildcards, checked before the key is
+  // looked up, so it refuses the master key too and cannot express PATCH /credentials/{name} or
+  // PATCH /model/{id}/update -- the two path-parameter routes the panel is built on. It also could
+  // not tell a tenant from the operator, which is what left PROXY-8 open. A list that came back
+  // would take the panel off the air with a 403 and no other clue.
+  for (const file of [CONFIG, CONFIG_STAGE1]) {
+    const parsed = await run("python3", ["-c",
+      "import sys,yaml,json;d=yaml.safe_load(open(sys.argv[1]));"
+      + "print(json.dumps((d.get('general_settings') or {}).get('allowed_routes')))", file]);
+    assert.equal(JSON.parse(parsed.stdout.trim()), null,
+      `${path.basename(file)} declares a global allowed_routes list again`);
+    // And the paragraph that replaced it is still there, so nobody adds the list back by reflex.
+    assert.match(readFileSync(file, "utf8"), /allowed_routes/,
+      `${path.basename(file)} no longer says what the door list did or what replaced it`);
+  }
+});
+
+test("the pass-through block is inside general_settings in both files, which is the only place LiteLLM reads it", async () => {
+  // MEASURED ON THE R750 2026-09-08 with the identical entries at the TOP LEVEL: the proxy started
+  // clean, logged nothing, listed no /tinyfish path in its own openapi.json and answered 404 on
+  // every call to one, while docs/PROXY.md carried a measured table for the route. mcp_servers is
+  // the opposite and is read from the top level. Either one in the other's place is silence.
+  for (const file of [CONFIG, CONFIG_STAGE1]) {
+    const parsed = await run("python3", ["-c",
+      "import sys,yaml,json;d=yaml.safe_load(open(sys.argv[1]));"
+      + "print(json.dumps({'nested':[e['path'] for e in ((d.get('general_settings') or {}).get('pass_through_endpoints') or [])],"
+      + "'top':d.get('pass_through_endpoints') is not None,"
+      + "'mcp':d.get('mcp_servers') is not None}))", file]);
+    const where = JSON.parse(parsed.stdout.trim());
+    assert.ok(where.nested.includes("/tinyfish/fetch") && where.nested.includes("/tinyfish/search"),
+      `${path.basename(file)}: the TinyFish pass-throughs are not under general_settings`);
+    assert.equal(where.top, false, `${path.basename(file)}: a pass_through_endpoints block at the top level is silence`);
+    assert.equal(where.mcp, true, `${path.basename(file)}: mcp_servers must stay at the TOP level`);
+  }
+});
+
+test("bootstrap.json holds no value that looks like a key, and every credential slot is an environment NAME", () => {
+  const text = readFileSync(BOOTSTRAP, "utf8");
+  const bootstrap = JSON.parse(text);
+  assert.ok(Number.isInteger(bootstrap.schemaVersion), "bootstrap.json carries no schema version");
+
+  // Every credential slot names an environment variable and holds nothing.
+  for (const one of bootstrap.credentials ?? []) {
+    assert.match(one.env, /^[A-Z0-9_]+$/, `${one.credentialName} names ${one.env}, which is not an environment name`);
+    assert.equal(one.value, undefined, `${one.credentialName} carries a value, and this file is in git`);
+    assert.ok(composeCode.includes(`${one.env}: \${${one.env}}`),
+      `bootstrap.json wants ${one.env} and the compose does not supply it, so the seed would write an empty credential`);
+  }
+
+  // And nothing anywhere in the file is key-shaped. A long opaque string with no url and no path
+  // separator is what a pasted credential looks like; model names, paths and urls are not that.
+  const suspicious = [...text.matchAll(/"([A-Za-z0-9_\-.]{28,})"/g)].map((m) => m[1])
+    .filter((one) => !/^https?:/.test(one));
+  assert.deepEqual(suspicious, [], `bootstrap.json holds something key-shaped: ${suspicious.join(", ")}`);
+
+  // The rule that keeps a routing target off a customer's screen. plan-zai-vision exists only so a
+  // screenshot-carrying turn has somewhere to go; a card for it would be a model nobody can choose
+  // and a name nobody recognises. The next mint would have produced exactly that.
+  const visible = (bootstrap.planModels ?? []).filter((one) => one.customerVisible);
+  const hidden = (bootstrap.planModels ?? []).filter((one) => !one.customerVisible);
+  assert.ok(visible.length > 0, "bootstrap.json seeds nothing a customer can see");
+  for (const one of visible) {
+    assert.ok(one.customerName && one.customerLabel,
+      `${one.modelName} is customer-visible with no name a person reads, so the routing alias would end up on their screen`);
+    assert.ok(one.visionFallback,
+      `${one.modelName} is customer-visible with no vision fallback, which is PROXY-10 waiting to happen again`);
+  }
+  assert.ok(hidden.some((one) => one.modelName.endsWith("-vision")),
+    "the vision model must be seeded NOT customer-visible");
+  for (const one of hidden) {
+    assert.ok(!one.customerName, `${one.modelName} is hidden and still carries a customer name`);
+  }
+
+  // The fallback map is seeded AFTER the deployments and never names a model that is not seeded, or
+  // POST /fallback answers 400 "Invalid fallback models" (measured on this Mac 2026-09-08).
+  const seeded = new Set((bootstrap.planModels ?? []).map((one) => one.modelName));
+  for (const pair of bootstrap.fallbacks ?? []) {
+    assert.ok(seeded.has(pair.model), `the fallback map names ${pair.model}, which nothing seeds`);
+    for (const target of pair.fallbackModels) {
+      assert.ok(seeded.has(target), `the fallback map points ${pair.model} at ${target}, which nothing seeds`);
+      assert.notEqual(target, pair.model, "a model cannot be its own fallback: the proxy answers 400");
+    }
+  }
+});
+
+test("the compose turns store_model_in_db ON and still pins one worker, which is what 'the next request' rests on", () => {
+  assert.match(composeCode, /STORE_MODEL_IN_DB:\s*"True"/,
+    "the compose and general_settings must agree; the file wins either way, but which one wins is not a thing to remember");
+  // MEASURED on this Mac 2026-09-08 with one worker: a deployment added with POST /model/new served
+  // its first request 10 ms after the add answered, and a deleted one stopped answering 8 ms after.
+  // With two workers that becomes "within proxy_config_reload_interval_seconds" and the panel's copy
+  // has to change with it.
+  assert.match(composeCode, /"--num_workers",\s*"1"/,
+    "the panel tells the operator a change takes effect on the next request, and that rests on one worker");
+});
+
+test("the installer ships both staged forms and the bootstrap, or a rollback has to fetch a file mid-incident", () => {
+  const installText = readFileSync(INSTALL, "utf8");
+  assert.match(installText, /config\.stage1\.yaml/, "proxy-install.sh does not install the stage one file");
+  assert.match(installText, /bootstrap\.json/, "proxy-install.sh does not install bootstrap.json");
+  assert.match(installText, /--stage/, "proxy-install.sh has no way to pick which staged form is active");
+  // The order that is load bearing: the per-key backfill runs BEFORE the restart that removes the
+  // global list, or there is a window in which the admin surface is open to every box on the bridge.
+  assert.match(installText, /proxy limits --all/, "proxy-install.sh never names the per-key backfill");
+  assert.match(installText, /proxy seed/, "proxy-install.sh never names the seed step");
+  // And sync.sh has to actually ship the directory, or the installer fails on the server.
+  const syncText = readFileSync(SYNC, "utf8");
+  assert.match(syncText, /proxy-config/, "sync.sh does not ship the proxy config directory");
+});
+
+test("the restore drill restores the proxy dump and its salt together, because one without the other is unreadable", () => {
+  // Verified 2026-09-08: deploy/backup/snapshot.sh already carried cp.env and already pg_dumped the
+  // proxy database, and this drill mentioned NEITHER. That did not matter much while the database
+  // held virtual keys and spend rows; it matters now that it holds every provider subscription the
+  // operator has, encrypted under PROXY_SALT_KEY, with no second copy anywhere.
+  const drill = readFileSync(path.join(repo, "deploy/backup/restore-drill.sh"), "utf8");
+  assert.match(drill, /proxy\/litellm\.sql/, "the drill never looks for the proxy dump");
+  assert.match(drill, /PROXY_SALT_KEY/, "the drill never looks for the salt that makes the dump readable");
+  assert.match(drill, /PROXY_BAD/, "the drill has no verdict for the proxy half");
+  // And the value is never printed: a length and a hash prefix, the same rule every script here
+  // follows. Every line that mentions it has to be one of four things -- reading it, measuring its
+  // length, hashing it, or handing it to the container that does the decrypt -- and a fifth kind of
+  // line is a key on somebody's terminal.
+  for (const line of drill.split("\n")) {
+    if (!line.includes("$SALT") && !line.includes("SALT=")) continue;
+    const reading = /SALT=/.test(line);
+    const length = /\$\{#SALT\}/.test(line);
+    const hashed = /(sha256sum|shasum)/.test(line);
+    const handedOver = /-e "LITELLM_SALT_KEY=\$SALT"|TB_SALT="\$SALT"/.test(line);
+    const tested = /^\s*(if|elif)\s+\[\s+-[zn]\s+"\$SALT"\s+\]/.test(line);
+    assert.ok(reading || length || hashed || handedOver || tested,
+      `this line could put the salt on a terminal: ${line.trim()}`);
+  }
+  assert.match(drill, /\$\{#SALT\}/, "the drill never reports the salt's length, so it proves nothing about which salt it found");
 });
 
 // ---- box-isolation.sh ----------------------------------------------------------------------------
@@ -248,11 +441,16 @@ exit 0
   return dir;
 }
 
-// A release tree with the one file the installer insists on before it will make anything.
+// A release tree with the three files the installer insists on before it will make anything: both
+// staged forms of the config and the bootstrap the seed reads. All three, because the one that is
+// not active is what a rollback reinstalls, and having to fetch it during an incident is how an
+// incident gets longer.
 function releaseTree() {
   const root = path.join(tempTree(), "titanbot");
   mkdirSync(path.join(root, "deploy/coolify/proxy-config"), { recursive: true });
   writeFileSync(path.join(root, "deploy/coolify/proxy-config/config.yaml"), readFileSync(CONFIG, "utf8"));
+  writeFileSync(path.join(root, "deploy/coolify/proxy-config/config.stage1.yaml"), readFileSync(CONFIG_STAGE1, "utf8"));
+  writeFileSync(path.join(root, "deploy/coolify/proxy-config/bootstrap.json"), readFileSync(BOOTSTRAP, "utf8"));
   return root;
 }
 
@@ -344,7 +542,24 @@ test("a real install generates the three secrets once, and a second run keeps ev
   assert.equal(statSync(path.join(proxyRoot, "config/config.yaml")).mode & 0o777, 0o644);
   assert.match(first.stdout, /it refers to these environment names/);
   assert.match(first.stdout, /PROXY_ZAI_KEY_1/);
-  assert.match(first.stdout, /and serves these model names.*plan-minimax plan-zai/);
+  // The report names what a fresh install SEEDS, which as of PROVIDERS-1 comes out of bootstrap.json
+  // rather than out of a model_list this file no longer carries.
+  assert.match(first.stdout, /a fresh install seeds these plan model names.*plan-minimax plan-zai plan-zai-vision/);
+  assert.match(first.stdout, /this file declares no model at all, which is stage 2/);
+
+  // And it names ONLY environment variables that exist. The first cut of that line scraped both
+  // whole files for `os.environ/...`, which matched the prose in them: it printed `NAME`, out of a
+  // sentence in bootstrap.json explaining that an unset pass-through forwards the literal string
+  // "os.environ/NAME" to the vendor, and PROXY_BROWSER_KEY out of a commented-out stub nothing
+  // reads. An operator who goes looking for a variable the installer invented loses an hour, so the
+  // shape of that line is asserted rather than left to a reader to notice.
+  const envLine = first.stdout.split("\n").find((line) => line.includes("it refers to these environment names"));
+  const printedNames = String(envLine).split(":").pop().trim().split(/\s+/).filter(Boolean);
+  assert.deepEqual(
+    printedNames,
+    ["PROXY_MINIMAX_KEY", "PROXY_TINYFISH_KEY_1", "PROXY_TINYFISH_KEY_2", "PROXY_ZAI_KEY_1", "PROXY_ZAI_KEY_2"],
+    "the installer named an environment variable that is not really referenced",
+  );
 
   // The second run. A new master here would lock the control plane out of the proxy, and a new salt
   // would make every stored credential unreadable.
@@ -628,8 +843,10 @@ test("it creates the service, sets the environment as literals, and never starts
       fake.state.envs.get("PROXY_DATABASE_URL"),
       `postgresql://litellm:${FAKE_DB_PASSWORD}@titanbot-proxy-db:5432/litellm`,
     );
-    // The literals in the file come through unchanged.
-    assert.equal(fake.state.envs.get("STORE_MODEL_IN_DB"), "False");
+    // The literals in the file come through unchanged. STORE_MODEL_IN_DB is True as of PROVIDERS-1:
+    // providers, keys and plan models are database rows managed from the panel, and config.yaml is
+    // the bootstrap for what has to be read before there is a database to read.
+    assert.equal(fake.state.envs.get("STORE_MODEL_IN_DB"), "True");
     assert.equal(fake.state.envs.get("LITELLM_MODE"), "PRODUCTION");
     assert.equal(fake.state.envs.get("LITELLM_LOG"), "ERROR");
     // A reference is posted under the name INSIDE the braces, which is the field Coolify's parser

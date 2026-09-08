@@ -75,6 +75,16 @@ services:
       com.titanbot.role: proxy
     # The image's entrypoint is `litellm`; this is its arguments. --config points into the DIRECTORY
     # bind below, because a bind to config.yaml itself would become a Coolify LocalFileVolume.
+    #
+    # --num_workers 1 IS LOAD BEARING as of PROVIDERS-1. The Providers panel tells the operator that
+    # a change takes effect on the next request, and that sentence rests on there being no second
+    # worker to converge: MEASURED on this Mac 2026-09-08 against litellm-database:v1.100.0 with one
+    # worker, over five add-then-delete cycles against a reachable upstream, a deployment added with
+    # POST /model/new was serving 6 to 14 ms after the add answered (mean 8) and a deleted one
+    # stopped being served 12 to 15 ms after. Raise this to 2 and that claim becomes
+    # "within proxy_config_reload_interval_seconds" instead, and the panel's copy and
+    # scripts/verify-proxy.mjs both have to change with it. The providers leg asserts the worker
+    # count before it reports a next-request number.
     command: ["--config", "/app/config/config.yaml", "--port", "4000", "--num_workers", "1"]
     environment:
       # The operator's master key. It opens /key/generate and every admin route, so it goes to
@@ -82,20 +92,40 @@ services:
       # Never a box, never git, never the sync payload. Generated once on the server by
       # deploy/r750/proxy-install.sh into /home/sem/titanbot/cp.env, and never rewritten.
       LITELLM_MASTER_KEY: ${PROXY_MASTER_KEY}
-      # The one-way key stored credentials are encrypted under. With STORE_MODEL_IN_DB false there
-      # are no stored credentials, so losing this costs budget rows and nothing else -- which is
-      # exactly why store_model_in_db is false this wave. PROXY-2 (bring-your-own through the proxy)
-      # is what flips it, and that is the day this key starts mattering.
+      # ---- THIS IS NOW A CROWN JEWEL, AND IT WAS NOT BEFORE ------------------------------------
+      # The one-way key every stored credential is encrypted under. It used to be nearly harmless:
+      # with STORE_MODEL_IN_DB false nothing was stored, so losing it cost budget rows.
+      #
+      # As of PROVIDERS-1 every provider subscription the operator holds lives in that database,
+      # encrypted under this value, and the control plane deliberately keeps NO second copy: it
+      # receives a key from the browser, hands it to /credentials and forgets it. So losing THIS
+      # LINE, or losing /data/titanbot-proxy/postgres, means re-entering every provider key by hand
+      # from the panel, which lists exactly which slots are empty. Losing both is every tenant off
+      # the air until that is done.
+      #
+      # Both halves are in the backup, verified 2026-09-08: deploy/backup/snapshot.sh copies cp.env
+      # (which holds PROXY_SALT_KEY) and pg_dumps the proxy database in a pass of its own, and as of
+      # this wave deploy/backup/restore-drill.sh restores the two TOGETHER and proves a credential
+      # decrypts, because a dump without its salt is ciphertext nobody can read.
+      #
+      # Rotating it is not a maintenance task. It makes every stored credential unreadable, which is
+      # why deploy/r750/proxy-install.sh never rewrites an existing value.
       LITELLM_SALT_KEY: ${PROXY_SALT_KEY}
       # postgresql://litellm:<password>@titanbot-proxy-db:5432/litellm, assembled by
       # proxy-coolify.mjs from PROXY_DB_PASSWORD in cp.env and posted as one literal. One field
       # rather than an interpolation, because a ${...} inside a longer string is the shape Coolify's
       # field-naming rule reads worst.
       DATABASE_URL: ${PROXY_DATABASE_URL}
-      # The model list lives in config.yaml, not in the database. Two reasons: the file is the thing
-      # an operator reads and a test can pin, and it is why the salt above is currently harmless.
-      # Turning this on is PROXY-2's decision, not this wave's.
-      STORE_MODEL_IN_DB: "False"
+      # The line PROVIDERS-1 turns on. Providers, their keys, the pools those keys form and the plan
+      # models customers run on live in the database and are managed live from the Providers panel;
+      # config.yaml is the bootstrap for what has to be read before there is a database to read.
+      #
+      # Set here AND in general_settings, deliberately, so the two agree. MEASURED on this Mac
+      # 2026-09-08 they do not have to: the FILE wins. With general_settings.store_model_in_db true
+      # and this field still "False", POST /model/new answered 200, the row came back from
+      # /model/info with db_model true, and it served traffic. Which one wins is not a thing anybody
+      # should have to remember, so both say the same.
+      STORE_MODEL_IN_DB: "True"
       LITELLM_MODE: PRODUCTION
       # ERROR, not INFO. At INFO this container logs a line per request carrying the model and the
       # key alias, which on a shared server is one customer's usage in an operator's log scroll, and

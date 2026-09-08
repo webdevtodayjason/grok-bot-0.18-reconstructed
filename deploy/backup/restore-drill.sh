@@ -14,13 +14,34 @@
 # damaged AFTER it was taken (a bad disk, a partial rsync to somewhere else) rather than while it
 # was being written.
 #
+# ---- AND THE PROXY, SINCE PROVIDERS-1 -------------------------------------------------------------
+# This drill used to mention neither the proxy's pg_dump nor cp.env, and snapshot.sh has captured
+# both for a while: cp.env in the per-instance file list, the proxy database as a pg_dump in a pass
+# of its own. That gap did not matter much while the proxy's database held virtual keys and spend
+# rows. It matters now: every provider subscription the operator holds lives in that database,
+# encrypted under PROXY_SALT_KEY, which is a line in cp.env, and the control plane keeps NO second
+# copy of any of them by design.
+#
+# So the two are restored TOGETHER and the drill asks the only question that matters about them: does
+# a credential in that dump DECRYPT with the salt in that cp.env. A dump without its salt is
+# ciphertext nobody can read, and a drill that reported a green verdict on one would be reporting on
+# a backup that cannot bring the operator's providers back.
+#
+# The decrypt is done by the litellm image itself rather than by re-implementing its crypto here,
+# and it needs docker and that image. If either is missing the drill says SKIPPED by name and keeps
+# going -- but a snapshot whose MANIFEST says a proxy dump was captured and which has no dump, or has
+# a dump and no salt, FAILS, because that is a broken snapshot rather than a missing tool.
+#
 # Env, all optional:
 #   TITANBOT_BACKUP_DEST  where snapshots live, default /mnt/rosa-storage/archives/titanbot/backups
 #   TITANBOT_INSTANCE     which instance, default titanbot
+#   TITANBOT_PROXY_IMAGE  the image to decrypt with, default docker.litellm.ai/berriai/litellm-database:v1.100.0
+#   TITANBOT_DRILL_SKIP_PROXY_DECRYPT=1   check the files are present and paired, do not run docker
 set -uo pipefail
 
 DEST_ROOT="${TITANBOT_BACKUP_DEST:-/mnt/rosa-storage/archives/titanbot/backups}"
 INSTANCE="${TITANBOT_INSTANCE:-titanbot}"
+PROXY_IMAGE="${TITANBOT_PROXY_IMAGE:-docker.litellm.ai/berriai/litellm-database:v1.100.0}"
 
 say() { printf '  %s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -156,9 +177,90 @@ EOF
   say "$(find "$WORK/tenants" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -cv '_control-plane$' | tr -d ' ') tenant director(ies) restored"
 fi
 
+step "the proxy, and the salt that makes its dump readable"
+# PROVIDERS-1. Every provider subscription the operator holds lives in the proxy's database,
+# encrypted under PROXY_SALT_KEY, and the control plane keeps no second copy. So the question here is
+# not "is there a dump", it is "does a credential in this dump decrypt with the salt in this
+# snapshot". A dump without its salt restores cleanly and is still worthless.
+PROXY_STATE="$(sed -n 's/.*"proxy"[^"]*"\([^"]*\)".*/\1/p' "$SNAP/manifest.json" | head -n 1)"
+PROXY_DUMP="$WORK/proxy/litellm.sql"
+CP_ENV_FILE="$WORK/relay/cp.env"
+PROXY_BAD=0
+PROXY_WHY=""
+say "manifest  proxy ${PROXY_STATE:-unstated}"
+if [ "${PROXY_STATE:-absent}" = absent ]; then
+  say "no proxy database in this snapshot, which is complete for an instance that runs no proxy"
+else
+  if [ ! -f "$PROXY_DUMP" ]; then
+    PROXY_BAD=1
+    PROXY_WHY="the manifest says the proxy database was captured ($PROXY_STATE) and proxy/litellm.sql is not in the snapshot"
+    say "the manifest says the proxy was captured $PROXY_STATE and proxy/litellm.sql is not in the snapshot"
+  else
+    say "dump      proxy/litellm.sql  $(wc -c < "$PROXY_DUMP" | tr -d ' ') bytes"
+    # The salt is a line in cp.env. Read into a variable, never printed, and reported by length and
+    # hash prefix only -- the same rule every script in this repo follows for a secret.
+    SALT=""
+    if [ -f "$CP_ENV_FILE" ]; then
+      SALT="$(sed -n 's/^PROXY_SALT_KEY=//p' "$CP_ENV_FILE" | head -n 1)"
+    fi
+    if [ -z "$SALT" ]; then
+      PROXY_BAD=1
+      PROXY_WHY="the proxy dump is here and PROXY_SALT_KEY is not, so the dump is ciphertext nobody can read"
+      say "cp.env is missing or carries no PROXY_SALT_KEY, so this dump is ciphertext nobody can read"
+      say "  looked in $CP_ENV_FILE"
+    else
+      say "salt      PROXY_SALT_KEY present, ${#SALT} characters, sha256 $( (printf '%s' "$SALT" | sha256sum 2>/dev/null || printf '%s' "$SALT" | shasum -a 256) | cut -c1-12)"
+      # One ciphertext out of the credentials table's COPY block. pg_dump writes that data as plain
+      # text, so this needs no database at all to get at -- which is the point: the drill does not
+      # have to stand a Postgres up to answer the question.
+      CIPHER="$(grep -o '{"api_key": "[^"]*"}' "$PROXY_DUMP" | head -n 1 | sed 's/.*"api_key": "//; s/"}//')"
+      CREDS="$(grep -c '{"api_key": "' "$PROXY_DUMP" 2>/dev/null || true)"
+      say "credentials in the dump: ${CREDS:-0}"
+      if [ -z "$CIPHER" ]; then
+        # Not a failure. A snapshot taken before the seed legitimately has no credential row, and
+        # calling that a broken backup would make the drill cry wolf on day one.
+        say "SKIPPED: this dump holds no credential row yet, so there is nothing to decrypt"
+      elif [ "${TITANBOT_DRILL_SKIP_PROXY_DECRYPT:-0}" = 1 ]; then
+        say "SKIPPED by TITANBOT_DRILL_SKIP_PROXY_DECRYPT: the dump and the salt are both here and paired"
+      elif ! command -v docker >/dev/null; then
+        say "SKIPPED: docker is not on PATH, so the decrypt cannot be run. The dump and the salt are both here."
+      else
+        # Decrypted BY THE IMAGE ITSELF rather than by re-implementing its crypto here. v1.100.0
+        # carries two formats (a versioned AES-256-GCM and the older nacl one) and a drill that
+        # guessed wrong would report a good backup as bad. The value is passed in the environment and
+        # only its LENGTH ever comes back out.
+        DECRYPT_OUT="$(TB_SALT="$SALT" TB_CIPHER="$CIPHER" docker run --rm --entrypoint python3 \
+          -e "LITELLM_SALT_KEY=$SALT" -e "TB_CIPHER=$CIPHER" "$PROXY_IMAGE" -c '
+import os
+from litellm.proxy.common_utils.encrypt_decrypt_utils import decrypt_value_helper
+v = decrypt_value_helper(os.environ["TB_CIPHER"], "api_key", exception_type="debug", return_original_value=False)
+ok = isinstance(v, str) and len(v) > 0 and v != os.environ["TB_CIPHER"]
+print(("DECRYPTED %d" % len(v)) if ok else "FAILED 0")
+' 2>/dev/null | tail -n 1)"
+        case "$DECRYPT_OUT" in
+          DECRYPTED*)
+            say "decrypt   ok: one credential decrypted with this snapshot's own salt, $(printf '%s' "$DECRYPT_OUT" | awk '{print $2}') characters (value not printed)"
+            ;;
+          FAILED*)
+            PROXY_BAD=1
+            PROXY_WHY="the proxy dump and the PROXY_SALT_KEY in this snapshot are not a pair"
+            say "decrypt   FAILED: the credential did not decrypt with this snapshot's PROXY_SALT_KEY."
+            say "          The dump and the salt in this snapshot do not belong together, so restoring it"
+            say "          would bring back every provider key unreadable. That is not a restore point."
+            ;;
+          *)
+            say "SKIPPED: could not run the decrypt (is $PROXY_IMAGE pulled?). The dump and the salt are both here."
+            ;;
+        esac
+      fi
+    fi
+  fi
+fi
+
 step "verdict"
 say "$OK store(s) opened and passed, $BAD did not"
 say "relay side: $(find "$WORK/relay" -type f 2>/dev/null | wc -l | tr -d ' ') file(s) restored"
+[ "$PROXY_BAD" -eq 0 ] || die "$PROXY_WHY; every provider key would come back unreadable, so this is not a restore point"
 [ "$CP_BAD" -eq 0 ] || die "the control plane store did not open; this snapshot cannot bring the customers back and is not a restore point"
 [ "$BAD" -eq 0 ] || die "$BAD store(s) failed; this snapshot is not a restore point"
 [ "$OK" -gt 0 ] || die "no agent store was found in the snapshot at all"

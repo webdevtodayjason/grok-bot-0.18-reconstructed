@@ -14,6 +14,18 @@
 // The seventh thing this file checks needs no server at all: the config an operator actually ships
 // says what the design decided. Model names are a contract with every box pointed at them, and the
 // two cache numbers are what "revocation within a minute" and "the panel sees a number" rest on.
+//
+// ---- WHAT CHANGED AT PROVIDERS-1 -----------------------------------------------------------------
+// The shipped config.yaml no longer holds a model list, a fallback map or a global door list: all
+// three moved into the proxy's own database and are managed from the Providers panel. So the file
+// assertions below now come in two halves -- what config.yaml must NO LONGER say, and what
+// config.stage1.yaml (the form the fleet is carried across the first restart on, and the last one
+// anybody edits by hand) must still say.
+//
+// The SERVER legs run against a stub configured from config.stage1.yaml, and that is deliberate:
+// they are about the proxy's door, its pool and its pass-through, which stage one is the last file
+// to express. The same shapes coming out of the DATABASE are the providers leg's job, and it proves
+// them from /model/new and /credentials rather than from a file.
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +33,7 @@ import { call, fingerprint, repoRoot, secret } from "./harness.mjs";
 import { blockParentOf, createStubProxy, createStubUpstream, readGeneralSettings, readModelList, readNestedList } from "./stub-proxy.mjs";
 
 const CONFIG_PATH = path.join(repoRoot, "deploy/coolify/proxy-config/config.yaml");
+const STAGE1_PATH = path.join(repoRoot, "deploy/coolify/proxy-config/config.stage1.yaml");
 const COMPOSE_PATH = path.join(repoRoot, "deploy/coolify/proxy.compose.yml");
 
 // The names of the two Z.AI subscriptions, which is what a pool is: one model_name, two keys.
@@ -33,10 +46,24 @@ export async function run({ report, real, baseUrl, masterKey }) {
   // ---- the file, with no server involved --------------------------------------------------------
   step("the config an operator ships");
   const configText = readFileSync(CONFIG_PATH, "utf8");
-  const models = readModelList(configText);
+  const stage1Text = readFileSync(STAGE1_PATH, "utf8");
+  const models = readModelList(stage1Text);
   const names = [...new Set(models.map((one) => one.model_name))];
 
-  check(names.includes("plan-zai"), "config.yaml serves plan-zai", names.join(", "));
+  // What config.yaml must NO LONGER say. Each of these is a thing that moved into the database at
+  // PROVIDERS-1, and a file that still declares one is a file that will quietly win over the panel.
+  check(readModelList(configText).length === 0,
+    "config.yaml declares NO model_list: the deployments live in the proxy's database and are managed from the panel",
+    `${readModelList(configText).length} model entries in the shipped file`);
+  check(!/^\s{2}fallbacks:/m.test(configText),
+    "and no router_settings.fallbacks, because the vision fallback is a database row the panel can require");
+  check(readNestedList(configText, "allowed_routes").length === 0,
+    "and no allowed_routes: the global door list is gone and the boundary is each key's own list",
+    `${readNestedList(configText, "allowed_routes").length} route(s) still listed`);
+
+  // What config.stage1.yaml must still say: it is what carries the fleet across the first restart,
+  // and the pool shape it expresses is the one `proxy seed` reproduces in the database.
+  check(names.includes("plan-zai"), "config.stage1.yaml still serves plan-zai across the first restart", names.join(", "));
   check(models.filter((one) => one.model_name === "plan-zai").length === 2,
     "plan-zai is TWO entries, which is how a pooled subscription is spelled",
     `${models.filter((one) => one.model_name === "plan-zai").length} entries`);
@@ -44,27 +71,39 @@ export async function run({ report, real, baseUrl, masterKey }) {
   check(zaiKeys.size === 2 && zaiKeys.has(ZAI_1) && zaiKeys.has(ZAI_2),
     "and the two entries carry two different keys, so a dead subscription drains to the other",
     [...zaiKeys].join(", "));
-  check(names.includes("plan-minimax"), "config.yaml serves plan-minimax");
+  check(names.includes("plan-minimax"), "config.stage1.yaml serves plan-minimax");
   check(names.every((one) => one.startsWith("plan-")),
     "every model name is plan- prefixed, so an included row can never collide with a customer's own endpoint id",
     names.join(", "));
 
-  // No key in the file. This is why it can live in git and sit readable in the bind mount, and it is
-  // the difference between this design and the box-secrets.json copies it replaces.
+  // No key in either file. This is why they can live in git and sit readable in the bind mount, and
+  // it is the difference between this design and the box-secrets.json copies it replaces.
   const literalKeys = models.filter((one) => one.api_key_env === "" );
   check(literalKeys.length === 0,
     "no model carries a literal key: every credential is an os.environ reference",
     literalKeys.map((one) => one.model_name).join(", ") || "none");
 
-  const settings = readGeneralSettings(configText);
-  check(settings.user_api_key_cache_ttl === 30,
-    "user_api_key_cache_ttl is set EXPLICITLY, so revocation is measurable rather than lucky",
-    `= ${settings.user_api_key_cache_ttl} (the default is 60 and is what a missing line would give)`);
-  check(settings.proxy_batch_write_at === 10,
-    "proxy_batch_write_at is 10, so the panel and this gate see a spend number promptly",
-    `= ${settings.proxy_batch_write_at}`);
-  check(settings.store_model_in_db === false,
-    "store_model_in_db is false, so the model list is the file above and the salt encrypts nothing that matters");
+  for (const [label, text] of [["config.yaml", configText], ["config.stage1.yaml", stage1Text]]) {
+    const settings = readGeneralSettings(text);
+    check(settings.user_api_key_cache_ttl === 30,
+      `${label}: user_api_key_cache_ttl is set EXPLICITLY, so revocation is measurable rather than lucky`,
+      `= ${settings.user_api_key_cache_ttl} (the default is 60 and is what a missing line would give)`);
+    check(settings.proxy_batch_write_at === 10,
+      `${label}: proxy_batch_write_at is 10, so the panel and this gate see a spend number promptly`,
+      `= ${settings.proxy_batch_write_at}`);
+    check(settings.store_model_in_db === true,
+      `${label}: store_model_in_db is TRUE, which is the line PROVIDERS-1 turns on`,
+      `= ${settings.store_model_in_db}`);
+    check(settings.proxy_config_reload_interval_seconds === 10,
+      `${label}: the reload interval is pinned, so a future second worker is bounded rather than a surprise`,
+      `= ${settings.proxy_config_reload_interval_seconds}`);
+    // NOT set, deliberately: it would stop a FAILED request being written to the spend log at all,
+    // and "zero failed requests during the roll" would then be true because nothing could ever be
+    // written. A gate that cannot fail is not a gate.
+    check(settings.disable_error_logs === undefined,
+      `${label}: disable_error_logs is NOT set, so a failed request is still written and can still be counted`,
+      settings.disable_error_logs === undefined ? "absent" : `= ${settings.disable_error_logs}`);
+  }
 
   // WHERE A BLOCK SITS, which is a thing this file got wrong once and nothing caught.
   //
@@ -74,26 +113,25 @@ export async function run({ report, real, baseUrl, masterKey }) {
   // `404 {"detail":"Not Found"}` on every call to one -- while docs/PROXY.md carried a measured
   // table for the route. mcp_servers is the opposite and is read from the top level. Both are
   // asserted, because either one in the other's place is silence rather than an error.
-  check(blockParentOf(configText, "pass_through_endpoints") === "general_settings",
-    "pass_through_endpoints is under general_settings, which is the only place LiteLLM reads it",
-    `found under ${blockParentOf(configText, "pass_through_endpoints") ?? "nothing"}`);
-  check(blockParentOf(configText, "mcp_servers") === "(top level)",
-    "and mcp_servers is at the top level, which is the only place LiteLLM reads THAT",
-    `found under ${blockParentOf(configText, "mcp_servers") ?? "nothing"}`);
-
-  // The door list. Everything the product calls is on it and nothing else is, which is what closes
-  // GET /health -- a route a tenant's own virtual key could call, which makes a live call to every
-  // provider deployment on the operator's subscriptions. It is one GLOBAL list applied before the
-  // key is looked up, so a control-plane call to a path that is not on it fails 403 with no other
-  // clue; that is why the list is asserted whole rather than only for its absences.
-  const allowed = readNestedList(configText, "allowed_routes");
-  check(allowed.length > 0, "general_settings carries an allowed_routes list", `${allowed.length} routes`);
-  for (const needed of ["/v1/chat/completions", "/key/generate", "/key/info", "/key/update", "/key/delete",
-    "/model/info", "/spend/logs", "/v1/models", "/health/readiness", "/tinyfish/fetch", "/tinyfish/search"]) {
-    check(allowed.includes(needed), `allowed_routes carries ${needed}, which this product calls`);
+  for (const [label, text] of [["config.yaml", configText], ["config.stage1.yaml", stage1Text]]) {
+    check(blockParentOf(text, "pass_through_endpoints") === "general_settings",
+      `${label}: pass_through_endpoints is under general_settings, which is the only place LiteLLM reads it`,
+      `found under ${blockParentOf(text, "pass_through_endpoints") ?? "nothing"}`);
+    check(blockParentOf(text, "mcp_servers") === "(top level)",
+      `${label}: and mcp_servers is at the top level, which is the only place LiteLLM reads THAT`,
+      `found under ${blockParentOf(text, "mcp_servers") ?? "nothing"}`);
   }
-  for (const closed of ["/health", "/key/list", "/global/spend/report", "/v1/embeddings"]) {
-    check(!allowed.includes(closed), `and does not carry ${closed}, so nobody can call it`);
+
+  // THE DOOR LIST IS GONE FROM BOTH FILES, and the paragraph that replaced it has to still be there.
+  // A list that came back would refuse the two path-parameter routes the panel is built on (PATCH
+  // /credentials/{name} and PATCH /model/{id}/update) with a 403 and no other clue, and it would
+  // refuse the master key while it did it.
+  for (const [label, text] of [["config.yaml", configText], ["config.stage1.yaml", stage1Text]]) {
+    check(readNestedList(text, "allowed_routes").length === 0,
+      `${label}: carries no allowed_routes list at all`,
+      `${readNestedList(text, "allowed_routes").length} route(s)`);
+    check(/allowed_routes/.test(text),
+      `${label}: and says in words what the list did and what replaced it, so nobody adds it back by reflex`);
   }
 
   // The compose, for the one property that is the whole security shape. Comment lines are stripped
@@ -124,9 +162,15 @@ export async function run({ report, real, baseUrl, masterKey }) {
 
   // A temp DIRECTORY holding a copy of the real config, because that is what the deploy binds: a
   // directory, never the file, so a change can be made without the container being recreated.
+  //
+  // config.STAGE1 is what is copied, and that is the whole point rather than a convenience: these
+  // server legs are about the door, the pool and the pass-through, and stage one is the last file
+  // that expresses them. The shipped config.yaml has no model_list at all, because after the second
+  // restart the deployments come out of the proxy's database. The providers leg proves the same
+  // shapes from there, through /model/new and /credentials.
   const dir = mkdtempSync(path.join(tmpdir(), "proxy-config-"));
   const configFile = path.join(dir, "config.yaml");
-  cpSync(CONFIG_PATH, configFile);
+  cpSync(STAGE1_PATH, configFile);
 
   const zai1 = createStubUpstream({ name: ZAI_1, content: "answered by the first subscription" });
   const zai2 = createStubUpstream({ name: ZAI_2, content: "answered by the second subscription" });
@@ -179,7 +223,11 @@ async function serverLegs({ report, base, masterKey, stub, upstreams, configFile
     body: {
       key_alias: `titanbot-gate-${Date.now()}`,
       models: ["plan-zai", "plan-minimax"],
-      tags: ["tenant:gate"],
+      // NO `tags`. MEASURED on this Mac 2026-09-08 against a real v1.100.0: a mint carrying tags is
+      // refused 403 "only available for LiteLLM Enterprise users: tags", so this gate could never
+      // have minted a key against the image it is written for. docs/PROXY.md said so already; the
+      // stub used to accept them, which is what hid it. The tenant rides key_alias and metadata,
+      // which is where cp/proxy.mjs and the admin console read it from anyway.
       metadata: { slug: "gate", box: "none" },
       rpm_limit: 60,
       soft_budget: 5,

@@ -1,0 +1,184 @@
+# STAGE ONE of the PROVIDERS-1 move (docs/PROXY.md, docs/GAP-ANALYSIS.md PROVIDERS-1).
+#
+# ---- WHY THERE ARE TWO FILES ---------------------------------------------------------------------
+# The proxy is a single point of failure for every tenant's inference: a restart is about twenty
+# seconds of failed turns fleet-wide. The move to a database-backed configuration takes two of them,
+# and this file is what makes the first one safe.
+#
+#   restart one   THIS FILE becomes /data/titanbot-proxy/config/config.yaml.
+#                 store_model_in_db goes on, proxy_config_reload_interval_seconds is pinned, and
+#                 general_settings.allowed_routes is GONE -- but model_list, the fallback map, the
+#                 TinyFish pass-throughs and mcp_servers all STAY, so the fleet keeps serving from
+#                 the file across the restart and nothing depends on the database being seeded yet.
+#                 Then `node cp/cli.mjs proxy seed` writes the credentials, the deployments and the
+#                 fallback map from bootstrap.json, and refuses to run if the flag did not take.
+#
+#                 For the window between the seed and restart two, each alias carries the FILE's
+#                 deployments and the DATABASE's. MEASURED on this Mac 2026-09-08 against
+#                 litellm-database:v1.100.0: that is exactly what happens, /model/info lists both
+#                 (db_model false for the file's, true for ours) under one model_name, and both
+#                 answer requests. It is not a fault: they are the same keys and the same models, so
+#                 traffic shuffles across a wider pool. The report names the window rather than
+#                 glossing it.
+#
+#   restart two   config.yaml (the sibling of this file) becomes the active one. model_list and
+#                 router_settings.fallbacks are gone from the file and the proxy comes back serving
+#                 the rows seeded above.
+#
+# deploy/r750/proxy-install.sh installs BOTH files into the config directory and picks which one is
+# active with --stage 1 or --stage 2.
+#
+# ---- THE ORDER THAT IS LOAD BEARING --------------------------------------------------------------
+# allowed_routes disappears at THIS restart. Every virtual key already in the field was minted with
+# allowed_routes [] and is therefore unrestricted, so `node cp/cli.mjs proxy limits --all` -- the
+# per-key backfill -- MUST have run and been measured BEFORE this file is installed, or there is a
+# window in which the whole admin surface is open to every box on the bridge. The backfill needs no
+# proxy restart and writes nothing into a box. docs/PROXY.md states the order; proxy-install.sh
+# prints it.
+#
+# ---- ROLLING BACK --------------------------------------------------------------------------------
+# THIS is the file you reinstall if the proxy has to go back to being file-configured, because it is
+# the one that still carries model_list. Turn store_model_in_db off in the same edit and the
+# database rows go inert rather than causing an outage. That is a third restart and an incident, not
+# a plan: anything wrong in our OWN code is a revert, a sync and a control-plane rebuild with no
+# proxy restart at all.
+#
+# ---- THIS FILE HOLDS NO KEY ----------------------------------------------------------------------
+# Every credential is an os.environ/<NAME> reference; the values live in the proxy service's Coolify
+# environment, put there by deploy/r750/proxy-coolify.mjs from ~/.api_keys by exact name.
+
+# ---- THE MODEL NAMES ARE A CONTRACT --------------------------------------------------------------
+# plan-zai and plan-minimax are strings every customer's box is pointed at and every virtual key is
+# scoped to. Renaming one takes every box using it off the air on the next message. They are plan-
+# prefixed so the control plane can tell an included model from a customer's own endpoint row by its
+# id alone (tests/cp-relay-pair.test.mjs asserts the prefix cannot collide).
+#
+# This is the LAST version of this list that is edited by hand. After restart two, adding a model or
+# a key is the Providers panel, and bootstrap.json is what a fresh install seeds from.
+model_list:
+  # ---- Z.AI, the coding plan, TWO subscriptions pooled -------------------------------------------
+  # Pooling in LiteLLM is repeated model_list entries sharing one model_name. Measured 2026-09-08
+  # 01:50 CDT against the coding plan endpoint: glm-5.3, glm-5, glm-4.7 and glm-4.6 all refuse an
+  # image part with code 1210 "messages.content.type is invalid, allowed values: ['text']";
+  # glm-5.3-flash and glm-4.6v take one and answer. Every Titan conversation carries screenshots, so
+  # a text-only plan model is a broken plan model. Hence two pools, joined by the fallbacks entry.
+  - model_name: plan-zai
+    litellm_params:
+      model: openai/glm-5.3
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/PROXY_ZAI_KEY_1
+  - model_name: plan-zai
+    litellm_params:
+      model: openai/glm-5.3
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/PROXY_ZAI_KEY_2
+  - model_name: plan-zai-vision
+    litellm_params:
+      model: openai/glm-5.3-flash
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/PROXY_ZAI_KEY_1
+  - model_name: plan-zai-vision
+    litellm_params:
+      model: openai/glm-5.3-flash
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/PROXY_ZAI_KEY_2
+
+  # ---- MiniMax ----------------------------------------------------------------------------------
+  - model_name: plan-minimax
+    litellm_params:
+      model: minimax/MiniMax-M3
+      api_key: os.environ/PROXY_MINIMAX_KEY
+
+  # ---- Qwen, NOT SERVED FROM THIS FILE ----------------------------------------------------------
+  # Left off deliberately. A model_list entry whose api_key resolves to nothing does not fail at
+  # startup; it fails at the customer, on their turn, as an upstream 401 -- the worst place to find
+  # out. Jason has rotated the Alibaba key and is putting the new one in Bitwarden as QWEN_API_KEY;
+  # when it is synced to ~/.api_keys, it goes in through the PANEL (add provider, add key, add plan
+  # model), not by uncommenting anything here. bootstrap.json carries the slot for a fresh install.
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  allowed_fails: 3
+  cooldown_time: 30
+  # A request the flagship refuses (an image part, code 1210) is retried once on the vision pool
+  # before the customer sees anything. STILL HERE at stage one, so the fleet is covered across the
+  # first restart; `proxy seed` writes the same pair into the database.
+  #
+  # MEASURED on this Mac 2026-09-08 against a proxy booted on THIS FILE: POST /fallback with
+  # {"model":"plan-zai","fallback_models":["plan-zai-vision"]} answered 200 "updated successfully"
+  # -- it is NOT refused for a pair this file already declares, which is what makes seeding before
+  # restart two safe.
+  #
+  # AND THE READ DOES NOT TELL YOU WHETHER THE SEED WORKED. Re-measured the same day: GET
+  # /fallback/plan-zai answered 200 with {"fallback_models":["plan-zai-vision"],"fallback_type":
+  # "general"} BEFORE anything was posted, because the read answers out of the router's CURRENT map
+  # and at stage one that map is the line below. An earlier note here claimed a 404 until the POST;
+  # that was wrong, and the correction is the load-bearing part: while this file still declares the
+  # pair, a green read cannot tell a seeded database row from this line. Confirm the seed against
+  # the database -- POST /fallback writes the whole router_settings blob to LiteLLM_Config where
+  # param_name = 'router_settings' -- not against a 200 from that route. After restart two the
+  # database map is the only one there is, and the read means something again.
+  fallbacks:
+    - plan-zai: ["plan-zai-vision"]
+
+litellm_settings:
+  request_timeout: 60
+
+general_settings:
+  # The line the whole wave turns on. MEASURED on this Mac 2026-09-08: this file's `true` beats
+  # STORE_MODEL_IN_DB=False in the container environment. The compose sets True as well so the two
+  # agree, and `proxy seed` refuses to run if /model/new is not actually writing to the database.
+  store_model_in_db: true
+  # Pinned explicitly. Our deploy runs --num_workers 1, so a change is effective on the next request
+  # rather than after this interval; this number bounds a future two-worker deploy.
+  proxy_config_reload_interval_seconds: 10
+  database_connection_pool_limit: 10
+  proxy_batch_write_at: 10
+  user_api_key_cache_ttl: 30
+  background_health_checks: false
+
+  # disable_error_logs is deliberately NOT set here either. The sibling config.yaml carries the full
+  # reasoning: it is read in one place, _should_track_errors_in_db(), and turning it on stops a
+  # FAILED request being written to the spend log at all, which would make "zero failed requests
+  # during the key roll" true because nothing could be written rather than because nothing failed.
+
+  # pass_through_endpoints is read from general_settings and NOWHERE ELSE (measured on the R750
+  # 2026-09-08: at the top level the proxy started clean and answered 404 on every /tinyfish path).
+  # The indentation below is load bearing. mcp_servers is the opposite and stays at the top level.
+  pass_through_endpoints:
+    - path: /tinyfish/fetch
+      target: https://api.fetch.tinyfish.ai
+      headers:
+        x-api-key: os.environ/PROXY_TINYFISH_KEY_1
+        content-type: application/json
+      cost_per_request: 0.0001
+    - path: /tinyfish/search
+      target: https://api.search.tinyfish.ai
+      headers:
+        x-api-key: os.environ/PROXY_TINYFISH_KEY_1
+        content-type: application/json
+      cost_per_request: 0.0001
+
+  # ---- NO allowed_routes, FROM THIS RESTART ONWARD ----------------------------------------------
+  # The global door list is gone here, not at restart two, because it is what refuses PATCH
+  # /credentials/{name} and PATCH /model/{id}/update -- the two path-parameter routes the panel is
+  # built on, which an exact-match list with no wildcards cannot express. It also refused the master
+  # key (it is checked in pre_db_read_auth_checks, before the key is looked up) and could not tell a
+  # tenant from the operator, which is what left PROXY-8 open.
+  #
+  # What replaced it is per-key allowed_routes on every tenant key. MEASURED on this Mac 2026-09-08:
+  # a key minted with ["/v1/chat/completions","/chat/completions","/v1/models","/models"] answers
+  # 403 "Virtual key is not allowed to call this route" on /key/info, /model/info, /model_group/info
+  # and /health while chat completions and /v1/models keep working, and POST /key/update applies the
+  # same list to a key already in the field without writing anything into a box.
+  #
+  # RUN THE BACKFILL BEFORE INSTALLING THIS FILE. See the header.
+
+mcp_servers:
+  tinyfish:
+    url: https://agent.tinyfish.ai/mcp
+    transport: http
+    auth_type: bearer_token
+    authentication_token: os.environ/PROXY_TINYFISH_KEY_1
+    description: "TinyFish browser automation, billed to the operator's pooled subscription"
