@@ -15,11 +15,35 @@ also push.
 ## How it works
 
 A connector is one entry in `/home/box/sand-data/connectors.json`, and that file is the whole
-configuration surface: a name, a `command`, its `args`, and an `env` map. The box runs the process
-as user `box` and the host discovers its tools. This build runs local stdio servers only, so a
-service whose MCP endpoint is remote is bridged by a local `mcp-remote` process carrying the token
-in an `Authorization` header; `mcp-remote` expands `${NAME}` inside a `--header` value from its own
-environment, so the literal `${...}` text is what lands in the file and the key does not.
+configuration surface. There are two shapes, and MARKET-6 made the second one real.
+
+A **program** is a name, a `command`, its `args` and an `env` map. The box runs the process and the
+host discovers its tools. The process runs as **root** inside the box, not as user `box` — that was
+wrong here for as long as this page has existed, and it is why a key must never reach a command
+line: the agent's own shell in a box is root too, and `ps -eo args` is readable to it.
+
+A **link** is a name, a `type` (`http` or `sse`), a `url` and its `headers`. The box's own daemon
+opens the address; there is no bridge process, no npm fetch when it starts, and nothing on a command
+line. A header that carries a key carries the placeholder `${NAME}` and never the key, and the host
+substitutes the stored value into the header at the moment it hands the server to the box. A link
+entry has no `env`: the field it owes is named by that placeholder, which is where the host reads it
+back from.
+
+Before MARKET-6 the host dropped a link entry on the floor, so every remote service was bridged
+through a local `mcp-remote` process with `--header "Authorization:Bearer ${NAME}"`. That is where
+the key went wrong: the box's exec daemon expands `${NAME}` in a command line **before** it execs,
+so the real key was in the argument list of three root processes. Measured on the R750 demo box on
+8 September 2026, and closed the same day. Entries already written that way keep working and move to
+the link shape the next time they are written; nothing on a live box had to be rewritten by hand.
+
+**Add your own** is the front door for anything the catalog does not carry: Marketplace → Add your
+own, then a link (an address, with a key if it needs one) or a program (a command the box runs), or
+paste a vendor's own `{"mcpServers": …}` block and it is read into whichever of the two fits. A
+header you tick as a secret mints a stored NAME; the key itself goes into the masked box on the
+server's page after it is added, so a literal never enters the form, the request, or the file. Five
+things are refused at the door, each in one sentence: the reserved name `shell`, a plain-http
+address, an address inside the box's own network, a key carried in the address itself, and a server
+that can only be signed into with a browser.
 
 **No credential ever goes in that file.** An env key whose value in the entry is the **empty
 string** is a credential field: the connector's card draws one masked "Enter securely" input per
@@ -65,8 +89,10 @@ is in the transcript, the model's context and whatever window that was compacted
 the value goes from the input to the store and is never in the conversation. So the split is always
 the same. The agent installs the connector and may ask for its key, the operator is the only one
 who ever sees the value, and a tool call made before the key is stored answers with an error naming
-that card rather than a bare transport failure. (Note what `AddMcpServer` accepts on this bundle: `name`, `url`, `headers`. The
-local `command`/`args`/`env` form the skill describes is the piece CONNECT-3 adds.)
+that card rather than a bare transport failure. `AddMcpServer` writes through the same one writer the console does, so an agent and a person adding
+the same server produce the same entry, byte for byte, with the same rules refusing the same things.
+It takes `name` with either `url` and `headers` or `command`, `args` and `env` — and `env` as a list
+of NAMES only, so a key typed into a tool call cannot reach the file even by accident.
 
 Removing a connector: **Remove this connector** on its card, or its row in the editor, drops it from
 `connectors.json` and re-reads the file. The stored secret is separate — `deleteConnectorSecret`

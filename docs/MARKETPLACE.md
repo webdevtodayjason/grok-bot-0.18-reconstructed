@@ -118,10 +118,14 @@ telling you the entry is written and the box has not got a tool list back.
 
 - A **shell tool** (CodeRabbit CLI, TinyFish CLI, GitHub CLI) is not an MCP server: it is a command-line program
   the agent runs itself, with a key in the box shell's environment. Its Add runs the catalog's
-  install command inside the box as user `box`, capped at five minutes, and shows the tail of its
-  output; its Accounts box writes to the `shell` section of the same 0600 store (`setShellSecret`),
-  which is a *different environment* from a connector's — a key stored on the `tinyfish` connector
-  does not reach the TinyFish CLI. Nothing about a shell tool appears in `connectors.json` or in
+  install command inside the box as **root** (every process in a box runs as root; this page said
+  `box` and was wrong), capped at five minutes, and shows the tail of its output; its Accounts box
+  writes to the `shell` section of the same 0600 store (`setShellSecret`). That is a *different
+  environment* from a connector's, but since MARKET-6 it is no longer a different FORM: a plugin
+  declares its credentials and everywhere each one is used, and the page draws one masked box per
+  credential with a line naming every consumer. One save reaches the connector and the shell both,
+  which is what "there shouldn't be two things here" asked for. Nothing about a shell tool appears
+  in `connectors.json` or in
   `tools/list`. **Nothing records the install, so "installed" is asked of the box, not of a file.**
   The host runs inside the box and already spawns `/bin/sh -lc` there to run the installer, so the
   same shell answers `command -v <binary>` — `cr` for CodeRabbit, `cli-anything-tinyfish` for the
@@ -410,7 +414,29 @@ was compacted into. So `InstallPlugin` succeeding does not mean the connector wo
 the credential card the operator has to go and fill, and a tool call made before the key is stored
 fails naming that card rather than as a bare transport error.
 
-`AddMcpServer` is unchanged and stays the route for a server the catalog does not know.
+A server the catalog does not carry has two doors, and they are the same door underneath.
+
+**Add your own**, the card at the end of the Marketplace, takes a link (an address, its transport,
+and headers whose secret values become stored names), a program (a command, its arguments and the
+names of the variables it needs), or a vendor's own `{"mcpServers": …}` block pasted whole. It shows
+the entry it is about to write before it writes anything, then the page says whether the server is
+working and lists its tools; a failure is one plain sentence naming the cause. Uninstall drops the
+entry and offers to clear its stored values, and a value left behind by an entry that is already
+gone is listed on the same page with a Clear beside it.
+
+**`AddMcpServer`** is the agent's door to the same writer, so a server the agent adds and one a
+person adds are the same entry with the same rules. A key it needs is asked for through the masked
+card on the page, never typed into the conversation.
+
+What neither door will do is sign in with a browser. No hosted MCP server we measured offers a
+device-code grant, so an OAuth-only server can only be authorized by a person clicking through in
+that box's own browser; the card says so in a sentence rather than opening a window nobody is
+watching and waiting forever. One such bridge on a test box had been waiting nine hours and
+fifty-one minutes when we found it.
+
+Every row in the catalog, what it installs, what credential it wants and where to mint it, is in
+[docs/MARKETPLACE-CATALOG.md](MARKETPLACE-CATALOG.md), together with the candidates that were
+measured and could not be shipped, and why.
 
 ## See also
 
