@@ -45,6 +45,20 @@ and its Postgres taken as a torn copy.
 
 ---
 
+### 1a. Why plan-zai is two pools (2026-09-08 01:50 CDT)
+
+Measured against the coding plan endpoint from the Mac: `glm-5.3`, `glm-5`, `glm-4.7` and `glm-4.6`
+refuse an image part with code 1210 (`messages.content.type is invalid, allowed values: ['text']`);
+`glm-5.3-flash` and `glm-4.6v` take one and answer. Every Titan conversation carries screenshots (the
+operator's box showed 41 image parts on its last turns), so the first real turn through a text-only
+plan model on the demo box was a 400 and the agent run failed. `plan-zai` is therefore the flagship
+`glm-5.3` on both keys, and `plan-zai-vision` is `glm-5.3-flash` on both keys, joined by
+`router_settings.fallbacks: [{plan-zai: [plan-zai-vision]}]`: a request the flagship refuses is
+retried on the flash model before the customer sees anything. A conversation with a screenshot in
+its history runs on the flash model for as long as that history is sent. The way back to what the
+boxes ran before the proxy, `qwen3.8-max`, is `plan-qwen` (commented out in the config) once the
+Qwen key is in `~/.api_keys` under `QWEN_API_KEY`.
+
 ## 2. The key names, end to end
 
 Nothing in this table is a secret. It is the map from a name on your laptop to the thing it opens.
@@ -119,9 +133,9 @@ home, here, and the console side needs no second key field because the second ke
 ```yaml
 model_list:
   - model_name: plan-zai
-    litellm_params: {model: openai/glm-4.6, api_key: os.environ/PROXY_ZAI_KEY_1, api_base: https://api.z.ai/api/coding/paas/v4}
+    litellm_params: {model: openai/glm-5.3, api_key: os.environ/PROXY_ZAI_KEY_1, api_base: https://api.z.ai/api/coding/paas/v4}
   - model_name: plan-zai
-    litellm_params: {model: openai/glm-4.6, api_key: os.environ/PROXY_ZAI_KEY_2, api_base: https://api.z.ai/api/coding/paas/v4}
+    litellm_params: {model: openai/glm-5.3, api_key: os.environ/PROXY_ZAI_KEY_2, api_base: https://api.z.ai/api/coding/paas/v4}
 ```
 
 `routing_strategy: simple-shuffle` with `num_retries: 2`, `allowed_fails: 3` and

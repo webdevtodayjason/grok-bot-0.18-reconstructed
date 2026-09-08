@@ -28,14 +28,31 @@ model_list:
   # routing_strategy simple-shuffle picks between them per request, and allowed_fails/cooldown_time
   # in router_settings below is what drains a dead key to the other one instead of failing the
   # customer.
+  # Measured 2026-09-08 01:50 CDT against the coding plan endpoint: glm-5.3, glm-5, glm-4.7 and
+  # glm-4.6 all refuse an image part with code 1210 "messages.content.type is invalid, allowed
+  # values: ['text']"; glm-5.3-flash and glm-4.6v take one and answer. Every Titan conversation
+  # carries screenshots (Jason's box: 41 image parts on its last turns), so a text-only plan model
+  # is a broken plan model: the first turn through it on the demo box was a 400. So two pools: the
+  # flagship for text, and the flash model for any request the flagship refuses, joined by the
+  # fallbacks entry in router_settings below.
   - model_name: plan-zai
     litellm_params:
-      model: openai/glm-4.6
+      model: openai/glm-5.3
       api_base: https://api.z.ai/api/coding/paas/v4
       api_key: os.environ/PROXY_ZAI_KEY_1
   - model_name: plan-zai
     litellm_params:
-      model: openai/glm-4.6
+      model: openai/glm-5.3
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/PROXY_ZAI_KEY_2
+  - model_name: plan-zai-vision
+    litellm_params:
+      model: openai/glm-5.3-flash
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/PROXY_ZAI_KEY_1
+  - model_name: plan-zai-vision
+    litellm_params:
+      model: openai/glm-5.3-flash
       api_base: https://api.z.ai/api/coding/paas/v4
       api_key: os.environ/PROXY_ZAI_KEY_2
 
@@ -78,6 +95,11 @@ router_settings:
   # exactly the class of invisible failure this wave is written against.
   allowed_fails: 3
   cooldown_time: 30
+  # A request the flagship refuses (an image part, code 1210) is retried once on the vision pool
+  # before the customer sees anything. The customer's key names plan-zai; the fallback is the
+  # router's own move and is not a second model the key has to be allowed.
+  fallbacks:
+    - plan-zai: ["plan-zai-vision"]
 
 litellm_settings:
   # A provider that accepts a request and then holds it open is a customer watching a spinner. Sixty

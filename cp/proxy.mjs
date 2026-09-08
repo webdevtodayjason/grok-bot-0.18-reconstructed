@@ -61,7 +61,7 @@ export const PLAN_MODEL_PREFIX = "plan-";
 export const PLAN_MODELS = Object.freeze({
   "plan-zai": Object.freeze({
     name: "Z.AI GLM (included with your plan)",
-    modelLabel: "GLM-4.6",
+    modelLabel: "GLM-5.3",
     servedBy: "Z.AI GLM",
     contextWindow: 200_000,
   }),
