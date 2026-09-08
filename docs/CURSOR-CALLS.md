@@ -43,13 +43,16 @@ relay restart moves a running box instead.
 
 | Landed in this change | Still owned by another row |
 | --- | --- |
-| Local gate pins with the product's defaults baked in, plus `gates.json` for the operator | The web tools becoming ours (`WebFetch`, `WebSearch`) |
-| The Statsig bootstrap, its poll, and its last egress path, all off | The shared RPC transport rejecting in mode none |
-| The privacy-mode lookup off | The `DEFAULT_CURSOR_BACKEND_URL` constant itself |
-| The credential renewer off | The compose files and the installer placeholder |
-| Codebase telemetry off above the capability check | The Cursor Origin section of the system prompt |
-| Host tracing, structured logs and product analytics off | The auto-review router inversion |
-| The gates line reporting the layer that actually decided | The tenant provisioner template |
+| Local gate pins with the product's defaults baked in, plus `gates.json` for the operator | The shared RPC transport rejecting in mode none |
+| The Statsig bootstrap, its poll, and its last egress path, all off | The `DEFAULT_CURSOR_BACKEND_URL` constant itself |
+| The privacy-mode lookup off | The compose files and the installer placeholder |
+| The credential renewer off | The Cursor Origin section of the system prompt |
+| Codebase telemetry off above the capability check | The auto-review router inversion |
+| Host tracing, structured logs and product analytics off | The account MCP, marketplace, automations and cloud-agent RPCs |
+| The gates line reporting the layer that actually decided | The `cursor.com` links in the Help menu and the integrations dashboard |
+| `WebFetch` and `WebSearch` becoming ours, behind the same two names | |
+| What a new box starts with, in `deploy/box-defaults/` | |
+| The gate, `scripts/verify-cursor-free.mjs` | |
 
 Rows marked "still owned" are named in the tables below with the reason they were left alone, so
 nobody reads this file and concludes the work is finished.
@@ -62,6 +65,25 @@ nobody reads this file and concludes the work is finished.
 | Same file, the RPC method names reachable through it | `getUserPrivacyMode`, `classifySandAutoReview`, `runWebSearch`, `runWebFetch`, `runGenerateImage`, `recordSandAuditEvents`, `getMe`, `availableModels`, `getSignedUrlForAttachedMedia`, `getEffectiveUserPlugins`, `installUserPlugin`, `publishPlugin`, `unpublishPlugin`, `getTeams`, `getAvailableMcpServers`, `getMcpConfig`, `listSandMcpTools`, `executeSandMcpTool`, `checkHttpMcpStatus`, `completeMcpOAuth`, `deleteMcpOAuthAccount`, `deleteMcpOAuthToken`, `renameMcpOAuthAccount`, `validateMcpOAuthTokens`, `getScmConnectionStatus`, `getSlackInstallUrl`, `getSlackUserSettings`, `createAutomation`, `updateAutomation`, `deleteAutomation`, `listSandAutomations`, `recordPostTurnLabeling`, `recordAgentPostTurnLabeling`, `recordFollowupClassification`, `recordAgentFollowupClassification`. Plus `BootstrapStatsig` over plain fetch and the fourteen `BackgroundComposerService` methods. | Per feature. | Each fails in its own way. The ones a person meets are the web tools and the classifier, below. | **Replace** as above. Listed in full so nobody has to rediscover the surface. |
 | `source/shared/node/marketplace/cursor-marketplace-client.ts` and `source/host/extensions/managed-setup/production.ts` | A **second**, independent Connect transport. `createDashboardClient` calls `createConnectTransport` directly with its own checksum interceptor, not through `createSandCursorBackendClient`. Fetches managed skills, marketplace plugins and team rules. | On first credential and on every renewal. | Nothing visible. The fetch fails and the seeded skills are used. | **Switch off**, still open. Name it here because any claim that "we removed the Cursor client" that only touches `createSandCursorBackendClient` misses this one. |
 | `source/host/extensions/inference/sand-labeling.ts` | Post-turn labeling. Sends the turn's transcript to `InferenceService` for classification and prompt-quality collection. | After every turn, unless skipped. | Nothing. It does not run today, and only because of a provider early return two lines away. | **Switch off**, still open. Of everything in this sweep this is the one a business owner would object to hardest: their conversations sent to a third party for that company's model quality work. It is luck, not a decision, that it is quiet. |
+
+### Where those methods are called from
+
+The method list above is a surface. This is where the product reaches for it, so nobody has to
+rediscover it. None of these dials out today, because in mode none every loop that would have is
+switched off at its own call site, but each one is still built and still points at the wrong place.
+
+| Locator | Method | What a person meets | Decision |
+| --- | --- | --- | --- |
+| `source/shared/node/cursor-backend/account-mcp.ts` | `getAvailableMcpServers`, `getMcpConfig` | The connector list would come from a Cursor account. | **Replaced already** by `source/host/extensions/mcp/local-connectors.ts`, which owns connectors from a local file. Finish it by not building the account client at all. |
+| `source/shared/node/cursor-backend/backend-mcp-exec.ts` | `listSandMcpTools`, `executeSandMcpTool`, `checkHttpMcpStatus` | Remote MCP execution. | **Switch off**, still open. stdio servers run inside the box through `boxMcpExec` with Cursor in none of it. |
+| `source/host/extensions/mcp/mcp-service.ts` | `completeMcpOAuth`, `deleteMcpOAuthAccount`, `deleteMcpOAuthToken`, `renameMcpOAuthAccount`, `validateMcpOAuthTokens` | Connector Authorize hands the operator to `cursor.com`. | **Switch off**, still open. Our own presets use a header and a connector secret, not OAuth. |
+| `source/host/extensions/mcp/plugin-skills.ts`, `skill-publish.ts` | `getEffectiveUserPlugins`, `installUserPlugin`, `publishPlugin`, `unpublishPlugin`, `getTeams`, `getMe` | The marketplace. | **Replace**, still open, with ours. |
+| `source/host/extensions/cloud-agents/cloud-agents-service.ts`, `cloud-agent-poll-loop.ts`, `cloud-agent-tool.ts` | Cloud agents, plus `cursor.com/agents/<id>` links and "create one from the Cloud Agents dashboard on cursor.com" | A whole feature that is somebody else's product, offered to our customer. | **Switch off**, still open. Drop the tool from the toolset. |
+| `source/host/extensions/cloud-agents/model-catalog-fetch.ts` | `availableModels` | The model list would be Cursor's catalog. | **Replace**, still open, with `ui/endpoints.json`, which is where our models already live. |
+| `source/shared/node/cursor-backend/cursor-generate-image.ts` | `runGenerateImage` | The `GenerateImage` tool is offered today and cannot work. | **Replace** or drop the tool, still open. |
+| `source/host/extensions/automations/extension.ts` | `createAutomation`, `updateAutomation`, `deleteAutomation`, `listSandAutomations` | A customer's automations stored on Cursor. | **Replace**, still open, with local storage. |
+| `source/host/extensions/notifications/extension.ts` and `box-lifecycle/extension.ts` | `GrokBotService` mobile push and box lifecycle | Push through Cursor; box lifecycle owned upstream when ours is Coolify. | **Switch off**, still open. |
+| `source/host/extensions/auth/user-full-name-service.ts` | `getMe` | The display name. | **Switch off**, still open. |
 
 ## 2. The privacy-mode lookup
 
@@ -171,11 +193,18 @@ This is the row that stopped a customer working.
 
 ## 6. WebFetch and WebSearch
 
+These two are ours now. The tool names, argument schemas, renderers and console tool rows are
+unchanged, so the model's habits and the console's tool rows keep working.
+
 | Locator | What it does | When it fires | Measured | Decision |
 | --- | --- | --- | --- | --- |
-| `source/host/extensions/inference/production.ts` and `cursor-web-tools.ts` | `createWebSearch` calls `AiService.RunWebSearch`; `createWebFetch` calls `AiService.RunWebFetch`. The provider router only overrides `createSession` and `createSummarizationSession`, so these two are built as separate production extras that never consult the routed provider. An operator can move the whole box to xAI or to a local endpoint and both web tools still call Cursor. | Every `WebFetch` and `WebSearch` tool call. | On the R750, every call answered `Error: Tool failed; this may be temporary. Try again.` Richard's first session showed 11 `webFetchToolCall` and 8 `webSearchToolCall`, all failed, six links refused to his face. | **Replace**, still open. This is TOOLS-FETCH-1. The factory is the seam: return our own service there and the tool names, schemas, renderers and console tool rows are untouched. |
-| `source/packages/agent/tools/core/web-fetch.ts` and `web-search.ts` | The tool shells: argument schemas, the names `WebFetch` and `WebSearch`, descriptions, truncation, the localhost and private-IP refusal, and the rendering. They call `dependencies.webFetchService` and `webSearchService`, which is the seam. | Same. | The shells are correct. Only the service behind them is wrong. | **Keep** both files and both names, so the model's habits and the console's tool rows keep working. Two description strings stop being true once the fetch is ours: "may return previously cached content" and "runs from an isolated server". Keep the private-IP refusal, which matters more once the fetch runs on the box. |
-| `source/packages/agent/tools/core/connect-error.ts` and `web-search.ts` | Five copies of "this may be temporary" in `connect-error.ts` and a sixth in `web-search.ts`. `DeadlineExceeded`, `ResourceExhausted` and the default all collapse to the same sentence, handed to both the person and the model. | Any failed RPC. | This is the exact string Richard saw eleven times. It tells the person nothing and tells the model to retry a call that can never succeed, so the agent loops. | **Replace**, still open. The person-visible message should say what was tried and name the next thing they can do, and the model-visible one should say do not retry. |
+| `source/host/extensions/inference/web-tools.ts`, `createSandWebFetchService` / `createSandWebSearchService`, wired from `production.ts` | Replaces `cursor-web-tools.ts`, which is deleted. `WebFetch` reads the page from the box itself: a browser-like User-Agent, redirects followed, a 25 MB cap, HTML reduced to text. It falls through to the backup only when the site refuses, and "refuses" is four measured cases, not one: a non-2xx, a body that reduces to nothing because the page only draws itself in a browser, content that is not text, and a page that answered 200 and is still a wall. | Every `WebFetch` and `WebSearch` call. | Before, on the R750, every call answered `Error: Tool failed; this may be temporary. Try again.` After, on grok-bot-local-vm with the road to Cursor closed, a turn asking for the heading of `https://example.com` came back "The heading on example.com is \"Example Domain\"", and a turn asking for the first thing on `https://www.linkedin.com/company/anthropic` came back with that page's own "Agree & Join" text. | **Replaced.** |
+| Same file, `looksLikeWall` | A login wall is not a status code. Measured from this Mac 2026-09-07: `linkedin.com/feed` answers HTTP 200 with 792 characters that are entirely a sign-in form. The detector needs both halves, text under 1,200 characters and one of seventeen markers, and a wall is never thrown away: if the backup cannot beat it the wall text is returned, because a sign-in page is worse than an article and better than an error. | On every direct read that answered. | See the LinkedIn measurement above. | **Keep.** |
+| `source/host/extensions/inference/tinyfish-route.ts` and `box-connector-tools.ts` | The backup. First the `tinyfish` connector's own `fetch_content` and `search` through the box's MCP client when that connector is installed, and otherwise the REST fetch and search APIs with the key already in the connector secret store. Nothing reads a key file on the operator's machine. | Only after a direct read was refused. | On grok-bot-local-vm no TinyFish connector is installed and no key is stored, so the backup is correctly absent, and the search failure below is what a box in that state says. | **Keep.** TinyFish is behind the scenes: it is a supplier, not a feature the person is shown. |
+| `source/packages/agent/tools/core/web-fetch.ts` and `web-search.ts` | The tool shells: names, schemas, descriptions, truncation, the localhost and private-IP refusal, the rendering. | Same. | Unchanged except two description strings that stopped being true once the fetch runs on the box, and the private-IP refusal's wording, which said the tool "runs from an isolated server" and was backwards. | **Keep** both files and both names. |
+| The failure words | `webFetchFailureMessage` and `webSearchFailureMessage`, ten messages in all, one per combination. None says "may be temporary". Each names what was tried, says that trying again will not help, and ends on the one thing that still works. | On any failure. | Measured on grok-bot-local-vm: the search on a box with no backup answered `Could not run that search. No web search service is set up on this machine. Ask whoever set this up to add one under Settings, or search for it in your browser.` No tool name, no service name, no vendor name. | **Replaced.** `tests/cursor-free.test.mjs` builds all ten and checks every one. |
+| `source/packages/agent/tools/core/connect-error.ts` | Five more copies of "this may be temporary", on the RPC error path. | Any failed RPC. | No web tool reaches it now. | **Replace**, still open. It is no longer on the path a person meets through the web tools, but it is still the sentence any other failing RPC hands out. |
+
 
 ## 7. The credential renewer
 
@@ -201,6 +230,7 @@ This is the row that stopped a customer working.
 | `https://cursor.com/dashboard?tab=integrations` | `source/host/extensions/automations/listener-integrations.ts` | **Replace**, still open. Sends a customer to a competitor's dashboard to fix their own integration. |
 | `https://cursor.com/agents/<id>` | `source/host/extensions/cloud-agents/cloud-agents-service.ts`, `cloudAgentUrl` | **Switch off**, still open. Describes a capability this box does not have. |
 | `https://cursor.com/help` | `source/electron-main/application-menu.ts` | **Replace**, still open. The Help menu item opens a competitor's help site. |
+| `api2.cursor.sh` | `source/node-agent-coordinator/gateway/gateway-dns-diagnostics.ts`, `GENERAL_CONTROL_HOSTNAME` | **Replace**, still open. When gateway DNS fails, the probe that decides whether the network is at fault resolves Cursor's hostname. It diagnoses our product by asking whether a competitor is reachable, at most once every 60 seconds. |
 | `playground.cursor.sh` | `source/host/extensions/box-store-sync/agent-store-sand-files.ts` | **Keep** for now. A hostname test, no call. |
 | `cursor.com` | `source/shared/webauthn-gateway.ts` | **Keep** for now. A hostname classifier, no call. |
 | `https://cursor.com/codebase/...`, `/opt/cursor/artifacts/`, the "Cursor Origin" section | `source/host/runner/system-prompt.ts` lines 152 and 239 to 261 | **Switch off**, still open. The base prompt teaches the model about Cursor by name on every turn of every box, describes a source-control platform this box cannot reach, and tells the agent to hand repository work to a Cursor cloud agent. It puts a competitor's brand in Titan's mouth in front of a business owner. |
@@ -261,6 +291,25 @@ transport rather than inside it.
 | `public.ecr.aws/k0i0n2g5/cursorenvironments/universal@sha256:d0bb69...` in both compose files, `install.sh` line 37 and `uninstall.sh` line 33 | The box image itself, pulled from Cursor's public ECR. | Pinned by digest, so it cannot change under us. | **Keep**, for now, with the reason stated: this is the environment image the whole product is built on, it is pinned by digest, and it is a pull at create time rather than a call at run time. Replacing it is its own project, not part of this sweep. It is named here so nobody believes the dependency is gone. |
 | `scripts/box-patches/apply-start-window-fix.sh` | The only script under `scripts/box-patches`. Applies a start-window fix inside a container. | No Cursor call. | **Keep.** Checked because the contract asked. It reaches nothing outside the box. |
 
+### What a new box starts with
+
+`deploy/box-defaults/` is the answer to "where do the product's decisions live for a customer we
+have never met". Two files, with a README saying why each pin is what it is:
+
+| file | lands at | what it is |
+| --- | --- | --- |
+| `gates.json` | `/home/box/sand-data/gates.json` | eighteen gate pins. Wins over the bundled default and over any live evaluation |
+| `sand-host-settings.json` | `/home/box/sand-data/sand-host-settings.json` | `SAND_BACKEND_URL` empty, so a new box is in mode none from its first boot |
+
+Both land in the tenant's own data directory, which the provisioner already creates. The template
+deliberately does **not** carry `SAND_AUTO_REVIEW_MODE`: the mode override beats the enforce switch,
+so a `"shadow"` written there would look harmless and would quietly swallow an operator's later
+decision to turn review on. The pin says off; the operator's switch still means what it says.
+
+The provisioner hook itself is a next step in `docs/TENANCY.md` and a gap row, `TENANT-8`, not a
+change made here. `cp/` is being edited for the admin console right now, and two hands in one
+provisioner is how it stops being idempotent.
+
 ## 11. What must stay for the box to boot, and why
 
 Nothing in this list dials Cursor. It is here so the answer to "why is that still there" is written
@@ -295,14 +344,57 @@ A row marked `"live":true` is re-resolved by its consumer on every call, so an o
 its switch into the settings file changes behaviour on a running box while the printed value stays
 as it was. A row without the mark is armed once, at start, and only a restart moves it.
 
+### The gate
+
+`scripts/verify-cursor-free.mjs` asks the only question a customer can feel: with the road to Cursor
+closed, does the box still do the work, and does it stay quiet. It cuts the box off two ways at
+once, because either alone can be argued with. `SAND_BACKEND_URL` in the settings file goes to the
+discard port, which is the switch a live box can take without the container recreate BOX-6 forbids,
+and `/etc/hosts` blackholes twelve Cursor hosts so anything that ignored the setting and dialled a
+literal URL is refused on the spot rather than hanging. A box that went quiet because the calls
+quietly succeeded would prove nothing.
+
+```
+timeout 280 node scripts/verify-cursor-free.mjs            the pins, two real turns, and the window they cover
+timeout 330 node scripts/verify-cursor-free.mjs --quiet    five idle minutes on their own
+```
+
+Measured on grok-bot-local-vm, 2026-09-07, on the bundle this change built:
+
+- **16 PASS, 0 FAIL, 1 not reached** in 70 seconds. The one not reached is the since-start arm,
+  which needs the host to have been up five minutes, and the gate's own restore restarts it.
+- The eighteen pinned gates all agree with `deploy/box-defaults/gates.json` on **value and source**,
+  and every one reads `"source":"local pin"`.
+- A Shell command ran. On the R750 demo box, before this, the classifier refused every one.
+- `WebFetch` of `https://example.com` came back with the page's own heading. `WebFetch` of
+  `https://www.linkedin.com/company/anthropic`, a page that walls a plain fetch, came back with that
+  page's own text.
+- `WebSearch` on a box with no backup configured failed in plain words, naming the next thing the
+  person can do, with no tool name, no service name and no vendor name in it.
+- **51 host log lines over 67 seconds of real work, none mentioning cursor.** The `--quiet` arm:
+  **2 lines over five idle minutes, none mentioning cursor.** Before this change the same log on the
+  same box held 1,740 `[sand:privacy]` lines out of 1,742 lines mentioning cursor at all.
+
+The gate says out loud what it does not prove. It fails on a vendor name in a reply, because that
+comes from the product. It prints tool-name mentions as INFO, because those come from the model's
+style, and a gate whose verdict is a model's word choice is not a gate.
+
+`tests/cursor-free.test.mjs` is the unit half: the pin file, the fetch fallback order, and the
+error text, ten cases, none skipped.
+
 ## 13. Gap rows
 
-- **CURSOR-1** is this document plus the changes it records. Landed: the gate pins, the loops, the
-  gates line. Open: the transport, the web tools, the prompt, the classifier router, the URLs, the
-  compose files, the installer placeholder, the tenant template.
-- **TOOLS-FETCH-1** is section 6. Not closed by this change. The web tools still call the upstream
-  RPC, and the failure text a person sees is unchanged.
-- **REVIEW-2** is section 5. Amended: `sand_auto_review` is now pinned false locally, so the demo
-  box's state cannot recur from a remote flag. The router inversion is still owed.
+- **CURSOR-1** is this document plus the changes it records. Landed and measured on
+  grok-bot-local-vm: the gate pins and the gates line, the loops, the web tools, the box defaults,
+  and the gate itself. Still open, each named in the tables above: the shared transport, the second
+  marketplace transport, post-turn labeling, the `DEFAULT_CURSOR_BACKEND_URL` constant, the prompt's
+  Cursor Origin section, the auto-review router inversion, the installer's placeholder credential,
+  the three compose lines, the account MCP and marketplace RPCs, and the `cursor.com` links.
+- **TOOLS-FETCH-1** part (2) is closed by section 6, measured. Parts (1) and (3) stay where they
+  are: the standing role on the R750 boxes, and onboarding.
+- **REVIEW-2** is section 5. Amended: `sand_auto_review` is pinned false locally, so the demo box's
+  state cannot recur from a remote flag. The router inversion is still owed.
 - **REVIEW-3** recorded the remote flag that rejected every command on the demo box. This change is
-  its durable fix: the flag can no longer be set remotely at all.
+  its durable fix: with no live evaluation possible, the flag can no longer be set remotely at all.
+- **TENANT-8** is the provisioner hook that copies `deploy/box-defaults/` into a new tenant's data
+  directory. Filed rather than made, because `cp/` is being edited right now.

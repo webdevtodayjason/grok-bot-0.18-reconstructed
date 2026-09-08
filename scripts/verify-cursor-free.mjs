@@ -93,6 +93,10 @@ const SEARCH_FOR = process.env.CURSOR_FREE_SEARCH ?? "node.js release schedule";
 // still has to put the settings file and /etc/hosts back and delete the probe.
 const TOTAL_BUDGET_MS = 205_000;
 const TURN_TIMEOUT_MS = 80_000;
+// After the turn's effect lands, how long to let it finish talking before its reply is read. Short,
+// because it is the tail of a turn whose work is already done, and it is bounded by the total
+// budget anyway.
+const SETTLE_TIMEOUT_MS = 25_000;
 const QUIET_WINDOW_MS = 300_000;
 const HOST_UPTIME_FOR_QUIET_S = 300;
 
@@ -278,6 +282,22 @@ const toolRows = (items, name) => items.filter((item) =>
 const isRunning = async (agentId) =>
   (await call("listAgents").catch(() => [])).find((agent) => agent.id === agentId)?.isRunning === true;
 
+/**
+ * Wait for the turn to stop before reading what it said. `awaitOutcome` returns the moment its
+ * effect lands, and the effect it waits on is not the last thing the turn does -- measured on
+ * grok-bot-local-vm 2026-09-07, the shell stamp landed 22 s in and the last reply at that instant
+ * was still "On it, running both now.", so the check on what the fetch came back with read the
+ * narration instead of the answer and failed a working fetch.
+ */
+const settle = async (agentId, timeoutMs) => {
+  const by = deadlineFor(timeoutMs);
+  while (Date.now() < by) {
+    if (!await isRunning(agentId).catch(() => false)) return true;
+    await sleep(3000);
+  }
+  return false;
+};
+
 const sendTurn = async (agentId, prompt, label) => {
   const idleBy = deadlineFor(TURN_TIMEOUT_MS);
   while (Date.now() < idleBy && await isRunning(agentId)) await sleep(3000);
@@ -317,7 +337,11 @@ const REPORTING_RULE = "If any step failed, quote that tool's own failure messag
   + "a failure and do not summarise it.";
 
 const stamp = Math.random().toString(36).slice(2, 8);
-const stampFile = `/workspace/probe-cursor-free-${stamp}.txt`;
+// Not "probe-cursor-free-...". The quiet arm below greps the host log for the word cursor, and the
+// agents extension logs an agent's name on mint, on createSession and inside every auto-review
+// record. A probe named after the thing being looked for reports itself: measured on
+// grok-bot-local-vm 2026-09-07, that alone was all 3 of the 3 "cursor" lines in a clean run.
+const stampFile = `/workspace/probe-noupstream-${stamp}.txt`;
 const previousBackend = await readSetting(BACKEND_SETTING);
 let probe = null;
 let hostsCut = false;
@@ -382,7 +406,7 @@ try {
   const from = await hostLogLines();
   const windowOpenedAt = Date.now();
 
-  probe = await call("createAgent", { name: `probe-cursor-free-${stamp}`, description: "", origin: "user", isKickstartRequested: false });
+  probe = await call("createAgent", { name: `probe-noupstream-${stamp}`, description: "", origin: "user", isKickstartRequested: false });
   probe = probe?.agent ?? probe;
   if (probe?.id == null) fatal("createAgent returned no agent");
   console.log(`probe agent: ${probe.id}`);
@@ -395,8 +419,13 @@ try {
     + `2. Read the page ${EXAMPLE_URL} and tell me the heading on it.\n`
     + REPORTING_RULE,
     "turn one");
-  const stampLanded = await awaitOutcome(probe.id, "turn one", TURN_TIMEOUT_MS, async () =>
-    (await sh(`test -f ${stampFile} && echo yes || echo no`)).trim() === "yes" ? true : null) === true;
+  const stampLanded = await awaitOutcome(probe.id, "turn one", TURN_TIMEOUT_MS, async () => {
+    if ((await sh(`test -f ${stampFile} && echo yes || echo no`)).trim() !== "yes") return null;
+    // Both halves, not just the stamp: the shell runs first and the fetch is what the next check
+    // reads, so returning on the stamp alone stops the wait before the turn's second job.
+    return toolRows(await outline(probe.id), "webFetchToolCall").length > 0 ? true : null;
+  }) === true;
+  await settle(probe.id, SETTLE_TIMEOUT_MS);
   const outlineOne = await outline(probe.id);
   const shellRows = toolRows(outlineOne, "shellToolCall");
   const fetchRowsOne = toolRows(outlineOne, "webFetchToolCall");
@@ -435,6 +464,7 @@ try {
     return toolRows(items, "webSearchToolCall").length > 0
       && toolRows(items, "webFetchToolCall").length > fetchRowsOne.length ? true : null;
   }) === true;
+  await settle(probe.id, SETTLE_TIMEOUT_MS);
   const outlineTwo = await outline(probe.id);
   const searchRows = toolRows(outlineTwo, "webSearchToolCall");
   const fetchRowsTwo = toolRows(outlineTwo, "webFetchToolCall");
