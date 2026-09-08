@@ -66,12 +66,24 @@ export function getSandBackendModeForUrl(raw: string | undefined): SandBackendMo
   return isForeignBackendHost(hostname) ? "none" : "ours";
 }
 
-export function getSandBackendMode(read: (name: string) => string | undefined = readSandBoxSetting): SandBackendMode {
-  return getSandBackendModeForUrl(read(SAND_BACKEND_URL_SETTING));
+/**
+ * How a caller says where to read the setting from. A function is the general form and the one
+ * production uses (`readSandBoxSetting`: container env first, `sand-host-settings.json` second). A
+ * plain record is accepted too, so a caller holding `process.env` -- or a test holding the exact
+ * environment measured on a box -- can pass it straight in without wrapping it.
+ */
+export type SandBackendSettingSource = ((name: string) => string | undefined) | Record<string, string | undefined>;
+
+function readFrom(source: SandBackendSettingSource, name: string): string | undefined {
+  return typeof source === "function" ? source(name) : source[name];
 }
 
-export function isSandBackendOurs(read: (name: string) => string | undefined = readSandBoxSetting): boolean {
-  return getSandBackendMode(read) === "ours";
+export function getSandBackendMode(source: SandBackendSettingSource = readSandBoxSetting): SandBackendMode {
+  return getSandBackendModeForUrl(readFrom(source, SAND_BACKEND_URL_SETTING));
+}
+
+export function isSandBackendOurs(source: SandBackendSettingSource = readSandBoxSetting): boolean {
+  return getSandBackendMode(source) === "ours";
 }
 
 /**

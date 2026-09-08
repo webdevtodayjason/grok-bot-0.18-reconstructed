@@ -43,6 +43,17 @@ const readSource = (relative) => {
   return existsSync(absolute) ? readFileSync(absolute, "utf8") : null;
 };
 
+// The "is this call gone" cases below grep the file text, and the replacement modules deliberately
+// write down what they replaced: web-tools.ts names `AiService.RunWebFetch` and quotes the exact
+// sentence Richard was handed eleven times, because a reader who does not know that history will
+// put the RPC back. A grep over raw text cannot tell a call from the note explaining why there is
+// no call, so these cases read the code with the comments taken out. Comments only: block comments
+// and whole-line `//` comments go, everything else stays, so a trailing comment after real code
+// cannot hide anything and a `//` inside a URL string is left alone.
+const codeOnly = (body) => body == null ? null : body
+  .replace(/\/\*[\s\S]*?\*\//g, " ")
+  .replace(/^[ \t]*\/\/.*$/gm, "");
+
 const PINS_PATH = "deploy/box-defaults/gates.json";
 const SETTINGS_PATH = "deploy/box-defaults/sand-host-settings.json";
 const GATE_PATH = "scripts/verify-cursor-free.mjs";
@@ -163,33 +174,68 @@ test("an unset backend means none, never Cursor", { skip: backendMode?.getSandBa
 const webTools = readSource(WEB_TOOLS_PATH);
 
 test("the web tools are ours", { skip: webTools == null ? `${WEB_TOOLS_PATH} does not exist yet` : false }, () => {
+  const code = codeOnly(webTools);
   for (const rpc of ["RunWebSearch", "RunWebFetch", "createCursorWebFetchService", "createCursorWebSearchService"]) {
-    assert.ok(!webTools.includes(rpc), `${WEB_TOOLS_PATH} still reaches for ${rpc}`);
+    assert.ok(!code.includes(rpc), `${WEB_TOOLS_PATH} still reaches for ${rpc}`);
   }
 });
 
-test("no web tool hands anybody \"may be temporary\"", { skip: webTools == null ? `${WEB_TOOLS_PATH} does not exist yet; the string still lives in connect-error.ts and web-search.ts` : false }, () => {
+test("no web tool hands anybody \"may be temporary\"", { skip: webTools == null ? `${WEB_TOOLS_PATH} does not exist yet; the string still lives in connect-error.ts and web-search.ts` : false }, async () => {
   // The exact sentence Richard was given eleven times in one session. It tells the person nothing
   // and tells the model to retry a call that can never succeed, so the agent loops.
   for (const relative of [WEB_TOOLS_PATH, "source/packages/agent/tools/core/web-search.ts", "source/packages/agent/tools/core/web-fetch.ts"]) {
-    const body = readSource(relative);
+    const body = codeOnly(readSource(relative));
     if (body == null) continue;
-    assert.ok(!body.toLowerCase().includes("may be temporary"), `${relative} still carries "may be temporary"`);
+    assert.ok(!body.toLowerCase().includes("may be temporary"), `${relative} still hands out "may be temporary"`);
   }
-  const failure = /Could not read that page[^"']*/.exec(webTools)?.[0] ?? "";
-  assert.ok(failure.length > 0, "the failure sentence is not in the web tools");
-  assert.ok(/in your browser/i.test(failure), "the failure sentence must name the next thing the person can do");
-  for (const vendor of ["cursor", "tinyfish", "exa"]) {
-    assert.ok(!failure.toLowerCase().includes(vendor), `the failure sentence names ${vendor}; the person asked for something, not for a supplier`);
+  // The words themselves are built from pieces, so read them off the builders rather than off the
+  // file: a regex over the source sees `${NEXT_STEP_PAGE}` and cannot tell whether that constant
+  // says anything useful. Every combination is checked, because the one a person actually hits is
+  // whichever one the site chose.
+  const built = await load(WEB_TOOLS_PATH, "web-tools-messages");
+  assert.ok(built?.webFetchFailureMessage != null, `${WEB_TOOLS_PATH} must export webFetchFailureMessage`);
+  assert.ok(built?.webSearchFailureMessage != null, `${WEB_TOOLS_PATH} must export webSearchFailureMessage`);
+  const messages = [];
+  for (const why of ["refused", "unreachable", "empty", "not-text"]) {
+    for (const fallback of ["failed", "missing"]) messages.push(built.webFetchFailureMessage({ why, fallback }));
+  }
+  for (const fallback of ["failed", "missing"]) messages.push(built.webSearchFailureMessage(fallback));
+  for (const failure of messages) {
+    assert.ok(failure.length > 0, "a failure message came back empty");
+    assert.ok(!failure.toLowerCase().includes("may be temporary"), `a failure message still says "may be temporary": ${failure}`);
+    assert.ok(/in your browser/i.test(failure), `the failure message must name the next thing the person can do: ${failure}`);
+    for (const vendor of ["cursor", "tinyfish", "exa", "anysphere"]) {
+      assert.ok(!failure.toLowerCase().includes(vendor), `the failure message names ${vendor}; the person asked for something, not for a supplier: ${failure}`);
+    }
   }
 });
 
 const fallbackProbe = await load(WEB_TOOLS_PATH, "web-tools");
-const predicate = fallbackProbe == null ? null : (fallbackProbe.shouldFallBackToFallbackFetch ?? fallbackProbe.shouldFallBack ?? fallbackProbe.directFetchWasRefused ?? null);
 
-test("the fallback order: direct first, fallback only when the site refused", { skip: predicate == null ? `export a predicate from ${WEB_TOOLS_PATH} named shouldFallBack, shouldFallBackToFallbackFetch or directFetchWasRefused, taking { status, body }, to wake this case` : false }, () => {
-  assert.equal(predicate({ status: 200, body: "<html><body>hello</body></html>" }), false, "a page that answered must not cost a fallback call");
-  assert.equal(predicate({ status: 403, body: "" }), true, "403 is the refusal the fallback exists for");
-  assert.equal(predicate({ status: 429, body: "" }), true, "429 is a refusal too");
-  assert.equal(predicate({ status: 200, body: "" }), true, "an empty body from a 200 is a JavaScript-only page");
+// This case was written asking for a `{ status, body }` predicate. The shipped code puts that rule
+// inside `readPageDirectly`, where it also gets the content type and the wall check, and a second
+// copy of the rule in a predicate would be two answers to one question -- the same fault this file
+// refuses on the pins. So the case drives the real thing with a stub fetch instead, and asserts the
+// same four claims it always wanted: a page that answered costs no fallback call, a refusal and a
+// rate limit both do, and a 200 that reduces to nothing is a page that only draws itself in a
+// browser.
+const stubResponse = ({ status, body, contentType = "text/html" }) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  headers: { get: (name) => (name.toLowerCase() === "content-type" ? contentType : null) },
+  text: async () => body,
+  body: null,
+});
+
+test("the fallback order: direct first, fallback only when the site refused", { skip: fallbackProbe?.readPageDirectly == null ? `${WEB_TOOLS_PATH} does not export readPageDirectly yet` : false }, async () => {
+  const read = async (shape) => await fallbackProbe.readPageDirectly("https://example.test/", {
+    fetchImpl: async () => stubResponse(shape),
+    timeoutMs: 5_000,
+    maxBytes: 1024 * 1024,
+  });
+  const answered = await read({ status: 200, body: "<html><body>hello</body></html>" });
+  assert.equal(answered.ok, true, "a page that answered must not cost a fallback call");
+  assert.equal((await read({ status: 403, body: "" })).why, "refused", "403 is the refusal the fallback exists for");
+  assert.equal((await read({ status: 429, body: "" })).why, "refused", "429 is a refusal too");
+  assert.equal((await read({ status: 200, body: "" })).why, "empty", "an empty body from a 200 is a JavaScript-only page");
 });
