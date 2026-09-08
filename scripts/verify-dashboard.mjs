@@ -207,6 +207,38 @@ const openHiddenGroup = async () => {
   await page.click("[data-roster-hidden] > summary", { timeout: 5000 }).catch(() => {});
   await page.waitForTimeout(500);
 };
+// CHAT-LONG-1 / DASH-GW03, 2026-09-08. Selecting an agent by its id, and CHECKING which one is
+// selected, because a text match silently measures the wrong conversation.
+//
+// The GW-03 arc reported "0 message rows" for a 1,578-item conversation and five checks failed
+// together, and the row was written up as a product defect: the console cannot render a long
+// conversation. It was not. Re-measured on grok-bot-local-vm through the same headless Chrome the
+// gate uses, the host answers getConversationOutline for that agent in 420 ms and the console draws
+// 190 .message-row elements in 525 ms, cold, with no page errors -- and every named agent draws,
+// 190/156/34/32/26/22/22 rows, each inside 500 ms.
+//
+// What actually happened is the alternative the DASH-GW03 row itself named: the click landed
+// somewhere else after the roster changed underneath it, and the arc then measured a different
+// agent's short transcript while believing it was measuring this one. A getByText match on a name
+// finds whatever is on screen; two roster cards, a search result and a details panel can all carry
+// the same words. So the agent is resolved to an id through the gateway and clicked by
+// data-context-id, and the selection is asserted before anything is read -- an arc that cannot say
+// which agent it is looking at cannot report a defect in it.
+const selectAgentByName = async (name) => {
+  const id = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.name === name)?.id ?? null;
+  if (id == null) throw new Error(`no agent called ${name} on this box`);
+  await openHiddenGroup();
+  const onScreen = await until(() => page.evaluate((agentId) => (document.querySelector(`.worker-card[data-context-id="${agentId}"]`) ? true : null), id), 15_000, 500);
+  if (onScreen == null) throw new Error(`${name} (${id}) never appeared in the roster`);
+  await page.click(`.worker-card[data-context-id="${id}"]`, { timeout: 10_000 });
+  const active = await until(() => page.evaluate((agentId) => (document.querySelector(".worker-card.is-active")?.getAttribute("data-context-id") === agentId ? true : null), id), 15_000, 500);
+  if (active == null) {
+    const got = await page.evaluate(() => document.querySelector(".worker-card.is-active")?.querySelector(".worker-name")?.textContent?.trim() ?? "(none)");
+    throw new Error(`clicked ${name} (${id}) and the active card is ${got}; this arc will not measure the wrong agent`);
+  }
+  await page.waitForTimeout(1200);
+  return id;
+};
 // MARKET-1: the Global capabilities panel is the Marketplace now, and the provider and chat
 // listener cards moved out of it into Settings. Two openers, so every check below says which
 // surface it means rather than clicking a word that appears on both.
@@ -762,8 +794,7 @@ try {
     check(!specValues.some((v) => blurbs.includes(v)), `no connector argv or env value in the dashboard DOM (${specValues.length} checked)`, specValues.filter((v) => blurbs.includes(v)).join(", "));
     // GW-13's disclosure is the other surface that paints raw host data. Open one and check it.
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);
-    await openHiddenGroup();
-    await clickText("Atera Triage").catch(() => {});
+    await selectAgentByName("Atera Triage").catch(() => {});
     for (let i = 0; i < 400; i += 1) await page.mouse.wheel(0, 2000); await page.waitForTimeout(600);
     const chip = (await page.$$(".evidence-chip")).at(-1) ?? null;
     if (chip) {
@@ -1199,8 +1230,7 @@ try {
       });
       check(!!panel.island && panel.island.w <= panel.column.w + 1 && panel.island.right <= panel.viewport && (!panel.capsule || panel.capsule.w <= panel.column.w + 1), "a long endpoint name cannot widen the Agent panel past its column", JSON.stringify(panel));
       // Read somewhere else while the reply lands, so the unread is raised off screen.
-      await openHiddenGroup();
-      await clickText("Atera Triage").catch(() => {});
+      await selectAgentByName("Atera Triage").catch(() => {});
       const spoke = await until(async () => {
         const t = await gw("getAgentTranscriptTail", { id: probeAgentId, limit: 10 });
         return (t?.entries ?? []).some((e) => e.kind === "send-message") ? true : null;
@@ -2287,8 +2317,10 @@ try {
 
     // -- The Files view is real, and labelled as what it is.
     apiCalls.length = 0;
-    await openHiddenGroup();
-    await clickText("Atera Triage"); await page.waitForTimeout(2500);
+    // CHAT-LONG-1 / DASH-GW03: by id, and the selection is asserted. See selectAgentByName above
+    // for what a text match cost this arc.
+    const ateraSelectedId = await selectAgentByName("Atera Triage");
+    await page.waitForTimeout(2500);
     // Loading a conversation here is two serial round trips -- getAgentTranscriptTail beside four
     // other reads, then getConversationOutline for the tool rows woven into it -- and the checks
     // below are about what those produced, not how fast they arrived. A fixed 2.5s made them a
@@ -2323,7 +2355,7 @@ try {
     check(/display :\d+|shared screen/.test(screenRow), "the Browser row resolves to this agent's real screen", screenRow.slice(0, 90) || "still 'Asking the host…' after 25s");
     // -- AUDIT-1 UI half: the Action ledger disclosure on an agent with tool history, against
     // getAgentActionAudit's own answer; tool output stays out of the DOM until one row is asked for.
-    const ledgerAgentId = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.name === "Atera Triage")?.id ?? null;
+    const ledgerAgentId = ateraSelectedId;
     const hostLedger = ledgerAgentId ? await gw("getAgentActionAudit", { id: ledgerAgentId, limit: 25 }).catch(() => null) : null;
     await page.click("[data-read-audit]");
     const ledgerRows = await until(() => page.evaluate(() => { const l = document.querySelector("[data-audit-list]"); return l && l.textContent.trim() ? l.querySelectorAll("[data-audit-row]").length : null; }), 10_000, 500);

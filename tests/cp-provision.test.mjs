@@ -11,6 +11,8 @@ import { randomBytes } from "node:crypto";
 
 import {
   BOX_COMPOSE_PATH,
+  boxDefaultNames,
+  writeBoxDefaults,
   RESERVED_SLUGS,
   boxContainerName,
   coolifyStatusOf,
@@ -755,4 +757,70 @@ test("a proxy that will not mint fails the workspace at that step and leaves the
       assert.equal(coolify.callsTo("POST /services").length, 1, "the retry built a second box");
     }, { coolify, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
   } finally { await proxy.close(); await coolify.close(); }
+});
+
+
+// TENANT-8 / CURSOR-1 item 5. A new tenant's box starts with settings of its own.
+//
+// MEASURED ON THE R750 2026-09-08: gates.json was missing from all three tenant data directories
+// (/data/titanbot/{demo,richard-avery,north-bay-roofing}/volumes/data), so every tenant box fell
+// through to whatever the bundled gate table happened to be. That file carries sand_auto_review:
+// false and the rest of the CURSOR-1 pins, which is the whole reason the row exists.
+test("a new tenant's data directory gets the box defaults, at 0600", async () => {
+  const root = await makeTempRoot("cp-defaults-");
+  try {
+    const data = path.join(root, "volumes", "data");
+    const result = writeBoxDefaults(data);
+    assert.equal(result.missingDefaults, false, "deploy/box-defaults is not in this checkout");
+    assert.deepEqual(result.written, boxDefaultNames());
+    assert.deepEqual(result.skipped, []);
+    assert.ok(result.written.includes("gates.json"), "gates.json is the file the row is about");
+    for (const name of result.written) {
+      const target = path.join(data, name);
+      assert.equal(existsSync(target), true, `${name} was reported written and is not there`);
+      assert.equal(((await stat(target)).mode & 0o777).toString(8), "600",
+        `${name} is more readable than box-secrets.json beside it`);
+      JSON.parse(readFileSync(target, "utf8"));
+    }
+    assert.equal(JSON.parse(readFileSync(path.join(data, "gates.json"), "utf8")).sand_auto_review, false,
+      "the CURSOR-1 pin is not in the file that was written");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// The retry case. The directories step is re-run from wherever a provision failed, and an operator
+// may have flipped a switch since the box was built. A default is what a box starts with, not what
+// it is held to.
+test("a retry does not overwrite a switch an operator has already edited", async () => {
+  const root = await makeTempRoot("cp-defaults-retry-");
+  try {
+    const data = path.join(root, "volumes", "data");
+    mkdirSync(data, { recursive: true });
+    const edited = JSON.stringify({ sand_auto_review: true, edited_by_hand: true }, null, 2);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(path.join(data, "gates.json"), edited, "utf8");
+
+    const result = writeBoxDefaults(data);
+    assert.deepEqual(result.skipped, ["gates.json"], "the edited file was not reported as skipped");
+    assert.equal(result.written.includes("gates.json"), false, "the edit was overwritten by the default");
+    assert.equal(readFileSync(path.join(data, "gates.json"), "utf8"), edited,
+      "an operator's edit did not survive a retry of the directories step");
+    // And the file that was NOT there still arrives, so a partial directory is completed rather
+    // than left as it was found.
+    assert.ok(result.written.includes("sand-host-settings.json"));
+
+    // Idempotent: a third run writes nothing at all and says so.
+    const again = writeBoxDefaults(data);
+    assert.deepEqual(again.written, []);
+    assert.deepEqual(again.skipped, boxDefaultNames());
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a checkout with no defaults directory provisions instead of failing", async () => {
+  const root = await makeTempRoot("cp-defaults-absent-");
+  try {
+    const data = path.join(root, "volumes", "data");
+    const result = writeBoxDefaults(data, { defaultsDir: path.join(root, "nowhere") });
+    assert.equal(result.missingDefaults, true);
+    assert.deepEqual(result.written, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

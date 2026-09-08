@@ -56,8 +56,54 @@
 # a reply is the relay. ARP is not matched either (an ARP frame has no ip saddr), so a box still
 # resolves names and simply times out on the addresses it may not have.
 #
+# ---- TENANT-3, the second thing this script does: a box cannot reach the HOST either -------------
+#
+# The rules above are box-to-box. This is box-to-host, and it is a different table because it is a
+# different problem in a different netfilter family.
+#
+# WHAT WAS MEASURED, from inside the demo tenant's box on the R750 2026-09-08, with bash /dev/tcp
+# (an earlier pass used `sh`, which is dash on this image and has no /dev/tcp, so it read every port
+# as shut -- that run was a false negative and is discarded). Sanity leg 1.1.1.1:443 OPEN. Then OPEN
+# on 22, 47291, 8000, 80, 443, 2049, 445, 11434 and 5000 against EACH of four host addresses: the
+# box's default gateway 192.168.32.1, its titanbot-net gateway 192.168.48.1, the tailnet address
+# 100.110.83.82 and docker0 172.17.0.1. `ss -lntp` on the host names them: sshd on 22 and 47291,
+# docker-proxy on 8000 (Coolify), smbd on 445, ollama on 11434, a python service on 5000 and NFS on
+# 2049. Between a customer's agent and the machine that runs every other customer there was nothing
+# but two login prompts, the hosting panel, the machine's file exports and its local model server.
+# The box has no IPv6 default route today, so v6 is a future path rather than a current one -- but
+# sshd and Coolify both listen on [::], so it becomes one the moment a bridge gets v6.
+#
+# WHY IT IS PREROUTING AND NOT INPUT, which is the part the docs got wrong. For 22 and 47291 the
+# INPUT reasoning is right: a packet from a container to its own gateway address terminates on the
+# host, so it goes through INPUT and not FORWARD, and DOCKER-USER never sees it. For 8000 -- the
+# port the whole row is about -- it is wrong. Measured: `iptables -t nat -S` carries
+# `-A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER` and then
+# `-A DOCKER ! -i br-7ef42af3f026 -p tcp --dport 8000 -j DNAT --to-destination 10.0.2.5:8080`.
+# br-7ef42af3f026 is Coolify's OWN bridge, so a packet arriving from a box bridge is not excluded:
+# its destination is rewritten to Coolify's container before INPUT is consulted and it is then
+# FORWARDED, never delivered locally. An INPUT rule would correctly drop 22 and 47291 and silently
+# do nothing for 8000. A prerouting hook at priority -250 runs BEFORE docker's nat prerouting at
+# -100, so it sees the original destination, and `fib daddr type local` is what says "this address
+# is one of ours" without naming a single gateway that changes every time a network is made.
+#
+# THE EXEMPTIONS FAIL CLOSED, and that is not caution for its own sake. Coolify drives this host
+# over SSH from inside its own container: measured, four established sessions from 10.0.2.5 to
+# 10.0.0.1:22. It arrives on a docker bridge exactly like a customer's box does, so `iifname br-*`
+# covers it too, and a blanket drop on 22 would take away the hosting panel's ability to do
+# anything -- re-applied every 60 seconds by the timer, so it would not be an event an operator
+# could wait out. So the coolify container's addresses are DISCOVERED at apply time, by name, and
+# if a coolify container exists and its addresses cannot be resolved this script installs NOTHING
+# and exits non-zero. Same for the control plane, discovered by its role label.
+#
+# IT SHADOWS BEFORE IT DROPS. TITANBOT_HOST_GUARD=shadow (the default, and what a fresh install
+# gets) installs the same matches as counter-only rules and drops nothing, so an operator can read
+# for himself which ports a box actually uses before anything is taken away. Only when he is
+# satisfied does he set the mode to drop. The counters are per port, which is what lets 2049, 445
+# and 11434 be added to the drop set once their shadow counters read zero rather than on a guess.
+#
 #   sudo bash box-isolation.sh            apply, and print what it applied
-#   sudo bash box-isolation.sh --verify   scan every box from every other box and fail on any port
+#   sudo bash box-isolation.sh --verify   scan box to box AND box to host, and fail on any open port
+#   sudo bash box-isolation.sh --counters print the host-guard counters, per port
 #   bash box-isolation.sh --show          print the rules that are installed
 #
 # It is idempotent: the whole table is replaced in one nft transaction every run, so a box that
@@ -74,6 +120,12 @@
 #   TITANBOT_RELAY_PORT  default 7777
 #   TITANBOT_PROXY_PORT  default 4000
 #   TITANBOT_PROXY_DB_PORT  the port --verify proves a box CANNOT reach, default 5432
+#   TITANBOT_HOST_GUARD       off | shadow | drop. Default: the mode file below, else shadow.
+#   TITANBOT_HOST_GUARD_MODE_FILE  where the mode is remembered so the timer reads the same one,
+#                                  default /etc/titanbot/host-guard.mode
+#   TITANBOT_HOST_GUARD_DROP_PORTS    dropped in drop mode, default 22,47291,8000
+#   TITANBOT_HOST_GUARD_WATCH_PORTS   counted but never dropped, default 2049,445,11434,5000,80,443
+#   TITANBOT_HOST_TABLE       the nft table, default titanbot_host
 set -uo pipefail
 
 NET="${TITANBOT_NET:-titanbot-net}"
@@ -81,12 +133,27 @@ TABLE="${TITANBOT_TABLE:-titanbot_isolation}"
 RELAY_PORT="${TITANBOT_RELAY_PORT:-7777}"
 PROXY_PORT="${TITANBOT_PROXY_PORT:-4000}"
 PROXY_DB_PORT="${TITANBOT_PROXY_DB_PORT:-5432}"
+HOST_TABLE="${TITANBOT_HOST_TABLE:-titanbot_host}"
+HOST_GUARD_MODE_FILE="${TITANBOT_HOST_GUARD_MODE_FILE:-/etc/titanbot/host-guard.mode}"
+# shadow by default, and by default on a host that has never been told otherwise. A first apply that
+# silently started dropping traffic on a live machine would be the wrong way round: the counters
+# come first, an operator reads them, and only then is anything taken away.
+HOST_GUARD="${TITANBOT_HOST_GUARD:-}"
+if [ -z "$HOST_GUARD" ] && [ -r "$HOST_GUARD_MODE_FILE" ]; then
+  HOST_GUARD="$(tr -d '[:space:]' < "$HOST_GUARD_MODE_FILE" 2>/dev/null)"
+fi
+HOST_GUARD="${HOST_GUARD:-shadow}"
+case "$HOST_GUARD" in off|shadow|drop) ;; *) echo "TITANBOT_HOST_GUARD must be off, shadow or drop (got '$HOST_GUARD')" >&2; exit 64 ;; esac
+DROP_PORTS="${TITANBOT_HOST_GUARD_DROP_PORTS:-22,47291,8000}"
+WATCH_PORTS="${TITANBOT_HOST_GUARD_WATCH_PORTS:-2049,445,11434,5000,80,443}"
+
 MODE=apply
 case "${1:-}" in
   --verify) MODE=verify ;;
   --show) MODE=show ;;
+  --counters) MODE=counters ;;
   "") MODE=apply ;;
-  *) echo "usage: $0 [--verify|--show]" >&2; exit 64 ;;
+  *) echo "usage: $0 [--verify|--show|--counters]" >&2; exit 64 ;;
 esac
 
 say() { printf '  %s\n' "$*"; }
@@ -137,6 +204,51 @@ RELAY_ADDR="$(address_of "$RELAY_NAME")"
 PROXY_NAME="${TITANBOT_PROXY:-$(docker ps --filter label=com.titanbot.role=proxy --format '{{.Names}}' | head -n 1)}"
 PROXY_ADDR="$(address_of "$PROXY_NAME")"
 
+# ---- TENANT-3: what may still reach the host, discovered rather than written down ----------------
+#
+# Two exemptions, both by ADDRESS and both found at apply time. A name or a bridge would be wrong
+# for the same reason the proxy's address is discovered above: Coolify renames containers and docker
+# hands out fresh addresses, and a rule that quietly stops matching here does not fail loudly, it
+# takes away Jason's hosting panel every sixty seconds.
+#
+# HOST_GUARD_BLOCKED is the fail-closed latch. If a container that must be exempt is present but its
+# addresses cannot be read, nothing is installed at all and the run exits non-zero. Absent is fine:
+# a host with no Coolify has nothing to exempt. Unreadable is not.
+HOST_GUARD_BLOCKED=""
+EXEMPT_ADDRS=()
+
+# Every IPv4 address a container holds, across every network it is on.
+addrs_of_container() {
+  docker inspect "$1" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{println}}{{end}}' 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u
+}
+
+exempt_container() {
+  name="$1"; why="$2"
+  [ -n "$name" ] || return 0
+  mapfile -t found < <(addrs_of_container "$name")
+  if [ "${#found[@]}" -eq 0 ]; then
+    HOST_GUARD_BLOCKED="$why: the container $name is running and docker would not tell me its addresses"
+    return 0
+  fi
+  for a in "${found[@]}"; do EXEMPT_ADDRS+=("$a"); say "exempt $a ($why, $name)"; done
+}
+
+if [ "$HOST_GUARD" != off ]; then
+  step "host guard: $HOST_GUARD"
+  # Coolify, by container name rather than by label: it is not our container and carries no label of
+  # ours. It SSHes into this host from inside its own container (measured: 10.0.2.5 -> 10.0.0.1:22,
+  # four live sessions), so without this exemption a drop on 22 stops every Coolify action.
+  COOLIFY_NAME="${TITANBOT_COOLIFY:-$(docker ps --format '{{.Names}}' | grep -E '^coolify$' | head -n 1)}"
+  if [ -n "$COOLIFY_NAME" ]; then exempt_container "$COOLIFY_NAME" "the hosting panel drives this host over ssh"
+  else say "no container called coolify on this host, so there is nothing to exempt for it"; fi
+  # The control plane, by our own role label. It calls Coolify's API on the host's published port to
+  # build a customer's box, so it needs 8000 for the same reason a box must not have it.
+  CP_NAME="${TITANBOT_CONTROL_PLANE:-$(docker ps --filter label=com.titanbot.role=control-plane --format '{{.Names}}' | head -n 1)}"
+  if [ -n "$CP_NAME" ]; then exempt_container "$CP_NAME" "the control plane builds boxes through the hosting panel"
+  else say "no control plane container on this host, so there is nothing to exempt for it"; fi
+fi
+
 step "$NET on $BR"
 say "network $NET_ID"
 say "relay   ${RELAY_NAME:-none} ${RELAY_ADDR:-(not on this network)}"
@@ -148,6 +260,20 @@ fi
 if [ "$MODE" = show ]; then
   step "installed rules"
   "${NFT[@]}" list table bridge "$TABLE" 2>/dev/null || say "the table bridge $TABLE is not installed"
+  step "host guard"
+  "${NFT[@]}" list table inet "$HOST_TABLE" 2>/dev/null || say "the table inet $HOST_TABLE is not installed"
+  exit 0
+fi
+
+# The counters, per port, which is the whole point of the shadow pass: 2049, 445 and 11434 join the
+# drop set once their counters read zero over a real window, not because somebody was fairly sure.
+if [ "$MODE" = counters ]; then
+  step "host guard counters"
+  if ! "${NFT[@]}" list table inet "$HOST_TABLE" >/dev/null 2>&1; then
+    say "the table inet $HOST_TABLE is not installed, so nothing has been counted"
+    exit 0
+  fi
+  "${NFT[@]}" -a list table inet "$HOST_TABLE" | grep -E 'counter packets|comment' | sed 's/^[[:space:]]*/  /'
   exit 0
 fi
 
@@ -242,9 +368,73 @@ if [ "$MODE" = verify ]; then
     done
   fi
 
+  # ---- TENANT-3: box to HOST, and this is the leg that fails ------------------------------------
+  #
+  # Until 2026-09-08 --verify scanned box to box and nothing else, so the deploy gate's isolation
+  # leg reported PASS while every host port stood open to every tenant. A green leg over an open
+  # door is worse than no leg: it reads as a proof.
+  #
+  # bash /dev/tcp EXPLICITLY, never sh. The box image's /bin/sh is dash, which has no /dev/tcp, so a
+  # probe written with sh reads every port as shut and the leg passes for the wrong reason. That
+  # false negative is on the record; this is the line that prevents it, and the sanity leg below is
+  # what proves the probe can still see an open port at all.
+  step "box to host"
+  if [ "${#BOX_LIST[@]}" -eq 0 ]; then
+    say "no box on this network, so there is nothing to probe the host from"
+  else
+  for from in "${BOX_LIST[@]}"; do
+    from_name="${from%% *}"
+    # Every host address this box can name, discovered from inside it: its default gateway, the
+    # gateway of every other bridge it is on, and docker0. Written down here they would be four
+    # literals that stop being true the next time a network is made.
+    mapfile -t host_addrs < <(docker exec "$from_name" bash -c '
+      ip route | awk "/^default/ {print \$3}"
+      ip route | awk "/proto kernel/ {print \$1}" | while read -r net; do
+        printf "%s\n" "${net%%/*}" | awk -F. "{print \$1\".\"\$2\".\"\$3\".1\"}"
+      done' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u)
+    for extra in ${TITANBOT_HOST_ADDRS:-}; do host_addrs+=("$extra"); done
+    if [ "${#host_addrs[@]}" -eq 0 ]; then
+      say "BROKEN could not work out any host address from inside $from_name, so this leg proved nothing"
+      bad=$((bad + 1))
+      continue
+    fi
+    # The sanity leg. If this cannot open a socket to something that is definitely listening, every
+    # "closed" below means "the probe is broken", not "the host is unreachable".
+    if ! docker exec "$from_name" bash -c 'timeout 4 bash -c "exec 3<>/dev/tcp/1.1.1.1/443"' 2>/dev/null; then
+      say "note   $from_name could not open 1.1.1.1:443 either, so it may have no egress; the closed results below are weaker than they look"
+    fi
+    guard_ports="$(printf '%s,%s' "$DROP_PORTS" "$WATCH_PORTS" | tr ',' ' ')"
+    for addr in "${host_addrs[@]}"; do
+      open="$(docker exec "$from_name" bash -c '
+        for p in '"$guard_ports"'; do
+          timeout 2 bash -c "exec 3<>/dev/tcp/'"$addr"'/$p" 2>/dev/null && printf "%s " "$p"
+        done' 2>/dev/null)"
+      open="$(printf '%s' "$open" | sed 's/ *$//')"
+      if [ -n "$open" ]; then
+        # A drop-set port open is the finding. A watch-only port open is what the shadow pass is
+        # for, so it is said plainly and does not fail the run until it joins the drop set.
+        hard=""; watched=""
+        for p in $open; do
+          case ",$DROP_PORTS," in
+            *",$p,"*) hard="$hard $p" ;;
+            *) watched="$watched $p" ;;
+          esac
+        done
+        if [ -n "$hard" ]; then
+          say "OPEN   $from_name -> host $addr on$hard; a customer's agent reaches the machine that runs every other customer"
+          bad=$((bad + 1))
+        fi
+        [ -n "$watched" ] && say "note   $from_name -> host $addr also answers on$watched (watch-only; add to the drop set once its shadow counter reads zero)"
+      else
+        say "closed $from_name -> host $addr: nothing answered on $guard_ports"
+      fi
+    done
+  done
+  fi
+
   [ "$bad" = 0 ] || die "$bad path(s) are open that should not be, or a box lost a path it needs"
   [ "$broken" = 0 ] || die "$broken box(es) cannot be reached by the console on 1340; their owners see an empty console"
-  printf '\nPASS  no box reaches another box, every box reaches the relay and the proxy, and nothing reaches the proxy database\n'
+  printf '\nPASS  no box reaches another box or the host on the drop set, every box reaches the relay and the proxy, and nothing reaches the proxy database\n'
   exit 0
 fi
 
@@ -302,3 +492,65 @@ fi
 
 "${NFT[@]}" list table bridge "$TABLE" | sed 's/^/  /'
 say "${#BOX_ADDRS[@]} box(es) isolated on $BR"
+
+# ---- TENANT-3: the host guard --------------------------------------------------------------------
+step "host guard"
+if [ -n "$HOST_GUARD_BLOCKED" ]; then
+  die "refusing to install the host guard: $HOST_GUARD_BLOCKED. Nothing was changed. Fix the lookup or set TITANBOT_HOST_GUARD=off, and do not install a drop set without its exemptions."
+fi
+if [ "$HOST_GUARD" = off ]; then
+  "${NFT[@]}" delete table inet "$HOST_TABLE" >/dev/null 2>&1 && say "removed the host guard table (mode off)" \
+    || say "mode off and no host guard table installed"
+else
+  # The rule set, in one nft transaction like the bridge table above.
+  #
+  #   type filter hook prerouting priority -250   before docker's nat prerouting at -100, so the
+  #                                               destination is still the host's own address and
+  #                                               not yet Coolify's container
+  #   fib daddr type local                        "addressed to this machine", without naming a
+  #                                               gateway that changes whenever a network is made
+  #   iifname { "br-*", "docker0" }               every docker bridge on this host, present or
+  #                                               future, and nothing that is not one
+  #   tcp flags syn / syn,ack                     only the opening packet: counting or dropping an
+  #                                               established stream's every packet is noise, and a
+  #                                               connection that cannot open never has one
+  #
+  # The exemptions come FIRST and accept, so nothing below can reach the packets they match. In
+  # shadow mode the drop rules are counters with no verdict, which is what makes "shadow" honest
+  # rather than a name: the same matches, the same order, no verdict.
+  VERDICT=""
+  [ "$HOST_GUARD" = drop ] && VERDICT=" drop"
+  {
+    printf 'table inet %s { }\n' "$HOST_TABLE"
+    printf 'delete table inet %s\n' "$HOST_TABLE"
+    printf 'table inet %s {\n' "$HOST_TABLE"
+    # Two chains rather than one, and positively matched rather than negated. `iifname "br-*"` is
+    # a wildcard match nft has had for years; `iifname != { "br-*", "docker0" }` is a negated set OF
+    # wildcards, which is exactly the sort of thing that parses on one nft and not on another. The
+    # entry chain decides "did this arrive on a docker bridge and is it a new TCP connection to this
+    # machine", and jumps; the guarded chain holds the exemptions and the ports.
+    printf '  chain guarded {\n'
+    if [ "${#EXEMPT_ADDRS[@]}" -gt 0 ]; then
+      EXEMPT_SET="$(IFS=, ; printf '%s' "${EXEMPT_ADDRS[*]}")"
+      printf '    ip saddr { %s } counter accept comment "the hosting panel and the control plane keep their way in"\n' "$EXEMPT_SET"
+    fi
+    # One rule per port so the counters are per port. That is the difference between "something
+    # used the guard set 4,000 times" and "nothing has touched 11434 in half an hour".
+    for port in $(printf '%s' "$DROP_PORTS" | tr ',' ' '); do
+      printf '    tcp dport %s counter%s comment "drop-set %s"\n' "$port" "$VERDICT" "$port"
+    done
+    for port in $(printf '%s' "$WATCH_PORTS" | tr ',' ' '); do
+      printf '    tcp dport %s counter comment "watch-only %s"\n' "$port" "$port"
+    done
+    printf '  }\n'
+    printf '  chain host {\n'
+    printf '    type filter hook prerouting priority -250; policy accept;\n'
+    printf '    fib daddr type local tcp flags syn / syn,ack iifname "br-*" jump guarded\n'
+    printf '    fib daddr type local tcp flags syn / syn,ack iifname "docker0" jump guarded\n'
+    printf '  }\n}\n'
+  } | "${NFT[@]}" -f - || die "nft would not load the host guard (root? does this kernel have fib expressions?)"
+  echo "$HOST_GUARD" > /dev/null
+  say "mode $HOST_GUARD; drop set $DROP_PORTS; watch-only $WATCH_PORTS; ${#EXEMPT_ADDRS[@]} exempt address(es)"
+  [ "$HOST_GUARD" = shadow ] && say "nothing is being dropped: read the counters with --counters, then set the mode to drop"
+  "${NFT[@]}" list table inet "$HOST_TABLE" | sed 's/^/  /'
+fi

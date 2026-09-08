@@ -226,6 +226,28 @@ services:
             || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq sqlite3; } >/dev/null 2>&1 \
             || echo "sqlite3 could not be installed here; the learn-from-demonstration URL step will not work" >&2
         } &
+        # TENANT-4. The start-window repair, from inside the box.
+        #
+        # It used to run only from outside, through the docker socket, so it reached the operator's
+        # box and neither customer's: a tenant's compose has no socket by design. Measured on the
+        # R750 2026-09-08, both tenant boxes were running the stock start-window and a forked agent
+        # on either met a black screen. Same shape as the sqlite3 install above and for the same
+        # reason: in the background, swallowing every failure, because a box whose job is to boot
+        # must never fail to boot over a repair.
+        #
+        # It waits for the file because /usr/local/bin/start-window is written by the image's own
+        # boot rather than baked into the image, and it runs on EVERY start because the edit is a
+        # filesystem change in the container that a recreate throws away.
+        {
+          i=0
+          while [ "$$i" -lt 120 ] && [ ! -f /usr/local/bin/start-window ]; do i=$$((i + 2)); sleep 2; done
+          if [ -f /opt/titanbot-runtime/apply-start-window-fix.sh ] && [ -f /usr/local/bin/start-window ]; then
+            TITANBOT_IN_BOX=1 sh /opt/titanbot-runtime/apply-start-window-fix.sh 2>&1 \
+              || echo "the start-window repair did not apply here; a forked agent may get a black screen" >&2
+          else
+            echo "no start-window repair in the runtime mount; a forked agent may get a black screen" >&2
+          fi
+        } &
         exec /usr/local/bin/start-sand-box
 
   # ---- the console -----------------------------------------------------------------------------

@@ -99,7 +99,15 @@ rsync -a --delete "$BUILD/box-exec-daemon/" "$HOST:$ROOT/runtime/box-exec-daemon
 # node will happily import.
 [ -d "$REPO/runtime/browser-driver" ] || die "$REPO/runtime/browser-driver is missing; the box has no browser driver to mount"
 rsync -a --delete "$REPO/runtime/browser-driver/" "$HOST:$ROOT/runtime/browser-driver/"
-say "runtime/host-main.cjs, runtime/sand-host-bundle-latest.version, runtime/box-exec-daemon/ and runtime/browser-driver/"
+
+# TENANT-4. The start-window repair goes into the RUNTIME directory as well as into deploy/.
+#
+# deploy/ below is where the host-side copy lives, for init-box.sh and the hand install; a tenant's
+# box has no socket and cannot be reached from there, so it runs the repair on itself from its own
+# entrypoint and reads it from the one directory every box already mounts read-only,
+# /opt/titanbot-runtime. Two copies of one file, and this is the one a customer's box uses.
+rsync -a "$REPO/scripts/box-patches/apply-start-window-fix.sh" "$HOST:$ROOT/runtime/apply-start-window-fix.sh"
+say "runtime/host-main.cjs, runtime/sand-host-bundle-latest.version, runtime/box-exec-daemon/, runtime/browser-driver/ and runtime/apply-start-window-fix.sh"
 
 step "ship the relay"
 # Named files, never the ui/ directory. That is the whole protection: ui/endpoints.json (API keys)
