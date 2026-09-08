@@ -2154,8 +2154,24 @@ export function createAdminApi({
           target: alias,
           detail: vendorModel.length > 0 ? `${alias} from ${rows[0].vendorModel} to ${vendorModel}` : `${alias}: ${Object.keys(info).join(", ")}`,
         });
+        // ONLY WHAT THIS ROUTE CAN ACTUALLY EDIT. While an install is moving off a file-configured
+        // proxy the same alias has file deployments and database ones, and LiteLLM refuses the file
+        // ones with 400 "Can't edit model. Model in config." (MEASURED on the R750 2026-09-08). They
+        // are not a failure to report: they are rows this route was never able to touch, and they go
+        // away at the second restart. Reporting them as failures is how an operator learns to read a
+        // red row as furniture.
+        const editable = rows.filter((row) => row.fromDb === true);
+        const fromFile = rows.length - editable.length;
+        if (editable.length === 0) {
+          ledger.failed("every deployment behind this alias is declared in the proxy's own file");
+          json(response, 409, {
+            error: "in_file",
+            message: `${alias} is served from the proxy's configuration file, which this console cannot edit. Seed it into the database first: node cp/cli.mjs proxy seed.`,
+          });
+          return true;
+        }
         const changed = [];
-        for (const row of rows) {
+        for (const row of editable) {
           // POST /model/update MERGES and keeps the credential and every tb_ key; it REFUSES a
           // model_info-only edit with 400, which is why the label path is a PATCH.
           const answer = vendorModel.length > 0
@@ -2171,7 +2187,7 @@ export function createAdminApi({
         }
         const landed = changed.filter((row) => row.ok).length;
         if (landed === 0) { ledger.failed(changed[0]?.why ?? "nothing changed"); json(response, 502, { error: "proxy", message: changed[0]?.why ?? "nothing changed", deployments: changed }); return true; }
-        ledger.done(`${landed} of ${rows.length} deployment(s) changed`);
+        ledger.done(`${landed} of ${editable.length} deployment(s) changed${fromFile > 0 ? `, and ${fromFile} more are declared in the proxy's file and were left alone` : ""}`);
         const ran = ranAlias(await askProxySpend(), alias);
         json(response, 200, {
           alias,
@@ -2202,7 +2218,9 @@ export function createAdminApi({
           },
         }));
         const at = new Date(now()).toISOString();
-        for (const row of rows) {
+        // Same rule as an edit: a deployment declared in the proxy's file cannot carry our answer,
+        // and asking it to would only put a 400 on the record.
+        for (const row of rows.filter((one) => one.fromDb === true)) {
           await askProxy("/model/{id}/update", () => proxy.patchModel({ id: row.id, info: { [TB.visionOk]: answer.ok === true, [TB.visionAt]: at } }));
         }
         ledger.done(answer.ok ? "it took the image" : `it refused the image: ${answer.why}`);
