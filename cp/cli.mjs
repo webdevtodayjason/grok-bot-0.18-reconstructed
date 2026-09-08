@@ -16,6 +16,12 @@
 //   node cp/cli.mjs proxy revoke <slug|--all>
 //   node cp/cli.mjs proxy migrate <slug|--all> [--forget <sha256 prefix>] [--dry-run]
 //   node cp/cli.mjs proxy rollback <slug>
+//   node cp/cli.mjs proxy providers
+//   node cp/cli.mjs proxy seed [--file <path>] [--dry-run]
+//   node cp/cli.mjs proxy key add|roll|park|unpark|remove|quota
+//   node cp/cli.mjs proxy model add|set|apply|vision-check|push-label|remove
+//   node cp/cli.mjs proxy catalog refresh <provider>
+//   node cp/cli.mjs proxy default-model [<alias>|none]
 //   node cp/cli.mjs session verify <token>
 //
 // `signup add` is the whole of adding a customer in one line: it makes the account, works the
@@ -41,7 +47,7 @@ import {
   tenantProfileDir,
   validateSlug,
 } from "./provision.mjs";
-import { createProxyClient, proxyKeyAlias } from "./proxy.mjs";
+import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias } from "./proxy.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
 import { createHash } from "node:crypto";
@@ -67,7 +73,14 @@ const hasFlag = (args, name) => args.includes(name);
 // Flags that take a value, so their value is not mistaken for a positional argument. A company
 // called "Acme Roofing" is two positionals joined back together by the caller; a --name that was
 // not skipped here would silently become part of it.
-const VALUED_FLAGS = new Set(["--name", "--box", "--state", "--profile", "--forget"]);
+const VALUED_FLAGS = new Set([
+  "--name", "--box", "--state", "--profile", "--forget",
+  // PROVIDERS-1. Everything the providers commands take a value for. A flag missing from
+  // this set has its VALUE read as a positional, so `--label "subscription two"` would make
+  // "subscription two" the thing being acted on.
+  "--label", "--slot", "--confirm", "--provider", "--vendor-model", "--served-by", "--context",
+  "--vision-fallback", "--keys", "--file", "--total", "--unit", "--window", "--reset",
+]);
 const positional = (args) => {
   const values = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -123,9 +136,9 @@ async function readPassword() {
   return password;
 }
 
-async function api(method, pathname, body) {
+async function api(method, pathname, body, headers = {}) {
   if (!config.adminToken) die("CP_ADMIN_TOKEN is not set. It is the operator password for this service.");
-  const init = { method, headers: { authorization: `Bearer ${config.adminToken}`, accept: "application/json" } };
+  const init = { method, headers: { authorization: `Bearer ${config.adminToken}`, accept: "application/json", ...headers } };
   if (body !== undefined) { init.headers["content-type"] = "application/json"; init.body = JSON.stringify(body); }
   let response;
   try { response = await fetch(`${BASE}${pathname}`, init); }
@@ -484,13 +497,42 @@ async function proxyLimits(args) {
   const proxy = proxyClient();
   const store = openLedger();
   try {
-    if (config.proxyAllowanceUsd <= 0 && config.proxyRpmLimit <= 0) {
-      out("neither CP_PROXY_ALLOWANCE_USD nor CP_PROXY_RPM_LIMIT is set on this control plane, so there is no ceiling to apply");
-      out("set them on the titanbot-cp service and run this again");
-      return;
+    // PROVIDERS-1 GAVE THIS COMMAND A SECOND JOB, AND IT IS THE ONE THAT CANNOT BE SKIPPED.
+    //
+    // Every key already in the field was minted with allowed_routes [] and is unrestricted: from
+    // inside any customer's box, that key opens /key/info, /model/info, /model_group/info and
+    // /health on the proxy. That was survivable only because ONE GLOBAL LIST in the proxy's config
+    // closed those routes to everybody. This wave removes that list, because it is checked before
+    // the key is looked up and therefore cannot tell the operator from a tenant.
+    //
+    // So this sweep pushes the route list and the current model list onto every key that exists,
+    // and it MUST be run and measured BEFORE the global list comes out of config.yaml, never after,
+    // or there is a window where the admin surface is open to every box on the bridge. The ship
+    // plan says so in the same words.
+    //
+    // MEASURED ON THIS MAC 2026-09-08 against a throwaway v1.100.0 stack: POST /key/update takes
+    // allowed_routes and it takes ON THE SAME KEY VALUE. So this writes NOTHING into a box: no
+    // re-mint, no new credential in anybody's file, and none of the registry hazard that wrote a
+    // REVOKED key back into a box on 2026-09-08. Had it not, this would have had to be a fleet-wide
+    // rotate and it would not have happened in this wave at all.
+    //
+    // It therefore runs whether or not a ceiling is set, and says which of the two it is doing.
+    const ceilings = config.proxyAllowanceUsd > 0 || config.proxyRpmLimit > 0;
+    if (!ceilings) {
+      out("neither CP_PROXY_ALLOWANCE_USD nor CP_PROXY_RPM_LIMIT is set on this control plane, so no ceiling is applied");
+      out("the route list and the model list below are applied anyway; that is the part that closes PROXY-8");
+      out("");
+    } else {
+      out(`allowance ${config.proxyAllowanceUsd > 0 ? `$${config.proxyAllowanceUsd} ${config.proxyEnforce ? "enforced (max_budget)" : "observed (soft_budget)"}` : "none"}`);
+      out(`rate limit ${config.proxyRpmLimit > 0 ? `${config.proxyRpmLimit} requests a minute per workspace` : "none"}`);
+      out("");
     }
-    out(`allowance ${config.proxyAllowanceUsd > 0 ? `$${config.proxyAllowanceUsd} ${config.proxyEnforce ? "enforced (max_budget)" : "observed (soft_budget)"}` : "none"}`);
-    out(`rate limit ${config.proxyRpmLimit > 0 ? `${config.proxyRpmLimit} requests a minute per workspace` : "none"}`);
+    // What the proxy serves RIGHT NOW, so a key minted before a model was added is widened by the
+    // same sweep rather than needing a separate one.
+    const served = await proxy.models();
+    if (!served.ok) return die(`the proxy could not be asked which models it serves: ${served.why}`);
+    out(`route list: ${TENANT_ALLOWED_ROUTES.join(" ")}`);
+    out(`model list: ${served.models.join(", ") || "none"}`);
     out("");
     for (const row of proxyTargets(store, args)) {
       const record = readProxyKey(row.slug, config, { file: keyFileFor(store, row.slug) });
@@ -500,10 +542,13 @@ async function proxyLimits(args) {
         allowanceUsd: config.proxyAllowanceUsd,
         enforce: config.proxyEnforce,
         rpmLimit: config.proxyRpmLimit,
+        models: served.models,
+        allowedRoutes: TENANT_ALLOWED_ROUTES,
       });
-      out(`${pad(row.slug, 20)}${pad(record.alias, 26)}${answer.ok ? "applied" : `NOT applied: ${answer.why}`}`);
+      out(`${pad(row.slug, 20)}${pad(record.alias, 26)}${answer.ok ? "applied, key value unchanged" : `NOT applied: ${answer.why}`}`);
     }
     out("");
+    out("nothing was written into any box: the same key value now carries a route list and a model list");
     out("the proxy caches a key for up to its user_api_key_cache_ttl, so a box mid-request may finish on the old ceiling");
   } finally { store.close(); }
 }
@@ -634,6 +679,283 @@ async function proxyMigrate(args) {
   } finally { store.close(); }
 }
 
+// ---- PROVIDERS-1: the panel, without a browser -------------------------------------------------
+//
+// Jason, 2026-09-08: "the mechanism for both me and the AI agent needs to be able to do this on our
+// own." A page an operator clicks is half of that. This is the other half, and it matters more than
+// it looks: an agent has no browser, and anything that can only be done by hand on a live instance
+// is the thing this whole wave exists to end.
+//
+// THESE GO OVER THE API, and that is a deliberate break with the proxy commands above, which talk
+// to the proxy directly out of this container. The reason is parity. Every one of these operations
+// has a rule attached -- a routing alias never reaches a customer's page, a key that still serves
+// cannot be removed, a label is never pushed at a workspace nobody named -- and a second
+// implementation here would be a second set of rules to keep in step. Going through the same routes
+// the console uses means the CLI cannot drift from the page, and it writes the same admin_actions
+// row, with `via` reading cli instead of console.
+//
+// A KEY IS NEVER AN ARGUMENT. It is read from the terminal with the echo off, or from stdin when
+// this is not a terminal, exactly the way a password is: arguments end up in shell history, in `ps`
+// output and in the scrollback of whoever is watching.
+
+// One call to this service's own admin API, as the operator, marked as having come from here.
+//
+// The header is the only difference from `api` above and it is what the change record reads: a
+// change made without a browser lands in admin_actions with `via` reading cli instead of console,
+// so "who changed the plan model" is answerable whichever way it was done.
+const askAdmin = (method, pathname, body) => api(method, pathname, body, { "x-titanbot-via": "cli" });
+
+/** A credential off the terminal, never off the command line. */
+async function readSecret(label) {
+  if (!process.stdin.isTTY) {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const value = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "").trim();
+    if (value.length === 0) die("nothing on stdin, so nothing was done");
+    return value;
+  }
+  const value = (await promptHidden(label)).trim();
+  if (value.length === 0) die("nothing typed, so nothing was done");
+  return value;
+}
+
+const say = (line) => out(line);
+const evidenceLine = (value) => `${String(value).length} characters, sha256 ${sha256Of(value).slice(0, 8)}`;
+
+async function proxyProviders() {
+  const answer = await askAdmin("GET", "/v1/admin/providers");
+  if (answer.configured !== true) return say(answer.why || "this control plane has no proxy configured");
+  say(`the proxy stores its model list in its database: ${answer.db.on === true ? "yes" : (answer.db.on === false ? "NO -- changes made here will not take" : "cannot be told yet")}`);
+  say(answer.db.why);
+  say("");
+  for (const provider of answer.providers) {
+    say(`${provider.name} (${provider.id})  ${provider.baseUrl || "no base url, the vendor's own default"}`);
+    if (provider.keys.length === 0) say("  no key here yet");
+    for (const key of provider.keys) {
+      const quota = key.quota.total != null ? `  plan window ${key.quota.used}/${key.quota.total} ${key.quota.unit}${key.quota.warn ? " -- OVER 80%" : ""}` : "";
+      // The mask the PROXY returned, never one this side built.
+      say(`  ${pad(key.slot, 12)}${pad(key.masked, 12)}${pad(key.parked ? "parked" : "serving", 9)}${pad(`$${(key.spend.month ?? 0).toFixed(4)}`, 12)}${key.serves.join(", ") || "nothing"}${quota}`);
+      if (key.lastError) say(`    last error ${key.lastError.at}: ${key.lastError.why}`);
+    }
+    say(`  models: ${provider.catalog.models.join(", ") || "none"}  (${provider.catalog.live ? `read from ${provider.name}` : "the curated list"})`);
+    say("");
+  }
+  say(`${pad("ALIAS", 20)}${pad("RUNS ON", 26)}${pad("CUSTOMERS SEE", 22)}${pad("LABEL", 14)}${pad("KEYS", 6)}WORKSPACES`);
+  for (const model of answer.planModels) {
+    say(`${pad(model.alias, 20)}${pad(model.vendorModel, 26)}${pad(model.shownToCustomers ? model.customerName : "-- not shown --", 22)}${pad(model.customerLabel || "-", 14)}${pad(String(model.deployments.length), 6)}${model.workspaces}`);
+  }
+  say("");
+  say(`new workspaces get ${answer.defaults.planModel || "whatever the proxy serves"}`);
+  if (answer.actions.length > 0) {
+    say("");
+    say("what changed most recently:");
+    for (const row of answer.actions.slice(0, 5)) say(`  ${row.at}  ${pad(row.actor, 26)}${pad(row.via, 9)}${row.action} ${row.target} -- ${row.outcome}`);
+  }
+}
+
+/**
+ * A FRESH install seeded from the file beside the proxy's config, idempotently.
+ *
+ * bootstrap.json describes the providers, the credential slots, the plan models and the fallback
+ * map a new install starts with. It holds NO KEY: a slot names the environment variable its value
+ * would come from and nothing else, which is why the file can sit in git and in a bind mount.
+ *
+ * AN EXISTING INSTALL NEVER RE-SEEDS. Everything below checks what is really at the proxy first and
+ * skips what is already there, so running this twice changes nothing and running it after somebody
+ * has edited a model in the panel does not put the file's version back.
+ *
+ * The keys are the honest gap and the output says so. The vendor keys live in the PROXY service's
+ * environment, not this one's, so a slot is filled here only when this container happens to carry
+ * the named variable too. Otherwise the slot is reported empty with its variable named, and the
+ * panel is where the key goes -- which is the design, not a shortfall: live keys go in through the
+ * panel and the file is a bootstrap.
+ */
+async function proxySeed(args) {
+  const dryRun = hasFlag(args, "--dry-run");
+  const file = String(flag(args, "--file") ?? "") || path.join(process.cwd(), "deploy", "coolify", "proxy-config", "bootstrap.json");
+  let plan;
+  try { plan = JSON.parse(readFileSync(file, "utf8")); }
+  catch (error) { return die(`could not read ${file}: ${String(error?.message ?? error)}`); }
+  if (Number(plan?.version) !== 1) die(`${file} is version ${plan?.version ?? "unknown"}; this build seeds version 1`);
+
+  const state = await askAdmin("GET", "/v1/admin/providers");
+  if (state.configured !== true) die(state.why || "this control plane has no proxy configured");
+  // THE REFUSAL THAT MATTERS. With store_model_in_db off, a credential write answers 200 and really
+  // persists while a deployment write answers 500, so a seed that ignored the flag would write half
+  // a configuration and report success: green checkmarks on the half that did nothing.
+  if (state.db.on === false) {
+    die(`the proxy is not storing its model list in its database, so this seed would write half a configuration. ${state.db.why}`);
+  }
+  say(`seeding from ${file}${dryRun ? " (dry run, nothing is written)" : ""}`);
+
+  for (const provider of plan.providers ?? []) {
+    const existing = state.providers.find((row) => row.id === provider.id);
+    if (existing == null) {
+      say(`  provider ${provider.id}: register`);
+      if (!dryRun) await askAdmin("POST", "/v1/admin/providers", provider);
+    } else {
+      say(`  provider ${provider.id}: already here`);
+    }
+    for (const slot of provider.keys ?? []) {
+      if (existing?.keys.some((row) => row.slot === slot.slot)) { say(`    ${slot.slot}: already holds a key`); continue; }
+      const value = String(process.env[String(slot.env ?? "")] ?? "");
+      if (value.length === 0) {
+        say(`    ${slot.slot}: EMPTY. Its value would come from ${slot.env}, which this container does not carry. Add the key in the Providers panel.`);
+        continue;
+      }
+      say(`    ${slot.slot}: adding a key from ${slot.env} (${evidenceLine(value)})`);
+      if (!dryRun) await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys`, { slot: slot.slot, label: slot.label, apiKey: value });
+    }
+  }
+
+  // The plan models in the file's own order, which is how a vision route comes before the model
+  // that falls back to it: POST /fallback validates that its target exists.
+  for (const model of plan.planModels ?? []) {
+    if (state.planModels.some((row) => row.alias === model.alias)) { say(`  ${model.alias}: already served`); continue; }
+    say(`  ${model.alias}: create on ${model.vendorModel} across ${(model.keySlots ?? []).join(", ") || "every key this provider has"}`);
+    if (!dryRun) {
+      const made = await askAdmin("POST", "/v1/admin/plan-models", model);
+      for (const row of made.deployments ?? []) if (!row.ok) say(`    ${row.slot}: NOT created, ${row.why}`);
+    }
+  }
+  say("");
+  say(dryRun ? "nothing was written" : "done. Run proxy providers to see what is there now.");
+}
+
+async function proxyKey(args) {
+  const [action, target] = positional(args);
+  const providers = () => askAdmin("GET", "/v1/admin/providers");
+  if (action === "add") {
+    if (!target) die("usage: node cp/cli.mjs proxy key add <provider> [--label \"subscription two\"] [--slot <name>]");
+    const apiKey = await readSecret(`Key for ${target}: `);
+    const answer = await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(target)}/keys`, {
+      apiKey, label: String(flag(args, "--label") ?? "") || undefined, slot: String(flag(args, "--slot") ?? "") || undefined,
+    });
+    say(`${answer.slot}  ${answer.evidence}`);
+    return say(answer.message);
+  }
+  if (action === "roll") {
+    if (!target) die("usage: node cp/cli.mjs proxy key roll <slot>");
+    const state = await providers();
+    const provider = state.providers.find((row) => row.keys.some((key) => key.slot === target));
+    if (provider == null) die(`there is no key in slot ${target}`);
+    const apiKey = await readSecret(`New key for ${target}: `);
+    const answer = await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(target)}/roll`, { apiKey });
+    say(`${target}  ${answer.evidence}`);
+    return say(answer.message);
+  }
+  if (action === "park" || action === "unpark") {
+    if (!target) die(`usage: node cp/cli.mjs proxy key ${action} <slot>`);
+    const state = await providers();
+    const provider = state.providers.find((row) => row.keys.some((key) => key.slot === target));
+    if (provider == null) die(`there is no key in slot ${target}`);
+    const answer = await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(target)}/park`, { parked: action === "park" });
+    return say(answer.message);
+  }
+  if (action === "remove") {
+    if (!target) die("usage: node cp/cli.mjs proxy key remove <slot> --confirm <slot>");
+    const state = await providers();
+    const provider = state.providers.find((row) => row.keys.some((key) => key.slot === target));
+    if (provider == null) die(`there is no key in slot ${target}`);
+    // The same typed confirmation the console takes, for the same reason: this is a decision and
+    // not a click.
+    const answer = await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(target)}/remove`, { confirm: String(flag(args, "--confirm") ?? "") });
+    return say(answer.message);
+  }
+  if (action === "quota") {
+    if (!target) die("usage: node cp/cli.mjs proxy key quota <slot> --total 40000 --unit \"thousands of tokens\" [--window \"7 days\"] [--reset <iso>]");
+    const state = await providers();
+    const provider = state.providers.find((row) => row.keys.some((key) => key.slot === target));
+    if (provider == null) die(`there is no key in slot ${target}`);
+    const answer = await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(target)}/quota`, {
+      total: Number(flag(args, "--total") ?? 0),
+      unit: String(flag(args, "--unit") ?? ""),
+      window: String(flag(args, "--window") ?? ""),
+      resetAt: String(flag(args, "--reset") ?? ""),
+    });
+    return say(answer.message);
+  }
+  return die("usage: node cp/cli.mjs proxy key add|roll|park|unpark|remove|quota");
+}
+
+async function proxyModel(args) {
+  const [action, alias, ...rest] = positional(args);
+  const flags = () => ({
+    ...(flag(args, "--vendor-model") === null ? {} : { vendorModel: String(flag(args, "--vendor-model")) }),
+    ...(flag(args, "--name") === null ? {} : { customerName: String(flag(args, "--name")) }),
+    ...(flag(args, "--label") === null ? {} : { customerLabel: String(flag(args, "--label")) }),
+    ...(flag(args, "--served-by") === null ? {} : { servedBy: String(flag(args, "--served-by")) }),
+    ...(flag(args, "--context") === null ? {} : { contextWindow: Number(flag(args, "--context")) }),
+    ...(flag(args, "--vision-fallback") === null ? {} : { visionFallback: String(flag(args, "--vision-fallback")) }),
+    ...(hasFlag(args, "--vision") ? { supportsVision: true } : {}),
+    ...(hasFlag(args, "--hidden") ? { customerVisible: false } : {}),
+  });
+  if (action === "add") {
+    if (!alias) die("usage: node cp/cli.mjs proxy model add <alias> --provider <id> --vendor-model <model> --name \"...\" --label \"...\" [--context 200000] [--vision-fallback <alias>] [--vision] [--hidden] [--keys a,b]");
+    const answer = await askAdmin("POST", "/v1/admin/plan-models", {
+      alias,
+      provider: String(flag(args, "--provider") ?? ""),
+      ...(flag(args, "--keys") === null ? {} : { keySlots: String(flag(args, "--keys")).split(",").map((one) => one.trim()).filter(Boolean) }),
+      ...flags(),
+    });
+    for (const row of answer.deployments ?? []) say(`  ${pad(row.slot, 12)}${row.ok ? row.id : `NOT created: ${row.why}`}`);
+    return say(answer.message);
+  }
+  if (action === "set") {
+    if (!alias) die("usage: node cp/cli.mjs proxy model set <alias> [--vendor-model <model>] [--label \"...\"] [--name \"...\"] [--context n] [--vision-fallback <alias>] [--hidden]");
+    const answer = await askAdmin("POST", `/v1/admin/plan-models/${encodeURIComponent(alias)}/update`, {
+      ...(flag(args, "--provider") === null ? {} : { provider: String(flag(args, "--provider")) }),
+      ...flags(),
+    });
+    return say(answer.message);
+  }
+  if (action === "apply") {
+    if (!alias) die("usage: node cp/cli.mjs proxy model apply <alias>");
+    const answer = await askAdmin("POST", `/v1/admin/plan-models/${encodeURIComponent(alias)}/apply`, {});
+    for (const row of answer.rows ?? []) say(`  ${pad(row.slug, 20)}${row.ok ? "scoped" : `NOT scoped: ${row.why}`}`);
+    return say(answer.message);
+  }
+  if (action === "vision-check") {
+    if (!alias) die("usage: node cp/cli.mjs proxy model vision-check <alias>");
+    const answer = await askAdmin("POST", `/v1/admin/plan-models/${encodeURIComponent(alias)}/vision-check`, {});
+    return say(answer.message);
+  }
+  if (action === "push-label") {
+    if (!alias) die("usage: node cp/cli.mjs proxy model push-label <alias> <slug> [<slug>...]");
+    // Named workspaces only, and the route refuses without them. The door it drives sets the MODEL
+    // as well as the label, so pushed at a box running something else it would move that customer.
+    const answer = await askAdmin("POST", `/v1/admin/plan-models/${encodeURIComponent(alias)}/push-label`, { slugs: rest });
+    for (const row of answer.workspaces ?? []) say(`  ${pad(row.slug, 20)}${row.ok ? "told" : `NOT told: ${row.why}`}`);
+    return say(answer.message);
+  }
+  if (action === "remove") {
+    if (!alias) die("usage: node cp/cli.mjs proxy model remove <alias> --confirm <alias>");
+    const answer = await askAdmin("POST", `/v1/admin/plan-models/${encodeURIComponent(alias)}/remove`, { confirm: String(flag(args, "--confirm") ?? "") });
+    return say(answer.message);
+  }
+  return die("usage: node cp/cli.mjs proxy model add|set|apply|vision-check|push-label|remove");
+}
+
+async function proxyCatalog(args) {
+  const [action, provider] = positional(args);
+  if (action !== "refresh" || !provider) die("usage: node cp/cli.mjs proxy catalog refresh <provider>");
+  const answer = await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(provider)}/catalog/refresh`, {});
+  say(`${answer.models.length} name(s) ${answer.live ? `read from the vendor just now` : "from the curated list"}`);
+  say(answer.models.join(", "));
+  if (answer.why) say(answer.why);
+  say(answer.note);
+}
+
+async function proxyDefaultModel(args) {
+  const [alias] = positional(args);
+  if (alias === undefined) {
+    const state = await askAdmin("GET", "/v1/admin/providers");
+    return say(`new workspaces get ${state.defaults.planModel || "whatever the proxy serves"}`);
+  }
+  const answer = await askAdmin("POST", "/v1/admin/defaults", { planModel: alias === "none" ? "" : alias });
+  return say(answer.message);
+}
+
 // Putting one customer back the way they were, from the snapshot the migration took. Kept for the
 // first week and then deleted in a follow-up: from the migration onward the proxy is a single point
 // of failure for every tenant's inference, and that is a change in the failure model rather than
@@ -701,10 +1023,20 @@ const USAGE = [
   "node cp/cli.mjs proxy limits <slug|--all>",
   "node cp/cli.mjs proxy migrate <slug|--all> [--forget <sha256 prefix>] [--dry-run]",
   "node cp/cli.mjs proxy rollback <slug>",
+  "node cp/cli.mjs proxy providers",
+  "node cp/cli.mjs proxy seed [--file <path>] [--dry-run]",
+  "node cp/cli.mjs proxy key add <provider> [--label \"subscription two\"] | roll <slot> | park <slot> | unpark <slot> | remove <slot> --confirm <slot> | quota <slot> --total n --unit \"...\"",
+  "node cp/cli.mjs proxy model add <alias> --provider <id> --vendor-model <model> --name \"...\" --label \"...\" [--context n] [--vision-fallback <alias>] [--vision] [--hidden] [--keys a,b]",
+  "node cp/cli.mjs proxy model set <alias> [--vendor-model <model>] [--label \"...\"] [--context n] [--hidden]",
+  "node cp/cli.mjs proxy model apply <alias> | vision-check <alias> | push-label <alias> <slug>... | remove <alias> --confirm <alias>",
+  "node cp/cli.mjs proxy catalog refresh <provider>",
+  "node cp/cli.mjs proxy default-model [<alias>|none]",
   "node cp/cli.mjs session verify <token>",
   "",
   "signup add is the one line that adds a customer: account, workspace and box.",
-  "the proxy commands run in this container: they read the tenant root and CP_PROXY_MASTER_KEY, so they do not go over the api.",
+  "proxy mint, rotate, revoke, limits, migrate and rollback run in this container: they read the tenant root and CP_PROXY_MASTER_KEY.",
+  "proxy providers, seed, key, model, catalog and default-model go over the api, so they keep the same rules the console keeps and write the same record.",
+  "a provider key is never an argument. These read it from the terminal with the echo off, or from stdin.",
   "proxy mint is the only way the operator's own workspace gets a key, because an adopted row is never re-provisioned.",
   "account promote makes somebody a super admin, which opens the console at /admin.",
   "CP_ADMIN_TOKEN and CP_PUBLIC_URL come from the environment.",
@@ -729,6 +1061,12 @@ const commands = {
   "proxy limits": proxyLimits,
   "proxy migrate": proxyMigrate,
   "proxy rollback": proxyRollback,
+  "proxy providers": proxyProviders,
+  "proxy seed": proxySeed,
+  "proxy key": proxyKey,
+  "proxy model": proxyModel,
+  "proxy catalog": proxyCatalog,
+  "proxy default-model": proxyDefaultModel,
   "session verify": sessionVerify,
 };
 const command = commands[`${group} ${action}`];

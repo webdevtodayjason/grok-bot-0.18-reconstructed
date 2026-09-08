@@ -233,34 +233,60 @@ export async function run(context = {}) {
       return "200 for the tenant, 401 for the operator";
     });
 
+    // PROXY-8, closed on the KEY rather than on the file.
+    //
+    // MEASURED ON THIS MAC 2026-09-08 against docker.litellm.ai/berriai/litellm-database:v1.100.0:
+    // a key minted with allowed_routes answers 403 "Virtual key is not allowed to call this route"
+    // on every admin path, while chat completions and /v1/models keep working and the master key is
+    // unaffected. Before this wave those paths were open to every virtual key on the bridge,
+    // because ONE global list in the proxy's config had to keep /key/info and /model/info open for
+    // the control plane, and a list checked before the key is looked up cannot tell the two apart.
     await record("a virtual key opens no admin route and reads nobody's spend", async () => {
       const key = readProxyKey("acme", config).key;
-      for (const pathname of ["/key/info?key=" + encodeURIComponent(key), "/model/info"]) {
+      const refused = [];
+      for (const pathname of [
+        `/key/info?key=${encodeURIComponent(key)}`,
+        "/model/info",
+        "/model_group/info",
+        "/spend/logs",
+        "/health",
+        "/global/spend/report?start_date=2026-09-01&end_date=2026-09-30",
+      ]) {
         const answer = await fetch(`${proxy.url}${pathname}`, { headers: { authorization: `Bearer ${key}` } });
-        assert.equal(answer.status, 401, `a virtual key opened ${pathname}`);
+        assert.equal(answer.status, 403, `a virtual key opened ${pathname} (HTTP ${answer.status})`);
+        const said = String((await answer.json())?.error?.message ?? "");
+        assert.match(said, /not allowed to call this route/, `${pathname} was refused for the wrong reason`);
+        refused.push(pathname);
       }
-      return "2 admin routes, 401 on both";
+      return `${refused.length} admin routes, 403 on every one, with the key's own route list named`;
     });
 
-    // The door list, which is a route that is not served at all rather than a route behind a key.
+    // THE OTHER HALF OF MOVING THE DOOR: the operator keeps working.
     //
     // MEASURED ON THE R750 2026-09-08, from inside a customer's box with that customer's own
     // virtual key: `GET /health` answered 200 with healthy_endpoints populated, so the calls were
     // actually made to every provider on the operator's subscriptions -- free to that tenant,
     // charged to the operator, attributed to nobody, and a rate-limit amplifier against a shared
     // plan. One admin sweep of the same route left three rows in /spend/logs under the alias
-    // `litellm-internal-health-check` at $0.000043. general_settings.allowed_routes closes it.
-    await record("a route the product does not use is not served to anybody", async () => {
-      const key = readProxyKey("acme", config).key;
-      const refusals = [];
-      for (const pathname of ["/health", "/key/list", "/global/spend/report?start_date=2026-09-01&end_date=2026-09-30"]) {
-        for (const bearer of [key, proxy.masterKey]) {
-          const answer = await fetch(`${proxy.url}${pathname}`, { headers: { authorization: `Bearer ${bearer}` } });
-          assert.equal(answer.status, 403, `${pathname} is still served (HTTP ${answer.status})`);
-          refusals.push(answer.status);
-        }
+    // `litellm-internal-health-check` at $0.000043.
+    //
+    // Until this wave that was closed by ONE GLOBAL LIST in the proxy's config, which refused the
+    // route to the master key as well and could not be written for the panel's two path-parameter
+    // routes at all. The list is gone; the refusal above is per key. So what is asserted here is
+    // that the same paths the tenant was refused still answer for the OPERATOR, because a boundary
+    // that also locks out the thing that manages the fleet is not a boundary, it is an outage.
+    await record("the same routes still answer for the operator", async () => {
+      const opened = [];
+      for (const pathname of ["/model/info", "/model_group/info", "/spend/logs", "/credentials"]) {
+        const answer = await fetch(`${proxy.url}${pathname}`, { headers: { authorization: `Bearer ${proxy.masterKey}` } });
+        assert.equal(answer.status, 200, `${pathname} is closed to the operator (HTTP ${answer.status})`);
+        opened.push(pathname);
       }
-      return `${refusals.length} refusals, 403 on every one, tenant key and master key alike`;
+      // And one that is refused for a reason of its own rather than by a door: the enterprise gate,
+      // which is what the spend panel was once built on.
+      const enterprise = await fetch(`${proxy.url}/global/spend/report`, { headers: { authorization: `Bearer ${proxy.masterKey}` } });
+      assert.equal(enterprise.status, 400, "the enterprise report answered something other than its own refusal");
+      return `${opened.length} admin routes open to the master key, and the enterprise report refused on its own terms`;
     });
 
     // ---- spend ---------------------------------------------------------------------------------

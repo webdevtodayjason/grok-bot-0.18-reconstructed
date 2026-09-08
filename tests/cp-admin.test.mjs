@@ -472,12 +472,16 @@ test("one refresh is one pair of spend reports, not four", async () => {
       // one click on Refresh has to be one sweep.
       await Promise.all([api.spend(), api.clients()]);
       assert.equal(proxy.callsTo("GET /spend/logs").length, 2, "the two windows were asked for more than once");
-      // And the per key read too, which is the one that scales with the number of customers: two
-      // panels times one call per customer is how a fleet's worth of calls comes out of one click.
-      assert.equal(proxy.callsTo("GET /key/info").length, 1, "the key's own spend was read once per panel");
+      // PROXY-8. This used to assert ONE /key/info per refresh. It now asserts NONE, and the change
+      // is the fix rather than an optimisation: that call was the only caller of /key/info in the
+      // product, and it is why /key/info had to stay in the proxy's global door list -- a list that
+      // cannot tell the operator from a tenant, so leaving it open for this panel left every box on
+      // the bridge able to read every other key's record. The number the panel needs is in the
+      // request log it already reads.
+      assert.equal(proxy.callsTo("GET /key/info").length, 0, "the panel still reads a key's own record, which is what PROXY-8 closes");
       await api.spend();
       assert.equal(proxy.callsTo("GET /spend/logs").length, 2, "a second refresh inside the window asked again");
-      assert.equal(proxy.callsTo("GET /key/info").length, 1);
+      assert.equal(proxy.callsTo("GET /key/info").length, 0);
     } finally { await proxy.close(); }
   });
 });

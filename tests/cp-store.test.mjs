@@ -351,3 +351,85 @@ test("removing the last account into a removed workspace releases its name", asy
     assert.equal(store.isSlugRetired("acme"), false, "the last door closed, so the name is free again");
   });
 });
+
+// ---- PROVIDERS-1: what a super admin changed ----------------------------------------------------
+//
+// There was no such record before this wave. Seven tables and not one of them could answer "who
+// changed the plan model, and when". login_attempts is the wrong home for it: its columns are fixed
+// around a sign-in and it is pruned to thirty days, while "who repointed plan-zai in March" is a
+// question asked in June.
+
+test("a change is written down before it happens and finished after, so a half change is still on the record", () => {
+  return withStore((store) => {
+    const id = store.recordAdminAction({
+      actor: "jason@example.com", via: "console", ip: "203.0.113.9",
+      action: "provider.key.roll", target: "zai/zai-1", detail: "rolling the key in slot zai-1",
+    });
+    // Between the two calls, which is where a timeout or a killed process leaves it.
+    const started = store.listAdminActions({ limit: 1 })[0];
+    assert.equal(started.outcome, "started");
+    assert.equal(started.actor, "jason@example.com");
+    assert.equal(started.ip, "203.0.113.9");
+
+    store.finishAdminAction(id, "ok", "slot zai-1 now holds a different key");
+    const done = store.listAdminActions({ limit: 1 })[0];
+    assert.equal(done.outcome, "ok");
+    // BOTH HALVES. What was attempted and what happened are two facts, and a row that kept only the
+    // second one could not answer what the change was trying to do.
+    assert.match(done.detail, /rolling the key in slot zai-1; slot zai-1 now holds a different key/);
+  });
+});
+
+test("a failure is on the record with the reason, and nothing prunes any of it", () => {
+  return withStore((store) => {
+    const id = store.recordAdminAction({ action: "plan-model.add", target: "plan-new", detail: "plan-new on openai/glm-5" });
+    store.finishAdminAction(id, "failed: the proxy did not answer in time");
+    assert.match(store.listAdminActions({ limit: 1 })[0].outcome, /^failed: /);
+
+    // The retention rule, asserted rather than documented. login_attempts has a prune and this
+    // deliberately has none: a year-old configuration change is exactly the row somebody needs.
+    const old = store.recordAdminAction({ at: Date.now() - 400 * 24 * 60 * 60 * 1000, action: "defaults.plan-model", target: "plan-zai" });
+    store.pruneLoginAttempts(Date.now());
+    assert.equal(store.countAdminActions(), 2);
+    assert.equal(store.listAdminActions({ sinceMs: 0, limit: 50 }).some((row) => row.id === old), true, "a year-old change was pruned");
+    // And the window still filters, because the panel asks for a day at a time.
+    assert.equal(store.listAdminActions({ sinceMs: Date.now() - 60_000 }).length, 1);
+  });
+});
+
+test("a key value cannot reach the change record, whatever a caller passes", () => {
+  return withStore((store) => {
+    const planted = "sk-zai-9f4c1d2e6b8a0357192a4c6e8d0f2b41";
+    // The rule is kept by the CALLERS, which put a length and a sha256 prefix in `detail` and never
+    // a value, so what this asserts is that the ledger keeps what it is handed intact and that the
+    // shape those callers use really does prove which key without being one.
+    const digest = "18927beb";
+    const id = store.recordAdminAction({ action: "provider.key.roll", target: "zai/zai-1", detail: `rolled the key in slot zai-1 (${planted.length} characters, sha256 ${digest})` });
+    store.finishAdminAction(id, "ok");
+    const rows = store.listAdminActions({ limit: 10 });
+    assert.equal(JSON.stringify(rows).includes(planted), false, "a key value landed in the ledger");
+    assert.match(rows[0].detail, /39 characters, sha256 18927beb/);
+  });
+});
+
+test("the console's own settings survive a reopen and remember who set them", async () => {
+  const root = await makeTempRoot("cp-store-settings-");
+  const file = path.join(root, "control-plane.sqlite");
+  let store = openStore({ file });
+  try {
+    store.setSetting("default_plan_model", "plan-zai", "jason@example.com");
+    assert.equal(store.getSetting("default_plan_model"), "plan-zai");
+    assert.equal(store.getSetting("nothing_here", "a default"), "a default");
+    store.setSetting("default_plan_model", "plan-minimax", "jason@example.com");
+    assert.equal(store.getSetting("default_plan_model"), "plan-minimax", "the second write did not replace the first");
+  } finally { store.close(); }
+  // The whole reason there is no migration entry for either new table: db.exec(SCHEMA) runs on
+  // every open, and CREATE TABLE IF NOT EXISTS makes a table that is not there. So the R750's
+  // existing database grows both on its next boot with no ALTER and no migration step.
+  store = openStore({ file });
+  try {
+    assert.equal(store.getSetting("default_plan_model"), "plan-minimax");
+    assert.equal(store.listSettings().length, 1);
+    assert.equal(store.listSettings()[0].actor, "jason@example.com");
+  } finally { store.close(); await rm(root, { recursive: true, force: true }); }
+});

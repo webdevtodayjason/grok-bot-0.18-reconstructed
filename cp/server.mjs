@@ -45,7 +45,7 @@ import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, 
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
-import { createProxyClient } from "./proxy.mjs";
+import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
   NEW_TENANTS_BLOCKED,
   adoptionDirs,
@@ -256,7 +256,7 @@ export function createApp(options = {}) {
   // an adoption row holds neither a token nor directories to seed it from anyway. An adopted row IS
   // returned when the adoption was given the box container name and the directories to read, which
   // is what `tenant adopt --box` writes.
-  function relayRegistry() {
+  async function relayRegistry() {
     const tenants = [];
     const skipped = [];
     for (const row of store.listTenants()) {
@@ -289,7 +289,7 @@ export function createApp(options = {}) {
         // missing stays skipped, because a row with no token would have the relay calling that
         // customer's gateway with an empty bearer instead of saying the workspace is not available.
         if (wasAdopted(row.slug, row)) {
-          const adoptedIncluded = includedFor(row.slug, profileDir);
+          const adoptedIncluded = await includedFor(row.slug, profileDir);
           if (adoptedIncluded.row) tenants.push({ slug: row.slug, included: adoptedIncluded.row });
         }
         continue;
@@ -303,7 +303,7 @@ export function createApp(options = {}) {
       // being off is the normal state of every install that has not had it turned on, and a
       // registry answer that grew a per tenant complaint on every read would be noise the day
       // somebody needs to read it.
-      const included = includedFor(row.slug, profileDir);
+      const included = await includedFor(row.slug, profileDir);
       if (included.why) skipped.push({ slug: row.slug, what: "included", why: included.why });
       tenants.push({
         ...(included.row ? { included: included.row } : {}),
@@ -341,23 +341,140 @@ export function createApp(options = {}) {
    * An adopted tenant reads from the profile directory the adoption named, the same way its
    * gateway token does, so the operator's own workspace works through the identical path.
    */
-  function includedFor(slug, profileDir) {
+  async function includedFor(slug, profileDir) {
     if (String(config.proxyUrl ?? "").length === 0) return { row: null, why: "" };
     const file = proxyKeyFileIn(profileDir);
     const record = readProxyKey(slug, config, { file });
     if (record == null) {
       return { row: null, why: `this workspace has no plan key yet, so nothing is included with its plan (mint one with cp/cli.mjs proxy mint ${slug})` };
     }
+    // PROVIDERS-1. The rows are computed from what the proxy serves RIGHT NOW, not from the
+    // snapshot the mint wrote.
+    //
+    // MEASURED ON THE R750 2026-09-08: all three tenants carried a two-row array written at mint
+    // with modelLabel undefined, and nothing re-writes it -- cp/provision.mjs returns an existing
+    // record untouched, by design, because re-minting is what wrote a REVOKED key back into a box.
+    // So a name changed in the Providers panel would have reached nobody, and the whole panel would
+    // have been a page that edits a database no customer reads.
+    //
+    // Reading them here instead means a label or a vendor-model change reaches the fleet inside one
+    // registry cycle with no re-mint, no box write and none of that hazard. The stored array stays
+    // as LAST KNOWN GOOD: a proxy that is down leaves every customer's plan card as it was rather
+    // than emptying it, which is the difference between a slow minute and a fleet-wide "your plan
+    // includes nothing".
+    const live = await planModelRows();
+    const models = live.rows ?? (Array.isArray(record.models) ? record.models : []);
     return {
-      why: "",
+      why: live.why,
       row: {
         baseUrl: `${config.proxyUrl}/v1`,
         key: record.key,
         keyId: record.keyId,
-        models: record.models,
+        models,
         enforced: record.enforced,
       },
     };
+  }
+
+  /**
+   * What the proxy serves, as customer-facing rows, cached for a few seconds and joined in flight.
+   *
+   * The same shape as the admin console's box sweep and for the same reason: every relay on this
+   * server polls the registry, and without the join that is one proxy read per relay per poll for
+   * an answer that changes when an operator clicks something. With it, a burst of polls is one
+   * read. The window is short because the whole point of this wave is that a change takes effect
+   * without a restart.
+   *
+   * A FAILED READ IS NOT CACHED. It answers {rows: null} with the reason, the caller falls back to
+   * the stored array, and the next poll asks again rather than sitting on a hole for the window.
+   */
+  const PLAN_ROWS_CACHE_MS = 5_000;
+  let planRowsCache = { at: 0, answer: null, inFlight: null };
+  function planModelRows() {
+    if (proxy == null || proxy.configured !== true) {
+      return Promise.resolve({ rows: null, why: "" });
+    }
+    if (planRowsCache.answer != null && Date.now() - planRowsCache.at < PLAN_ROWS_CACHE_MS) {
+      return Promise.resolve(planRowsCache.answer);
+    }
+    if (planRowsCache.inFlight != null) return planRowsCache.inFlight;
+    const pending = proxy.listModels().then(
+      (answer) => {
+        const result = answer.ok
+          ? { rows: includedModelRows({ deployments: answer.rows }), why: "" }
+          : { rows: null, why: `the proxy could not be asked what it serves (${answer.why}), so this workspace's plan card is the last one that was measured` };
+        planRowsCache = answer.ok ? { at: Date.now(), answer: result, inFlight: null } : { at: 0, answer: null, inFlight: null };
+        return result;
+      },
+      (error) => {
+        planRowsCache = { at: 0, answer: null, inFlight: null };
+        return { rows: null, why: `the proxy could not be asked what it serves (${String(error?.message ?? error).split("\n")[0]})` };
+      },
+    );
+    planRowsCache = { ...planRowsCache, inFlight: pending };
+    return pending;
+  }
+
+  /**
+   * PROVIDERS-1. Put the vision fallback map back if it went missing, once at boot.
+   *
+   * WHY THIS EXISTS AND WHY IT IS AT BOOT. Until this wave the map that sends a screenshot-carrying
+   * turn from plan-zai to plan-zai-vision lived in router_settings.fallbacks in the proxy's config
+   * file. This wave moves it into the proxy's database, and the second of the wave's two restarts
+   * takes it OUT of the file. Between those two facts there is exactly one window where a fallback
+   * can be missing: the file no longer carries it and the database's copy is not there either.
+   * PROXY-10 is what that costs -- a fleet-wide screenshot outage that read as the model being
+   * broken -- so it is worth one read at boot rather than a line in a runbook.
+   *
+   * IT RECONCILES, IT DOES NOT REWRITE. The wanted target is each deployment's own
+   * tb_vision_fallback, which the Providers panel wrote in the same action that wrote the fallback
+   * row, so this is putting back what the operator already said rather than a second opinion about
+   * it. An alias that already lists its target is left alone, and where one has to be written the
+   * entries already there are KEPT behind it, because POST /fallback overwrites the whole list and
+   * an operator who added a second route should not lose it to a restart.
+   *
+   * IT NEVER WRITES A TARGET THE PROXY DOES NOT SERVE. POST /fallback validates that the target
+   * exists and answers 400 with the available list, so a target that is not being served is
+   * reported and skipped rather than becoming a failed write on every boot.
+   *
+   * Nothing here throws and nothing here blocks the listen: a proxy that is down leaves the map as
+   * it is and says so on stdout, which is the same answer as before this function existed.
+   */
+  async function reconcileFallbacks() {
+    if (proxy == null || proxy.configured !== true) {
+      return { ok: false, why: "this control plane has no proxy configured", restored: [], kept: [], skipped: [] };
+    }
+    const listed = await proxy.listModels();
+    if (!listed.ok) {
+      return { ok: false, why: `the proxy could not be asked what it serves (${listed.why})`, restored: [], kept: [], skipped: [] };
+    }
+    const rows = Array.isArray(listed.rows) ? listed.rows : [];
+    const served = new Set(rows.map((row) => String(row?.alias ?? "")).filter((alias) => alias.length > 0));
+    // One alias can be a pool of deployments. They carry the same customer-facing facts, so the
+    // first one that names a target answers for the alias and the rest are the same row again.
+    const wanted = new Map();
+    for (const row of rows) {
+      const alias = String(row?.alias ?? "");
+      const target = String(row?.visionFallback ?? "");
+      if (alias.length === 0 || target.length === 0 || wanted.has(alias)) continue;
+      wanted.set(alias, target);
+    }
+    const restored = [];
+    const kept = [];
+    const skipped = [];
+    for (const [alias, target] of wanted) {
+      if (!served.has(target)) {
+        skipped.push({ alias, target, why: `the proxy does not serve ${target}, so writing this would be refused` });
+        continue;
+      }
+      const current = await proxy.getFallback(alias);
+      if (!current.ok) { skipped.push({ alias, target, why: current.why }); continue; }
+      if (current.fallbacks.includes(target)) { kept.push({ alias, target }); continue; }
+      const written = await proxy.setFallback({ alias, fallbacks: [target, ...current.fallbacks] });
+      if (!written.ok) { skipped.push({ alias, target, why: written.why }); continue; }
+      restored.push({ alias, target, alongside: current.fallbacks });
+    }
+    return { ok: true, why: "", restored, kept, skipped };
   }
 
   // The extra facts an adoption was given, read back out of the ledger step it wrote. An adopted
@@ -456,6 +573,11 @@ export function createApp(options = {}) {
     config, store, client, now, fetchImpl, proxy,
     json, noContent, publicAccount, publicTenant, tenantView, tenantPower, tenantProvision,
     currentSession, version: CP_VERSION,
+    // PROVIDERS-1. The address a change came from, so an admin_actions row can say WHERE as well as
+    // who and when. This function is the only thing in the process that knows which peers are
+    // trusted proxies, which are Cloudflare and which are boxes, and the admin API had no way to
+    // ask before this wave.
+    clientOf,
     // PROXY-1. One tenant's plan key, read off the disk through the same adoption-aware path the
     // registry uses, so the operator's own workspace is read the same way a customer's is.
     //
@@ -735,7 +857,7 @@ export function createApp(options = {}) {
     if (segments[1] === "relay" && segments[2] === "tenants" && segments.length === 3) {
       if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       if (!requireRelay(request, response)) return undefined;
-      return json(response, 200, relayRegistry());
+      return json(response, 200, await relayRegistry());
     }
 
     if (segments[1] === "sessions" && segments[2] === "current" && segments.length === 3) {
@@ -1027,11 +1149,38 @@ export function createApp(options = {}) {
     }
   }
 
-  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers };
+  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks };
 }
 
 export function createHttpServer(app) {
   return http.createServer((request, response) => { void app.handle(request, response); });
+}
+
+/**
+ * The boot-time fallback reconcile, and what it says on the way past.
+ *
+ * Kept out of main() so the reconcile itself stays a plain function a test can call, and so a proxy
+ * that is down produces one sentence on stdout rather than an unhandled rejection during startup.
+ */
+async function reconcileFallbacksAtBoot(app) {
+  let answer;
+  try { answer = await app.reconcileFallbacks(); }
+  catch (error) {
+    answer = { ok: false, why: String(error?.message ?? error).split("\n")[0], restored: [], kept: [], skipped: [] };
+  }
+  if (!answer.ok) {
+    process.stdout.write(`vision fallbacks: not checked, ${answer.why}\n`);
+    return;
+  }
+  for (const row of answer.restored) {
+    process.stdout.write(`vision fallbacks: ${row.alias} had no route to ${row.target} and now has one\n`);
+  }
+  for (const row of answer.skipped) {
+    process.stdout.write(`vision fallbacks: ${row.alias} still has no route to ${row.target}, ${row.why}\n`);
+  }
+  if (answer.restored.length === 0 && answer.skipped.length === 0) {
+    process.stdout.write(`vision fallbacks: ${answer.kept.length} already in place, nothing written\n`);
+  }
 }
 
 async function main() {
@@ -1053,6 +1202,11 @@ async function main() {
   void app.refreshBoxPeers().catch(() => {});
   const peerTimer = setInterval(() => { void app.refreshBoxPeers().catch(() => {}); }, 60_000);
   peerTimer.unref?.();
+  // PROVIDERS-1. Once at boot, and never on a timer: the vision fallback map is the one thing the
+  // wave's second restart takes out of the config file, and a missing one is a fleet-wide
+  // screenshot outage rather than a slow page. It reads first and writes only what is missing, so
+  // on an ordinary boot it writes nothing and prints one line saying so.
+  void reconcileFallbacksAtBoot(app);
   const server = createHttpServer(app);
   server.listen(config.port, "0.0.0.0", () => {
     process.stdout.write(`control plane listening on ${config.port}, tenants under ${config.tenantRoot}, release ${config.releaseRoot}\n`);

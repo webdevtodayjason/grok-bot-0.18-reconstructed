@@ -423,7 +423,17 @@ test("no route on this service ever answers with a hash, the session secret or t
       await plane.admin("POST", "/v1/tenants", { slug: "roofing", name: "Roofing" });
       const minted = readProxyKey("roofing", plane.config);
       assert.ok(minted != null, "the workspace was built with no plan key, so this sweep proves nothing");
-      await sweepForSecrets(plane, coolify, account, [proxy.masterKey, minted.key]);
+      // PROVIDERS-1 puts a THIRD kind of secret through this service, and it is a new direction of
+      // travel: nothing had ever put a credential INTO this console before, and the only secret
+      // that moved was a temporary password coming out once in a banner. A provider key now crosses
+      // the browser, the TLS terminator, a 64 KB JSON body, cp/admin.mjs and then the proxy. So one
+      // is really POSTed here, through the real route, before the sweep runs -- which makes the
+      // assertion measured rather than a claim about a value nothing ever handled.
+      const planted = "sk-zai-9f4c1d2e6b8a0357192a4c6e8d0f2b41";
+      const stored = await plane.admin("POST", "/v1/admin/providers/zai/keys", { apiKey: planted, label: "subscription one" });
+      assert.equal(stored.status, 200, stored.text);
+      assert.equal(stored.text.includes(planted), false, "the route that takes a key answered with it");
+      await sweepForSecrets(plane, coolify, account, [proxy.masterKey, minted.key, planted]);
     }, { withCoolify: true, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
   } finally { await proxy.close(); }
 });
@@ -525,6 +535,16 @@ async function sweepForSecrets(plane, coolify, account, extraSecrets) {
       await plane.admin("GET", "/v1/admin/spend"),
       await plane.admin("GET", "/v1/admin/clients"),
       await plane.admin("GET", "/v1/admin/system"),
+      // PROVIDERS-1. The panel that holds the key pools, the record of who changed what, and every
+      // route that could plausibly echo a key back. The mask the panel renders comes from the proxy;
+      // nothing here reconstructs one and nothing here carries a value.
+      await plane.admin("GET", "/v1/admin/providers"),
+      await plane.admin("GET", "/v1/admin/actions"),
+      await plane.admin("POST", "/v1/admin/providers/zai/catalog/refresh", {}),
+      await plane.admin("POST", "/v1/admin/providers/zai/keys/zai-1/quota", { total: 40000, unit: "thousands of tokens" }),
+      await plane.admin("POST", "/v1/admin/plan-models", { alias: "plan-nothing", provider: "zai", vendorModel: "glm-5" }),
+      await plane.admin("POST", "/v1/admin/providers/zai/keys/zai-1/remove", { confirm: "wrong" }),
+      await plane.admin("POST", "/v1/admin/defaults", { planModel: "" }),
     ];
 
     for (const answer of sweep) {
