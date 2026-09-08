@@ -175,8 +175,110 @@ Settings keeps one Providers area, split in two.
 line: *"You have used 12 percent of what your plan includes this month."* Percent and words on the
 customer's side. Dollars only in your admin console.
 
-**Your own keys.** Exactly today's surface, unchanged, one row per provider id. Bringing your own
-key wins over the included set.
+**Your own keys.** One row per provider id, and since PROVIDERS-1 the model on that row is a
+**picker rather than a typed string** — see §6b.
+
+Bringing your own key wins over the included set.
+
+### 6a. The name a customer reads is never the routing alias
+
+`plan-zai` is a **routing alias**. It exists so the proxy can pick a pool and it is the operator's
+word, not the customer's. What the customer reads is `modelLabel`, which the control plane sets from
+the plan model's `tb_customer_label` and which travels: control plane → `GET /v1/relay/tenants` →
+`ui/tenant-registry.mjs` → `ui/server.mjs` → `SAND_OPENAI_COMPATIBLE_MODEL_LABEL` in the box's
+`box-secrets.json`, where the host reads it into the persona fact its Titan answers with.
+
+**That path was broken end to end until PROVIDERS-1, and both R750 boxes were wrong.**
+`ui/tenant-registry.mjs`'s `includedOf` normalised each plan row to exactly
+`{id, model, name, contextWindow, servedBy}` and dropped the label one function before it was used,
+so `ui/server.mjs` read `undefined`, no box was ever given the variable, and demo's and Richard's
+Titan both told their customer they run `plan-zai`. Both halves of the pin were green throughout:
+the control-plane side asserted the field was SENT, and nothing asserted it was KEPT.
+
+A customer reads the model's name in **four** places and only one of them is behind a Settings
+visit, so all four are pinned now:
+
+| where | built by | pinned by |
+| --- | --- | --- |
+| the agent context card, always on screen | `endpointModels` → `modelById` → `app.js` | `tests/machine-room-plugins.test.mjs`, `scripts/verify-models.mjs` |
+| the agent profile panel | the same entry | the same two |
+| Settings → Inference → Endpoint, and Currently answering | `app.js` `fillEndpoints` | `scripts/verify-models.mjs` |
+| Settings → Included with your plan | `includedPlugins` | `tests/machine-room-plugins.test.mjs`, `scripts/verify-models.mjs` |
+
+**MEASURED IN A REAL BROWSER ON THIS MAC, 2026-09-08** (`node scripts/verify-models.mjs`, Chrome
+headless, a relay from this tree against the real `grok-bot-local-vm`): all four read
+`Z.AI GLM (included with your plan) · GLM-5.3`, no string starting `plan-` appears on any of them,
+and after clicking "Use this one" the box's own `box-secrets.json` carries
+`SAND_OPENAI_COMPATIBLE_MODEL_LABEL=GLM-5.3`. The same run found and fixed a second thing: Currently
+answering appended "(included with your plan)" to a name that already ended in those words, so every
+customer on a plan read it twice.
+
+**A plan model with no label falls back to its alias, on purpose.** That is the visible symptom of a
+model nobody has named yet, and the operator's Providers panel is where it gets a name. Inventing a
+prettier string would be a guess printed as a fact, and drawing nothing would hide the evidence —
+today every plan model on the R750 is unnamed, so a console that dropped unnamed rows would show a
+paying customer no plan at all. The rule that an unnamed or non-customer model never REACHES a
+console belongs one layer up, in the control plane's `includedModelRows`; that is what stops
+`plan-zai-vision` ever being minted on to a customer's screen.
+
+**Changing the label reaches an existing box only when something writes that box's file.** The label
+lives in `box-secrets.json`, so a panel edit moves the registry and the console immediately and the
+BOX on its next `use-included` or Settings switch. Renaming a model and not pushing it leaves Titan
+confidently saying the old name, which is the same class of quiet lie as `plan-zai` was.
+
+### 6b. Picking a model on your own provider (MODELS-1)
+
+The model on a bring-your-own-key card is a dropdown. Two sources, never merged, and **the card says
+in one plain line which of the two it is showing**, because "this is what your provider says it has"
+and "this is the list we shipped" are different claims and a person acts on them differently:
+
+- **live** — that provider's own `/models`. `ui/server.mjs`'s `probe()` has returned it on every
+  catalog row as `health.models` since TENANT-2 and nothing read it until this wave.
+- **curated** — the list `ui/subscriptions.mjs` ships for that provider. It is the only answer for a
+  provider with no list to read: Codex is transport `responses` against the Codex backend, is never
+  probed, and is always curated. Alibaba's five model names used to be a sentence inside its posture
+  string ending "type the model you want"; they are structure now.
+
+The curated row is also where the FACTS live — a context window somebody actually measured, and
+whether the model takes an image — because a live list is **names and only names**. The model the
+box is currently on is always in the list even when the provider has stopped listing it, so the
+picker can never quietly read back a model the box is not running.
+
+**A model with no measured context window writes no context window.** `endpointEntry` used to stamp
+the preset's number on whatever was chosen (measured on this Mac 2026-09-08: adopting `zai` with
+`glm-5.3-flash` wrote `128000`, which is `glm-5.3`'s number). Leaving it out is not a degraded
+answer — the host has its own default — whereas a wrong one is either a conversation compacted
+before it needed to be or a prompt the vendor rejects on every single turn.
+
+Choosing a model is `POST /subscriptions/adopt` with `{id, model}` and no key: a re-adopt with no key
+keeps the stored one, so there is no new route and the credential never moves. If the box is already
+answering through that provider the switch is applied to the box as well; if it is not, the card
+says so rather than promising something it will not do.
+
+**MEASURED IN A REAL BROWSER ON THIS MAC, 2026-09-08:** the Z.AI card offered six models, said
+*"Z.AI GLM (coding plan)'s own list could not be read just now, so this is the list we ship for it"*,
+said *"This box is answering somewhere else, so a change here waits until you pick this provider
+above"*, and choosing `glm-5.3-flash` moved the stored endpoint and wrote **no** context window.
+
+### 6c. The three clocks, and never "immediately"
+
+"Takes effect with no restart" is three different sentences and the copy has to say which:
+
+| what changed | when it takes effect |
+| --- | --- |
+| the vendor model behind an alias | the next request at the proxy, and the next turn in a box |
+| a newly added plan model | within one registry cycle, plus the panel's "give every workspace access" step |
+| a model or label written into a box | that box's next turn — the host re-reads `box-secrets.json` on every stream |
+| the customer's open page | its next hydrate. `refreshSubscriptions` runs only after a local action and nothing pushes |
+
+Never a bare "takes effect immediately."
+
+### 6d. What a customer sees while you roll a key
+
+**Nothing.** The alias does not change, the label does not change, and `box-secrets.json` is not
+touched, so no box is written to and no page needs to redraw. That is the whole reason the roll is a
+credential edit rather than a re-mint: a re-mint writes a new key into a box and drags in the
+registry cycle with it, which is the hazard that put a revoked key into a snapshot on 2026-09-08.
 
 When something goes wrong the box decides the words, never the model. Four sentences, and no alias,
 no dollars, no vendor name, no tool name, and never "may be temporary":
@@ -356,6 +458,25 @@ operator's subscriptions — and everything else the product does not call. It c
 `/key/info` or `/model/info`, because `cp/admin.mjs` and `cp/proxy.mjs` call both. On v1.100.0 a
 virtual key that knows another tenant's key HASH can read that key's alias, models, spend and budget
 from `/key/info`. Not guessable at 64 hex, so it needs a leak to exploit, and it is `PROXY-8`.
+
+**PROVIDERS-1 moves that boundary from the global list to the key**, because a global list cannot
+tell a tenant from the operator and two of the panel's central mechanisms are path-parameter routes
+an exact-match list cannot express at all. The replacement is `allowed_routes` on each virtual key at
+mint, plus a backfill over every key already in the field — and the ORDER is load bearing: keys in
+the field today were minted with `allowed_routes []` and are unrestricted, so the backfill lands
+BEFORE the global list is removed or there is a window where the admin surface is open to every box
+on the bridge. **The per-key 403 and the backfill are measured by this wave's proxy and control-plane
+items, on the R750, and their numbers belong in this section rather than a guess written ahead of
+them.** Until those land, the paragraph above is the state of the machine.
+
+One correction to that paragraph while it stands: the door list does **not** close everything.
+**MEASURED ON THIS MAC, 2026-09-08, against LiteLLM v1.100.0 in Docker with NO `Authorization`
+header:** `/public/providers`, `/public/providers/fields`, `/public/model_hub`,
+`/public/litellm_model_cost_map` and `/health/readiness` all answered **200**, while `/model/info`
+and `/key/info` answered 401. Those five are unauthenticated on this build, so no key-checking or
+route-checking runs on them at all. None of them carries a customer's data or a key, which is why
+this is a correction to the claim rather than a defect — but the claim was wrong, and the R750's own
+run of the same seven requests belongs beside this line once the proxy item takes it.
 
 ---
 

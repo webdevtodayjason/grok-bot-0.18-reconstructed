@@ -927,6 +927,36 @@ but it is a reason to treat `CP_RELAY_TOKEN` as the highest-value string in the 
 session secret, and to re-mint every virtual key rather than only rotating the relay token if it
 ever leaks.
 
+### What PROVIDERS-1 makes restore-critical
+
+From this wave the operator's provider keys live in the **proxy's own database**, entered through
+the admin console and encrypted under `PROXY_SALT_KEY`. The control plane receives a key from the
+browser, hands it to the proxy, and forgets it: it renders the mask the proxy returns and holds no
+value. That is a deliberate trade and it is stated here rather than discovered later.
+
+**Two things become restore-critical together, and losing either costs the same thing:**
+
+| what | where | what losing it costs |
+| --- | --- | --- |
+| `/data/titanbot-proxy/postgres` | the proxy's Postgres directory bind | every provider key, every plan model and every virtual key |
+| `PROXY_SALT_KEY` | `cp.env`, appended once and never rewritten | the stored credentials are unreadable ciphertext; the rows survive and the values do not |
+
+Either way the recovery is the same: **re-enter every provider key by hand in the Providers panel**,
+which lists exactly which slots are empty. Minutes of work, and only if somebody knows to do it.
+
+There is deliberately **no second encrypted copy in the control plane's sqlite.** It would double
+the blast radius of a control-plane compromise — that database already holds the session secret and
+every customer's account — to buy back a five-minute operation. One copy, backed up, is the trade.
+
+**The backup already carries both; the drill does not exercise either.** VERIFIED 2026-09-08:
+`deploy/backup/snapshot.sh` copies `cp.env` (which holds `PROXY_SALT_KEY`) in its relay file loop,
+and `pg_dump`s the proxy database to `proxy/litellm.sql`. `deploy/backup/restore-drill.sh` mentions
+neither — a grep for `SALT`, `postgres`, `proxy` and `cp.env` over that file returns nothing. So the
+bytes are being taken and nobody has ever proved they come back. That mattered less when the proxy's
+database held only virtual keys that `proxy mint --all` could rebuild from the tenant ledger; it
+matters now that it holds the only copy of the provider keys. Extending the drill is filed as
+`BACKUP-DRILL-1`.
+
 ---
 
 ## 18. What one relay with a socket does and does not change

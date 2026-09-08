@@ -149,10 +149,29 @@ test("an evidence verdict rides on the reply it judged, never as a line of its o
 
 // What GET /endpoints answers in its `included` array. The relay computes these from the registry
 // per request; the key is never in them, which is why there is nothing key-shaped to assert.
+//
+// PROVIDERS-1: both rows carry modelLabel, and that is not cosmetic in a fixture. Until this wave
+// the fixture omitted it, so a card built from `row.modelLabel` would have rendered the word
+// "undefined" and this suite would still have been green -- a guard that cannot fail is not a
+// guard. The unlabelled case has its own fixture and its own test below.
 const INCLUDED = [
-  { id: "plan-zai", model: "plan-zai", name: "Z.AI GLM (included with your plan)", baseUrl: "http://titanbot-proxy:4000/v1", contextWindow: 200000, servedBy: "Z.AI", apiKey: "included", enforced: false, health: { reachable: true } },
-  { id: "plan-minimax", model: "plan-minimax", name: "MiniMax M3 (included with your plan)", baseUrl: "http://titanbot-proxy:4000/v1", contextWindow: 1000000, servedBy: "MiniMax", apiKey: "included", enforced: true, health: { reachable: true } },
+  { id: "plan-zai", model: "plan-zai", modelLabel: "GLM-5.3", name: "Z.AI GLM (included with your plan)", baseUrl: "http://titanbot-proxy:4000/v1", contextWindow: 200000, servedBy: "Z.AI", apiKey: "included", enforced: false, health: { reachable: true } },
+  { id: "plan-minimax", model: "plan-minimax", modelLabel: "MiniMax M3", name: "MiniMax M3 (included with your plan)", baseUrl: "http://titanbot-proxy:4000/v1", contextWindow: 1000000, servedBy: "MiniMax", apiKey: "included", enforced: true, health: { reachable: true } },
 ];
+
+// THE FORBIDDEN LIST, and why `plan-` is now on it.
+//
+// The first six are money and plumbing: a customer's plan card is words and percentages, and the
+// operator's container names are not theirs to read. `plan-` is the seventh and it was on their
+// screen the whole time. It is a ROUTING ALIAS -- the string the operator's proxy keys a pool on --
+// and it reached the customer twice over: as the plan card's description on Settings, and as the
+// model-menu entry that app.js prints on the always-visible agent context card and in the agent
+// profile panel, which needs no Settings visit at all. MEASURED on the R750 2026-09-08: demo's
+// console read "plan-zai · 200k context" and "Z.AI GLM (included with your plan) · plan-zai".
+//
+// The list is checked against every surface a customer reads a model's name on, because fixing one
+// of the three and leaving the other two is what happened last time.
+const FORBIDDEN = ["$", "dollar", "USD", "budget", "titanbot", "proxy", "sk-", "plan-"];
 
 test("a plan card has nothing to paste, nothing to connect and no money on it", () => {
   const cards = includedPlugins(INCLUDED, "plan-zai");
@@ -181,15 +200,81 @@ test("a plan card has nothing to paste, nothing to connect and no money on it", 
   assert.match(zai.connectedNote, /^Included with your plan\./);
   assert.match(minimax.connectedNote, /Titan will say so/, "an enforced plan says what happens at the end of it");
   for (const card of cards) {
-    for (const forbidden of ["$", "dollar", "USD", "budget", "titanbot", "proxy", "sk-"]) {
+    for (const forbidden of FORBIDDEN) {
       const text = `${card.name} ${card.description} ${card.connectedNote} ${card.account} ${card.category}`;
       assert.equal(text.includes(forbidden), false, `"${forbidden}" is on a card a customer reads`);
     }
   }
+  // And the label is actually the thing being printed, not merely absent-of-alias. A card that
+  // said "· 200k context" with no model name at all would pass the loop above.
+  assert.match(zai.description, /^GLM-5\.3 · 200k context\./);
+  assert.match(minimax.description, /^MiniMax M3 · 1000k context\./);
 
   // Nothing at all when the plan is off, which is a developer Mac and a single-box install.
   assert.deepEqual(includedPlugins(undefined, null), []);
   assert.deepEqual(includedPlugins([], null), []);
+});
+
+// A plan model NOBODY HAS NAMED, and what this page is allowed to do about it.
+//
+// This card falls back to the alias, and that is deliberate rather than an oversight, so it is
+// pinned here in the open instead of left to be rediscovered. Three reasons, in order:
+//
+//   inventing a name is worse   there is no humane form of "plan-qwen" that is not a guess, and a
+//                               guess printed as a fact is the failure this whole wave is about;
+//   drawing nothing is worse    every plan model on the R750 is unnamed today (all three tenants
+//                               carry a snapshot written at mint with modelLabel undefined), so a
+//                               console that dropped unnamed rows would show a customer who pays
+//                               for a plan no plan at all;
+//   the drop belongs upstream   the rule that an unnamed or non-customer model never REACHES a
+//                               console is the control plane's (cp/server.mjs includedModelRows,
+//                               PROVIDERS-1). That is what stops "plan-zai-vision" ever
+//                               being minted onto a customer's screen. This layer's job is to
+//                               print faithfully whatever it was handed.
+//
+// So: the alias here is a visible, fixable symptom of an unnamed model, and the operator's own
+// Providers panel is where it is fixed. It must never be mistaken for the intended state, which is
+// why it gets its own named test rather than a quiet `||`.
+test("a plan model nobody has named falls back to its alias, visibly, rather than to a guess", () => {
+  const [card] = includedPlugins([{ ...INCLUDED[0], modelLabel: undefined }], "plan-zai");
+  assert.match(card.description, /^plan-zai · 200k context\./, "the alias, plainly, so the operator can see it needs a name");
+  // An empty string is the same answer as absent: the control plane sends "" for a model with no
+  // label and this must not render "· 200k context" with a hole where the name goes.
+  const [empty] = includedPlugins([{ ...INCLUDED[0], modelLabel: "" }], "plan-zai");
+  assert.equal(empty.description, card.description);
+});
+
+// THE OTHER TWO SURFACES. The plan card is behind a Settings visit; these are not.
+//
+// modelById(worker.model).name is what app.js prints on the agent context card, which is on screen
+// for every conversation, and in the agent profile panel. That name comes from endpointModels, so
+// pinning it here pins all three places at once -- but only as long as app.js keeps READING it,
+// which the source assertions below are for. Grepping the file is a blunt instrument and it is the
+// right one here: these are two template literals in a browser IIFE with no seam to call, and the
+// failure being guarded against is somebody changing them back to worker.model.
+test("the model menu entry, the agent context card and the agent profile panel all name the model, never the alias", async () => {
+  const catalog = {
+    endpoints: [{ id: "mine", name: "my own provider", model: "glm-4.6", baseUrl: "https://example.test/v1", contextWindow: 128000 }],
+    included: INCLUDED,
+    live: { baseUrl: "http://titanbot-proxy:4000/v1", model: "plan-zai" },
+  };
+  const models = endpointModels({ model: "plan-zai" }, catalog);
+  assert.equal(models.available[0].name, "Z.AI GLM (included with your plan) · GLM-5.3");
+  assert.equal(models.available[1].name, "MiniMax M3 (included with your plan) · MiniMax M3");
+  for (const entry of models.available) {
+    for (const forbidden of FORBIDDEN) {
+      assert.equal(entry.name.includes(forbidden), false, `"${forbidden}" is in a model-menu entry a customer reads`);
+    }
+  }
+  // A customer's own row has no label and keeps naming its own model, exactly as it always did.
+  assert.equal(models.available[2].name, "my own provider · glm-4.6");
+
+  // And the two app.js surfaces read that entry rather than the raw model id.
+  const app = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const reads = app.split("\n").filter((line) => line.includes("model ? model.name : worker.model"));
+  assert.equal(reads.length, 2, "the agent context card and the agent profile panel, and only those two");
+  assert.equal(reads.some((line) => line.includes("Endpoint (box-wide)")), true, "the agent context card");
+  assert.equal(reads.some((line) => line.includes("endpoint (box-wide) ·")), true, "the agent profile panel");
 });
 
 test("the endpoint menu carries the plan rows, so Currently answering matches when the box is on one", () => {

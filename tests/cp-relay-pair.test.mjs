@@ -142,7 +142,15 @@ test("the included object the control plane writes is the one the relay reads, f
   // tree would still be green, which is exactly the failure this suite was written to catch.
   //
   // The pin, and it does not move:
-  //   included = {baseUrl, key, keyId, models: [{id, model, name, contextWindow, servedBy}], enforced}
+  //   included = {baseUrl, key, keyId, models: [{id, model, name, contextWindow, servedBy,
+  //                modelLabel}], enforced}
+  //
+  // modelLabel is in the pin below and has been since 611fc9c, and it is worth saying why a green
+  // assertion here was not enough. This is the CONTROL PLANE's half. The relay's own normaliser
+  // (ui/tenant-registry.mjs includedOf) dropped the field on the way in, so both sides of this pin
+  // agreed on a name that then went nowhere, and every box on the R750 told its customer it ran
+  // "plan-zai". The relay's half of the same pin is in tests/relay-tenant-endpoints.test.mjs, on
+  // GET /endpoints, which is where the field is finally read.
   const pair = await startPair({ withProxy: true });
   try {
     const body = await (await pair.ask("GET", "/v1/relay/tenants", { token: pair.relayToken })).json();

@@ -129,10 +129,13 @@ counted per source because the two services keep different salts.
 
 ---
 
-## The five panels, and where every number comes from
+## The six panels, and where every number comes from
 
 Every number carries the moment it was measured. Anything that could not be measured says **"not
 measured"** and why, and never a zero, a dash, or a green tick.
+
+Five of them are the console as it shipped. The sixth, **Providers**, is what PROVIDERS-1 adds, and
+it is the one that takes a text file plus a proxy restart out of the operator's hands.
 
 ### 1. Sign-in attempts
 
@@ -263,6 +266,38 @@ and mint them a new one. Until they are, both are `cp/cli.mjs proxy revoke <slug
 Payments stay where they were: "Not connected yet. Plan and billing appear here when Stripe is
 wired in."
 
+### 6. Providers (PROVIDERS-1)
+
+The panel that ends the hand operation. Before it, adding a provider, adding a second key to a plan,
+rolling a key or repointing a plan alias were an ssh, an edit of
+`deploy/coolify/proxy-config/config.yaml` and a proxy restart — which is about 20 s of failed turns
+for every tenant on the machine, for a change that has nothing to do with any of them.
+
+Four things it holds, and where each number comes from:
+
+| what | source | what it is not |
+| --- | --- | --- |
+| providers: name, kind, base URL, health | the proxy's own deployment records | not a file on disk |
+| a provider's keys as a pool: add, roll, remove, order, per-key spend, last error | the proxy's credential store, masked on read (`sk****AA`); spend from its spend log | the control plane holds no key value at all |
+| plan models: alias, vendor model, vision fallback, context window, customer label, plans | the proxy's deployment `model_info`, where the product's own `tb_*` fields ride | the alias is a contract with every box already pointed at it and is never renamed |
+| a per-provider model catalog, with Refresh | the vendor's own `/models`, read through a pass-through so the control plane holds no vendor key | **names and only names.** Context window, vision and the customer label are facts a human sets, and the page says so in those words |
+
+**The ledger is never pruned, and that is said here so nobody trims it later.** `admin_actions`
+records who changed what, when, and from which address, for every change made on this panel. Sign-in
+attempts are pruned at 30 days because they are noise after that; "who changed the plan model in
+March" is a question asked in June, so this table keeps everything. No key value ever reaches a row —
+names, lengths and sha256 prefixes only, and a test plants a key value and asserts it does not
+appear.
+
+**The customer half of this panel is `docs/PROXY.md` §6a–6d**: what a customer reads instead of the
+routing alias, how they pick a model on their own provider, the three clocks a change runs on, and
+what they see while you roll a key (nothing).
+
+**The R750 measurements for this panel — adding a second key, rolling one with no failed request,
+repointing an alias and back, a catalog refresh, per-key spend and the ledger rows — belong in this
+section and come with the proxy and console items of this wave.** Nothing above is a measured number;
+it is what the panel is for.
+
 ---
 
 ## What is not measured, and what would fix each one
@@ -370,4 +405,6 @@ The unit tests are `tests/login-ledger.test.mjs` and `tests/cp-admin.test.mjs`, 
 Super admins will be required to enrol, which is the right order: this console is the account worth
 protecting most, and today it is one password.
 
-Stripe fills in the Payments panel.
+Stripe fills in the **Spend** panel's billing half. The old line here said "Payments panel" and there
+is no such panel: the five are Sign-in attempts, Clients and users, Box health, System health and
+Spend, and payments are a placeholder paragraph inside Spend saying billing is not wired in yet.

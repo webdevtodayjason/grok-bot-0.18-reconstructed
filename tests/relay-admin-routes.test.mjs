@@ -184,10 +184,20 @@ const OPERATOR_TINYFISH = "an-operator-tinyfish-key-copied-the-same-way";
 const sha12 = (value) => createHash("sha256").update(value, "utf8").digest("hex").slice(0, 12);
 
 // One customer, one box that is a directory on this Mac, one included set.
+//
+// PROVIDERS-1. The set carries a label on plan-zai and none on the others, because both are real
+// states and the super admin's door has to be honest about each. A named model is what the panel
+// produces once an operator has named it; an unnamed one is every plan model on the R750 today.
+// The label is added here rather than in the shared includedSet so this file can say what the
+// SUPER ADMIN's door answers without moving what every other suite measures.
 async function startMigrationConsole() {
   const demo = tenantRow("demo");
   const stub = boxStub([demo.row.box]);
-  const included = includedSet({ key: "sk-virtual-for-demo" });
+  const base = includedSet({ key: "sk-virtual-for-demo" });
+  const included = {
+    ...base,
+    models: base.models.map((row) => (row.id === "plan-zai" ? { ...row, modelLabel: "GLM-5.3" } : row)),
+  };
   // Exactly what the R750 boxes hold today: one copied operator provider key in the endpoint pin,
   // and the same operator's TinyFish key in the connector store.
   stub.writeSecrets(demo.row.box, {
@@ -255,6 +265,22 @@ test("use-included points the box at a plan model, keeps the way back, and answe
     assert.equal(wrote.get("SAND_OPENAI_COMPATIBLE_API_KEY").sha256, sha12("sk-virtual-for-demo"));
     assert.equal(wrote.get("SAND_OPENAI_COMPATIBLE_SERVED_BY").sha256, sha12("Z.AI"));
 
+    // PROVIDERS-1. The two things the super admin needs back from this door and could not get
+    // before, both about what the customer will experience rather than about the write succeeding.
+    //
+    // The LABEL, because it is what that customer's own Titan will tell them it is running. A door
+    // that reports a successful switch while the box goes on naming a routing alias is the failure
+    // this wave exists to end, and the operator has to be able to read the name back without
+    // opening the customer's console.
+    assert.equal(body.modelLabel, "GLM-5.3");
+    assert.equal(wrote.get("SAND_OPENAI_COMPATIBLE_MODEL_LABEL").sha256, sha12("GLM-5.3"));
+    // The PIN, because a box whose container carries SAND_OPENAI_COMPATIBLE_* keeps answering
+    // through that env whatever this door writes into the file. This box is a directory on this
+    // Mac with no container behind it, so the honest answer is false and no reason -- not knowing
+    // is a different answer from knowing it is unpinned, and both callers refuse without docker.
+    assert.equal(body.pinned, false);
+    assert.equal(body.pinnedBy, null);
+
     const secrets = stub.secretsOf(box);
     assert.equal(secrets.SAND_OPENAI_COMPATIBLE_API_KEY, "sk-virtual-for-demo");
     assert.equal(secrets.SAND_OPENAI_COMPATIBLE_MODEL, "plan-zai");
@@ -272,6 +298,14 @@ test("use-included points the box at a plan model, keeps the way back, and answe
     const kept = JSON.parse(readFileSync(rollback, "utf8")).secrets;
     assert.equal(kept.SAND_OPENAI_COMPATIBLE_API_KEY, OPERATOR_KEY, "the snapshot is what was there before");
     assert.equal(kept.SAND_OPENAI_COMPATIBLE_MODEL, "qwen3.8-max");
+
+    // A plan model nobody has named answers with no label AND takes the last one back out of the
+    // box. A stale label is worse than none: the box would go on confidently telling its customer
+    // it runs a model it no longer runs, which is the same quiet lie in a different place.
+    const unnamed = JSON.parse(await (await asAdmin(relay, "/admin/tenants/demo/use-included", { model: "plan-minimax" })).text());
+    assert.equal(unnamed.modelLabel, "");
+    assert.equal(stub.secretsOf(box).SAND_OPENAI_COMPATIBLE_MODEL, "plan-minimax", "the box did move");
+    assert.equal(stub.secretsOf(box).SAND_OPENAI_COMPATIBLE_MODEL_LABEL, undefined, "GLM-5.3 must not outlive the model it named");
 
     // A model that is not in the plan is a plain refusal, not a half-done switch.
     assert.equal((await asAdmin(relay, "/admin/tenants/demo/use-included", { model: "plan-nothing" })).status, 404);

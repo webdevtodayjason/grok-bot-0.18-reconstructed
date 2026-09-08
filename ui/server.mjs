@@ -450,6 +450,29 @@ async function probeIncluded(t) {
   return health;
 }
 
+// Whether this box's endpoint is pinned by its container environment, and by which names.
+//
+// The host resolves process.env first and box-secrets.json second, so a SAND_OPENAI_COMPATIBLE_*
+// variable baked into the container wins over anything written into the file -- and every writer
+// on this relay writes the file. GET /endpoints has computed this since TENANT-2 and shows it; the
+// SUPER ADMIN's door did not, so `proxy migrate` could report a successful write, list the six
+// names it wrote, and leave the box answering through something else entirely. A door that reports
+// a write it knows cannot take effect is a door that lies quietly, which is worse than one that
+// refuses. Read once here so both callers say the same thing.
+//
+// A box with no docker under it answers {pinned: false, pinnedBy: null}: not knowing is not the
+// same as knowing it is unpinned, and the two callers already refuse without docker anyway.
+async function endpointPin(t) {
+  const envOut = await dockerOut(["inspect", t.box, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]);
+  const names = PROVIDER_KEYS.filter((key) => (envOut ?? "").split("\n").some((line) => line.startsWith(`${key}=`)));
+  return {
+    pinned: names.length > 0,
+    pinnedBy: names.length > 0
+      ? `container env (${names.join(", ")}); recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin`
+      : null,
+  };
+}
+
 // A saved endpoint is only useful if it is actually up, so say so rather than implying it.
 async function probe(t, endpoint) {
   const started = Date.now();
@@ -1225,8 +1248,20 @@ async function useIncluded(res, t, body, answer) {
   else delete next.SAND_OPENAI_COMPATIBLE_MODEL_LABEL;
   if (plan.contextWindow) next.SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW = String(plan.contextWindow);
   await writeSecrets(t, next);
+  // PROVIDERS-1. Read AFTER the write, so nothing is refused over it: the file is the right place
+  // for these values whether or not the container also carries them, and a rollback still needs
+  // them there. What changes is what the answer CLAIMS. `pinned: true` means the super admin just
+  // wrote seven names into a box that will keep answering through its container environment until
+  // it is recreated, so the caller has the fact and can say that instead of reporting a success.
+  // Today the only caller is `cp/cli.mjs proxy migrate`, which prints the endpoint name and not
+  // this; printing it belongs to that file and to the item of this wave that owns it.
+  const pin = await endpointPin(t);
   return answer({
     using: plan.id, endpointName: plan.name, rollbackFile, rollback,
+    // What the customer's own Titan will say it is running. Empty when the control plane sent no
+    // label for this model, in which case the box says the model and the operator knows to set one.
+    modelLabel: plan.modelLabel || "",
+    ...pin,
     // Names, lengths and hash prefixes. The key itself has already gone into the box and does not
     // come back out through this answer.
     wrote: Object.keys(next).filter((name) => name.startsWith("SAND_OPENAI_COMPATIBLE_")).sort()
@@ -2361,7 +2396,9 @@ const server = createServer(async (req, res) => {
         .find((l) => l.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
       // env beats the secrets file in the host's own resolver, so an env value pins the
       // endpoint and nothing chosen here can take effect until the box is recreated without it.
-      const pinned = PROVIDER_KEYS.some((k) => envOf(k) != null);
+      // The same fact the super admin's use-included door now reports, from the same inspect.
+      const pinnedNames = PROVIDER_KEYS.filter((k) => envOf(k) != null);
+      const pinned = pinnedNames.length > 0;
       const live = { baseUrl: envOf(PROVIDER_KEYS[0]) ?? secrets[PROVIDER_KEYS[0]] ?? null,
         model: envOf(PROVIDER_KEYS[1]) ?? secrets[PROVIDER_KEYS[1]] ?? null };
       const endpoints = await Promise.all((catalog.endpoints ?? []).map(async (e) => {
@@ -2383,7 +2420,7 @@ const server = createServer(async (req, res) => {
       const included = includedRows(t).map((row) => ({ ...row, apiKey: "included", health: includedHealth }));
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ endpoints, included, live, pinned,
-        pinnedBy: pinned ? "container env; recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin" : null,
+        pinnedBy: pinned ? `container env (${pinnedNames.join(", ")}); recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin` : null,
         // Present only when it is true, so nothing has to read it on Jason's instance.
         ...(hasDocker ? {} : { liveNote: NOT_AVAILABLE.liveModel, switchable: false }) }));
     }

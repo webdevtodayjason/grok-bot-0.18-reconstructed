@@ -365,8 +365,14 @@ test("an included set is normalised, and anything unusable in it is no set at al
 
   assert.equal(registry.get("slash").included.baseUrl, "http://titanbot-proxy:4000/v1");
   // A row given only a model name still resolves: the id is the model.
+  //
+  // PROVIDERS-1 adds modelLabel to this shape, and an empty string is the honest answer for a row
+  // that carries none: it means "nobody has named this model", which ui/server.mjs turns into no
+  // SAND_OPENAI_COMPATIBLE_MODEL_LABEL in the box and the console renders as the model itself. The
+  // field is normalised in rather than left off precisely so no reader downstream has to ask
+  // whether it might be missing -- which is the mistake that lost the label in the first place.
   assert.deepEqual(registry.get("slash").included.models, [
-    { id: "plan-zai", model: "plan-zai", name: "plan-zai", contextWindow: null, servedBy: "" },
+    { id: "plan-zai", model: "plan-zai", name: "plan-zai", contextWindow: null, servedBy: "", modelLabel: "" },
   ]);
 
   // Absent is a real answer, and every unusable shape lands on it. This is what keeps a developer

@@ -33,36 +33,91 @@ const MINIMAX_CLIENT_ID = "78257093-7e40-4613-99e0-527b14b39113"; // the MiniMax
 const NEAR_EXPIRY_MS = 10 * 60 * 1000;
 const CLAUDE_CLEAR_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS"];
 
+// MODELS-1. THE CURATED MODEL LIST PER PROVIDER, and what it is for.
+//
+// A provider's own /models is the live answer and is always preferred: ui/server.mjs's probe()
+// already fetches `<baseUrl>/models` on every catalog row and returns `health.models`, and nothing
+// read it until this wave. But not every provider has such a list to read -- Codex is transport
+// "responses" against chatgpt.com/backend-api/codex and is never probed at all -- and a picker
+// with nothing in it is worse than the free-text field it replaces. So each preset carries the
+// list we ship for it, the console uses the live one where there is one, and the page says in one
+// line WHICH of the two the person is looking at. Never both silently merged: "these are the
+// models your provider says it has" and "this is the list we shipped" are different claims and a
+// person acts on them differently.
+//
+// contextWindow is null where we do not know it, and null is honest. endpointEntry below writes
+// this number into the box, and a WRONG one is not a cosmetic error: too small compacts the
+// conversation before it needed to be, too large builds a prompt the vendor rejects on every turn.
+// Before this wave endpointEntry stamped the PRESET's window on whatever model was chosen
+// (measured on this Mac 2026-09-08: adopting zai with model "glm-5.3-flash" still wrote
+// contextWindow 128000), which is how a guess became a number in somebody's box.
+//
+// vision is what the model does with an image part. Titan sends screenshots on most turns -- 41
+// image parts on Jason's box's last turns -- so a text-only model is not a slower model, it is a
+// box that answers 400 on the first real turn. That is PROXY-10, and it cost a day. Measured
+// 2026-09-08 01:50 CDT against the Z.AI coding plan endpoint and recorded in
+// deploy/coolify/proxy-config/config.yaml: glm-5.3, glm-5, glm-4.7 and glm-4.6 refuse an image
+// part with code 1210; glm-5.3-flash and glm-4.6v take one and answer. null means nobody has
+// asked that vendor, and the card says nothing rather than guessing.
+const model = (id, label, contextWindow = null, vision = null) => ({ id, label, contextWindow, vision });
+
 export const PROVIDERS = {
   codex: {
     name: "ChatGPT / Codex", route: "endpoint", endpointId: "sub-codex",
     baseUrl: "https://chatgpt.com/backend-api/codex", transport: "responses", defaultModel: "gpt-5.6-sol", contextWindow: 272_000,
     posture: "The Codex CLI stores this token for reuse. Adopted once, refreshed through OpenAI's own token endpoint, never written back. Requests identify as grok-bot.",
+    // Curated only, always: this transport speaks to the Codex backend, which serves no model
+    // list, so probe() never asks it and there is no live answer to prefer. The model the person's
+    // own Codex CLI is configured for is added to this list at scan time (codexConfiguredModel).
+    models: [model("gpt-5.6-sol", "GPT-5.6 Sol", 272_000)],
   },
   minimax: {
     name: "MiniMax", route: "endpoint", endpointId: "sub-minimax",
     baseUrl: "https://api.minimax.io/v1", transport: "chat", defaultModel: "MiniMax-M3", contextWindow: 1_000_000,
     posture: "The MiniMax CLI stores this token for reuse. Adopted, refreshed through MiniMax's own token endpoint, never written back.",
+    models: [model("MiniMax-M3", "MiniMax-M3", 1_000_000)],
   },
   zai: {
     name: "Z.AI GLM (coding plan)", route: "key", endpointId: "sub-zai", env: "ZAI_API_KEY",
     baseUrl: "https://api.z.ai/api/coding/paas/v4", transport: "chat", defaultModel: "glm-5.3", contextWindow: 128_000,
     posture: "API key from your coding plan, pasted once. No discovery: Z.AI keeps no CLI store.",
+    // The six measured on 2026-09-08 01:50 CDT. Only the default's context window is a number this
+    // repo has ever measured, so the other five carry null rather than a copy of it.
+    models: [
+      model("glm-5.3", "GLM-5.3", 128_000, false),
+      model("glm-5.3-flash", "GLM-5.3 Flash", null, true),
+      model("glm-5", "GLM-5", null, false),
+      model("glm-4.7", "GLM-4.7", null, false),
+      model("glm-4.6", "GLM-4.6", null, false),
+      model("glm-4.6v", "GLM-4.6V", null, true),
+    ],
   },
   alibaba: {
     name: "Alibaba Model Studio (token plan)", route: "key", endpointId: "sub-alibaba", env: "DASHSCOPE_API_KEY",
     baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", transport: "chat", defaultModel: "qwen3.8-max", contextWindow: 128_000,
-    posture: "API key from your Model Studio token plan, pasted once. Serves qwen3.8-max, qwen3.8-flash, deepseek-v4-pro, deepseek-v4-pro-0813, deepseek-v4-flash-0731; type the model you want or take the default.",
+    // The five names below used to be a sentence in this string ending "type the model you want",
+    // which is the free-text field MODELS-1 replaces. They are structure now, so the card can draw
+    // them, and the posture says what the key is rather than reciting a catalogue.
+    posture: "API key from your Model Studio token plan, pasted once. Pick the model from the list on this card.",
+    models: [
+      model("qwen3.8-max", "Qwen3.8 Max", 128_000),
+      model("qwen3.8-flash", "Qwen3.8 Flash"),
+      model("deepseek-v4-pro", "DeepSeek V4 Pro"),
+      model("deepseek-v4-pro-0813", "DeepSeek V4 Pro (0813)"),
+      model("deepseek-v4-flash-0731", "DeepSeek V4 Flash (0731)"),
+    ],
   },
   "gemini-key": {
     name: "Gemini (API key)", route: "key", endpointId: "sub-gemini-key", env: "GEMINI_API_KEY",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", transport: "chat", defaultModel: "gemini-2.5-flash", contextWindow: 1_000_000,
     posture: "An AI Studio API key through Google's OpenAI-compatible endpoint; the free tier works. Your Gemini CLI login stays untouched; that route is the runtime contract.",
+    models: [model("gemini-2.5-flash", "Gemini 2.5 Flash", 1_000_000)],
   },
   "minimax-key": {
     name: "MiniMax (API key)", route: "key", endpointId: "sub-minimax-key", env: "MINIMAX_API_KEY",
     baseUrl: "https://api.minimax.io/v1", transport: "chat", defaultModel: "MiniMax-M3", contextWindow: 1_000_000,
     posture: "A MiniMax platform API key, pasted once; the alternative to a MiniMax CLI login.",
+    models: [model("MiniMax-M3", "MiniMax-M3", 1_000_000)],
   },
   claude: {
     name: "Claude subscription", route: "runtime",
@@ -180,6 +235,28 @@ function scanGrok(env) {
   return { present: true, usable: false, source: `${file} (presence and email only)`, identity: entry?.email ?? null, expiresAt: iso(expiresAt) };
 }
 
+// The curated list for one provider, plus the model the person's own Codex CLI is configured for.
+// That last part is the only place a curated list is not a constant, and it is worth the exception:
+// a Codex card that cannot offer the model the CLI beside it is set to is a picker that argues with
+// the machine it is reading.
+function curatedModels(id, env = process.env) {
+  const rows = (PROVIDERS[id]?.models ?? []).map((row) => ({ ...row }));
+  if (id !== "codex") return rows;
+  const configured = codexConfiguredModel(env);
+  if (!configured || rows.some((row) => row.id === configured)) return rows;
+  return [...rows, { id: configured, label: `${configured} (your Codex CLI is set to this)`, contextWindow: null, vision: null }];
+}
+
+// The model the stored catalog row for this provider currently carries, or "" when there is none.
+// Read from the catalog the caller already had rather than from the store, because the catalog row
+// is what POST /endpoints/use actually points the box at.
+function chosenOf(id, catalog) {
+  const endpointId = PROVIDERS[id]?.endpointId ?? null;
+  if (endpointId == null) return "";
+  const row = (catalog?.endpoints ?? []).find((entry) => entry?.id === endpointId);
+  return typeof row?.model === "string" ? row.model : "";
+}
+
 /** The scan: presence, identity, expiry per provider. No secret appears in the result. */
 export async function scanSubscriptions(env = process.env, catalog = null) {
   const store = await readStore();
@@ -197,6 +274,15 @@ export async function scanSubscriptions(env = process.env, catalog = null) {
       id, name: spec.name, route: spec.route, posture: spec.posture, ...visible,
       adopted: adoptedIds.has(id), endpointId: spec.endpointId ?? null, endpointReady: spec.endpointId != null && endpointIds.has(spec.endpointId),
       ...(spec.defaultModel ? { defaultModel: spec.defaultModel } : {}),
+      // MODELS-1. The list we ship for this provider, so the console can draw a picker for a
+      // provider whose own /models cannot be read. The live list, where there is one, reaches the
+      // browser on the endpoint row's health.models and the page prefers it -- see the note above
+      // PROVIDERS. Absent for a provider with no endpoint at all (claude, gemini, grok), because a
+      // card with no endpoint has no model to choose.
+      ...(Array.isArray(spec.models) ? { models: curatedModels(id, env) } : {}),
+      // Which row of the catalog this provider's model is stored on right now, so the picker opens
+      // on what the box would actually use rather than on the preset's default.
+      ...(chosenOf(id, catalog) ? { model: chosenOf(id, catalog) } : {}),
     };
   }));
   return rows;
@@ -249,13 +335,30 @@ function codexConfiguredModel(env = process.env) {
   const home = env.CODEX_HOME?.trim() || path.join(HOME, ".codex");
   try { return /^\s*model\s*=\s*"([^"]+)"/m.exec(readFileSync(path.join(home, "config.toml"), "utf8"))?.[1] ?? null; } catch { return null; }
 }
-/** The endpoints.json row for an adopted subscription: no key, a pointer instead. */
+/**
+ * The endpoints.json row for an adopted subscription: no key, a pointer instead.
+ *
+ * MODELS-1, the context window rule. This function used to write `spec.contextWindow` on to the row
+ * whatever model was chosen, which is right for the preset's default and wrong for every other
+ * model the person can now pick. Measured on this Mac 2026-09-08: adopting `zai` with model
+ * `glm-5.3-flash` wrote contextWindow 128000, the number that belongs to glm-5.3.
+ *
+ * The number goes in when the chosen model is one we have measured a window for, and is LEFT OUT
+ * otherwise. Left out is not a degraded answer: the host has its own default and takes it, whereas
+ * a wrong window is either a conversation compacted before it needed to be or a prompt the vendor
+ * rejects on every single turn. A guess that is silently wrong every turn is worse than no guess.
+ */
 export function endpointEntry(id, model) {
   const spec = PROVIDERS[id];
   const chosen = (model ?? "").trim() || (id === "codex" ? codexConfiguredModel() : null) || spec.defaultModel;
+  const known = (spec.models ?? []).find((row) => row.id === chosen) ?? null;
+  // The preset's own number still applies to the preset's own default, which is what keeps every
+  // row this product has already written byte-identical to what it was.
+  const contextWindow = known?.contextWindow ?? (chosen === spec.defaultModel ? spec.contextWindow ?? null : null);
   return {
     id: spec.endpointId, name: spec.name, baseUrl: spec.baseUrl, model: chosen,
-    subscription: id, transport: spec.transport, ...(spec.contextWindow ? { contextWindow: spec.contextWindow } : {}),
+    subscription: id, transport: spec.transport,
+    ...(Number.isFinite(contextWindow) && contextWindow > 0 ? { contextWindow } : {}),
   };
 }
 
