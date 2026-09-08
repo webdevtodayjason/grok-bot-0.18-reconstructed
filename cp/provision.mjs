@@ -258,7 +258,15 @@ export function loadConfig(env = process.env) {
     // that has no proxy yet, which is every existing customer including Jason's own console. The
     // pattern is CP_RELAY_TOKEN's: unset is a closed door that answers honestly, set but malformed
     // is the thing that gets refused.
-    proxyUrl: text("CP_PROXY_URL").replace(/\/+$/, ""),
+    // THE ROOT, never the OpenAI path. Measured on the R750 2026-09-08: `proxy-install.sh
+    // --pin-url` writes CP_PROXY_URL with the /v1 already on it, because that is the address a box
+    // is pointed at, and an operator setting this by hand will do the same. Two things then read
+    // it, and they need different halves: the admin calls (/key/generate, /key/info, /key/delete,
+    // /global/spend/report) live at the ROOT, and only the chat surface lives under /v1. Left as
+    // written, every mint would have gone to /v1/key/generate and every box to /v1/v1. So a
+    // trailing /v1 is stripped HERE, once, and the one place that wants it puts it back. Either
+    // form of the value now means the same thing.
+    proxyUrl: text("CP_PROXY_URL").replace(/\/+$/, "").replace(/\/v1$/, ""),
     // The proxy's master key. It reaches exactly two places, this service's environment and the
     // proxy's own, and it is never written into a box, into git or into the sync payload.
     proxyMasterKey: text("CP_PROXY_MASTER_KEY"),

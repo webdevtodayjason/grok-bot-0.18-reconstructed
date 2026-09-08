@@ -198,4 +198,24 @@ if [ "$INSTALL" = no ]; then
 fi
 
 step "install on $HOST"
+# install.sh builds a STANDALONE instance: one titanbot-relay and one titanbot-box of its own, on a
+# network called titanbot. On a server that Coolify already runs the fleet on, that is a second,
+# useless copy sitting beside the real one, and it is not obvious from the output that it happened.
+#
+# Measured on the R750 2026-09-08, doing exactly this: a plain `sync.sh` to ship the proxy wave
+# created titanbot-relay and titanbot-box beside the three live customer boxes. Nothing live broke,
+# because the names do not collide, but the stray relay sat there restarting every few seconds
+# because it has no password file, and somebody reading `docker ps` at three in the morning now has
+# two things called a relay. On this fleet the shipping step is `--no-install`.
+if ssh "$HOST" 'docker ps --format "{{.Names}}" 2>/dev/null | grep -qE "^titanbot-relay-[a-z0-9]+$"'; then
+  printf '\n== shipped, and NOT installed\n'
+  say "this server already runs the Coolify fleet: a container named titanbot-relay-<service uuid> is up."
+  say "install.sh would build a SECOND, standalone relay and box beside it, which is not what you want."
+  say "the files are shipped. What to do next depends on what changed:"
+  say "  ui/          docker restart titanbot-relay-<service uuid>     (by NAME, never through Coolify)"
+  say "  cp/          ssh $HOST bash $ROOT/deploy/control-plane-install.sh, then restart titanbot-cp"
+  say "  the bundle   POST /api/updateHostNow to each box, one at a time, and wait for the supervisor"
+  say "to build a standalone instance here anyway: ssh $HOST bash $ROOT/deploy/install.sh"
+  exit 0
+fi
 ssh "$HOST" "bash '$ROOT/deploy/install.sh'"

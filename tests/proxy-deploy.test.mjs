@@ -686,3 +686,17 @@ test("it stops before creating anything when the installer's secrets are not the
     assert.equal(fake.calls.filter((call) => call.route.startsWith("POST")).length, 0, "nothing was created");
   } finally { fake.server.close(); }
 });
+
+test("sync.sh will not build a standalone relay on a server already running the Coolify fleet", () => {
+  // Measured on the R750 2026-09-08: a plain sync.sh created titanbot-relay and titanbot-box beside
+  // the three live customer boxes, because install.sh builds a standalone instance and sync.sh ran
+  // it by default. Nothing live broke, but a second thing called a relay was left restarting.
+  const sync = readFileSync(SYNC, "utf8");
+  assert.match(sync, /titanbot-relay-\[a-z0-9\]\+/, "sync.sh does not look for a Coolify-managed relay");
+  // The guard must come BEFORE the install call, or it guards nothing.
+  const guardAt = sync.indexOf("titanbot-relay-[a-z0-9]+");
+  const installAt = sync.lastIndexOf("deploy/install.sh'\"");
+  assert.ok(guardAt > 0 && installAt > guardAt, "the guard must be ahead of the install call");
+  // And it must still be possible on purpose, so a fresh server is not locked out of install.sh.
+  assert.match(sync, /to build a standalone instance here anyway/);
+});

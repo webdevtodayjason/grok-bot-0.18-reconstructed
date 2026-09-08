@@ -65,6 +65,19 @@ async function withProxy(run, options = {}) {
 
 // ---- the names that cannot change ---------------------------------------------------------------
 
+test("CP_PROXY_URL means the same thing with or without the /v1 an operator will paste", () => {
+  // Measured on the R750 2026-09-08: proxy-install.sh --pin-url writes the value WITH /v1, because
+  // that is the address a box is pointed at. The admin calls live at the root and only the chat
+  // surface lives under /v1, so a value carrying it once would have sent every mint to
+  // /v1/key/generate and pointed every box at /v1/v1. Both spellings now load to the same root.
+  const root = "http://titanbot-proxy:4000";
+  for (const written of [root, `${root}/`, `${root}/v1`, `${root}/v1/`]) {
+    assert.equal(loadConfig({ CP_PROXY_URL: written }).proxyUrl, root, `${written} did not load as the root`);
+  }
+  // And a host that merely ENDS in something v1-ish is not trimmed by accident.
+  assert.equal(loadConfig({ CP_PROXY_URL: "http://proxy-v1:4000" }).proxyUrl, "http://proxy-v1:4000");
+});
+
 test("the alias and the plan prefix are what every other piece computes", () => {
   // Derivable from the slug, which is the whole reason this wave adds no column to the store:
   // /key/delete takes aliases, so a handle you can compute is a handle that cannot go stale.
