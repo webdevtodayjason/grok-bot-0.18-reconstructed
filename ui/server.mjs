@@ -1179,8 +1179,10 @@ async function useIncluded(res, t, body, answer) {
   // PROVIDERS-1. Read AFTER the write, so nothing is refused over it: the file is the right place
   // for these values whether or not the container also carries them, and a rollback still needs
   // them there. What changes is what the answer CLAIMS. `pinned: true` means the super admin just
-  // wrote six names into a box that will keep answering through its container environment until it
-  // is recreated, and `proxy migrate` prints that sentence instead of a success.
+  // wrote seven names into a box that will keep answering through its container environment until
+  // it is recreated, so the caller has the fact and can say that instead of reporting a success.
+  // Today the only caller is `cp/cli.mjs proxy migrate`, which prints the endpoint name and not
+  // this; printing it belongs to that file and to the item of this wave that owns it.
   const pin = await endpointPin(t);
   return answer({
     using: plan.id, endpointName: plan.name, rollbackFile, rollback,
