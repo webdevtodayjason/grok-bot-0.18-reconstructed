@@ -6,9 +6,9 @@ import { buildHostShellArgs } from "./box/box-shell-command.js";
 import { getSandRootDir } from "./host-paths.js";
 import { isConnectorEnvFieldName } from "./extensions/mcp/connector-secrets.js";
 import {
-  MARKETPLACE_CATALOG,
   findMarketplaceBot,
   findMarketplacePlugin,
+  marketplaceCatalogWireView,
 } from "../shared/marketplace/catalog.js";
 import {
   SHELL_TOOLS,
@@ -1135,7 +1135,7 @@ export function createHostGatewayApi(
     // no network and no account behind them: the console draws its Plugins and Bots tabs from
     // exactly the data the agent's SearchPlugins resolves against. Nothing here is per-install
     // state -- "installed", "needs auth" and "ready" come from the connector commands above.
-    listMarketplace: () => MARKETPLACE_CATALOG,
+    listMarketplace: () => marketplaceCatalogWireView(),
     getMarketplaceItem: (args: any) => {
       const kind = typeof args?.kind === "string" ? args.kind : "";
       const id = args?.id;

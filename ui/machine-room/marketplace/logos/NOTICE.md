@@ -36,6 +36,29 @@ gives that plugin (Linear's `#5E6AD2` on Linear's `#5e6ad2` tile would be invisi
 therefore placed, path unmodified, on a 192×192 white square the way cursor/plugins draws its own
 third-party logos, so every logo on the page reads as the same kind of object.
 
+## MARKET-6: eleven new cards, no new marks
+
+MARKET-6 took the catalog from ten rows to nineteen. **Not one of the new rows ships a vendor
+mark**, and that is a decision rather than an omission.
+
+The rule this directory now runs on: **a letter tile is the default, and a vendor's mark ships only
+when that vendor's own brand terms have been read and the permission quoted in a row of this file,
+beside the source and the licence.** Simple Icons publishes its SVG collection under CC0, and CC0
+on a path is not a trademark licence — that distinction is exactly what the Slack and TinyFish rows
+below record, and it applies identically to every logo somebody might fetch from the same place.
+
+So Notion, Airtable, Todoist, Resend, Stripe, Context7, Exa, DeepWiki, Cloudflare, Playwright and
+Browser Use are all drawn as letter tiles. Six of them (Context7, Exa, DeepWiki, Playwright,
+Browser Use and the Cloudflare docs card) have no Simple Icons entry at all, so the question does
+not even arise. The other five do, and the answer is the same as TinyFish's until somebody reads
+their brand terms and can quote a permission here.
+
+The five plugin marks above predate this and keep their rows: each already carries a source and a
+licence, and `github.svg` carries an explicit MIT grant from the repository it came from.
+
+A tile is not a downgrade. `tests/marketplace-logos.test.mjs` fails as loudly on an orphaned file as
+on a missing one, so a mark and its row land in one commit or neither does.
+
 ## Marks this catalog does NOT ship, and why
 
 Three cards carried a real logo and no licence. Both vendors publish terms that answer the question,

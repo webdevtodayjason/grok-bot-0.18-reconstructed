@@ -82,10 +82,13 @@ test("every plugin carries a category from the declared list", () => {
       `plugin ${plugin.id} icon carries ${Object.keys(plugin.icon).sort().join(",")}`);
     assert.equal(catalog.marketplaceLogoProblem(`plugin ${plugin.id}`, plugin.icon.file), null);
   }
-  // The seed the contract names, in full.
+  // The catalog MARKET-6 ships, in full. Nineteen rows from ten: eleven services added, and the
+  // two CLI rows folded into the products they belong to (tinyfish-cli into tinyfish, github-cli
+  // into github) because one product gets one place to put a key -- which is MARKET-5.
   assert.deepEqual(catalog.MARKETPLACE_PLUGINS.map((plugin) => plugin.id), [
-    "github", "slack", "linear", "google", "tinyfish", "localfiles", "coderabbit", "tinyfish-cli", "github-cli",
-    "custom-mcp",
+    "github", "slack", "linear", "google", "tinyfish", "context7", "exa", "cloudflare-docs", "deepwiki",
+    "notion", "airtable", "todoist", "playwright", "resend", "stripe", "browser-use", "localfiles",
+    "coderabbit", "custom-mcp",
   ]);
 });
 
@@ -167,14 +170,54 @@ async function loadConsolePresets() {
   return new Function("window", "fetch", `${body}\nreturn window.__connectorPresets;`)(window, fetchStub);
 }
 
-test("every connector entry in the catalog is the console's preset entry, argument for argument", async () => {
+// MARKET-6 moved one side of this triangle. A catalog row now declares a SPEC -- an endpoint, or a
+// program -- and `connectorEntryFromSpec` is the single function that turns one into a
+// connectors.json entry, so the bridge's own arguments (which mcp-remote, pinned to which version,
+// where it keeps its state) belong to that function and not to any row. The console's preset array
+// is still hand-written at this commit and therefore still carries the pre-MARKET-6 argument list.
+//
+// So what is pinned here is what CAN actually drift and matter: which connector name a preset
+// takes, which credential fields it asks for, that each of them carries a sentence, and -- for a
+// remote row -- the address and the header names. The bridge arguments are deliberately not
+// compared, because the catalog is now their only author. When the adapter derives its presets
+// from the catalog, this test tightens back to equality on the whole entry and this comment goes.
+test("the console's preset row still names the catalog's connector, fields and endpoint", async () => {
   const presets = await loadConsolePresets();
   for (const preset of presets) {
     const plugin = catalog.findMarketplacePlugin(preset.id);
     assert.ok(plugin != null, `the console offers preset "${preset.id}" and the catalog has no such plugin`);
     assert.equal(plugin.connectorName, preset.name, `${preset.id}: connector name`);
-    assert.deepEqual(catalog.marketplaceConnectorEntry(plugin), preset.entry, `${preset.id}: the connectors.json entry`);
-    assert.deepEqual(plugin.credentialHints, preset.hints ?? {}, `${preset.id}: the credential hints`);
+
+    const spec = catalog.marketplaceConnectorSpec(plugin);
+    assert.ok(spec != null, `${preset.id}: the catalog row installs no connector`);
+    assert.deepEqual(
+      Object.keys(spec.env).sort(),
+      Object.keys(preset.entry.env ?? {}).sort(),
+      `${preset.id}: the environment variable names the operator has to fill`,
+    );
+    // The hint TEXT is the catalog's to write -- MARKET-5 rewrote TinyFish's so that one sentence
+    // covers both places the key lands, which is the whole point of folding the CLI row in. What
+    // both sides must agree on is that every field the operator has to fill carries a sentence,
+    // because a masked box with nothing under it is the bug CONNECT-4 was about.
+    const hints = catalog.marketplaceCredentialHints(plugin);
+    assert.deepEqual(Object.keys(hints).sort(), Object.keys(preset.hints ?? {}).sort(), `${preset.id}: which fields carry a hint`);
+    for (const field of catalog.marketplaceCredentialFields(plugin)) {
+      assert.ok(hints[field]?.length > 0, `${preset.id}: ${field} has no hint in the catalog`);
+      assert.ok((preset.hints ?? {})[field]?.length > 0, `${preset.id}: ${field} has no hint on the console side`);
+    }
+
+    if (spec.transport === "stdio") {
+      // A program is its own entry: nothing is derived, so this stays an exact comparison.
+      assert.deepEqual(catalog.marketplaceConnectorEntry(plugin), preset.entry, `${preset.id}: the connectors.json entry`);
+      continue;
+    }
+    // A remote row: the address and the header names are the contract, and the preset reaches the
+    // same endpoint through whatever bridge arguments it was written with.
+    const argsText = preset.entry.args.join(" ");
+    assert.ok(argsText.includes(spec.url), `${preset.id}: the console's preset does not point at ${spec.url}`);
+    for (const header of Object.keys(spec.headers)) {
+      assert.ok(argsText.toLowerCase().includes(header.toLowerCase()), `${preset.id}: the console's preset does not send ${header}`);
+    }
   }
 });
 
@@ -201,7 +244,14 @@ test("SearchPlugins filters on name, tagline and category", async () => {
   // And the catalog's own filter, which the console's search field uses, agrees. It is a substring
   // match over name, tagline and category, so "search" legitimately finds Slack's tagline too.
   assert.deepEqual(catalog.searchMarketplacePlugins("web search").map((row) => row.id), ["tinyfish"]);
-  assert.deepEqual(catalog.searchMarketplacePlugins("search").map((row) => row.id), ["slack", "tinyfish"]);
+  assert.deepEqual(catalog.searchMarketplacePlugins("search").map((row) => row.id),
+    ["slack", "tinyfish", "exa", "cloudflare-docs", "playwright", "browser-use"]);
+  // And the point of `keywords`: an owner types what they want, not what it is called. None of
+  // these words appears in the tagline, the name or the category of the row that answers.
+  assert.deepEqual(catalog.searchMarketplacePlugins("crm").map((row) => row.id), ["airtable"]);
+  assert.deepEqual(catalog.searchMarketplacePlugins("refund").map((row) => row.id), ["stripe"]);
+  assert.deepEqual(catalog.searchMarketplacePlugins("newsletter").map((row) => row.id), ["resend"]);
+  assert.deepEqual(catalog.searchMarketplacePlugins("wiki").map((row) => row.id), ["deepwiki", "notion"]);
   assert.equal(catalog.searchMarketplacePlugins("").length, catalog.MARKETPLACE_PLUGINS.length);
 });
 

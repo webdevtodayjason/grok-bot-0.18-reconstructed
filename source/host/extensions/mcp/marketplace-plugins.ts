@@ -21,6 +21,9 @@ import {
   findMarketplacePlugin,
   marketplaceConnectorEntry,
   marketplaceCredentialFields,
+  marketplaceConnectorSpec,
+  marketplaceCredentialHints,
+  marketplacePluginKind,
   marketplaceShellToolId,
   searchMarketplacePlugins,
   type MarketplacePlugin,
@@ -81,7 +84,7 @@ function connectorInstalled(reader: MarketplaceInstallReader, plugin: Marketplac
 
 function storedFieldsFor(reader: MarketplaceInstallReader, plugin: MarketplacePlugin): Set<string> {
   const root = reader.rootDir();
-  return new Set(plugin.kind === "shell-tool"
+  return new Set(marketplacePluginKind(plugin) === "shell-tool"
     ? listShellEnvSecretFields(root)
     : plugin.connectorName == null ? [] : listConnectorEnvSecretFields(root, plugin.connectorName));
 }
@@ -106,7 +109,7 @@ export async function marketplacePluginIsInstalled(
   plugin: MarketplacePlugin,
 ): Promise<boolean> {
   if (plugin.opensEditor === true) return false;
-  if (plugin.kind === "shell-tool") return shellToolInstalled(reader, plugin);
+  if (marketplacePluginKind(plugin) === "shell-tool") return shellToolInstalled(reader, plugin);
   return connectorInstalled(reader, plugin);
 }
 
@@ -120,7 +123,7 @@ export function marketplacePluginFields(
     // The environment variable name IS what the operator fills, so it is the honest label; the
     // sentence that says where the value is minted rides in `hint`, which the tool prints.
     label: key,
-    hint: plugin.credentialHints[key] ?? "",
+    hint: marketplaceCredentialHints(plugin)[key] ?? "",
     isRequired: true,
     isSecret: true,
     isStored: stored.has(key),
@@ -138,10 +141,10 @@ export async function marketplacePluginSummary(
     displayName: plugin.name,
     description: plugin.tagline,
     category: plugin.category,
-    kind: plugin.kind,
+    kind: marketplacePluginKind(plugin),
     isInstalled,
     ...(isInstalled ? { installMode: "local" } : {}),
-    connectorCount: plugin.kind === "connector" && plugin.install != null ? 1 : 0,
+    connectorCount: marketplacePluginKind(plugin) === "connector" && plugin.install?.connector != null ? 1 : 0,
     skills: [],
   };
 }
@@ -202,13 +205,17 @@ export async function installMarketplacePlugin(
   if (plugin.opensEditor === true) {
     return {
       pluginId: plugin.id,
-      kind: plugin.kind,
+      kind: marketplacePluginKind(plugin),
       installed: false,
       fields: [],
       refused: `"${plugin.name}" is the connector editor, not an entry: it has no command to install. Ask the operator for the server's command, arguments and environment variable names and use AddMcpServer.`,
     };
   }
-  const shellEntry = shellToolEntryFor(plugin);
+  // A row may install BOTH a connector and a CLI -- TinyFish and GitHub are one product with two
+  // ways in, which is what MARKET-5 folded into a single card. The connector is what "install"
+  // means for such a row: it is the thing the console draws a card and a health line for, and the
+  // CLI rides along with the same stored key. Only a shell-tool-ONLY row takes the installer path.
+  const shellEntry = marketplaceConnectorSpec(plugin) == null ? shellToolEntryFor(plugin) : null;
   if (shellEntry != null) return installShellToolPlugin(reader, plugin, shellEntry);
   const entry = marketplaceConnectorEntry(plugin);
   const name = plugin.connectorName;
@@ -216,7 +223,7 @@ export async function installMarketplacePlugin(
   if (connectorInstalled(reader, plugin)) {
     return {
       pluginId: plugin.id,
-      kind: plugin.kind,
+      kind: marketplacePluginKind(plugin),
       installed: true,
       fields: marketplacePluginFields(reader, plugin),
       refused: `"${plugin.name}" is already installed: "${name}" is in connectors.json and nothing was written. If its entry differs from the catalog's, that is the operator's edit and it is theirs to change in the connector editor (Marketplace \u2192 Plugins \u2192 ${plugin.name}).`,
@@ -225,7 +232,7 @@ export async function installMarketplacePlugin(
   writeLocalConnectorEntry(reader.rootDir(), name, entry);
   return {
     pluginId: plugin.id,
-    kind: plugin.kind,
+    kind: marketplacePluginKind(plugin),
     installed: true,
     fields: marketplacePluginFields(reader, plugin),
   };
@@ -244,7 +251,7 @@ async function installShellToolPlugin(
 ): Promise<MarketplaceInstallOutcome> {
   const answer = (installed: boolean, refused?: string): MarketplaceInstallOutcome => ({
     pluginId: plugin.id,
-    kind: plugin.kind,
+    kind: marketplacePluginKind(plugin),
     installed,
     fields: marketplacePluginFields(reader, plugin),
     ...(refused == null ? {} : { refused }),

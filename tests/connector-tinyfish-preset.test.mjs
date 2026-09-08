@@ -19,7 +19,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { transform } from "esbuild";
+import { build } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -91,6 +91,24 @@ const seed = () => ({
 });
 
 const TINYFISH_ARGS = ["-y", "mcp-remote", "https://agent.tinyfish.ai/mcp", "--transport", "http-only", "--header", "Authorization:Bearer ${TINYFISH_API_KEY}"];
+// MARKET-6 pinned the bridge's own package version in the catalog: a bare `mcp-remote` resolves to
+// whatever npm published this morning, which on grok-bot-local-vm today is 0.8.5. The console's
+// preset array below is still hand-written and still carries the unpinned form, so the two
+// expectations are separate constants until the adapter derives its presets from the catalog.
+// MARKET-6 gave the catalog a seam: it now imports source/shared/marketplace/connector-spec.ts,
+// which is the only module in the tree that knows how a remote endpoint is actually reached. A
+// bare `transform` cannot resolve that import from a data: URL, so the catalog is BUNDLED here the
+// way tests/marketplace-catalog.test.mjs bundles it, and the assertions below are unchanged.
+async function loadCatalogModule() {
+  const result = await build({
+    entryPoints: [path.join(repoRoot, "source/shared/marketplace/catalog.ts")],
+    bundle: true, write: false, format: "esm", platform: "node", target: "es2022", logLevel: "silent",
+  });
+  const code = result.outputFiles[0].text;
+  return import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+}
+
+const TINYFISH_CATALOG_ARGS = ["-y", "mcp-remote@0.8.5", "https://agent.tinyfish.ai/mcp", "--transport", "http-only", "--header", "Authorization:Bearer ${TINYFISH_API_KEY}"];
 const TINYFISH_ARGS_TEXT = '-y mcp-remote https://agent.tinyfish.ai/mcp --transport http-only --header "Authorization:Bearer ${TINYFISH_API_KEY}"';
 
 // -- The preset entry, character for character. Every part of it is load-bearing: the bearer
@@ -252,26 +270,26 @@ test("a host that answers no stored list leaves the card claiming nothing is hel
  * connects to the mount, initializes and lists tools with exactly these two headers.
  * ------------------------------------------------------------------------------------------- */
 test("the catalog's TinyFish entry is the public one until a proxy is configured, and then it bridges to the proxy", async () => {
-  const source = await readFile(path.join(repoRoot, "source/shared/marketplace/catalog.ts"), "utf8");
-  const { code } = await transform(source, { format: "esm", loader: "ts", target: "es2022" });
-  const catalog = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const catalog = await loadCatalogModule();
   const tinyfish = catalog.findMarketplacePlugin("tinyfish");
 
-  // No proxy: byte for byte what an operator install has always had.
-  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish).args, TINYFISH_ARGS);
-  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, {}).args, TINYFISH_ARGS);
-  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: null }).args, TINYFISH_ARGS);
-  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: "" }).args, TINYFISH_ARGS);
+  // No proxy: the public endpoint, the bearer header, the unexpanded placeholder.
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish).args, TINYFISH_CATALOG_ARGS);
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, {}).args, TINYFISH_CATALOG_ARGS);
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: null }).args, TINYFISH_CATALOG_ARGS);
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: "" }).args, TINYFISH_CATALOG_ARGS);
 
   // With a proxy: the mount, the key header the bridge does not own, and the server name.
   const tenant = catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: "http://titanbot-proxy:4000/mcp/" });
   assert.deepEqual(tenant.args, [
-    "-y", "mcp-remote", "http://titanbot-proxy:4000/mcp/", "--transport", "http-only",
+    "-y", "mcp-remote@0.8.5", "http://titanbot-proxy:4000/mcp/", "--transport", "http-only",
     "--header", "x-litellm-api-key:Bearer ${TINYFISH_API_KEY}",
     "--header", "x-mcp-servers:tinyfish",
   ]);
   // The credential name does not move, so the box's own 0600 store and the card keep one name.
-  assert.deepEqual(tenant.env, { TINYFISH_API_KEY: "" });
+  // MCP_REMOTE_CONFIG_DIR rides along on every bridged entry: it is where the bridge keeps its own
+  // state, and left alone that is /root, which a box recreate wipes.
+  assert.deepEqual(tenant.env, { MCP_REMOTE_CONFIG_DIR: "/home/box/sand-data/.mcp-auth", TINYFISH_API_KEY: "" });
   // Authorization stays free: mcp-remote uses it for its own OAuth discovery, which is why the
   // proxy's alternate header name exists at all.
   assert.equal(tenant.args.some((a) => a.startsWith("Authorization:")), false);
@@ -287,10 +305,8 @@ test("the catalog's TinyFish entry is the public one until a proxy is configured
 });
 
 test("the credential card says a customer on a plan needs no key of their own", async () => {
-  const source = await readFile(path.join(repoRoot, "source/shared/marketplace/catalog.ts"), "utf8");
-  const { code } = await transform(source, { format: "esm", loader: "ts", target: "es2022" });
-  const catalog = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
-  const hint = catalog.findMarketplacePlugin("tinyfish").credentialHints.TINYFISH_API_KEY;
+  const catalog = await loadCatalogModule();
+  const hint = catalog.marketplaceCredentialHints(catalog.findMarketplacePlugin("tinyfish")).TINYFISH_API_KEY;
   assert.match(hint, /included with your plan you need no key here at all/);
   // Plain words on the customer's side: no vendor of ours, no dollars, no tool name.
   assert.equal(/LiteLLM|virtual key|proxy/i.test(hint), false);
