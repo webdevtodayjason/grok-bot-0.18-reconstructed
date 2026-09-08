@@ -105,10 +105,15 @@ import "./cursor-free.test.mjs";
 // and all resolve before this module's body runs, which is why they work and nothing else does.
 import "./agent-cap.test.mjs";
 import "./box-health-sweep.test.mjs";
+import "./browser-direct-tools.test.mjs";
+import "./browser-driver-extraction.test.mjs";
+import "./browser-driver-protocol.test.mjs";
+import "./browser-tools-prompt.test.mjs";
 import "./browser-tools.test.mjs";
 import "./cp-admin.test.mjs";
 import "./cp-relay-pair.test.mjs";
 import "./cp-relay-registry.test.mjs";
+import "./deploy-sync-ships-browser-driver.test.mjs";
 import "./login-ledger.test.mjs";
 import "./machine-room-onboarding.test.mjs";
 import "./mail-edge-routing.test.mjs";

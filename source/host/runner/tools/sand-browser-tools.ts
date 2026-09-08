@@ -21,6 +21,15 @@ import {
 } from "./sand-browser-driver-source.js";
 
 export const BOX_CDP_PORT_BASE = 9_222;
+
+/**
+ * BROWSER-1. The browser driver that ships with the product rather than being uploaded per host
+ * process. Every box bind-mounts /opt/titanbot-runtime read-only (deploy/r750/install.sh and the
+ * two compose files), deploy/r750/sync.sh puts runtime/browser-driver/ there, and
+ * scripts/build-host.mjs --deploy stages the same directory for the local box. host-op.mjs is the
+ * box end of one tool call: same base64 request, same marked result line.
+ */
+export const SAND_BROWSER_RUNTIME_DRIVER_PATH = "/opt/titanbot-runtime/browser-driver/host-op.mjs";
 export const PENDING_SCREENSHOT_CAP = 32;
 
 const pendingScreenshots = new Map<string, string>();
@@ -84,6 +93,12 @@ export interface BrowserDriverResponse {
   readonly text?: string | undefined;
   readonly needsLogin?: boolean | undefined;
   readonly blocked?: boolean | undefined;
+  /**
+   * BROWSER-1. What the picture actually is. The older driver only ever took PNGs, so the host
+   * stamped every shot "image/png"; Titan's driver takes a JPEG resized to 1280 wide, and a
+   * provider told png over jpeg bytes fails to decode with nothing worth reading in the message.
+   */
+  readonly mimeType?: string | undefined;
 }
 
 function optionalString(
@@ -137,6 +152,9 @@ export function toDriverResponse(
     ...(optionalBoolean(parsed, "blocked") == null
       ? {}
       : { blocked: optionalBoolean(parsed, "blocked") }),
+    ...(optionalString(parsed, "mimeType") == null
+      ? {}
+      : { mimeType: optionalString(parsed, "mimeType") }),
   };
 }
 
@@ -236,6 +254,8 @@ export interface BrowserDriverOutput {
   readonly title?: string;
   readonly needsLogin?: boolean;
   readonly blocked?: boolean;
+  /** BROWSER-1. The picture's real type, so a JPEG is not handed over labelled as a PNG. */
+  readonly mimeType?: string;
 }
 
 export class SandBrowserDriver<Context = unknown> {
@@ -288,11 +308,18 @@ export class SandBrowserDriver<Context = unknown> {
       readonly toolCallId: string;
       readonly args: Record<string, unknown>;
       readonly skipScreenshot?: boolean;
+      /**
+       * BROWSER-1. Run the driver that ships in the box's runtime mount instead of the one this
+       * host uploads. Titan's four tools take that road: the mounted driver is what knows how to
+       * read a page's words, spot a sign-in wall and take a JPEG, and it is already on every box
+       * because deploy ships it beside the host bundle. Nothing has to be uploaded for it.
+       */
+      readonly useRuntimeDriver?: boolean;
     },
   ): Promise<BrowserDriverOutput> {
     const [windowIndex] = await Promise.all([
       this.resolveWindowIndex(context),
-      this.ensureUploaded(context),
+      input.useRuntimeDriver === true ? Promise.resolve() : this.ensureUploaded(context),
     ]);
 
     const screenshotPath = input.skipScreenshot === true
@@ -314,8 +341,11 @@ export class SandBrowserDriver<Context = unknown> {
       "utf8",
     ).toString("base64");
 
+    const driverPath = input.useRuntimeDriver === true
+      ? SAND_BROWSER_RUNTIME_DRIVER_PATH
+      : SAND_BROWSER_DRIVER_BOX_PATH;
     const shell = await this.dependencies.executeShell(context, {
-      command: `node ${SAND_BROWSER_DRIVER_BOX_PATH} ${encoded}`,
+      command: `node ${driverPath} ${encoded}`,
       name: "node",
       workingDirectory: "/workspace",
       toolCallId: `sand-browser-${input.op}-${sanitizeForBoxPath(input.toolCallId)}`,
@@ -363,7 +393,7 @@ export class SandBrowserDriver<Context = unknown> {
     }
 
     const imageB64 = response.screenshot === true && screenshotPath != null
-      ? await this.fetchScreenshot(context, screenshotPath)
+      ? await this.fetchScreenshot(context, screenshotPath, response.mimeType ?? "image/png")
       : undefined;
     return {
       text: parts.join("\n\n"),
@@ -372,12 +402,14 @@ export class SandBrowserDriver<Context = unknown> {
       ...(response.title == null ? {} : { title: response.title }),
       ...(response.needsLogin == null ? {} : { needsLogin: response.needsLogin }),
       ...(response.blocked == null ? {} : { blocked: response.blocked }),
+      ...(response.mimeType == null ? {} : { mimeType: response.mimeType }),
     };
   }
 
   async fetchScreenshot(
     context: Context,
     boxPath: string,
+    mimeType = "image/png",
   ): Promise<string | undefined> {
     try {
       const bytes = await this.dependencies.downloadFile(
@@ -388,7 +420,7 @@ export class SandBrowserDriver<Context = unknown> {
       if (bytes.length === 0) return undefined;
       const persistImage = this.dependencies.getPersistImage?.();
       if (persistImage != null) {
-        await persistImage(bytes, "image/png").catch(() => null);
+        await persistImage(bytes, mimeType).catch(() => null);
       }
       return Buffer.from(bytes).toString("base64");
     } catch {
@@ -625,6 +657,8 @@ export interface BrowserToolSpec {
   readonly skipScreenshot?: boolean;
   /** BROWSER-1: write one browser_navigation audit row after this tool succeeds. */
   readonly recordsNavigation?: boolean;
+  /** BROWSER-1: run the driver mounted in the box rather than the one this host uploads. */
+  readonly usesRuntimeDriver?: boolean;
 }
 
 /**
@@ -743,6 +777,7 @@ export function createSandBrowserTools<Context>(
           ...(spec.skipScreenshot === undefined
             ? {}
             : { skipScreenshot: spec.skipScreenshot }),
+          ...(spec.usesRuntimeDriver === true ? { useRuntimeDriver: true } : {}),
         });
         if (spec.canNavigate === true && output.isError !== true) {
           dependencies.onPossibleNavigation?.(context);

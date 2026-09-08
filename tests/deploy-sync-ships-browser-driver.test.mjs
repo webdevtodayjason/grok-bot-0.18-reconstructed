@@ -54,6 +54,13 @@ test("install.sh refuses a box whose runtime mount has no driver in it", () => {
     /\[ -f "\$ROOT\/runtime\/browser-driver\/cli\.mjs" \] \|\| die/,
     "the guard sits beside the ones for the bundle and the exec daemon",
   );
+  // And the entry point Titan's own tools run, which is the one a person notices when it is gone:
+  // browser_open on a box with no host-op.mjs cannot say anything better than "no such file".
+  assert.match(
+    installer,
+    /\[ -f "\$ROOT\/runtime\/browser-driver\/host-op\.mjs" \] \|\| die/,
+    "the browser tools run host-op.mjs for every page they open",
+  );
 });
 
 test("the mount that carries the driver into a box is the one every box already has", () => {

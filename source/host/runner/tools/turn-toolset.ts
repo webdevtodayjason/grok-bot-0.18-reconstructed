@@ -1078,8 +1078,12 @@ export function createTurnBrowserToolFactory(
     execute: async (ctx, args: Record<string, unknown>, deps) => {
       const output = await tool.execute(ctx as never, args, { toolCallId: deps.toolCallId });
       if (output.isError === true) throw new Error(output.text);
+      // BROWSER-1. The driver's own type travels with the bytes. This said "image/png" for every
+      // shot, which was true while the only driver took PNGs and became a lie the moment Titan's
+      // took a JPEG: a provider told png and handed jpeg bytes fails to decode, with nothing in
+      // the message worth reading.
       return output.imageB64 != null && output.imageB64.length > 0
-        ? { text: output.text, imageB64: output.imageB64, mimeType: "image/png" }
+        ? { text: output.text, imageB64: output.imageB64, mimeType: output.mimeType ?? "image/png" }
         : output.text;
     },
   }) as unknown as TurnTool);
@@ -1101,8 +1105,12 @@ export function createTurnDirectBrowserToolFactory(
     execute: async (ctx, args: Record<string, unknown>, deps) => {
       const output = await tool.execute(ctx as never, args, { toolCallId: deps.toolCallId });
       if (output.isError === true) throw new Error(output.text);
+      // BROWSER-1. The driver's own type travels with the bytes. This said "image/png" for every
+      // shot, which was true while the only driver took PNGs and became a lie the moment Titan's
+      // took a JPEG: a provider told png and handed jpeg bytes fails to decode, with nothing in
+      // the message worth reading.
       return output.imageB64 != null && output.imageB64.length > 0
-        ? { text: output.text, imageB64: output.imageB64, mimeType: "image/png" }
+        ? { text: output.text, imageB64: output.imageB64, mimeType: output.mimeType ?? "image/png" }
         : output.text;
     },
   }) as unknown as TurnTool);

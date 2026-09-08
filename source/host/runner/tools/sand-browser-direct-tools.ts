@@ -19,6 +19,14 @@
  * these act on what a person would say: the visible words on a button, or a CSS selector when the
  * words are ambiguous. That is why the specs carry their own zod schemas rather than borrowing the
  * op-keyed table (three of the four ops collide by name with the fifteen's).
+ *
+ * And they run a different driver on the box, which is what `usesRuntimeDriver` says. The fifteen
+ * upload their driver from the host process on first use; these four run the one that SHIPS with
+ * the product, in the read-only runtime mount every box already has
+ * (/opt/titanbot-runtime/browser-driver). That is the driver that reads a page's words, notices a
+ * sign-in wall, and takes one JPEG 1280 wide -- the three things the model needs and the fifteen's
+ * ref-and-snapshot driver was never asked for. Same shell call, same result line, same screenshot
+ * pulled back off the box; only the file that runs is different.
  */
 import { z } from "zod";
 import {
@@ -54,6 +62,7 @@ export const DIRECT_BROWSER_TOOL_SPECS: readonly BrowserToolSpec[] = [
     }),
     canNavigate: true,
     recordsNavigation: true,
+    usesRuntimeDriver: true,
   },
   {
     id: "BROWSER_CLICK_TARGET",
@@ -65,6 +74,7 @@ export const DIRECT_BROWSER_TOOL_SPECS: readonly BrowserToolSpec[] = [
     schema: { required: ["target"] },
     parameters: z.object({ target }),
     canNavigate: true,
+    usesRuntimeDriver: true,
   },
   {
     id: "BROWSER_TYPE_TARGET",
@@ -80,6 +90,7 @@ export const DIRECT_BROWSER_TOOL_SPECS: readonly BrowserToolSpec[] = [
       submit: z.boolean().optional().describe("Press Enter after typing, to search or send the form"),
     }),
     canNavigate: true,
+    usesRuntimeDriver: true,
   },
   {
     id: "BROWSER_SCREENSHOT_ONE",
@@ -89,6 +100,7 @@ export const DIRECT_BROWSER_TOOL_SPECS: readonly BrowserToolSpec[] = [
       "Take one fresh picture of the page the browser is showing, without changing anything."
       + " Every other browser tool already returns a picture, so you rarely need this: use it to look again after the page has had a moment to finish loading.",
     parameters: z.object({}),
+    usesRuntimeDriver: true,
   },
 ];
 
