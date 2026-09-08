@@ -252,6 +252,22 @@ export function looksLikeWall(text: string): boolean {
   return WALL_MARKERS.some((marker) => lowered.includes(marker));
 }
 
+/**
+ * A shell is a page that answered 200 with a lot of markup and almost no words: the page draws
+ * itself in a browser and the plain fetch only got the frame. Measured 2026-09-07 from this Mac:
+ * https://www.instagram.com/titaniumcomputing/ answers 200 with a 620,447 byte body that reduces
+ * to 13 characters, "# Instagram", and says none of the wall phrases. example.com reduces to 131
+ * characters from a 559 byte body, and is a real page, as is any small page with few words. So
+ * the rule is a big body that left almost nothing behind, both halves. A shell is handled like a
+ * wall: the backup is asked, and the title is kept only if the backup cannot beat it.
+ */
+const SHELL_MIN_BODY_BYTES = 50_000;
+const SHELL_MAX_CHARS = 400;
+
+export function looksLikeShell(text: string, bodyBytes: number): boolean {
+  return bodyBytes >= SHELL_MIN_BODY_BYTES && text.length < SHELL_MAX_CHARS;
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message || error.name : String(error);
 }
@@ -313,7 +329,7 @@ export async function readPageDirectly(
     ? htmlToText(body)
     : body.trim();
   if (text.length === 0) return { ok: false, why: "empty", detail: "no readable text" };
-  return { ok: true, text, wall: looksLikeWall(text) };
+  return { ok: true, text, wall: looksLikeWall(text) || looksLikeShell(text, body.length) };
 }
 
 /* ------------------------------------------------------------------ *

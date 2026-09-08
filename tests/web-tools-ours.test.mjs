@@ -118,6 +118,33 @@ test("a JavaScript-only page reads as empty and falls through", async () => {
   assert.equal(tinyfish.calls[0].kind, "fetch");
 });
 
+test("a JavaScript shell that leaves only its title behind goes to the backup, and the title is kept only if the backup cannot beat it", async () => {
+  // Measured 2026-09-07 from this Mac: https://www.instagram.com/titaniumcomputing/ answers 200
+  // with a 620,447 byte body that reduces to "# Instagram" and none of the wall phrases. Richard's
+  // Titan read that as the page and told him Instagram was empty.
+  const SHELL = `<html><head><title>Instagram</title></head><body><div id="mount"></div><script>${"x".repeat(200_000)}</script></body></html>`;
+  const good = fakeTinyFish({ page: "the profile, rendered by the backup" });
+  const viaBackup = webTools.createSandWebFetchService({
+    resolveFallback: () => good.fallback,
+    fetchImpl: async () => reply({ body: SHELL }),
+  });
+  assert.equal((await viaBackup(null, "https://www.instagram.com/titaniumcomputing/")).content, "the profile, rendered by the backup");
+  assert.equal(good.calls[0].kind, "fetch");
+
+  const broken = fakeTinyFish({ fail: true });
+  const kept = await webTools.createSandWebFetchService({
+    resolveFallback: () => broken.fallback,
+    fetchImpl: async () => reply({ body: SHELL }),
+  })(null, "https://www.instagram.com/titaniumcomputing/");
+  assert.equal(kept.error, undefined);
+  assert.match(kept.content, /Instagram/);
+
+  // A short real page is not a shell: example.com is 559 bytes that reduce to 131 characters.
+  assert.equal(webTools.looksLikeShell("# Example Domain\n\nThis domain is for use in documentation examples without needing permission. Coordinate this with somebody.", 559), false);
+  assert.equal(webTools.looksLikeShell("# Instagram\n\n", 620_447), true);
+  assert.equal(webTools.looksLikeShell("# A big page\n\nwith three lines of words", 300_000), true);
+});
+
 test("a 200 that is really a sign-in wall goes to the backup, and the wall is kept if the backup cannot beat it", async () => {
   // Measured 2026-09-07 from this Mac: https://www.linkedin.com/feed/ answers 200 with 792
   // characters that are entirely a sign-in form. A status code alone never catches that.

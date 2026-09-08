@@ -1473,9 +1473,7 @@
   }
   function pluginAccountMarkup(plugin, lead) {
     // CP-04: a listener binds per agent with a token the host takes (connectChannel). The local
-    // form is the route that works on this box; the Cursor-hosted flow stays as a labelled
-    // secondary, because getListenerConnectUrl answers with cursor.com's page for an account this
-    // box does not have and clicking it can only end in a dead tab.
+    // form is the only route: the old vendor-hosted connect page is gone from the card.
     const { canConnect, channel } = listenerChannelOf(plugin, lead);
     if (canConnect && channel?.connected !== true) return listenerConnectMarkup(plugin, lead);
     if (canConnect && channel?.connected === true) return listenerConnectedMarkup(plugin, lead);
