@@ -69,6 +69,51 @@ export function readGeneralSettings(text) {
   return settings;
 }
 
+// Which TOP-LEVEL key a block is nested under, by its own name.
+//
+// This exists because of one measured failure. MEASURED ON THE R750 2026-09-08:
+// `pass_through_endpoints` sat at the top level of config.yaml, LiteLLM reads it only from
+// general_settings, and the proxy started clean, logged nothing and answered 404 on every
+// /tinyfish path -- while docs/PROXY.md carried a measured table for the route. A block in the
+// wrong place is silence, so the gate reads where each one actually is.
+export function blockParentOf(text, blockName) {
+  let parent = null;
+  for (const raw of String(text).split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    if (/^\s*#/.test(line) || line.trim() === "") continue;
+    const top = /^([a-z_]+):\s*$/.exec(line);
+    if (top) { parent = top[1]; if (top[1] === blockName) return "(top level)"; continue; }
+    if (new RegExp(`^\\s{2}${blockName}:\\s*$`).test(line)) return parent;
+  }
+  return null;
+}
+
+// The values of a simple `  key:` list nested one level under general_settings, in order.
+export function readNestedList(text, blockName) {
+  const values = [];
+  let inBlock = false;
+  for (const raw of String(text).split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    if (/^\s*#/.test(line) || line.trim() === "") continue;
+    if (new RegExp(`^\\s{2}${blockName}:\\s*$`).test(line)) { inBlock = true; continue; }
+    if (!inBlock) continue;
+    const item = /^ {4}- (\S+)\s*$/.exec(line);
+    if (item) { values.push(item[1]); continue; }
+    break;
+  }
+  return values;
+}
+
+// The same list as deploy/coolify/proxy-config/config.yaml's general_settings.allowed_routes.
+// Kept as a literal rather than read out of the YAML: the gate has to FAIL when the two drift, and
+// reading the file would make them agree by construction.
+const ALLOWED_ROUTES = new Set([
+  "/v1/chat/completions", "/chat/completions", "/v1/models", "/models",
+  "/tinyfish/fetch", "/tinyfish/search", "/mcp", "/mcp/",
+  "/key/generate", "/key/info", "/key/update", "/key/delete",
+  "/model/info", "/spend/logs", "/health/readiness", "/health/liveness",
+]);
+
 const json = (response, status, payload) => {
   const body = JSON.stringify(payload);
   response.writeHead(status, { "content-type": "application/json" });
@@ -138,6 +183,17 @@ export function createStubProxy({ configPath, masterKey, upstreams = {}, cacheTt
       if (chunks.length > 0) { try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { body = null; } }
       state.calls.push({ route, at: Date.now() });
 
+      // The door list, applied BEFORE the credential is looked at, which is where the real proxy
+      // applies it (pre_db_read_auth_checks in litellm/proxy/auth/auth_utils.py). It is one global
+      // list, so it refuses the master key too, and it is what closes GET /health -- a route a
+      // tenant's own virtual key could call, which makes a live call to every provider deployment
+      // on the operator's subscriptions. MEASURED ON THE R750 2026-09-08 before the list existed:
+      // one sweep of /health put three rows in /spend/logs under `litellm-internal-health-check`,
+      // charged to the operator and attributed to no tenant.
+      if (!ALLOWED_ROUTES.has(url.pathname) && !url.pathname.startsWith("/tinyfish/") && !url.pathname.startsWith("/mcp")) {
+        return json(response, 403, errorBody(`Access forbidden: Route ${url.pathname} not allowed`, "auth_error", 403));
+      }
+
       // Readiness needs no credential, the same as the real one: it is what a deploy and a health
       // check ask, and a health route behind a key is a health route nobody can use.
       if (route === "GET /health/readiness") {
@@ -185,8 +241,14 @@ export function createStubProxy({ configPath, masterKey, upstreams = {}, cacheTt
         const asked = url.searchParams.get("key") ?? (who.kind === "key" ? who.token : "");
         const record = state.keys.get(asked);
         if (!record) return json(response, 404, errorBody("Key not found", "not_found", 404));
-        // A key may read its own info and nothing else's, which is what keeps one tenant from
-        // reading another tenant's spend by asking the proxy directly from inside their own box.
+        // A key may read its own info and nothing else's.
+        //
+        // THIS IS STRICTER THAN THE PROXY WE RUN, and saying so here is the point. MEASURED ON THE
+        // R750 2026-09-08: v1.100.0 answers 200 to any virtual key that passes another tenant's
+        // key HASH to /key/info, alias, models, spend and budget included. The door list cannot
+        // close it, because cp/admin.mjs calls /key/info itself and the list is global. That is
+        // PROXY-8. The stub keeps the behaviour the product wants so this leg measures OUR side;
+        // the real gap is a named row and not a silent difference.
         if (who.kind === "key" && asked !== who.token) {
           return json(response, 401, errorBody("Authentication Error, a key may only read its own info.", "auth_error", 401));
         }
@@ -361,6 +423,7 @@ export function createStubProxy({ configPath, masterKey, upstreams = {}, cacheTt
     reload,
     modelNames: () => modelNames(),
     generalSettings: () => readGeneralSettings(config),
+    allowedRoutes: () => [...ALLOWED_ROUTES],
     async listen() {
       await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
       return `http://127.0.0.1:${server.address().port}`;

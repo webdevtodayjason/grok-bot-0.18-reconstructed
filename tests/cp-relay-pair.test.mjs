@@ -158,7 +158,7 @@ test("the included object the control plane writes is the one the relay reads, f
     assert.equal(typeof row.included.enforced, "boolean");
     assert.ok(Array.isArray(row.included.models) && row.included.models.length > 0);
     for (const model of row.included.models) {
-      assert.deepEqual(Object.keys(model).sort(), ["contextWindow", "id", "model", "name", "servedBy"]);
+      assert.deepEqual(Object.keys(model).sort(), ["contextWindow", "id", "model", "modelLabel", "name", "servedBy"]);
       assert.equal(model.id, model.model, "the relay keys a row by id and points the box at model");
       // A plan id must never be able to collide with a row a customer made themselves, because the
       // console drops plan- rows out of anything a customer posts back.

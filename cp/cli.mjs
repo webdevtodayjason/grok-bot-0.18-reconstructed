@@ -45,6 +45,8 @@ import { createProxyClient, proxyKeyAlias } from "./proxy.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
 import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import path from "node:path";
 
 // A credential by its hash, never by its value. Everything this file prints about a key, and
 // everything it compares, goes through here.
@@ -250,6 +252,77 @@ async function tenantList() {
   out(`everybody signs in at https://${answer.tenants[0].host}`);
 }
 
+// Tenant directories on this machine that the ledger has never heard of.
+//
+// MEASURED ON THE R750 2026-09-08: /data/titanbot held demo, north-bay-roofing, richard-avery and
+// titanium, and the ledger held three. north-bay-roofing had a profile directory and a host-secrets
+// file with a machineId in it, no box container, no proxy key and no box-secrets -- a provision
+// that stopped half way on 2026-09-07 and was never finished or cleaned up. It was invisible to the
+// migration, to the spend panel and to any revocation sweep, which is the whole problem with an
+// orphan: nothing that walks the ledger will ever look at it again.
+//
+// This returns the names rather than printing them, because the migration and the revoke path call
+// it too: a tenant tree the panel cannot see gets named at the moment somebody is working on the
+// fleet, not only when they think to ask.
+function orphanTenantDirs(store) {
+  const root = String(config.tenantRoot ?? "");
+  if (root.length === 0) return [];
+  let names;
+  try { names = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name); }
+  catch { return []; }
+  const known = new Set(store.listTenants().map((row) => row.slug));
+  // A leading dot is ours: .orphans is where a retired tree is moved to, and it is not a tenant.
+  return names.filter((name) => !name.startsWith(".") && !known.has(name)).sort();
+}
+
+// Named on every fleet-wide command, so an orphan cannot sit unseen for another week.
+function reportOrphans(store) {
+  const orphans = orphanTenantDirs(store);
+  if (orphans.length === 0) return;
+  out("");
+  out(`${orphans.length} directory tree${orphans.length === 1 ? "" : "s"} under ${config.tenantRoot} that this control plane has no client for:`);
+  for (const name of orphans) out(`  ${name}`);
+  out("  Nothing above touched them. Finish the provision (node cp/cli.mjs tenant add <slug> <name>) or retire the tree.");
+}
+
+// Whether a workspace has a way back, and whether the way back is real.
+//
+// MEASURED ON THE R750 2026-09-08: demo's snapshot held a REVOKED virtual key pointed at the proxy,
+// because the migration ran twice and the second run snapshotted what the first had left; and
+// titanium had no snapshot at all, so `proxy rollback titanium` answered 409. Only richard-avery
+// had a true pre-migration state. useIncluded no longer overwrites a snapshot, which stops the
+// first; this is how an operator sees which of the three they are looking at without opening a
+// 0600 file.
+function rollbackState(store, slug) {
+  const file = path.join(tenantProfileDir(slug, config, store.listSteps(slug)), PROXY_ROLLBACK_NAME);
+  let saved;
+  try { saved = JSON.parse(readFileSync(file, "utf8")); } catch { return "none"; }
+  const secrets = saved?.secrets;
+  if (typeof secrets !== "object" || secrets == null) return "unreadable";
+  const base = String(secrets.SAND_OPENAI_COMPATIBLE_BASE_URL ?? "");
+  const proxyBase = String(config.proxyUrl ?? "");
+  return proxyBase.length > 0 && base.startsWith(proxyBase.replace(/\/v1$/, "")) ? "on-proxy" : "kept";
+}
+
+function tenantOrphans() {
+  const store = openLedger();
+  try {
+    const orphans = orphanTenantDirs(store);
+    if (orphans.length === 0) return out(`every directory under ${config.tenantRoot} belongs to a client in the ledger`);
+    out(`${pad("DIRECTORY", 28)}${pad("BOX-SECRETS", 14)}${pad("PROXY KEY", 12)}CONTENTS`);
+    for (const name of orphans) {
+      const dir = path.join(config.tenantRoot, name);
+      const has = (relative) => { try { statSync(path.join(dir, relative)); return "yes"; } catch { return "no"; } };
+      let contents = [];
+      try { contents = readdirSync(dir).slice(0, 8); } catch { contents = ["(unreadable)"]; }
+      out(`${pad(name, 28)}${pad(has("volumes/data/box-secrets.json"), 14)}${pad(has("profile/model-proxy.json"), 12)}${contents.join(" ")}`);
+    }
+    out("");
+    out("these are invisible to the migration, to the spend panel and to a revocation sweep.");
+    out("finish one with `tenant add`, or retire its tree by hand once you have read what is in it.");
+  } finally { store.close(); }
+}
+
 // Claims an instance that already exists, and tells the registry where its box and its files are so
 // the one relay can serve it. The three optional flags are for an instance that was not built from
 // this repo's compose; the defaults are what Coolify and deploy/r750 already produce.
@@ -389,6 +462,49 @@ async function proxyRevoke(args) {
     }
     out("");
     out("the proxy caches a key for up to its user_api_key_cache_ttl, so a box already mid-request may finish it");
+    reportOrphans(store);
+  } finally { store.close(); }
+}
+
+// The budget and the rate limit applied to keys that ALREADY EXIST, with no re-mint and nothing
+// written into a box.
+//
+// MEASURED ON THE R750 2026-09-08, straight out of the proxy's Postgres: all three tenant keys had
+// max_budget NULL, tpm_limit NULL, rpm_limit NULL and max_parallel_requests NULL, and the four
+// budget rows carried an advisory soft_budget of 20 and nothing else. So nothing at the proxy
+// stopped one customer consuming the whole pooled subscription. mintKey has always sent rpm_limit,
+// but only when CP_PROXY_RPM_LIMIT is set, and it was not set on titanbot-cp -- and a key that was
+// already minted would not have picked it up in any case.
+//
+// This is the command that applies the current settings to the fleet. Run it after changing
+// CP_PROXY_ALLOWANCE_USD, CP_PROXY_ENFORCE or CP_PROXY_RPM_LIMIT on this service; running it twice
+// changes nothing, and running it with none of them set says so rather than quietly doing nothing.
+async function proxyLimits(args) {
+  requireProxyConfigured();
+  const proxy = proxyClient();
+  const store = openLedger();
+  try {
+    if (config.proxyAllowanceUsd <= 0 && config.proxyRpmLimit <= 0) {
+      out("neither CP_PROXY_ALLOWANCE_USD nor CP_PROXY_RPM_LIMIT is set on this control plane, so there is no ceiling to apply");
+      out("set them on the titanbot-cp service and run this again");
+      return;
+    }
+    out(`allowance ${config.proxyAllowanceUsd > 0 ? `$${config.proxyAllowanceUsd} ${config.proxyEnforce ? "enforced (max_budget)" : "observed (soft_budget)"}` : "none"}`);
+    out(`rate limit ${config.proxyRpmLimit > 0 ? `${config.proxyRpmLimit} requests a minute per workspace` : "none"}`);
+    out("");
+    for (const row of proxyTargets(store, args)) {
+      const record = readProxyKey(row.slug, config, { file: keyFileFor(store, row.slug) });
+      if (record == null) { out(`${pad(row.slug, 20)}no key here yet; run proxy mint first`); continue; }
+      const answer = await proxy.updateKey({
+        key: record.key,
+        allowanceUsd: config.proxyAllowanceUsd,
+        enforce: config.proxyEnforce,
+        rpmLimit: config.proxyRpmLimit,
+      });
+      out(`${pad(row.slug, 20)}${pad(record.alias, 26)}${answer.ok ? "applied" : `NOT applied: ${answer.why}`}`);
+    }
+    out("");
+    out("the proxy caches a key for up to its user_api_key_cache_ttl, so a box mid-request may finish on the old ceiling");
   } finally { store.close(); }
 }
 
@@ -397,18 +513,26 @@ function proxyList() {
   try {
     const rows = store.listTenants();
     if (rows.length === 0) return out("no workspaces in the ledger yet");
-    out(`${pad("SLUG", 20)}${pad("ALIAS", 26)}${pad("KEY ID", 18)}${pad("MINTED", 26)}MODELS`);
+    out(`${pad("SLUG", 20)}${pad("ALIAS", 26)}${pad("KEY ID", 18)}${pad("WAY BACK", 12)}${pad("MINTED", 26)}MODELS`);
     for (const row of rows) {
       const record = readProxyKey(row.slug, config, { file: keyFileFor(store, row.slug) });
+      const back = rollbackState(store, row.slug);
       if (record == null) {
-        out(`${pad(row.slug, 20)}${pad(proxyKeyAlias(row.slug), 26)}${pad("-", 18)}${pad("not minted", 26)}`);
+        out(`${pad(row.slug, 20)}${pad(proxyKeyAlias(row.slug), 26)}${pad("-", 18)}${pad(back, 12)}${pad("not minted", 26)}`);
         continue;
       }
       // The alias, the id and when. Never the key, on a terminal an operator may be sharing.
-      out(`${pad(row.slug, 20)}${pad(record.alias, 26)}${pad(`${String(record.keyId).slice(0, 12)}...`, 18)}${pad(record.mintedAt || "unknown", 26)}${record.models.map((model) => model.id).join(", ")}`);
+      out(`${pad(row.slug, 20)}${pad(record.alias, 26)}${pad(`${String(record.keyId).slice(0, 12)}...`, 18)}${pad(back, 12)}${pad(record.mintedAt || "unknown", 26)}${record.models.map((model) => model.id).join(", ")}`);
+    }
+    if (rows.some((row) => rollbackState(store, row.slug) !== "kept")) {
+      out("");
+      out("WAY BACK is the pre-migration snapshot `proxy rollback` replays. `on-proxy` means the snapshot");
+      out("holds a plan endpoint rather than what the box had before, so replaying it would leave that box");
+      out("on the proxy; `none` means that workspace rolls back by picking an endpoint in its console instead.");
     }
     out("");
     out(config.proxyUrl ? `proxy ${config.proxyUrl}` : "CP_PROXY_URL is not set on this control plane, so nothing is included with any plan yet");
+    reportOrphans(store);
   } finally { store.close(); }
 }
 
@@ -494,7 +618,19 @@ async function proxyMigrate(args) {
         out(`  remaining ${line.where}.${line.name}: ${line.length} chars, sha256 ${String(line.sha256 ?? "").slice(0, 12)}`);
       }
       out(`  removed ${forgotten.removedCount ?? 0} value${forgotten.removedCount === 1 ? "" : "s"} matching ${prefix}`);
+      // The store sweep's own verdict, said out loud. `storeCarrying` counts files inside the box's
+      // content-addressed store that STILL hold the value and were deliberately not deleted -- a
+      // pack of unrelated files, an agent's conversation database, an audit log. Removing one of
+      // those to chase a credential is the customer's data gone, so they are named and the honest
+      // next step is said rather than implied.
+      if (Number(forgotten.storeCarrying ?? 0) > 0) {
+        out(`  ${forgotten.storeCarrying} file(s) in this box's own store still carry that value and were NOT deleted.`);
+        out("  Rotate the credential at the vendor. That is the only thing that ends it.");
+      } else if (forgotten.storeSwept) {
+        out("  the box's own store was swept as well and carries nothing matching");
+      }
     }
+    reportOrphans(store);
   } finally { store.close(); }
 }
 
@@ -556,11 +692,13 @@ const USAGE = [
   "node cp/cli.mjs account demote <email>",
   "node cp/cli.mjs tenant add <slug> <name> [--dry-run]",
   "node cp/cli.mjs tenant list",
+  "node cp/cli.mjs tenant orphans",
   "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]",
   "node cp/cli.mjs proxy list",
   "node cp/cli.mjs proxy mint <slug|--all>",
   "node cp/cli.mjs proxy rotate <slug|--all>",
   "node cp/cli.mjs proxy revoke <slug|--all>",
+  "node cp/cli.mjs proxy limits <slug|--all>",
   "node cp/cli.mjs proxy migrate <slug|--all> [--forget <sha256 prefix>] [--dry-run]",
   "node cp/cli.mjs proxy rollback <slug>",
   "node cp/cli.mjs session verify <token>",
@@ -582,11 +720,13 @@ const commands = {
   "account demote": accountDemote,
   "tenant add": tenantAdd,
   "tenant list": tenantList,
+  "tenant orphans": tenantOrphans,
   "tenant adopt": tenantAdopt,
   "proxy list": proxyList,
   "proxy mint": proxyMint,
   "proxy rotate": proxyRotate,
   "proxy revoke": proxyRevoke,
+  "proxy limits": proxyLimits,
   "proxy migrate": proxyMigrate,
   "proxy rollback": proxyRollback,
   "session verify": sessionVerify,

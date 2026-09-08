@@ -391,3 +391,95 @@ test("no migration door exists when this console has no control plane", async ()
     }
   } finally { relay.stop(); }
 });
+
+test("a second migration keeps the first way back instead of overwriting it with a plan state", async () => {
+  const { relay, stub, box, demo } = await startMigrationConsole();
+  const rollback = path.join(demo.profile, "model-proxy-rollback.json");
+  try {
+    // MEASURED ON THE R750 2026-09-08, which is why this case exists. demo was migrated twice
+    // inside a minute while a re-mint hazard was being fixed. The first run saved the true
+    // pre-migration state; the second run saved what the first had left, a REVOKED virtual key
+    // pointed at the proxy. `proxy rollback demo` would have written that back into the box and
+    // taken the tenant off the air while reporting success.
+    const first = JSON.parse(await (await asAdmin(relay, "/admin/tenants/demo/use-included", { model: "plan-zai" })).text());
+    assert.equal(first.rollback, "written");
+    const saved = readFileSync(rollback, "utf8");
+    assert.equal(JSON.parse(saved).secrets.SAND_OPENAI_COMPATIBLE_API_KEY, OPERATOR_KEY);
+
+    const second = JSON.parse(await (await asAdmin(relay, "/admin/tenants/demo/use-included", { model: "plan-minimax" })).text());
+    assert.equal(second.rollback, "kept", "a second migration overwrote the way back");
+    assert.equal(readFileSync(rollback, "utf8"), saved, "the snapshot changed under a second migration");
+
+    // And the rollback still lands on what the box actually had, not on the plan.
+    await asAdmin(relay, "/admin/tenants/demo/rollback-included", {});
+    assert.equal(stub.secretsOf(box).SAND_OPENAI_COMPATIBLE_API_KEY, OPERATOR_KEY);
+    assert.equal(stub.secretsOf(box).SAND_OPENAI_COMPATIBLE_MODEL, "qwen3.8-max");
+  } finally { relay.stop(); }
+});
+
+test("a box already on the plan records no way back rather than recording the plan as one", async () => {
+  const { relay, stub, box, demo } = await startMigrationConsole();
+  const rollback = path.join(demo.profile, "model-proxy-rollback.json");
+  try {
+    // titanium's shape on the R750: a workspace pointed at the proxy with no snapshot beside it.
+    // The old code would have taken one here, and the thing it recorded would have been the plan.
+    stub.writeSecrets(box, {
+      SAND_OPENAI_COMPATIBLE_BASE_URL: "http://titanbot-proxy:4000/v1",
+      SAND_OPENAI_COMPATIBLE_MODEL: "plan-zai",
+      SAND_OPENAI_COMPATIBLE_API_KEY: "sk-virtual-for-demo",
+    });
+    const body = JSON.parse(await (await asAdmin(relay, "/admin/tenants/demo/use-included", { model: "plan-zai" })).text());
+    assert.equal(body.rollback, "none");
+    assert.throws(() => readFileSync(rollback, "utf8"), "a plan state was written as the way back");
+    // And the door says so plainly rather than restoring something invented.
+    assert.equal((await asAdmin(relay, "/admin/tenants/demo/rollback-included", {})).status, 409);
+  } finally { relay.stop(); }
+});
+
+test("forget-provider-keys reaches the box's own store, and names what it will not delete", async () => {
+  const { relay, stub, box } = await startMigrationConsole();
+  try {
+    // The blob the first absence proof missed. MEASURED ON THE R750 2026-09-08: box-store-sync had
+    // copied box-secrets.json into the box's content-addressed store, so a byte-identical copy of
+    // the operator's key sat at /var/lib/sand-box-store/<id>/blobs/<sha>, mode 0644 root:root, in
+    // every one of the three boxes -- and the agent host runs as root inside the box. The removal
+    // read three files and reported the key absent while it was still there.
+    const blob = stub.writeStoreFile(box, "store-1/blobs/aaaa", JSON.stringify({ version: 1, secrets: {
+      SAND_OPENAI_COMPATIBLE_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      SAND_OPENAI_COMPATIBLE_MODEL: "qwen3.8-max",
+      SAND_OPENAI_COMPATIBLE_API_KEY: OPERATOR_KEY,
+    } }));
+    // And something that is NOT a secrets document but carries the same bytes: a pack, a
+    // conversation database, an audit log. Deleting one of these to chase a credential is the
+    // customer's data gone, so it is named and left where it is.
+    const pack = stub.writeStoreFile(box, "store-1/packs/pack-1", `some packed bytes ${OPERATOR_KEY} and more`);
+
+    const raw = await (await asAdmin(relay, "/admin/tenants/demo/forget-provider-keys", { prefix: sha12(OPERATOR_KEY) })).text();
+    const body = JSON.parse(raw);
+    assert.equal(raw.includes(OPERATOR_KEY), false, "the answer must not carry what it swept for");
+    assert.equal(body.storeSwept, true);
+    assert.equal(body.removed.some((entry) => entry.file === "box-store" && entry.name === blob), true,
+      "the stored copy of box-secrets.json was not removed");
+    assert.throws(() => readFileSync(blob, "utf8"), "the blob is still on disk");
+    assert.equal(body.storeCarrying, 1);
+    assert.equal(body.remaining.some((entry) => entry.where === "box-store" && entry.name === pack), true,
+      "a store file that still carries the value has to be named");
+    assert.equal(readFileSync(pack, "utf8").includes(OPERATOR_KEY), true, "an unrelated store file was deleted");
+  } finally { relay.stop(); }
+});
+
+test("a second forget still sweeps the store when the three files are already clean", async () => {
+  const { relay, stub, box } = await startMigrationConsole();
+  try {
+    // The PROXY-7 shape: the live files were cleaned by an earlier run, so there is no value left
+    // to grep the store with. Found by SHAPE instead, which is why the sweep parses candidates
+    // rather than trusting what the three files happen to still hold.
+    stub.writeSecrets(box, { SAND_OPENAI_COMPATIBLE_MODEL: "plan-zai" });
+    const blob = stub.writeStoreFile(box, "store-1/blobs/bbbb",
+      JSON.stringify({ servers: { tinyfish: { TINYFISH_API_KEY: OPERATOR_TINYFISH } } }));
+
+    const body = JSON.parse(await (await asAdmin(relay, "/admin/tenants/demo/forget-provider-keys", { prefix: sha12(OPERATOR_TINYFISH) })).text());
+    assert.equal(body.removed.some((entry) => entry.file === "box-store" && entry.name === blob), true);
+    assert.throws(() => readFileSync(blob, "utf8"));
+  } finally { relay.stop(); }
+});

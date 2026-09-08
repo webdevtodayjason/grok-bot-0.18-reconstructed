@@ -100,6 +100,77 @@ general_settings:
   # subscription to answer a question nobody asked and can trip a rate limit on its own.
   background_health_checks: false
 
+  # ---- WHERE THE PASS-THROUGH BLOCK LIVES IS THE WHOLE FEATURE ---------------------------------
+  # `pass_through_endpoints` is read from general_settings and NOWHERE ELSE. MEASURED ON THE R750
+  # 2026-09-08 with the identical two entries at the TOP LEVEL of this file: the proxy started
+  # clean, logged nothing, listed no /tinyfish path in its own openapi.json, and answered every
+  # call to one with `404 {"detail":"Not Found"}`. It looked configured and was absent.
+  # proxy_server.py in the image we run (v1.100.0) has exactly one line that registers these:
+  #   if general_settings.get("pass_through_endpoints", None) is not None:
+  # An unknown key at the top level of a LiteLLM config is not an error, it is silence. So the
+  # indentation below is load bearing, and scripts/verify-proxy.mjs asks the PROXY whether the
+  # route exists rather than trusting this file -- a key in the wrong place has to fail a gate.
+  #
+  # `mcp_servers` is the opposite and stays where it is: proxy_server.py reads that one with
+  # config.get("mcp_servers"), at the top level. The two are not interchangeable.
+
+  # ---- THE DOOR LIST ---------------------------------------------------------------------------
+  # Every route this proxy serves, and nothing else. A route not on this list answers 403 to every
+  # caller, which is what closes GET /health. A customer's virtual key could call /health, and
+  # /health makes a LIVE call to every provider deployment on the operator's own subscriptions:
+  # free to that tenant, attributed to nobody, and a rate-limit amplifier against a shared plan.
+  # MEASURED ON THE R750 2026-09-08 before this list existed: one sweep of /health put three rows
+  # in /spend/logs under the alias `litellm-internal-health-check`, spend $0.000043, on the
+  # operator. background_health_checks: false stops the timer, not the tenant-triggered call.
+  #
+  # READ THIS BEFORE ADDING A CALL ANYWHERE. The check is `route not in allowed_routes` in
+  # litellm/proxy/auth/auth_utils.py, run from pre_db_read_auth_checks BEFORE the key is looked
+  # up, so it applies to the MASTER KEY TOO, and the match is an exact string with no wildcards.
+  # A new control-plane call to a path that is not below fails 403 with no other clue. Both sides
+  # of the product are marked so the next person can see what they would be taking away.
+  #
+  # It does NOT separate a tenant from the operator: it is one global list, so /key/info and
+  # /model/info stay open to a virtual key because cp/proxy.mjs calls both. That residue is
+  # PROXY-8 in docs/GAP-ANALYSIS.md, named rather than implied.
+  allowed_routes:
+    # what a customer's box calls
+    - /v1/chat/completions
+    - /chat/completions
+    - /v1/models
+    - /models
+    - /tinyfish/fetch
+    - /tinyfish/search
+    - /mcp
+    - /mcp/
+    # what the control plane, the installer and the gate call
+    - /key/generate
+    - /key/info
+    - /key/update
+    - /key/delete
+    - /model/info
+    - /spend/logs
+    - /health/readiness
+    - /health/liveness
+
+  pass_through_endpoints:
+    - path: /tinyfish/fetch
+      target: https://api.fetch.tinyfish.ai
+      headers:
+        x-api-key: os.environ/PROXY_TINYFISH_KEY_1
+        content-type: application/json
+      # Metering. A pass_through call is not a token call, so there is nothing to price from a usage
+      # block; a flat per-request cost is what puts it on the same spend ledger as everything else and
+      # therefore into the admin console's per-client number. TinyFish's own fetch and search are free
+      # on this plan, so the figure is deliberately small and exists to make the call COUNTABLE.
+      cost_per_request: 0.0001
+    - path: /tinyfish/search
+      target: https://api.search.tinyfish.ai
+      headers:
+        x-api-key: os.environ/PROXY_TINYFISH_KEY_1
+        content-type: application/json
+      cost_per_request: 0.0001
+
+
 # ---- TinyFish, through the same door -------------------------------------------------------------
 # The connector preset and the web-fetch/search backup route (source/host/extensions/inference/
 # web-tools.ts and tinyfish-route.ts, CURSOR-1) keep working when they are pointed here, and the
@@ -123,28 +194,11 @@ mcp_servers:
     authentication_token: os.environ/PROXY_TINYFISH_KEY_1
     description: "TinyFish browser automation, billed to the operator's pooled subscription"
 
-pass_through_endpoints:
-  - path: /tinyfish/fetch
-    target: https://api.fetch.tinyfish.ai
-    headers:
-      x-api-key: os.environ/PROXY_TINYFISH_KEY_1
-      content-type: application/json
-    # Metering. A pass_through call is not a token call, so there is nothing to price from a usage
-    # block; a flat per-request cost is what puts it on the same spend ledger as everything else and
-    # therefore into the admin console's per-client number. TinyFish's own fetch and search are free
-    # on this plan, so the figure is deliberately small and exists to make the call COUNTABLE.
-    cost_per_request: 0.0001
-  - path: /tinyfish/search
-    target: https://api.search.tinyfish.ai
-    headers:
-      x-api-key: os.environ/PROXY_TINYFISH_KEY_1
-      content-type: application/json
-    cost_per_request: 0.0001
-
 # ---- reserved for CLOUD-BROWSER-1 ----------------------------------------------------------------
 # Cloud browsers ride this proxy rather than getting a door of their own: same virtual key, same
 # meter, same revocation. Left commented so the shape is decided now and the credential is not.
-# docs/PROXY.md has the section stub.
+# docs/PROXY.md has the section stub. It goes UNDER general_settings, beside the two TinyFish
+# entries, and its path has to be added to allowed_routes in the same edit or it answers 403.
 #
 #  - path: /browser/
 #    target: https://api.browserbase.com

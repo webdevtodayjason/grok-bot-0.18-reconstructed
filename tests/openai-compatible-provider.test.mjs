@@ -379,6 +379,9 @@ const PLAN_ENV = {
   SAND_OPENAI_COMPATIBLE_API_KEY: "sk-a-virtual-key",
   SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: "Z.AI GLM (included with your plan)",
   SAND_OPENAI_COMPATIBLE_SERVED_BY: "Z.AI",
+  // The name the customer hears for the model. Without it the note read `plan-zai` back to them,
+  // which is a routing alias only the operator's proxy uses.
+  SAND_OPENAI_COMPATIBLE_MODEL_LABEL: "GLM-4.6",
 };
 
 // Swaps the whole SAND_OPENAI_COMPATIBLE_ family for the turn and puts it back afterwards, so a
@@ -386,7 +389,8 @@ const PLAN_ENV = {
 function withEnv(t, values) {
   const names = ["SAND_DATA_ROOT", "SAND_OPENAI_COMPATIBLE_BASE_URL", "SAND_OPENAI_COMPATIBLE_MODEL",
     "SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME",
-    "SAND_OPENAI_COMPATIBLE_SERVED_BY", "SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW"];
+    "SAND_OPENAI_COMPATIBLE_SERVED_BY", "SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW",
+    "SAND_OPENAI_COMPATIBLE_MODEL_LABEL"];
   const restore = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   t.after(() => { for (const name of names) { if (restore[name] === undefined) delete process.env[name]; else process.env[name] = restore[name]; } });
   for (const name of names) delete process.env[name];
@@ -450,7 +454,10 @@ test("the persona note names the plan, never the container the proxy runs in", a
 
   await session.module.runRoutedProviderText("openai-compatible", [{ role: "user", content: "what do you run on" }]);
   const note = server.requests[0].body.messages[0].content;
-  assert.match(note, /answering through "Z\.AI GLM \(included with your plan\)", model 'plan-zai' at Z\.AI\./);
+  assert.match(note, /answering through "Z\.AI GLM \(included with your plan\)", model 'GLM-4\.6' at Z\.AI\./);
+  // The routing alias is the operator's plumbing, and this note is the single place a customer is
+  // most likely to ask. The four PLAN_REFUSAL sentences keep aliases out; so does this one now.
+  assert.equal(note.includes("plan-zai"), false, "the persona note must not name the routing alias");
   // The base URL's host is a loopback address here and `titanbot-proxy` on the R750. Neither is a
   // thing to tell a customer, and the assertion is the address rather than the name so it measures
   // the substitution rather than a string that happens not to appear.

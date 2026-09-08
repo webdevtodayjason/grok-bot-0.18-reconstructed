@@ -164,6 +164,100 @@ const readConnectorSecrets = async (t) => {
 };
 const CONNECTORS_PATH = "/home/box/sand-data/connectors.json";
 
+// ---- the box store, the fourth place a credential lives ----------------------------------------
+//
+// MEASURED ON THE R750 2026-09-08, and it is why the first removal did not remove anything. The
+// migration deleted the operator's provider key from box-secrets.json in all three boxes and the
+// proof read those three files back and reported it absent. It was not absent: box-store-sync had
+// already copied box-secrets.json into the box's own content-addressed store, so a byte-identical
+// 539-byte copy of the same 113-character key sat at
+//   /var/lib/sand-box-store/<store id>/blobs/<sha256 of the file>
+// mode 0644 root:root, in every one of the three boxes, and the agent host runs as root inside the
+// box, so any shell tool call a customer's agent makes could read it. An absence proof scoped to
+// three files is not an absence proof.
+//
+// Two halves fix it, and both are needed. The host no longer puts these files in the store at all
+// (source/host/durable-file-policy.ts, BOX_STORE_SECRET_FILE_NAMES), which stops the next copy;
+// and the sweep below takes out the copies already there, which the exclusion cannot do.
+const BOX_STORE_DIR = "/var/lib/sand-box-store";
+// The two file names whose stored copies this route is allowed to DELETE outright. Anything else in
+// the store that carries the value is reported and left alone: a blob can be a pack holding
+// unrelated files, an agent's conversation database or a Chrome profile, and deleting one of those
+// to chase a credential is the customer's data gone (BOX-6). Reporting it is the honest answer, and
+// rotating the credential at the vendor is the only thing that ends it.
+const STORE_SECRET_MARKERS = ['"secrets"', '"servers"'];
+
+// What a grep inside the box printed, as paths. Anchored on being ABSOLUTE rather than on the store
+// prefix: the grep was pointed at the store directory, so everything it names is under it, and the
+// test harness reaches a directory on this Mac instead of a container so the prefix there is its
+// own. Anchoring on the prefix silently found nothing under the harness, which is the shape of bug
+// this whole sweep exists because of.
+const storeLines = (text) => String(text ?? "").split("\n").map((line) => line.trim()).filter((line) => line.startsWith("/"));
+
+// Every path under the store whose bytes contain one of `values`. One pass, patterns on stdin so no
+// secret ever reaches a command line, where `ps` inside the box would show it.
+async function storePathsCarrying(t, values) {
+  if (values.length === 0) return [];
+  const out = await new Promise((resolve) => {
+    const child = execFile("docker", ["exec", "-i", t.box, "sh", "-c",
+      `grep -rlsaF -f - -- ${BOX_STORE_DIR} 2>/dev/null || true`],
+      { maxBuffer: 8 << 20, timeout: 120_000 }, (err, stdout) => resolve(err != null && !stdout ? "" : String(stdout ?? "")));
+    child.stdin.end(values.join("\n") + "\n");
+  });
+  return storeLines(out);
+}
+
+// The stored copies of the two secret files, as {path, parsed}. Found by SHAPE rather than by name,
+// because a blob is named after the sha256 of its contents and carries no name at all: the marker
+// grep narrows the store to a handful of candidates, and each one is parsed here.
+async function storedSecretDocuments(t) {
+  const found = await new Promise((resolve) => {
+    execFile("docker", ["exec", t.box, "sh", "-c",
+      `grep -rlsa ${STORE_SECRET_MARKERS.map((one) => `-e '${one}'`).join(" ")} -- ${BOX_STORE_DIR} 2>/dev/null || true`],
+      { maxBuffer: 8 << 20, timeout: 120_000 }, (err, stdout) => resolve(err != null && !stdout ? "" : String(stdout ?? "")));
+  });
+  const paths = storeLines(found);
+  const documents = [];
+  for (const filePath of paths.slice(0, 200)) {
+    const raw = await dockerOut(["exec", t.box, "sh", "-c", `head -c 262144 -- '${filePath}'`]);
+    if (raw == null) continue;
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { continue; }
+    if (typeof parsed !== "object" || parsed == null || Array.isArray(parsed)) continue;
+    // box-secrets.json is {version, secrets:{...}}; connector-env-secrets.json is {servers:{...},
+    // shell:{...}}. A pack, a database or a profile matches neither and is never a delete.
+    const isSecrets = typeof parsed.secrets === "object" && parsed.secrets != null && !Array.isArray(parsed.secrets);
+    const isConnectors = typeof parsed.servers === "object" && parsed.servers != null && !Array.isArray(parsed.servers);
+    if (isSecrets || isConnectors) documents.push({ path: filePath, parsed });
+  }
+  return documents;
+}
+
+// Every string value inside one of those documents, one level deep on the sections that hold them.
+function valuesOfStoredDocument(parsed) {
+  const values = [];
+  const push = (value) => { if (typeof value === "string" && value.length > 0) values.push(value); };
+  for (const value of Object.values(parsed?.secrets ?? {})) push(value);
+  for (const section of ["servers", "shell"]) {
+    const holder = parsed?.[section];
+    if (typeof holder !== "object" || holder == null || Array.isArray(holder)) continue;
+    for (const value of Object.values(holder)) {
+      if (typeof value === "string") push(value);
+      else if (typeof value === "object" && value != null && !Array.isArray(value)) for (const inner of Object.values(value)) push(inner);
+    }
+  }
+  return values;
+}
+
+async function removeStorePaths(t, paths) {
+  if (paths.length === 0) return;
+  await new Promise((resolve) => {
+    const child = execFile("docker", ["exec", "-i", t.box, "sh", "-c", "xargs -0 rm -f --"],
+      { timeout: 60_000 }, () => resolve());
+    child.stdin.end(paths.map((one) => `${one}\0`).join(""));
+  });
+}
+
 // The connector file lives in the box's sand-data, which is a docker VOLUME -- there is no path on
 // the host to open it with. Read and write it through the box the same way the secrets file is
 // handled, so adding a connector is an edit in the UI rather than a docker exec.
@@ -257,7 +351,7 @@ function includedRows(t) {
   if (included == null) return [];
   return included.models.map((row) => ({
     id: row.id, name: row.name, model: row.model, baseUrl: included.baseUrl,
-    contextWindow: row.contextWindow, servedBy: row.servedBy,
+    contextWindow: row.contextWindow, servedBy: row.servedBy, modelLabel: row.modelLabel,
     // Set HERE, out of the registry, and stripped from anything a request body carries before a
     // catalog is written. It is the flag probe() reads to skip the tenant guard, so where it can
     // come from is the whole of that bypass's safety.
@@ -999,6 +1093,15 @@ async function handleTenantMigration(req, res, slug, step) {
 // operator key leaves this box the proxy is the only thing answering for it: a rollback that
 // depends on remembering what was there is not a rollback.
 const ROLLBACK_NAME = "model-proxy-rollback.json";
+// The snapshot on disk, or null when there is none and null when what is there is not readable.
+// Both callers treat those the same on purpose: a file that cannot be parsed is not a way back,
+// and the one thing neither of them may do is overwrite it on the strength of that.
+async function readRollback(rollbackFile) {
+  let saved;
+  try { saved = JSON.parse(await readFile(rollbackFile, "utf8")); } catch { return null; }
+  const secrets = saved?.secrets;
+  return (typeof secrets === "object" && secrets != null && !Array.isArray(secrets)) ? secrets : null;
+}
 async function useIncluded(res, t, body, answer) {
   const included = t.entry?.included ?? null;
   if (included == null) return fail(res, 409, `no included set for ${t.slug}`);
@@ -1011,19 +1114,47 @@ async function useIncluded(res, t, body, answer) {
 
   const before = await readSecrets(t);
   const rollbackFile = path.join(t.profileDir, ROLLBACK_NAME);
-  await writeFile(rollbackFile, JSON.stringify({ version: 1, secrets: before }), { mode: 0o600 });
-  // writeFile's mode applies only when it creates the file, and this one is rewritten per tenant
-  // on every migration attempt, so the mode is set again rather than assumed.
-  await chmod(rollbackFile, 0o600).catch(() => {});
+  // THE SNAPSHOT IS WRITTEN ONCE AND NEVER OVERWRITTEN, and this is the second-run bug it fixes.
+  //
+  // MEASURED ON THE R750 2026-09-08: demo was migrated twice inside a minute while the re-mint
+  // hazard was being fixed. The first run saved the true pre-migration state; the second run saved
+  // what the first run had left, which is a REVOKED virtual key pointed at the proxy. `proxy
+  // rollback demo` would have written that key back into the box and taken the tenant off the air,
+  // and the command would have reported success. A way back that a second attempt destroys is not
+  // a way back.
+  //
+  // Two guards, because either alone leaves a hole. A snapshot that exists is kept whatever it
+  // holds; and a box that is ALREADY on a plan endpoint has no pre-migration state left to save,
+  // so nothing is written rather than a plan state being recorded as the way home.
+  const already = await readRollback(rollbackFile);
+  const onPlan = String(before?.SAND_OPENAI_COMPATIBLE_BASE_URL ?? "") === String(plan.baseUrl ?? "");
+  // "kept" the snapshot was already there, "written" this call took it, "none" there was nothing
+  // pre-migration left to take. The answer carries it so `proxy migrate` can print the truth
+  // instead of "the way back is kept at ..." over a file it did not write.
+  let rollback = "kept";
+  if (already == null) {
+    if (onPlan) rollback = "none";
+    else {
+      await writeFile(rollbackFile, JSON.stringify({ version: 1, secrets: before }), { mode: 0o600 });
+      // writeFile's mode applies only when it CREATES the file, so the mode is set again rather
+      // than assumed.
+      await chmod(rollbackFile, 0o600).catch(() => {});
+      rollback = "written";
+    }
+  }
 
   const next = { ...before, SAND_OPENAI_COMPATIBLE_BASE_URL: plan.baseUrl, SAND_OPENAI_COMPATIBLE_MODEL: plan.model, SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: plan.name, SAND_OPENAI_COMPATIBLE_API_KEY: included.key };
   for (const key of ["SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR"]) delete next[key];
   if (plan.servedBy) next.SAND_OPENAI_COMPATIBLE_SERVED_BY = plan.servedBy;
   else delete next.SAND_OPENAI_COMPATIBLE_SERVED_BY;
+  // What this box tells the customer it is running. Without it the persona note reads the routing
+  // alias `plan-zai` back to them, which is a name only the operator's proxy uses.
+  if (plan.modelLabel) next.SAND_OPENAI_COMPATIBLE_MODEL_LABEL = plan.modelLabel;
+  else delete next.SAND_OPENAI_COMPATIBLE_MODEL_LABEL;
   if (plan.contextWindow) next.SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW = String(plan.contextWindow);
   await writeSecrets(t, next);
   return answer({
-    using: plan.id, endpointName: plan.name, rollbackFile,
+    using: plan.id, endpointName: plan.name, rollbackFile, rollback,
     // Names, lengths and hash prefixes. The key itself has already gone into the box and does not
     // come back out through this answer.
     wrote: Object.keys(next).filter((name) => name.startsWith("SAND_OPENAI_COMPATIBLE_")).sort()
@@ -1043,11 +1174,15 @@ async function forgetProviderKeys(res, t, body, answer) {
   if (!/^[0-9a-f]{6,64}$/.test(prefix)) return fail(res, 400, "prefix must be at least six hex characters of a sha256");
   const matches = (value) => String(value ?? "").length > 0 && sha256Hex(value).startsWith(prefix);
   const removed = [];
+  // Every distinct value this call has proved is the one being forgotten. It is what the store
+  // sweep greps for, and it never leaves this function.
+  const hit = new Set();
+  const noteHit = (value) => { hit.add(String(value)); return true; };
 
   const secrets = await readSecrets(t);
   const keptSecrets = {};
   for (const [name, value] of Object.entries(secrets)) {
-    if (matches(value)) removed.push({ file: "box-secrets.json", ...evidenceOf(name, value) });
+    if (matches(value) && noteHit(value)) removed.push({ file: "box-secrets.json", ...evidenceOf(name, value) });
     else keptSecrets[name] = value;
   }
   if (removed.length > 0) await writeSecrets(t, keptSecrets);
@@ -1059,6 +1194,7 @@ async function forgetProviderKeys(res, t, body, answer) {
   let catalogChanged = false;
   const endpoints = (catalog.endpoints ?? []).map((row) => {
     if (!matches(row?.apiKey)) return row;
+    noteHit(row.apiKey);
     catalogChanged = true;
     removed.push({ file: "endpoints.json", ...evidenceOf(`${row.id}.apiKey`, row.apiKey) });
     return { ...row, apiKey: "" };
@@ -1077,6 +1213,7 @@ async function forgetProviderKeys(res, t, body, answer) {
       if (typeof fields !== "object" || fields == null || Array.isArray(fields)) continue;
       for (const [field, value] of Object.entries(fields)) {
         if (!matches(value)) continue;
+        noteHit(value);
         delete fields[field];
         connectorsChanged = true;
         removed.push({ file: "connector-env-secrets.json", ...evidenceOf(`servers.${server}.${field}`, value) });
@@ -1084,6 +1221,30 @@ async function forgetProviderKeys(res, t, body, answer) {
     }
   }
   if (connectorsChanged) await writeBoxFile(t, CONNECTOR_SECRETS_PATH, JSON.stringify(connectorSecrets));
+
+  // ---- the box store ---------------------------------------------------------------------------
+  //
+  // The stored copies come FIRST, because they also teach this route the value when the live files
+  // no longer hold it. Run `forget` a second time after a migration and the three files are already
+  // clean; without this pass there would be nothing to grep the store with and the sweep would
+  // report a clean box over a store that still had the key in it.
+  const storeRemoved = [];
+  for (const document of await storedSecretDocuments(t)) {
+    const carried = valuesOfStoredDocument(document.parsed).filter((value) => matches(value));
+    if (carried.length === 0) continue;
+    for (const value of carried) noteHit(value);
+    storeRemoved.push({ path: document.path, values: carried.length });
+  }
+  await removeStorePaths(t, storeRemoved.map((one) => one.path));
+  for (const one of storeRemoved) {
+    removed.push({ file: "box-store", name: one.path, length: one.values, sha256: prefix });
+  }
+  // And then everything else in the store that still carries it. NOT deleted: a blob can be a pack
+  // of unrelated files, an agent's conversation database, an audit log or a Chrome profile, and
+  // deleting one of those to chase a credential loses the customer's data. Named instead, with its
+  // path, so the operator reads the truth and rotates the credential rather than believing a count.
+  const storeRemaining = (await storePathsCarrying(t, [...hit]))
+    .map((filePath) => ({ where: "box-store", name: filePath, length: 0, sha256: prefix }));
 
   // What is STILL in this box afterwards, by name, length and hash prefix. This is the absence
   // proof the migration is judged on: the operator reads it and sees that the hash they asked to
@@ -1097,9 +1258,12 @@ async function forgetProviderKeys(res, t, body, answer) {
       (typeof fields === "object" && fields != null && !Array.isArray(fields))
         ? Object.entries(fields).map(([field, value]) => ({ where: "connector-env-secrets.json", ...evidenceOf(`servers.${server}.${field}`, value) }))
         : []),
+    ...storeRemaining,
   ];
 
-  return answer({ prefix, removed, removedCount: removed.length, remaining });
+  // `storeSwept` is the difference between "the sweep found nothing" and "the sweep did not run",
+  // which is the distinction the first proof lost. False means this box's store could not be read.
+  return answer({ prefix, removed, removedCount: removed.length, remaining, storeSwept: true, storeCarrying: storeRemaining.length });
 }
 
 // Putting one box back the way it was, from the snapshot use-included took before it moved.
@@ -1111,12 +1275,10 @@ async function forgetProviderKeys(res, t, body, answer) {
 async function rollbackIncluded(res, t, answer) {
   if (String(t.profileDir ?? "").length === 0) return fail(res, 409, `${t.slug} has no profile directory to read a rollback from`);
   const rollbackFile = path.join(t.profileDir, ROLLBACK_NAME);
-  let saved;
-  try { saved = JSON.parse(await readFile(rollbackFile, "utf8")); }
-  catch { return fail(res, 409, `there is no rollback to replay for ${t.slug}; this box was never moved onto a plan`); }
-  const secrets = saved?.secrets;
-  if (typeof secrets !== "object" || secrets == null || Array.isArray(secrets)) {
-    return fail(res, 409, `the rollback kept for ${t.slug} is not readable`);
+  const secrets = await readRollback(rollbackFile);
+  if (secrets == null) {
+    return fail(res, 409, `there is no rollback to replay for ${t.slug}; this box was never moved onto a plan, ` +
+      `or the snapshot is unreadable. Point this workspace at an endpoint of its own in Settings instead.`);
   }
   // Through the same writer as every other change to this file, so it lands 0600 like its
   // neighbours and takes effect on that workspace's next message with no restart and no recreate.
@@ -2169,10 +2331,13 @@ const server = createServer(async (req, res) => {
       // SERVED_BY joins the four that are deleted on every switch. It has to: it is what makes
       // Titan say a plan's name instead of the base URL's host AND what turns on the plan-worded
       // refusals, so a box moving BACK to a customer's own key must not keep either.
-      for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR", "SAND_OPENAI_COMPATIBLE_SERVED_BY"]) delete next[key];
+      // MODEL_LABEL travels with SERVED_BY for the same reason: it is a plan-only name, and a box
+      // moving back to a customer's own key must say that key's model, not the plan's.
+      for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR", "SAND_OPENAI_COMPATIBLE_SERVED_BY", "SAND_OPENAI_COMPATIBLE_MODEL_LABEL"]) delete next[key];
       if (plan != null) {
         next.SAND_OPENAI_COMPATIBLE_API_KEY = t.entry.included.key;
         if (plan.servedBy) next.SAND_OPENAI_COMPATIBLE_SERVED_BY = plan.servedBy;
+        if (plan.modelLabel) next.SAND_OPENAI_COMPATIBLE_MODEL_LABEL = plan.modelLabel;
       } else if (chosen.subscription) {
         // A subscription row names a credential in the OPERATOR's own home directory, so only the
         // operator's console can resolve one. A tenant never has such a row: the scan that writes

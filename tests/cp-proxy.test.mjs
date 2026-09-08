@@ -94,7 +94,7 @@ test("an included row's id equals its model, so there is one string and not two 
   const rows = includedModelRows({ models: ["plan-zai", "plan-minimax"], windows: { "plan-zai": 123_456 } });
   for (const row of rows) {
     assert.equal(row.id, row.model, "id and model have to be the same string");
-    assert.deepEqual(Object.keys(row).sort(), ["contextWindow", "id", "model", "name", "servedBy"]);
+    assert.deepEqual(Object.keys(row).sort(), ["contextWindow", "id", "model", "modelLabel", "name", "servedBy"]);
     assert.equal(typeof row.name, "string");
     assert.notEqual(row.servedBy, "", "servedBy is what stops a customer's agent naming a container");
   }
@@ -370,11 +370,25 @@ test("the enterprise-only report is not what the windows are built on, and its r
     assert.equal(proxy.callsTo("GET /global/spend/report").length, 0, "the enterprise-only report was called");
     assert.equal(proxy.callsTo("GET /spend/logs").length, 1);
 
-    // And if anything does call it, what comes back is a sentence a person can act on.
+    // And if anything does call it, it does not even reach the enterprise gate any more: the
+    // proxy's own allowed_routes list refuses it first, to every caller including the master key.
+    // MEASURED ON THE R750 2026-09-08, the reason that list exists: without it a customer's virtual
+    // key could call GET /health, which makes a live call to every provider deployment on the
+    // operator's subscriptions -- free to the tenant, charged to the operator, attributed to
+    // nobody. Closing it means closing everything the product does not call, this route included.
     const refused = await client.call("GET", "/global/spend/report");
     assert.equal(refused.ok, false);
-    assert.match(refused.why, /Enterprise/);
-    assert.equal(refused.why.includes("[object Object]"), false, "the refusal rendered as an object again");
+    assert.match(refused.why, /not allowed/);
+
+    // The refusal SHAPE, which is the other half of what this case was written for. LiteLLM's
+    // enterprise refusals arrive as {detail: {error: "<sentence>"}}; the extractor read past that
+    // to the object and every client's spend window said "the proxy answered 400: [object Object]",
+    // which told the operator nothing and hid the real reason.
+    proxy.failOnce("GET /spend/logs", 400, "", { detail: { error: "/spend/report endpoint You must be a LiteLLM Enterprise user to use this feature" } });
+    const shaped = await client.call("GET", "/spend/logs");
+    assert.equal(shaped.ok, false);
+    assert.match(shaped.why, /Enterprise/);
+    assert.equal(shaped.why.includes("[object Object]"), false, "the refusal rendered as an object again");
   });
 });
 

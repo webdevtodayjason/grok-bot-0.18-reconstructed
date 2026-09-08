@@ -458,8 +458,15 @@ function withBackendNote(instructions: string, settings: OpenAiCompatibleSetting
   // say instead; with none set the host is still the answer, so the sentence is byte-equal for
   // every endpoint that does not set one.
   const where = (settings.servedBy ?? "").length > 0 ? settings.servedBy : host;
+  // And the same reasoning one field along. On the plan `settings.model` is `plan-zai`, a routing
+  // alias only the operator's proxy uses, and this sentence is the single place a customer is most
+  // likely to read it: the four PLAN_REFUSAL sentences are careful to keep aliases and vendor names
+  // out, and the persona note put both straight back. modelLabel is the name the box was told to
+  // say; with none set the model id is still the answer, so nothing changes for a customer on their
+  // own key.
+  const called = (settings.modelLabel ?? "").length > 0 ? settings.modelLabel : settings.model;
   const through = settings.endpointName ? `"${settings.endpointName}"` : "an OpenAI-compatible endpoint";
-  return `${instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${through}, model '${settings.model}' at ${where}. If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`;
+  return `${instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${through}, model '${called}' at ${where}. If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`;
 }
 
 /**

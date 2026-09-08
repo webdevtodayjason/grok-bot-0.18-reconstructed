@@ -18,7 +18,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { call, fingerprint, repoRoot, secret } from "./harness.mjs";
-import { createStubProxy, createStubUpstream, readGeneralSettings, readModelList } from "./stub-proxy.mjs";
+import { blockParentOf, createStubProxy, createStubUpstream, readGeneralSettings, readModelList, readNestedList } from "./stub-proxy.mjs";
 
 const CONFIG_PATH = path.join(repoRoot, "deploy/coolify/proxy-config/config.yaml");
 const COMPOSE_PATH = path.join(repoRoot, "deploy/coolify/proxy.compose.yml");
@@ -65,6 +65,36 @@ export async function run({ report, real, baseUrl, masterKey }) {
     `= ${settings.proxy_batch_write_at}`);
   check(settings.store_model_in_db === false,
     "store_model_in_db is false, so the model list is the file above and the salt encrypts nothing that matters");
+
+  // WHERE A BLOCK SITS, which is a thing this file got wrong once and nothing caught.
+  //
+  // MEASURED ON THE R750 2026-09-08: the two pass_through_endpoints entries were at the TOP LEVEL
+  // of config.yaml. LiteLLM reads that key from general_settings and nowhere else, so the proxy
+  // started clean, logged nothing, listed no /tinyfish path in its own openapi.json and answered
+  // `404 {"detail":"Not Found"}` on every call to one -- while docs/PROXY.md carried a measured
+  // table for the route. mcp_servers is the opposite and is read from the top level. Both are
+  // asserted, because either one in the other's place is silence rather than an error.
+  check(blockParentOf(configText, "pass_through_endpoints") === "general_settings",
+    "pass_through_endpoints is under general_settings, which is the only place LiteLLM reads it",
+    `found under ${blockParentOf(configText, "pass_through_endpoints") ?? "nothing"}`);
+  check(blockParentOf(configText, "mcp_servers") === "(top level)",
+    "and mcp_servers is at the top level, which is the only place LiteLLM reads THAT",
+    `found under ${blockParentOf(configText, "mcp_servers") ?? "nothing"}`);
+
+  // The door list. Everything the product calls is on it and nothing else is, which is what closes
+  // GET /health -- a route a tenant's own virtual key could call, which makes a live call to every
+  // provider deployment on the operator's subscriptions. It is one GLOBAL list applied before the
+  // key is looked up, so a control-plane call to a path that is not on it fails 403 with no other
+  // clue; that is why the list is asserted whole rather than only for its absences.
+  const allowed = readNestedList(configText, "allowed_routes");
+  check(allowed.length > 0, "general_settings carries an allowed_routes list", `${allowed.length} routes`);
+  for (const needed of ["/v1/chat/completions", "/key/generate", "/key/info", "/key/update", "/key/delete",
+    "/model/info", "/spend/logs", "/v1/models", "/health/readiness", "/tinyfish/fetch", "/tinyfish/search"]) {
+    check(allowed.includes(needed), `allowed_routes carries ${needed}, which this product calls`);
+  }
+  for (const closed of ["/health", "/key/list", "/global/spend/report", "/v1/embeddings"]) {
+    check(!allowed.includes(closed), `and does not carry ${closed}, so nobody can call it`);
+  }
 
   // The compose, for the one property that is the whole security shape. Comment lines are stripped
   // first: the header explains at length WHY there is no port and no Domain, and a check that read
@@ -168,6 +198,18 @@ async function serverLegs({ report, base, masterKey, stub, upstreams, configFile
   check(mintedByTenant.status === 401,
     "and a virtual key cannot mint another one, so a customer's own agents cannot widen their plan",
     `status ${mintedByTenant.status}`);
+
+  // THE PASS-THROUGH ROUTE EXISTS, asked of the PROXY rather than of the file.
+  //
+  // The config check above proves the block is in the right place in the tree we ship. This proves
+  // the running server actually registered the route, which is the thing that was false on the
+  // R750 for the whole of the first wave. A 404 here means the route is not served; anything else,
+  // including an upstream refusal because no TinyFish key is set, means it is.
+  step("the pass-through is a route this proxy serves");
+  const passThrough = await call(`${base}/tinyfish/search?query=gate`, { token: tenantKey });
+  check(passThrough.status !== 404,
+    "GET /tinyfish/search is registered (a 404 means the config block is in the wrong place)",
+    `status ${passThrough.status}`);
 
   step("a model");
   const models = await call(`${base}/v1/models`, { token: tenantKey });

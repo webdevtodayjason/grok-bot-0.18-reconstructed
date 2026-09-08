@@ -11,6 +11,10 @@
 // exec it rewrites /home/box/sand-data to that box's directory and runs the rest for real. That
 // last part is the point: `umask 077 && cat > … && chmod 600 …` runs as itself, so the FILE MODE
 // this suite asserts is a mode a shell actually produced, not one a mock agreed to report.
+//
+// /var/lib/sand-box-store is rewritten the same way, to <box>/box-store, because the box store is
+// the fourth place a credential lives and the one the first absence proof missed: the grep, the
+// head and the xargs rm that sweep it all run for real here against real files.
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -32,10 +36,10 @@ dir="$root/$box"
 if [ ! -d "$dir" ]; then exit 1; fi
 if [ "$1" = "cat" ]; then
   shift
-  exec cat "$(printf '%s' "$1" | sed "s|^/home/box/sand-data|$dir|")"
+  exec cat "$(printf '%s' "$1" | sed -e "s|^/home/box/sand-data|$dir|" -e "s|^/var/lib/sand-box-store|$dir/box-store|")"
 fi
 if [ "$1" = "sh" ] && [ "$2" = "-c" ]; then
-  exec /bin/sh -c "$(printf '%s' "$3" | sed "s|/home/box/sand-data|$dir|g")"
+  exec /bin/sh -c "$(printf '%s' "$3" | sed -e "s|/home/box/sand-data|$dir|g" -e "s|/var/lib/sand-box-store|$dir/box-store|g")"
 fi
 exit 1
 `;
@@ -74,6 +78,15 @@ export function boxStub(boxes = []) {
     },
     writeConnectorSecrets(box, document) {
       writeFileSync(path.join(root, box, "connector-env-secrets.json"), JSON.stringify(document));
+    },
+    // A file in the box's own content-addressed store, at the relative path under it. The relay
+    // never knows the name; it finds these by shape.
+    storeFileOf: (box, relative) => path.join(root, box, "box-store", relative),
+    writeStoreFile(box, relative, body) {
+      const target = path.join(root, box, "box-store", relative);
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, body);
+      return target;
     },
   };
 }

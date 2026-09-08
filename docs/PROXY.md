@@ -57,6 +57,29 @@ Nothing in this table is a secret. It is the map from a name on your laptop to t
 | `QWEN_API_KEY` | `PROXY_QWEN_KEY` | `os.environ/PROXY_QWEN_KEY` | Qwen, when that name exists |
 | *(none — see below)* | `PROXY_TINYFISH_KEY_1` | `os.environ/PROXY_TINYFISH_KEY_1` | TinyFish search, fetch and MCP |
 
+### What a tenant's key carries
+
+| field | where it comes from | what it does |
+| --- | --- | --- |
+| `key_alias` | `titanbot-<slug>` | the handle revocation and the spend panel both use |
+| `models` | the `plan-` models the proxy serves | that key opens those and nothing else |
+| `object_permission.mcp_servers` | `MCP_SERVERS` in `cp/proxy.mjs` | without it the MCP mount answers 200 with an empty tool list |
+| `soft_budget` | `CP_PROXY_ALLOWANCE_USD` | advisory. Produces the number the 80 percent chip reads and **fails nothing** |
+| `max_budget` | the same, when `CP_PROXY_ENFORCE` is set | the hard stop. Unset today, deliberately: observe mode first |
+| `rpm_limit` | `CP_PROXY_RPM_LIMIT` | requests a minute for that workspace. **The only ceiling that exists while `CP_PROXY_ENFORCE` is empty** |
+
+`CP_PROXY_RPM_LIMIT` is applied at mint. A key that already exists does not pick up a change to it,
+so after changing any of the three run `node cp/cli.mjs proxy limits --all` inside `titanbot-cp`:
+it sends `/key/update` for every workspace in the ledger, writes nothing into a box, mints nothing,
+and is safe to run twice.
+
+**Where the rate-limit number comes from, and what it is not.** It is an operator-set ceiling, not a
+quota derived from the plan: Z.AI's coding plan is metered in prompts per five hours, which is not
+an RPM and cannot be divided by a tenant count. The number's job is to stop one runaway agent loop
+eating the shared subscription before anyone notices, not to be a customer's fair share. Raise it
+when a customer hits it; the refusal reaches them as the plain "that is more than the plan allows
+right now" sentence and nothing else.
+
 Two names generated on the server, appended to `/home/sem/titanbot/cp.env` and never rewritten:
 `PROXY_MASTER_KEY` (`sk-` prefixed) and `PROXY_SALT_KEY`. The master key goes to exactly two places,
 the proxy's own environment and the control plane's as `CP_PROXY_MASTER_KEY`. Never a box, never
@@ -162,6 +185,16 @@ TinyFish is the one included service that is not a chat model, so it rides two d
 this section is the record of which one does what. Both were **measured on this Mac, 2026-09-08,
 against LiteLLM v1.100.0 in Docker with stub upstreams** — a real TinyFish key was not available to
 the measurement (see §2), so the numbers below are the proxy hop, not TinyFish's own time.
+
+> **The two entries were in the wrong place until 2026-09-08.** They sat at the TOP LEVEL of
+> `config.yaml`; LiteLLM reads `pass_through_endpoints` from `general_settings` and nowhere else,
+> so the block was parsed and discarded, the proxy listed no `/tinyfish` path in its own
+> `openapi.json`, and every call to one answered `404 {"detail":"Not Found"}` on the R750 while the
+> table below described a route that had never served a request there. The block is now under
+> `general_settings`, `scripts/verify-proxy.mjs` asserts both the placement in the file and that the
+> running proxy actually registered the route, and the table below is still a **measurement taken on
+> this Mac against a stub** — the R750 leg of it is owed by `PROXY-7`, which also needs
+> `PROXY_TINYFISH_KEY_1` set before any of it serves a customer.
 
 ### The REST pass-through — the metered route, and the default
 
@@ -281,6 +314,35 @@ that box can read the 0600 file, by design: the agent's tools are supposed to re
 filesystem. Its value is that it is *per box, metered and revocable*, not that it is hidden. Say
 that out loud to anyone who asks; do not let it be discovered later.
 
+**Removal reaches four places, and the fourth is the one that was missed.** MEASURED ON THE R750
+2026-09-08: the migration deleted the operator's provider key from `box-secrets.json` in all three
+boxes and proved it gone by reading that file back — while a byte-identical copy sat in each box's
+own content-addressed store at `/var/lib/sand-box-store/<store id>/blobs/<sha256>`, mode 0644
+root:root, put there by `box-store-sync`. The agent host runs as root inside the box, so a shell
+tool call could read it. Two changes: the host no longer offers `box-secrets.json` or
+`connector-env-secrets.json` to the store at all, and `forget-provider-keys` now sweeps the store
+and deletes the stored copies. **What it does NOT delete** is a store file that carries the value
+and is not one of those two documents — a pack of unrelated files, an agent's conversation database,
+an audit log. Those are named in the answer with their paths and left where they are, because
+deleting one to chase a credential is the customer's data gone. **A credential that has been in a
+box has to be rotated at the vendor.** The sweep is what stops it spreading; rotation is what ends
+it.
+
+**A rate limit is the only ceiling today.** `CP_PROXY_ENFORCE` is deliberately empty, so
+`soft_budget` is advisory by LiteLLM's own definition and no request is ever refused for spend.
+`CP_PROXY_RPM_LIMIT` is what stops one workspace consuming the pooled subscription; see §2 for what
+that number is and is not. Until enforce is armed, "the plan is spent" is a fact on the admin
+panel and not a thing that happens to a customer.
+
+**The door list is global, so it cannot separate a tenant from the operator.**
+`general_settings.allowed_routes` is checked before the key is looked up, which is what makes it
+work on the open-source build and also what stops it being per-key. It closes `GET /health` — which
+a tenant's key could call, and which makes a live call to every provider deployment on the
+operator's subscriptions — and everything else the product does not call. It cannot close
+`/key/info` or `/model/info`, because `cp/admin.mjs` and `cp/proxy.mjs` call both. On v1.100.0 a
+virtual key that knows another tenant's key HASH can read that key's alias, models, spend and budget
+from `/key/info`. Not guessable at 64 hex, so it needs a leak to exploit, and it is `PROXY-8`.
+
 ---
 
 ## 9. Per-tenant rollback
@@ -288,6 +350,22 @@ that out loud to anyone who asks; do not let it be discovered later.
 `cp/cli.mjs proxy rollback <slug>` replays that box's pre-migration `box-secrets.json` from the
 0600 snapshot taken during the migration, through the same door the migration used. The host
 re-reads that file on every turn, so it takes effect on the next message: no restart, no recreate.
+
+**The snapshot is written once and never overwritten.** MEASURED ON THE R750 2026-09-08: demo was
+migrated twice inside a minute while a re-mint hazard was being fixed, and the second run
+snapshotted what the first had left — a revoked virtual key pointed at the proxy. Rolling demo back
+would have taken it off the air and reported success. `use-included` now writes the file only when
+there is none, and takes none at all from a box that is already on a plan; its answer says which of
+`written`, `kept` or `none` happened, and `proxy migrate` prints it.
+
+**`node cp/cli.mjs proxy list` has a WAY BACK column**, and it is the thing to read before promising
+anybody a rollback: `kept` is a true pre-migration state, `on-proxy` is a snapshot that would leave
+the box on the proxy, `none` is a workspace with no snapshot at all.
+
+**Jason's own workspace (`titanium`) has no snapshot and is not getting one.** Its pre-migration
+state was the copied operator key that this wave exists to remove and that has to be rotated at the
+vendor, so replaying it would put a dead credential back. `titanium` rolls back by picking an
+endpoint of its own in the console's Settings, which is the same door any customer uses.
 
 Keep the snapshots for the first week, then delete them in a follow-up row. From the migration
 onward the proxy is a **single point of failure for every tenant's inference**, which is a change in
@@ -302,6 +380,8 @@ the failure model and not only in key custody.
 | budget hit | the plain "plan spent" sentence | raise the allowance, or the customer adds their own key |
 | control plane down | nothing | the relay keeps the last good registry answer |
 | key stolen from inside a box | that tenant's own budget only | revoke and re-mint from the admin console |
+| one workspace runs away | that workspace is rate limited, everyone else is unaffected | raise `CP_PROXY_RPM_LIMIT` and run `proxy limits --all` |
+| a tenant tree on disk the ledger does not know | it is invisible to migration, spend and revocation | `node cp/cli.mjs tenant orphans` names them; every fleet-wide proxy command prints them too |
 
 ---
 

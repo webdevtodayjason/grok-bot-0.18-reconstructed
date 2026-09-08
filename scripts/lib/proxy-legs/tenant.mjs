@@ -235,11 +235,32 @@ export async function run(context = {}) {
 
     await record("a virtual key opens no admin route and reads nobody's spend", async () => {
       const key = readProxyKey("acme", config).key;
-      for (const pathname of ["/key/info?key=" + encodeURIComponent(key), "/global/spend/report?start_date=2026-09-01&end_date=2026-09-30", "/model/info"]) {
+      for (const pathname of ["/key/info?key=" + encodeURIComponent(key), "/model/info"]) {
         const answer = await fetch(`${proxy.url}${pathname}`, { headers: { authorization: `Bearer ${key}` } });
         assert.equal(answer.status, 401, `a virtual key opened ${pathname}`);
       }
-      return "3 admin routes, 401 on every one";
+      return "2 admin routes, 401 on both";
+    });
+
+    // The door list, which is a route that is not served at all rather than a route behind a key.
+    //
+    // MEASURED ON THE R750 2026-09-08, from inside a customer's box with that customer's own
+    // virtual key: `GET /health` answered 200 with healthy_endpoints populated, so the calls were
+    // actually made to every provider on the operator's subscriptions -- free to that tenant,
+    // charged to the operator, attributed to nobody, and a rate-limit amplifier against a shared
+    // plan. One admin sweep of the same route left three rows in /spend/logs under the alias
+    // `litellm-internal-health-check` at $0.000043. general_settings.allowed_routes closes it.
+    await record("a route the product does not use is not served to anybody", async () => {
+      const key = readProxyKey("acme", config).key;
+      const refusals = [];
+      for (const pathname of ["/health", "/key/list", "/global/spend/report?start_date=2026-09-01&end_date=2026-09-30"]) {
+        for (const bearer of [key, proxy.masterKey]) {
+          const answer = await fetch(`${proxy.url}${pathname}`, { headers: { authorization: `Bearer ${bearer}` } });
+          assert.equal(answer.status, 403, `${pathname} is still served (HTTP ${answer.status})`);
+          refusals.push(answer.status);
+        }
+      }
+      return `${refusals.length} refusals, 403 on every one, tenant key and master key alike`;
     });
 
     // ---- spend ---------------------------------------------------------------------------------

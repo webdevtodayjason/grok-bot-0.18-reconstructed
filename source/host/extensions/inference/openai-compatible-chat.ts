@@ -53,12 +53,25 @@ export type OpenAiCompatibleSettings = {
    * Absent unless configured, so settings stay byte-equal for every endpoint that does not set it.
    */
   readonly servedBy?: string | null;
+  /**
+   * PROXY-1. What this model is CALLED to the person, when its routing id is not a name they own.
+   *
+   * On the plan the model id is `plan-zai`: a string that exists so the proxy can pick a pool and
+   * so the console can tell an included row from a customer's own. Asked what it runs on, the
+   * persona note read that id straight back to the customer, which hands them an internal routing
+   * alias as the answer to the one question this note exists to answer honestly. This is the label
+   * that goes in the sentence instead. Absent unless configured, so a customer on their own key
+   * still hears their own model name and the sentence is byte-equal for every endpoint that does
+   * not set one.
+   */
+  readonly modelLabel?: string | null;
 };
 export const OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV = "SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME";
 export const OPENAI_COMPATIBLE_TRANSPORT_ENV = "SAND_OPENAI_COMPATIBLE_TRANSPORT";
 export const OPENAI_COMPATIBLE_ACCOUNT_ID_ENV = "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID";
 export const OPENAI_COMPATIBLE_ORIGINATOR_ENV = "SAND_OPENAI_COMPATIBLE_ORIGINATOR";
 export const OPENAI_COMPATIBLE_SERVED_BY_ENV = "SAND_OPENAI_COMPATIBLE_SERVED_BY";
+export const OPENAI_COMPATIBLE_MODEL_LABEL_ENV = "SAND_OPENAI_COMPATIBLE_MODEL_LABEL";
 
 export type OpenAiCompatibleEvent =
   | { readonly type: "text-delta"; readonly delta: string }
@@ -109,6 +122,7 @@ export function resolveOpenAiCompatibleSettings(env: Readonly<Record<string, str
     ...(configured(OPENAI_COMPATIBLE_ORIGINATOR_ENV).length > 0 ? { originator: configured(OPENAI_COMPATIBLE_ORIGINATOR_ENV) } : {}),
     ...(configured(OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV).length > 0 ? { endpointName: configured(OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV) } : {}),
     ...(configured(OPENAI_COMPATIBLE_SERVED_BY_ENV).length > 0 ? { servedBy: configured(OPENAI_COMPATIBLE_SERVED_BY_ENV) } : {}),
+    ...(configured(OPENAI_COMPATIBLE_MODEL_LABEL_ENV).length > 0 ? { modelLabel: configured(OPENAI_COMPATIBLE_MODEL_LABEL_ENV) } : {}),
   };
 }
 

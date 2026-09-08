@@ -110,6 +110,7 @@ import "./cursor-free.test.mjs";
 // and all resolve before this module's body runs, which is why they work and nothing else does.
 import "./agent-cap.test.mjs";
 import "./box-secrets-preserve.test.mjs";
+import "./box-store-secret-exclusion.test.mjs";
 import "./box-health-sweep.test.mjs";
 import "./browser-direct-tools.test.mjs";
 import "./browser-driver-address-guard.test.mjs";

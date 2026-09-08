@@ -48,22 +48,32 @@ export const PLAN_MODEL_PREFIX = "plan-";
 // a container name, is meaningless to them, and is a fact about our infrastructure that they have
 // no reason to be handed.
 //
+// `modelLabel` is what the customer's own Titan says it is running when asked. NOT the model id:
+// on the plan that id is `plan-zai`, a routing alias that exists so the proxy can pick a pool and
+// so the console can tell an included row from a customer's own row, and reading it back to a
+// customer hands them a fact about our plumbing as the answer to "what are you". Measured on the
+// R750 2026-09-08: every box carried SAND_OPENAI_COMPATIBLE_MODEL = plan-zai and the persona note
+// composed "model 'plan-zai'". The label is the name of the thing, and it is true.
+//
 // contextWindow here is the FALLBACK. The measured number comes from the proxy's own /model/info,
 // which reports max_input_tokens per model out of the model list it was configured with, and that
 // is what gets written down when it answers. These numbers are what a card shows when it does not.
 export const PLAN_MODELS = Object.freeze({
   "plan-zai": Object.freeze({
     name: "Z.AI GLM (included with your plan)",
+    modelLabel: "GLM-4.6",
     servedBy: "Z.AI GLM",
     contextWindow: 200_000,
   }),
   "plan-minimax": Object.freeze({
     name: "MiniMax M3 (included with your plan)",
+    modelLabel: "MiniMax-M3",
     servedBy: "MiniMax M3",
     contextWindow: 200_000,
   }),
   "plan-qwen": Object.freeze({
     name: "Qwen (included with your plan)",
+    modelLabel: "Qwen",
     servedBy: "Qwen",
     contextWindow: 128_000,
   }),
@@ -418,6 +428,9 @@ export function includedModelRows({ models = [], windows = {} } = {}) {
       name: known?.name ?? `${id} (included with your plan)`,
       contextWindow: numberOrNull(windows?.[id]) ?? known?.contextWindow ?? null,
       servedBy: known?.servedBy ?? id,
+      // What the box tells the customer it is running. Falls back to the id, which is what every
+      // row did before this field existed, so an unknown plan model is no worse than it was.
+      modelLabel: known?.modelLabel ?? id,
     };
   });
 }

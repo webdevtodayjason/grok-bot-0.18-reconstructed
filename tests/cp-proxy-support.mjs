@@ -23,6 +23,15 @@
 // presented is one this server actually minted and the model is one it actually serves.
 import http from "node:http";
 
+// The same list as deploy/coolify/proxy-config/config.yaml's general_settings.allowed_routes.
+// A literal rather than something read out of the YAML: the gate has to FAIL when the two drift.
+const ALLOWED_ROUTES = new Set([
+  "/v1/chat/completions", "/chat/completions", "/v1/models", "/models",
+  "/tinyfish/fetch", "/tinyfish/search", "/mcp", "/mcp/",
+  "/key/generate", "/key/info", "/key/update", "/key/delete",
+  "/model/info", "/spend/logs", "/health/readiness", "/health/liveness",
+]);
+
 export async function startFakeProxy(options = {}) {
   const masterKey = options.masterKey ?? "sk-master-for-a-test-only";
   // The pool the design pins: two Z.AI subscriptions under one model_name is two model_list entries
@@ -42,9 +51,13 @@ export async function startFakeProxy(options = {}) {
   const failures = new Map();  // route -> queued failures
   let minted = 0;
 
-  const failOnce = (route, status = 500, message = "the proxy said no") => {
+  // `body` overrides the plain {error:{message}} shape, because LiteLLM's own enterprise refusals
+  // come back as {detail: {error: "<a sentence>"}} and the extractor in cp/proxy.mjs once read past
+  // that to the object and rendered "[object Object]" on every client's spend window. A stub that
+  // can only produce one refusal shape cannot hold that regression.
+  const failOnce = (route, status = 500, message = "the proxy said no", body = null) => {
     const queued = failures.get(route) ?? [];
-    queued.push({ status, message });
+    queued.push({ status, message, body });
     failures.set(route, queued);
   };
 
@@ -68,10 +81,22 @@ export async function startFakeProxy(options = {}) {
       response.end(text);
     };
 
+    // The door list, applied BEFORE the credential, which is where the real proxy applies it
+    // (pre_db_read_auth_checks in litellm/proxy/auth/auth_utils.py). One global list, so it refuses
+    // the master key too. It is what closes GET /health: a route a tenant's own virtual key could
+    // call, which makes a live call to every provider deployment on the operator's subscriptions.
+    // MEASURED ON THE R750 2026-09-08 before the list existed: one sweep of /health left three rows
+    // in /spend/logs under `litellm-internal-health-check`, $0.000043, charged to the operator and
+    // attributed to no tenant. The list is a literal here and in
+    // deploy/coolify/proxy-config/config.yaml, so the gate fails when the two drift.
+    if (!ALLOWED_ROUTES.has(url.pathname) && !url.pathname.startsWith("/tinyfish/") && !url.pathname.startsWith("/mcp")) {
+      return send(403, { error: { message: `Access forbidden: Route ${url.pathname} not allowed` } });
+    }
+
     const queued = failures.get(route);
     if (queued && queued.length > 0) {
       const next = queued.shift();
-      return send(next.status, { error: { message: next.message } });
+      return send(next.status, next.body ?? { error: { message: next.message } });
     }
 
     // The inference door: a minted key, and only a model it was minted for. The operator's master
