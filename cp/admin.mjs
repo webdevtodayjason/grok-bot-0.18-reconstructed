@@ -2210,6 +2210,89 @@ export function createAdminApi({
       }
 
       // A catalog refresh can never infer this, and PROXY-10 was a fleet-wide screenshot outage.
+      // THE POOL ITSELF. Jason, 2026-09-08: "add a third, second, or fourth key on a specific model
+      // plan." Adding a key to a PROVIDER is one thing; putting an existing plan model onto it is
+      // another, because a plan model IS its deployments and there is one per key. Without this a
+      // key added after the model was created could only be attached by deleting the model and
+      // making it again, which is exactly the hand operation this wave exists to end.
+      //
+      // Add first, then remove, never the reverse: a pool must not be short a key for an instant.
+      if (action === "keys") {
+        const wanted = Array.isArray(body?.keySlots) ? [...new Set(body.keySlots.map(String))] : null;
+        if (wanted == null || wanted.length === 0) {
+          json(response, 400, { error: "bad_request", message: "Name the keys this model should run on. A plan model with no key behind it serves nothing." });
+          return true;
+        }
+        const mine = rows.filter((row) => row.fromDb === true);
+        const have = new Set(mine.map((row) => row.keySlot));
+        const adding = wanted.filter((slot) => !have.has(slot));
+        const removing = mine.filter((row) => !wanted.includes(row.keySlot));
+        if (adding.length === 0 && removing.length === 0) {
+          json(response, 200, { alias, keySlots: wanted, message: `${alias} already runs on ${wanted.join(", ")}. Nothing changed.` });
+          return true;
+        }
+        const credentials = await askProxy("/credentials", () => proxy.listCredentials());
+        if (!credentials.ok) { json(response, 502, { error: "proxy", message: credentials.why }); return true; }
+        const provider = providerById(known.provider) ?? { id: known.provider, kind: "openai", baseUrl: "" };
+        const ledger = beginAction(guard, request, {
+          action: "plan-model.keys",
+          target: alias,
+          detail: `${adding.length > 0 ? `adding ${adding.join(", ")}` : ""}${adding.length > 0 && removing.length > 0 ? "; " : ""}${removing.length > 0 ? `removing ${removing.map((row) => row.keySlot).join(", ")}` : ""}`,
+        });
+        const added = [];
+        for (const slot of adding) {
+          const credential = credentials.rows.find((row) => row.name === slot);
+          if (credential == null) { added.push({ slot, ok: false, why: `there is no key in slot ${slot}` }); continue; }
+          const id = deploymentIdFor(alias, slot);
+          const answer = await askProxy("/model/new", () => proxy.addModel({
+            alias,
+            vendorModel: known.vendorModel,
+            credentialName: slot,
+            id,
+            params: provider.baseUrl ? { api_base: provider.baseUrl } : {},
+            // The same facts the other deployments behind this alias carry, so a pool stays one
+            // thing rather than becoming two rows that disagree about what a customer is told.
+            info: {
+              ...(Number(known.contextWindow) > 0 ? { max_input_tokens: Number(known.contextWindow) } : {}),
+              supports_vision: known.supportsVision === true,
+              [TB.provider]: known.provider,
+              [TB.keySlot]: slot,
+              [TB.keyLabel]: credential.label,
+              [TB.keyOrder]: credential.order ?? 0,
+              [TB.customerName]: known.customerName,
+              [TB.customerLabel]: known.customerLabel,
+              [TB.servedBy]: known.servedBy,
+              [TB.customerVisible]: known.customerVisible === true,
+              [TB.visionFallback]: known.visionFallback,
+              [TB.plans]: known.plans,
+            },
+          }));
+          added.push({ slot, id, ok: answer.ok === true, why: answer.ok ? "" : answer.why });
+        }
+        // Only once something is serving. A pool that went empty for an instant is the failure this
+        // whole shape exists to avoid, so a removal that would empty it is refused rather than run.
+        const serving = mine.length + added.filter((row) => row.ok).length - removing.length;
+        const taken = [];
+        if (serving < 1) {
+          ledger.failed("that would leave the alias with no deployment");
+          json(response, 409, { error: "empty", message: `That would leave ${alias} with nothing to run on. Add a key before taking the last one away.`, added });
+          return true;
+        }
+        for (const row of removing) {
+          const answer = await askProxy("/model/delete", () => proxy.deleteModel(row.id));
+          taken.push({ slot: row.keySlot, ok: answer.ok === true, why: answer.ok ? "" : answer.why });
+        }
+        ledger.done(`${alias} now runs on ${wanted.join(", ")}`);
+        json(response, 200, {
+          alias,
+          keySlots: wanted,
+          added,
+          removed: taken,
+          message: `${alias} runs on ${wanted.length === 1 ? "one key" : `${wanted.length} keys`} from the next request: ${wanted.join(", ")}. The load spreads across them and one being rate limited no longer stops the others.`,
+        });
+        return true;
+      }
+
       if (action === "vision-check") {
         const ledger = beginAction(guard, request, { action: "plan-model.vision-check", target: alias, detail: `sending an image part through ${alias}` });
         const answer = await askProxy("/v1/chat/completions", () => proxy.call("POST", "/v1/chat/completions", {

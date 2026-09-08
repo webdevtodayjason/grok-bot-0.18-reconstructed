@@ -540,6 +540,19 @@ function providersFixtureAnswer(method, pathname, body) {
     fixtureLedger("changed a plan model", alias, existing.vendorModel);
     return [200, { ok: true, message: `${existing.customerName || alias} is saved. The proxy uses it on the next request and a workspace picks it up on its next turn.` }];
   }
+  // The pool a plan model runs on: one deployment per key. Add first, then remove, so it is never
+  // short a key, and never empty.
+  if (method === "POST" && at[0] === "plan-models" && at[2] === "keys") {
+    const alias = decodeURIComponent(at[1]);
+    const row = providersFixture.planModels.find((one) => one.alias === alias);
+    if (row == null) return [404, { message: `The proxy serves nothing called ${alias}.` }];
+    const wanted = Array.isArray(body?.keySlots) ? [...new Set(body.keySlots.map(String))] : [];
+    if (wanted.length === 0) return [400, { message: "Name the keys this model should run on. A plan model with no key behind it serves nothing." }];
+    row.deployments = wanted.map((slot) => (row.deployments ?? []).find((one) => one.keySlot === slot)
+      ?? { id: `tb-${alias}-${slot}`, keySlot: slot, fromDb: true, healthy: true, why: "" });
+    fixtureLedger("changed the keys a plan model runs on", alias, wanted.join(", "));
+    return [200, { alias, keySlots: wanted, message: `${alias} runs on ${wanted.length === 1 ? "one key" : `${wanted.length} keys`} from the next request: ${wanted.join(", ")}.` }];
+  }
   if (method === "POST" && at[0] === "plan-models" && at[2] === "vision-check") {
     const alias = decodeURIComponent(at[1]);
     const row = providersFixture.planModels.find((one) => one.alias === alias);

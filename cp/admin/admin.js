@@ -744,6 +744,7 @@
   //                                                                visionFallback, contextWindow,
   //                                                                plans }
   //   POST /v1/admin/plan-models/:alias/update                   any of the above but alias
+  //   POST /v1/admin/plan-models/:alias/keys                     { keySlots: [] }
   //   POST /v1/admin/plan-models/:alias/vision-check             {}
   //   POST /v1/admin/plan-models/:alias/apply                    {}
   //   POST /v1/admin/plan-models/:alias/push-label               { all: true } or { slugs: [] }
@@ -1264,7 +1265,9 @@
         node.selected = running.size === 0 ? !one.parked : running.has(String(one.slot));
         keySelect.appendChild(node);
       }
-      keySelect.disabled = editingAlias.length > 0;
+      // Live on an edit as well, because the pool IS the thing an operator most often changes:
+      // a second subscription arrives and the model it is for already exists.
+      keySelect.disabled = false;
       const catalogModels = Array.isArray(chosen?.catalog?.models) ? chosen.catalog.models : [];
       const options = catalogModels.map((one) => ({ value: one, label: one }));
       options.push({ value: "__other__", label: "something else, typed in" });
@@ -1290,7 +1293,7 @@
     // deployment, which is not what this form does, so on an edit the picker shows what is really
     // there and does not pretend to change it.
     $("pmKeyNote").textContent = editingAlias.length > 0
-      ? "These are the keys this model runs on now. To change the pool, add or remove a key on the provider above."
+      ? "These are the keys it runs on. Select another and it starts using it on the next request; the new one goes in before any old one comes out, so the pool is never short."
       : "It runs on every key selected here, one deployment each. That is what makes a second subscription share the load.";
 
     form.hidden = false;
@@ -1362,7 +1365,16 @@
     // AN EDIT IS AN EDIT. The alias is a contract with every box already pointed at it, so the
     // create route refuses one that exists; sending an edit there answered 409 and changed nothing.
     if (editingAlias.length > 0) {
-      await act(button, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(editingAlias)}/update`, shared));
+      const keySlots = [...$("pmKey").selectedOptions].map((one) => one.value);
+      if (keySlots.length === 0) { banner("A plan model needs at least one key to run on."); return; }
+      // Two calls, because they are two different things at the proxy: an edit changes what the
+      // deployments say, and the pool is which deployments there are. The pool goes first, so a key
+      // added in the same save carries the labels this edit is about to set rather than the old ones.
+      await act(button, async () => {
+        const pool = await api("POST", `/v1/admin/plan-models/${encodeURIComponent(editingAlias)}/keys`, { keySlots });
+        const edit = await api("POST", `/v1/admin/plan-models/${encodeURIComponent(editingAlias)}/update`, shared);
+        return { message: `${pool.message} ${edit.message}` };
+      });
     } else {
       const keySlots = [...$("pmKey").selectedOptions].map((one) => one.value);
       if (keySlots.length === 0) { banner("Pick at least one key for it to run on."); return; }
