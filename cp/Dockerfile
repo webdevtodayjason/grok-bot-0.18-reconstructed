@@ -78,6 +78,14 @@ COPY deploy/coolify/box.compose.yml /app/deploy/coolify/box.compose.yml
 # file the box template above was cut from and a reader in this container will want it.
 COPY deploy/coolify/docker-compose.yml /app/deploy/coolify/docker-compose.yml
 
+# PROVIDERS-1. What a FRESH install seeds into the proxy's database: the providers, their credential
+# slots by os.environ NAME (never a value), the plan models and the fallback map. `proxy seed` is
+# documented as `docker exec titanbot-cp node cp/cli.mjs proxy seed`, and it reads this file out of
+# the working directory, so without this line that command answers ENOENT on the one step of the
+# database move that cannot be done from the Providers panel, because the panel needs the models to
+# exist before it can manage them.
+COPY deploy/coolify/proxy-config/bootstrap.json /app/deploy/coolify/proxy-config/bootstrap.json
+
 # ---- the defaults ------------------------------------------------------------------------------
 # Set here as well as in control-plane.compose.yml so the image is honest on its own: a plain
 # `docker run titanbot-cp:local` with only the two secrets given still starts, writes its store
