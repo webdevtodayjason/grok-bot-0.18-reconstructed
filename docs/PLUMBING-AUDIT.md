@@ -1062,8 +1062,15 @@ node scripts/verify-agent-identity.mjs
 node --test tests/*.test.mjs      # the glob matters
 ```
 
-`node --test tests/` alone fails on this Node with `Cannot find module .../tests`; the suite is
-fine, the command form is not. The mock list inside the harness is derived from the audit's 55
+`node --test tests/` alone used to fail on this Node with `Cannot find module .../tests`, and
+`tests/index.js` was added to make it work. Use the glob anyway, for a second reason found on
+2026-09-07: that index is a hand-written list of imports, it had drifted to 79 of 101 suites, and
+the directory form was quietly running 891 tests where the glob ran 1101. The list is complete now
+and `tests/test-index-covers-the-suite.test.mjs` holds it there, but the directory form still runs
+every suite in one process, where a suite that awaits at the top can lose the registration race.
+TESTS-1 in [docs/GAP-ANALYSIS.md](GAP-ANALYSIS.md) has the measurement.
+
+The mock list inside the harness is derived from the audit's 55
 MOCK verdicts, not written from memory -- a hand-kept list is how a mock survives its own test.
 
 **Wave 2-3 findings worth keeping.**

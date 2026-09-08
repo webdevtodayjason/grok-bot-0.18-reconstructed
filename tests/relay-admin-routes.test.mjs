@@ -32,6 +32,24 @@ const withControlPlane = {
 
 const rowsOn = (relay) => readLedgerFile(path.join(relay.dir, LEDGER_NAME));
 
+// The ledger write is deliberately fire-and-forget: `noteLoginAttempt` does `void
+// LOGIN_LEDGER.record(...)` so a disk write can never hold up somebody's sign-in. That means the
+// response comes back BEFORE the row is on disk, and reading the ledger the instant a login
+// returns is a race these tests kept winning on an idle machine and started losing when the suite
+// got busy enough to deschedule the write. Wait for the row instead of assuming it, and give up
+// with the rows that did arrive so a real regression still reads as one.
+async function rowsOnce(read, ready, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await read();
+    if (ready(rows)) return rows;
+    if (Date.now() >= deadline) {
+      assert.fail(`${label} never reached the ledger in ${timeoutMs}ms; it holds ${JSON.stringify(rows)}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 // Everything the relay wrote into its own directory, as one string. This is the "grep the data
 // directory for the password" check, done in process.
 function everythingWritten(relay) {
@@ -57,18 +75,27 @@ test("only CP_RELAY_TOKEN opens the ledger, and what it opens holds no password"
     await fetch(`${relay.base}/login`, form({ password: TRIED }));
     await fetch(`${relay.base}/login`, form({ password: RELAY_PASSWORD }));
 
-    const response = await read({ headers: { authorization: `Bearer ${RELAY_TOKEN}` } });
-    assert.equal(response.status, 200);
-    const body = await response.json();
+    // Both rows, through the route itself, once the later of the two has landed.
+    let body = null;
+    const rows = await rowsOnce(
+      async () => {
+        const response = await read({ headers: { authorization: `Bearer ${RELAY_TOKEN}` } });
+        assert.equal(response.status, 200);
+        body = await response.json();
+        return body.rows;
+      },
+      (all) => all.some((row) => row.outcome === "ok")
+        && all.some((row) => row.outcome === "refused" && row.door === "instance"),
+      "the refused sign-in and the one that worked");
     assert.equal(body.source, "relay");
     assert.match(body.measuredAt, /^\d{4}-\d\d-\d\dT/, "every number carries when it was measured");
 
-    const refused = body.rows.find((row) => row.outcome === "refused" && row.door === "instance");
-    assert.notEqual(refused, undefined, `no refused row in ${JSON.stringify(body.rows)}`);
+    const refused = rows.find((row) => row.outcome === "refused" && row.door === "instance");
+    assert.notEqual(refused, undefined, `no refused row in ${JSON.stringify(rows)}`);
     assert.match(refused.triedHash, /^[0-9a-f]{64}$/, "the try is recorded as a digest");
     assert.equal(refused.ip.length > 0, true, "with the address that sent it");
 
-    const ok = body.rows.find((row) => row.outcome === "ok");
+    const ok = rows.find((row) => row.outcome === "ok");
     assert.notEqual(ok, undefined, "a sign-in that worked is recorded too");
     // The row shape is fixed and absent reads as empty, so a reader never has to ask whether a key
     // is missing or the value is. A sign-in that worked keeps no shadow of the password.
@@ -90,7 +117,12 @@ test("a lockout is a row of its own, and five wrong passwords are five digests",
 
     // Read off disk rather than through the route: this address is locked out of that door too,
     // which is itself the point -- the control plane reads from its own address on titanbot-net.
-    const rows = await rowsOn(relay);
+    // The lockout row and the five digests before it: waiting for the last row alone would still
+    // race the five, which are what the second half of this test counts.
+    const rows = await rowsOnce(() => rowsOn(relay),
+      (all) => all.some((row) => row.outcome === "locked")
+        && new Set(all.filter((row) => row.triedHash.length > 0).map((row) => row.triedHash)).size >= 5,
+      "the lockout row and the five digests before it");
     const lockRow = rows.find((row) => row.outcome === "locked");
     assert.notEqual(lockRow, undefined, `no locked row in ${JSON.stringify(rows)}`);
     assert.equal(lockRow.ip.length > 0, true);

@@ -49,6 +49,10 @@ command -v curl >/dev/null || die "curl is not on PATH (needed for the readiness
 # writes it beside the bundle, so its absence means an old sync.sh put that bundle there.
 [ -f "$ROOT/runtime/sand-host-bundle-latest.version" ] || die "$ROOT/runtime/sand-host-bundle-latest.version is missing -- run deploy/r750/sync.sh from the Mac (it stages the version beside the bundle)"
 [ -f "$ROOT/runtime/box-exec-daemon/main.cjs" ] || die "$ROOT/runtime/box-exec-daemon/main.cjs is missing -- run deploy/r750/sync.sh from the Mac"
+# BROWSER-1. Titan's browser tools read the page through this, and it is mounted into every box
+# from the same runtime directory as the bundle. Without it browser_open answers with an import
+# error the person never sees the reason for, so the absence is caught here instead.
+[ -f "$ROOT/runtime/browser-driver/page-text.mjs" ] || die "$ROOT/runtime/browser-driver/page-text.mjs is missing -- run deploy/r750/sync.sh from the Mac (it ships runtime/browser-driver/ as a directory)"
 [ -f "$ROOT/deploy/apply-start-window-fix.sh" ] || die "$ROOT/deploy/apply-start-window-fix.sh is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/ui/server.mjs" ] || die "$ROOT/ui/server.mjs is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/ui/auth.mjs" ] || die "$ROOT/ui/auth.mjs is missing -- run deploy/r750/sync.sh from the Mac"

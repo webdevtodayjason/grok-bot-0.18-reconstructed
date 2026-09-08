@@ -83,7 +83,17 @@ rsync -a "$BUNDLE" "$HOST:$ROOT/runtime/host-main.cjs"
 rsync -a "$VERSION_FILE" "$HOST:$ROOT/runtime/sand-host-bundle-latest.version"
 # The DIRECTORY is what the box bind-mounts, so ship it as one and delete anything stale in it.
 rsync -a --delete "$BUILD/box-exec-daemon/" "$HOST:$ROOT/runtime/box-exec-daemon/"
-say "runtime/host-main.cjs, runtime/sand-host-bundle-latest.version and runtime/box-exec-daemon/"
+# BROWSER-1. Titan's browser driver is plain .mjs straight out of the repo -- there is nothing to
+# build, and the box installs no packages, so the source files ARE the artifact. It rides the same
+# runtime mount as the bundle (/opt/titanbot-runtime, read-only inside every box), which is why it
+# is shipped here and not with the relay: the relay's files never enter a box.
+#
+# A directory rsync, like box-exec-daemon above and for the same reason. A file added to
+# runtime/browser-driver/ in the repo then ships without anyone remembering to add a line here,
+# and a file deleted there is deleted on the server rather than left behind to be imported.
+[ -d "$REPO/runtime/browser-driver" ] || die "$REPO/runtime/browser-driver is missing; the box has no browser driver to mount"
+rsync -a --delete "$REPO/runtime/browser-driver/" "$HOST:$ROOT/runtime/browser-driver/"
+say "runtime/host-main.cjs, runtime/sand-host-bundle-latest.version, runtime/box-exec-daemon/ and runtime/browser-driver/"
 
 step "ship the relay"
 # Named files, never the ui/ directory. That is the whole protection: ui/endpoints.json (API keys)
