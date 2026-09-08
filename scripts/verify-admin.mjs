@@ -649,7 +649,18 @@ step("the five panels' data");
   check(clients.status === 200 && client != null, "clients answers", `status ${clients.status}`);
   check(client?.slug === TENANT_SLUG, "with the workspace", String(client?.slug));
   check((client?.users ?? []).length === 2, "and the people who can sign in to it", String((client?.users ?? []).length));
-  check(client?.plan === "none", "and a plan of none, said out loud rather than left blank");
+  // PROXY-1 replaced the `plan: "none"` placeholder with the real allowance object, and this leg
+  // was still asserting the placeholder, so the no-browser run was red on a correct tree. What it
+  // asks now is the thing that actually matters on this card: the allowance is a named object and
+  // never a blank, and with no proxy configured in this fixture every number in it reads as the
+  // reason it could not be measured rather than as a zero.
+  check(client?.spend != null, "and an allowance object on the row rather than a blank");
+  check(client?.spend?.minted === false, "which says this workspace has no plan key at the proxy", String(client?.spend?.minted));
+  check(String(client?.spend?.why ?? "").length > 0, "and says why in plain words", String(client?.spend?.why ?? "").slice(0, 60));
+  check(client?.spend?.thisMonth?.dollars === null && client?.spend?.today?.dollars === null,
+    "with no dollar figure invented for a proxy that was never asked");
+  check(clients.json?.proxy?.configured === false && String(clients.json?.proxy?.why ?? "").length > 0,
+    "and the panel carries the reason the proxy is not configured", String(clients.json?.proxy?.why ?? "").slice(0, 60));
   check((client?.users ?? []).some((row) => row.lastSignInAt != null), "and a last sign-in for somebody who has signed in");
   check(client?.coolify?.reachable === true && client?.coolify?.status === "running", "and what Coolify says right now", String(client?.coolify?.status));
 
@@ -741,6 +752,13 @@ if (!WANT_BROWSER) {
   page.on("pageerror", (error) => pageErrors.push(String(error)));
   page.on("console", (message) => { if (message.type() === "error") pageErrors.push(message.text()); });
 
+  // THE PAGE LEG CANNOT KILL THE RUN. A locator that never resolves throws a TimeoutError, and
+  // until now that threw straight out of the top level: the process died mid leg and the two legs
+  // after this one, the leak sweep and the em dash check, had not run since PROXY-1 renamed a
+  // panel. A gate whose last checks can be skipped by an unrelated failure is not measuring them.
+  // So the whole page leg is one try now: a throw is a FAIL with the message on it, and the run
+  // carries on to the legs that have to happen whatever the browser did.
+  try {
   await page.goto(`${BASE}/admin`, { waitUntil: "domcontentloaded" });
   check(await page.locator("#door").isVisible(), "the console opens on a sign-in form and nothing else");
   check(!(await page.locator("#console").isVisible()), "and the panels are not on screen before anyone signs in");
@@ -762,7 +780,7 @@ if (!WANT_BROWSER) {
   const live = await page.evaluate(() => window.__adminLive ?? null);
   check(live != null, "the super admin gets in and the page finishes loading", live ? `${live.panels} panels at ${live.at}` : "no readiness flag");
 
-  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-payments"];
+  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-spend"];
   for (const id of panels) {
     check(await page.locator(`#${id}`).isVisible(), `the ${id.replace("panel-", "")} panel renders`);
   }
@@ -790,18 +808,27 @@ if (!WANT_BROWSER) {
 
   const systemText = await page.locator("#system").textContent();
   check(String(systemText).includes("not measured"), "and says 'not measured' for what it cannot read, rather than a zero");
-  const payments = await page.locator("#panel-payments .placeholder").textContent();
-  check(String(payments).trim() === "Not connected yet. Plan and billing appear here when Stripe is wired in.",
-    "the payments panel says exactly what it was asked to say", String(payments).trim().slice(0, 60));
+  // The panel was renamed panel-payments -> panel-spend by PROXY-1 and its placeholder was
+  // rewritten, and this leg still waited on the old id, so it threw an uncaught TimeoutError that
+  // killed the process here: everything below this line, the leak sweep and the em dash check
+  // included, had not run since. The wait is bounded now as well as correct, so a future rename is
+  // a FAIL with the reason on it rather than a dead gate.
+  const spendPlaceholder = await page.locator("#panel-spend .placeholder").textContent({ timeout: 10_000 })
+    .catch((error) => `NOT FOUND: ${String(error?.message ?? error).split("\n")[0]}`);
+  check(String(spendPlaceholder).replace(/\s+/g, " ").trim()
+    === "Taking the money is not connected yet. Plan pricing and invoices appear here when Stripe is wired in.",
+  "the spend panel says exactly what it was asked to say", String(spendPlaceholder).replace(/\s+/g, " ").trim().slice(0, 70));
 
   // No em dashes anywhere on the screen. Jason's rule, and the panel is copy a business owner reads.
   const visible = await page.evaluate(() => document.body.innerText);
   check(!visible.includes("—"), "no em dash on the whole screen");
 
   check(pageErrors.length === 0, "and the page threw nothing", pageErrors.slice(0, 2).join(" | "));
-
-  await browser.close();
-  browser = null;
+  } catch (error) {
+    check(false, "the page leg ran to the end", String(error?.message ?? error).split("\n")[0]);
+  } finally {
+    if (browser) { try { await browser.close(); } catch { /* already gone */ } browser = null; }
+  }
 }
 
 // ---- leak -----------------------------------------------------------------------------------------
