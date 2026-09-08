@@ -897,6 +897,10 @@ They share one box besides, and a gate run has a 300 second ceiling.
 | `COOLIFY_API_KEY` | the control plane's environment, and Coolify | operator only |
 | a tenant's gateway token | that tenant's `profile/local-docker-vm.json` at 0600, Coolify's env store, and the relay's memory | that tenant's box, and the relay |
 | the operator's console password | `state/auth.json` as a scrypt hash | operator only |
+| `CP_PROXY_MASTER_KEY`, the proxy's master | the proxy's environment and the control plane's, and nowhere else | operator only |
+| `PROXY_SALT_KEY`, the proxy's salt | the proxy's environment, appended once to `cp.env` and never rewritten | operator only |
+| the operator's provider keys (Z.AI, MiniMax, Qwen, TinyFish) | the proxy's environment only. **This is the change PROXY-1 exists for**: they used to be copied into every box | operator only |
+| a tenant's proxy virtual key | that tenant's `profile/model-proxy.json` at 0600, the relay's memory, and that tenant's own box | that tenant's box, and the relay |
 
 None of them is ever a query parameter, ever in a log line, or ever in an answer. The last leg of
 the control plane gate and the log leg of `verify-one-console` are there to keep that true after the
@@ -905,6 +909,23 @@ next route is added.
 Two of those rows moved in TENANT-5 and both moved toward the relay and away from customers. A
 derived session key used to sit in a customer's container where anything running in it could read
 it; a gateway token still does, but only that customer's own. Neither ever reaches a browser.
+
+**Two things PROXY-1 changed here, and one of them widens a blast radius.**
+
+The good half: the operator's own provider keys were in every box and now are in none. A customer's
+box holds a credential that is theirs alone, budgeted and revocable, so a key read out of one box
+buys that customer's own allowance and nothing else. It is still readable by that customer's own
+agents — anything in the box can read a 0600 file it owns — and `docs/PROXY.md` §8 says so out loud
+rather than leaving it to be discovered. The value is metering and revocation, not secrecy.
+
+The half that costs something: `GET /v1/relay/tenants` is the one route on the control plane that
+deliberately answers with secrets, and it now hands the relay **every customer's inference
+credential** as well as their gateway token. A leaked `CP_RELAY_TOKEN` was already worth every box's
+gateway token; it is now worth every box's provider access too, until those keys are re-minted. That
+is not a reason to move the credential elsewhere — the relay has to serve it to the box somehow —
+but it is a reason to treat `CP_RELAY_TOKEN` as the highest-value string in the system after the
+session secret, and to re-mint every virtual key rather than only rotating the relay token if it
+ever leaks.
 
 ---
 

@@ -614,7 +614,7 @@
       env: { TINYFISH_API_KEY: "" },
     },
     hints: {
-      TINYFISH_API_KEY: "Your TinyFish account's API key, carried to https://agent.tinyfish.ai/mcp as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. The key is account-wide; it carries no separate scopes.",
+      TINYFISH_API_KEY: "Your TinyFish account's API key, carried to https://agent.tinyfish.ai/mcp as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. The key is account-wide; it carries no separate scopes. If web search and page fetch are included with your plan you need no key here at all: your box is given one of its own and this card stays empty.",
     },
     // A box wants one TinyFish, so filling this over an entry already called tinyfish -- the OAuth
     // recipe in docs/CONNECTORS-TINYFISH.md -- replaces it instead of being refused as a duplicate.

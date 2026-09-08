@@ -326,6 +326,19 @@ Featured because `featured` is true, and under From Titanbot team because `creat
 4. Rebuild the host and run the gates in §7. The catalog is bundled, so an entry that is not in a
    deployed bundle does not exist on the box.
 
+**A plugin whose upstream is on the customer's plan (PROXY-1).** One extra field and nothing else:
+`proxyMcpServer`, the name the service is mounted under on the proxy. It is read only when a proxy
+is configured, and then `marketplaceConnectorEntry(plugin, {proxyMcpUrl})` returns the bridged form
+— the proxy's `/mcp/` mount, `x-litellm-api-key:Bearer ${<the credential field>}`, and
+`x-mcp-servers:<that name>` — while the credential field's NAME stays what it was, so the box's 0600
+store and the credential card keep one name for one thing. With no proxy the entry is the public one
+character for character, which is what lets one catalog serve an operator install and a tenant box
+and is asserted in `tests/connector-tinyfish-preset.test.mjs`. The plugin's `credentialHints` line
+should say the customer needs no key of their own when the plan covers it, and **that sentence has
+to be identical in `ui/machine-room/gateway-adapter.js`'s preset row**, because
+`tests/marketplace-catalog.test.mjs` holds the two against each other. Only TinyFish declares the
+field today; the proxy's own routing is `docs/PROXY.md`.
+
 **A bot.**
 
 1. Write it against plugins that are already in the catalog: `integrations` is a list of plugin ids,

@@ -369,6 +369,18 @@ around. It fills:
 A box wants one TinyFish, so this preset replaces an entry already named `tinyfish` — including the
 older OAuth one — rather than being refused as a duplicate.
 
+**On a plan, you paste nothing.** If web search and page fetch are included with the customer's
+plan, their box is given a credential of its own and this preset points at the proxy's mount of the
+same service instead of the public endpoint — same connector name, same `TINYFISH_API_KEY` field,
+different far end and two different headers (`x-litellm-api-key` and `x-mcp-servers`; `Authorization`
+is left alone because `mcp-remote` uses it for its own OAuth discovery). The card stays empty and
+the hint says so. Everything below is the operator install and the bring-your-own case, which are
+unchanged. Two things to know before you rely on the plan route, both measured on this Mac
+2026-09-08 against LiteLLM v1.100.0: the mount **renames the tools** (`search` and `fetch_content`
+are listed as `tinyfish-search` and `tinyfish-fetch_content`, though a call on the unprefixed name
+still works), and it **does not meter** — the REST route behind WebFetch and WebSearch does.
+Details in [docs/PROXY.md](PROXY.md) §7.
+
 **The credential.** The account's TinyFish API key, pasted into the single `TINYFISH_API_KEY` card.
 It goes in the **`Authorization: Bearer`** header, not `X-API-Key`: measured from inside the box on
 2026-09-04 with an invented key, the MCP endpoint answers

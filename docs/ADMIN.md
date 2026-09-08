@@ -232,9 +232,36 @@ makes it if it is not there yet, and says whether the record is being written an
 not. The failure also goes to the container log with the path in it, and it is retried on the next
 sign-in rather than remembered for the life of the process.
 
-### 5. Payments
+### 5. Spend
 
-"Not connected yet. Plan and billing appear here when Stripe is wired in."
+Per client, this month and today: requests and dollars, one row per customer, read from the proxy's
+own spend API through the master key the control plane already holds. The handle is the virtual key
+— `key_alias` `titanbot-<slug>` — so a row is a customer by construction and cannot be attributed to
+the wrong one by an address or a header a box chooses. Spend to date comes from `/key/info`; the two
+windows come from `/global/spend/report` grouped by api key.
+
+A plain chip at 80 percent of the plan's allowance, and a stop at 100. **Observe mode is the default
+this wave**: allowances are recorded and nothing is enforced until `CP_PROXY_ENFORCE` is set, so the
+number appears here before it can ever refuse a customer's turn.
+
+Four sentences on this panel that are honesty, not decoration, and they are on the page as well as
+in this document:
+
+- **Spend is batch-written**, every 10 seconds. A number read immediately after a burst reads low.
+- **The TinyFish column counts requests, not dollars.** It is metered at a flat cost per request,
+  because the pass-through cannot see TinyFish's own pricing.
+- **That column also counts REST calls only.** The proxy's MCP mount does not meter (PROXY-4,
+  measured on this Mac 2026-09-08), so a customer's browser automation runs through a route this
+  panel cannot count.
+- **The 100 percent stop is a stop, not an exact cap.** The counter chain can read stale-low, so a
+  customer may go slightly past their allowance before it lands.
+
+Two actions belong on this panel and are not on it yet: revoke a customer's inference credential,
+and mint them a new one. Until they are, both are `cp/cli.mjs proxy revoke <slug>` and
+`cp/cli.mjs proxy mint <slug>` on the R750, and `docs/OPERATOR-RUNBOOK.md` carries them.
+
+Payments stay where they were: "Not connected yet. Plan and billing appear here when Stripe is
+wired in."
 
 ---
 
@@ -342,7 +369,5 @@ The unit tests are `tests/login-ledger.test.mjs` and `tests/cp-admin.test.mjs`, 
 **AUTH-MFA-1**, the wave after this one, puts passkeys and authenticator codes on the same door.
 Super admins will be required to enrol, which is the right order: this console is the account worth
 protecting most, and today it is one password.
-
-**PROXY-1** brings per-customer usage into this panel once the metering proxy exists.
 
 Stripe fills in the Payments panel.

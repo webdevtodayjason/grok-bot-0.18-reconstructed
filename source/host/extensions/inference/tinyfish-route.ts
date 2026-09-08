@@ -19,6 +19,14 @@
  *     `GET https://api.search.tinyfish.ai?query=...`, both with `X-API-Key`, both free per
  *     TinyFish's own documentation.
  *
+ * PROXY-1 changed WHERE route 2 dials and WHAT it carries, and changed nothing else. On an operator
+ * install both endpoints are still TinyFish's own hosts and the header is still `X-API-Key`. On a
+ * tenant box the control plane writes the proxy's two pass-through paths into the same 0600 store,
+ * and the key in `TINYFISH_API_KEY` is that box's own virtual key rather than the operator's
+ * TinyFish key -- so the header becomes an `Authorization` bearer, which is what the pass-through
+ * authenticates and meters on. One box, one credential, revocable, and the operator's key never
+ * lands in it. See docs/PROXY.md.
+ *
  * Neither route ever reads a key off the operator's own laptop. The only place a key comes from is
  * the host-owned secret store this product already writes.
  *
@@ -35,6 +43,29 @@ export const TINYFISH_SEARCH_ENDPOINT = "https://api.search.tinyfish.ai";
 export const TINYFISH_FETCH_TOOL = "fetch_content";
 export const TINYFISH_SEARCH_TOOL = "search";
 
+/**
+ * PROXY-1. The two endpoints above are defaults now, not constants of the product. A tenant box is
+ * pointed at the proxy instead, and the two names below are where that redirection is written: the
+ * SAME 0600 store the key already comes from (`connector-env-secrets.json`, server `tinyfish`), so
+ * one file write moves the credential and the target together, and a box with neither field set
+ * behaves exactly as it did before.
+ *
+ * They are endpoints, not credentials. They live in that file because it is the per-server
+ * configuration the host already merges into this connector's world, not because a URL is a secret.
+ */
+export const TINYFISH_FETCH_ENDPOINT_FIELD = "TINYFISH_FETCH_ENDPOINT";
+export const TINYFISH_SEARCH_ENDPOINT_FIELD = "TINYFISH_SEARCH_ENDPOINT";
+
+/**
+ * The pass-through contract, pinned here so the proxy's config, the control plane's writer and this
+ * caller cannot disagree: the proxy mounts TinyFish's two REST APIs under these two paths and
+ * injects the OPERATOR key on the way out. A box therefore holds `<proxy base>/tinyfish/fetch` and
+ * `<proxy base>/tinyfish/search` in the two fields above, and its own virtual key in
+ * `TINYFISH_API_KEY`.
+ */
+export const PROXY_TINYFISH_FETCH_PATH = "/tinyfish/fetch";
+export const PROXY_TINYFISH_SEARCH_PATH = "/tinyfish/search";
+
 /** The one thing this module needs from the box's own MCP client. */
 export interface ConnectorToolCaller {
   callTool(request: {
@@ -49,6 +80,13 @@ export interface TinyFishRouteDeps {
   readonly listConnectors: () => readonly string[];
   /** The stored TinyFish key, or null. Never returns a value from anywhere but the host store. */
   readonly readApiKey: () => string | null;
+  /**
+   * PROXY-1. Where the REST leg dials, or null for TinyFish's own host. Optional, so every caller
+   * that predates the proxy -- and every box with nothing configured -- keeps today's behaviour
+   * byte for byte.
+   */
+  readonly readFetchEndpoint?: () => string | null;
+  readonly readSearchEndpoint?: () => string | null;
   /** The box's MCP client, or null before the box is up. */
   readonly connectorTools: () => ConnectorToolCaller | null;
   readonly fetchImpl?: FetchLike;
@@ -128,12 +166,49 @@ function createConnectorFallback(caller: ConnectorToolCaller): WebFallback {
   };
 }
 
-function createApiFallback(apiKey: string, fetchImpl: FetchLike): WebFallback {
-  const headers = { "x-api-key": apiKey, "content-type": "application/json", accept: "application/json" };
+/**
+ * TinyFish's own REST endpoints require `X-API-Key`; the proxy's pass-through authenticates and
+ * meters on an `Authorization` bearer, which is what its virtual keys are everywhere else in this
+ * product. BOTH shapes stay in this file on purpose -- the connector preset's own description
+ * records that the MCP endpoint refuses `X-API-Key` while the REST endpoints require it, so neither
+ * header is a leftover and deleting either one breaks a real route.
+ *
+ * The endpoint decides, not a flag: a host under `tinyfish.ai` is TinyFish itself and takes the key
+ * header; anything else a box has been pointed at is the proxy and takes the bearer. An endpoint
+ * that will not parse is treated as TinyFish's own, which is exactly today's behaviour.
+ */
+function isTinyFishOwnHost(endpoint: string): boolean {
+  let host: string;
+  try { host = new URL(endpoint).hostname.toLowerCase(); } catch { return true; }
+  return host === "tinyfish.ai" || host.endsWith(".tinyfish.ai");
+}
+
+function authHeaders(endpoint: string, apiKey: string): Record<string, string> {
+  return isTinyFishOwnHost(endpoint) ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` };
+}
+
+/** `?query=` on a bare endpoint, `&query=` on one that already carries a query string. */
+function withQuery(endpoint: string, query: string): string {
+  return `${endpoint}${endpoint.includes("?") ? "&" : "?"}query=${encodeURIComponent(query)}`;
+}
+
+/** A stored endpoint, or the default. Blank or whitespace reads as "not set", never as an empty URL. */
+function resolveEndpoint(read: (() => string | null) | undefined, fallback: string): string {
+  const value = read?.() ?? null;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+}
+
+function createApiFallback(
+  apiKey: string,
+  fetchImpl: FetchLike,
+  fetchEndpoint: string,
+  searchEndpoint: string,
+): WebFallback {
+  const headers = { ...authHeaders(fetchEndpoint, apiKey), "content-type": "application/json", accept: "application/json" };
   return {
     route: "api",
     async fetchPage(url) {
-      const response = await fetchImpl(TINYFISH_FETCH_ENDPOINT, {
+      const response = await fetchImpl(fetchEndpoint, {
         method: "POST",
         headers,
         body: JSON.stringify({ urls: [url], format: "markdown" }),
@@ -143,9 +218,9 @@ function createApiFallback(apiKey: string, fetchImpl: FetchLike): WebFallback {
       return parseFetchPayload(await response.text(), url);
     },
     async search(query) {
-      const response = await fetchImpl(`${TINYFISH_SEARCH_ENDPOINT}?query=${encodeURIComponent(query)}`, {
+      const response = await fetchImpl(withQuery(searchEndpoint, query), {
         method: "GET",
-        headers: { "x-api-key": apiKey, accept: "application/json" },
+        headers: { ...authHeaders(searchEndpoint, apiKey), accept: "application/json" },
         signal: AbortSignal.timeout(60_000),
       });
       if (!response.ok) throw new Error(`search API answered ${response.status}`);
@@ -168,7 +243,12 @@ export function resolveWebFallback(deps: TinyFishRouteDeps): WebFallback | null 
   }
   const apiKey = deps.readApiKey();
   if (apiKey != null && apiKey.length > 0) {
-    return createApiFallback(apiKey, deps.fetchImpl ?? (globalThis.fetch as unknown as FetchLike));
+    return createApiFallback(
+      apiKey,
+      deps.fetchImpl ?? (globalThis.fetch as unknown as FetchLike),
+      resolveEndpoint(deps.readFetchEndpoint, TINYFISH_FETCH_ENDPOINT),
+      resolveEndpoint(deps.readSearchEndpoint, TINYFISH_SEARCH_ENDPOINT),
+    );
   }
   return null;
 }
