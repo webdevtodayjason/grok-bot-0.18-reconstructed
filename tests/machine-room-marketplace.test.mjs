@@ -25,6 +25,19 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 
 const UNKNOWN = (method) => new Error(`unknown gateway method: ${method}`);
 
+// MARKET-6: the console now asks the HOST to write a connector (addLocalConnector), and falls back
+// to the relay's whole-file POST /connectors on a box whose bundle predates that command. Both
+// paths are real and both are pinned here. This is the older box -- the default, because it is
+// what every box on today's bundle answers -- so every guard below goes on testing the relay path
+// it was written for, and the tests that want the new one say so by answering these.
+const HOST_WITHOUT_MARKET6 = {
+  addLocalConnector: () => UNKNOWN("addLocalConnector"),
+  removeLocalConnector: () => UNKNOWN("removeLocalConnector"),
+  previewLocalConnector: () => UNKNOWN("previewLocalConnector"),
+  setPluginCredential: () => UNKNOWN("setPluginCredential"),
+  listConnectorSecretOrphans: () => UNKNOWN("listConnectorSecretOrphans"),
+};
+
 // A connectors.json with two entries: one that wants a key, one that wants nothing.
 const CONNECTORS = {
   mcpServers: {
@@ -124,7 +137,7 @@ async function loadAdapter(answers = {}, options = {}) {
     const method = target.slice(5);
     const args = init?.body ? JSON.parse(init.body) : {};
     calls.push({ method, args });
-    const answer = answers[method] ?? {};
+    const answer = answers[method] ?? HOST_WITHOUT_MARKET6[method] ?? {};
     const value = typeof answer === "function" ? answer(args, calls) : answer;
     if (value instanceof Error) return { ok: false, status: 500, text: async () => JSON.stringify({ error: value.message }) };
     return { ok: true, text: async () => JSON.stringify(value) };
@@ -286,6 +299,45 @@ test("Add writes the catalog's own entry through the connector path, with env na
   // The entry that was already there survives the write, and the host is asked to re-read.
   assert.ok(posts[0].mcpServers.localfiles);
   assert.ok(calls.some((c) => c.method === "refreshMcp"));
+});
+
+// MARKET-6: on a box that has the host's own writer, Add goes there instead, and a catalog row
+// that names an ADDRESS rather than a command is added as a remote server rather than refused for
+// having no command. Which way the box opens that address is the host's decision, so the console
+// hands it the same spec its own Add-your-own link door builds and states no transport of its own.
+test("Add reaches the host's writer where the box has one, and an address goes as a remote server", async () => {
+  const written = [];
+  const { createGatewayAdapter, posts } = await loadAdapter(
+    answers({
+      listInstalledMcpServers: INSTALLED_SERVERS.map((row) => ({ ...row, status: "connected" })),
+      listMarketplace: {
+        ...CATALOG,
+        plugins: [...CATALOG.plugins, {
+          id: "cloudflare-docs", name: "Cloudflare docs", tagline: "Search the documentation.", description: "A public docs server.",
+          category: "Development", kind: "connector", icon: { letter: "C", color: "#f38020" },
+          install: { url: "https://docs.mcp.cloudflare.com/mcp", type: "http" },
+        }],
+      },
+      addLocalConnector: (args) => { written.push(args.spec); return { added: true, message: "added" }; },
+    }),
+    { connectors: { mcpServers: { localfiles: CONNECTORS.mcpServers.localfiles } } },
+  );
+  const adapter = createGatewayAdapter(seed());
+  const catalog = await adapter.listMarketplace();
+
+  await adapter.addMarketplacePlugin(catalog.plugins.find((p) => p.id === "tinyfish"));
+  assert.equal(written.length, 1);
+  assert.equal(written[0].shape, "program");
+  assert.deepEqual(written[0].envNames, ["TINYFISH_API_KEY"]);
+
+  const remote = await adapter.addMarketplacePlugin(catalog.plugins.find((p) => p.id === "cloudflare-docs"));
+  assert.equal(remote.accepted, true);
+  assert.equal(written[1].shape, "remote");
+  assert.equal(written[1].url, "https://docs.mcp.cloudflare.com/mcp");
+  assert.equal(Object.hasOwn(written[1], "command"), false);
+
+  // And the customer's connector file was never rewritten wholesale to do either of them.
+  assert.equal(posts.length, 0);
 });
 
 test("Add on a shell-tool row runs the box installer and writes nothing to connectors.json", async () => {

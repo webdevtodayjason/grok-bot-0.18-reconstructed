@@ -280,6 +280,69 @@ async function writeConnectors(t, next) {
   });
 }
 
+// MARKET-6: the diff behind POST /connectors. What arrives is still a whole map, because every
+// caller sends one; what leaves is one host command per key that actually moved. An entry is
+// "the same" only if it serialises identically, so a changed argument is a change and a resend of
+// the same file is nothing at all.
+//
+// `handled: false` means this box's host has no such command -- an older bundle -- and the caller
+// falls back to the whole-file write. Anything else the host says is its own answer to give: a
+// refusal comes back as the sentence it wrote, not as a 500.
+const sameConnectorEntry = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+// An entry as it sits in the file, said in the shape the host's one writer takes. A command is a
+// program; an address is a remote server, and which way the box opens one is the host's decision,
+// not something a whole-map POST gets to state. Credential values are never carried: the env map
+// goes across as NAMES with empty values, the same contract the file itself keeps.
+function connectorSpecFromEntry(name, config) {
+  const envNames = Object.keys(config?.env ?? {});
+  const url = String(config?.url ?? "").trim();
+  if (url) {
+    return {
+      name,
+      shape: "remote",
+      url,
+      transport: String(config?.type ?? config?.transport ?? "http"),
+      headers: Object.entries(config?.headers ?? {}).map(([header, value]) => ({ name: header, secret: false, value: String(value ?? "") })),
+      envNames,
+    };
+  }
+  return {
+    name,
+    shape: "program",
+    command: String(config?.command ?? ""),
+    args: Array.isArray(config?.args) ? config.args.map((one) => String(one)) : [],
+    envNames,
+  };
+}
+async function delegateConnectorChanges(t, held, submitted) {
+  const changed = [];
+  for (const [name, config] of Object.entries(submitted)) {
+    if (!sameConnectorEntry(held[name], config)) changed.push({ op: "add", name, config });
+  }
+  for (const name of Object.keys(held)) {
+    if (!Object.hasOwn(submitted, name)) changed.push({ op: "remove", name });
+  }
+  if (changed.length === 0) return { handled: true, changed: [] };
+  const done = [];
+  for (const change of changed) {
+    const command = change.op === "add" ? "addLocalConnector" : "removeLocalConnector";
+    const args = change.op === "add"
+      ? { spec: connectorSpecFromEntry(change.name, change.config), replace: true }
+      : { name: change.name };
+    let answer;
+    try { answer = await jobBusCall(t, command, args); } catch { return { handled: false }; }
+    let body;
+    try { body = JSON.parse(answer.text); } catch { body = null; }
+    // The one string that separates "this bundle is older than the command" from "the host
+    // refused". Nothing else answers it, and treating a refusal as an absent command would write
+    // the whole file behind the host's back, which is what this shim exists to stop.
+    if (/unknown gateway method/i.test(String(body?.error ?? ""))) return { handled: false };
+    if (answer.status >= 400 || body?.error) return { handled: true, error: String(body?.error ?? `the host answered ${answer.status} for ${change.name}`), changed: done };
+    done.push(`${change.op} ${change.name}`);
+  }
+  return { handled: true, changed: done };
+}
+
 const readCatalog = async (t) => {
   try { return JSON.parse(await readFile(t.endpointsFile, "utf8")); } catch { return { endpoints: [] }; }
 };
@@ -2156,6 +2219,26 @@ const server = createServer(async (req, res) => {
         const servers = parsed?.mcpServers;
         if (servers == null || typeof servers !== "object" || Array.isArray(servers)) {
           return fail(res, 400, "expected { mcpServers: { ... } }");
+        }
+        // MARKET-6. This used to be the mechanism: read a customer's connectors.json out of the
+        // box with `docker exec cat`, replace it whole, write it back. Two writers of one file
+        // that never agreed on the rules, and a read that hiccuped could take every connector on
+        // the box with it. It is now a SHIM: it works out which keys actually changed and calls
+        // the host's own addLocalConnector / removeLocalConnector for each one, so validation
+        // lives where the parser is and a customer's file is never rewritten wholesale by us.
+        //
+        // Every existing caller keeps its shape -- the same body in, the same {saved} out. A box
+        // whose bundle predates those commands answers "unknown gateway method", and the old
+        // whole-file write is what happens then, guards and all.
+        // A read that failed and an empty file look the same in a map, and a diff computed from
+        // the first would add every submitted entry a second time. So a failed read stops here
+        // rather than being taken for a box with no connectors.
+        const current = await readConnectors(t);
+        if (current == null) return fail(res, 503, "the box could not be read, so nothing was changed");
+        const delegated = await delegateConnectorChanges(t, current.mcpServers ?? {}, servers);
+        if (delegated.handled) {
+          if (delegated.error) return fail(res, 400, delegated.error);
+          return sendJson({ saved: Object.keys(servers), restartRequired: true, delegated: delegated.changed });
         }
         // Reject a config the host would silently drop, rather than accepting it and leaving the
         // operator wondering why their connector never appears.

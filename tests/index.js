@@ -54,6 +54,7 @@ import "./machine-room-identity.test.mjs";
 import "./connector-plane.test.mjs";
 import "./machine-room-connectors.test.mjs";
 import "./machine-room-marketplace.test.mjs";
+import "./machine-room-byo-mcp.test.mjs";
 import "./connector-tinyfish-preset.test.mjs";
 import "./connector-preset-catalog.test.mjs";
 import "./managed-seed-skills.test.mjs";

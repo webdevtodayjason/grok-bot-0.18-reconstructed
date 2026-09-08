@@ -55,7 +55,15 @@ async function loadAdapter(answers = {}, options = {}) {
     crypto: { randomUUID: () => "nonce-0001" },
     open: () => {},
   };
-  const defaults = { listAgents: [], getTrays: [], getAgentAutomations: [], getAgentWorkflows: [], getConversationOutline: [], getAgentTranscriptTail: { entries: [] } };
+  // MARKET-6: a box on today's bundle has no addLocalConnector, so the console writes the preset
+  // through the relay exactly as it always has. That is the path this file is about.
+  const missing = (method) => () => new Error(`unknown gateway method: ${method}`);
+  const defaults = {
+    listAgents: [], getTrays: [], getAgentAutomations: [], getAgentWorkflows: [], getConversationOutline: [], getAgentTranscriptTail: { entries: [] },
+    addLocalConnector: missing("addLocalConnector"), removeLocalConnector: missing("removeLocalConnector"),
+    previewLocalConnector: missing("previewLocalConnector"), setPluginCredential: missing("setPluginCredential"),
+    listConnectorSecretOrphans: missing("listConnectorSecretOrphans"),
+  };
   const fetchStub = async (url, init) => {
     const target = String(url);
     if (target === "/connectors") {

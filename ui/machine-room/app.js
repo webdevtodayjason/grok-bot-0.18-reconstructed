@@ -1838,6 +1838,10 @@
     openPanel("Marketplace", "Plugins & bots", marketplaceMarkup());
     mountMarketplaceBots();
     refreshMarketplace();
+    // CONNECT-11: values the host still holds for a plugin this box no longer has. Asked once when
+    // the panel opens rather than on every heartbeat -- it is a store read, and an orphan does not
+    // appear on its own.
+    refreshByoOrphans();
   }
 
   // The catalog is read once through the gateway and cached by the adapter; the install states are
@@ -1926,8 +1930,23 @@
 
   // -- The Plugins tab, list view: an installed strip, a search field, category chips, and one
   // section per category with a card each.
+  // A plugin that installs two things -- one provider's connector and its shell tool -- used to
+  // put two tiles in this strip under one name, and clicking either opened a different half of it.
+  // The catalog says which card is the plugin's front door (`cardId`) and which are the rest
+  // (`cardIds`), so the rest are folded away here and the strip has one tile per plugin again.
+  function marketplaceFoldedCardIds() {
+    const folded = new Set();
+    for (const install of marketplaceInstalls) {
+      const ids = Array.isArray(install?.cardIds) ? install.cardIds.map(String) : [];
+      if (ids.length < 2) continue;
+      for (const id of ids) if (id !== String(install.cardId)) folded.add(id);
+    }
+    return folded;
+  }
+
   function marketplaceInstalledStripMarkup() {
-    const cards = marketplaceCards();
+    const folded = marketplaceFoldedCardIds();
+    const cards = marketplaceCards().filter((card) => !folded.has(String(card.id)));
     const connected = cards.filter((card) => card.status === "connected").length;
     // QOL-LOGOS: the strip's tiles are the catalog's tiles, at the same 40px as a card's. A card
     // the catalog does not carry (a custom MCP server, a gate's throwaway) keeps the character it
@@ -2028,11 +2047,14 @@
     }, true);
   }
 
-  // The same filter the catalog's own SearchPlugins tool applies: name, tagline, category.
+  // The same filter the catalog's own SearchPlugins tool applies: name, tagline, category -- and
+  // now the row's own keywords. A business owner types "crm", "invoice" or "database", none of
+  // which belong in a tagline a person reads, and the catalog carries them beside it instead.
   function marketplaceMatches(item) {
     const q = marketplaceQuery.trim().toLowerCase();
     if (!q) return true;
-    return [item.name, item.tagline, item.category].some((field) => String(field ?? "").toLowerCase().includes(q));
+    const keywords = Array.isArray(item?.keywords) ? item.keywords.map((word) => String(word ?? "")) : [];
+    return [item.name, item.tagline, item.category, ...keywords].some((field) => String(field ?? "").toLowerCase().includes(q));
   }
 
   function marketplaceCardMarkup(item) {
@@ -2145,22 +2167,123 @@
     return `${clear}<button class="danger-button" type="button" data-marketplace-uninstall="${escapeHtml(name)}">${armed ? "Click again to remove" : "Uninstall"}</button>`;
   }
 
+  // ---- MARKET-5: one credential home per provider ----------------------------------------------
+  // The complaint was literal: the TinyFish page carried two key forms for one provider, each
+  // warning that the other's value did not reach it. They are genuinely two processes -- the
+  // connector the host launches and the shell the agent runs commands in -- but they are two
+  // CONSUMERS of one key, which is a different thing, and a page that makes the person hold that
+  // distinction has made its problem theirs.
+  //
+  // So the catalog row declares its credentials and who eats each one, this draws ONE masked box
+  // per credential, and one save fans out. Where the row declares nothing, the card's own fields
+  // are still drawn the way they always were -- a box added by hand knows its env names and
+  // nothing else, and that is a real case, not a gap.
+  const CREDENTIAL_CONSUMER_WORDS = {
+    connector: "the connector",
+    shell: "the agent's shell",
+    header: "the server's own header",
+    url: "the address it opens",
+  };
+  function credentialConsumerLine(consumers) {
+    const words = [...new Set((Array.isArray(consumers) ? consumers : [])
+      .map((consumer) => CREDENTIAL_CONSUMER_WORDS[String(consumer?.kind ?? "")])
+      .filter(Boolean))];
+    if (!words.length) return "Stored once, on the host, in its own 0600 store. It never enters this page, chat, or the file on the box.";
+    const list = words.length === 1 ? words[0] : `${words.slice(0, -1).join(", ")} and by ${words[words.length - 1]}`;
+    return `Stored once. Used by ${list}.`;
+  }
+
+  // The credentials this page draws a box for: the catalog's declaration first, because it is the
+  // only place that knows a field feeds two processes, and the card's own field list otherwise.
+  function pluginCredentials(item, card) {
+    const declared = Array.isArray(item?.credentials) ? item.credentials : [];
+    if (declared.length) {
+      return declared.map((credential) => ({
+        field: String(credential?.field ?? ""),
+        label: String(credential?.label ?? credential?.field ?? ""),
+        hint: String(credential?.hint ?? ""),
+        consumers: Array.isArray(credential?.consumers) ? credential.consumers : [],
+      })).filter((credential) => credential.field.length > 0);
+    }
+    const hints = card?.secretHints ?? item?.credentialHints ?? {};
+    return (Array.isArray(card?.secretFields) ? card.secretFields : Object.keys(item?.credentialHints ?? {}))
+      .map((field) => ({ field: String(field), label: String(field), hint: String(hints[field] ?? ""), consumers: [] }));
+  }
+
+  function pluginCredentialHomeMarkup(item, install, card) {
+    // PROXY-7's shape: where the box carries this provider on its plan there is no key to put
+    // anywhere, so the page says so and draws no box at all rather than an input nobody should use.
+    if (install?.includedWithPlan === true) {
+      return `<div class="secure-card" data-plugin-credential-included><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Included with your plan</strong><small>Your plan already carries this one, so there is no key to put in. Add it and it works.</small></div></div></div>`;
+    }
+    const credentials = pluginCredentials(item, card);
+    if (!credentials.length) return "";
+    const pluginId = String(item?.id ?? card?.id ?? "");
+    const stored = new Set((card?.storedFields ?? install?.storedCredentials ?? []).map(String));
+    const boxes = credentials.map((credential) => {
+      const id = `plugin-credential-${escapeHtml(pluginId)}-${escapeHtml(credential.field)}`;
+      const held = stored.has(credential.field);
+      return `<div class="field"><label for="${id}">${escapeHtml(credential.label)}</label>`
+        + `<input id="${id}" name="${escapeHtml(credential.field)}" type="password" autocomplete="off" placeholder="${held ? "The host holds a value — type to replace it" : "Enter securely"}" />`
+        + (credential.hint ? `<span class="field-hint" data-credential-hint="${escapeHtml(credential.field)}">${escapeHtml(credential.hint)}</span>` : "")
+        + `<span class="field-hint" data-credential-consumers="${escapeHtml(credential.field)}">${escapeHtml(credentialConsumerLine(credential.consumers))}</span></div>`;
+    }).join("");
+    return `<div class="secure-card" data-plugin-credential-card="${escapeHtml(pluginId)}"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>Key for ${escapeHtml(String(item?.name ?? card?.name ?? pluginId))}</strong><small>One place to put it. The host stores it and hands it to everything that needs it.</small></div></div>`
+      + `<form data-plugin-credential-form="${escapeHtml(pluginId)}">${boxes}<div class="form-actions"><button class="primary-button" type="submit">Store on the host</button></div>`
+      + `<span class="field-hint">Leave a box blank to leave what the host already holds untouched. Nothing typed here is written into this page.</span></form>`
+      + `<div class="field-hint" data-plugin-credential-result hidden></div></div>`;
+  }
+
+  // One row per thing this plugin installs, so a folded row (a connector AND a shell tool for one
+  // provider) says what it put where instead of appearing twice on the page under one name.
+  function pluginComponentRowsMarkup(install) {
+    const components = Array.isArray(install?.components) ? install.components : [];
+    if (components.length < 2) return "";
+    const rows = components.map((component) => {
+      const what = component.kind === "shell-tool" ? "a command in the box" : "a connector the host launches";
+      const state = component.installed ? (component.ready ? "working" : component.needsAuth ? "needs its key" : "starting") : "not installed";
+      const name = component.kind === "shell-tool" ? component.shellToolId : component.connectorName;
+      return `<div class="setting-row" data-plugin-component="${escapeHtml(String(name))}"><div><strong>${escapeHtml(String(name))}</strong><small>${escapeHtml(what)}</small></div><span class="status-pill${component.ready ? " success" : ""}">${escapeHtml(state)}</span></div>`;
+    }).join("");
+    return `<div class="plugin-list" data-plugin-components>${rows}</div>`;
+  }
+
   function marketplaceAccountsSectionMarkup(item, install, card, lead) {
     const label = install ? install.label : pluginStatusLabel(card?.status ?? "available");
     const ready = install ? install.ready === true : card?.status === "connected";
-    const line = install?.installed === false
-      ? "Add it and its credential fields appear here; the host stores the values, never this page."
-      : install?.needsAuth
-        ? `The host holds no value for ${install.missingCredentials.join(", ")}. Enter it below and the host stores it.`
-        : "The host holds this account's credentials in its own 0600 store and hands them to the process it launches.";
+    const line = install?.includedWithPlan === true
+      ? "Your plan carries this one, so there is no key to enter."
+      : install?.installed === false
+        ? "Add it and its key box appears here; the host stores the value, never this page."
+        : install?.needsAuth
+          ? `The host holds no value for ${install.missingCredentials.join(", ")}. Enter it below and the host stores it.`
+          : "The host holds this account's credentials in its own 0600 store and hands them to the process it launches.";
     const account = `<div class="setting-row" data-marketplace-account="${escapeHtml(String(item?.id ?? card?.id ?? ""))}"><div><strong>default</strong><small>${escapeHtml(line)}</small></div><span class="status-pill${ready ? " success" : ""}">${escapeHtml(label)}</span></div>`;
-    // Not installed: the catalog's own one-line hints are all there is to show, and they are what
-    // an operator needs before they go and make the credential.
-    const hints = install?.installed === false && item?.credentialHints
-      ? Object.entries(item.credentialHints).map(([field, hint]) => `<div class="setting-row"><div><strong>${escapeHtml(field)}</strong><small data-credential-hint="${escapeHtml(field)}">${escapeHtml(String(hint))}</small></div></div>`).join("")
-      : "";
-    const body = card ? `${pluginAccountMarkup(card, lead)}${pluginSecretsMarkup(card)}` : "";
-    return `<section data-marketplace-accounts><div class="plugin-section-title"><span>Accounts</span><span>1 account</span></div>${account}${hints}${body}</section>`;
+    const components = pluginComponentRowsMarkup(install);
+    // ONE credential block, whether the plugin is on the box yet or not: an operator reads the hint
+    // before they go and mint a key, and types it in the same box afterwards. The second card is
+    // gone -- pluginSecretsMarkup is drawn only for a card the catalog does not carry, which is a
+    // connector somebody added by hand and the one case with nothing to fan out to.
+    const home = item ? pluginCredentialHomeMarkup(item, install, card) : "";
+    // And the card's own account block only where there is no home to draw: otherwise this is the
+    // second thing on the page saying where the key goes, which is the whole of MARKET-5.
+    const fallback = home ? "" : (card ? `${pluginAccountMarkup(card, lead)}${pluginSecretsMarkup(card)}` : "");
+    return `<section data-marketplace-accounts><div class="plugin-section-title"><span>Accounts</span><span>1 account</span></div>${account}${components}${home}${fallback}</section>`;
+  }
+
+  // What an operator saw when a connector failed was several hundred characters of Node stack:
+  // "MCP error -32000: Connection closed; stderr: … SseError … at EventSource.failConnection_fn".
+  // The host maps its own status to ONE plain sentence and this draws it verbatim. The browser
+  // must never match on a statusDetail to work out what happened -- the day it starts guessing
+  // from that string is the day the sentence stops being true -- so a host with no sentence for
+  // this state draws no line at all, and the raw text sits behind a disclosure either way.
+  function connectorHealthMarkup(card) {
+    const sentence = typeof card?.statusSentence === "string" ? card.statusSentence.trim() : "";
+    const detail = typeof card?.statusDetail === "string" ? card.statusDetail.trim() : "";
+    if (!sentence && !detail) return "";
+    const raw = detail ? `<details class="panel-card" data-connector-health-detail><summary>What the box actually said</summary><pre class="shell-tool-output">${escapeHtml(detail)}</pre></details>` : "";
+    const line = sentence ? `<p class="field-hint" data-connector-health="${escapeHtml(String(card?.name ?? ""))}">${escapeHtml(sentence)}</p>` : "";
+    return `${line}${raw}`;
   }
 
   function marketplaceConnectorsSectionMarkup(item, card) {
@@ -2171,7 +2294,7 @@
     }
     const status = String(card.boxStatus ?? card.status ?? "unknown");
     const server = `<div class="setting-row" data-connector-status="${escapeHtml(card.name)}"><div><strong>${escapeHtml(card.name)}</strong><small>${escapeHtml(card.description)}</small></div><span class="status-pill${card.status === "connected" ? " success" : ""}">${escapeHtml(status)}</span></div>`;
-    return `<section data-marketplace-connectors><div class="plugin-section-title"><span>Connectors</span>${count}</div>${server}<div class="plugin-list">${pluginToolsMarkup(card)}</div></section>`;
+    return `<section data-marketplace-connectors><div class="plugin-section-title"><span>Connectors</span>${count}</div>${server}${connectorHealthMarkup(card)}<div class="plugin-list">${pluginToolsMarkup(card)}</div></section>`;
   }
 
   // Typing filters the sections in place: repainting the whole body would take the focus and the
@@ -2197,15 +2320,109 @@
   // on refreshMcp, so this form is the whole round trip. Environment VALUES are deliberately not
   // collected here -- the file is plaintext on the box; the values go through the key form on the
   // connector's own card, which hands them to the host's store.
+  // ---- MARKET-6: Add your own -----------------------------------------------------------------
+  // "We've got to get more of the plugins added, along with the ability for people to add
+  // third-party MCP servers easily." The catalog is the first half; this is the second. The old
+  // editor asked for a command, its arguments and its environment names -- which is one of the
+  // three shapes a server actually arrives in, and the least common one now. A hosted server could
+  // not be added from this console at all.
+  //
+  // So the card asks ONE question first, the way every other client that does this asks it: is
+  // this a LINK or a PROGRAM. A third door takes the vendor's own config block, because that is
+  // what is in the operator's clipboard when they get here, and turns it into one of the other
+  // two so they can read it before it is written.
+  //
+  // A value never enters this form. A header ticked as a secret mints an environment NAME and an
+  // empty value; the key goes in the masked box on the server's own page afterwards, into the
+  // host's 0600 store. That is what keeps it out of connectors.json, which is plaintext on the box.
+  const BYO_DOORS = [
+    { id: "link", label: "A link", blurb: "The server runs somewhere else and you have its address." },
+    { id: "program", label: "A program", blurb: "The box runs the server itself, from a command." },
+    { id: "paste", label: "Paste their config", blurb: "You copied a block out of the server's own page." },
+  ];
+  let byoDoor = "link";
+  let byoHeaders = [{ name: "Authorization", secret: true, env: "", value: "" }];
+  let byoRefusalText = null;
+  let byoNote = null;
+  let byoPreview = null;
+  // What the link door holds. Adding a header row or ticking one repaints the door, and a door
+  // drawn from constants would take the address someone had typed with it -- so the fields are
+  // read out of the DOM into this before every repaint and drawn back from it after.
+  let byoLink = { url: "", name: "", transport: "http", named: false };
+
+  const byoField = (id, label, value, placeholder, hint) => `<div class="field"><label for="${id}">${escapeHtml(label)}</label><input id="${id}" name="${escapeHtml(id.replace(/^byo-/, ""))}" value="${escapeHtml(String(value ?? ""))}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" />${hint ? `<span class="field-hint">${escapeHtml(hint)}</span>` : ""}</div>`;
+
+  // One header row. The tick is what decides whether a value is ever typed here at all: ticked, the
+  // row carries a NAME the host will store the key under and no value box; unticked, it carries a
+  // literal, which is what an "X-MCP-Readonly: true" is.
+  function byoHeaderRowMarkup(row, index) {
+    const env = String(row.env ?? "");
+    const secret = row.secret === true;
+    return `<div class="setting-row byo-header-row" data-byo-header="${index}">`
+      + `<div class="field"><label for="byo-header-name-${index}">Header</label><input id="byo-header-name-${index}" data-byo-header-name="${index}" value="${escapeHtml(String(row.name ?? ""))}" placeholder="Authorization" autocomplete="off" /></div>`
+      + `<label class="tag"><input type="checkbox" data-byo-header-secret="${index}"${secret ? " checked" : ""} /> this value is a secret</label>`
+      + (secret
+        ? `<div class="field"><label for="byo-header-env-${index}">Stored under</label><input id="byo-header-env-${index}" data-byo-header-env="${index}" value="${escapeHtml(env)}" placeholder="NAME_THE_HOST_STORES_IT_UNDER" autocomplete="off" /><span class="field-hint">The key itself goes in the masked box on this server's page once it is added. Nothing you type here is stored.</span></div>`
+        : `<div class="field"><label for="byo-header-value-${index}">Value</label><input id="byo-header-value-${index}" data-byo-header-value="${index}" value="${escapeHtml(String(row.value ?? ""))}" placeholder="true" autocomplete="off" /></div>`)
+      + `<button class="ghost-button" type="button" data-byo-header-remove="${index}">Remove</button></div>`;
+  }
+
+  // The exact entry that will be written, before Add. Where the host can be asked it is the host's
+  // own answer; where it cannot, it is what was typed, with a line saying the box decides how it
+  // opens the address. Either way there is no key in it: a secret header shows the name it is
+  // stored under, never a value.
+  function byoPreviewMarkup() {
+    if (!byoPreview) return "";
+    const body = escapeHtml(JSON.stringify(byoPreview.entry, null, 2));
+    const line = byoPreview.fromHost
+      ? "This is the entry the box will write."
+      : (byoPreview.note ?? "This is what will be written.");
+    return `<div class="demo-note" data-byo-preview><strong>What will be written</strong><br />${escapeHtml(line)}<pre class="shell-tool-command">${body}</pre></div>`;
+  }
+
+  function byoLinkDoorMarkup() {
+    const transports = (typeof adapter.byoTransports === "function" ? adapter.byoTransports() : [{ id: "http", label: "Streamable HTTP" }]);
+    const options = transports.map((t) => `<option value="${escapeHtml(t.id)}"${byoLink.transport === t.id ? " selected" : ""}>${escapeHtml(t.label)}</option>`).join("");
+    const named = byoLink.named ? ` data-touched="1"` : "";
+    return `<form data-byo-link>`
+      + byoField("byo-url", "Address", byoLink.url, "https://mcp.example.com/mcp", "The whole address from the server's own page, starting with https://.")
+      + `<div class="field"><label for="byo-transport">How it talks</label><select id="byo-transport" name="transport">${options}</select></div>`
+      + byoField("byo-name", "Name", byoLink.name, "filled in from the address", "What the box files it under and what the agent will see. Leave it blank and the address names it.").replace('id="byo-name"', `id="byo-name"${named}`)
+      + `<div class="plugin-section-title"><span>Headers</span><span>only if the server asks for one</span></div>`
+      + `<div class="plugin-list" data-byo-headers>${byoHeaders.map(byoHeaderRowMarkup).join("")}</div>`
+      + `<div class="form-actions"><button class="ghost-button" type="button" data-byo-header-add>Add a header</button><button class="ghost-button" type="button" data-byo-show>Show what will be written</button><button class="primary-button" type="submit">Add server</button></div>`
+      + `</form>`;
+  }
+
+  function byoProgramDoorMarkup() {
+    return `<form data-add-connector><div class="field"><label for="connector-name">Name</label><input id="connector-name" name="name" required placeholder="e.g. localfiles" /></div><div class="field"><label for="connector-command">Command</label><input id="connector-command" name="command" required placeholder="e.g. npx" /></div><div class="field"><label for="connector-args">Arguments</label><input id="connector-args" name="args" placeholder="space separated; quote one that holds a space, e.g. --header &quot;Name:Value&quot;" /></div><div class="field"><label for="connector-env">Environment variable names</label><input id="connector-env" name="envNames" placeholder="comma separated, names only" /></div><div class="form-actions"><button class="primary-button" type="submit">Add connector</button></div></form>`;
+  }
+
+  function byoPasteDoorMarkup() {
+    return `<form data-byo-paste><div class="field"><label for="byo-paste">Their config block</label><textarea id="byo-paste" name="block" rows="7" placeholder='{ "mcpServers": { "example": { "url": "https://mcp.example.com/mcp" } } }'></textarea><span class="field-hint">Paste it whole, braces included. It is read into the form above so you can see what it will do; nothing is written until you press Add there. A key inside the block is dropped rather than kept.</span></div><div class="form-actions"><button class="primary-button" type="submit">Read it</button></div></form>`;
+  }
+
+  // CONNECT-11: values the host still holds for a connector nobody has any more. The old resolver
+  // went through connectors.json for list, set AND delete, so once an entry left the file its
+  // stored value could not even be named. A host without the command draws no strip at all rather
+  // than an empty one claiming everything is clean.
+  let byoOrphans = null;
+  function byoOrphanStripMarkup() {
+    if (!Array.isArray(byoOrphans) || byoOrphans.length === 0) return "";
+    const rows = byoOrphans.map((row) => `<div class="setting-row"><div><strong>${escapeHtml(row.server)}</strong><small>${escapeHtml(`${row.fields.length} value${row.fields.length === 1 ? "" : "s"} the host still holds, for a plugin this box no longer has.`)}</small></div><button class="ghost-button" type="button" data-byo-clear-orphan="${escapeHtml(row.server)}">Clear</button></div>`).join("");
+    return `<div class="panel-card" data-byo-orphans><div class="plugin-section-title"><span>Stored keys with no plugin</span><span>${byoOrphans.length}</span></div>${rows}</div>`;
+  }
+
   function connectorEditorMarkup() {
     if (typeof adapter.addConnector !== "function") return "";
     const configured = state.plugins.filter((p) => p.group === "Connectors" && p.removable);
     const rows = configured.length
       ? configured.map((p) => `<div class="setting-row"><div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.category)}</small></div><button class="ghost-button" type="button" data-remove-connector="${escapeHtml(p.name)}">Remove</button></div>`).join("")
-      : `<div class="empty-state">No stdio connector is configured on this box yet.</div>`;
-    // CONNECT-3: a preset is a button that FILLS this form, not one that installs anything. The
+      : `<div class="empty-state">No connector is configured on this box yet.</div>`;
+    // CONNECT-3: a preset is a button that FILLS a form, not one that installs anything. The
     // operator sees the entry before it is written, and the credential still goes through the key
-    // form on the connector's own card afterwards.
+    // form on the connector's own card afterwards. The row sits above the doors because a preset
+    // is a program, so pressing one takes you to that door with the fields already filled.
     const presets = typeof adapter.connectorPresets === "function" ? adapter.connectorPresets() : [];
     const presetRow = presets.length
       ? `<div class="form-actions" data-connector-presets>${presets.map((p) => `<button class="ghost-button" type="button" data-connector-preset="${escapeHtml(p.id)}">${escapeHtml(p.label)}</button>`).join("")}</div><span class="field-hint">A preset fills the fields below with that service's connector entry, so it can be read before it is written. Nothing is written until Add connector, and a credential is a separate step on the connector's own card.</span>`
@@ -2215,8 +2432,276 @@
     // pressing Add connector can see what they have to go and get, rather than finding out at the
     // key form on the card afterwards.
     const presetHints = presets.length ? `<div class="plugin-list" data-connector-preset-hints></div>` : "";
-    return `<details class="panel-card" data-connector-editor><summary>Add or remove a connector</summary><p class="field-hint">Writes connectors.json on the box and calls refreshMcp, so the host relaunches its stdio servers without a container restart. Give the environment variable NAMES the process needs; their values go in the key form on the connector's card, where the host stores them instead of this file.</p>${presetRow}${presetHints}<form data-add-connector><div class="field"><label for="connector-name">Name</label><input id="connector-name" name="name" required placeholder="e.g. localfiles" /></div><div class="field"><label for="connector-command">Command</label><input id="connector-command" name="command" required placeholder="e.g. npx" /></div><div class="field"><label for="connector-args">Arguments</label><input id="connector-args" name="args" placeholder="space separated; quote one that holds a space, e.g. --header &quot;Name:Value&quot;" /></div><div class="field"><label for="connector-env">Environment variable names</label><input id="connector-env" name="envNames" placeholder="comma separated, names only" /></div><div class="form-actions"><button class="primary-button" type="submit">Add connector</button></div></form><div class="plugin-list">${rows}</div></details>`;
+    const doors = BYO_DOORS
+      .map((door) => `<button class="roster-tab${byoDoor === door.id ? " is-active" : ""}" type="button" data-byo-door="${door.id}" title="${escapeHtml(door.blurb)}">${escapeHtml(door.label)}</button>`)
+      .join("");
+    const panel = byoDoor === "program" ? byoProgramDoorMarkup() : byoDoor === "paste" ? byoPasteDoorMarkup() : byoLinkDoorMarkup();
+    const refusal = byoRefusalText ? `<div class="empty-state" data-byo-refusal>${escapeHtml(byoRefusalText)}</div>` : "";
+    const note = byoNote ? `<div class="demo-note" data-byo-note>${escapeHtml(byoNote)}</div>` : "";
+    return `<details class="panel-card" data-connector-editor><summary>Add your own</summary>`
+      + `<p class="field-hint">Anything this catalog does not carry, you add here. The box starts it, lists its tools, and it appears on the Plugins page like any other. A key it needs goes in the masked box on its own page afterwards, where the host stores it — never in the file on the box.</p>`
+      + `${presetRow}${presetHints}`
+      + `<div class="roster-tabs" data-byo-doors>${doors}</div>`
+      + `<div data-byo-panel>${panel}${refusal}${note}${byoPreviewMarkup()}</div>`
+      + `<div class="plugin-list">${rows}</div>${byoOrphanStripMarkup()}</details>`;
   }
+
+  // The link form as a spec, read out of the DOM at the moment it is used rather than tracked in a
+  // variable per keystroke: the fields are the truth, and a mirror of them is one more thing that
+  // can be wrong.
+  function byoLinkSpec(form) {
+    const root = form ?? elements.panelContent.querySelector("[data-byo-link]");
+    if (!root || typeof adapter.byoRemoteSpec !== "function") return null;
+    const value = (selector) => root.querySelector(selector)?.value ?? "";
+    const headers = byoHeaders.map((row, index) => ({
+      name: root.querySelector(`[data-byo-header-name="${index}"]`)?.value ?? row.name,
+      secret: row.secret === true,
+      env: root.querySelector(`[data-byo-header-env="${index}"]`)?.value ?? row.env,
+      value: root.querySelector(`[data-byo-header-value="${index}"]`)?.value ?? row.value,
+    })).filter((row) => String(row.name ?? "").trim().length > 0);
+    return adapter.byoRemoteSpec({
+      name: value("#byo-name"),
+      url: value("#byo-url"),
+      transport: value("#byo-transport"),
+      headers,
+    });
+  }
+
+  // What the link door's own three fields hold right now, kept so a repaint can put them back.
+  // Adding a header row redraws the door; without this it redrew an empty one, and the address
+  // someone had just pasted was gone.
+  function byoCaptureLink() {
+    const root = elements.panelContent.querySelector("[data-byo-link]");
+    if (!root) return;
+    const nameBox = root.querySelector("#byo-name");
+    byoLink = {
+      url: root.querySelector("#byo-url")?.value ?? byoLink.url,
+      name: nameBox?.value ?? byoLink.name,
+      transport: root.querySelector("#byo-transport")?.value ?? byoLink.transport,
+      named: byoLink.named || nameBox?.dataset.touched === "1",
+    };
+  }
+
+  // Repaint the doors alone. The whole panel would take the operator's typing with it, and this is
+  // called while they are typing.
+  function repaintByoPanel() {
+    const panel = elements.panelContent.querySelector("[data-byo-panel]");
+    if (!panel) { paintMarketplaceBody(); return; }
+    byoCaptureLink();
+    const door = byoDoor === "program" ? byoProgramDoorMarkup() : byoDoor === "paste" ? byoPasteDoorMarkup() : byoLinkDoorMarkup();
+    const refusal = byoRefusalText ? `<div class="empty-state" data-byo-refusal>${escapeHtml(byoRefusalText)}</div>` : "";
+    const note = byoNote ? `<div class="demo-note" data-byo-note>${escapeHtml(byoNote)}</div>` : "";
+    panel.innerHTML = `${door}${refusal}${note}${byoPreviewMarkup()}`;
+  }
+
+  // Everything below the form: the refusal, the note and the preview. Repainted on its own so the
+  // fields keep their values and the caret keeps its place.
+  function repaintByoVerdict() {
+    const panel = elements.panelContent.querySelector("[data-byo-panel]");
+    if (!panel) return;
+    for (const stale of panel.querySelectorAll("[data-byo-refusal], [data-byo-note], [data-byo-preview]")) stale.remove();
+    const refusal = byoRefusalText ? `<div class="empty-state" data-byo-refusal>${escapeHtml(byoRefusalText)}</div>` : "";
+    const note = byoNote ? `<div class="demo-note" data-byo-note>${escapeHtml(byoNote)}</div>` : "";
+    panel.insertAdjacentHTML("beforeend", `${refusal}${note}${byoPreviewMarkup()}`);
+  }
+
+  // Ask the host what it would write, then draw it. A refusal stops before the ask, because the
+  // sentence an operator needs is the one about what is wrong, not one about a preview.
+  function showByoPreview(spec) {
+    byoRefusalText = typeof adapter.byoRefusal === "function" ? adapter.byoRefusal(spec) : null;
+    if (byoRefusalText) { byoPreview = null; repaintByoVerdict(); return Promise.resolve(false); }
+    if (typeof adapter.byoPreview !== "function") { byoPreview = null; repaintByoVerdict(); return Promise.resolve(true); }
+    return Promise.resolve(adapter.byoPreview(spec))
+      .then((preview) => { byoPreview = preview; repaintByoVerdict(); return true; })
+      .catch(() => { byoPreview = null; repaintByoVerdict(); return true; });
+  }
+
+  function refreshByoOrphans() {
+    if (typeof adapter.listConnectorSecretOrphans !== "function") return;
+    Promise.resolve(adapter.listConnectorSecretOrphans())
+      .then((rows) => {
+        byoOrphans = rows;
+        const strip = elements.panelContent.querySelector("[data-byo-orphans]");
+        const next = byoOrphanStripMarkup();
+        if (strip) { if (next) strip.outerHTML = next; else strip.remove(); return; }
+        if (next) elements.panelContent.querySelector("[data-connector-editor]")?.insertAdjacentHTML("beforeend", next);
+      })
+      .catch(() => { byoOrphans = null; });
+  }
+  // The controls on the card, in one place. Each returns true when it took the click, so the long
+  // chain in handlePanelClick never has to know these exist.
+  function handleByoClick(target) {
+    if (target.dataset.byoDoor) {
+      // Switching doors throws away the last door's verdict rather than leaving a refusal about an
+      // address sitting under a form asking for a command.
+      byoDoor = target.dataset.byoDoor;
+      byoRefusalText = null;
+      byoNote = null;
+      byoPreview = null;
+      repaintByoPanel();
+      return true;
+    }
+    if (target.hasAttribute("data-byo-header-add")) {
+      byoHeaders = [...byoLiveHeaders(), { name: "", secret: false, env: "", value: "" }];
+      repaintByoPanel();
+      return true;
+    }
+    if (target.dataset.byoHeaderRemove) {
+      const index = Number(target.dataset.byoHeaderRemove);
+      byoHeaders = byoLiveHeaders().filter((row, at) => at !== index);
+      repaintByoPanel();
+      return true;
+    }
+    if (target.hasAttribute("data-byo-show")) {
+      const spec = byoLinkSpec();
+      if (spec) showByoPreview(spec);
+      return true;
+    }
+    if (target.dataset.byoClearOrphan) {
+      const server = target.dataset.byoClearOrphan;
+      if (typeof adapter.clearConnectorSecretOrphan !== "function") return true;
+      target.disabled = true;
+      Promise.resolve(adapter.clearConnectorSecretOrphan(server))
+        .then((result) => { showToast(result?.message ?? `${server} cleared from the host's store.`); refreshByoOrphans(); })
+        .catch((error) => { target.disabled = false; showToast(`${server} was not cleared: ${error.message}`); });
+      return true;
+    }
+    return false;
+  }
+
+  // What the header rows hold RIGHT NOW, fields included. Adding or removing a row repaints the
+  // list, and repainting from the variable alone would put every other row back to what it was
+  // when the form was drawn, which is how a form eats what someone typed.
+  function byoLiveHeaders() {
+    const root = elements.panelContent.querySelector("[data-byo-link]");
+    if (!root) return byoHeaders;
+    return byoHeaders.map((row, index) => ({
+      name: root.querySelector(`[data-byo-header-name="${index}"]`)?.value ?? row.name,
+      secret: row.secret === true,
+      env: root.querySelector(`[data-byo-header-env="${index}"]`)?.value ?? row.env,
+      value: root.querySelector(`[data-byo-header-value="${index}"]`)?.value ?? row.value,
+    }));
+  }
+
+  // Typing the address fills in the name a secret header will be stored under, so the box is
+  // already right rather than looking like one more thing to invent. Only a box the operator has
+  // not written in: once they have named it, it is theirs.
+  function handleByoInput(event) {
+    const named = event.target.closest?.("[data-byo-link] #byo-name");
+    if (named) { named.dataset.touched = "1"; return; }
+    const field = event.target.closest?.("[data-byo-link] #byo-url");
+    if (!field || typeof adapter.byoEnvNameFor !== "function") return;
+    const url = field.value ?? "";
+    const root = elements.panelContent.querySelector("[data-byo-link]");
+    if (!root) return;
+    const taken = [];
+    byoHeaders.forEach((row, index) => {
+      const box = root.querySelector(`[data-byo-header-env="${index}"]`);
+      if (!box) return;
+      const name = root.querySelector(`[data-byo-header-name="${index}"]`)?.value ?? row.name;
+      if (box.value && box.value !== row.env) { taken.push(box.value); return; }
+      const minted = adapter.byoEnvNameFor(url, name, taken);
+      box.value = minted;
+      row.env = minted;
+      taken.push(minted);
+    });
+    // The name the box files the server under follows the address too, until it is typed in.
+    const nameBox = root.querySelector("#byo-name");
+    if (nameBox && !nameBox.dataset.touched && typeof adapter.byoNameFromUrl === "function") nameBox.value = adapter.byoNameFromUrl(url);
+  }
+
+  // The tick. Turning it ON mints the name the host will store the key under, from the address and
+  // the header, and DROPS whatever was in the value box: a literal must not survive as one.
+  function handleByoHeaderToggle(event) {
+    const box = event.target.closest?.("[data-byo-header-secret]");
+    if (!box) return;
+    const index = Number(box.dataset.byoHeaderSecret);
+    const live = byoLiveHeaders();
+    const row = live[index];
+    if (!row) return;
+    const url = elements.panelContent.querySelector("[data-byo-link] #byo-url")?.value ?? "";
+    const taken = live.filter((other, at) => at !== index).map((other) => String(other.env ?? "")).filter(Boolean);
+    live[index] = box.checked
+      ? { name: row.name, secret: true, env: typeof adapter.byoEnvNameFor === "function" ? adapter.byoEnvNameFor(url, row.name, taken) : "", value: "" }
+      : { name: row.name, secret: false, env: "", value: "" };
+    byoHeaders = live;
+    repaintByoPanel();
+  }
+
+  // Add, from the link door. The refusal is checked first and drawn on the card rather than fired
+  // as a toast: it names something to change in a field that is still on screen.
+  function submitByoLink(form) {
+    const spec = byoLinkSpec(form);
+    if (!spec) { showToast("This console has no gateway behind it, so there is nothing to add a server to."); return; }
+    byoRefusalText = typeof adapter.byoRefusal === "function" ? adapter.byoRefusal(spec) : null;
+    if (byoRefusalText) { byoPreview = null; repaintByoVerdict(); return; }
+    const submit = form.querySelector("button[type=submit]");
+    if (submit) submit.disabled = true;
+    Promise.resolve(adapter.addLocalConnector(spec))
+      .then((result) => {
+        if (submit) submit.disabled = false;
+        if (result?.accepted === false) {
+          byoRefusalText = result?.message ?? null;
+          repaintByoVerdict();
+          showToast(result?.message ?? `${spec.name} was not added`);
+          return;
+        }
+        byoRefusalText = null;
+        byoPreview = null;
+        byoHeaders = [{ name: "Authorization", secret: true, env: "", value: "" }];
+        byoLink = { url: "", name: "", transport: "http", named: false };
+        showToast(result?.message ?? `${spec.name} added`);
+        // Straight to its own page, where the key box and the tools list are. The health line
+        // catches up on the refresh; waiting for it here leaves a blank card for the host's full
+        // sixty-second connect timeout, which is the normal case for a server with no key yet.
+        marketplacePluginId = `mcp:${spec.name}`;
+        marketplaceArmedUninstall = null;
+        paintMarketplaceBody();
+        refreshMarketplace();
+      })
+      .catch((error) => { if (submit) submit.disabled = false; showToast(`${spec.name} was not added: ${error.message}`); });
+  }
+
+  // Paste. Reads the vendor's block into whichever door fits it and stops there: the operator
+  // presses Add on a form they can read, which is the whole point of taking the block at all.
+  function submitByoPaste(form) {
+    const text = form.querySelector("[name=block]")?.value ?? "";
+    const read = typeof adapter.byoParsePasted === "function" ? adapter.byoParsePasted(text) : null;
+    if (!read) { showToast("This console cannot read a config block on its own."); return; }
+    if (!read.ok) { byoRefusalText = read.message; byoNote = null; byoPreview = null; repaintByoVerdict(); return; }
+    byoRefusalText = null;
+    byoNote = read.note;
+    byoDoor = read.door;
+    if (read.door === "link") {
+      byoHeaders = (read.spec.headers ?? []).map((row) => ({ name: row.name, secret: row.secret === true, env: row.env ?? "", value: row.value ?? "" }));
+    }
+    repaintByoPanel();
+    byoFillFromSpec(read.spec);
+    showByoPreview(read.spec);
+  }
+
+  // The block that was read, written into the door's fields. Done after the repaint so it is
+  // writing into the form that is actually on screen.
+  function byoFillFromSpec(spec) {
+    const set = (selector, value) => { const field = elements.panelContent.querySelector(selector); if (field) field.value = value; };
+    if (spec?.shape === "remote") {
+      // Into the variable as well as into the fields: the next repaint draws from the variable.
+      byoLink = { url: spec.url ?? "", name: spec.name ?? "", transport: spec.transport ?? "http", named: true };
+      set("[data-byo-link] #byo-url", byoLink.url);
+      set("[data-byo-link] #byo-name", byoLink.name);
+      set("[data-byo-link] #byo-transport", byoLink.transport);
+      const nameBox = elements.panelContent.querySelector("[data-byo-link] #byo-name");
+      if (nameBox) nameBox.dataset.touched = "1";
+      return;
+    }
+    set("[data-add-connector] [name=name]", spec?.name ?? "");
+    set("[data-add-connector] [name=command]", spec?.command ?? "");
+    set("[data-add-connector] [name=args]", typeof adapter.joinConnectorArgs === "function"
+      ? adapter.joinConnectorArgs(spec?.args ?? [])
+      : (spec?.args ?? []).join(" "));
+    set("[data-add-connector] [name=envNames]", (spec?.envNames ?? []).join(", "));
+  }
+  // ---- end MARKET-6: Add your own ---------------------------------------------------------------
 
   function agentProfilePanel(worker) {
     const model = modelById(worker.model);
@@ -3477,6 +3962,11 @@
     }
     const target = event.target.closest("button");
     if (!target) return;
+    // MARKET-6: the Add-your-own doors, their header rows, the preview button and the orphan
+    // strip's Clear. Handled before the long chain below because none of them belongs in it: they
+    // are one card's own controls, and threading five more branches through a list every other
+    // panel also walks is how that list became unreadable.
+    if (handleByoClick(target)) return;
     // Rows in the unread panel carry a context; clicking one should take you there.
     if (target.dataset.contextKind && target.dataset.contextId) {
       selectContext(target.dataset.contextKind, target.dataset.contextId);
@@ -3526,7 +4016,7 @@
         paintMarketplaceBody();
         const editor = elements.panelContent.querySelector("[data-connector-editor]");
         if (editor) { editor.setAttribute("open", "open"); editor.scrollIntoView({ block: "center" }); }
-        showToast("Fill in the connector editor below — nothing is written until Add connector.");
+        showToast("Add your own is open below. Pick a link or a program, or paste the server's own config block; nothing is written until you press Add.");
         return;
       }
       target.disabled = true;
@@ -3556,23 +4046,19 @@
       // Armed on the label, not on a repaint: redrawing the page here would put the "also clear"
       // box back to its default under the hand of an operator who had just changed it.
       if (marketplaceArmedUninstall !== name) { marketplaceArmedUninstall = name; target.textContent = "Click again to remove"; return; }
-      // The stored values go first: deleteConnectorSecret resolves the server through
-      // connectors.json, so once the entry is gone the host cannot reach its own store for it and
-      // the value would sit there for the life of the box.
+      // CONNECT-11: the ordering is no longer this page's private knowledge. The values have to go
+      // before the entry, because the host resolves a connector's store through connectors.json
+      // and cannot reach it once the row has left the file -- so the host does both, in that
+      // order, under one call. All this says is whether the operator asked for the clear.
       const clear = elements.panelContent.querySelector("[data-marketplace-clear-secrets]");
-      const install = marketplaceInstallById(marketplacePluginId);
-      const held = install?.storedCredentials ?? [];
       target.disabled = true;
-      const cleared = clear?.checked && held.length && typeof adapter.deleteConnectorSecret === "function"
-        ? Promise.all(held.map((field) => adapter.deleteConnectorSecret(name, field)))
-        : Promise.resolve([]);
-      cleared
-        .then(() => adapter.removeConnector(name))
+      Promise.resolve(adapter.removeConnector(name, { clearSecrets: clear?.checked === true }))
         .then((result) => {
           marketplaceArmedUninstall = null;
           marketplacePluginId = null;
           showToast(result?.message ?? `${name} removed`);
           refreshMarketplace();
+          refreshByoOrphans();
         })
         .catch((error) => { target.disabled = false; showToast(`${name} was not removed: ${error.message}`); });
     } else if (target.dataset.installPlugin) {
@@ -3601,6 +4087,10 @@
       // see in the fields, and the key is a separate step on the connector's own card afterwards.
       const preset = (typeof adapter.connectorPresets === "function" ? adapter.connectorPresets() : [])
         .find((p) => p.id === target.dataset.connectorPreset) ?? null;
+      // MARKET-6: a preset IS a program, and the card now opens on the link door. Take the
+      // operator to the door the fields are on before filling them, or the toast would say the
+      // form was filled and there would be no form on screen.
+      if (preset && byoDoor !== "program") { byoDoor = "program"; byoRefusalText = null; byoNote = null; byoPreview = null; repaintByoPanel(); }
       const form = document.querySelector("[data-add-connector]");
       if (!preset || !form) { showToast("That preset is no longer on this page; nothing was filled in."); return; }
       form.querySelector('[name="name"]').value = preset.name;
@@ -4059,6 +4549,46 @@
           showToast(bad?.message ?? results[0]?.message ?? `${plugin.name} credentials stored on the host`);
         })
         .catch((error) => { if (submit) submit.disabled = false; showToast(`Not stored: ${error.message}`); });
+    } else if (form.dataset.pluginCredentialForm) {
+      // MARKET-5: one write per credential, through setPluginCredential, which fans it out to
+      // every consumer the catalog row declares. The boxes are cleared before the call resolves,
+      // so no value sits in a control while the write is in flight, and the answer says where the
+      // value actually went rather than this page guessing.
+      const pluginId = form.dataset.pluginCredentialForm;
+      const item = marketplaceItemById(pluginId);
+      const entries = Array.from(form.querySelectorAll("input[type=password]"))
+        .map((input) => ({ field: input.name, value: input.value }))
+        .filter((entry) => entry.value.length > 0);
+      form.querySelectorAll("input[type=password]").forEach((input) => { input.value = ""; });
+      if (!entries.length) { showToast("Nothing to store — every box was blank"); return; }
+      const submit = form.querySelector("button[type=submit]");
+      if (submit) submit.disabled = true;
+      const result = form.parentElement?.querySelector("[data-plugin-credential-result]");
+      Promise.all(entries.map((entry) => Promise.resolve(adapter.setPluginCredential(pluginId, entry.field, entry.value, item))))
+        .then((answers) => {
+          if (submit) submit.disabled = false;
+          const bad = answers.find((answer) => answer && answer.accepted === false);
+          const wentTo = [...new Set(answers.flatMap((answer) => (Array.isArray(answer?.wentTo) ? answer.wentTo : [])))];
+          const pending = [...new Set(answers.flatMap((answer) => (Array.isArray(answer?.pendingWindows) ? answer.pendingWindows : [])))];
+          if (result) {
+            result.hidden = false;
+            result.textContent = bad
+              ? bad.message
+              : `Stored on the host${wentTo.length ? ` and handed to ${wentTo.join(" and ")}` : ""}.`
+                + (pending.length ? ` ${pending.length} open window${pending.length === 1 ? "" : "s"} still ${pending.length === 1 ? "has" : "have"} the old value until ${pending.length === 1 ? "it is" : "they are"} restarted.` : "");
+          }
+          showToast(bad?.message ?? answers[0]?.message ?? "Stored on the host");
+          refreshMarketplace();
+        })
+        .catch((error) => {
+          if (submit) submit.disabled = false;
+          if (result) { result.hidden = false; result.textContent = `Not stored: ${error.message}`; }
+          showToast(`Not stored: ${error.message}`);
+        });
+    } else if (form.hasAttribute("data-byo-link")) {
+      submitByoLink(form);
+    } else if (form.hasAttribute("data-byo-paste")) {
+      submitByoPaste(form);
     } else if (form.hasAttribute("data-add-connector")) {
       const data = new FormData(form);
       const submit = form.querySelector("button[type=submit]");
@@ -4385,7 +4915,11 @@
   elements.panelContent.addEventListener("click", handlePanelClick);
   elements.panelContent.addEventListener("input", handleTriggerInput);
   elements.panelContent.addEventListener("input", handleMarketplaceInput);
+  elements.panelContent.addEventListener("input", handleByoInput);
   elements.panelContent.addEventListener("change", handleTriggerInput);
+  // MARKET-6: ticking "this value is a secret" swaps a value box for the env NAME the host will
+  // store the key under. A checkbox is not a button, so the click handler never sees it.
+  elements.panelContent.addEventListener("change", handleByoHeaderToggle);
   // GW-01: the avatar control. A PNG file, base64, to setAgentAvatarBytes; the adapter reads
   // the new version back and the panel's own image follows it.
   elements.panelContent.addEventListener("change", async (event) => {
