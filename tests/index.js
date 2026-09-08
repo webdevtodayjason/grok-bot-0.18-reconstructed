@@ -90,3 +90,4 @@ import "./cp-store.test.mjs";
 import "./cp-provision.test.mjs";
 import "./cp-server.test.mjs";
 import "./control-plane-deploy.test.mjs";
+import "./cursor-free.test.mjs";

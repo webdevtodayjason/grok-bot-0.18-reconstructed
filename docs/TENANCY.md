@@ -729,6 +729,42 @@ The box container name is `titanbot-box-<service uuid>`, computed and then verif
 
 `--dry-run` does every read and every render and creates nothing.
 
+### Next step: a new box starts with our settings, not with a rollout
+
+Not yet wired. This is CURSOR-1 item 5, and it is filed as `TENANT-8` in `docs/GAP-ANALYSIS.md`
+because `cp/` is being changed for the admin console at the same time and two hands in one file is
+how a provisioner stops being idempotent.
+
+What is missing: a new tenant's box comes up with no settings of its own, so every gate falls
+through to whatever the bundled table says. Measured on the R750 on 2026-09-07, the same host
+bundle read `sand_auto_review` as true on the demo box and false on the other two, and on the box
+where it read true the agent could not run a single Shell command. Nothing in the product decided
+that, and nothing in the product could see it: all three rows printed `"source":"bundled default"`.
+
+The settings a box should start with are written down, in `deploy/box-defaults/`. That directory's
+README says what each pin is and why. The provisioner's job is only to copy them.
+
+The hook goes in the `directories` step of `cp/provision.mjs`, right after
+`for (const directory of tenantDirectoryList(slug, config)) mkdirSync(...)`, one line:
+
+```js
+writeBoxDefaults(paths.data);
+```
+
+`writeBoxDefaults(dataDir)` copies every file in `deploy/box-defaults/` into `dataDir` at mode
+0600 and **skips any file that is already there**. Skipping matters more than copying: the step is
+retried from the point it failed, and a customer or an operator may have edited a switch by hand
+since the box was built. A provisioner that overwrote those on a retry would silently undo somebody
+else's decision, which is the same class of bug as the rollout this is fixing.
+
+`paths.data` is already `tenantPaths(slug, config).data`, and it is the host side of the box's
+`/home/box/sand-data`, so the files land where `readSandBoxSetting` and the gate pin reader look
+for them. The step's ledger detail should name the files written and the files skipped, so a retry
+that changed nothing says so.
+
+Nothing here needs a container recreate. On a box that already exists, the same two files are
+copied in with `docker cp` and picked up on the next relay restart, which is what BOX-6 allows.
+
 ---
 
 ## 15. What changed from TENANT-2, and why
