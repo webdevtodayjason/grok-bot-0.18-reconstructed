@@ -6,24 +6,52 @@
  * what makes the agent's SearchPlugins and the operator's Marketplace panel the same catalog
  * rather than two lists that drift.
  *
- * A PLUGIN is one installable thing. `kind: "connector"` means an entry in
- * `/home/box/sand-data/connectors.json` -- `{command, args, env}`, the shape CONNECT-3 fixed, with
- * every credential env value left as the EMPTY STRING so the host's credential rule (CONNECT-4)
- * recognises it and the console draws a card for it. `kind: "shell-tool"` means a CLI the agent
- * runs from its own shell, installed through `installShellTool`; `install` is then the shell tool's
- * id in source/host/extensions/shell-tools/shell-tool-catalog.ts.
+ * A PLUGIN is one installable thing, and it declares WHAT it is rather than how this box happens to
+ * run it. `install.connector` is a `ConnectorSpec` (source/shared/marketplace/connector-spec.ts):
+ * a program the box runs, or an endpoint it talks to. `connectorEntryFromSpec` is the only place
+ * that turns one into a connectors.json entry, so the day a remote endpoint stops being bridged by
+ * mcp-remote, one function changes and not one row. `install.shellTool` is a CLI the agent runs
+ * from its own shell, named by its id in shell-tool-catalog.ts. A row may declare both: TinyFish is
+ * one product with a connector AND a CLI, and MARKET-5 is the rule that it therefore has ONE place
+ * to put a key rather than two forms that each warn the other's value does not reach it.
  *
- * The connector entries here are the same objects the console's preset row offers
- * (ui/machine-room/gateway-adapter.js, CONNECTOR_PRESETS), which are in turn section 2 of that
- * service's report under docs/connectors/ character for character. Three copies of one fact would
- * drift, so tests/marketplace-catalog.test.mjs holds this file against the preset array and
- * tests/connector-preset-catalog.test.mjs holds the preset array against the reports. Editing any
- * one of the three alone fails the suite.
+ * A CREDENTIAL is declared once and names its CONSUMERS. One masked box on the page, one write,
+ * and the host fans the value out to every consumer that asked for it -- the connector's process
+ * environment, a request header, the agent's shell. That is why `credentials` replaced the old
+ * `credentialHints` map: a hint keyed by env name could only ever describe one destination, so a
+ * product with two destinations had to be two cards, which is the complaint MARKET-5 is.
  *
- * NOTHING in this file is a credential. Every `env` value is the empty string, every hint says
- * where a key is minted and what the least permission is, and no value is ever stored here.
+ * VERIFICATION is a stamp, not a promise. Every row carries `verification {checkedOn, proof, how}`,
+ * `validateMarketplaceCatalog` REFUSES `proof: "documented"`, and tests/marketplace-catalog.test.mjs
+ * is the enforcement -- so "do not ship an unverified preset as if it worked" stops being
+ * discipline and becomes a failing test. `tools-listed` means the spec was spawned or called on a
+ * box and tools/list came back. `endpoint-answered` means it answered and named its refusal (a 401
+ * against a key we do not own) -- a real fact, weaker than the first, and the plugin page draws a
+ * quiet line saying so.
+ *
+ * NOTHING in this file is a credential. Every credential env value is the empty string (which is
+ * exactly how the host recognises a credential field, CONNECT-4), every header value is a
+ * `${FIELD}` placeholder, and `validateMarketplaceCatalog` refuses a literal in either position.
  */
 
+import {
+  type ConnectorEntry,
+  type ConnectorSpec,
+  type RemoteConnectorMode,
+  connectorEntryFromSpec,
+  connectorSpecCredentialFields,
+  connectorSpecProblems,
+  headerPlaceholderField,
+  isRemoteSpec,
+} from "./connector-spec.js";
+
+export type {
+  ConnectorEntry,
+  ConnectorSpec,
+  RemoteConnectorMode,
+} from "./connector-spec.js";
+
+/** Kept as the wire's word for what a row is, derived from `install` rather than declared. */
 export type MarketplacePluginKind = "connector" | "shell-tool";
 
 /**
@@ -34,7 +62,8 @@ export type MarketplacePluginKind = "connector" | "shell-tool";
  * internet, so every image it draws is a file in this repo under `ui/machine-room/marketplace/logos/`,
  * named in that directory's NOTICE.md with its source and licence. `letter` and `color` stay
  * REQUIRED and are the fallback: a plugin with no logo, or one whose image fails to load, is drawn
- * as the letter tile it has always been.
+ * as the letter tile it has always been. A vendor mark ships only when that vendor's own brand
+ * terms have been read and the permission quoted in NOTICE.md; the letter tile is the default.
  */
 export interface MarketplaceIcon {
   readonly letter: string;
@@ -56,6 +85,58 @@ export interface MarketplaceConnectorEntry {
   readonly env: Readonly<Record<string, string>>;
 }
 
+/**
+ * Where one stored value is USED. A credential is written once, under `field`, and the host pushes
+ * it to each of these:
+ *   connector  the connector process's environment, under `env`
+ *   header     a request header on a remote endpoint, under `name`
+ *   shell      the agent's own shell environment, under `env`
+ *
+ * GitHub is why the shape is a list rather than a name: one fine-grained token is
+ * GITHUB_PERSONAL_ACCESS_TOKEN to the connector and GITHUB_TOKEN to `gh` in the shell, and the old
+ * one-hint-per-env-name map could only ever have drawn that as two boxes to fill with the same
+ * string.
+ */
+export type MarketplaceCredentialConsumer =
+  | { readonly kind: "connector"; readonly env: string }
+  | { readonly kind: "header"; readonly name: string }
+  | { readonly kind: "shell"; readonly env: string };
+
+export interface MarketplaceCredential {
+  /** The name the value is stored under. */
+  readonly field: string;
+  /** What the operator is being asked for, in their words. */
+  readonly label: string;
+  /** Where it is minted, and the least permission that works. Never empty. */
+  readonly hint: string;
+  /** Every place one write has to reach. Never empty. */
+  readonly consumers: readonly MarketplaceCredentialConsumer[];
+}
+
+/** What installing this row does. At least one of the two, and a row may carry both. */
+export interface MarketplaceInstall {
+  readonly connector?: ConnectorSpec;
+  readonly shellTool?: string;
+}
+
+/**
+ * How we know this row works, and when we last knew it.
+ *
+ * `documented` exists in the type ONLY so the validator can name it in a refusal: a row that has
+ * been read about but not run does not reach a card. There is no fourth "trust me".
+ */
+export interface MarketplaceVerification {
+  /** ISO date, the day the check below was run. */
+  readonly checkedOn: string;
+  readonly proof:
+    | "tools-listed"
+    | "endpoint-answered"
+    | "vendor-installer"
+    | "documented";
+  /** One sentence: what was done, on which machine, and what came back. */
+  readonly how: string;
+}
+
 export interface MarketplacePlugin {
   readonly id: string;
   readonly name: string;
@@ -66,26 +147,38 @@ export interface MarketplacePlugin {
   readonly featured: boolean;
   readonly icon: MarketplaceIcon;
   readonly source: { readonly label: string; readonly url: string };
-  readonly kind: MarketplacePluginKind;
   /**
-   * A connector's entry, or a shell tool's id. `null` is the one exception in the seed: the
-   * "Custom MCP server" card has no entry of its own -- it opens the connector editor the console
-   * already has, which is what `opensEditor` says.
+   * What this row installs. Absent only on the "Add your own" card, which installs nothing: it
+   * opens the editor, which is what `opensEditor` says.
    */
-  readonly install: MarketplaceConnectorEntry | string | null;
-  /** The connector name this entry takes in connectors.json. Absent for a shell tool. */
+  readonly install?: MarketplaceInstall;
+  /** The connector name this entry takes in connectors.json. Absent for a shell-tool-only row. */
   readonly connectorName?: string;
-  /** One line per credential field, keyed by the env name the operator must fill. */
-  readonly credentialHints: Readonly<Record<string, string>>;
-  /** True only for the Custom MCP server card, which opens the existing connector editor. */
-  readonly opensEditor?: boolean;
+  /** Every credential this plugin needs, each declaring where one write has to land. */
+  readonly credentials: readonly MarketplaceCredential[];
   /**
-   * PROXY-1. The name this service is mounted under on the proxy's MCP gateway. Present only on a
-   * plugin whose upstream the operator holds a subscription to, and read only when a proxy is
-   * configured: `marketplaceConnectorEntry(plugin, {proxyMcpUrl})` then bridges to the proxy
-   * instead of the public endpoint, carrying the box's own virtual key. With no proxy the entry is
-   * the public one, character for character, so ONE catalog serves an operator install and a
-   * tenant box.
+   * What an owner types when they want this and do not know its name -- "crm", "invoice",
+   * "database". Read by the console's search and by the agent's plugin ranking, so the words
+   * people search for do not have to be forced into a tagline.
+   */
+  readonly keywords: readonly string[];
+  /** True only for the "Add your own" card, which opens the connector editor. */
+  readonly opensEditor?: boolean;
+  /** How we know it works. Required on every row; `documented` is refused. */
+  readonly verification: MarketplaceVerification;
+  /**
+   * DERIVED, and present only on the rows `MARKETPLACE_PLUGINS` hands out -- never written by hand.
+   * The vocabulary the catalog spoke before MARKET-6, kept answering so that a reader of this
+   * module did not have to change in the same commit the row shape did. Prefer
+   * `marketplacePluginKind` and `marketplaceCredentialHints`, which are the same answers.
+   */
+  readonly kind?: MarketplacePluginKind;
+  readonly credentialHints?: Readonly<Record<string, string>>;
+  /**
+   * PROXY-1 / PROXY-7. The name this service is mounted under on the proxy's MCP gateway. Present
+   * only on a plugin whose upstream the operator holds a subscription to, and read only when a
+   * proxy is configured: the row then comes back "Included with your plan" with no credential
+   * fields, because the box is given a key of its own and the operator has none to type.
    */
   readonly proxyMcpServer?: string;
 }
@@ -121,11 +214,17 @@ export interface MarketplaceCatalog {
   };
 }
 
+/**
+ * Frozen on purpose: every chip widens the row the console draws, so a new category is a design
+ * decision and not a side effect of adding a plugin. `Business` is the one this wave adds -- the
+ * money-and-customers row an owner looks for, which none of the engineering categories was.
+ */
 export const MARKETPLACE_PLUGIN_CATEGORIES: readonly string[] = Object.freeze([
   "Featured",
   "Development",
   "Communication",
   "Project management",
+  "Business",
   "Documents & Files",
   "Web & Search",
   "Code review",
@@ -145,45 +244,70 @@ export const MARKETPLACE_BOT_CATEGORIES: readonly string[] = Object.freeze([
  * Configuration env keys a catalog entry is allowed to give a non-empty value. A key NOT on this
  * list must be left empty, because an empty value is precisely how the host recognises a
  * credential field (CONNECT-4) -- and a credential with a value baked into the catalog would be a
- * secret in the repo. The list is empty today and the test asserts the rule either way.
+ * secret in the repo.
+ *
+ * `MCP_REMOTE_CONFIG_DIR` is here because it is the opposite of a secret: it is where a bridge
+ * keeps its own state. Left alone, mcp-remote writes under /root/.mcp-auth, which is not a volume,
+ * so a box recreate wipes it. Pointed at sand-data it survives one.
  */
-export const MARKETPLACE_CONFIGURATION_ENV_KEYS: readonly string[] = Object.freeze([]);
+export const MARKETPLACE_CONFIGURATION_ENV_KEYS: readonly string[] = Object.freeze([
+  "MCP_REMOTE_CONFIG_DIR",
+]);
 
-const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
+/** Where a bridge's own state lives, so a box recreate does not wipe it. */
+export const MCP_REMOTE_CONFIG_DIR = "/home/box/sand-data/.mcp-auth";
+
+/** The env every bridged remote row carries: the bridge's state directory, and nothing else. */
+const BRIDGE_ENV = Object.freeze({ MCP_REMOTE_CONFIG_DIR });
+
+/**
+ * The rows as they are written. `PLUGINS` below is these with two DERIVED fields attached, so a
+ * consumer that still speaks the pre-MARKET-6 vocabulary keeps working against the module itself
+ * rather than only against the wire.
+ */
+const DECLARED_PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
   Object.freeze({
     id: "github",
     name: "GitHub",
     tagline: "Read repositories, issues and pull requests",
     description:
-      "GitHub's own hosted MCP server, bridged into this box's stdio interface by mcp-remote and authorized with a fine-grained personal access token. The entry filters the server down to repository, issue and pull-request reads plus the identity tool, and sets X-MCP-Readonly, so nothing it exposes can write to a repository.",
+      "GitHub's own hosted MCP server, authorized with a fine-grained personal access token. The entry filters the server down to repository, issue and code-change reads plus the identity tool, and sets X-MCP-Readonly, so nothing it exposes can write to a repository. The same token also feeds `gh` in the agent's shell, which is what gives git inside the box something to push with.",
     category: "Development",
     featured: true,
     icon: Object.freeze({ letter: "G", color: "#2d333b", file: "marketplace/logos/github.svg" }),
     source: Object.freeze({ label: "github/github-mcp-server", url: "https://github.com/github/github-mcp-server" }),
-    kind: "connector",
     connectorName: "github",
     install: Object.freeze({
-      command: "npx",
-      args: Object.freeze([
-        "-y",
-        "mcp-remote@0.8.3",
-        "https://api.githubcopilot.com/mcp/",
-        "--transport",
-        "http-only",
-        "--header",
-        "Authorization:Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
-        "--header",
-        "X-MCP-Toolsets:repos,issues,pull_requests",
-        "--header",
-        "X-MCP-Tools:get_me",
-        "--header",
-        "X-MCP-Readonly:true",
-      ]),
-      env: Object.freeze({ GITHUB_PERSONAL_ACCESS_TOKEN: "" }),
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://api.githubcopilot.com/mcp/",
+        headers: Object.freeze({
+          Authorization: "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
+          "X-MCP-Toolsets": "repos,issues,pull_requests",
+          "X-MCP-Tools": "get_me",
+          "X-MCP-Readonly": "true",
+        }),
+        env: Object.freeze({ GITHUB_PERSONAL_ACCESS_TOKEN: "" }),
+      }),
+      shellTool: "github-cli",
     }),
-    credentialHints: Object.freeze({
-      GITHUB_PERSONAL_ACCESS_TOKEN:
-        "A GitHub fine-grained personal access token. Create one under Settings → Developer settings → Personal access tokens → Fine-grained tokens (github.com/settings/personal-access-tokens/new); the least this entry needs is Contents: read, Issues: read and Pull requests: read, plus the Metadata: read it includes automatically.",
+    keywords: Object.freeze(["git", "repository", "repo", "issues", "pull request", "code", "version control", "gh"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "GITHUB_PERSONAL_ACCESS_TOKEN",
+        label: "GitHub personal access token",
+        hint: "A GitHub fine-grained personal access token. Create one under Settings → Developer settings → Personal access tokens → Fine-grained tokens (github.com/settings/personal-access-tokens/new); reading needs Contents: read, Issues: read and Pull requests: read, plus the Metadata: read it includes automatically. Add Contents: write only if you want the box to push.",
+        consumers: Object.freeze([
+          Object.freeze({ kind: "connector", env: "GITHUB_PERSONAL_ACCESS_TOKEN" }),
+          Object.freeze({ kind: "header", name: "Authorization" }),
+          Object.freeze({ kind: "shell", env: "GITHUB_TOKEN" }),
+        ]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "endpoint-answered",
+      how: "POSTed an MCP initialize to https://api.githubcopilot.com/mcp/ from inside grok-bot-local-vm with a well-formed but invented token: HTTP 401 \"unauthorized: AuthenticateToken authentication failed\" in 0.4 s. The endpoint is live and reads the Authorization header; we hold no GitHub token of our own to list tools with.",
     }),
   }),
   Object.freeze({
@@ -191,21 +315,33 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
     name: "Slack",
     tagline: "Read channels, threads and search as yourself",
     description:
-      "A maintained stdio Slack server that takes a user OAuth token from the environment, so it acts as the installing user and search works. Posting stays off: that is the server's own default, not a header this entry sets. This is not the Slack chat listener — the listener binds inbound events to an agent, this connector is outbound tools inside the box.",
+      "A maintained Slack server that takes a user OAuth token from the environment, so it acts as the installing user and search works. Posting stays off: that is the server's own default, not a header this entry sets. This is not the Slack chat listener — the listener binds inbound events to an agent, this connector is outbound tools inside the box.",
     category: "Communication",
     featured: true,
     icon: Object.freeze({ letter: "S", color: "#4a154b" }),
     source: Object.freeze({ label: "korotovsky/slack-mcp-server", url: "https://github.com/korotovsky/slack-mcp-server" }),
-    kind: "connector",
     connectorName: "slack",
     install: Object.freeze({
-      command: "npx",
-      args: Object.freeze(["-y", "slack-mcp-server@1.3.0", "--transport", "stdio"]),
-      env: Object.freeze({ SLACK_MCP_XOXP_TOKEN: "" }),
+      connector: Object.freeze({
+        transport: "stdio",
+        command: "npx",
+        args: Object.freeze(["-y", "slack-mcp-server@1.3.0", "--transport", "stdio"]),
+        env: Object.freeze({ SLACK_MCP_XOXP_TOKEN: "" }),
+      }),
     }),
-    credentialHints: Object.freeze({
-      SLACK_MCP_XOXP_TOKEN:
-        "A Slack user OAuth token (xoxp-), acting as the installing user. Create the app at api.slack.com/apps, add User Token Scopes, Install to Workspace and copy the User OAuth Token; channels:read alone lists public channels, and reading plus search also wants channels:history, groups:read, groups:history, im:read, im:history, mpim:read, mpim:history, users:read and search:read.",
+    keywords: Object.freeze(["chat", "messages", "channels", "team", "dm", "conversation"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "SLACK_MCP_XOXP_TOKEN",
+        label: "Slack user OAuth token",
+        hint: "A Slack user OAuth token (xoxp-), acting as the installing user. Create the app at api.slack.com/apps, add User Token Scopes, Install to Workspace and copy the User OAuth Token; channels:read alone lists public channels, and reading plus search also wants channels:history, groups:read, groups:history, im:read, im:history, mpim:read, mpim:history, users:read and search:read.",
+        consumers: Object.freeze([Object.freeze({ kind: "connector", env: "SLACK_MCP_XOXP_TOKEN" })]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "endpoint-answered",
+      how: "Spawned `npx -y slack-mcp-server@1.3.0 --transport stdio` inside grok-bot-local-vm with an invented xoxp- token: the program downloaded, started and refused by name — \"Authentication failed - check your Slack tokens\", invalid_auth — rather than crashing or 404ing on npm. We hold no Slack workspace token to list tools with.",
     }),
   }),
   Object.freeze({
@@ -213,55 +349,82 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
     name: "Linear",
     tagline: "Read issues, projects and cycles",
     description:
-      "Linear's hosted Streamable HTTP endpoint, bridged by mcp-remote with a personal API key as the bearer. The header matters: without it mcp-remote falls through to a browser OAuth flow, and this box has no browser that can finish one. A read-only key is what Linear's own MCP guidance recommends.",
+      "Linear's hosted endpoint, reached with a personal API key. The key matters: with no key the bridge falls through to a browser sign-in, and this box has no browser a person can finish one in. A read-only key is what Linear's own guidance recommends.",
     category: "Project management",
     featured: true,
     icon: Object.freeze({ letter: "L", color: "#5e6ad2", file: "marketplace/logos/linear.svg" }),
     source: Object.freeze({ label: "linear.app/docs/mcp", url: "https://linear.app/docs/mcp" }),
-    kind: "connector",
     connectorName: "linear",
     install: Object.freeze({
-      command: "npx",
-      args: Object.freeze([
-        "-y",
-        "mcp-remote@0.8.3",
-        "https://mcp.linear.app/mcp",
-        "--transport",
-        "http-only",
-        "--header",
-        "Authorization:Bearer ${LINEAR_API_KEY}",
-      ]),
-      env: Object.freeze({ LINEAR_API_KEY: "" }),
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://mcp.linear.app/mcp",
+        headers: Object.freeze({ Authorization: "Bearer ${LINEAR_API_KEY}" }),
+        env: Object.freeze({ LINEAR_API_KEY: "" }),
+      }),
     }),
-    credentialHints: Object.freeze({
-      LINEAR_API_KEY:
-        "A Linear personal API key. Create one under Settings → Account → Security & Access → Personal API keys (linear.app/settings/account/security) and copy it once; Read is the only permission the read tools need, and Linear's own MCP FAQ recommends a Read-only key.",
+    keywords: Object.freeze(["issues", "tickets", "backlog", "sprint", "roadmap", "project tracker"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "LINEAR_API_KEY",
+        label: "Linear personal API key",
+        hint: "A Linear personal API key. Create one under Settings → Account → Security & Access → Personal API keys (linear.app/settings/account/security) and copy it once; Read is the only permission the read tools need, and Linear's own guidance recommends a Read-only key.",
+        consumers: Object.freeze([
+          Object.freeze({ kind: "connector", env: "LINEAR_API_KEY" }),
+          Object.freeze({ kind: "header", name: "Authorization" }),
+        ]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "endpoint-answered",
+      how: "POSTed an MCP initialize to https://mcp.linear.app/mcp from inside grok-bot-local-vm with an invented bearer: HTTP 401 {\"error\":\"invalid_token\"} in 0.5 s. The endpoint is live and the bearer scheme is the right one; we hold no Linear key of our own to list tools with.",
     }),
   }),
   Object.freeze({
     id: "google",
     name: "Google Workspace",
-    tagline: "Gmail, Docs and Drive through one stdio server",
+    tagline: "Gmail, Docs and Drive through one server",
     description:
-      "One stdio process covering Gmail and Docs. It mints access tokens at runtime from an OAuth client pair plus a refresh token, so consent is done once in Google's OAuth Playground and nothing afterwards needs a browser inside the box. Three credential fields, not one.",
+      "One process covering Gmail and Docs. It mints access tokens at runtime from an OAuth client pair plus a refresh token, so consent is done once in Google's OAuth Playground and nothing afterwards needs a browser inside the box. Three fields to fill, not one.",
     category: "Documents & Files",
     featured: false,
     icon: Object.freeze({ letter: "W", color: "#1a73e8", file: "marketplace/logos/google.svg" }),
     source: Object.freeze({ label: "EveryInc/google-workspace-mcp-server", url: "https://github.com/EveryInc/google-workspace-mcp-server" }),
-    kind: "connector",
     connectorName: "google",
     install: Object.freeze({
-      command: "npx",
-      args: Object.freeze(["-y", "google-workspace-mcp-server@1.4.3"]),
-      env: Object.freeze({ GOOGLE_CLIENT_ID: "", GOOGLE_CLIENT_SECRET: "", GOOGLE_REFRESH_TOKEN: "" }),
+      connector: Object.freeze({
+        transport: "stdio",
+        command: "npx",
+        args: Object.freeze(["-y", "google-workspace-mcp-server@1.4.3"]),
+        env: Object.freeze({ GOOGLE_CLIENT_ID: "", GOOGLE_CLIENT_SECRET: "", GOOGLE_REFRESH_TOKEN: "" }),
+      }),
     }),
-    credentialHints: Object.freeze({
-      GOOGLE_CLIENT_ID:
-        "The client ID of an OAuth Web application client. Create it in Google Cloud under APIs & Services → Credentials with https://developers.google.com/oauthplayground as an authorized redirect URI, on a project with the Gmail, Google Docs and Google Drive APIs enabled.",
-      GOOGLE_CLIENT_SECRET:
-        "The secret shown beside that same OAuth client under APIs & Services → Credentials. It is half of the client pair, not a scope of its own, and it is what the Playground is given to mint the refresh token.",
-      GOOGLE_REFRESH_TOKEN:
-        "The refresh token from the OAuth 2.0 Playground exchange (gear → Use your own OAuth credentials → Authorize APIs → Exchange authorization code for tokens), not the access token; authorize gmail.readonly for Gmail reads, gmail.compose for drafts, documents for Docs read and write, and drive.file plus drive.readonly for the Docs file IDs.",
+    keywords: Object.freeze(["gmail", "email", "docs", "drive", "calendar", "spreadsheet", "workspace"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "GOOGLE_CLIENT_ID",
+        label: "Google OAuth client ID",
+        hint: "The client ID of an OAuth Web application client. Create it in Google Cloud under APIs & Services → Credentials with https://developers.google.com/oauthplayground as an authorized redirect URI, on a project with the Gmail, Google Docs and Google Drive APIs enabled.",
+        consumers: Object.freeze([Object.freeze({ kind: "connector", env: "GOOGLE_CLIENT_ID" })]),
+      }),
+      Object.freeze({
+        field: "GOOGLE_CLIENT_SECRET",
+        label: "Google OAuth client secret",
+        hint: "The secret shown beside that same OAuth client under APIs & Services → Credentials. It is half of the client pair, not a scope of its own, and it is what the Playground is given to mint the refresh token.",
+        consumers: Object.freeze([Object.freeze({ kind: "connector", env: "GOOGLE_CLIENT_SECRET" })]),
+      }),
+      Object.freeze({
+        field: "GOOGLE_REFRESH_TOKEN",
+        label: "Google refresh token",
+        hint: "The refresh token from the OAuth 2.0 Playground exchange (gear → Use your own OAuth credentials → Authorize APIs → Exchange authorization code for tokens), not the access token; authorize gmail.readonly for Gmail reads, gmail.compose for drafts, documents for Docs read and write, and drive.file plus drive.readonly for the Docs file IDs.",
+        consumers: Object.freeze([Object.freeze({ kind: "connector", env: "GOOGLE_REFRESH_TOKEN" })]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "Spawned `npx -y google-workspace-mcp-server@1.4.3` inside grok-bot-local-vm with invented client credentials: it started and listed 34 tools in 5.2 s. It defers Google's own auth to the first call, so listing tools does not prove the credentials, only that the server runs in this box.",
     }),
   }),
   Object.freeze({
@@ -269,32 +432,387 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
     name: "TinyFish",
     tagline: "Web search, page fetch and browser automation",
     description:
-      "TinyFish's hosted MCP endpoint, bridged by mcp-remote with the API key carried as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. mcp-remote expands ${TINYFISH_API_KEY} from its own environment at start, so the literal ${...} text is what lands in connectors.json and the key stays in the host's store.",
+      "TinyFish's hosted endpoint plus its published command-line tool, which is one product and therefore one place to put a key: the value you store here reaches both the connector and the agent's shell. The key is carried as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it.",
     category: "Web & Search",
     featured: true,
     icon: Object.freeze({ letter: "T", color: "#0f766e" }),
     source: Object.freeze({ label: "agent.tinyfish.ai/mcp", url: "https://agent.tinyfish.ai/mcp" }),
-    kind: "connector",
     connectorName: "tinyfish",
     install: Object.freeze({
-      command: "npx",
-      args: Object.freeze([
-        "-y",
-        "mcp-remote",
-        "https://agent.tinyfish.ai/mcp",
-        "--transport",
-        "http-only",
-        "--header",
-        "Authorization:Bearer ${TINYFISH_API_KEY}",
-      ]),
-      env: Object.freeze({ TINYFISH_API_KEY: "" }),
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://agent.tinyfish.ai/mcp",
+        headers: Object.freeze({ Authorization: "Bearer ${TINYFISH_API_KEY}" }),
+        env: Object.freeze({ TINYFISH_API_KEY: "" }),
+      }),
+      shellTool: "tinyfish-cli",
     }),
-    // PROXY-1. Web search and page fetch are part of a plan, so a tenant box bridges to the proxy's
-    // mount of this same service with its own virtual key instead of holding the operator's.
+    keywords: Object.freeze(["search", "browse", "scrape", "web", "automation", "crawler", "fetch"]),
     proxyMcpServer: "tinyfish",
-    credentialHints: Object.freeze({
-      TINYFISH_API_KEY:
-        "Your TinyFish account's API key, carried to https://agent.tinyfish.ai/mcp as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. The key is account-wide; it carries no separate scopes. If web search and page fetch are included with your plan you need no key here at all: your box is given one of its own and this card stays empty.",
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "TINYFISH_API_KEY",
+        label: "TinyFish API key",
+        hint: "Your TinyFish account's API key, from the dashboard at agent.tinyfish.ai. The key is account-wide and carries no separate scopes. Stored once here, it is used by the connector and by the command-line tool in the agent's shell. If web search and page fetch are included with your plan you need no key here at all: your box is given one of its own and this card stays empty.",
+        consumers: Object.freeze([
+          Object.freeze({ kind: "connector", env: "TINYFISH_API_KEY" }),
+          Object.freeze({ kind: "header", name: "Authorization" }),
+          Object.freeze({ kind: "shell", env: "TINYFISH_API_KEY" }),
+        ]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "endpoint-answered",
+      how: "POSTed an MCP initialize to https://agent.tinyfish.ai/mcp from inside grok-bot-local-vm with an invented bearer: HTTP 401 \"Unauthorized: Valid OAuth Bearer token required\" in 0.6 s. The endpoint is live and the bearer scheme is the right one; no account key was used in this check.",
+    }),
+  }),
+  Object.freeze({
+    id: "context7",
+    name: "Context7",
+    tagline: "Up-to-date documentation for any library",
+    description:
+      "Looks up the current documentation for a library or framework and hands back the pages, so the agent writes against what a package does today rather than what it did when the model was trained. It needs no key at all: the endpoint answers anonymously.",
+    category: "Development",
+    featured: true,
+    icon: Object.freeze({ letter: "C7", color: "#111827" }),
+    source: Object.freeze({ label: "context7.com", url: "https://context7.com" }),
+    connectorName: "context7",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://mcp.context7.com/mcp",
+        headers: Object.freeze({}),
+        env: Object.freeze({}),
+      }),
+    }),
+    keywords: Object.freeze(["docs", "documentation", "api reference", "library", "framework", "sdk"]),
+    credentials: Object.freeze([]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "POSTed an MCP initialize then tools/list to https://mcp.context7.com/mcp from inside grok-bot-local-vm with no credential: 2 tools back in 0.6 s (resolve-library-id, query-docs).",
+    }),
+  }),
+  Object.freeze({
+    id: "exa",
+    name: "Exa",
+    tagline: "Search the web and read the pages it finds",
+    description:
+      "A search engine built for agents: it returns the contents of the pages, not a list of links to fetch separately. The public endpoint answers without a key, which is what makes it the cheapest thing on this page to try.",
+    category: "Web & Search",
+    featured: true,
+    icon: Object.freeze({ letter: "E", color: "#1d4ed8" }),
+    source: Object.freeze({ label: "exa.ai", url: "https://exa.ai" }),
+    connectorName: "exa",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://mcp.exa.ai/mcp",
+        headers: Object.freeze({}),
+        env: Object.freeze({}),
+      }),
+    }),
+    keywords: Object.freeze(["search", "web", "research", "find", "lookup", "internet"]),
+    credentials: Object.freeze([]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "POSTed an MCP initialize then tools/list to https://mcp.exa.ai/mcp from inside grok-bot-local-vm with no credential: 2 tools back in 0.4 s.",
+    }),
+  }),
+  Object.freeze({
+    id: "cloudflare-docs",
+    name: "Cloudflare docs",
+    tagline: "Search Cloudflare's own documentation",
+    description:
+      "Cloudflare's documentation server. It reads their docs and nothing else — no account, no zone, no API token — so it is safe to add on a box that has no Cloudflare relationship at all, and it is the one card here that proves the remote path end to end without anybody minting anything.",
+    category: "Development",
+    featured: false,
+    icon: Object.freeze({ letter: "CF", color: "#f6821f" }),
+    source: Object.freeze({ label: "developers.cloudflare.com/agents/model-context-protocol", url: "https://developers.cloudflare.com/agents/model-context-protocol/" }),
+    connectorName: "cloudflare-docs",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://docs.mcp.cloudflare.com/mcp",
+        headers: Object.freeze({}),
+        env: Object.freeze({}),
+      }),
+    }),
+    keywords: Object.freeze(["cloudflare", "dns", "workers", "cdn", "docs", "documentation"]),
+    credentials: Object.freeze([]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "POSTed an MCP initialize then tools/list to https://docs.mcp.cloudflare.com/mcp from inside grok-bot-local-vm with no credential: 2 tools back in 0.2 s (search_cloudflare_documentation, migrate_pages_to_workers_guide).",
+    }),
+  }),
+  Object.freeze({
+    id: "deepwiki",
+    name: "DeepWiki",
+    tagline: "Ask questions about any public repository",
+    description:
+      "Reads a public GitHub repository and answers questions about how it works, with the structure already indexed. Useful when somebody hands you a dependency and you need to know what it does before you trust it. No key: the endpoint answers anonymously.",
+    category: "Development",
+    featured: false,
+    icon: Object.freeze({ letter: "DW", color: "#0f172a" }),
+    source: Object.freeze({ label: "deepwiki.com", url: "https://deepwiki.com" }),
+    connectorName: "deepwiki",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://mcp.deepwiki.com/mcp",
+        headers: Object.freeze({}),
+        env: Object.freeze({}),
+      }),
+    }),
+    keywords: Object.freeze(["repository", "repo", "open source", "dependency", "codebase", "explain"]),
+    credentials: Object.freeze([]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "POSTed an MCP initialize then tools/list to https://mcp.deepwiki.com/mcp from inside grok-bot-local-vm with no credential: 3 tools back in 1.5 s.",
+    }),
+  }),
+  Object.freeze({
+    id: "notion",
+    name: "Notion",
+    tagline: "Read and write pages and databases",
+    description:
+      "Notion's own server, running inside the box with an internal integration token. It reaches only the pages you explicitly share with the integration, which is the permission model — there is no scope to narrow beyond choosing what to connect.",
+    category: "Documents & Files",
+    featured: true,
+    icon: Object.freeze({ letter: "N", color: "#191919" }),
+    source: Object.freeze({ label: "makenotion/notion-mcp-server", url: "https://github.com/makenotion/notion-mcp-server" }),
+    connectorName: "notion",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "stdio",
+        command: "npx",
+        args: Object.freeze(["-y", "@notionhq/notion-mcp-server@2.5.1"]),
+        env: Object.freeze({ NOTION_TOKEN: "" }),
+      }),
+    }),
+    keywords: Object.freeze(["notes", "wiki", "docs", "database", "knowledge base", "pages"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "NOTION_TOKEN",
+        label: "Notion internal integration token",
+        hint: "An internal integration token (ntn_...) from notion.so/profile/integrations — create the integration, then open each page or database you want reachable and use its ••• menu → Connections → your integration. Nothing you do not connect is visible, so connect the smallest set that works.",
+        consumers: Object.freeze([Object.freeze({ kind: "connector", env: "NOTION_TOKEN" })]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "Spawned `npx -y @notionhq/notion-mcp-server@2.5.1` inside grok-bot-local-vm with an invented token: 24 tools listed in 36.2 s on a cold npx cache, and about 2 s once cached. The first connect on a fresh box is close to the 60-second connect timeout; the second is not.",
+    }),
+  }),
+  Object.freeze({
+    id: "airtable",
+    name: "Airtable",
+    tagline: "Read and update bases, tables and records",
+    description:
+      "The spreadsheet-shaped database a lot of small businesses actually run on: customers, inventory, jobs. The server runs in the box against a personal access token, and the token's scopes are what decide whether the agent can write or only read.",
+    category: "Business",
+    featured: true,
+    icon: Object.freeze({ letter: "A", color: "#fcb400" }),
+    source: Object.freeze({ label: "domdomegg/airtable-mcp-server", url: "https://github.com/domdomegg/airtable-mcp-server" }),
+    connectorName: "airtable",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "stdio",
+        command: "npx",
+        args: Object.freeze(["-y", "airtable-mcp-server@1.14.0"]),
+        env: Object.freeze({ AIRTABLE_API_KEY: "" }),
+      }),
+    }),
+    keywords: Object.freeze(["database", "spreadsheet", "records", "crm", "inventory", "table", "base"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "AIRTABLE_API_KEY",
+        label: "Airtable personal access token",
+        hint: "A personal access token (pat...) from airtable.com/create/tokens, scoped to the bases you want reachable. schema.bases:read and data.records:read are enough to read; add data.records:write only if you want the agent to change records.",
+        consumers: Object.freeze([Object.freeze({ kind: "connector", env: "AIRTABLE_API_KEY" })]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "Spawned `npx -y airtable-mcp-server@1.14.0` inside grok-bot-local-vm with an invented token: 16 tools listed in 6.6 s. It checks the token on the first call, not at startup, so listing tools proves the server runs here and not that the token is good.",
+    }),
+  }),
+  Object.freeze({
+    id: "todoist",
+    name: "Todoist",
+    tagline: "Read and manage tasks and projects",
+    description:
+      "Todoist's own server, running in the box against an API token from your account settings. The token is account-wide — Todoist does not scope them — so this one reaches everything the account can see.",
+    category: "Project management",
+    featured: false,
+    icon: Object.freeze({ letter: "T", color: "#e44332" }),
+    source: Object.freeze({ label: "Doist/todoist-mcp", url: "https://github.com/Doist/todoist-mcp" }),
+    connectorName: "todoist",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "stdio",
+        command: "npx",
+        args: Object.freeze(["-y", "@doist/todoist-mcp@13.2.3"]),
+        env: Object.freeze({ TODOIST_API_KEY: "" }),
+      }),
+    }),
+    keywords: Object.freeze(["tasks", "todo", "reminders", "checklist", "projects", "personal"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "TODOIST_API_KEY",
+        label: "Todoist API token",
+        hint: "The API token from Todoist under Settings → Integrations → Developer. It is account-wide and cannot be narrowed, so add this on an account whose whole task list you are willing to expose.",
+        consumers: Object.freeze([Object.freeze({ kind: "connector", env: "TODOIST_API_KEY" })]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "Spawned `npx -y @doist/todoist-mcp@13.2.3` inside grok-bot-local-vm with an invented token: 47 tools listed in 24.9 s on a cold npx cache. The token is checked on the first call, not at startup.",
+    }),
+  }),
+  Object.freeze({
+    id: "playwright",
+    name: "Playwright browser",
+    tagline: "Drive a real browser inside the box",
+    description:
+      "A real Chromium the agent can open pages in, click through and read — for the sites that have no API. It runs headless and isolated, so each session starts from a clean profile and nothing it does is saved. No credential: the browser is the whole permission model.",
+    category: "Web & Search",
+    featured: false,
+    icon: Object.freeze({ letter: "P", color: "#2d4a3e" }),
+    source: Object.freeze({ label: "microsoft/playwright-mcp", url: "https://github.com/microsoft/playwright-mcp" }),
+    connectorName: "playwright",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "stdio",
+        command: "npx",
+        args: Object.freeze(["-y", "@playwright/mcp@0.0.80", "--headless", "--isolated"]),
+        env: Object.freeze({}),
+      }),
+    }),
+    keywords: Object.freeze(["browser", "chrome", "automation", "click", "form", "screenshot", "scrape"]),
+    credentials: Object.freeze([]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "Spawned `npx -y @playwright/mcp@0.0.80 --headless --isolated` inside grok-bot-local-vm: 24 tools listed in 2.5 s. Listing tools does not download a browser; the first page it opens will, and that download is slower than the first connect.",
+    }),
+  }),
+  Object.freeze({
+    id: "resend",
+    name: "Resend",
+    tagline: "Send email from your own domain",
+    description:
+      "Sends transactional email — a quote, a receipt, a follow-up — from a domain you have verified, rather than from a mailbox the agent has to log into. The key is carried as a bearer, which is what their docs prescribe for a client with no browser.",
+    category: "Business",
+    featured: true,
+    icon: Object.freeze({ letter: "R", color: "#000000" }),
+    source: Object.freeze({ label: "resend.com/docs/mcp", url: "https://resend.com/docs" }),
+    connectorName: "resend",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://mcp.resend.com/mcp",
+        headers: Object.freeze({ Authorization: "Bearer ${RESEND_API_KEY}" }),
+        env: Object.freeze({ RESEND_API_KEY: "" }),
+      }),
+    }),
+    keywords: Object.freeze(["email", "send", "mail", "smtp", "newsletter", "transactional", "invoice"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "RESEND_API_KEY",
+        label: "Resend API key",
+        hint: "An API key from resend.com/api-keys. Choose Sending access rather than Full access, and restrict it to the one verified domain you want the agent to send from; a Full access key can also read and delete your domains.",
+        consumers: Object.freeze([
+          Object.freeze({ kind: "connector", env: "RESEND_API_KEY" }),
+          Object.freeze({ kind: "header", name: "Authorization" }),
+        ]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "POSTed an MCP initialize then tools/list to https://mcp.resend.com/mcp from inside grok-bot-local-vm with an invented bearer: 103 tools back in 0.6 s. It does not check the key until a tool is called, so this proves the endpoint and the transport, not the key.",
+    }),
+  }),
+  Object.freeze({
+    id: "stripe",
+    name: "Stripe",
+    tagline: "Look up customers, invoices and payments",
+    description:
+      "Reads and creates the objects a business actually asks about: who paid, what is outstanding, send this invoice. Use a restricted key rather than your secret key — Stripe lets you build one that can read customers and invoices and touch nothing else.",
+    category: "Business",
+    featured: true,
+    icon: Object.freeze({ letter: "S", color: "#635bff" }),
+    source: Object.freeze({ label: "docs.stripe.com/mcp", url: "https://docs.stripe.com/mcp" }),
+    connectorName: "stripe",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://mcp.stripe.com",
+        headers: Object.freeze({ Authorization: "Bearer ${STRIPE_API_KEY}" }),
+        env: Object.freeze({ STRIPE_API_KEY: "" }),
+      }),
+    }),
+    keywords: Object.freeze(["payments", "invoice", "billing", "customers", "subscription", "revenue", "money", "refund"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "STRIPE_API_KEY",
+        label: "Stripe restricted API key",
+        hint: "A RESTRICTED key (rk_...) from the Stripe dashboard under Developers → API keys → Create restricted key, not your secret key. Give it read on Customers, Invoices and Charges and nothing else; add write only for the objects you want the agent to create.",
+        consumers: Object.freeze([
+          Object.freeze({ kind: "connector", env: "STRIPE_API_KEY" }),
+          Object.freeze({ kind: "header", name: "Authorization" }),
+        ]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "endpoint-answered",
+      how: "POSTed an MCP initialize to https://mcp.stripe.com from inside grok-bot-local-vm with an invented restricted key: HTTP 401 {\"error\":\"Unauthorized. See https://docs.stripe.com/mcp for usage instructions.\"} in 0.6 s. The endpoint is live and takes a bearer; we hold no Stripe key of our own to list tools with.",
+    }),
+  }),
+  Object.freeze({
+    id: "browser-use",
+    name: "Browser Use",
+    tagline: "Hand a browsing job to a hosted agent",
+    description:
+      "Describes a task in words — find this, fill that in, get me the number — and a hosted agent drives a browser to do it, so the box does not have to run one. The alternative to the Playwright card when the job is a goal rather than a script.",
+    category: "Web & Search",
+    featured: false,
+    icon: Object.freeze({ letter: "BU", color: "#111827" }),
+    source: Object.freeze({ label: "docs.browser-use.com", url: "https://docs.browser-use.com" }),
+    connectorName: "browser-use",
+    install: Object.freeze({
+      connector: Object.freeze({
+        transport: "http",
+        url: "https://api.browser-use.com/mcp",
+        headers: Object.freeze({ "X-Browser-Use-API-Key": "${BROWSER_USE_API_KEY}" }),
+        env: Object.freeze({ BROWSER_USE_API_KEY: "" }),
+      }),
+    }),
+    keywords: Object.freeze(["browser", "agent", "automation", "web task", "scrape", "form"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "BROWSER_USE_API_KEY",
+        label: "Browser Use API key",
+        hint: "An API key from cloud.browser-use.com under Billing → API keys. It is account-wide and it spends your balance on every run, so put it on an account with a cap you are comfortable with.",
+        consumers: Object.freeze([
+          Object.freeze({ kind: "connector", env: "BROWSER_USE_API_KEY" }),
+          Object.freeze({ kind: "header", name: "X-Browser-Use-API-Key" }),
+        ]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "POSTed an MCP initialize then tools/list to https://api.browser-use.com/mcp from inside grok-bot-local-vm with an invented key in X-Browser-Use-API-Key: 6 tools back in 0.3 s. It checks the key when a task is started, not at listing time, so this proves the endpoint and the header name, not the key.",
     }),
   }),
   Object.freeze({
@@ -302,7 +820,7 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
     name: "Filesystem",
     tagline: "Read and write files in the box's workspace",
     description:
-      "The reference filesystem MCP server, scoped to /workspace inside the box. It needs no credential at all — the box's own filesystem is the whole permission model — so its card has no Accounts row to fill and it reads Ready as soon as the server connects.",
+      "The reference filesystem server, scoped to /workspace inside the box. It needs no credential at all — the box's own filesystem is the whole permission model — so its card has nothing to fill in and it reads Working as soon as it connects.",
     category: "Documents & Files",
     featured: false,
     icon: Object.freeze({ letter: "F", color: "#7c5cff", file: "marketplace/logos/localfiles.svg" }),
@@ -310,14 +828,22 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       label: "modelcontextprotocol/servers · filesystem",
       url: "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
     }),
-    kind: "connector",
     connectorName: "localfiles",
     install: Object.freeze({
-      command: "npx",
-      args: Object.freeze(["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]),
-      env: Object.freeze({}),
+      connector: Object.freeze({
+        transport: "stdio",
+        command: "npx",
+        args: Object.freeze(["-y", "@modelcontextprotocol/server-filesystem@2026.8.31", "/workspace"]),
+        env: Object.freeze({}),
+      }),
     }),
-    credentialHints: Object.freeze({}),
+    keywords: Object.freeze(["files", "folder", "workspace", "read", "write", "disk", "documents"]),
+    credentials: Object.freeze([]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "tools-listed",
+      how: "Spawned `npx -y @modelcontextprotocol/server-filesystem@2026.8.31 /workspace` inside grok-bot-local-vm: 14 tools listed in 3.1 s. The version is pinned to the dated release that resolved on that day; this package ships a rolling date version and an unpinned entry is a different program every few weeks.",
+    }),
   }),
   Object.freeze({
     id: "coderabbit",
@@ -329,75 +855,40 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
     featured: true,
     icon: Object.freeze({ letter: "C", color: "#e05d38", file: "marketplace/logos/coderabbit.svg" }),
     source: Object.freeze({ label: "docs.coderabbit.ai/cli", url: "https://docs.coderabbit.ai/cli/index.md" }),
-    kind: "shell-tool",
-    install: "coderabbit",
-    credentialHints: Object.freeze({
-      CODERABBIT_API_KEY:
-        "An Agentic API key from app.coderabbit.ai/settings/api-keys (app.eu.coderabbit.ai for EU accounts). User and workspace keys are a different product and the CLI refuses them; the key is org-bound and that org is billed for CLI reviews.",
-    }),
-  }),
-  Object.freeze({
-    id: "tinyfish-cli",
-    name: "TinyFish CLI",
-    tagline: "Drive TinyFish from the shell, with its published skill",
-    description:
-      "A pip package that reads TINYFISH_API_KEY out of the environment, with a published SKILL.md the host imports as an agent workflow so the agent learns the commands from their author. Its key lives in the shell section of the secret store, which is a different place from the tinyfish connector's process environment: storing one does not fill the other.",
-    category: "Shell tools",
-    featured: false,
-    icon: Object.freeze({ letter: "T", color: "#155e75" }),
-    source: Object.freeze({
-      label: "webdevtodayjason/cli-anything-tinyfish",
-      url: "https://github.com/webdevtodayjason/cli-anything-tinyfish",
-    }),
-    kind: "shell-tool",
-    install: "tinyfish-cli",
-    credentialHints: Object.freeze({
-      TINYFISH_API_KEY:
-        "The same TinyFish API key the tinyfish connector uses, stored for the agent's shell instead of the connector process. A key stored on the tinyfish connector card does not reach this CLI.",
-    }),
-  }),
-  Object.freeze({
-    id: "github-cli",
-    name: "GitHub CLI (gh)",
-    tagline: "Give git in the box a credential it can push with",
-    description:
-      "An agent that commits inside the box could not push: git over https with no credential helper has "
-      + "nowhere to get a username and answers \"could not read Username for https://github.com\". This "
-      + "installs GitHub's own CLI from its documented Debian package (or its precompiled tarball into "
-      + "~/.local/bin where apt is out of reach) and then runs `gh auth setup-git`, which points git's "
-      + "credential helper at gh. gh reads GITHUB_TOKEN from the shell environment the host merges the "
-      + "stored value into, so git authenticates without a token ever landing in a remote URL or a file.",
-    category: "Development",
-    featured: false,
-    // The binary's own name rather than an initial, and no logo file on purpose: GitHub's Octocat is
-    // in this repo, but drawing it here would put two identical marks side by side in Development,
-    // and this card is the one an operator must not confuse with the GitHub connector. Two glyphs sit
-    // inside the 40px tile the console draws.
-    icon: Object.freeze({ letter: "gh", color: "#1f2328" }),
-    source: Object.freeze({ label: "cli/cli", url: "https://github.com/cli/cli/blob/trunk/docs/install_linux.md" }),
-    kind: "shell-tool",
-    install: "github-cli",
-    credentialHints: Object.freeze({
-      GITHUB_TOKEN:
-        "A fine-grained personal access token from github.com/settings/personal-access-tokens/new, one owner "
-        + "and only the repositories it may touch; pushing needs Contents: write. It is the shell's own copy — "
-        + "the GitHub connector's GITHUB_PERSONAL_ACCESS_TOKEN is a different name in a different environment.",
+    install: Object.freeze({ shellTool: "coderabbit" }),
+    keywords: Object.freeze(["review", "code review", "pull request", "lint", "quality", "diff"]),
+    credentials: Object.freeze([
+      Object.freeze({
+        field: "CODERABBIT_API_KEY",
+        label: "CodeRabbit Agentic API key",
+        hint: "An Agentic API key from app.coderabbit.ai/settings/api-keys (app.eu.coderabbit.ai for EU accounts). User and workspace keys are a different product and the CLI refuses them; the key is org-bound and that org is billed for CLI reviews.",
+        consumers: Object.freeze([Object.freeze({ kind: "shell", env: "CODERABBIT_API_KEY" })]),
+      }),
+    ]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "vendor-installer",
+      how: "There is no endpoint to call: this row installs a command-line tool. Its install command is CodeRabbit's own documented one from docs.coderabbit.ai/cli, re-read on this date, and the gate never runs it because it is a curl-to-shell on a shared box.",
     }),
   }),
   Object.freeze({
     id: "custom-mcp",
-    name: "Custom MCP server",
-    tagline: "Add any stdio MCP server by hand",
+    name: "Add your own",
+    tagline: "Connect any MCP server, from a link or a command",
     description:
-      "Anything the catalog does not carry. This opens the connector editor already in the console: a name, a command, its arguments and the environment variable NAMES the process needs. Names only — a value you leave empty becomes a credential field on the connector's card, where the host stores it instead of connectors.json.",
+      "Anything this page does not already carry. Two shapes, and you pick: a LINK, which is an address the box talks to and a key if it needs one; or a PROGRAM, which is a command the box runs. Either way a key you type goes into the same protected store as every card here — never into the connector list, never into a chat. Servers that require signing in through a browser are the one thing this cannot take, because the sign-in would have to happen inside the box.",
     category: "Development",
     featured: false,
     icon: Object.freeze({ letter: "+", color: "#475569" }),
-    source: Object.freeze({ label: "docs/CONNECTORS.md", url: "https://modelcontextprotocol.io/docs/concepts/transports" }),
-    kind: "connector",
-    install: null,
+    source: Object.freeze({ label: "modelcontextprotocol.io", url: "https://modelcontextprotocol.io/docs/concepts/transports" }),
     opensEditor: true,
-    credentialHints: Object.freeze({}),
+    keywords: Object.freeze(["custom", "own", "byo", "add", "manual", "third party", "mcp server", "url", "command"]),
+    credentials: Object.freeze([]),
+    verification: Object.freeze({
+      checkedOn: "2026-09-08",
+      proof: "vendor-installer",
+      how: "This row installs nothing of its own: it opens the editor. What it opens is proved by scripts/verify-marketplace.mjs, which adds a link server and a program server through it on grok-bot-local-vm.",
+    }),
   }),
 ]);
 
@@ -596,6 +1087,20 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([
   }),
 ]);
 
+/**
+ * `kind` and `credentialHints` were fields a row declared; they are now answers computed from what
+ * it installs and what credentials it declares. They are attached here rather than left to each
+ * caller because the alternative is a flag day: every reader of the catalog module -- the host, the
+ * console, the verify scripts, four test suites -- would have to change in the same commit as the
+ * row shape, across three waves editing the same tree. Derived and attached, the new shape is the
+ * authority and the old vocabulary keeps answering.
+ */
+const PLUGINS: readonly MarketplacePlugin[] = Object.freeze(DECLARED_PLUGINS.map((plugin) => Object.freeze({
+  ...plugin,
+  kind: marketplacePluginKind(plugin),
+  credentialHints: Object.freeze(marketplaceCredentialHints(plugin)),
+})));
+
 export const MARKETPLACE_PLUGINS = PLUGINS;
 export const MARKETPLACE_BOTS = BOTS;
 
@@ -617,84 +1122,165 @@ export function findMarketplaceBot(id: unknown): MarketplaceBot | undefined {
 }
 
 /**
+ * What the wire calls this row. Derived rather than declared: a row that installs a connector is a
+ * connector, and TinyFish -- which installs both -- is a connector with a CLI attached, because
+ * that is the thing the console draws a connector card for.
+ */
+export function marketplacePluginKind(plugin: MarketplacePlugin): MarketplacePluginKind {
+  return plugin.install?.connector != null ? "connector" : "shell-tool";
+}
+
+/** The spec a row declares, before this box's opinion about how to run it. */
+export function marketplaceConnectorSpec(plugin: MarketplacePlugin): ConnectorSpec | null {
+  return plugin.install?.connector ?? null;
+}
+
+/**
  * The one filter both surfaces use: the console's search field and the agent's SearchPlugins.
- * Name, tagline and category, case-insensitively, so "search" finds TinyFish through its tagline
- * and "code review" finds CodeRabbit through its category.
+ *
+ * `keywords` is in the haystack on purpose. An owner does not type "Airtable", they type
+ * "database" or "customers"; forcing those words into the tagline instead would make every card
+ * read like a keyword stuffing, and it would break the four searches the tool suite pins.
  */
 export function searchMarketplacePlugins(query: unknown): readonly MarketplacePlugin[] {
   const needle = typeof query === "string" ? query.trim().toLowerCase() : "";
   if (needle.length === 0) return MARKETPLACE_PLUGINS;
   return MARKETPLACE_PLUGINS.filter((plugin) =>
-    `${plugin.name} ${plugin.tagline} ${plugin.category}`.toLowerCase().includes(needle));
+    `${plugin.name} ${plugin.tagline} ${plugin.category} ${plugin.keywords.join(" ")}`.toLowerCase().includes(needle));
 }
 
 /**
- * PROXY-1. The proxy's MCP mount, when this box has one. `null` and an absent option are the same
- * thing and are the default everywhere: an operator install, the console's preset row, the
- * marketplace card and every existing caller pass nothing and get exactly the entry they got
+ * PROXY-1 / PROXY-7. The proxy's MCP mount, when this box has one. `null` and an absent option are
+ * the same thing and are the default everywhere: an operator install, the console's preset row,
+ * the marketplace card and every existing caller pass nothing and get exactly the entry they got
  * before.
  */
 export interface MarketplaceConnectorEntryOptions {
   readonly proxyMcpUrl?: string | null;
+  /** How a remote spec is materialised. Defaults to the tree's own default. */
+  readonly remoteMode?: RemoteConnectorMode;
 }
 
 /**
- * The tenant form of a bridged connector. `mcp-remote` still spawns in the box and still expands
- * `${...}` in a header value from its own environment; what moves is the far end and the header
- * names. `x-litellm-api-key` rather than `Authorization` because the bridge owns the Authorization
- * header for its own OAuth flow, and `x-mcp-servers` because the proxy mounts several services at
- * one URL and this names the one this connector is.
- *
- * An `http://` far end is fine here and is not the endpoint guard's business: that guard lives in
- * the relay's endpoint save, and an included route never goes through it.
+ * The tenant form of a remote connector: the far end moves to the proxy, which mounts several
+ * services at one URL, and the box carries its own virtual key instead of the operator's.
+ * `x-litellm-api-key` rather than `Authorization` because the bridge owns the Authorization header
+ * for its own sign-in flow, and `x-mcp-servers` names which of the proxy's mounts this row is.
  */
-function proxyConnectorEntry(entry: MarketplaceConnectorEntry, server: string, proxyMcpUrl: string): MarketplaceConnectorEntry {
-  const credentialField = Object.entries(entry.env).find(([, value]) => value === "")?.[0] ?? null;
-  if (credentialField == null) return entry;
-  return Object.freeze({
-    command: entry.command,
-    args: Object.freeze([
-      "-y",
-      "mcp-remote",
-      proxyMcpUrl,
-      "--transport",
-      "http-only",
-      "--header",
-      `x-litellm-api-key:Bearer \${${credentialField}}`,
-      "--header",
-      `x-mcp-servers:${server}`,
-    ]),
-    env: entry.env,
-  });
+function proxyConnectorSpec(spec: ConnectorSpec, server: string, proxyMcpUrl: string): ConnectorSpec {
+  const field = connectorSpecCredentialFields(spec)[0];
+  if (field == null) return spec;
+  return {
+    transport: "http",
+    url: proxyMcpUrl,
+    headers: { "x-litellm-api-key": `Bearer \${${field}}`, "x-mcp-servers": server },
+    env: { [field]: "" },
+  };
 }
 
-/** The connector entry of a plugin, or null for a shell tool and for the editor card. */
+/**
+ * The connectors.json entry of a plugin on this box today, or null for a shell-tool-only row and
+ * for the editor card.
+ *
+ * Every word about bridges, version pins and transport flags lives in `connectorEntryFromSpec`.
+ * What is added here is `MCP_REMOTE_CONFIG_DIR`: a bridge left alone writes its own state under
+ * /root, which is not a volume, so a box recreate throws it away. It is configuration, not a
+ * credential, which is why it is on MARKETPLACE_CONFIGURATION_ENV_KEYS and why it does not show up
+ * as a field to fill.
+ */
 export function marketplaceConnectorEntry(
   plugin: MarketplacePlugin,
   options: MarketplaceConnectorEntryOptions = {},
 ): MarketplaceConnectorEntry | null {
-  const entry = plugin.kind === "connector" && plugin.install != null && typeof plugin.install !== "string"
-    ? plugin.install
-    : null;
-  if (entry == null) return null;
+  const declared = marketplaceConnectorSpec(plugin);
+  if (declared == null) return null;
   const proxyMcpUrl = options.proxyMcpUrl ?? null;
-  if (proxyMcpUrl == null || proxyMcpUrl.length === 0 || plugin.proxyMcpServer == null) return entry;
-  return proxyConnectorEntry(entry, plugin.proxyMcpServer, proxyMcpUrl);
+  const spec = proxyMcpUrl != null && proxyMcpUrl.length > 0 && plugin.proxyMcpServer != null
+    ? proxyConnectorSpec(declared, plugin.proxyMcpServer, proxyMcpUrl)
+    : declared;
+  const entry = connectorEntryFromSpec(spec, {
+    ...(options.remoteMode == null ? {} : { remoteMode: options.remoteMode }),
+    ...(plugin.connectorName == null ? {} : { connectorName: plugin.connectorName }),
+  });
+  if (!("command" in entry)) return null;
+  const bridged = isRemoteSpec(spec);
+  return {
+    command: entry.command,
+    args: entry.args,
+    env: bridged ? { ...BRIDGE_ENV, ...entry.env } : entry.env,
+  };
 }
 
-/** The shell tool id of a plugin, or null when it is not a shell tool. */
+/** The full entry, including the native remote shape when that is the mode. For the host. */
+export function marketplaceConnectorEntryOrRemote(
+  plugin: MarketplacePlugin,
+  options: MarketplaceConnectorEntryOptions = {},
+): ConnectorEntry | null {
+  const spec = marketplaceConnectorSpec(plugin);
+  if (spec == null) return null;
+  if (options.remoteMode !== "native") return marketplaceConnectorEntry(plugin, options);
+  return connectorEntryFromSpec(spec, {
+    remoteMode: "native",
+    ...(plugin.connectorName == null ? {} : { connectorName: plugin.connectorName }),
+  });
+}
+
+/** The shell tool id of a plugin, or null when it installs no CLI. */
 export function marketplaceShellToolId(plugin: MarketplacePlugin): string | null {
-  return plugin.kind === "shell-tool" && typeof plugin.install === "string" ? plugin.install : null;
+  return plugin.install?.shellTool ?? null;
+}
+
+/** Every credential field of a plugin: the name each stored value is written under. */
+export function marketplaceCredentialFields(plugin: MarketplacePlugin): readonly string[] {
+  return plugin.credentials.map((credential) => credential.field);
 }
 
 /**
- * Every credential field of a plugin: for a connector, the env keys the entry leaves empty (the
- * host's own rule), and for a shell tool, the env names its hints declare.
+ * The old `credentialHints` map, derived. Kept because the plugin page, the agent's field list and
+ * the console's preset row all still speak "a sentence per env name", and MARKET-5's fan-out is a
+ * change to WHERE one value goes, not to what the operator is told about it.
  */
-export function marketplaceCredentialFields(plugin: MarketplacePlugin): readonly string[] {
-  const entry = marketplaceConnectorEntry(plugin);
-  if (entry == null) return Object.keys(plugin.credentialHints);
-  return Object.entries(entry.env).flatMap(([field, value]) => (value === "" ? [field] : []));
+export function marketplaceCredentialHints(plugin: MarketplacePlugin): Record<string, string> {
+  const hints: Record<string, string> = {};
+  for (const credential of plugin.credentials) hints[credential.field] = credential.hint;
+  return hints;
+}
+
+/** The credential a stored field belongs to, so a write knows every consumer it has to reach. */
+export function marketplaceCredential(plugin: MarketplacePlugin, field: unknown): MarketplaceCredential | null {
+  return plugin.credentials.find((credential) => credential.field === field) ?? null;
+}
+
+/**
+ * The catalog in the shape the console and the verify scripts already read.
+ *
+ * `listMarketplace` served this module verbatim, so the row shape WAS the wire shape and changing
+ * one changed the other. This is the seam: rows carry `install.connector` as a spec and
+ * `credentials` as a list, and the wire keeps carrying `kind`, `install` and `credentialHints`
+ * derived from them, so nothing in ui/machine-room or scripts/ has to change on the day the row
+ * shape does. The new fields ride along beside the old ones rather than replacing them, because a
+ * console that wants the fan-out needs `credentials` and a console that does not is unaffected.
+ */
+export function marketplaceCatalogWireView(
+  catalog: MarketplaceCatalog = MARKETPLACE_CATALOG,
+  options: MarketplaceConnectorEntryOptions = {},
+): Record<string, unknown> {
+  return {
+    plugins: catalog.plugins.map((plugin) => {
+      const kind = marketplacePluginKind(plugin);
+      const entry = marketplaceConnectorEntry(plugin, options);
+      const install = plugin.opensEditor === true ? null : entry ?? marketplaceShellToolId(plugin);
+      return {
+        ...plugin,
+        kind,
+        install,
+        credentialHints: marketplaceCredentialHints(plugin),
+        shellToolId: marketplaceShellToolId(plugin),
+      };
+    }),
+    bots: catalog.bots,
+    categories: catalog.categories,
+  };
 }
 
 /**
@@ -714,42 +1300,131 @@ export function marketplaceLogoProblem(where: string, file: unknown): string | n
 }
 
 /**
+ * The four search tokens the plugin tools pin with `deepEqual`. A tagline that carries one of them
+ * silently changes what SearchPlugins answers for a query nobody re-ran, so the catalog refuses it
+ * and the words owners actually type go in `keywords` instead, which those searches do not read.
+ */
+const PINNED_SEARCH_TOKENS: readonly string[] = Object.freeze(["linear", "pull requests", "code review", "kubernetes"]);
+
+/** Which row is allowed to answer each pinned search, because it is the row the token is about. */
+const PINNED_SEARCH_OWNER: Readonly<Record<string, string>> = Object.freeze({
+  linear: "linear",
+  "pull requests": "github",
+  "code review": "coderabbit",
+});
+
+/**
  * The catalog's own invariants, as a list of problems rather than a throw, so a test can print all
  * of them at once and the host can log rather than fail to start.
  */
 export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETPLACE_CATALOG): string[] {
   const problems: string[] = [];
   const pluginIds = new Set<string>();
+  const connectorNames = new Map<string, string>();
   for (const plugin of catalog.plugins) {
+    const where = `plugin "${plugin.id}"`;
     if (pluginIds.has(plugin.id)) problems.push(`duplicate plugin id "${plugin.id}"`);
     pluginIds.add(plugin.id);
     if (!catalog.categories.plugins.includes(plugin.category)) {
-      problems.push(`plugin "${plugin.id}" has category "${plugin.category}", which is not in the category list`);
+      problems.push(`${where} has category "${plugin.category}", which is not in the category list`);
     }
-    if (plugin.tagline.includes("\n")) problems.push(`plugin "${plugin.id}" has a multi-line tagline`);
-    const logoProblem = marketplaceLogoProblem(`plugin "${plugin.id}"`, plugin.icon.file);
-    if (logoProblem != null) problems.push(logoProblem);
-    if (plugin.install == null && plugin.opensEditor !== true) {
-      problems.push(`plugin "${plugin.id}" has no install and does not open the editor`);
-    }
-    if (plugin.kind === "shell-tool" && typeof plugin.install !== "string") {
-      problems.push(`shell-tool plugin "${plugin.id}" must install by shell tool id`);
-    }
-    const entry = marketplaceConnectorEntry(plugin);
-    if (entry != null) {
-      if (plugin.connectorName == null || plugin.connectorName.length === 0) {
-        problems.push(`connector plugin "${plugin.id}" has no connectorName`);
+    if (plugin.tagline.length === 0 || plugin.tagline.includes("\n")) problems.push(`${where} has no one-line tagline`);
+    const searchable = `${plugin.name} ${plugin.tagline} ${plugin.category}`.toLowerCase();
+    for (const token of PINNED_SEARCH_TOKENS) {
+      const owner = PINNED_SEARCH_OWNER[token];
+      if (searchable.includes(token) && owner !== plugin.id) {
+        problems.push(`${where} answers the pinned search "${token}", which belongs to ${owner == null ? "no plugin at all" : `"${owner}"`}; put the words owners type in keywords, which that search does not read`);
       }
-      for (const [field, value] of Object.entries(entry.env)) {
-        if (value !== "" && !MARKETPLACE_CONFIGURATION_ENV_KEYS.includes(field)) {
-          problems.push(`plugin "${plugin.id}" gives env "${field}" a non-empty value; only a declared configuration key may carry one`);
+    }
+    if (plugin.keywords.length === 0) problems.push(`${where} carries no keywords, so an owner who does not know its name cannot find it`);
+    const logoProblem = marketplaceLogoProblem(where, plugin.icon.file);
+    if (logoProblem != null) problems.push(logoProblem);
+
+    // -- verification: a stamp, and never "documented"
+    const verification = plugin.verification;
+    if (verification == null) {
+      problems.push(`${where} carries no verification stamp; a row nobody ran does not reach a card`);
+    } else {
+      if (verification.proof === "documented") {
+        problems.push(`${where} is verified only by reading the vendor's documentation; run it on a box and record what came back, or leave it out`);
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(verification.checkedOn)) {
+        problems.push(`${where} has a verification date that is not a date ("${verification.checkedOn}")`);
+      }
+      if (verification.how.trim().length < 40) {
+        problems.push(`${where} does not say what was actually done to verify it`);
+      }
+      if (verification.proof === "vendor-installer" && plugin.install?.connector != null) {
+        problems.push(`${where} installs a connector, so its proof has to be that the connector ran, not that the vendor documents an installer`);
+      }
+    }
+
+    // -- what it installs
+    const spec = marketplaceConnectorSpec(plugin);
+    const shellTool = marketplaceShellToolId(plugin);
+    if (plugin.install == null && plugin.opensEditor !== true) {
+      problems.push(`${where} installs nothing and does not open the editor`);
+    }
+    if (plugin.install != null && spec == null && shellTool == null) {
+      problems.push(`${where} has an install that names neither a connector nor a shell tool`);
+    }
+    if (spec != null) {
+      if (plugin.connectorName == null || plugin.connectorName.length === 0) {
+        problems.push(`${where} installs a connector and has no connectorName`);
+      } else {
+        const taken = connectorNames.get(plugin.connectorName);
+        if (taken != null) problems.push(`${where} and "${taken}" both claim the connector name "${plugin.connectorName}"; one would silently overwrite the other`);
+        connectorNames.set(plugin.connectorName, plugin.id);
+      }
+      problems.push(...connectorSpecProblems(where, spec, MARKETPLACE_CONFIGURATION_ENV_KEYS));
+    } else if (plugin.connectorName != null) {
+      problems.push(`${where} names a connector "${plugin.connectorName}" but declares no connector to run`);
+    }
+
+    // -- credentials: one home, every consumer real
+    const declared = new Set<string>();
+    for (const credential of plugin.credentials) {
+      if (declared.has(credential.field)) problems.push(`${where} declares "${credential.field}" twice`);
+      declared.add(credential.field);
+      if (credential.hint.trim().length === 0) {
+        problems.push(`${where} credential "${credential.field}" has no hint; a masked box with no sentence under it is the bug CONNECT-4 was about`);
+      }
+      if (credential.label.trim().length === 0) problems.push(`${where} credential "${credential.field}" has no label`);
+      if (credential.consumers.length === 0) {
+        problems.push(`${where} credential "${credential.field}" names no consumer, so a stored value would go nowhere`);
+      }
+      for (const consumer of credential.consumers) {
+        if (consumer.kind === "connector") {
+          if (spec == null) {
+            problems.push(`${where} credential "${credential.field}" feeds a connector and the plugin installs none`);
+          } else if (spec.env[consumer.env] !== "") {
+            problems.push(`${where} credential "${credential.field}" feeds connector env "${consumer.env}", which the entry does not leave empty`);
+          }
+        } else if (consumer.kind === "header") {
+          if (spec == null || !isRemoteSpec(spec)) {
+            problems.push(`${where} credential "${credential.field}" feeds header "${consumer.name}" and the plugin has no endpoint to send it to`);
+          } else {
+            const value = spec.headers[consumer.name];
+            if (value == null) {
+              problems.push(`${where} credential "${credential.field}" feeds header "${consumer.name}", which the entry does not set`);
+            } else if (headerPlaceholderField(value) !== credential.field) {
+              problems.push(`${where} header "${consumer.name}" does not resolve against "${credential.field}"`);
+            }
+          }
+        } else if (shellTool == null) {
+          problems.push(`${where} credential "${credential.field}" feeds the agent's shell and the plugin installs no shell tool`);
         }
       }
-      for (const field of marketplaceCredentialFields(plugin)) {
-        if (plugin.credentialHints[field] == null) problems.push(`plugin "${plugin.id}" has no hint for credential field "${field}"`);
+    }
+    if (spec != null) {
+      for (const field of connectorSpecCredentialFields(spec)) {
+        if (!declared.has(field)) {
+          problems.push(`${where} leaves env "${field}" empty, which the host reads as a credential field, and declares no credential for it`);
+        }
       }
     }
   }
+
   const botIds = new Set<string>();
   for (const bot of catalog.bots) {
     if (botIds.has(bot.id)) problems.push(`duplicate bot id "${bot.id}"`);
