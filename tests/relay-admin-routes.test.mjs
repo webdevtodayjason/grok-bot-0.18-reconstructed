@@ -32,6 +32,22 @@ const withControlPlane = {
 
 const rowsOn = (relay) => readLedgerFile(path.join(relay.dir, LEDGER_NAME));
 
+/**
+ * The lockout row is appended after the 429 has already gone back on the wire, so reading the file
+ * the instant the response lands is a race: it passed alone and failed about one run in three under
+ * `npm test`, where a dozen suites share the machine. Poll for the row the case is about instead of
+ * assuming it is there, and let the assertion below report the rows it did find when the wait runs
+ * out, so a real regression still reads as a real regression.
+ */
+const rowsOnceLocked = async (relay, timeoutMs = 5_000) => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await rowsOn(relay);
+    if (rows.some((row) => row.outcome === "locked") || Date.now() >= deadline) return rows;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+};
+
 // Everything the relay wrote into its own directory, as one string. This is the "grep the data
 // directory for the password" check, done in process.
 function everythingWritten(relay) {
@@ -90,7 +106,7 @@ test("a lockout is a row of its own, and five wrong passwords are five digests",
 
     // Read off disk rather than through the route: this address is locked out of that door too,
     // which is itself the point -- the control plane reads from its own address on titanbot-net.
-    const rows = await rowsOn(relay);
+    const rows = await rowsOnceLocked(relay);
     const lockRow = rows.find((row) => row.outcome === "locked");
     assert.notEqual(lockRow, undefined, `no locked row in ${JSON.stringify(rows)}`);
     assert.equal(lockRow.ip.length > 0, true);

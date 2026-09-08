@@ -4,6 +4,7 @@ import { resolveMultitaskEnabled } from "../../sand-multitask.js";
 import { readSandBoxSetting, resolveAutoReviewEnforceEnabled, resolveBrowserUseEnabled, resolveMemoryDreamingEnabled, resolveTeachEnabled, SAND_AUTO_REVIEW_SETTING, SAND_BROWSER_USE_SETTING, SAND_MEMORY_DREAMING_SETTING, SAND_TEACH_SETTING } from "../../sand-box-setting.js";
 import { resolveSpotlightEnabled } from "../../../shared/sand-spotlight.js";
 import { SandExperimentService } from "../../../shared/node/experiments/cursor-experiments.js";
+import { pinnedGateNames } from "../../../shared/node/experiments/gate-pins.js";
 import { HostExtensions } from "../extension-ids.generated.js";
 
 interface AuthApi { getAccessToken(options: { backendUrl: string }): Promise<string>; getMachineId(): Promise<string>; peekAccessToken(): string | null; subscribeToRenewal(listener: (event: { outcome: string; isFirstCredential: boolean }) => void): () => void; }
@@ -22,6 +23,45 @@ export const experimentsExtension = defineHostExtension({
       // and readSandBoxSetting reads the container env before the settings file, so a row that
       // says "host setting" when the value came from the environment names the wrong switch.
       const fromEnv = (name: string | undefined) => name !== undefined && (process.env[name]?.trim() ?? "").length > 0;
+      // CURSOR-1. The gate's own layer, straight from the resolver, instead of a guess. The old
+      // helper had no word for "a StatsigClient hydrated from a cached bootstrap file", so it
+      // called that "bundled default" -- which is how the R750's demo box printed
+      // {"sand_auto_review":{"value":true,"source":"bundled default"}} when the bundled default is
+      // false, and then refused every Shell command on that box. `pin` says which pin won: "file"
+      // is gates.json in the data root, "host" is the product's table in the bundle.
+      type Row = { value: boolean; source: string; pin?: "file" | "host"; live?: true };
+      const gateRow = (name: Parameters<typeof service.resolveFeatureGate>[0]): Row => {
+        const resolved = service.resolveFeatureGate(name);
+        return { value: resolved.value, source: resolved.source, ...(resolved.pin === undefined ? {} : { pin: resolved.pin }) };
+      };
+      // A row whose switch is a host setting: the setting wins where it is set (and only a value
+      // that actually decides may be named, because readSandBoxSetting reads the container env
+      // before the file), otherwise the gate's own layer is reported.
+      const settingRow = (
+        name: Parameters<typeof service.resolveFeatureGate>[0],
+        settingName: string,
+        resolve: (override: string | undefined, gate: () => boolean) => boolean,
+        isLive: boolean,
+      ): Row => {
+        const live = isLive ? { live: true as const } : {};
+        const override = readSandBoxSetting(settingName);
+        const resolved = service.resolveFeatureGate(name);
+        if (override !== undefined && override.length > 0) {
+          return { value: resolve(override, () => resolved.value), source: fromEnv(settingName) ? `env ${settingName}` : `host setting ${settingName}`, ...live };
+        }
+        return { ...gateRow(name), ...live };
+      };
+      // The same shape for the two switches that are read straight off process.env, not the
+      // settings file. These two are armed once at host start, so they carry no live mark.
+      const envRow = (
+        name: Parameters<typeof service.resolveFeatureGate>[0],
+        envName: string,
+        resolve: (override: string | undefined, gate: () => boolean) => boolean,
+      ): Row => {
+        const resolved = service.resolveFeatureGate(name);
+        if (fromEnv(envName)) return { value: resolve(process.env[envName], () => resolved.value), source: `env ${envName}` };
+        return gateRow(name);
+      };
       const source = (envName?: string, settingName?: string) =>
         fromEnv(settingName) ? `env ${settingName}`
         : settingName !== undefined && readSandBoxSetting(settingName) !== undefined ? `host setting ${settingName}`
@@ -34,25 +74,29 @@ export const experimentsExtension = defineHostExtension({
       // this printed value stays as it was -- a security switch that reads "off" here can be
       // holding commands right now. A row without the mark is armed once, here, and only a restart
       // moves it. Saying which is which is the difference between a snapshot and a lie.
-      const rows: Record<string, { value: boolean; source: string; live?: true }> = {
-        sand_browser_use_subagent: { value: resolveBrowserUseEnabled(readSandBoxSetting(SAND_BROWSER_USE_SETTING), () => gate("sand_browser_use_subagent")), source: source(undefined, SAND_BROWSER_USE_SETTING), live: true },
-        grok_bot_dynamic_tools: { value: gate("grok_bot_dynamic_tools"), source: source() },
-        sand_agent_network: { value: gate("sand_agent_network"), source: source() },
-        sand_multitask: { value: resolveMultitaskEnabled(process.env.SAND_MULTITASK, () => gate("sand_multitask")), source: source("SAND_MULTITASK") },
-        sand_spotlight: { value: resolveSpotlightEnabled(process.env.SAND_SPOTLIGHT, () => gate("sand_spotlight")), source: source("SAND_SPOTLIGHT") },
-        sand_global_search: { value: gate("sand_global_search"), source: source() },
-        sand_teach_by_demonstration: { value: resolveTeachEnabled(readSandBoxSetting(SAND_TEACH_SETTING), () => gate("sand_teach_by_demonstration")), source: source(undefined, SAND_TEACH_SETTING), live: true },
+      const rows: Record<string, Row> = {
+        sand_browser_use_subagent: settingRow("sand_browser_use_subagent", SAND_BROWSER_USE_SETTING, resolveBrowserUseEnabled, true),
+        grok_bot_dynamic_tools: gateRow("grok_bot_dynamic_tools"),
+        sand_agent_network: gateRow("sand_agent_network"),
+        sand_multitask: envRow("sand_multitask", "SAND_MULTITASK", resolveMultitaskEnabled),
+        sand_spotlight: envRow("sand_spotlight", "SAND_SPOTLIGHT", resolveSpotlightEnabled),
+        sand_global_search: gateRow("sand_global_search"),
+        sand_teach_by_demonstration: settingRow("sand_teach_by_demonstration", SAND_TEACH_SETTING, resolveTeachEnabled, true),
         // FLAGS-2. Both decide whether a shipped feature runs at all, and neither was in the table:
         // memory synthesis is armed once at host start (memory extension), and auto-review only
         // escalates past shadow when sand_auto_review is on (auto-review-service). Off here means
         // the feature is silently inert, not broken. Both read their own host switch now, because
         // the gates behind them can never bootstrap without a Cursor login.
-        sand_memory_dreaming: { value: resolveMemoryDreamingEnabled(readSandBoxSetting(SAND_MEMORY_DREAMING_SETTING), () => gate("sand_memory_dreaming")), source: source(undefined, SAND_MEMORY_DREAMING_SETTING) },
-        sand_auto_review: { value: resolveAutoReviewEnforceEnabled(readSandBoxSetting(SAND_AUTO_REVIEW_SETTING), () => gate("sand_auto_review")), source: source(undefined, SAND_AUTO_REVIEW_SETTING), live: true },
+        sand_memory_dreaming: settingRow("sand_memory_dreaming", SAND_MEMORY_DREAMING_SETTING, resolveMemoryDreamingEnabled, false),
+        sand_auto_review: settingRow("sand_auto_review", SAND_AUTO_REVIEW_SETTING, resolveAutoReviewEnforceEnabled, true),
         sand_stale_root_gc: { value: gate("sand_stale_root_gc"), source: source("SAND_STALE_ROOT_GC", "SAND_STALE_ROOT_GC") },
         grok_bot_conversation_gc: { value: gate("grok_bot_conversation_gc"), source: source("SAND_CONVERSATION_GC", "SAND_CONVERSATION_GC") },
         sand_legacy_store_blob_retirement: { value: gate("sand_legacy_store_blob_retirement"), source: source("SAND_RETIRE_LEGACY_STORE_BLOBS", "SAND_RETIRE_LEGACY_STORE_BLOBS") },
       };
+      // CURSOR-1. Every gate the product pins gets a row, not just the fifteen somebody once
+      // thought were interesting. A pin whose effect nobody can read at boot is a rollout again,
+      // just ours, and the whole point of the pin file is that an operator can see what decided.
+      for (const name of pinnedGateNames()) rows[name] ??= gateRow(name);
       console.log(`[sand][gates] ${JSON.stringify(rows)}`);
     } catch (error) { console.warn(`[sand][gates] table failed: ${error instanceof Error ? error.message : String(error)}`); }
     return {

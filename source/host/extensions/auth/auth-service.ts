@@ -1,4 +1,5 @@
 import type { Clock, RetryPolicy } from "../../../internal/scheduling.js";
+import { getSandBackendMode } from "../../../shared/node/backend-mode.js";
 import { getConfiguredBackendUrl } from "../../../shared/node/cursor-token.js";
 import { getOrCreateHostMachineId } from "../../host-secret-store.js";
 import {
@@ -40,6 +41,8 @@ export function createHostAuthService(options: {
   readonly renewCredential?: (backendUrl: string, credential: string) => Promise<InferenceCredential>;
   readonly readDevCredential?: (path: string) => Promise<InferenceCredential>;
   readonly getMachineId?: () => Promise<string>;
+  /** CURSOR-1. Injected by the tests; production asks `getSandBackendMode()`. */
+  readonly isBackendOurs?: boolean;
 }) {
   const env = options.env ?? process.env;
   const store = new InferenceCredentialStore();
@@ -71,16 +74,31 @@ export function createHostAuthService(options: {
     retry: options.retry,
     clock: options.clock
   });
-  renewer.start();
-  options.log(isDevTokenFile
-    ? `DEV inference-credential renewer started, reading short-lived tokens from ${devTokenFile} (dev:box-docker local loop)`
-    : hasRenewalCredential
-      ? "inference-credential renewer started (backend self-renewal is the sole inference-credential source)"
-      : "inference-credential renewer started, but no renewal credential was delivered into the box; inference is unavailable until the box is re-provisioned with one");
+  /**
+   * CURSOR-1. The renewer is a forever loop against the backend (or against a file the backend is
+   * meant to keep fresh), backing off between 30 s and 30 min. On a box with no backend of ours its
+   * only real effect was noise and harm: Jason measured "inference-credential renewal failed
+   * (streak N): ENOENT" on every tenant box on the R750 until the file was copied in by hand, and
+   * on the boxes where the file WAS present it made `peekAccessToken()` non-null -- which is the
+   * test the auto-review router used to choose the upstream classifier over REVIEW-1's local one.
+   * Real inference credentials come from the endpoint picker, which writes SAND_OPENAI_COMPATIBLE_*
+   * into the box's own secrets file and never touches this loop.
+   */
+  const isBackendOurs = options.isBackendOurs ?? getSandBackendMode() === "ours";
+  if (isBackendOurs) {
+    renewer.start();
+    options.log(isDevTokenFile
+      ? `DEV inference-credential renewer started, reading short-lived tokens from ${devTokenFile} (dev:box-docker local loop)`
+      : hasRenewalCredential
+        ? "inference-credential renewer started (backend self-renewal is the sole inference-credential source)"
+        : "inference-credential renewer started, but no renewal credential was delivered into the box; inference is unavailable until the box is re-provisioned with one");
+  } else {
+    options.log("inference-credential renewer is off: this box has no backend of ours configured, so there is nothing to renew against. Inference credentials come from the endpoint settings.");
+  }
   return {
     async getAccessToken(_options?: { readonly backendUrl?: string }): Promise<string> {
       let token = store.getValidAccessToken();
-      if (token === null && hasRenewalCredential) {
+      if (token === null && hasRenewalCredential && isBackendOurs) {
         const renewed = await renewer.requestImmediateRenewal();
         if (renewed) token = store.getValidAccessToken();
       }

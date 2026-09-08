@@ -12,7 +12,17 @@ export const STATSIG_CLIENT_KEY = "client-Bm4HJ0aDjXHQVsoACMREyLNxm5p6zzuzhO50Mg
 export const STATSIG_LOG_EVENT_PROXY_URL = "https://api3.cursor.sh/tev1/v1";
 export const BOOTSTRAP_CACHE_FILENAME = "sand-statsig-bootstrap.json";
 
-export function sandStatsigNetworkUrlAllowed(url: string): boolean { return url.includes("/rgstr"); }
+/**
+ * CURSOR-1. Nothing leaves through the Statsig SDK any more.
+ *
+ * This filter used to pass any URL containing "/rgstr" to real fetch and answer everything else
+ * with a synthetic 204. "/rgstr" is Statsig's event-logging endpoint, so the filter blocked config
+ * fetches and PERMITTED event uploads -- to STATSIG_LOG_EVENT_PROXY_URL, which is
+ * https://api3.cursor.sh/tev1/v1. It was inert only because the client never hydrated on our
+ * boxes, and "inert by accident" is not a setting. The 204 shim stays so the SDK is still happy if
+ * a client is ever constructed against a backend of ours.
+ */
+export function sandStatsigNetworkUrlAllowed(_url: string): boolean { return false; }
 export function sandStatsigNetworkOverride(url: string, args: RequestInit, fetchImpl: typeof fetch = fetch): Promise<Response> { return sandStatsigNetworkUrlAllowed(url) ? fetchImpl(url, args) : Promise.resolve(new Response(null, { status: 204 })); }
 export function extractStatsigUser(config: string): Record<string, unknown> { const parsed = JSON.parse(config) as { user?: unknown }; return typeof parsed.user === "object" && parsed.user != null && !Array.isArray(parsed.user) ? parsed.user as Record<string, unknown> : {}; }
 export function readStatsigBootstrapUserId(config: string): string | null { try { const user = extractStatsigUser(config); return typeof user.userID === "string" ? user.userID : null; } catch (error) { reportExperimentsDiagnostic({ kind: "bootstrap_config_unparseable", errorClass: errorLogTag(error) }); return null; } }

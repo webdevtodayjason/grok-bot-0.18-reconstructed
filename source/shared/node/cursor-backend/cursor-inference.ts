@@ -14,6 +14,7 @@ import { SAND_DEFAULT_MODEL_SELECTION } from "../../agents/agent-model.js";
 import { SAND_COMPUTER_USE_MODEL_SELECTION, type SandAgentModelSelection } from "../../agents/sand-agent-model.js";
 import { PrivacyMode } from "../../observability/sentry-privacy-mode.js";
 import { accountCacheScope, getConfiguredBackendUrl } from "../cursor-token.js";
+import { getSandBackendMode } from "../backend-mode.js";
 import { SAND_BOX_NAMESPACE_HEADER, SAND_CLIENT_TYPE, getSandBoxNamespace, getSandClientVersion } from "../sand-client-metadata.js";
 import { createSandRpcTracingInterceptor } from "./rpc-tracing.js";
 import { SandSettingsStore } from "../settings/sand-settings-store.js";
@@ -88,8 +89,25 @@ export async function resolveCachedSandPrivacyMode(options: PrivacyLookupOptions
 }
 export function clearSandPrivacyModeCacheForTesting(): void { cachedPrivacyMode = undefined; }
 
-export async function resolveSandPrivacyMode(options: PrivacyLookupOptions, fetchPrivacyMode: PrivacyModeFetcher = fetchSandPrivacyMode): Promise<PrivacyMode | undefined> { return await resolveCachedSandPrivacyMode(options, fetchPrivacyMode); }
+/**
+ * CURSOR-1. The privacy lookup does not run unless the box has a backend of ours.
+ *
+ * This was 99.9 percent of the product's Cursor noise: measured on grok-bot-local-vm 2026-09-07,
+ * /tmp/sand-host.log was 2,947,354 bytes and held 1740 "[sand:privacy] privacy-mode lookup failed,
+ * using privacy-safe fallback" lines out of 1742 lines containing "cursor" at all. The lookup is
+ * exposed on the inference object BEFORE the provider branch, so it fired once per turn and again
+ * per subagent run even on a box routed entirely to xAI or a local endpoint -- a 3 s stall at the
+ * head of every turn for an answer that could never arrive. Failures cache for 10 s and successes
+ * for 5 min, so the worse it went the harder it retried.
+ *
+ * Returning the fallback with no network call and no log line is exactly what the failure path
+ * already returned, so nothing downstream changes: `getSandGhostModeHeaderFromPrivacyMode`
+ * answers "true" for undefined, which is the privacy-safe header. The function, its cache and the
+ * header all stay for the day a backend of ours exists.
+ */
+export async function resolveSandPrivacyMode(options: PrivacyLookupOptions, fetchPrivacyMode: PrivacyModeFetcher = fetchSandPrivacyMode): Promise<PrivacyMode | undefined> { if (getSandBackendMode() !== "ours") return undefined; return await resolveCachedSandPrivacyMode(options, fetchPrivacyMode); }
 export async function resolveSandRunPrivacyMode(options: { readonly getAccessToken: (options: { backendUrl: string }) => Promise<string>; readonly getMachineId: () => Promise<string> | string; readonly backendUrl?: string }, fetchPrivacyMode: PrivacyModeFetcher = fetchSandPrivacyMode): Promise<PrivacyMode> {
+  if (getSandBackendMode() !== "ours") return SAND_RUN_PRIVACY_MODE_FALLBACK;
   try {
     const backendUrl = options.backendUrl ?? getConfiguredBackendUrl();
     const [accessToken, machineId] = await Promise.all([options.getAccessToken({ backendUrl }), options.getMachineId()]);
