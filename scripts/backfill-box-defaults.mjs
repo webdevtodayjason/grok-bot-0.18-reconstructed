@@ -20,7 +20,7 @@
 //   node scripts/backfill-box-defaults.mjs --dry-run     say what it would add, change nothing
 //   node scripts/backfill-box-defaults.mjs               add what is missing
 //   node scripts/backfill-box-defaults.mjs --root /data/titanbot --tenant demo
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55,10 +55,26 @@ const tenants = readdirSync(ROOT)
 
 if (tenants.length === 0) { console.error(`FAILED: no tenant tree with volumes/data under ${ROOT}`); process.exit(1); }
 
+// AN UNREADABLE DIRECTORY IS NOT AN EMPTY ONE, and this check exists because the first run of this
+// script said otherwise. The tenant data directories on the R750 are mode 700 owned by the box's
+// user; run as anybody else, `existsSync` answers false for every file in them, so a dry run
+// reported it would add two files to three tenants that between them already had four of the six.
+// A backfill that cannot see what is there must refuse, not guess.
+let blocked = 0;
 let added = 0;
 for (const tenant of tenants) {
   const data = path.join(ROOT, tenant, "volumes", "data");
   step(`${tenant}`);
+  try {
+    accessSync(data, constants.R_OK | constants.X_OK | (DRY ? 0 : constants.W_OK));
+  } catch {
+    let owner = "?";
+    try { const info = statSync(data); owner = `mode ${(info.mode & 0o777).toString(8)}, uid ${info.uid}`; } catch {}
+    say(`BLOCKED cannot read ${data} (${owner}); every file in it would read as missing, so nothing is reported for this tenant`);
+    say(`        re-run this with the user that owns it, or with sudo`);
+    blocked += 1;
+    continue;
+  }
   for (const name of defaults) {
     const target = path.join(data, name);
     if (existsSync(target)) {
@@ -76,6 +92,11 @@ for (const tenant of tenants) {
 }
 
 step("result");
-say(DRY ? `${added} file(s) would be added across ${tenants.length} tenant(s); nothing was changed`
-        : `${added} file(s) added across ${tenants.length} tenant(s)`);
+const reached = tenants.length - blocked;
+say(DRY ? `${added} file(s) would be added across ${reached} tenant(s); nothing was changed`
+        : `${added} file(s) added across ${reached} tenant(s)`);
 if (!DRY && added > 0) say("each box picks these up on its next ordinary restart; nothing here restarts or recreates one");
+if (blocked > 0) {
+  say(`${blocked} tenant(s) could not be read at all, so this run says nothing about them`);
+  process.exit(1);
+}
