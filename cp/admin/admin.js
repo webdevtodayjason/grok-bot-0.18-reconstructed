@@ -1063,10 +1063,18 @@
 
     const visionName = (answer.planModels ?? []).find((one) => one.alias === model.visionFallback);
     const vision = el("p", "quiet");
+    // Three states, and the middle one is the reason this is not a two-branch check. The model every
+    // other one falls back TO has no fallback of its own and never will, so a bare "is there a
+    // fallback" test shouts an outage warning at the one model that is working exactly as designed,
+    // on every load, forever. The save handler already knows the difference; the screen has to as
+    // well, or the operator learns to read the warning as furniture and misses the real one.
     if (String(model.visionFallback ?? "").length > 0) {
       vision.appendChild(text(`a screenshot falls back to ${visionName?.customerName || model.visionFallback}`));
+    } else if (model.supportsVision === true) {
+      vision.appendChild(text("this one takes screenshots itself, so nothing falls back"));
     } else {
-      vision.appendChild(text("NO SCREENSHOT ROUTE. Every Titan conversation carries screenshots, so a workspace on this model fails on its next turn."));
+      vision.appendChild(el("span", "chip off", "no screenshot route"));
+      vision.appendChild(text(" Every Titan conversation carries screenshots, so a workspace on this model fails on its next turn."));
     }
     card.appendChild(vision);
 

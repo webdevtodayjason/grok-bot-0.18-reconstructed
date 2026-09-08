@@ -1184,6 +1184,23 @@ if (!WANT_BROWSER) {
   check(String(aliasLine).includes("what the routing calls it") && String(aliasLine).includes("plan-zai"),
     "on a line an operator can read without guessing what it is", String(aliasLine).replace(/\s+/g, " ").slice(0, 60));
 
+  // THE WARNING HAS TO BE TRUE OR IT IS FURNITURE. plan-zai-vision is the model every other one
+  // falls back TO: it has no fallback of its own and never will. The form already knew that and let
+  // it save; the card did not, and shouted "no screenshot route ... fails on its next turn" at it on
+  // every single load. An operator who learns that this panel cries wolf about the vision model is
+  // an operator who scrolls past the day it is a real text-only model saying the same thing. The
+  // other half of the rule, that a model with nowhere to fall back to is refused, is measured on the
+  // form below rather than on a card, because this API will not save such a model in the first place.
+  const visionSelf = await page.locator('#planModels .planModel[data-alias="plan-zai-vision"]').textContent();
+  check(!String(visionSelf).includes("no screenshot route"),
+    "the model everything falls back to is not warned that it has nowhere to fall back to",
+    String(visionSelf).replace(/\s+/g, " ").slice(0, 80));
+  check(String(visionSelf).includes("takes screenshots itself"),
+    "it says why instead", String(visionSelf).replace(/\s+/g, " ").slice(0, 80));
+  const visionFlagship = await page.locator('#planModels .planModel[data-alias="plan-zai"]').textContent();
+  check(String(visionFlagship).includes("a screenshot falls back to"),
+    "and a model that does fall back somewhere names where");
+
   // NOTHING DANGEROUS IS OPEN BEFORE IT IS ASKED FOR. This is here because the first build of this
   // panel drew a roll form and a remove form under every key on load: the code set hidden, and a
   // class setting `display: flex` beat the browser's own rule for it. Every check in this leg still
