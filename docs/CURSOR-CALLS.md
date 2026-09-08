@@ -392,8 +392,9 @@ error text, ten cases, none skipped.
   the three compose lines, the account MCP and marketplace RPCs, and the `cursor.com` links.
 - **TOOLS-FETCH-1** part (2) is closed by section 6, measured. Parts (1) and (3) stay where they
   are: the standing role on the R750 boxes, and onboarding.
-- **REVIEW-2** is section 5. Amended: `sand_auto_review` is pinned false locally, so the demo box's
-  state cannot recur from a remote flag. The router inversion is still owed.
+- **REVIEW-2** is untouched. It is about the deterministic layer's natural-language limits, not the
+  classifier, and nothing here moved it. Section 5's classifier row belongs to REVIEW-3 and REVIEW-1,
+  not to REVIEW-2, which the earlier draft of this file had wrong.
 - **REVIEW-3** recorded the remote flag that rejected every command on the demo box. This change is
   its durable fix: with no live evaluation possible, the flag can no longer be set remotely at all.
 - **TENANT-8** is the provisioner hook that copies `deploy/box-defaults/` into a new tenant's data
