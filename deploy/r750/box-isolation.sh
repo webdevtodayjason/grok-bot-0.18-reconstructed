@@ -135,6 +135,10 @@ PROXY_PORT="${TITANBOT_PROXY_PORT:-4000}"
 PROXY_DB_PORT="${TITANBOT_PROXY_DB_PORT:-5432}"
 HOST_TABLE="${TITANBOT_HOST_TABLE:-titanbot_host}"
 HOST_GUARD_MODE_FILE="${TITANBOT_HOST_GUARD_MODE_FILE:-/etc/titanbot/host-guard.mode}"
+# Where the last-installed policy is remembered, so a re-apply that would change nothing leaves the
+# counters running. Under /run on purpose: nftables rules do not survive a reboot either.
+HOST_GUARD_STATE="${TITANBOT_HOST_GUARD_STATE:-/run/titanbot/host-guard.fingerprint}"
+SHASUM="$(command -v sha256sum || command -v shasum)"
 # shadow by default, and by default on a host that has never been told otherwise. A first apply that
 # silently started dropping traffic on a live machine would be the wrong way round: the counters
 # come first, an operator reads them, and only then is anything taken away.
@@ -518,8 +522,17 @@ else
   # The exemptions come FIRST and accept, so nothing below can reach the packets they match. In
   # shadow mode the drop rules are counters with no verdict, which is what makes "shadow" honest
   # rather than a name: the same matches, the same order, no verdict.
+  HOST_RULES="$(mktemp)"
   VERDICT=""
   [ "$HOST_GUARD" = drop ] && VERDICT=" drop"
+  # In shadow, SAY WHO. A counter answers "something used this port" and the question an operator
+  # actually has is "what will I break if I turn this on". Measured on the R750 2026-09-08: 8000 was
+  # counting one packet a minute from a docker bridge that is neither Coolify nor the control plane,
+  # and with counters alone there is no way to find out which of the other 68 containers it is.
+  # Rate limited, because this is a prerouting hook on a busy host and a log that floods is a log
+  # nobody reads. Nothing is logged in drop mode: by then the question has been answered.
+  LOGRULE=""
+  [ "$HOST_GUARD" = shadow ] && LOGRULE=' limit rate 10/minute log prefix "titanbot-host-guard "'
   {
     printf 'table inet %s { }\n' "$HOST_TABLE"
     printf 'delete table inet %s\n' "$HOST_TABLE"
@@ -537,10 +550,10 @@ else
     # One rule per port so the counters are per port. That is the difference between "something
     # used the guard set 4,000 times" and "nothing has touched 11434 in half an hour".
     for port in $(printf '%s' "$DROP_PORTS" | tr ',' ' '); do
-      printf '    tcp dport %s counter%s comment "drop-set %s"\n' "$port" "$VERDICT" "$port"
+      printf '    tcp dport %s counter%s%s comment "drop-set %s"\n' "$port" "$LOGRULE" "$VERDICT" "$port"
     done
     for port in $(printf '%s' "$WATCH_PORTS" | tr ',' ' '); do
-      printf '    tcp dport %s counter comment "watch-only %s"\n' "$port" "$port"
+      printf '    tcp dport %s counter%s comment "watch-only %s"\n' "$port" "$LOGRULE" "$port"
     done
     printf '  }\n'
     printf '  chain host {\n'
@@ -548,9 +561,32 @@ else
     printf '    fib daddr type local tcp flags syn / syn,ack iifname "br-*" jump guarded\n'
     printf '    fib daddr type local tcp flags syn / syn,ack iifname "docker0" jump guarded\n'
     printf '  }\n}\n'
-  } | "${NFT[@]}" -f - || die "nft would not load the host guard (root? does this kernel have fib expressions?)"
-  echo "$HOST_GUARD" > /dev/null
-  say "mode $HOST_GUARD; drop set $DROP_PORTS; watch-only $WATCH_PORTS; ${#EXEMPT_ADDRS[@]} exempt address(es)"
+  } > "$HOST_RULES"
+  # RELOAD ONLY WHEN THE POLICY WOULD CHANGE. nft resets a counter when its rule is replaced, and
+  # this runs every 60 seconds from a timer, so rebuilding the table unconditionally meant every
+  # counter read as "the last minute" -- which makes the shadow pass, whose entire purpose is to
+  # accumulate evidence before anything is taken away, worth nothing. Found by reading counters on
+  # the R750 2026-09-08 that would not add up.
+  #
+  # The comparison is a fingerprint of the rules THIS RUN would install, remembered in a file,
+  # rather than a diff against `nft list`: the listing is nft's own rendering of the policy and
+  # differs from the input in whitespace and set formatting, so a text comparison would never match
+  # and would reload every minute anyway. The file lives under /run because nftables rules do not
+  # survive a reboot either, so the memory and the thing it remembers disappear together. The table
+  # still has to be present -- a fingerprint on its own would happily skip re-installing a policy
+  # somebody had flushed by hand.
+  FINGERPRINT="$(sed -e "/^table inet $HOST_TABLE { }$/d" -e "/^delete table inet $HOST_TABLE$/d" "$HOST_RULES" | "$SHASUM" | awk '{print $1}')"
+  PREVIOUS=""
+  [ -r "$HOST_GUARD_STATE" ] && PREVIOUS="$(cat "$HOST_GUARD_STATE" 2>/dev/null)"
+  if [ "$FINGERPRINT" = "$PREVIOUS" ] && "${NFT[@]}" list table inet "$HOST_TABLE" >/dev/null 2>&1; then
+    say "mode $HOST_GUARD; the installed policy is already this one, so the counters were left running"
+  else
+    "${NFT[@]}" -f "$HOST_RULES" || die "nft would not load the host guard (root? does this kernel have fib expressions?)"
+    mkdir -p "$(dirname "$HOST_GUARD_STATE")" 2>/dev/null || true
+    printf '%s\n' "$FINGERPRINT" > "$HOST_GUARD_STATE" 2>/dev/null || true
+    say "mode $HOST_GUARD; drop set $DROP_PORTS; watch-only $WATCH_PORTS; ${#EXEMPT_ADDRS[@]} exempt address(es)"
+  fi
+  rm -f "$HOST_RULES"
   [ "$HOST_GUARD" = shadow ] && say "nothing is being dropped: read the counters with --counters, then set the mode to drop"
   "${NFT[@]}" list table inet "$HOST_TABLE" | sed 's/^/  /'
 fi
