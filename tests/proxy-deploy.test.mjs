@@ -366,9 +366,21 @@ test("box-isolation.sh finds the proxy by its label and never by an address writ
   // The accept rule is built from that lookup.
   assert.match(script, /ip daddr %s tcp dport %s accept comment "a box asks the proxy for an answer"/);
   assert.match(script, /"\$BR" "\$SET" "\$PROXY_ADDR" "\$PROXY_PORT"/);
-  // And no address is hard-coded anywhere in the file.
-  const literals = [...script.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)].map((m) => m[0]);
-  assert.deepEqual(literals, [], `an address is written into the script: ${literals.join(", ")}`);
+  // And no address is hard-coded in any RULE. Comments are read separately below, because
+  // TENANT-3's header records exactly which addresses were measured open on which host and on which
+  // day, and a measurement is worth more written down than paraphrased. What must never appear is a
+  // literal the script acts on.
+  const code = script.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  const literals = [...code.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)].map((m) => m[0]);
+  // One exception, named rather than pattern-matched: --verify opens a socket to 1.1.1.1:443 before
+  // it believes a "closed" result. Without that sanity leg a broken probe reads as a locked-down
+  // host, which is exactly the false negative TENANT-3 already recorded once (a probe written with
+  // `sh`, which is dash on the box image and has no /dev/tcp, reported every port shut).
+  const unexplained = literals.filter((address) => address !== "1.1.1.1");
+  assert.deepEqual(unexplained, [], `an address is written into the script: ${unexplained.join(", ")}`);
+  for (const line of code.split("\n").filter((l) => l.includes("1.1.1.1"))) {
+    assert.match(line, /dev\/tcp\/1\.1\.1\.1\/443|^\s*say /, `1.1.1.1 is used for something other than the sanity leg: ${line.trim()}`);
+  }
 });
 
 test("and its accept rule sits ahead of the drop, so the drop is still what catches everything else", () => {

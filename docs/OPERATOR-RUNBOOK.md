@@ -299,6 +299,99 @@ What it does NOT cover: `~/.local`, `~/.cache` and the pip user site are in no s
 `pip install --user` still does not survive a recreate. `persist-cli-auth` sweeps `~/.config/*` and
 its own credential list, and nothing else.
 
+### What a recreate no longer does to an agent's store (BOX-6)
+
+Until 2026-09-08 the copy-in restored `store.db` and `conversation-blobs.db` over the live files on
+the persistent mount, first and alone, because they were named CRITICAL. The store's copy of a busy
+SQLite file is stale by construction, so what came back were pages that no longer matched the live
+WAL, and every turn after that failed with `database disk image is malformed`. It happened twice on
+the R750 and it is what the old advice "no Coolify recreate of a running instance" was protecting
+against.
+
+An agent database that already exists on the mount is no longer a copy-in candidate at all. A box
+with no sand-data yet still hydrates from the store; a box that has one keeps what it wrote. You can
+see it in the box's own log at start:
+
+```
+[box-copy-in] copy-in left 20 live agent database(s) as they are: home/box/sand-data/agents/…/store.db, …
+[box-copy-in] result outcome=hydrated store_entries=1668 files=1648 …
+```
+
+`files` being lower than `store_entries` by exactly the number left alone is correct and is not a
+partial hydrate.
+
+**The advice is still to ship with `updateHostNow` and relay restarts rather than a recreate,** for
+the reasons in SHIP-2 above. What changed is that a recreate is no longer the thing that eats an
+agent's history.
+
+If a store is already damaged, the host now tries `REINDEX` before it quarantines anything, and
+`sqlite3 .recover` before falling back to copying salvageable rows one at a time. The row-by-row
+salvage stops at the first page it cannot read, which is how a 2,940-row file once came back with 5.
+
+### Repairing a store by hand, without a recreate
+
+```sh
+# read-only first, and name the agent before touching anything
+docker exec <box> sqlite3 "file:/home/box/sand-data/agents/<id>/conversation-blobs.db?mode=ro" \
+  "PRAGMA integrity_check; select count(*) from blobs;"
+# rebuild beside it
+docker exec <box> sh -c 'sqlite3 /home/box/sand-data/agents/<id>/conversation-blobs.db .recover \
+  | sqlite3 /home/box/sand-data/agents/<id>/conversation-blobs.db.recovered'
+# count the rebuilt file, then swap it in during the host's SIGTERM window of an updateHostNow swap
+```
+
+Swap during the swap window, never under a running host, and never by recreating the container.
+
+## Keeping a customer's box off the host (TENANT-3)
+
+`deploy/r750/box-isolation.sh` does two things. Box to box has been live since 2026-09-07. Box to
+**host** is new on 2026-09-08, and it starts in shadow rather than dropping anything.
+
+What was open, measured from inside the demo tenant's box: **22, 47291, 8000, 80, 443, 2049, 445,
+11434 and 5000**, on each of four host addresses. That is both sshd ports, Coolify, the machine's NFS
+and Samba exports and its local model server, reachable from any tenant's agent shell.
+
+```sh
+sudo bash /home/sem/titanbot/deploy/box-isolation.sh            # apply (shadow by default)
+sudo bash /home/sem/titanbot/deploy/box-isolation.sh --counters  # what has hit each port
+sudo bash /home/sem/titanbot/deploy/box-isolation.sh --verify    # probe box to box AND box to host
+```
+
+**Shadow first, and read the counters before you drop anything.** In `shadow` the same rules are
+installed with counters and no verdict, so nothing is taken away and you can see what a real day
+looks like. Leave it for at least half an hour with the boxes doing their normal work, then:
+
+```sh
+sudo bash /home/sem/titanbot/deploy/box-isolation.sh --counters
+```
+
+The line you are looking for first is the exempt one. Coolify drives this host over SSH from inside
+its own container, so its traffic must be counted on the `accept` rule and not on the 22 rule. If it
+is on the 22 rule, the exemption did not resolve and turning on drop would take the hosting panel's
+hands off the machine, every sixty seconds, until you turned it back.
+
+To turn on the drop:
+
+```sh
+echo drop | sudo tee /etc/titanbot/host-guard.mode
+sudo bash /home/sem/titanbot/deploy/box-isolation.sh
+```
+
+The mode file is what the 60-second timer reads, so this survives the next tick. The way back is one
+word and the same command:
+
+```sh
+echo shadow | sudo tee /etc/titanbot/host-guard.mode
+sudo bash /home/sem/titanbot/deploy/box-isolation.sh
+```
+
+`2049`, `445`, `11434`, `5000`, `80` and `443` are counted and never dropped until you add them to
+`TITANBOT_HOST_GUARD_DROP_PORTS`, and the rule for that is their counter reading zero over a real
+window, not a guess about who uses them.
+
+If the exemption cannot be resolved the script installs **nothing** and exits non-zero, on purpose. A
+half-installed drop set is worse than none.
+
 ## Backups (BACKUP-1)
 
 `deploy/backup/snapshot.sh` copies all six places an instance lives — the four volumes, the relay

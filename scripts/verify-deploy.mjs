@@ -244,9 +244,14 @@ check(wideOpen.length === 0, "no titanbot port is published on 0.0.0.0", wideOpe
 // deploy/r750/box-isolation.sh installs the rule (from a box, on that bridge, the relay's bundle
 // port and nothing else) and its --verify runs the scan itself, from every box against every other
 // box. This leg is that scan, so the gate measures the boundary rather than the rule.
+let isolationOutput = "";
 {
   const LABEL = "no customer's box can reach another customer's box on the shared network";
   const out = await ssh(`bash ${ROOT}/deploy/box-isolation.sh --verify 2>&1 || true`).catch((error) => String(error?.message ?? error));
+  // TENANT-3. The same run now also probes box to HOST, and this leg reads that half of it. Until
+  // 2026-09-08 --verify scanned box to box only, so this gate stood green while every host port was
+  // open to every tenant -- a leg that reads as a proof and is not one.
+  isolationOutput = String(out);
   const lines = String(out).split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
   const open = lines.filter((line) => line.startsWith("OPEN ") || line.startsWith("BROKEN "));
   if (/there is no pair to scan/.test(out)) {
@@ -257,6 +262,28 @@ check(wideOpen.length === 0, "no titanbot port is published on 0.0.0.0", wideOpe
     unresolved(LABEL, `${ROOT}/deploy/box-isolation.sh is not on the server; run deploy/r750/sync.sh, which ships it`);
   } else {
     check(false, LABEL, open.length > 0 ? open.join("; ") : String(out).slice(0, 300));
+  }
+}
+
+// TENANT-3, its own leg, because it fails for its own reason and an operator reading a red gate
+// should not have to work out which half of one line broke.
+{
+  const LABEL = "no customer's box can reach the host on the ports the guard drops";
+  const out = isolationOutput;
+  const openHost = out.split("\n").map((l) => l.trim()).filter((l) => /^OPEN\s+\S+ -> host /.test(l));
+  const closedHost = out.split("\n").map((l) => l.trim()).filter((l) => /^closed\s+\S+ -> host /.test(l));
+  const watched = out.split("\n").map((l) => l.trim()).filter((l) => /^note\s+\S+ -> host .* watch-only/.test(l));
+  if (out.length === 0 || /No such file|not found/.test(out)) {
+    unresolved(LABEL, `${ROOT}/deploy/box-isolation.sh is not on the server; run deploy/r750/sync.sh, which ships it`);
+  } else if (/no box on this network, so there is nothing to probe the host from/.test(out)) {
+    check(true, LABEL, "no box on this network, so there was nothing to probe the host from");
+  } else if (openHost.length > 0) {
+    check(false, LABEL, openHost.join("; ").slice(0, 400));
+  } else if (closedHost.length === 0) {
+    unresolved(LABEL, "the isolation script ran but produced no box-to-host result, so this was not measured");
+  } else {
+    const note = watched.length > 0 ? ` (still answering on watch-only ports: ${watched.length} address(es))` : "";
+    check(true, LABEL, `${closedHost.length} box-to-host probe(s) refused on the drop set${note}`);
   }
 }
 

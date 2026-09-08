@@ -56,6 +56,11 @@ command -v curl >/dev/null || die "curl is not on PATH (needed for the readiness
 [ -f "$ROOT/runtime/browser-driver/cli.mjs" ] || die "$ROOT/runtime/browser-driver/cli.mjs is missing -- run deploy/r750/sync.sh from the Mac (it ships runtime/browser-driver/ as a directory)"
 [ -f "$ROOT/runtime/browser-driver/host-op.mjs" ] || die "$ROOT/runtime/browser-driver/host-op.mjs is missing -- run deploy/r750/sync.sh from the Mac (it ships runtime/browser-driver/ as a directory)"
 [ -f "$ROOT/deploy/apply-start-window-fix.sh" ] || die "$ROOT/deploy/apply-start-window-fix.sh is missing -- run deploy/r750/sync.sh from the Mac"
+# TENANT-4. The copy a BOX reads, in the one directory every box mounts read-only. The hand install
+# below still applies the repair through the socket, because it has one and it is right there; a
+# tenant's box has no socket and applies it to itself from its own entrypoint, and this is the file
+# it reads. Both copies come from scripts/box-patches/apply-start-window-fix.sh in one sync.
+[ -f "$ROOT/runtime/apply-start-window-fix.sh" ] || die "$ROOT/runtime/apply-start-window-fix.sh is missing -- run deploy/r750/sync.sh from the Mac (a customer's box repairs its own window from this copy)"
 [ -f "$ROOT/ui/server.mjs" ] || die "$ROOT/ui/server.mjs is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/ui/auth.mjs" ] || die "$ROOT/ui/auth.mjs is missing -- run deploy/r750/sync.sh from the Mac"
 [ -f "$ROOT/ui/set-password.mjs" ] || die "$ROOT/ui/set-password.mjs is missing -- run deploy/r750/sync.sh from the Mac"

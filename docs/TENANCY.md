@@ -744,11 +744,11 @@ that, and nothing in the product could see it: all three rows printed `"source":
 The settings a box should start with are written down, in `deploy/box-defaults/`. That directory's
 README says what each pin is and why. The provisioner's job is only to copy them.
 
-The hook goes in the `directories` step of `cp/provision.mjs`, right after
-`for (const directory of tenantDirectoryList(slug, config)) mkdirSync(...)`, one line:
+**Landed 2026-09-08.** The hook is in the `directories` step of `cp/provision.mjs`, right after
+`for (const directory of tenantDirectoryList(slug, config)) mkdirSync(...)`:
 
 ```js
-writeBoxDefaults(paths.data);
+const defaults = writeBoxDefaults(tenantPaths(slug, config).data);
 ```
 
 `writeBoxDefaults(dataDir)` copies every file in `deploy/box-defaults/` into `dataDir` at mode
@@ -762,8 +762,17 @@ else's decision, which is the same class of bug as the rollout this is fixing.
 for them. The step's ledger detail should name the files written and the files skipped, so a retry
 that changed nothing says so.
 
-Nothing here needs a container recreate. On a box that already exists, the same two files are
-copied in with `docker cp` and picked up on the next relay restart, which is what BOX-6 allows.
+Nothing here needs a container recreate. On a box that already exists the files are added to the
+tenant's data directory, which is the host side of that same bind mount, and picked up on the box's
+next ordinary restart — which is what BOX-6 allows and a recreate is what BOX-6 forbids.
+
+**The tenants provisioned before this existed** are backfilled by
+`node scripts/backfill-box-defaults.mjs` (`--dry-run` first). It adds only what is missing, names
+what it skipped, restarts nothing and recreates nothing, and prints names only — two of the
+neighbours in that directory are `box-secrets.json` and `connector-env-secrets.json`. Measured on the
+R750 2026-09-08 before the backfill: `gates.json` was missing from all three of
+`/data/titanbot/{demo,richard-avery,north-bay-roofing}/volumes/data`, and
+`sand-host-settings.json` was missing from `north-bay-roofing`.
 
 ---
 
@@ -984,7 +993,7 @@ a refusal in that position is an error badge on a page that is working perfectly
 | repair | where it happens | on a customer's box |
 | --- | --- | --- |
 | sqlite3, which `learn-from-demonstration` needs to read Chrome's history | the box's own entrypoint, in the background, swallowing its own failures | yes |
-| `apply-start-window-fix.sh`, which edits `/usr/local/bin/start-window` inside the box | applied from outside, through the socket | **no. This is TENANT-4** |
+| `apply-start-window-fix.sh`, which edits `/usr/local/bin/start-window` inside the box | the box's own entrypoint, from `/opt/titanbot-runtime`, in the background | yes, since 2026-09-08 |
 
 The sqlite3 loss was measured: on the R750, 2026-09-07, `command -v sqlite3` answered on the
 operator's box and reported MISSING on the demo tenant's. It moved into the box's entrypoint because
@@ -992,10 +1001,28 @@ that runs inside the container and needs no socket at all.
 
 The start-window repair does real work: on the operator's own box, 2026-09-07, it reported `patched`,
 `orphan branch patched`, `stop-window patched`, `live-seat rule patched` and `adopt rule patched`.
-TENANT-5 makes it *reachable* again, because the one relay has the socket and knows every box's
-name, but reachable is not the same as done: it is a 159-line script with eight `docker exec` call
-sites and it has to run on every box start, because a Coolify redeploy recreates. That is TENANT-4
-and it is unchanged by this wave.
+Without it a forked agent gets the black screen DISPLAY-2 is about.
+
+**TENANT-4, closed 2026-09-08.** It ran only through the socket, so it reached the operator's box and
+neither customer's. Measured on the R750 that morning, by `md5sum /usr/local/bin/start-window` and
+`grep -c session_alive` inside each box: Jason's `99a90e45a5b5c18ec18da4c5c61a08e4`, 3 occurrences,
+patched; Richard's and the demo tenant's both `d69219afc86a297d16bee3d97b120095`, 0 occurrences,
+stock. A forked agent on a customer box met the black screen right then.
+
+The script now has an in-box mode: one `run` wrapper over what were seven `docker exec` call sites,
+which runs the command directly when `TITANBOT_IN_BOX=1`. `deploy/r750/sync.sh` ships it into
+`runtime/`, which every box already mounts read-only at `/opt/titanbot-runtime`, and the box's own
+entrypoint waits for `/usr/local/bin/start-window` to appear and then applies it — in the background,
+swallowing its own failures, exactly like the sqlite3 install beside it, because a box whose job is
+to boot must never fail to boot over a repair. It runs on **every** start, because the edit is a
+filesystem change in the container and a recreate throws it away.
+
+Measured on grok-bot-local-vm 2026-09-08: the box was reset to the stock `start-window`
+(`d69219af…`, 0 `session_alive`), the script was run from inside the container with
+`TITANBOT_IN_BOX=1`, and the result was `99a90e45a5b5c18ec18da4c5c61a08e4` with 3 occurrences — byte
+for byte what the socket path produces. A second run reported `already patched` for every step. That
+box has no `docker` CLI in it at all, which is what makes the run socket-free rather than merely
+socket-less.
 
 ---
 
@@ -1076,36 +1103,91 @@ The gate is `bash deploy/r750/box-isolation.sh --verify`, which runs the scan ab
 against every other box, and `scripts/verify-deploy.mjs` carries it as a leg so a green deploy means
 the boundary was measured and not assumed.
 
-### 19.2 What is still open: the host
+### 19.2 The host, and the guard in front of it
 
-What the box must not reach is the **host**. Measured inside the demo tenant's box on the R750,
-2026-09-07: the default gateway is `192.168.32.1`, a TCP connect succeeds on 22, 80, 443 and 8000
-and is refused on 2375, 5432 and 6379, and `http://192.168.32.1:8000/` answers a 302 to its own
-`/login` while `/api/v1/servers` answers `401 {"message":"Unauthenticated."}`. That is Coolify, which
-creates and deletes every resource on this machine, and `COOLIFY_API_KEY` is in the control plane's
-environment on the same host. So between a customer's agent and the machine every other customer
-runs on there is nothing but sshd's login and Coolify's.
+What the box must not reach is the **host**.
 
-That is `TENANT-3`, and TENANT-5 does not change it, does not worsen it and does not fix it. The
-gateway address a box reaches the host on is the same one; adding `titanbot-net` adds a second
-bridge with a second gateway address on the same host, so the rule has to cover both bridges, which
-is the one thing about it that TENANT-5 does change.
+**The exposure, re-measured 2026-09-08 and wider than the first pass said.** The 2026-09-07 note
+read "a TCP connect succeeds on 22, 80, 443 and 8000 and is refused on 2375, 5432 and 6379". The
+refused list is still true. The open list was short because those were the only ports probed. From
+inside the demo tenant's box on the R750, with `bash` `/dev/tcp` and a 1.1.1.1:443 sanity leg first,
+a TCP connect succeeds on **22, 47291, 8000, 80, 443, 2049, 445, 11434 and 5000**, against **each of
+four host addresses**: the box's default gateway `192.168.32.1`, its `titanbot-net` gateway
+`192.168.48.1`, the tailnet address `100.110.83.82` and docker0 `172.17.0.1`. `ss -lntp` on the host
+names them: sshd on 22 **and 47291**, docker-proxy on 8000 (Coolify), smbd on 445, ollama on 11434, a
+python service on 5000, NFS on 2049. `http://192.168.32.1:8000/` answers a 302 to its own `/login`
+and `/api/v1/servers` answers `401 {"message":"Unauthenticated."}`, which is Coolify — the thing that
+creates and deletes every resource on this machine, with `COOLIFY_API_KEY` in the control plane's
+environment on the same host.
 
-The two candidate fixes are unchanged, and (a) is where to start:
+So it is not two login prompts and a hosting panel. It is those plus the machine's file exports and
+its local model server. The box has no IPv6 default route today, so v6 is a future path rather than a
+current one — but sshd and Coolify both listen on `[::]`, so it becomes one the moment a bridge gets
+v6.
 
-**(a) Bind Coolify off `0.0.0.0`.** It listens on `0.0.0.0:8000`; on the tailnet address or on
-loopback it is not on any container bridge at all. Smallest change, no packet filtering, and it is a
-Coolify setting rather than a firewall.
+**Use `bash`, never `sh`, to probe this.** The box image's `/bin/sh` is dash, which has no
+`/dev/tcp`, so a probe written with `sh` reads every port as shut. One pass did exactly that and
+recorded a clean result that was a false negative.
 
-**(b) Drop container-to-host traffic per bridge.** Note the trap: traffic from a container to its own
-gateway address terminates on the host, so it goes through `INPUT` and **not** through `FORWARD`,
-which means `DOCKER-USER` (a FORWARD chain) does not see it and a rule written there does nothing.
-The rule belongs in `INPUT`: `-i br-<id> -d <that bridge's gateway> -j DROP`, one per bridge,
-including `titanbot-net`'s, re-applied when Coolify creates a network. Unlike 19.1 this one really
-is an ip-family rule: a packet to the bridge's own address is delivered locally rather than bridged
-across it, so it reaches `INPUT` whether or not `br_netfilter` is loaded. Docker's embedded resolver
-runs in the daemon's namespace, so DNS needs no exception, and container-to-container traffic on the
-same bridge is untouched.
+**Why the remedy is PREROUTING and not INPUT.** An earlier version of this section prescribed
+`-i br-<id> -d <that bridge's gateway> -j DROP` in `INPUT`, and reasoned that container-to-gateway
+traffic terminates on the host so it goes through `INPUT` and not `FORWARD`. That reasoning is right
+in general and right for 22 and 47291. **It is wrong for 8000, which is the port the row is about.**
+Measured: `iptables -t nat -S` carries `-A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER` and
+then `-A DOCKER ! -i br-7ef42af3f026 -p tcp --dport 8000 -j DNAT --to-destination 10.0.2.5:8080`.
+`br-7ef42af3f026` is Coolify's **own** bridge, so a packet arriving from a box bridge is not
+excluded: its destination is rewritten to Coolify's container before `INPUT` is consulted, and it is
+then forwarded rather than delivered locally. An `INPUT` rule would correctly drop 22 and 47291 and
+silently do nothing for 8000. 8000 is a published container port; only a prerouting hook that runs
+before docker's nat prerouting catches it.
+
+**What is installed.** `deploy/r750/box-isolation.sh` builds a second table beside the bridge one:
+
+```
+table inet titanbot_host {
+  chain guarded {
+    ip saddr { <coolify>, <control plane> } counter accept
+    tcp dport 22    counter [drop]     # drop set
+    tcp dport 47291 counter [drop]
+    tcp dport 8000  counter [drop]
+    tcp dport 2049  counter            # watch-only until its counter reads zero
+    tcp dport 445   counter
+    tcp dport 11434 counter
+    tcp dport 5000  counter
+    tcp dport 80    counter
+    tcp dport 443   counter
+  }
+  chain host {
+    type filter hook prerouting priority -250; policy accept;
+    fib daddr type local tcp flags syn / syn,ack iifname "br-*"   jump guarded
+    fib daddr type local tcp flags syn / syn,ack iifname "docker0" jump guarded
+  }
+}
+```
+
+Priority −250 runs before docker's nat prerouting at −100, so the destination is still the host's own
+address. `fib daddr type local` says "addressed to this machine" without naming a gateway that
+changes every time a network is made. `iifname "br-*"` plus `docker0` is every docker bridge on the
+host, present or future. Only SYN is matched: a connection that cannot open never has anything else.
+
+**Two exemptions, discovered at apply time, failing closed.** Coolify drives this host over SSH from
+inside its own container — measured, four established sessions from `10.0.2.5` to `10.0.0.1:22` — so
+it arrives on a docker bridge exactly like a customer's box does and `iifname "br-*"` covers it too.
+A blanket drop on 22 would take away the hosting panel's ability to do anything, re-applied every
+sixty seconds by the timer. So the coolify container and the control plane are resolved to addresses
+at apply time, and **if a container that must be exempt is present but its addresses cannot be read,
+the script installs nothing and exits non-zero.** Absent is fine; unreadable is not.
+
+**It shadows before it drops.** `TITANBOT_HOST_GUARD` is `shadow` by default and on a fresh install:
+the same matches, the same order, counters and no verdict. `--counters` prints them per port.
+2049, 445 and 11434 join the drop set only once their counters have read zero over a real window.
+Setting the mode to `drop` (or writing it to `/etc/titanbot/host-guard.mode`, which the timer reads)
+is an operator action, and `--verify` then probes box to host from every box and fails on any
+drop-set port that answers.
+
+**The alternative that was not taken.** Binding Coolify off `0.0.0.0` is a smaller change and closes
+one of the nine ports. It is still worth doing, and it is a Coolify setting rather than a firewall
+rule; it is not a substitute for the guard, because sshd, NFS, Samba and ollama are not Coolify.
 
 Everything else on a customer's box is unchanged. The gateway answers, and the job bus, mail and
 subscriptions all work the way section 5 routes them. The one thing a box does reach on

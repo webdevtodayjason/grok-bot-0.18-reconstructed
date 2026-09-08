@@ -1,7 +1,13 @@
+import { createBoxSecretRedactor } from "../secret-redaction.js";
 import {
   SAND_HIDDEN_PROMPT_MARKER,
   SAND_TRUSTED_AUTOMATION_PROMPT_MARKER,
 } from "./sand-prompt-markers.js";
+
+// PROXY-9. One redactor for the outline, made once and cached inside, so deriving an outline of a
+// thousand items reads the two secret stores at most once every few seconds rather than per row.
+let redactOutlineSecrets: (text: string) => string = createBoxSecretRedactor();
+export function setOutlineRedactor(redact: (text: string) => string): void { redactOutlineSecrets = redact; }
 
 export const SEND_MESSAGE_TOOL_CALL_OUTLINE_NAME = "sendMessageToolCall";
 export const MCP_TOOL_CALL_OUTLINE_NAME = "mcpToolCall";
@@ -285,7 +291,10 @@ export function deriveOutlineTurnsFromConversationState(state: ConversationState
       });
       turns.push({ rawUserText, userMessageId, items });
     } else if (turn.turn.case === "shellConversationTurn") {
-      const command = turn.turn.value.shellCommand?.command ?? "";
+      // PROXY-9. The outline's shell rows carry the command the same way the action ledger does,
+      // and they are read by the console, so the same redaction applies at the same moment. The
+      // ledger's fix alone would leave the credential on a screen.
+      const command = redactOutlineSecrets(turn.turn.value.shellCommand?.command ?? "");
       turns.push({
         rawUserText: "",
         userMessageId: "",

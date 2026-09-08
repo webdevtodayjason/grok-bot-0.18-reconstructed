@@ -13,13 +13,43 @@
 # It survives `docker restart` (it is a filesystem change inside the container) but NOT a recreate,
 # so re-run it after `recreate-box.sh`.
 #
-#   sh scripts/box-patches/apply-start-window-fix.sh [container]
+# TENANT-4. IT ALSO RUNS FROM INSIDE THE BOX, and that is not a convenience.
+#
+# Every line below used to go through `docker exec`, and a tenant's box has no docker socket by
+# design (TENANT-2: a socket in that container is root on the host). So this repair reached exactly
+# one box on the R750 -- the operator's, the one with the socket -- and both customer boxes ran the
+# stock start-window. Measured 2026-09-08: md5 99a90e45... with 3 `session_alive` on Jason's box,
+# d69219af... with 0 on Richard's and on the demo tenant's. A forked agent on a customer box met
+# the black screen DISPLAY-2 is about, right then.
+#
+# `run` is the whole change: inside the container it runs the command directly, outside it runs the
+# same command through `docker exec`. The box's own entrypoint calls this with TITANBOT_IN_BOX=1
+# before `exec /usr/local/bin/start-sand-box`, the way the sqlite3 install already does, and it has
+# to run on EVERY start because the edit is a filesystem change in the container and a recreate
+# throws it away.
+#
+#   sh scripts/box-patches/apply-start-window-fix.sh [container]   from the host, through the socket
+#   TITANBOT_IN_BOX=1 sh /opt/titanbot-runtime/apply-start-window-fix.sh   from inside the box
 set -eu
 BOX="${1:-grok-bot-local-vm}"
+IN_BOX="${TITANBOT_IN_BOX:-0}"
 
-docker exec "$BOX" sh -c 'test -f /usr/local/bin/start-window.orig || cp /usr/local/bin/start-window /usr/local/bin/start-window.orig'
+# One wrapper over what used to be seven `docker exec` call sites. `run` takes a command; `run_stdin`
+# is the same thing for the heredocs, which are the reason this could not just be an alias.
+if [ "$IN_BOX" = 1 ]; then
+  run() { "$@"; }
+  run_stdin() { "$@"; }
+  WHERE="this box"
+else
+  command -v docker >/dev/null 2>&1 || { echo "no docker CLI and TITANBOT_IN_BOX is not set; this cannot reach a box" >&2; exit 1; }
+  run() { docker exec "$BOX" "$@"; }
+  run_stdin() { docker exec -i "$BOX" "$@"; }
+  WHERE="$BOX"
+fi
 
-docker exec -i "$BOX" python3 - <<'PY'
+run sh -c 'test -f /usr/local/bin/start-window.orig || cp /usr/local/bin/start-window /usr/local/bin/start-window.orig'
+
+run_stdin python3 - <<'PY'
 p = "/usr/local/bin/start-window"
 s = open(p).read()
 if "session_alive" in s:
@@ -56,7 +86,7 @@ open(p, "w").write(s)
 print("patched")
 PY
 
-docker exec -i "$BOX" python3 - <<'PY'
+run_stdin python3 - <<'PY'
 # DISPLAY-1 (2026-09-03). stop-window removes the owner token and kills by port, but an X server
 # holds no port, so a released fork's Xvfb lived on as an orphan with no token; start-window then
 # read "no token" as "someone else's token" and refused the display to the next agent
@@ -95,7 +125,7 @@ rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
     print("stop-window patched")
 PY
 
-docker exec -i "$BOX" python3 - <<'PY'
+run_stdin python3 - <<'PY'
 # DISPLAY-2, second rule (2026-09-03). A display owned by another token is refused only while its
 # exec daemon answers; a seat whose daemon is dead is an orphan whatever token it carries (a
 # subagent's seat after its run, a stopped fork that came back), and is torn down and rebuilt.
@@ -129,11 +159,11 @@ fi'''
     print("live-seat rule patched")
 PY
 
-docker exec "$BOX" sh -n /usr/local/bin/start-window
-docker exec "$BOX" sh -n /usr/local/bin/stop-window
-echo "start-window and stop-window patched and syntax-checked on $BOX"
+run sh -n /usr/local/bin/start-window
+run sh -n /usr/local/bin/stop-window
+echo "start-window and stop-window patched and syntax-checked on $WHERE"
 
-docker exec -i "$BOX" python3 - <<'PY'
+run_stdin python3 - <<'PY'
 # DISPLAY-4 (2026-09-04). The host is the only allocator of fork windows, so a live seat whose token
 # the host did not issue is one the host lost (a bring-up that outlived its agent's deletion, or a
 # host restart that could not read its assignments). Refusing it wedged every new agent onto the

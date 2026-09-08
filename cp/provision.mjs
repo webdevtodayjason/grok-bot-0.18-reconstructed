@@ -34,7 +34,7 @@
 // browser, in a plan preview or in a log line.
 
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, chmodSync, existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,6 +53,15 @@ export const BASE_COMPOSE_PATH = path.join(REPO_ROOT, "deploy", "coolify", "dock
 // render time rather than at import, so a container that ships a different copy of it does not need
 // this file rebuilt.
 export const BOX_COMPOSE_PATH = path.join(REPO_ROOT, "deploy", "coolify", "box.compose.yml");
+// TENANT-8. The settings a box starts with, one file per concern, with deploy/box-defaults/README.md
+// saying what each pin is and why.
+export const BOX_DEFAULTS_DIR = path.join(REPO_ROOT, "deploy", "box-defaults");
+
+// For the dry run, which has to say what it would write before it writes anything.
+export function boxDefaultNames({ defaultsDir = BOX_DEFAULTS_DIR } = {}) {
+  try { return readdirSync(defaultsDir).filter((name) => name.endsWith(".json")).sort(); }
+  catch { return []; }
+}
 
 // What Coolify calls the box's container. Measured on the R750 2026-09-07: every Coolify service's
 // containers are named "<compose service name>-<resource uuid>", and both live boxes are exactly
@@ -589,7 +598,7 @@ export function provisioningPlan({ slug, name, config }) {
       name: "directories",
       method: "local",
       path: paths.root,
-      bodyPreview: { create: tenantDirectoryList(slug, config) },
+      bodyPreview: { create: tenantDirectoryList(slug, config), boxDefaults: boxDefaultNames() },
     },
     {
       name: "secrets",
@@ -665,6 +674,42 @@ const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex")
 
 function ensureDirectories(slug, config) {
   for (const directory of tenantDirectoryList(slug, config)) mkdirSync(directory, { recursive: true, mode: 0o700 });
+}
+
+// TENANT-8 / CURSOR-1 item 5. A new tenant's box starts with settings of its own.
+//
+// WHY IT EXISTS. Without these files a box falls through to whatever the bundled gate table happens
+// to be, and the bundled table is rolled out rather than pinned, so it can differ between two boxes
+// on the SAME host bundle. That is what made three R750 boxes on one bundle behave three ways, and
+// `sand_auto_review: false` in gates.json is the pin that keeps a tenant's every command from being
+// auto-rejected (CURSOR-1). Measured on the R750 2026-09-08: gates.json was missing from all three
+// tenant data directories, which is the whole reason this row was open.
+//
+// WHY IT SKIPS. The directories step is retried from wherever a provision failed, and an operator
+// may have changed a switch since the box was built. A default is what a box starts with, not what
+// it is held to, so a file that is already there is left exactly as it is and named as skipped.
+// 0600 because the same directory holds box-secrets.json and there is no reason for these to be
+// more readable than their neighbours.
+export function writeBoxDefaults(dataDir, { defaultsDir = BOX_DEFAULTS_DIR } = {}) {
+  const written = [];
+  const skipped = [];
+  let names = [];
+  try {
+    names = readdirSync(defaultsDir).filter((name) => name.endsWith(".json")).sort();
+  } catch {
+    // No defaults directory on this checkout is not a provisioning failure: the box still boots on
+    // the bundled table, which is the behaviour every tenant had before this step existed.
+    return { written, skipped, missingDefaults: true };
+  }
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  for (const name of names) {
+    const target = path.join(dataDir, name);
+    if (existsSync(target)) { skipped.push(name); continue; }
+    writeFileSync(target, readFileSync(path.join(defaultsDir, name), "utf8"), { mode: 0o600 });
+    chmodSync(target, 0o600);
+    written.push(name);
+  }
+  return { written, skipped, missingDefaults: false };
 }
 
 // Reads the token back when it is already there, which is what makes a retry safe: minting a second
@@ -965,7 +1010,16 @@ export async function provisionTenant(options) {
   try {
     if (!done.has("directories")) {
       ensureDirectories(slug, config);
-      store.recordStep({ slug, step: "directories", status: "ok", detail: JSON.stringify({ created: tenantDirectoryList(slug, config) }) });
+      // TENANT-8. Named in the ledger rather than counted, because "wrote gates.json" and
+      // "skipped gates.json, it was already there" are different facts and a retry produces the
+      // second one on purpose.
+      const defaults = writeBoxDefaults(tenantPaths(slug, config).data);
+      store.recordStep({ slug, step: "directories", status: "ok", detail: JSON.stringify({
+        created: tenantDirectoryList(slug, config),
+        boxDefaultsWritten: defaults.written,
+        boxDefaultsSkipped: defaults.skipped,
+        ...(defaults.missingDefaults ? { boxDefaults: "deploy/box-defaults is not in this checkout" } : {}),
+      }) });
       ran.push("directories");
     }
   } catch (error) { return fail("directories", error); }

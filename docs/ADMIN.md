@@ -335,6 +335,30 @@ lives on its own.
 **No key value ever reaches a detail.** A test asserts it: a planted key is POSTed through the panel
 and the whole ledger is swept for its bytes.
 
+### The per-agent action ledger, and the lines that predate 2026-09-08 (PROXY-9)
+
+A different ledger, in a different place: `agents/<id>/audit.jsonl` inside a box is the receipt of
+what an agent's tools actually did, and its `shell_command` rows carry the command as typed. Until
+2026-09-08 that meant they carried the credential the command acted with. Measured on the R750 that
+day, one agent's ledger in Jason's box held the operator's TinyFish key twice, in full (44
+characters, sha256 prefix `9165ce2daa86`); the demo box scanned clean across 87 ledgers, so it was
+one agent's history rather than a fleet-wide spray.
+
+Since that date the host redacts at write time. It reads the box's own two secret stores,
+`box-secrets.json` and `connector-env-secrets.json`, and replaces any of their values appearing in a
+command or a browser URL with `<redacted:<first 12 of its sha256>>` — the receipt stays readable, and
+the hash stays comparable, so an operator chasing a leaked key can still match a row to a key without
+the row holding one. The same redaction runs on the conversation outline's shell rows, which the
+console draws, because a ledger-only fix would have left the credential on a screen.
+
+**Lines written before 2026-09-08 predate this and were never rewritten.** Nothing sweeps them, on
+purpose: deleting a receipt to chase a key is the wrong trade in the other direction. If a key was in
+a ledger, the answer is to rotate the key, not to edit the history of what was done with it.
+
+Only values of 12 characters or more with no whitespace are redacted. Those files also hold a model
+name, a context window and a boolean, and redacting `1` or `gpt-4` would mangle every row while
+protecting nothing. A secret shorter than that is out of scope by construction.
+
 ---
 
 ## What is not measured, and what would fix each one

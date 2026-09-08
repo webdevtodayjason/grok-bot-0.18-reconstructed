@@ -20,8 +20,10 @@
 # is set by the compose file and survives the renaming.
 #
 # On an instance with NO socket -- every tenant -- this script says so in one sentence and exits 0.
-# Its two steps have somewhere else to happen: the box's own entrypoint installs sqlite3, and the
-# start-window repair needs the socket and is applied only where there is one.
+# Both of its steps have somewhere else to happen now: the box's own entrypoint installs sqlite3 AND
+# runs the start-window repair on itself (TENANT-4, from /opt/titanbot-runtime with
+# TITANBOT_IN_BOX=1). Until 2026-09-08 the second one had nowhere else to go, so it reached only the
+# operator's box and both customer boxes ran the stock start-window.
 #
 #   sh init-box.sh            wait for the box, then repair it
 #   TITANBOT_DRY_RUN=1 ...    resolve and report only, change nothing
@@ -44,9 +46,8 @@ die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
 # console has no docker, which reads as a broken deploy and is not one. So it says what is true in
 # one plain sentence and stops with a zero.
 #
-# What a tenant's box gets instead: sqlite3 is installed by the box's own entrypoint, which needs no
-# socket, and the start-window repair is applied only where a socket exists. docs/TENANCY.md section
-# 18 has the table.
+# What a tenant's box gets instead: its own entrypoint installs sqlite3 and applies the start-window
+# repair to itself, neither of which needs a socket. docs/TENANCY.md section 18 has the table.
 if [ ! -S "$SOCK" ]; then
   say "this instance runs its box repairs from its own container, not from here"
   exit 0

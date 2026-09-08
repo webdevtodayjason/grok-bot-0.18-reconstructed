@@ -23,7 +23,16 @@ test("sync.sh ships the whole browser driver directory, and cleans up what an ol
     /rsync -a --delete "\$REPO\/runtime\/browser-driver\/" "\$HOST:\$ROOT\/runtime\/browser-driver\/"/,
     "the driver ships as a directory, so a file added to it needs no edit here",
   );
-  assert.match(source, /say "runtime\/host-main\.cjs.*runtime\/browser-driver\/"/, "the ship says what it shipped");
+  assert.match(source, /say "runtime\/host-main\.cjs.*runtime\/browser-driver\/.*"/, "the ship says what it shipped");
+  // TENANT-4. A second file goes into the same directory for the same reason: a customer's box has
+  // no docker socket, so it applies the start-window repair to itself and reads it from the one
+  // directory every box already mounts.
+  assert.match(
+    source,
+    /rsync -a "\$REPO\/scripts\/box-patches\/apply-start-window-fix\.sh" "\$HOST:\$ROOT\/runtime\/apply-start-window-fix\.sh"/,
+    "a tenant's box cannot repair its own window if the script never reaches the runtime mount",
+  );
+  assert.match(source, /say "runtime\/host-main\.cjs.*runtime\/apply-start-window-fix\.sh"/, "and the ship says it shipped that too");
 });
 
 test("every module the driver imports is inside the directory that ships", () => {

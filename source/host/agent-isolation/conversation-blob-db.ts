@@ -6,8 +6,10 @@ import {
   copySalvageableSqliteRows,
   openSqliteForSalvage,
   quarantineCorruptSqliteDb,
+  recoverSqliteDbWithCli,
   removeSqliteDb,
   removeSqliteSidecars as removeSqliteRecoverySidecars,
+  tryReindexSqliteDb,
 } from "../storage/sqlite-recovery.js";
 
 export const CONVERSATION_BLOB_SCHEMA = `
@@ -139,6 +141,27 @@ function getHealthOnDisk(options: Pick<ConversationBlobDbOptions, "dbPath" | "bu
 }
 
 export function recoverConversationBlobDb(options: ConversationBlobDbOptions): DatabaseSync {
+  // BOX-6, the cheap repair first. A damaged INDEX is the shape this failure took twice on the
+  // R750, and REINDEX rebuilds one in place with every row still where it was. It costs one pass
+  // over the file when it works and nothing at all when it does not, and it runs before anything
+  // is moved, so a file it fixes is never quarantined and never loses a row.
+  if (tryReindexSqliteDb({ dbPath: options.dbPath, busyTimeoutMs: options.busyTimeoutMs })) {
+    options.log?.(`[agent-store-worker] REINDEX repaired conversation-blobs.db for agent=${options.agentId}; no rows lost`);
+    try {
+      const repaired = openConfiguredConversationBlobDb(options.dbPath, options.busyTimeoutMs);
+      if (getHealth(repaired) === "healthy") {
+        let kept = 0;
+        try {
+          kept = Number((repaired.prepare("SELECT count(*) AS n FROM blobs").get() as { n?: unknown } | undefined)?.n ?? 0);
+        } catch {
+          kept = 0;
+        }
+        options.onRecovery?.({ outcome: "recovered", quarantinePath: null, salvagedBlobs: kept });
+        return repaired;
+      }
+      try { repaired.close(); } catch { /* fall through to the quarantine path */ }
+    } catch { /* fall through to the quarantine path */ }
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const intendedQuarantinePath = `${options.dbPath}.corrupt-${stamp}`;
   const intentPath = `${intendedQuarantinePath}.intent`;
@@ -369,13 +392,29 @@ function finishConversationBlobRecovery(args: {
   removeSqliteDb({ dbPath: replacementPath });
   const freshDb = openConversationBlobRecoveryTarget(options, replacementPath);
   let salvagedBlobs = 0;
+  let recoveredForCleanup: string | null = null;
   try {
     if (quarantinePath != null) {
+      // BOX-6. `.recover` before the cursor walk. copySalvageableSqliteRows stops at the first
+      // page it cannot read, so on a file with one bad btree page in the middle it keeps the rows
+      // before it and nothing after -- 5 of 2,940, measured. `.recover` rebuilds from every page it
+      // can find, and what comes back is an ordinary healthy database this same walk then reads
+      // whole. Absent sqlite3 (an entrypoint whose apt-get failed) this is null and the old path
+      // runs unchanged.
+      const recoveredPath = recoverSqliteDbWithCli({
+        sourcePath: quarantinePath,
+        destPath: `${quarantinePath}.recovered`,
+      });
+      if (recoveredPath != null) {
+        recoveredForCleanup = recoveredPath;
+        options.log?.(`[agent-store-worker] rebuilt conversation-blobs.db for agent=${options.agentId} with sqlite3 .recover`);
+      }
+      const salvageSourcePath = recoveredPath ?? quarantinePath;
       const source = openSqliteForSalvage({
-        dbPath: quarantinePath,
+        dbPath: salvageSourcePath,
         busyTimeoutMs: options.busyTimeoutMs,
       });
-      if (source == null && existsSync(quarantinePath)) {
+      if (source == null && existsSync(salvageSourcePath)) {
         throw new ConversationBlobRecoveryError(
           "SAND_BLOB_RECOVERY_QUARANTINE_UNREADABLE",
           "quarantined conversation blob database is unreadable",
@@ -412,6 +451,7 @@ function finishConversationBlobRecovery(args: {
     }
   }
   removeSqliteSidecars(replacementPath);
+  if (recoveredForCleanup != null) removeSqliteDb({ dbPath: recoveredForCleanup });
   removeSqliteDb({
     dbPath: options.dbPath,
     attempts: Math.ceil(options.busyTimeoutMs / 50),
