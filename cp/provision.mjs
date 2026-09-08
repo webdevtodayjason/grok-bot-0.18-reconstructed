@@ -7,7 +7,7 @@
 // console.titanium.bot for everybody, and it works out which box a request belongs to from the
 // session. So there is no relay to build here, no hostname to set, and no second login door.
 //
-// Seven steps, in this order, every one of them idempotent and every one of them written to the
+// Eight steps, in this order, every one of them idempotent and every one of them written to the
 // provisioning ledger with the answer Coolify gave:
 //
 //   directories  the tenant's own tree under CP_TENANT_ROOT
@@ -16,6 +16,9 @@
 //   service      POST /services, and the container name Coolify will give the box written down
 //   envs         POST /services/{uuid}/envs, the one value the compose refers to but does not carry
 //                (PATCH instead when Coolify already made the field from the compose's ${VAR})
+//   proxy-key    PROXY-1: this tenant's own virtual key at the proxy, minted once and written 0600
+//                beside the gateway token. Skipped, and recorded as skipped, on a server with no
+//                CP_PROXY_URL, so it runs the day one is configured
 //   start        POST /services/{uuid}/start
 //   ready        wait for that box to answer, so "created" means something
 //
@@ -31,11 +34,12 @@
 // browser, in a plan preview or in a log line.
 
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { tenantSessionSecret } from "./session.mjs";
+import { createProxyClient, includedModelRows, proxyKeyAlias } from "./proxy.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..");
@@ -71,6 +75,12 @@ export const RESERVED_SLUGS = new Set([
 
 export const SLUG_MIN = 3;
 export const SLUG_MAX = 32;
+
+// PROXY-1. The two file names in a tenant's profile directory that belong to the proxy, pinned as
+// constants because the relay joins them onto the profileDir it is handed over the registry route
+// and two spellings of one name is a bug nobody sees until a rollback does nothing.
+export const PROXY_KEY_NAME = "model-proxy.json";
+export const PROXY_ROLLBACK_NAME = "model-proxy-rollback.json";
 
 // The answers are the sentences an operator reads, so they say what to do rather than which rule
 // fired.
@@ -236,6 +246,33 @@ export function loadConfig(env = process.env) {
     // And the box isolation timer's verdict, for the day it writes one. box-isolation.sh --verify
     // prints its result today and writes no file, so this is unset and the panel says why.
     isolationReport: text("CP_ISOLATION_REPORT"),
+
+    // ---- the proxy (PROXY-1) -------------------------------------------------------------------
+    //
+    // All four are CP_ prefixed for the reason CP_COOLIFY_URL is: Coolify injects names of its own
+    // into every service container and its value wins, so a name this product wants has to be one
+    // Coolify does not also use.
+    //
+    // UNSET MEANS THE FEATURE IS OFF, EVERYWHERE, AND EVERY SURFACE SAYS SO. None of these ever
+    // goes in configProblems: `required` would stop the control plane booting for every install
+    // that has no proxy yet, which is every existing customer including Jason's own console. The
+    // pattern is CP_RELAY_TOKEN's: unset is a closed door that answers honestly, set but malformed
+    // is the thing that gets refused.
+    proxyUrl: text("CP_PROXY_URL").replace(/\/+$/, ""),
+    // The proxy's master key. It reaches exactly two places, this service's environment and the
+    // proxy's own, and it is never written into a box, into git or into the sync payload.
+    proxyMasterKey: text("CP_PROXY_MASTER_KEY"),
+    // What one tenant's plan includes in a month, in dollars. Called an allowance and not a plan
+    // anywhere in cp/, because `plan` already means the seven step provisioning plan in four files
+    // here and one word for two things is how a reader ends up reading the wrong one.
+    proxyAllowanceUsd: Number(text("CP_PROXY_ALLOWANCE_USD", "0")) || 0,
+    // Observe first. Unset mints soft_budget, which never fails a request and still produces the
+    // number the 80 percent chip reads. Set, the mint sends max_budget and a spent allowance is a
+    // refusal the box turns into a plain sentence. Arming it is a decision of its own.
+    proxyEnforce: /^(1|true|yes)$/i.test(text("CP_PROXY_ENFORCE", "")),
+    // Requests a minute, per tenant, at the proxy. 0 leaves the key unlimited, which is what an
+    // install that has not thought about it should get rather than a number somebody guessed.
+    proxyRpmLimit: Number(text("CP_PROXY_RPM_LIMIT", "0")) || 0,
   };
 }
 
@@ -303,6 +340,13 @@ export function tenantPaths(slug, config) {
     store: path.join(root, "volumes", "store"),
     chrome: path.join(root, "volumes", "chrome"),
     profileTokenFile: path.join(root, "profile", "local-docker-vm.json"),
+    // PROXY-1. This tenant's virtual key at the proxy, beside its gateway token and written the
+    // same way: 0600, in the profile directory, read back on a retry rather than minted twice.
+    proxyKeyFile: path.join(root, "profile", PROXY_KEY_NAME),
+    // And the snapshot the migration takes of what the box held BEFORE it was pointed at the
+    // proxy, so `proxy rollback` can put it back. Written by the relay, which is the only thing in
+    // this product that can read a box's own files, and named here so both sides use one name.
+    proxyRollbackFile: path.join(root, "profile", PROXY_ROLLBACK_NAME),
   };
 }
 
@@ -575,6 +619,21 @@ export function provisioningPlan({ slug, name, config }) {
       // sees it.
       bodyPreview: { keys: ["TITANBOT_GATEWAY_TOKEN"], values: "(set)" },
     },
+    // PROXY-1. The eighth step, and it had to be a NEW step rather than something folded into
+    // "secrets" or "envs": demo and richard-avery both have all seven of the others marked ok on
+    // the R750, and completedSteps skips a step that is already ok, so anything added inside an
+    // existing one would never run again for the two customers who exist.
+    //
+    // Nothing about the key itself is previewed, because a dry run is a thing an operator pastes
+    // into a ticket. The alias and the file are facts about where it lives, not the key.
+    {
+      name: "proxy-key",
+      method: config.proxyUrl ? "POST" : "local",
+      path: config.proxyUrl ? `${config.proxyUrl}/key/generate` : "(no proxy configured on this server)",
+      bodyPreview: config.proxyUrl
+        ? { key_alias: proxyKeyAlias(slug), tags: [`tenant:${slug}`], writes: [paths.proxyKeyFile], key: "(generated)", allowanceUsd: config.proxyAllowanceUsd, enforced: Boolean(config.proxyEnforce && config.proxyAllowanceUsd > 0) }
+        : { skipped: "CP_PROXY_URL is not set, so this workspace keeps whatever provider configuration it already has" },
+    },
     // No urls step. A tenant has no hostname: everybody signs in at the one console, and a PATCH
     // that put <slug>.titanium.bot on this service would publish a customer's box to the internet.
     {
@@ -631,6 +690,149 @@ export function readGatewayToken(slug, config) {
     const token = String(JSON.parse(readFileSync(paths.profileTokenFile, "utf8"))?.token ?? "");
     return token.length > 0 ? token : null;
   } catch { return null; }
+}
+
+// ---- the proxy key (PROXY-1) -------------------------------------------------------------------
+//
+// Read then mint, exactly the shape ensureSecrets uses for the gateway token, and for the same
+// reason: a retry of a half finished provisioning run has to be a READ. Minting a second key would
+// leave the tenant's box holding the first one and the registry handing out the second, the
+// symptom would be a customer whose agent answers 401 with nothing in any log to say why, and the
+// first key would go on spending against an allowance nobody could see.
+//
+// The models are not assumed. The proxy is asked which plan- models it actually serves, and the
+// key is minted against that list, so an install where the operator has no Qwen key does not hand
+// a customer a model that 400s the moment they pick it. That answer is written into the file with
+// the key, so the registry never has to call the proxy to answer the relay.
+
+// WHERE A TENANT'S PROFILE DIRECTORY IS, in one place.
+//
+// For a workspace this service built it is under CP_TENANT_ROOT. For one that was ADOPTED it is
+// wherever the operator already had it, which is recorded in the adopt step and nowhere else: tenant
+// "titanium" is Jason's own instance, its files are under the release root, and it has no directory
+// under the tenant root at all. That matters here more than anywhere, because `proxy mint titanium`
+// through the CLI is the ONLY way the operator's own workspace ever gets a key, and a CLI that
+// wrote it under the tenant root would write a file the registry never reads: the mint would report
+// success and Jason's console would still show nothing included with his plan.
+export function adoptionDirs(steps = []) {
+  for (const step of [...steps].reverse()) {
+    if (step.step !== "adopt" || step.status !== "ok") continue;
+    try {
+      const parsed = JSON.parse(step.detail || "{}");
+      return {
+        stateDir: typeof parsed.stateDir === "string" ? parsed.stateDir : "",
+        profileDir: typeof parsed.profileDir === "string" ? parsed.profileDir : "",
+      };
+    } catch { return { stateDir: "", profileDir: "" }; }
+  }
+  return { stateDir: "", profileDir: "" };
+}
+
+export function tenantProfileDir(slug, config, steps = []) {
+  return adoptionDirs(steps).profileDir || tenantPaths(slug, config).profile;
+}
+
+/** The path of one tenant's plan key, adopted or not. */
+export const proxyKeyFileIn = (profileDir) => path.join(profileDir, PROXY_KEY_NAME);
+
+/** The single reader. Called by the registry and by the CLI, and by nothing else. */
+export function readProxyKey(slug, config, { file = null } = {}) {
+  const target = file ?? tenantPaths(slug, config).proxyKeyFile;
+  if (!existsSync(target)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    const key = String(parsed?.key ?? "");
+    if (key.length === 0) return null;
+    return {
+      key,
+      keyId: String(parsed?.keyId ?? ""),
+      alias: String(parsed?.alias ?? proxyKeyAlias(slug)),
+      mintedAt: String(parsed?.mintedAt ?? ""),
+      models: Array.isArray(parsed?.models) ? parsed.models : [],
+      enforced: parsed?.enforced === true,
+    };
+  } catch { return null; }
+}
+
+export function writeProxyKey(slug, config, record, { file = null } = {}) {
+  const target = file ?? tenantPaths(slug, config).proxyKeyFile;
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  writeFileSync(target, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(target, 0o600);
+  return record;
+}
+
+/** Forgetting one locally, which is what a revoke and a rotate both do before anything else. */
+export function forgetProxyKey(slug, config, { file = null } = {}) {
+  const target = file ?? tenantPaths(slug, config).proxyKeyFile;
+  if (!existsSync(target)) return false;
+  rmSync(target, { force: true });
+  return true;
+}
+
+/**
+ * The tenant's key, minted once.
+ *
+ * Answers {ok, minted, record} or {ok: false, why}. It never throws, because it is called from a
+ * provisioning step whose job is to record a sentence and stop, and from a CLI whose job is to
+ * print one.
+ *
+ * `force` is the rotate: the old key is deleted at the proxy BY ALIAS before a new one is minted,
+ * rather than being left orphaned holding a budget nobody is reading.
+ */
+export async function ensureProxyKey(slug, config, options = {}) {
+  const {
+    proxy = createProxyClient({ config, fetchImpl: options.fetchImpl }),
+    force = false,
+    box = "",
+    now = () => Date.now(),
+    // Where to write it. Defaults to this tenant's own profile directory under the tenant root,
+    // and is passed in by the CLI for an ADOPTED workspace whose files are somewhere else.
+    file = null,
+  } = options;
+
+  if (String(config.proxyUrl ?? "").length === 0) {
+    return { ok: false, skipped: true, why: "this server has no proxy configured (CP_PROXY_URL is not set)" };
+  }
+
+  const existing = readProxyKey(slug, config, { file });
+  if (existing && !force) return { ok: true, minted: false, record: existing };
+
+  const served = await proxy.models();
+  if (!served.ok) return { ok: false, why: `the proxy could not be asked which models it serves: ${served.why}` };
+  if (served.models.length === 0) {
+    return { ok: false, why: "the proxy serves no plan models, so there is nothing to mint a key against" };
+  }
+
+  if (force && existing) {
+    const removed = await proxy.deleteKeyByAlias(slug);
+    // A rotate whose delete failed is still a rotate, and the new key is what the box will use, so
+    // this is reported rather than fatal. The old one keeps its own budget until somebody revokes
+    // it, and `proxy revoke` is the way to.
+    if (!removed.ok) options.onNote?.(`the old key could not be deleted at the proxy: ${removed.why}`);
+  }
+
+  const minted = await proxy.mintKey({
+    slug,
+    models: served.models,
+    allowanceUsd: config.proxyAllowanceUsd,
+    enforce: config.proxyEnforce,
+    rpmLimit: config.proxyRpmLimit,
+    box,
+  });
+  if (!minted.ok) return { ok: false, why: `the proxy would not mint a key: ${minted.why}` };
+
+  const record = {
+    key: minted.key,
+    keyId: minted.keyId,
+    alias: minted.alias,
+    mintedAt: new Date(now()).toISOString(),
+    enforced: minted.enforced,
+    // The rows the relay serves, worked out once here rather than on every registry read.
+    models: includedModelRows({ models: served.models, windows: served.windows }),
+  };
+  writeProxyKey(slug, config, record, { file });
+  return { ok: true, minted: true, record };
 }
 
 // ---- waiting for the box -------------------------------------------------------------------
@@ -842,12 +1044,49 @@ export async function provisionTenant(options) {
     }
   } catch (error) { return fail("envs", error); }
 
+  // 6. the proxy key (PROXY-1). One virtual key for this tenant, metered and revocable, written
+  // 0600 into the profile directory beside the gateway token.
+  //
+  // Recorded as "skipped" rather than "ok" when this server has no proxy, so completedSteps does
+  // not count it and the day CP_PROXY_URL is set the next provisioning run actually mints. A
+  // failure IS fatal here: a workspace whose agents cannot reach a model is not a workspace, and
+  // the retry route picks up at this step with the container and the directories already built.
+  try {
+    if (!done.has("proxy-key")) {
+      const notes = [];
+      const answer = await ensureProxyKey(slug, config, { fetchImpl, box: boxContainer ?? "", onNote: (note) => notes.push(note) });
+      if (answer.skipped) {
+        store.recordStep({ slug, step: "proxy-key", status: "skipped", detail: answer.why });
+      } else if (!answer.ok) {
+        return fail("proxy-key", new Error(answer.why));
+      } else {
+        // The alias, the key id and the file. Never the key: this detail is read back by the admin
+        // console and by `tenant list`, and the ledger is the one place a secret has never been.
+        store.recordStep({
+          slug,
+          step: "proxy-key",
+          status: "ok",
+          detail: JSON.stringify({
+            alias: answer.record.alias,
+            keyId: answer.record.keyId,
+            file: paths.proxyKeyFile,
+            models: answer.record.models.map((row) => row.id),
+            enforced: answer.record.enforced,
+            minted: answer.minted,
+            ...(notes.length > 0 ? { notes } : {}),
+          }),
+        });
+        ran.push("proxy-key");
+      }
+    }
+  } catch (error) { return fail("proxy-key", error); }
+
   // No urls step. A tenant has no hostname of its own: everybody signs in at the one console, and a
   // PATCH that put <slug>.titanium.bot on this service would publish a customer's box to the
   // internet with no login page in front of it. The host on the tenant row is the shared console,
   // which is what the session token says and what the relay checks.
 
-  // 6. start. Asynchronous on Coolify's side: it queues the request and answers immediately, which
+  // 7. start. Asynchronous on Coolify's side: it queues the request and answers immediately, which
   // is why the wait below exists at all.
   try {
     if (!done.has("start")) {
@@ -857,7 +1096,7 @@ export async function provisionTenant(options) {
     }
   } catch (error) { return fail("start", error); }
 
-  // 7. ready. Waits for the box to answer and records which way it answered.
+  // 8. ready. Waits for the box to answer and records which way it answered.
   //
   // A timeout here is NOT a failure and never marks the tenant failed: the image is 5.2 GB and a
   // server that does not have it yet takes longer than any wait worth putting a customer through.

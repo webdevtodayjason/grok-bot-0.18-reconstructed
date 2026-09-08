@@ -45,8 +45,10 @@ import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, 
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
+import { createProxyClient } from "./proxy.mjs";
 import {
   NEW_TENANTS_BLOCKED,
+  adoptionDirs,
   boxContainerName,
   configProblems,
   consoleHost,
@@ -54,8 +56,10 @@ import {
   deriveSlug,
   loadConfig,
   provisionTenant,
+  proxyKeyFileIn,
   readCoolifyState,
   readGatewayToken,
+  readProxyKey,
   tenantDirectory,
   tenantPaths,
   validateSlug,
@@ -173,6 +177,11 @@ export function createApp(options = {}) {
   const probeImpl = options.probeImpl ?? fetchImpl;
   const now = options.now ?? (() => Date.now());
   const client = createCoolifyClient({ config, fetchImpl });
+  // PROXY-1. The proxy, for the one thing this service does to it on a route: revoke a key when the
+  // workspace it belongs to is removed. Minting happens in provisioning and in the CLI. A client
+  // built with no CP_PROXY_URL is not an error and never throws; every call on it answers with the
+  // sentence saying the feature is off.
+  const proxy = options.proxy ?? createProxyClient({ config, fetchImpl });
 
   // The address the lockout counts against, decided by the relay's own code (ui/auth.mjs) with the
   // relay's own two settings.
@@ -256,13 +265,25 @@ export function createApp(options = {}) {
       const stateDir = adoption.stateDir || paths.state;
       const profileDir = adoption.profileDir || paths.profile;
       const box = row.boxContainer || (row.coolifyServiceUuid ? boxContainerName(row.coolifyServiceUuid) : "");
-      if (row.status === "failed") { skipped.push({ slug: row.slug, why: "this workspace did not finish being built" }); continue; }
-      if (!box) { skipped.push({ slug: row.slug, why: "this workspace has no container yet" }); continue; }
+      if (row.status === "failed") { skipped.push({ slug: row.slug, what: "tenant", why: "this workspace did not finish being built" }); continue; }
+      if (!box) { skipped.push({ slug: row.slug, what: "tenant", why: "this workspace has no container yet" }); continue; }
       const token = adoption.profileDir
         ? readTokenFromDirectory(adoption.profileDir)
         : readGatewayToken(row.slug, config);
-      if (!token) { skipped.push({ slug: row.slug, why: "this workspace has no gateway token on this server" }); continue; }
+      if (!token) { skipped.push({ slug: row.slug, what: "tenant", why: "this workspace has no gateway token on this server" }); continue; }
+      // PROXY-1. What this customer's plan includes, if anything.
+      //
+      // Two rules, and both of them are about not lying to the relay. The whole object is OMITTED
+      // rather than sent half filled, because the relay renders it as a read-only card in Settings
+      // and a card with no key behind it is a customer clicking Use this one and getting a 401. And
+      // when CP_PROXY_URL is unset nothing is said at all, not even a skipped row: this feature
+      // being off is the normal state of every install that has not had it turned on, and a
+      // registry answer that grew a per tenant complaint on every read would be noise the day
+      // somebody needs to read it.
+      const included = includedFor(row.slug, profileDir);
+      if (included.why) skipped.push({ slug: row.slug, what: "included", why: included.why });
       tenants.push({
+        ...(included.row ? { included: included.row } : {}),
         slug: row.slug,
         name: row.name,
         status: row.status,
@@ -280,22 +301,50 @@ export function createApp(options = {}) {
     return { tenants, skipped };
   }
 
+  /**
+   * PROXY-1. The `included` object for one tenant, pinned field for field.
+   *
+   *   included = {baseUrl, key, keyId, models: [{id, model, name, contextWindow, servedBy}], enforced}
+   *
+   * These names are read by the relay and asserted in tests/cp-relay-pair, which exists precisely
+   * so the two halves cannot quietly disagree about a spelling. `id` EQUALS `model`, so there is
+   * one string rather than two that can drift.
+   *
+   * The base url is the proxy on the shared bridge, http://titanbot-proxy:4000/v1, which is plain
+   * http to a private name. That is exactly what the relay's tenantEndpointRefusal guard exists to
+   * refuse, and the guard is NOT relaxed: these rows never live in a tenant's endpoints.json at
+   * all, the relay computes them from this answer and never lets a request body claim one.
+   *
+   * An adopted tenant reads from the profile directory the adoption named, the same way its
+   * gateway token does, so the operator's own workspace works through the identical path.
+   */
+  function includedFor(slug, profileDir) {
+    if (String(config.proxyUrl ?? "").length === 0) return { row: null, why: "" };
+    const file = proxyKeyFileIn(profileDir);
+    const record = readProxyKey(slug, config, { file });
+    if (record == null) {
+      return { row: null, why: `this workspace has no plan key yet, so nothing is included with its plan (mint one with cp/cli.mjs proxy mint ${slug})` };
+    }
+    return {
+      why: "",
+      row: {
+        baseUrl: `${config.proxyUrl}/v1`,
+        key: record.key,
+        keyId: record.keyId,
+        models: record.models,
+        enforced: record.enforced,
+      },
+    };
+  }
+
   // The extra facts an adoption was given, read back out of the ledger step it wrote. An adopted
   // instance was not built here, so its directories are wherever the operator already had them and
   // there is nothing in the tenant row that would know.
-  function adoptionDetail(slug) {
-    for (const step of store.listSteps(slug).reverse()) {
-      if (step.step !== "adopt" || step.status !== "ok") continue;
-      try {
-        const parsed = JSON.parse(step.detail || "{}");
-        return {
-          stateDir: typeof parsed.stateDir === "string" ? parsed.stateDir : "",
-          profileDir: typeof parsed.profileDir === "string" ? parsed.profileDir : "",
-        };
-      } catch { return { stateDir: "", profileDir: "" }; }
-    }
-    return { stateDir: "", profileDir: "" };
-  }
+  // One parse of that step, in cp/provision.mjs, shared with the CLI. It was inline here until
+  // PROXY-1 needed the same answer on the operator's side: `proxy mint titanium` has to write into
+  // the directory this reader names, and a second implementation of "where does this workspace keep
+  // its files" is how one of the two ends up writing a file nothing reads.
+  const adoptionDetail = (slug) => adoptionDirs(store.listSteps(slug));
 
   // The same 0600 file cp/provision.mjs writes, read from a directory an adoption named rather than
   // from this service's own tenant root. Nothing else reads a path a request supplied: the path
@@ -381,9 +430,21 @@ export function createApp(options = {}) {
   // client and one session verifier in this process rather than two. It mounts below, before the
   // operator-token routes, and every route inside it refuses anything that is not a super admin.
   const admin = createAdminApi({
-    config, store, client, now, fetchImpl,
+    config, store, client, now, fetchImpl, proxy,
     json, noContent, publicAccount, publicTenant, tenantView, tenantPower, tenantProvision,
     currentSession, version: CP_VERSION,
+    // PROXY-1. One tenant's plan key, read off the disk through the same adoption-aware path the
+    // registry uses, so the operator's own workspace is read the same way a customer's is.
+    //
+    // The KEY VALUE is in this record, and it is in it for exactly one reason: /key/info is asked
+    // for a key's spend by the key, and that is the number LiteLLM itself compares a budget
+    // against. cp/admin.mjs puts the alias and the key id in an answer and never the key, and
+    // tests/cp-server asserts it by sweeping every route for a real minted key's bytes.
+    proxyKeyOf: (slug) => {
+      const adoption = adoptionDetail(slug);
+      const profileDir = adoption.profileDir || tenantPaths(slug, config).profile;
+      return readProxyKey(slug, config, { file: proxyKeyFileIn(profileDir) });
+    },
   });
 
   async function handleSessionCreate(request, response, body) {
@@ -829,6 +890,24 @@ export function createApp(options = {}) {
         if (String(body.confirm ?? "") !== slug) {
           return json(response, 400, { error: "confirm_required", message: `To remove this tenant send {"confirm": "${slug}"} in the body.` });
         }
+        // PROXY-1. The plan key goes BEFORE the container does.
+        //
+        // Order matters and it is asserted by call order in the tests. A key deleted after the
+        // service is gone is a key that is still spending for however long the delete takes, and a
+        // key deleted after a FAILED service delete is worse: the box is still running with a
+        // credential the operator believes they revoked. Revoking first means the worst case is a
+        // workspace that is up and cannot reach a model, which is visible, rather than one that is
+        // gone and can, which is not.
+        //
+        // A failed revoke does NOT stop the delete. The operator asked to remove a customer and a
+        // proxy that is down must not strand that; it comes back as a sentence naming the CLI that
+        // finishes the job. The alias is derivable from the slug, so it can be revoked later with
+        // nothing but the name.
+        let revokeNote = "";
+        if (proxy.configured) {
+          const revoked = await proxy.deleteKeyByAlias(slug);
+          if (!revoked.ok) revokeNote = ` The key this workspace used with the models included in its plan could NOT be revoked: ${revoked.why}. Revoke it with cp/cli.mjs proxy revoke ${slug}.`;
+        }
         if (row.coolifyServiceUuid) {
           try { await client.deleteService(row.coolifyServiceUuid); }
           catch (error) { return json(response, 502, { error: "coolify_error", message: String(error?.message ?? error) }); }
@@ -848,6 +927,7 @@ export function createApp(options = {}) {
           dataKept: tenantDirectory(slug, config),
           accountsLeft: orphaned,
           message: `The Coolify service is gone. Everything in ${tenantDirectory(slug, config)} was left alone, so nothing the customer made was deleted.`
+            + revokeNote
             + (orphaned.length === 0
               ? ""
               : ` ${orphaned.length} sign-in${orphaned.length === 1 ? "" : "s"} still point${orphaned.length === 1 ? "s" : ""} at this workspace (${orphaned.join(", ")}). Build it again under the same name and they work; remove them with DELETE /v1/accounts/<email>. Until one or the other, those people are told the workspace is not available, and the name ${slug} is held back so no new customer can be given it.`),

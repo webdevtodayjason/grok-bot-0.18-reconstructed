@@ -6,11 +6,12 @@ import test from "node:test";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { tenantPaths } from "../cp/provision.mjs";
+import { readProxyKey, tenantPaths } from "../cp/provision.mjs";
 import { CP_VERSION } from "../cp/server.mjs";
 import { LOCKOUT_MAX_FAILURES } from "../cp/store.mjs";
 import { tenantSessionSecret, verifySessionToken } from "../cp/session.mjs";
 import { startControlPlane, startFakeCoolify } from "./cp-support.mjs";
+import { startFakeProxy } from "./cp-proxy-support.mjs";
 
 const PASSWORD = "a-good-tenant-password";
 
@@ -310,7 +311,7 @@ test("a dry run over the API answers with the plan and leaves no tenant behind",
     assert.equal(answer.body.dryRun, true);
     // The one console everybody signs in at, not a hostname of this tenant's own.
     assert.equal(answer.body.host, "console.titanium.bot");
-    assert.deepEqual(answer.body.plan.steps.map((step) => step.name), ["directories", "secrets", "compose", "service", "envs", "start", "ready"]);
+    assert.deepEqual(answer.body.plan.steps.map((step) => step.name), ["directories", "secrets", "compose", "service", "envs", "proxy-key", "start", "ready"]);
     assert.deepEqual(coolify.routes(), []);
     assert.equal(plane.store.countTenants(), 0, "a rehearsal that left half a tenant would be the opposite of a rehearsal");
     assert.equal((await plane.admin("GET", "/v1/tenants/acme")).status, 404);
@@ -410,9 +411,78 @@ test("an unknown route is a 404 and an oversized or unparseable body is a 400", 
 });
 
 test("no route on this service ever answers with a hash, the session secret or the operator token", async () => {
+  // PROXY-1 adds two more secrets to this sweep and they are the ones with the widest blast
+  // radius on the whole server. The proxy's MASTER key opens every tenant's budget and every
+  // provider subscription behind it, and a tenant's virtual key is a live credential for one
+  // customer's inference. Neither may come out of any route here, including the admin console,
+  // which is why the spend panel answers with the alias and the key id and never the key.
+  const proxy = await startFakeProxy();
+  try {
+    await withPlane(async (plane, coolify) => {
+      const account = await seedTenantAndAccount(plane);
+      await plane.admin("POST", "/v1/tenants", { slug: "roofing", name: "Roofing" });
+      const minted = readProxyKey("roofing", plane.config);
+      assert.ok(minted != null, "the workspace was built with no plan key, so this sweep proves nothing");
+      await sweepForSecrets(plane, coolify, account, [proxy.masterKey, minted.key]);
+    }, { withCoolify: true, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); }
+});
+
+test("removing a workspace revokes its plan key before it removes the container", async () => {
+  const proxy = await startFakeProxy();
+  try {
+    await withPlane(async (plane, coolify) => {
+      await plane.admin("POST", "/v1/tenants", { slug: "roofing", name: "Roofing" });
+      assert.equal(proxy.keyByAlias("titanbot-roofing") != null, true, "the workspace was built with no plan key");
+      await plane.admin("POST", "/v1/tenants/roofing/stop");
+
+      // The order, proved by breaking the second half. If the revoke ran after the Coolify delete,
+      // a Coolify delete that fails would leave the customer's box running with a credential the
+      // operator believes they took away. It runs first, so the worst case is the visible one: a
+      // workspace that is up and cannot reach a model.
+      coolify.failOnce("DELETE /services/{uuid}", 500, "Coolify is busy");
+      const broken = await plane.admin("DELETE", "/v1/tenants/roofing", { confirm: "roofing" });
+      assert.equal(broken.status, 502);
+      assert.equal(proxy.keyByAlias("titanbot-roofing"), null, "the key was left alive when the container delete failed");
+
+      // And the second attempt still finishes, with a revoke that is now a no-op.
+      const done = await plane.admin("DELETE", "/v1/tenants/roofing", { confirm: "roofing" });
+      assert.equal(done.status, 200, done.text);
+      assert.equal(proxy.callsTo("POST /key/delete").length, 2);
+    }, { withCoolify: true, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); }
+});
+
+test("a proxy that will not revoke does not strand the operator, it names the command that finishes it", async () => {
+  const proxy = await startFakeProxy();
+  try {
+    await withPlane(async (plane) => {
+      await plane.admin("POST", "/v1/tenants", { slug: "roofing", name: "Roofing" });
+      await plane.admin("POST", "/v1/tenants/roofing/stop");
+      proxy.failOnce("POST /key/delete", 503, "the proxy database is not up");
+      const answer = await plane.admin("DELETE", "/v1/tenants/roofing", { confirm: "roofing" });
+      // The operator asked to remove a customer, so a proxy that is down must not stop that. What
+      // it gets instead is the sentence naming the command that finishes the job, and the alias is
+      // derivable from the slug so it can be run later with nothing but the name.
+      assert.equal(answer.status, 200, answer.text);
+      assert.match(answer.body.message, /could NOT be revoked/);
+      assert.match(answer.body.message, /cp\/cli\.mjs proxy revoke roofing/);
+    }, { withCoolify: true, env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
+  } finally { await proxy.close(); }
+});
+
+// The same sweep with no proxy configured, which is the state of every install that has not turned
+// it on. It runs the older assertions unchanged.
+test("the leak sweep holds on a server with no proxy at all", async () => {
   await withPlane(async (plane, coolify) => {
     const account = await seedTenantAndAccount(plane);
     await plane.admin("POST", "/v1/tenants", { slug: "roofing", name: "Roofing" });
+    await sweepForSecrets(plane, coolify, account, []);
+  }, { withCoolify: true });
+});
+
+async function sweepForSecrets(plane, coolify, account, extraSecrets) {
+  {
     const signIn = await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } });
     const token = signIn.body.token;
 
@@ -427,6 +497,7 @@ test("no route on this service ever answers with a hash, the session secret or t
 
     const forbidden = [
       ...hashes, plane.config.sessionSecret, plane.config.adminToken, coolify.apiKey, gatewayToken,
+      ...extraSecrets,
     ];
 
     const sweep = [
@@ -448,6 +519,12 @@ test("no route on this service ever answers with a hash, the session secret or t
       await plane.request("GET", "/v1/relay/tenants"),
       await plane.admin("GET", "/v1/relay/tenants"),
       await plane.request("POST", "/v1/signups", { body: { email: "someone@example.com", password: "a-good-password", company: "Someone" } }),
+      // PROXY-1. The admin console's own routes, opened with the operator token, because the spend
+      // panel is the one place a virtual key could plausibly have been rendered. It answers with
+      // the alias and the key id and never with the key.
+      await plane.admin("GET", "/v1/admin/spend"),
+      await plane.admin("GET", "/v1/admin/clients"),
+      await plane.admin("GET", "/v1/admin/system"),
     ];
 
     for (const answer of sweep) {
@@ -456,8 +533,8 @@ test("no route on this service ever answers with a hash, the session secret or t
       }
       assert.equal(/"hash"|"password_json"|"cookieSecret"/.test(answer.text), false, `a response carried a password field: ${answer.text.slice(0, 200)}`);
     }
-  }, { withCoolify: true });
-});
+  }
+}
 
 test("the retry route re-runs provisioning from the step that failed", async () => {
   await withPlane(async (plane, coolify) => {

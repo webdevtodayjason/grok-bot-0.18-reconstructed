@@ -45,6 +45,7 @@ import path from "node:path";
 // widens the other's blast radius.
 import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.mjs";
 import { normalizeEmail } from "./store.mjs";
+import { isoDay, monthStartDay, proxyKeyAlias } from "./proxy.mjs";
 
 export const ADMIN_SALT_NAME = "login-attempt-salt";
 
@@ -90,6 +91,11 @@ export const RELAY_TIMEOUT_MS = 15_000;
 // health panel and the System health panel together and both want the same answer, so without this
 // a single refresh runs the relay's whole docker-plus-du fleet sweep twice.
 export const BOXES_CACHE_MS = 5_000;
+
+// PROXY-1. How a TinyFish row is recognised in the proxy's per-model spend breakdown. It is a
+// substring rather than an exact name because the pass-through's model string carries the route on
+// it, and the column it feeds counts requests rather than dollars.
+export const TINYFISH_MODEL_MARK = "tinyfish";
 
 /** The control plane's own salt, made once in CP_DATA_DIR at 0600. */
 export function adminSalt(dataDir, { name = ADMIN_SALT_NAME } = {}) {
@@ -498,6 +504,11 @@ export function createAdminApi({
   currentSession, version = "0.0.0", pageDir = new URL("./admin/", import.meta.url).pathname,
   read = (file) => readFileSync(file, "utf8"),
   log = (line) => { try { process.stderr.write(`${line}\n`); } catch { /* a closed stderr is not worth throwing over */ } },
+  // PROXY-1. The proxy, and one tenant's plan key read off the disk. Both are handed in by
+  // cp/server.mjs rather than built here, for the same reason the store and the Coolify client
+  // are: one of each in this process.
+  proxy = null,
+  proxyKeyOf = () => null,
 } = {}) {
   // Made on the first refused sign-in rather than at boot, so a data directory that is not writable
   // yet cannot stop the service from starting.
@@ -623,6 +634,209 @@ export function createAdminApi({
     return pending;
   }
 
+  // ---- the proxy (PROXY-1) ----------------------------------------------------------------------
+  //
+  // Modelled line for line on askRelay above: a bearer, a deadline, and it never throws. A proxy
+  // that is down has to come out of here as "not measured" with the reason on the panel, because a
+  // zero on a spend column is indistinguishable from a customer who has not spent anything, and
+  // that is the one number an operator would act on without checking.
+  //
+  // The BROWSER never talks to the proxy. The admin page's own CSP is connect-src 'self', which is
+  // deliberate: the proxy is on the docker bridge and is not on the internet, so a panel that
+  // fetched it directly could not work and a panel that could would be the proxy on the internet.
+  // Everything below runs in this container.
+
+  /** Whether there is a proxy to ask at all, in the words the panel prints when there is not. */
+  const proxyOff = () => {
+    if (proxy == null || proxy.configured !== true) {
+      return "this control plane has no proxy configured (CP_PROXY_URL and CP_PROXY_MASTER_KEY)";
+    }
+    return "";
+  };
+
+  async function askProxy(method, call) {
+    const off = proxyOff();
+    if (off) return { ok: false, why: off };
+    try { return await call(); }
+    catch (error) {
+      // createProxyClient does not throw, so reaching this is a bug in it rather than a proxy that
+      // is down. It is still caught, because a panel that 500s tells an operator less than a panel
+      // that says what happened.
+      return { ok: false, why: `the proxy call ${method} failed: ${notMeasured(error)}` };
+    }
+  }
+
+  /**
+   * One sweep of the two spend windows, shared by the Spend panel and the Clients panel.
+   *
+   * The same cache and in-flight join askRelayBoxes uses, and for the same reason: the two panels
+   * load together, so one Refresh has to be one pair of reports rather than four.
+   *
+   * The windows are calendar windows in UTC. "This month" is the first of the month to today,
+   * because an allowance is a monthly allowance and a rolling thirty days would never line up with
+   * the number a customer is told they get.
+   */
+  let spendCache = { at: 0, answer: null, inFlight: null };
+  function askProxySpend() {
+    if (spendCache.answer != null && now() - spendCache.at < BOXES_CACHE_MS) return Promise.resolve(spendCache.answer);
+    if (spendCache.inFlight != null) return spendCache.inFlight;
+    const at = now();
+    const pending = (async () => {
+      const today = isoDay(at);
+      const [month, day] = await Promise.all([
+        askProxy("/global/spend/report month", () => proxy.spendReport({ startDay: monthStartDay(at), endDay: today })),
+        askProxy("/global/spend/report today", () => proxy.spendReport({ startDay: today, endDay: today })),
+      ]);
+      return { month, day, today, monthStart: monthStartDay(at) };
+    })().then(
+      (answer) => { spendCache = { at: now(), answer, inFlight: null }; return answer; },
+      (error) => { spendCache = { at: 0, answer: null, inFlight: null }; throw error; },
+    );
+    spendCache = { ...spendCache, inFlight: pending };
+    return pending;
+  }
+
+  /** One report's row for one tenant, matched on the key id first and the alias second. */
+  function windowFor(report, { alias, keyId }) {
+    if (!report.ok) return { requests: null, dollars: null, why: report.why };
+    const row = report.keys.find((one) => (keyId.length > 0 && one.keyId === keyId))
+      ?? report.keys.find((one) => (alias.length > 0 && one.alias === alias));
+    // Nothing in the report for this key is not a hole. It is a real zero: the report covers the
+    // whole window and this key is not in it, so nothing was spent. That is the one place a zero is
+    // honest, and it is written out rather than left to a default.
+    if (row == null) return { requests: 0, dollars: 0, why: "" };
+    return {
+      requests: row.requests,
+      dollars: row.dollars,
+      why: row.requests === null && row.dollars === null ? "the proxy reported this key with no numbers on it" : "",
+      models: row.models,
+    };
+  }
+
+  /**
+   * Per client: what their plan includes, what they have spent, and how close they are.
+   *
+   * PERCENT AND DOLLARS ARE NOT THE SAME AUDIENCE. Dollars are here, in the operator's own
+   * console. What a customer is shown in their own Settings is a percentage and a sentence, which
+   * is C's surface, and the reason is that a customer's plan price is not their provider cost and
+   * showing them one as the other invites a conversation nobody wants to have.
+   */
+  // The whole answer, cached and joined the way the box sweep is, not just the two reports inside
+  // it. The Spend panel and the Clients panel both render this object and they load together, so
+  // without this one Refresh would be one pair of reports and TWO /key/info calls per customer.
+  let spendAnswerCache = { at: 0, answer: null, inFlight: null };
+  function spend() {
+    if (spendAnswerCache.answer != null && now() - spendAnswerCache.at < BOXES_CACHE_MS) {
+      return Promise.resolve(spendAnswerCache.answer);
+    }
+    if (spendAnswerCache.inFlight != null) return spendAnswerCache.inFlight;
+    const pending = computeSpend().then(
+      (answer) => { spendAnswerCache = { at: now(), answer, inFlight: null }; return answer; },
+      (error) => { spendAnswerCache = { at: 0, answer: null, inFlight: null }; throw error; },
+    );
+    spendAnswerCache = { ...spendAnswerCache, inFlight: pending };
+    return pending;
+  }
+
+  async function computeSpend() {
+    const off = proxyOff();
+    const at = now();
+    if (off) {
+      return {
+        configured: false,
+        why: off,
+        clients: store.listTenants().map((tenant) => ({
+          slug: tenant.slug,
+          name: tenant.name,
+          alias: "",
+          keyId: "",
+          minted: false,
+          allowance: null,
+          enforced: false,
+          pct: null,
+          spendToDate: null,
+          thisMonth: { requests: null, dollars: null, why: off },
+          today: { requests: null, dollars: null, why: off },
+          tinyfish: { requests: null, why: off },
+          why: off,
+        })),
+        allowance: Number(config.proxyAllowanceUsd) > 0 ? Number(config.proxyAllowanceUsd) : null,
+        enforced: Boolean(config.proxyEnforce),
+        measuredAt: new Date(at).toISOString(),
+      };
+    }
+
+    const sweep = await askProxySpend();
+    const allowance = Number(config.proxyAllowanceUsd) > 0 ? Number(config.proxyAllowanceUsd) : null;
+    const rows = [];
+    for (const tenant of store.listTenants()) {
+      const record = proxyKeyOf(tenant.slug);
+      if (record == null) {
+        rows.push({
+          slug: tenant.slug,
+          name: tenant.name,
+          alias: proxyKeyAlias(tenant.slug),
+          keyId: "",
+          minted: false,
+          allowance,
+          enforced: false,
+          pct: null,
+          spendToDate: null,
+          thisMonth: { requests: null, dollars: null, why: "this workspace has no plan key yet" },
+          today: { requests: null, dollars: null, why: "this workspace has no plan key yet" },
+          tinyfish: { requests: null, why: "this workspace has no plan key yet" },
+          why: `this workspace has no plan key yet (mint one with cp/cli.mjs proxy mint ${tenant.slug})`,
+        });
+        continue;
+      }
+      const handle = { alias: record.alias, keyId: record.keyId };
+      const thisMonth = windowFor(sweep.month, handle);
+      const today = windowFor(sweep.day, handle);
+      // The spend LiteLLM itself compares a budget against, which is not the same as the sum of a
+      // report window: the report is a calendar month and the key's own counter resets on the
+      // budget duration. The chip has to read the number that will actually stop a request.
+      const info = await askProxy("/key/info", () => proxy.keyInfo(record.key));
+      const spendToDate = info.ok ? info.spend : null;
+      // TinyFish is counted in REQUESTS and never in dollars. Its pass-through is priced as a flat
+      // cost per request on our side and an agent run's real credits vary, so a dollar figure here
+      // would be a number that looks precise and is not.
+      const models = Array.isArray(thisMonth.models) ? thisMonth.models : [];
+      const tinyfishRows = models.filter((row) => String(row.model).toLowerCase().includes(TINYFISH_MODEL_MARK));
+      rows.push({
+        slug: tenant.slug,
+        name: tenant.name,
+        alias: record.alias,
+        keyId: record.keyId,
+        minted: true,
+        mintedAt: record.mintedAt,
+        allowance,
+        enforced: record.enforced === true,
+        pct: allowance != null && spendToDate != null ? Math.round((spendToDate / allowance) * 100) : null,
+        spendToDate,
+        spendToDateWhy: info.ok ? "" : info.why,
+        thisMonth: { requests: thisMonth.requests, dollars: thisMonth.dollars, why: thisMonth.why },
+        today: { requests: today.requests, dollars: today.dollars, why: today.why },
+        tinyfish: models.length === 0
+          ? { requests: null, why: thisMonth.why || "the proxy's report does not break this key down by model on this build" }
+          : { requests: tinyfishRows.reduce((total, row) => total + (row.requests ?? 0), 0), why: "" },
+        why: "",
+      });
+    }
+    return {
+      configured: true,
+      why: "",
+      clients: rows,
+      allowance,
+      enforced: Boolean(config.proxyEnforce),
+      // Said out loud on the panel as well as here. The spend counter chain is batch written, so a
+      // stop at the allowance is a stop and not an exact cap: a burst in flight when the number is
+      // read can carry a customer past it before the next write lands.
+      note: "A stop at the allowance is a stop, not an exact cap. Spend is batch written at the proxy, so the number this panel reads can be a little behind what has actually been spent.",
+      window: { month: `${sweep.monthStart} to ${sweep.today}`, today: sweep.today },
+      measuredAt: new Date(at).toISOString(),
+    };
+  }
+
   /** The merged sign-in ledger, both sides, filtered and summarised. */
   async function signIns({ sinceMs, outcome, limit }) {
     const relay = await askRelay("/admin/login-attempts", `?since=${encodeURIComponent(new Date(sinceMs).toISOString())}&outcome=${encodeURIComponent(outcome)}&limit=${limit}`);
@@ -649,6 +863,12 @@ export function createAdminApi({
 
   /** Every customer, their people, and what their workspace is doing right now. */
   async function clients() {
+    // PROXY-1. The same object the Spend panel renders, on the same row as the customer, from the
+    // same sweep. `plan: "none"` used to sit here as a named placeholder; it is now the real
+    // allowance, and it is called an allowance because `plan` already means the eight step
+    // provisioning plan everywhere else in cp/.
+    const spending = await spend();
+    const byTenant = new Map(spending.clients.map((row) => [row.slug, row]));
     // The last time each person actually got in, out of the sign-in record. Read ONCE for the whole
     // fleet rather than per account: the rows come back newest first, so the first one seen for an
     // address is that person's most recent sign-in. "never" is a real answer and reads as one -- an
@@ -667,12 +887,12 @@ export function createAdminApi({
       rows.push({
         ...view,
         users,
-        // Named rather than left out, because "we do not bill yet" is a fact about the product and
-        // an empty column is a bug report waiting to be filed.
-        plan: "none",
+        // Named rather than left out, because a fact that could not be measured has to read as one
+        // and never as an empty column.
+        spend: byTenant.get(tenant.slug) ?? null,
       });
     }
-    return { clients: rows, measuredAt: new Date(now()).toISOString() };
+    return { clients: rows, proxy: { configured: spending.configured, why: spending.why }, measuredAt: new Date(now()).toISOString() };
   }
 
   /** Box health: the ledger's view, plus the relay's, joined on the slug. */
@@ -878,6 +1098,12 @@ export function createAdminApi({
       return true;
     }
 
+    // PROXY-1. What every customer has spent against what their plan includes.
+    if (rest.length === 1 && rest[0] === "spend" && method === "GET") {
+      json(response, 200, await spend());
+      return true;
+    }
+
     // ---- the six actions -------------------------------------------------------------------------
 
     if (rest.length === 3 && rest[0] === "clients" && method === "POST") {
@@ -967,5 +1193,5 @@ export function createAdminApi({
     store.pruneLoginAttempts(at - ATTEMPT_RETENTION_MS);
   }
 
-  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system };
+  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend };
 }

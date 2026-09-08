@@ -10,6 +10,12 @@
 //   node cp/cli.mjs tenant add <slug> <name> [--dry-run]
 //   node cp/cli.mjs tenant list
 //   node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]
+//   node cp/cli.mjs proxy list
+//   node cp/cli.mjs proxy mint <slug|--all>
+//   node cp/cli.mjs proxy rotate <slug|--all>
+//   node cp/cli.mjs proxy revoke <slug|--all>
+//   node cp/cli.mjs proxy migrate <slug|--all> [--forget <sha256 prefix>] [--dry-run]
+//   node cp/cli.mjs proxy rollback <slug>
 //   node cp/cli.mjs session verify <token>
 //
 // `signup add` is the whole of adding a customer in one line: it makes the account, works the
@@ -25,8 +31,19 @@
 // terminal scrollback of whoever is watching, so `account add` asks for it on the terminal with the
 // echo turned off, exactly the way ui/set-password.mjs does.
 
-import { loadConfig, validateSlug } from "./provision.mjs";
+import {
+  PROXY_ROLLBACK_NAME,
+  ensureProxyKey,
+  forgetProxyKey,
+  loadConfig,
+  proxyKeyFileIn,
+  readProxyKey,
+  tenantProfileDir,
+  validateSlug,
+} from "./provision.mjs";
+import { createProxyClient, proxyKeyAlias } from "./proxy.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
+import { openStore } from "./store.mjs";
 
 const config = loadConfig();
 const BASE = config.publicUrl;
@@ -43,7 +60,7 @@ const hasFlag = (args, name) => args.includes(name);
 // Flags that take a value, so their value is not mistaken for a positional argument. A company
 // called "Acme Roofing" is two positionals joined back together by the caller; a --name that was
 // not skipped here would silently become part of it.
-const VALUED_FLAGS = new Set(["--name", "--box", "--state", "--profile"]);
+const VALUED_FLAGS = new Set(["--name", "--box", "--state", "--profile", "--forget"]);
 const positional = (args) => {
   const values = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -249,6 +266,211 @@ async function tenantAdopt(args) {
   out("nothing on that service was changed");
 }
 
+// ---- the proxy (PROXY-1) ------------------------------------------------------------------------
+//
+// These six commands do NOT go through the HTTP api the rest of this file uses, and that is a
+// decision rather than an oversight. They need three things only this container has: the tenant
+// root on its bind mount, where the 0600 key file lives; CP_PROXY_MASTER_KEY, which reaches exactly
+// two places and a browser is not one of them; and CP_RELAY_TOKEN, for the two relay routes that
+// change what a box uses. So they run in process against the same store the service has open, which
+// is what the WAL in cp/store.mjs is there for.
+//
+// This is also THE ONLY PATH FOR THE OPERATOR'S OWN WORKSPACE. Tenant "titanium" is an adopted row,
+// and tenantProvision refuses a non-dry-run provision on an adopted row on purpose, because
+// building it again would be a second copy of Jason's live console. So the eighth provisioning step
+// never runs for it and `proxy mint titanium` is how it gets a key.
+//
+// And the LEDGER is what is iterated, never a directory listing of /data/titanbot. Measured on the
+// R750: north-bay-roofing has a directory and a live 0600 gateway token and no ledger row at all,
+// and titanium has a box and no directory. A loop over the disk would mint a key for a workspace
+// nobody has and miss the one Jason uses.
+
+const openLedger = () => openStore({ dataDir: config.dataDir });
+
+const proxyClient = () => createProxyClient({ config });
+
+// Every tenant in the ledger, or the one named. A slug that is not in the ledger is a stop rather
+// than a skip: the operator typed a name, and a name that resolves to nothing is a typo.
+function proxyTargets(store, args) {
+  if (hasFlag(args, "--all")) return store.listTenants();
+  const [slug] = positional(args);
+  if (!slug) die("name a workspace, or pass --all");
+  const row = store.getTenant(slug);
+  if (row == null) die(`there is no workspace called ${slug} in the ledger`);
+  return [row];
+}
+
+// WHERE THIS WORKSPACE'S KEY FILE GOES, resolved from the ledger rather than assumed.
+//
+// A workspace this service built keeps its files under CP_TENANT_ROOT. An ADOPTED one keeps them
+// wherever the operator already had them, which is exactly the case these commands exist for:
+// tenant "titanium" is Jason's own instance, its profile directory is under the release root, and
+// it has no directory under the tenant root at all. Writing the key to the wrong place would report
+// success and leave his console with nothing included in his plan, which is a failure with no error
+// message anywhere. cp/server.mjs resolves it with the same function.
+const keyFileFor = (store, slug) => proxyKeyFileIn(tenantProfileDir(slug, config, store.listSteps(slug)));
+
+function requireProxyConfigured() {
+  if (String(config.proxyUrl ?? "").length === 0) {
+    die("CP_PROXY_URL is not set on this control plane, so there is no proxy to mint keys at.");
+  }
+  if (String(config.proxyMasterKey ?? "").length === 0) {
+    die("CP_PROXY_MASTER_KEY is not set on this control plane, so the proxy cannot be opened.");
+  }
+}
+
+// The relay's two admin routes, which are the ONLY way a box's provider configuration is changed.
+//
+// This matters more than the mechanism: anything done to a live box by hand over ssh has to become
+// something Jason runs himself, so the migration is a command and not a session. The relay owns the
+// docker exec because it is the container with the socket; this holds the relay's own credential
+// and asks it.
+async function askRelay(method, pathname, body) {
+  if (String(config.relayUrl ?? "").length === 0 || String(config.relayToken ?? "").length === 0) {
+    die("CP_RELAY_URL and CP_RELAY_TOKEN have to be set for this, because changing what a box uses goes through the relay.");
+  }
+  const init = { method, headers: { authorization: `Bearer ${config.relayToken}`, accept: "application/json" } };
+  if (body !== undefined) { init.headers["content-type"] = "application/json"; init.body = JSON.stringify(body); }
+  let response;
+  try { response = await fetch(`${config.relayUrl}${pathname}`, init); }
+  catch (error) { die(`could not reach the relay at ${config.relayUrl}: ${String(error?.message ?? error)}`); }
+  const text = await response.text();
+  let parsed = null;
+  if (text.length > 0) { try { parsed = JSON.parse(text); } catch { parsed = { message: text.slice(0, 400) }; } }
+  if (!response.ok) die(`${method} ${pathname} answered ${response.status}: ${String(parsed?.message ?? parsed?.error ?? "no message")}`);
+  return parsed ?? {};
+}
+
+async function proxyMint(args) {
+  requireProxyConfigured();
+  const store = openLedger();
+  try {
+    for (const row of proxyTargets(store, args)) {
+      const answer = await ensureProxyKey(row.slug, config, { box: row.boxContainer ?? "", file: keyFileFor(store, row.slug), onNote: (note) => out(`  note: ${note}`) });
+      if (!answer.ok) { out(`${pad(row.slug, 20)}not minted: ${answer.why}`); continue; }
+      // "read" rather than "minted" is the answer a second run gives, and it is the answer that
+      // proves this is safe to run twice: the key is read back off the disk and no second one is
+      // made at the proxy.
+      out(`${pad(row.slug, 20)}${pad(answer.record.alias, 26)}${answer.minted ? "minted" : "read"} ${answer.record.models.map((model) => model.id).join(", ")}`);
+    }
+  } finally { store.close(); }
+}
+
+async function proxyRotate(args) {
+  requireProxyConfigured();
+  const store = openLedger();
+  try {
+    for (const row of proxyTargets(store, args)) {
+      const answer = await ensureProxyKey(row.slug, config, { force: true, box: row.boxContainer ?? "", file: keyFileFor(store, row.slug), onNote: (note) => out(`  note: ${note}`) });
+      if (!answer.ok) { out(`${pad(row.slug, 20)}not rotated: ${answer.why}`); continue; }
+      out(`${pad(row.slug, 20)}${pad(answer.record.alias, 26)}rotated`);
+      out("  the box picks the new key up on its next message, because the host re-reads that file every turn");
+    }
+  } finally { store.close(); }
+}
+
+async function proxyRevoke(args) {
+  requireProxyConfigured();
+  const proxy = proxyClient();
+  const store = openLedger();
+  try {
+    for (const row of proxyTargets(store, args)) {
+      const answer = await proxy.deleteKeyByAlias(row.slug);
+      // The local file goes whatever the proxy said. A file holding a key the proxy has deleted is
+      // a registry row that hands a box a credential that answers 401, which is harder to read than
+      // a workspace that has no plan key at all.
+      const forgotten = forgetProxyKey(row.slug, config, { file: keyFileFor(store, row.slug) });
+      out(`${pad(row.slug, 20)}${pad(proxyKeyAlias(row.slug), 26)}${answer.ok ? "revoked at the proxy" : `NOT revoked: ${answer.why}`}${forgotten ? ", key file removed" : ", no key file here"}`);
+    }
+    out("");
+    out("the proxy caches a key for up to its user_api_key_cache_ttl, so a box already mid-request may finish it");
+  } finally { store.close(); }
+}
+
+function proxyList() {
+  const store = openLedger();
+  try {
+    const rows = store.listTenants();
+    if (rows.length === 0) return out("no workspaces in the ledger yet");
+    out(`${pad("SLUG", 20)}${pad("ALIAS", 26)}${pad("KEY ID", 18)}${pad("MINTED", 26)}MODELS`);
+    for (const row of rows) {
+      const record = readProxyKey(row.slug, config, { file: keyFileFor(store, row.slug) });
+      if (record == null) {
+        out(`${pad(row.slug, 20)}${pad(proxyKeyAlias(row.slug), 26)}${pad("-", 18)}${pad("not minted", 26)}`);
+        continue;
+      }
+      // The alias, the id and when. Never the key, on a terminal an operator may be sharing.
+      out(`${pad(row.slug, 20)}${pad(record.alias, 26)}${pad(`${String(record.keyId).slice(0, 12)}...`, 18)}${pad(record.mintedAt || "unknown", 26)}${record.models.map((model) => model.id).join(", ")}`);
+    }
+    out("");
+    out(config.proxyUrl ? `proxy ${config.proxyUrl}` : "CP_PROXY_URL is not set on this control plane, so nothing is included with any plan yet");
+  } finally { store.close(); }
+}
+
+// The migration. Mint the key, point the box at it, and forget the copied operator key.
+//
+// THE ORDER IS THE SAFETY. The key is minted and the box is switched over BEFORE anything is
+// deleted, so a customer is never between two credentials. And the forget step matches on a sha256
+// PREFIX rather than on a name: matching the hash is what makes it impossible for this to delete a
+// customer's own key by accident, because the only thing it will remove is a value it was told the
+// hash of.
+async function proxyMigrate(args) {
+  requireProxyConfigured();
+  const dryRun = hasFlag(args, "--dry-run");
+  const prefix = String(flag(args, "--forget") ?? "").trim();
+  const store = openLedger();
+  try {
+    for (const row of proxyTargets(store, args)) {
+      const profileDir = tenantProfileDir(row.slug, config, store.listSteps(row.slug));
+      const keyFile = proxyKeyFileIn(profileDir);
+      out(`${row.slug}`);
+      if (dryRun) {
+        const existing = readProxyKey(row.slug, config, { file: keyFile });
+        out(`  would ${existing ? "reuse the key already in" : "mint a key into"} ${keyFile}`);
+        out(`  would ask the relay to point the box at ${config.proxyUrl}/v1, snapshotting what it holds now to ${profileDir}/${PROXY_ROLLBACK_NAME}`);
+        out(prefix
+          ? `  would ask the relay to delete every stored value whose sha256 starts ${prefix}, and nothing else`
+          : "  would delete nothing, because no --forget <sha256 prefix> was given");
+        out("  nothing was written");
+        continue;
+      }
+      const minted = await ensureProxyKey(row.slug, config, { box: row.boxContainer ?? "", file: keyFile, onNote: (note) => out(`  note: ${note}`) });
+      if (!minted.ok) { out(`  stopped: ${minted.why}`); continue; }
+      out(`  key ${minted.record.alias} ${minted.minted ? "minted" : "already there"}`);
+
+      const used = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/use-included`, {});
+      out(`  the box now answers through the plan: ${String(used.message ?? "switched")}`);
+
+      if (!prefix) {
+        out("  nothing was deleted, because no --forget <sha256 prefix> was given. Run again with it once you have read what the box holds.");
+        continue;
+      }
+      const forgotten = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/forget-provider-keys`, { sha256Prefix: prefix });
+      // Names, lengths and hash prefixes of what is left. Never a value, so this output is safe to
+      // paste into a ticket, which is exactly what it is for.
+      for (const line of forgotten.remaining ?? []) {
+        out(`  remaining ${line.where}.${line.name}: ${line.length} chars, sha256 ${String(line.sha256 ?? "").slice(0, 12)}`);
+      }
+      out(`  removed ${forgotten.removed ?? 0} value${forgotten.removed === 1 ? "" : "s"} matching ${prefix}`);
+    }
+  } finally { store.close(); }
+}
+
+// Putting one customer back the way they were, from the snapshot the migration took. Kept for the
+// first week and then deleted in a follow-up: from the migration onward the proxy is a single point
+// of failure for every tenant's inference, and that is a change in the failure model rather than
+// just in where a key lives.
+async function proxyRollback(args) {
+  const store = openLedger();
+  try {
+    for (const row of proxyTargets(store, args)) {
+      const answer = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/rollback-included`, {});
+      out(`${pad(row.slug, 20)}${String(answer.message ?? "restored")}`);
+      out("  it takes effect on that workspace's next message, with no restart and no recreate");
+    }
+  } finally { store.close(); }
+}
+
 // Verified here rather than at the service when CP_SESSION_SECRET is in the environment, because
 // that is the check a relay does and this is the way to reproduce it by hand. Without the secret it
 // asks the service instead.
@@ -293,9 +515,17 @@ const USAGE = [
   "node cp/cli.mjs tenant add <slug> <name> [--dry-run]",
   "node cp/cli.mjs tenant list",
   "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]",
+  "node cp/cli.mjs proxy list",
+  "node cp/cli.mjs proxy mint <slug|--all>",
+  "node cp/cli.mjs proxy rotate <slug|--all>",
+  "node cp/cli.mjs proxy revoke <slug|--all>",
+  "node cp/cli.mjs proxy migrate <slug|--all> [--forget <sha256 prefix>] [--dry-run]",
+  "node cp/cli.mjs proxy rollback <slug>",
   "node cp/cli.mjs session verify <token>",
   "",
   "signup add is the one line that adds a customer: account, workspace and box.",
+  "the proxy commands run in this container: they read the tenant root and CP_PROXY_MASTER_KEY, so they do not go over the api.",
+  "proxy mint is the only way the operator's own workspace gets a key, because an adopted row is never re-provisioned.",
   "account promote makes somebody a super admin, which opens the console at /admin.",
   "CP_ADMIN_TOKEN and CP_PUBLIC_URL come from the environment.",
 ].join("\n");
@@ -311,6 +541,12 @@ const commands = {
   "tenant add": tenantAdd,
   "tenant list": tenantList,
   "tenant adopt": tenantAdopt,
+  "proxy list": proxyList,
+  "proxy mint": proxyMint,
+  "proxy rotate": proxyRotate,
+  "proxy revoke": proxyRevoke,
+  "proxy migrate": proxyMigrate,
+  "proxy rollback": proxyRollback,
   "session verify": sessionVerify,
 };
 const command = commands[`${group} ${action}`];

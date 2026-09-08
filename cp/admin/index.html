@@ -123,10 +123,19 @@
     <div id="system" class="cards"></div>
   </section>
 
-  <!-- 5. Payments --------------------------------------------------------------------------- -->
-  <section class="panel" id="panel-payments" data-panel="payments">
-    <h2>Payments</h2>
-    <p class="placeholder">Not connected yet. Plan and billing appear here when Stripe is wired in.</p>
+  <!-- 5. Spend ------------------------------------------------------------------------------ -->
+  <section class="panel" id="panel-spend" data-panel="spend">
+    <h2>Spend</h2>
+    <p class="quiet" id="spendNote">What each customer has run through the models included in their
+      plan, this month and today. Dollars are for you and never for them: their own Settings shows a
+      percentage and a sentence. Anything the proxy could not be asked for says "not measured" and
+      why, never a zero.</p>
+    <div class="scroll"><table id="spend"><thead><tr>
+      <th>Client</th><th>This month</th><th>Today</th><th>Against the allowance</th>
+      <th>Web requests</th><th>Key</th>
+    </tr></thead><tbody></tbody></table></div>
+    <p class="placeholder">Taking the money is not connected yet. Plan pricing and invoices appear
+      here when Stripe is wired in.</p>
   </section>
 
   <footer class="foot">

@@ -18,7 +18,9 @@ import {
   summariseByAddress,
   summariseByPassword,
 } from "../cp/admin.mjs";
+import { createProxyClient } from "../cp/proxy.mjs";
 import { makeTempRoot } from "./cp-support.mjs";
+import { startFakeProxy } from "./cp-proxy-support.mjs";
 
 async function withStore(run) {
   const root = await makeTempRoot("cp-admin-");
@@ -338,6 +340,167 @@ test("one refresh of the console is one box-health sweep on the relay, not two",
     // cannot quietly show a stale minute.
     await api.boxes();
     assert.equal(asks, 1);
+  });
+});
+
+// ---- the spend panel (PROXY-1) ------------------------------------------------------------------
+
+// The same shape the other two api tests here use, plus a proxy and a reader for one tenant's key.
+function makeApi({ store, root, proxy = null, keys = new Map(), allowance = "", enforce = "", fetchImpl }) {
+  const config = {
+    dataDir: root, tenantRoot: root,
+    proxyUrl: proxy?.url ?? "", proxyMasterKey: proxy?.masterKey ?? "",
+    proxyAllowanceUsd: Number(allowance) || 0, proxyEnforce: /^(1|true)$/i.test(String(enforce)),
+  };
+  return createAdminApi({
+    config, store,
+    client: { base: "", call: async () => ({}) },
+    json: () => {}, noContent: () => {},
+    publicAccount: (account) => account,
+    publicTenant: (tenant) => tenant,
+    tenantView: async (row) => ({ slug: row.slug, status: row.status, coolify: { reachable: false } }),
+    tenantPower: async () => {}, tenantProvision: async () => {},
+    currentSession: () => ({ ok: false }),
+    log: () => {},
+    proxy: proxy ? createProxyClient({ config }) : null,
+    proxyKeyOf: (slug) => keys.get(slug) ?? null,
+    ...(fetchImpl ? { fetchImpl } : {}),
+  });
+}
+
+test("spend lands against the client who spent it and never against the neighbour", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    store.createTenant({ slug: "beta", name: "Beta", status: "running" });
+    const proxy = await startFakeProxy();
+    try {
+      const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+      const keys = new Map();
+      for (const slug of ["acme", "beta"]) {
+        const minted = await client.mintKey({ slug, models: ["plan-zai"], allowanceUsd: 20 });
+        keys.set(slug, { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "2026-09-08T00:00:00.000Z", enforced: false, models: [] });
+      }
+      proxy.chargeAlias("titanbot-acme", 4, 8);
+
+      const answer = await makeApi({ store, root, proxy, keys, allowance: "20" }).spend();
+      assert.equal(answer.configured, true);
+      const acme = answer.clients.find((row) => row.slug === "acme");
+      const beta = answer.clients.find((row) => row.slug === "beta");
+      assert.equal(acme.thisMonth.dollars, 4);
+      assert.equal(acme.thisMonth.requests, 8);
+      assert.equal(acme.spendToDate, 4);
+      assert.equal(acme.pct, 20, "four dollars against a twenty dollar allowance is 20 percent");
+      // The neighbour is a real zero, and it is the one place a zero is honest: the report covered
+      // the window and this key is not in it.
+      assert.equal(beta.thisMonth.dollars, 0);
+      assert.equal(beta.pct, 0);
+      // And what comes out carries the alias and the id and never the key, because this answer is
+      // rendered in a browser.
+      assert.equal(JSON.stringify(answer).includes(keys.get("acme").key), false, "the spend panel carried a live key");
+      assert.equal(acme.alias, "titanbot-acme");
+    } finally { await proxy.close(); }
+  });
+});
+
+test("an unreachable proxy renders not measured with the reason, and never a zero", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    const keys = new Map([["acme", { key: "sk-whatever", keyId: "hashed-1", alias: "titanbot-acme", mintedAt: "", enforced: false, models: [] }]]);
+    // A proxy at an address nothing answers on, which is what a stopped titanbot-proxy looks like
+    // from in here. A zero on this panel would be indistinguishable from a customer who has not
+    // spent anything, and that is the one number an operator would act on without checking.
+    const api = makeApi({
+      store, root, keys, allowance: "20",
+      proxy: { url: "http://127.0.0.1:1", masterKey: "sk-master" },
+    });
+    const answer = await api.spend();
+    const acme = answer.clients[0];
+    assert.equal(acme.thisMonth.dollars, null);
+    assert.equal(acme.thisMonth.requests, null);
+    assert.equal(acme.pct, null);
+    assert.match(acme.thisMonth.why, /the proxy did not answer/);
+    assert.equal(acme.tinyfish.requests, null);
+  });
+});
+
+test("with no proxy configured every route stays honest and the service still boots", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    // CP_PROXY_URL unset is the state of every install that has not turned this on. It is
+    // deliberately NOT in configProblems: making it required would stop the control plane starting
+    // for every existing customer including Jason's own console.
+    const answer = await makeApi({ store, root }).spend();
+    assert.equal(answer.configured, false);
+    assert.match(answer.why, /CP_PROXY_URL/);
+    assert.equal(answer.clients[0].thisMonth.dollars, null);
+    assert.equal(answer.clients[0].minted, false);
+
+    // And the Clients panel carries the same object rather than a hardcoded word.
+    const clients = await makeApi({ store, root }).clients();
+    assert.equal(clients.clients[0].spend.configured, undefined, "the per client row is the row, not the envelope");
+    assert.equal(clients.clients[0].spend.minted, false);
+    assert.equal(clients.proxy.configured, false);
+    assert.equal(Object.hasOwn(clients.clients[0], "plan"), false, "the placeholder word is gone");
+  });
+});
+
+test("a workspace with no plan key says so and names the command that mints one", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    const proxy = await startFakeProxy();
+    try {
+      const answer = await makeApi({ store, root, proxy, keys: new Map() }).spend();
+      const acme = answer.clients[0];
+      assert.equal(acme.minted, false);
+      assert.match(acme.why, /proxy mint acme/);
+      assert.equal(acme.thisMonth.dollars, null, "a workspace with no key must not read as one that spent nothing");
+    } finally { await proxy.close(); }
+  });
+});
+
+test("one refresh is one pair of spend reports, not four", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    const proxy = await startFakeProxy();
+    try {
+      const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+      const minted = await client.mintKey({ slug: "acme", models: ["plan-zai"] });
+      const keys = new Map([["acme", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] }]]);
+      const api = makeApi({ store, root, proxy, keys });
+
+      // The Spend panel and the Clients panel load together and both want the same two windows, so
+      // one click on Refresh has to be one sweep.
+      await Promise.all([api.spend(), api.clients()]);
+      assert.equal(proxy.callsTo("GET /global/spend/report").length, 2, "the two windows were asked for more than once");
+      // And the per key read too, which is the one that scales with the number of customers: two
+      // panels times one call per customer is how a fleet's worth of calls comes out of one click.
+      assert.equal(proxy.callsTo("GET /key/info").length, 1, "the key's own spend was read once per panel");
+      await api.spend();
+      assert.equal(proxy.callsTo("GET /global/spend/report").length, 2, "a second refresh inside the window asked again");
+      assert.equal(proxy.callsTo("GET /key/info").length, 1);
+    } finally { await proxy.close(); }
+  });
+});
+
+test("the web tools column counts requests and never dollars", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    const proxy = await startFakeProxy();
+    try {
+      const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+      const minted = await client.mintKey({ slug: "acme", models: ["plan-zai"] });
+      const keys = new Map([["acme", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] }]]);
+      proxy.chargeAlias("titanbot-acme", 1, 4, "plan-zai");
+      proxy.chargeAlias("titanbot-acme", 0.5, 5, "tinyfish-search");
+
+      const answer = await makeApi({ store, root, proxy, keys }).spend();
+      const acme = answer.clients[0];
+      // Requests, because the pass-through is a flat cost per request on our side and an agent
+      // run's real credits vary. A dollar figure here would look precise and would not be.
+      assert.equal(acme.tinyfish.requests, 5);
+      assert.equal(Object.hasOwn(acme.tinyfish, "dollars"), false);
+      assert.equal(acme.thisMonth.requests, 9, "the model rows still add up to the whole month");
+    } finally { await proxy.close(); }
   });
 });
 

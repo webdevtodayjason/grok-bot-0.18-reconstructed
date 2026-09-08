@@ -25,7 +25,12 @@ FROM node@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa3
 
 WORKDIR /app
 
-# cp/ is the whole service: server.mjs, session.mjs (a re-export), store.mjs, provision.mjs, cli.mjs.
+# cp/ is the whole service: server.mjs, session.mjs (a re-export), store.mjs, provision.mjs,
+# admin.mjs and the admin/ page it serves, proxy.mjs, and cli.mjs.
+#
+# The DIRECTORY is copied, not a list of files, and that is worth saying out loud because a list is
+# how a new module gets left out: the image would build cleanly and the service would fail at import
+# on the first request that reached the route needing it. Adding a file to cp/ needs no change here.
 COPY cp/ /app/cp/
 
 # ui/auth.mjs is copied because cp/server.mjs imports clientAddress and parseTrustedProxies from it:
