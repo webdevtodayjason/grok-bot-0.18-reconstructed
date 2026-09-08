@@ -1964,9 +1964,23 @@ try {
       // render right after the POST ran before the box had finished launching the process.
       await page.keyboard.press("Escape"); await page.waitForTimeout(500);
       await openMarketplace(); await page.waitForTimeout(1500);
-      await pickPlugin(`mcp:${PROBE_CONNECTOR}`).catch(() => {});
-      const probeName = await page.evaluate(() => document.querySelector(".plugin-detail h3")?.textContent ?? "");
-      const probeCard = await page.evaluate(() => document.querySelector(".plugin-detail .plugin-hero-copy p")?.textContent ?? "");
+      // Read the card until it agrees with the host, don't read it once. refreshMcp relaunches the
+      // box's stdio servers, so a server that reported connected a moment ago can be back in
+      // "initializing" by the time the panel draws -- measured on grok-bot-local-vm 2026-09-07,
+      // "The box reports this server as initializing ... 0 tool(s) discovered", one run in two.
+      // The assertion is that the card says what the host says, and that is what this waits for.
+      let probeName = "";
+      let probeCard = "";
+      const cardBy = Date.now() + 25_000;
+      do {
+        await pickPlugin(`mcp:${PROBE_CONNECTOR}`).catch(() => {});
+        probeName = await page.evaluate(() => document.querySelector(".plugin-detail h3")?.textContent ?? "");
+        probeCard = await page.evaluate(() => document.querySelector(".plugin-detail .plugin-hero-copy p")?.textContent ?? "");
+        if (probeName === PROBE_CONNECTOR && (connected == null || /connected/.test(probeCard))) break;
+        await page.waitForTimeout(2500);
+        await page.keyboard.press("Escape"); await page.waitForTimeout(300);
+        await openMarketplace(); await page.waitForTimeout(1200);
+      } while (Date.now() < cardBy);
       check(probeName === PROBE_CONNECTOR, "the probe connector has its own card on the Plugins page", `${probeName} · ${probeCard.slice(0, 100)}`);
       check(connected == null || /connected/.test(probeCard), "and that card says the box connected it", probeCard.slice(0, 110));
       // -- CP-10 item 1, on a connector nothing else depends on: a throwaway value through the key
