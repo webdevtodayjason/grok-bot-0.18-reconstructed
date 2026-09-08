@@ -126,11 +126,11 @@ say "every module ui/server.mjs imports is on the server"
 say "endpoints.json, subscriptions.json, auth.json and mail.json are not shipped"
 
 step "ship the deploy scripts"
-# control-plane-install.sh is here rather than with the cp/ files below because it is a deploy
-# script that runs ON the server, like the other five. Its other half,
-# deploy/r750/control-plane-coolify.mjs, is deliberately NOT shipped: it holds the Coolify api key
-# in its environment while it runs, and that key can delete every resource on this machine. It runs
-# from the Mac.
+# control-plane-install.sh and proxy-install.sh are here rather than with the cp/ files below
+# because they are deploy scripts that run ON the server, like the other five. Their other halves,
+# deploy/r750/control-plane-coolify.mjs and deploy/r750/proxy-coolify.mjs, are deliberately NOT
+# shipped: each holds the Coolify api key in its environment while it runs, and that key can delete
+# every resource on this machine. Both run from the Mac.
 rsync -a "$REPO/deploy/r750/common.sh" "$REPO/deploy/r750/install.sh" \
   "$REPO/deploy/r750/uninstall.sh" "$REPO/deploy/r750/enable-route.sh" \
   "$REPO/deploy/r750/disable-route.sh" "$REPO/deploy/r750/relay.Dockerfile" \
@@ -138,7 +138,8 @@ rsync -a "$REPO/deploy/r750/common.sh" "$REPO/deploy/r750/install.sh" \
   "$REPO/deploy/r750/one-console-migrate.sh" \
   "$REPO/deploy/r750/box-isolation.sh" \
   "$REPO/deploy/r750/titanbot-isolation.service" "$REPO/deploy/r750/titanbot-isolation.timer" \
-  "$REPO/deploy/r750/control-plane-install.sh" "$HOST:$ROOT/deploy/"
+  "$REPO/deploy/r750/control-plane-install.sh" \
+  "$REPO/deploy/r750/proxy-install.sh" "$HOST:$ROOT/deploy/"
 rsync -a "$REPO/scripts/box-patches/apply-start-window-fix.sh" "$HOST:$ROOT/deploy/"
 # The Coolify stack's init service runs this from the same directory, bind-mounted read-only. It
 # lives here rather than under deploy/coolify on the server because that is the directory the
@@ -148,7 +149,7 @@ rsync -a "$REPO/deploy/coolify/init-box.sh" "$HOST:$ROOT/deploy/"
 # ~/.config/systemd/user. A directory, because the units name paths inside it.
 ssh "$HOST" "mkdir -p '$ROOT/deploy/backup'"
 rsync -a --delete "$REPO/deploy/backup/" "$HOST:$ROOT/deploy/backup/"
-say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,one-console-migrate.sh,box-isolation.sh,titanbot-isolation.{service,timer},control-plane-install.sh,apply-start-window-fix.sh,init-box.sh,backup/}"
+say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,one-console-migrate.sh,box-isolation.sh,titanbot-isolation.{service,timer},control-plane-install.sh,proxy-install.sh,apply-start-window-fix.sh,init-box.sh,backup/}"
 
 step "ship the control plane"
 # TENANT-1. docs/TENANCY.md section 9 tells the operator to run this script and then build the
@@ -178,8 +179,14 @@ rsync -a "$REPO"/cp/*.mjs "$REPO/cp/Dockerfile" "$REPO/cp/README.md" "$HOST:$ROO
 # this line the image builds, the service starts, and GET /admin answers 500 "the admin console's
 # index.html is not in this image", which is a deploy that looks fine until somebody opens it.
 rsync -a --delete "$REPO/cp/admin/" "$HOST:$ROOT/cp/admin/"
-rsync -a "$REPO/deploy/coolify/docker-compose.yml" "$REPO/deploy/coolify/box.compose.yml" "$REPO/deploy/coolify/control-plane.compose.yml" "$HOST:$ROOT/deploy/coolify/"
-say "cp/{$(cd "$REPO/cp" && ls *.mjs | tr '\n' ',')Dockerfile,README.md}, cp/admin/ and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml}"
+rsync -a "$REPO/deploy/coolify/docker-compose.yml" "$REPO/deploy/coolify/box.compose.yml" "$REPO/deploy/coolify/control-plane.compose.yml" "$REPO/deploy/coolify/proxy.compose.yml" "$HOST:$ROOT/deploy/coolify/"
+# PROXY-1. The proxy's model list, as a DIRECTORY with --delete, because proxy-install.sh copies
+# whatever is in it into /data/titanbot-proxy/config and a stale file left behind by an older ship
+# is a model list the proxy would happily serve. Without this line the installer stops by name on a
+# missing config.yaml, which is the right failure and still a failure.
+ssh "$HOST" "mkdir -p '$ROOT/deploy/coolify/proxy-config'"
+rsync -a --delete "$REPO/deploy/coolify/proxy-config/" "$HOST:$ROOT/deploy/coolify/proxy-config/"
+say "cp/{$(cd "$REPO/cp" && ls *.mjs | tr '\n' ',')Dockerfile,README.md}, cp/admin/ and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml,proxy.compose.yml,proxy-config/}"
 # The control plane's own store is never shipped. It lives on the server under /data/titanbot and
 # holds every customer's password hash.
 say "cp/.data is not shipped"

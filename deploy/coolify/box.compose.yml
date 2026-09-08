@@ -23,8 +23,11 @@
 #   the shared network   Coolify puts every service on a network of its own, named after that
 #                        service's uuid. One relay serving every customer has to reach every
 #                        customer's box, so every box joins one extra network as well. It is
-#                        declared external and is made once on the server, by hand or by
-#                        deploy/r750/shared-network.sh:
+#                        declared external and is made once on the server, by hand. There is no
+#                        shared-network.sh in this tree and there never was; this comment used to
+#                        point at one, which is the kind of pointer somebody follows at three in the
+#                        morning. It is one line, run once, and deploy/r750/install.sh is the script
+#                        that already runs it:
 #
 #                          docker network create titanbot-net
 #

@@ -1,0 +1,174 @@
+# The proxy: one place the operator's provider subscriptions live, and one per-customer key in front
+# of them (docs/GAP-ANALYSIS.md PROXY-1, docs/PROXY.md).
+#
+# THE WORD. This is the PROXY, never the gateway. "Gateway" already means the box's own host gateway
+# on 1340, the one a SAND_GATEWAY_TOKEN opens. This file is service titanbot-proxy, role label
+# com.titanbot.role=proxy, and the control plane reaches it at CP_PROXY_URL.
+#
+# WHAT IT ENDS. Measured on the R750 2026-09-08, before this wave: all three boxes carried a
+# byte-identical /home/box/sand-data/box-secrets.json, 539 bytes, holding ONE operator provider key
+# (113 characters, sha256 734e60c2f9de) and an identical operator TinyFish key (44 characters,
+# sha256 9165ce2daa86) in connector-env-secrets.json. One key, copied into every customer's sandbox,
+# with no meter, no budget, and no way to revoke one customer without revoking everybody. This
+# service replaces it with a per-box credential that is metered, budgeted and revocable.
+#
+# It is deployed ONCE, beside the control plane, in the same Coolify project (Titanium Computing)
+# and environment (production). Nothing here is done by hand: deploy/r750/proxy-install.sh makes the
+# directories and the secrets on the server, deploy/r750/proxy-coolify.mjs makes this service and
+# sets its environment from the Mac.
+#
+# ---- the Coolify rewrites, which shape every line below -----------------------------------------
+# The same parser that shapes deploy/coolify/control-plane.compose.yml shapes this file, and the
+# reasoning is written out in full there rather than repeated here. In short:
+#
+#   no named volumes    Coolify renames every named volume to "{service-uuid}_{slug}" and creates it
+#                       fresh and empty. A renamed Postgres volume is every virtual key in the fleet
+#                       gone and every box answering 401. Both mounts below are host PATHS.
+#   no single-FILE bind Coolify's parser reads a bind to a FILE into its own database as a
+#                       LocalFileVolume, and one Save in the Storages UI then writes that copy back
+#                       over the real file. config.yaml is therefore mounted as the DIRECTORY that
+#                       holds it, and the installer is what puts the file in the directory.
+#   no ports            see below; this is the whole security shape of the service.
+#   no Domain           Traefik routes nothing here, so "not reachable from the internet" is true by
+#                       construction rather than by a rule somebody has to maintain.
+#   no container_name   Coolify overwrites it with "<service>-<resource uuid>". The role labels
+#                       below are how box-isolation.sh and the backup job find these containers.
+#   no ${VAR:?}, no ${VAR:-}
+#                       Coolify builds an environment field's NAME from everything between the
+#                       braces, so ${PROXY_MASTER_KEY:?} makes a field literally named
+#                       "PROXY_MASTER_KEY:?", which is not a legal shell name: the line is dropped
+#                       and the deploy fails on a variable no field in the UI can set.
+#
+# And the rule that follows from that last one, which deploy/r750/proxy-coolify.mjs is written
+# against: the environment field Coolify makes is named by what is INSIDE the braces, not by the key
+# on the left. So every reference here is deliberately SELF-NAMED
+# (PROXY_MASTER_KEY: ${PROXY_MASTER_KEY}) except the three that LiteLLM insists on calling something
+# else, and those three are paired by name in that script so the mapping lives in one place rather
+# than being inferred twice.
+#
+# ---- NO PUBLISHED PORT, EVER --------------------------------------------------------------------
+# Measured from Richard's box on the R750 2026-09-07 (TENANT-3): the host answers a box on 22, 80,
+# 443, 8000 and 3000, because container-to-bridge-gateway traffic hits INPUT, where no bridge rule
+# can see it. A `ports:` line here would therefore hand this proxy to every box on the machine with
+# no virtual key involved at all, which is precisely the thing this wave exists to stop. The proxy
+# listens on 4000 inside the bridge and nowhere else; deploy/r750/box-isolation.sh opens exactly
+# that one address and port to a box and drops the rest.
+#
+# ---- WHY THE STORAGE IS WHERE IT IS -------------------------------------------------------------
+# /data/titanbot-proxy is a SIBLING of /data/titanbot, not a child. deploy/backup/snapshot.sh walks
+# the tenant root one directory at a time and skips exactly one name (_control-plane); a proxy
+# directory under there would be reported as a customer in every manifest, and its Postgres would be
+# taken as a live file copy, which for a database is a torn copy that restores without complaint and
+# is still wrong. The proxy is backed up as a pg_dump instead, in a pass of its own.
+services:
+  # ---- the proxy -------------------------------------------------------------------------------
+  # Pinned to a bare version. The per-version -stable suffix is a 404 on this registry: measured on
+  # this Mac 2026-09-08, `docker manifest inspect` answers for
+  # docker.litellm.ai/berriai/litellm-database:v1.100.0 and does not for :v1.100.0-stable. Pinned
+  # rather than :main-latest because what this container holds is every customer's ability to get an
+  # answer at all, and an image that moved under a redeploy is the failure nobody thinks to look for.
+  titanbot-proxy:
+    image: docker.litellm.ai/berriai/litellm-database:v1.100.0
+    pull_policy: missing
+    restart: unless-stopped
+    labels:
+      com.titanbot.role: proxy
+    # The image's entrypoint is `litellm`; this is its arguments. --config points into the DIRECTORY
+    # bind below, because a bind to config.yaml itself would become a Coolify LocalFileVolume.
+    command: ["--config", "/app/config/config.yaml", "--port", "4000", "--num_workers", "1"]
+    environment:
+      # The operator's master key. It opens /key/generate and every admin route, so it goes to
+      # exactly two places: here, and the control plane's own environment as CP_PROXY_MASTER_KEY.
+      # Never a box, never git, never the sync payload. Generated once on the server by
+      # deploy/r750/proxy-install.sh into /home/sem/titanbot/cp.env, and never rewritten.
+      LITELLM_MASTER_KEY: ${PROXY_MASTER_KEY}
+      # The one-way key stored credentials are encrypted under. With STORE_MODEL_IN_DB false there
+      # are no stored credentials, so losing this costs budget rows and nothing else -- which is
+      # exactly why store_model_in_db is false this wave. PROXY-2 (bring-your-own through the proxy)
+      # is what flips it, and that is the day this key starts mattering.
+      LITELLM_SALT_KEY: ${PROXY_SALT_KEY}
+      # postgresql://litellm:<password>@titanbot-proxy-db:5432/litellm, assembled by
+      # proxy-coolify.mjs from PROXY_DB_PASSWORD in cp.env and posted as one literal. One field
+      # rather than an interpolation, because a ${...} inside a longer string is the shape Coolify's
+      # field-naming rule reads worst.
+      DATABASE_URL: ${PROXY_DATABASE_URL}
+      # The model list lives in config.yaml, not in the database. Two reasons: the file is the thing
+      # an operator reads and a test can pin, and it is why the salt above is currently harmless.
+      # Turning this on is PROXY-2's decision, not this wave's.
+      STORE_MODEL_IN_DB: "False"
+      LITELLM_MODE: PRODUCTION
+      # ERROR, not INFO. At INFO this container logs a line per request carrying the model and the
+      # key alias, which on a shared server is one customer's usage in an operator's log scroll, and
+      # it is the kind of volume that fills a disk quietly.
+      LITELLM_LOG: ERROR
+      # ---- the operator's provider subscriptions -------------------------------------------------
+      # config.yaml refers to each of these as os.environ/<name> and holds no key itself, which is
+      # why that file is safe in git and safe to leave readable in the bind.
+      #
+      # Two Z.AI keys under one model name is how a pooled subscription is spelled in LiteLLM: two
+      # model_list entries, same model_name, one key each. That is also MARKET-5's answer for the
+      # console side -- the second key has nowhere to live there and does not need one.
+      #
+      # A name the operator does not have is SKIPPED by proxy-coolify.mjs and NAMED in its output,
+      # never posted empty. That script says which name in ~/.api_keys each one is loaded from.
+      PROXY_ZAI_KEY_1: ${PROXY_ZAI_KEY_1}
+      PROXY_ZAI_KEY_2: ${PROXY_ZAI_KEY_2}
+      PROXY_MINIMAX_KEY: ${PROXY_MINIMAX_KEY}
+      PROXY_QWEN_KEY: ${PROXY_QWEN_KEY}
+      # TinyFish, for the pass_through endpoints and the MCP entry in config.yaml. Two names, pooled
+      # the same way, so a rate limit on one subscription is not an outage for every tenant.
+      PROXY_TINYFISH_KEY_1: ${PROXY_TINYFISH_KEY_1}
+      PROXY_TINYFISH_KEY_2: ${PROXY_TINYFISH_KEY_2}
+    volumes:
+      # A DIRECTORY, for the LocalFileVolume reason in the header. Made by
+      # deploy/r750/proxy-install.sh, which also copies config.yaml into it.
+      - /data/titanbot-proxy/config:/app/config
+    # The shared bridge, so every customer's box and the control plane reach this at
+    # http://titanbot-proxy:4000. The alias is what makes that name resolve after Coolify has
+    # renamed the container to titanbot-proxy-<resource uuid>; it is the same shape box.compose.yml
+    # uses to keep a box findable across a rebuild.
+    networks:
+      titanbot-net:
+        aliases:
+          - titanbot-proxy
+
+  # ---- its database ----------------------------------------------------------------------------
+  # Deliberately NOT on titanbot-net. Coolify puts every service in a stack on a network of its own,
+  # so the proxy above reaches this by name on that private network, and a customer's box has no
+  # route to this container at all rather than a route with one nftables rule standing in front of
+  # it. box-isolation.sh --verify measures both halves anyway: every box reaches the proxy on 4000,
+  # and nothing reaches 5432.
+  titanbot-proxy-db:
+    image: postgres:16
+    pull_policy: missing
+    restart: unless-stopped
+    labels:
+      com.titanbot.role: proxy-db
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${PROXY_DB_PASSWORD}
+    # So the proxy's first start does not race initdb. LiteLLM retries its migration, but a retry
+    # loop in the log is a deploy an operator has to read rather than one that simply comes up.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      # A host directory owned by uid 999, which is the uid the postgres image runs as (measured on
+      # this Mac 2026-09-08: `id postgres` inside postgres:16 answers uid=999 gid=999). The image
+      # drops to that user before initdb and does not chown a bind mount, so a directory owned by
+      # sem here means initdb fails on permission and the proxy never gets a database.
+      # deploy/r750/proxy-install.sh sets that ownership; it is the one directory in this wave that
+      # is not owned by the invoking user, and it says so out loud.
+      - /data/titanbot-proxy/postgres:/var/lib/postgresql/data
+
+# No top-level volumes key, no ports and no Domain anywhere above. See the header for each.
+networks:
+  # Created once on the server and never by a deploy. external: true means docker attaches to what
+  # is there and creates nothing, so a deploy that runs before the network exists fails loudly
+  # instead of quietly making a second one.
+  titanbot-net:
+    external: true
+    name: titanbot-net
