@@ -254,7 +254,7 @@ const providersFixture = {
     {
       id: "zai", name: "Z.AI", kind: "openai", baseUrl: "https://api.z.ai/api/coding/paas/v4",
       fromPreset: true, bootstrapEnv: ["PROXY_ZAI_KEY_1", "PROXY_ZAI_KEY_2"],
-      health: { reachable: true, why: "", checkedAt: nowIso() },
+      health: { reachable: true, why: "", checkedAt: nowIso(), how: "412 request(s) went through inside this window and none failed", requests: 412, failures: 0 },
       catalog: {
         models: ["glm-5.3", "glm-5.3-flash", "glm-5", "glm-4.7", "glm-4.6", "glm-4.6v"],
         live: true,
@@ -262,13 +262,14 @@ const providersFixture = {
         why: "",
         note: "This is a list of names. The context window and whether a model takes an image are things you set.",
         ready: true,
-        wired: true,
+        liveNeedsKey: true,
+        leftoverDoor: false,
       },
       keys: [
         {
           slot: "zai-1", label: "Z.AI subscription one", order: 1, masked: "sk-****4f2a", parked: false,
-          backsCatalog: true, serves: ["plan-zai", "plan-zai-vision"], lastError: null,
-          spend: { month: 12.41, requests: 4120, why: "" },
+          serves: ["plan-zai", "plan-zai-vision"], lastError: null,
+          spend: { month: 12.41, requests: 4120, tokens: 8_400_000, priced: true, why: "" },
           quota: {
             unit: "prompts", window: "5 hours", used: 120, total: 400, remaining: 280, pct: 30,
             resetAt: new Date(Date.now() + 3 * 3600 * 1000).toISOString(), warn: false, live: false,
@@ -278,8 +279,11 @@ const providersFixture = {
         },
         {
           slot: "zai-2", label: "Z.AI subscription two", order: 2, masked: "sk-****9c11", parked: false,
-          backsCatalog: false, serves: ["plan-zai", "plan-zai-vision"], lastError: null,
-          spend: { month: 11.08, requests: 3980, why: "" },
+          serves: ["plan-zai", "plan-zai-vision"], lastError: null,
+          // NOT PRICED. This is the state every Z.AI key on the R750 was really in on 2026-09-08:
+          // 654 spend rows all at spend 0.000000, because the deployments carry no cost per token.
+          // The page must print "not priced" here and never a dollar sign in front of a zero.
+          spend: { month: 0, requests: 3980, tokens: 7_100_000, priced: false, why: "no price is set on this key's deployment(s), so what went through it cannot be turned into money." },
           quota: {
             unit: "prompts", window: "5 hours", used: 340, total: 400, remaining: 60, pct: 85,
             resetAt: new Date(Date.now() + 3 * 3600 * 1000).toISOString(), warn: true, live: false,
@@ -292,18 +296,18 @@ const providersFixture = {
     {
       id: "minimax", name: "MiniMax", kind: "openai", baseUrl: "https://api.minimax.io/v1",
       fromPreset: true, bootstrapEnv: ["PROXY_MINIMAX_KEY"],
-      health: { reachable: null, why: "no key here yet, so there is nothing to reach", checkedAt: "" },
+      health: { reachable: null, why: "nothing has run on MiniMax inside this window and no check has been made, so there is nothing to report", checkedAt: "", requests: 0, failures: 0 },
       catalog: {
         models: ["MiniMax-M3", "MiniMax-M2"], live: false, readAt: "",
         why: "This is the short list this product has actually run. Refresh reads the vendor's own list once a key is in.",
         note: "This is a list of names. The context window and whether a model takes an image are things you set.",
-        ready: false, wired: false,
+        ready: false, liveNeedsKey: true, leftoverDoor: false,
       },
       keys: [
         {
           slot: "minimax-1", label: "MiniMax subscription", order: 1, masked: "sk-****77ab", parked: false,
-          backsCatalog: false, serves: ["plan-minimax"], lastError: null,
-          spend: { month: null, requests: null, why: "the proxy reported this key with no numbers on it" },
+          serves: ["plan-minimax"], lastError: null,
+          spend: { month: null, requests: null, tokens: null, priced: true, why: "the proxy reported this key with no numbers on it" },
           quota: {
             unit: "requests", window: "", used: 0, total: null, remaining: null, pct: null, resetAt: "",
             warn: false, live: false,
@@ -326,7 +330,13 @@ const providersFixture = {
         { id: "tb-plan-zai-zai-2", keySlot: "zai-2", fromDb: true, healthy: true, why: "" },
       ],
       workspaces: 3, workspaceSlugs: ["demo", "richard-avery", "titanium"], workspacesWhy: "",
-      labelBehind: null, labelBehindWhy: "the label a customer's Titan says lives inside each box, and nothing reports it back to this service.",
+      inputCostPerToken: null, outputCostPerToken: null, priced: false,
+      pricedWhy: "Every dollar figure for this model is zero until a cost per token is set on it, and a zero reads as 'they have not spent anything'.",
+      // WHAT THE R750 REALLY LOOKED LIKE. demo was pushed the label; richard-avery and titanium were
+      // not, so their Titans answered with the routing alias while their consoles said GLM-5.3.
+      runningHere: ["demo", "richard-avery", "titanium"],
+      labelBehind: 2, labelBehindSlugs: ["richard-avery", "titanium"],
+      labelBehindWhy: "richard-avery, titanium are pointed at plan-zai and say something else. Push the label to fix what their Titan calls itself.",
     },
     {
       // The model everything else falls back TO. It has no fallback of its own and never will, and
@@ -341,7 +351,8 @@ const providersFixture = {
         { id: "tb-plan-zai-vision-zai-2", keySlot: "zai-2", fromDb: true, healthy: true, why: "" },
       ],
       workspaces: 3, workspaceSlugs: ["demo", "richard-avery", "titanium"], workspacesWhy: "",
-      labelBehind: null, labelBehindWhy: "",
+      inputCostPerToken: null, outputCostPerToken: null, priced: false, pricedWhy: "",
+      runningHere: [], labelBehind: 0, labelBehindSlugs: [], labelBehindWhy: "",
     },
     {
       alias: "plan-minimax", provider: "minimax", vendorModel: "openai/MiniMax-M3",
@@ -350,10 +361,13 @@ const providersFixture = {
       vision: { ok: false, at: "", why: "this model has never been asked whether it takes an image" },
       plans: ["included"], customerVisible: true, shownToCustomers: true,
       deployments: [{ id: "tb-plan-minimax-minimax-1", keySlot: "minimax-1", fromDb: true, healthy: null, why: "" }],
-      workspaces: 0, workspaceSlugs: [], workspacesWhy: "", labelBehind: null, labelBehindWhy: "",
+      workspaces: 0, workspaceSlugs: [], workspacesWhy: "",
+      inputCostPerToken: 0.0000012, outputCostPerToken: 0.0000048, priced: true, pricedWhy: "",
+      runningHere: [], labelBehind: 0, labelBehindSlugs: [], labelBehindWhy: "",
     },
   ],
   defaults: { planModel: "plan-zai", why: "" },
+  pricing: { unpriced: ["plan-zai", "plan-zai-vision"], why: "Some plan models carry no cost per token. Every dollar figure that touches them is zero." },
   actions: [],
 };
 
@@ -361,6 +375,7 @@ const providersFixture = {
 // 2, 3, 2 in that order: the new key was in before the old one came out. A delete-then-add would
 // read 2, 1, 2, and there is no way to tell those apart from the answer alone.
 const poolHistory = { zai: [], minimax: [] };
+const pushBodies = [];
 const recordPool = (id) => {
   const provider = providersFixture.providers.find((one) => one.id === id);
   if (provider) (poolHistory[id] ??= []).push(provider.keys.length);
@@ -401,7 +416,7 @@ function providersFixtureAnswer(method, pathname, body) {
       catalog: {
         models: [], live: false, readAt: "", why: "nobody has read this provider's model list yet",
         note: "This is a list of names. The context window and whether a model takes an image are things you set.",
-        ready: String(body?.catalogPath ?? "").length > 0, wired: false,
+        ready: String(body?.catalogPath ?? "").length > 0, liveNeedsKey: true, leftoverDoor: false,
       },
       keys: [],
     });
@@ -506,8 +521,14 @@ function providersFixtureAnswer(method, pathname, body) {
     workspaces: existing?.workspaces ?? 0,
     workspaceSlugs: existing?.workspaceSlugs ?? [],
     workspacesWhy: "",
-    labelBehind: null,
-    labelBehindWhy: "",
+    inputCostPerToken: body?.inputCostPerToken !== undefined ? Number(body.inputCostPerToken) : (existing?.inputCostPerToken ?? null),
+    outputCostPerToken: body?.outputCostPerToken !== undefined ? Number(body.outputCostPerToken) : (existing?.outputCostPerToken ?? null),
+    priced: (body?.inputCostPerToken !== undefined || body?.outputCostPerToken !== undefined) ? true : (existing?.priced === true),
+    pricedWhy: "",
+    runningHere: existing?.runningHere ?? [],
+    labelBehind: existing?.labelBehind ?? 0,
+    labelBehindSlugs: existing?.labelBehindSlugs ?? [],
+    labelBehindWhy: existing?.labelBehindWhy ?? "",
   });
   const withShown = (row) => ({
     ...row,
@@ -569,6 +590,10 @@ function providersFixtureAnswer(method, pathname, body) {
   if (method === "POST" && at[0] === "plan-models" && at[2] === "push-label") {
     const alias = decodeURIComponent(at[1]);
     const row = providersFixture.planModels.find((one) => one.alias === alias);
+    // Every push body the page sent, so the leg below can prove what it sent and not only what came
+    // back. The defect this catches is a page that answers the route's refusal by resending
+    // { all: true }, which is the safety being defeated by the client rather than a bug in either.
+    pushBodies.push(body ?? {});
     // The route refuses a push that names nobody, because it writes inside a box AND sets the
     // model. The fixture refuses it too, or the page could ship sending an empty body forever.
     const named = Array.isArray(body?.slugs) ? body.slugs.map(String) : [];
@@ -1197,7 +1222,18 @@ if (!WANT_BROWSER) {
   const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
-  page.on("console", (message) => { if (message.type() === "error") pageErrors.push(message.text()); });
+  page.on("console", (message) => {
+    if (message.type() !== "error") return;
+    // A DELIBERATE REFUSAL IS NOT A PAGE ERROR. Chrome logs every non-2xx fetch to the console, and
+    // this panel now ASKS before it writes inside a customer's box: the push-label button sends an
+    // empty body on purpose and renders the 409's candidate list. Counting that as a thrown error
+    // would make the guard itself fail this gate, and the fix somebody would reach for is removing
+    // the guard. Every other status, and every real exception, still counts.
+    const text = message.text();
+    const where = String(message.location?.()?.url ?? "");
+    if (/status of 409/.test(text) && /push-label/.test(where)) return;
+    pageErrors.push(text);
+  });
 
   // THE PROVIDERS FIXTURE, SERVED INTO THE BROWSER. The routes the sixth panel reads and writes
   // belong to another item of this wave, so this gate answers them itself. Nothing about the page
@@ -1394,6 +1430,59 @@ if (!WANT_BROWSER) {
     JSON.stringify(poolHistory.zai));
   const zaiKeys = await page.locator('.provider[data-provider="zai"] tbody tr[data-key]').count();
   check(zaiKeys === 2, "and the pool is the size it started at", String(zaiKeys));
+
+  // MONEY THAT IS NOT MONEY. A deployment with no cost per token bills every request at zero, so
+  // $0.00 in a spend column means either "spent nothing" or "nobody set a price" and the two are
+  // indistinguishable on a screen. On the R750 2026-09-08 every Z.AI row was the second while the
+  // page drew the first, for a customer at 665,915 tokens.
+  const unpricedRow = await zai.locator('tr[data-key="zai-2"]').textContent();
+  check(String(unpricedRow).includes("not priced"), "a key whose model carries no price says not priced",
+    String(unpricedRow).replace(/\s+/g, " ").slice(0, 90));
+  check(!/\$0\.00/.test(String(unpricedRow)), "and never draws a dollar sign in front of a zero");
+  const pricedRow = await zai.locator('tr[data-key="zai-1"]').textContent();
+  check(/\$/.test(String(pricedRow)), "while a priced one still shows the money", String(pricedRow).replace(/\s+/g, " ").slice(0, 60));
+
+  // AND HEALTH THAT CANNOT GO RED IS NOT HEALTH. Nothing on this install checks in the background,
+  // so a provider nothing has run on says so instead of drawing a green light with a fresh
+  // timestamp on it, which is what it used to do for a provider whose catalog had never been read.
+  const minimaxHead = await minimax.locator(".head").first().textContent();
+  check(String(minimaxHead).includes("not checked"), "a provider nothing has checked says not checked",
+    String(minimaxHead).replace(/\s+/g, " ").slice(0, 80));
+  check(await minimax.locator(".actions button", { hasText: "Check now" }).count() === 1,
+    "and there is a button to check it, because a real check costs the vendor a request");
+
+  // PUSHING A LABEL ASKS WHICH WORKSPACES, ALWAYS.
+  //
+  // The relay door this drives writes the base url, the key, the model, the endpoint name, the
+  // served-by line, the context window and the label in one call, so a push does not merely correct
+  // a name: it MOVES that workspace onto this plan model. The route was rewritten to refuse a body
+  // that names nobody for exactly that reason, and the page answered that refusal by resending
+  // { all: true } on one click, with no list, no ticking and no confirm.
+  const behindChip = await page.locator('#planModels .planModel[data-alias="plan-zai"] .head').textContent();
+  check(String(behindChip).includes("behind on the name"),
+    "a model whose boxes are behind on their label says how many", String(behindChip).replace(/\s+/g, " ").slice(0, 90));
+  const pushesBefore = pushBodies.length;
+  await page.locator('#planModels .planModel[data-alias="plan-zai"] .actions button', { hasText: "Fix what" }).first().click();
+  await page.waitForSelector('#planModels .planModel[data-alias="plan-zai"] .pushPicker', { timeout: 15_000 }).catch(() => {});
+  const picker = page.locator('#planModels .planModel[data-alias="plan-zai"] .pushPicker');
+  check(await picker.count() === 1, "the first click asks which workspaces instead of pushing");
+  check(pushBodies.length === pushesBefore + 1 && Object.keys(pushBodies[pushBodies.length - 1]).length === 0,
+    "and what it sent was an EMPTY body, so the route's own refusal is what produced the list",
+    JSON.stringify(pushBodies[pushBodies.length - 1] ?? null));
+  const boxes = await picker.locator("input[type=checkbox]").count();
+  check(boxes === 3, "every candidate the route named is on screen as its own tick box", String(boxes));
+  const pickerText = await picker.textContent();
+  check(String(pickerText).includes("richard-avery (behind)"),
+    "the ones actually behind are marked", String(pickerText).replace(/\s+/g, " ").slice(0, 90));
+  check(await picker.locator('input[value="demo"]').isChecked() === false,
+    "a workspace already saying the right thing is left unticked, because pushing at it writes in a customer's box for no change");
+  await picker.locator("button", { hasText: "Update the ticked" }).click();
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("will call it") === true, null, { timeout: 15_000 })
+    .catch(() => {});
+  const sent = pushBodies[pushBodies.length - 1];
+  check(Array.isArray(sent?.slugs) && sent.slugs.length === 2 && !sent.slugs.includes("demo"),
+    "and only the ticked workspaces are sent, by name", JSON.stringify(sent?.slugs ?? sent));
+  check(sent?.all !== true, "the page never sends { all: true }, which is what defeated the guard");
 
   // A PLAN MODEL WITH NOWHERE FOR A SCREENSHOT TO GO IS REFUSED, in a sentence a person reads.
   // This is PROXY-10 as a form rule: every conversation on this product carries screenshots.

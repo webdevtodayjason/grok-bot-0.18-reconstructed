@@ -47,7 +47,7 @@ import {
   tenantProfileDir,
   validateSlug,
 } from "./provision.mjs";
-import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias } from "./proxy.mjs";
+import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias, tenantRoutesFor } from "./proxy.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
 import { createHash } from "node:crypto";
@@ -531,7 +531,13 @@ async function proxyLimits(args) {
     // same sweep rather than needing a separate one.
     const served = await proxy.models();
     if (!served.ok) return die(`the proxy could not be asked which models it serves: ${served.why}`);
-    out(`route list: ${TENANT_ALLOWED_ROUTES.join(" ")}`);
+    // The list as the proxy really is. A pass-through whose credential header is empty is dropped:
+    // a door that can only fail upstream while booking a metered request is not a door a customer
+    // should be given. Measured on the R750 2026-09-08, both TinyFish paths were in that state.
+    const routes = tenantRoutesFor(await proxy.listPassThrough());
+    out(`route list: ${routes.join(" ")}`);
+    const dropped = TENANT_ALLOWED_ROUTES.filter((one) => !routes.includes(one));
+    if (dropped.length > 0) out(`left off, because the proxy carries no key on them: ${dropped.join(" ")}`);
     out(`model list: ${served.models.join(", ") || "none"}`);
     out("");
     for (const row of proxyTargets(store, args)) {
@@ -543,7 +549,7 @@ async function proxyLimits(args) {
         enforce: config.proxyEnforce,
         rpmLimit: config.proxyRpmLimit,
         models: served.models,
-        allowedRoutes: TENANT_ALLOWED_ROUTES,
+        allowedRoutes: routes,
       });
       out(`${pad(row.slug, 20)}${pad(record.alias, 26)}${answer.ok ? "applied, key value unchanged" : `NOT applied: ${answer.why}`}`);
     }
@@ -783,7 +789,12 @@ async function proxySeed(args) {
   // pins the file's shape, so the file is the contract and this is the side that moves.
   if (Number(plan?.schemaVersion) !== 1) die(`${file} is schema version ${plan?.schemaVersion ?? "unknown"}; this build seeds version 1`);
 
-  const state = await askAdmin("GET", "/v1/admin/providers");
+  // `let`, because the credential loop below changes it: a plan model's keys have to be checked
+  // against the pool as it is AFTER the keys went in, not as it was before.
+  let state = await askAdmin("GET", "/v1/admin/providers");
+  // Plan models this pass could not create for want of a key. Named at the end, because an install
+  // that stopped half way has to say what is left rather than exit 0 looking finished.
+  const skipped = [];
   if (state.configured !== true) die(state.why || "this control plane has no proxy configured");
   // THE REFUSAL THAT MATTERS. With store_model_in_db off, a credential write answers 200 and really
   // persists while a deployment write answers 500, so a seed that ignored the flag would write half
@@ -837,6 +848,9 @@ async function proxySeed(args) {
     }
   }
 
+  // The pool as it is NOW, after whatever keys this pass managed to add.
+  if (!dryRun) state = await askAdmin("GET", "/v1/admin/providers");
+
   // The plan models in the file's own order, which is how a vision route comes before the model
   // that falls back to it: POST /fallback validates that its target exists.
   for (const model of plan.planModels ?? []) {
@@ -852,13 +866,37 @@ async function proxySeed(args) {
     }
     if (already != null) say(`  ${alias}: served from the file only, so it is created in the database now`);
     const slots = Array.isArray(model.credentials) ? model.credentials.map(String) : [];
-    say(`  ${alias}: create on ${model.vendorModel} across ${slots.join(", ") || "every key this provider has"}`);
+    // A PLAN MODEL WITH NO KEY IS SKIPPED, NOT A DEATH.
+    //
+    // This is the fresh-install path and it used to end here. The keys in bootstrap.json are named
+    // by their environment variable, those variables live on the PROXY service, and the container
+    // this command runs in is the CONTROL PLANE, which deliberately carries no vendor key at all --
+    // that is the whole point of the panel. So on a genuinely fresh install every credential slot
+    // is skipped with a line above, and then every plan model asked the panel to create a
+    // deployment on a slot that holds nothing, got 502, and `api()` turned that into a die. The
+    // operator was left with a proxy serving no plan model, which also refuses to mint the first
+    // tenant ("the proxy serves no plan models, so there is nothing to mint a key against").
+    //
+    // The install is therefore TWO PASSES and says so: seed, add the keys in the Providers panel,
+    // seed again. docs/PROXY.md section 4 carries the same order. A skip is a named line, not
+    // silence, because an install that quietly did half its work is worse than one that stopped.
+    const present = new Set((state.providers.find((row) => row.id === String(model.provider))?.keys ?? []).map((row) => String(row.slot)));
+    const missing = slots.filter((slot) => !present.has(slot));
+    if (slots.length > 0 && missing.length === slots.length) {
+      say(`  ${alias}: SKIPPED. Not one of its keys (${slots.join(", ")}) is in the pool yet.`);
+      say(`     Add the key in the Providers panel at ${BASE.replace(/\/$/, "")}/admin, then run this command again.`);
+      skipped.push(alias);
+      continue;
+    }
+    if (missing.length > 0) say(`  ${alias}: ${missing.join(", ")} holds no key yet, so it is created on the rest and you can add it later from the panel`);
+    const usable = slots.filter((slot) => present.has(slot));
+    say(`  ${alias}: create on ${model.vendorModel} across ${usable.join(", ") || "every key this provider has"}`);
     if (!dryRun) {
       const made = await askAdmin("POST", "/v1/admin/plan-models", {
         alias,
         provider: model.provider,
         vendorModel: model.vendorModel,
-        keySlots: slots,
+        keySlots: usable,
         customerName: model.customerName,
         customerLabel: model.customerLabel,
         servedBy: model.servedBy,
@@ -882,6 +920,14 @@ async function proxySeed(args) {
     say(`  fallback ${pair.model} -> ${wanted}: ${row?.visionFallback === wanted ? "set" : `NOT set, the proxy says ${row?.visionFallback || "nothing"}`}`);
   }
   say("");
+  if (skipped.length > 0) {
+    // THE SECOND PASS, named with the command that finishes it. A fresh install is meant to end
+    // here the first time: the control plane carries no vendor key, so the first pass registers the
+    // providers and stops, and the keys go in through the panel like every other key ever will.
+    say(`${skipped.length} plan model(s) were not created because their keys are not in the pool yet: ${skipped.join(", ")}`);
+    say(`Add each key at ${BASE.replace(/\/$/, "")}/admin under Providers, then run this command again. It only creates what is missing.`);
+    say("Until they exist the proxy serves no plan model, and a new workspace cannot be minted against one.");
+  }
   say(dryRun ? "nothing was written" : "done. Run proxy providers to see what is there now.");
 }
 

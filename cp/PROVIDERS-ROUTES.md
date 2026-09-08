@@ -281,12 +281,29 @@ being asked, and on the R750 one of those boxes is a real customer. The route th
 neither it answers `409 {error: "name_them", candidates: [...]}` and does nothing. The page should
 show the candidates and make the operator tick them.
 
-**CHANGED: `workspaces` is a measurement, and `labelBehind` is null.** What a box actually runs
-lives in its own `box-secrets.json`, which only the relay can read and which it has no route to
-report. So `workspaces` counts the workspaces whose key RAN this alias inside the current spend
-window, `workspaceSlugs` names them, and `workspacesWhy` says that in words. `labelBehind` is
-`null` with `labelBehindWhy` saying why: nothing reports a box's label back, so the page must not
-draw a number there. Push it to be sure.
+**CHANGED: `workspaces` is a measurement, and it joins on the DEPLOYMENT ID.** `workspaces` counts
+the workspaces whose traffic ran on one of this alias's deployments inside the current spend window,
+`workspaceSlugs` names them, and `workspacesWhy` says that in words. The first version matched the
+alias against the spend log's `model` string, which is the VENDOR model: on the R750 2026-09-08
+`select model,count(*) from "LiteLLM_SpendLogs"` answered `openai/glm-5.3` 596 times and the alias
+`plan-zai` three times in the whole log, so the panel reported plan-zai as run by `demo` alone while
+`richard-avery` and `titanium` were on it. That list is the input to the remove guard, so deleting
+the alias would have been allowed and would have failed every turn in two live boxes, one of them a
+paying customer's. The join is `deployments[].id` now, with the model-name match kept as a union
+because a false positive is the safe direction for a guard that refuses a destructive change.
+
+**CHANGED: `labelBehind` is a NUMBER, measured off each box's own file.** The control plane has
+`/data/titanbot` bind mounted — it is where it writes every tenant's directory — so it reads each
+tenant's `box-secrets.json` and reports `runningHere` (the boxes pointed at this alias),
+`labelBehind` (how many of those say something other than `customerLabel`, the empty label
+included) and `labelBehindSlugs`. It used to be `null` forever, which is how richard-avery's Titan
+went on calling itself `plan-zai` for two days while his own console said GLM-5.3. A file that
+cannot be read is reported as unknown in `labelBehindWhy`, never as up to date.
+
+**CHANGED: `push-label` candidates include the boxes POINTED at the alias.** A box with a stale
+label may not have sent a request this month, and it is exactly the box this route exists to repair.
+The candidate list is the union of the boxes running the alias and the workspaces measured to have
+run it.
 
 Additive, and safe to ignore until the page wants them:
 
@@ -298,11 +315,37 @@ Additive, and safe to ignore until the page wants them:
   database and which the proxy still reads out of its config file. During the ship plan's stage 1
   both are served at once, deliberately, and this is how that window is visible rather than
   confusing.
-- every key carries **`backsCatalog`**, true for the slot whose key is in the `/catalog/<id>`
-  pass-through. Rolling that slot re-registers the pass-through in the same action.
-- every provider's catalog carries **`ready`** (there is an address and a path to read) and
-  **`wired`** (a pass-through is actually registered), so a Refresh button can be disabled with a
-  reason rather than failing.
+- every provider's catalog carries **`ready`** (there is an address and a path to read),
+  **`liveNeedsKey`** (a live read goes through the vendor with the key, which this service keeps no
+  copy of, so Refresh takes an optional `apiKey` and otherwise returns the stored list with its
+  date), and **`leftoverDoor`** (a `/catalog/<id>` pass-through an older install still carries,
+  which should always be false).
+- **GONE: `backsCatalog`, and the `/catalog/<id>` pass-through behind it.** That door carried the
+  vendor key as a header, and MEASURED ON THE R750 2026-09-08 LiteLLM stored it in
+  `LiteLLM_Config.general_settings` in cleartext, with none of the encryption
+  `LiteLLM_CredentialsTable` gets under `PROXY_SALT_KEY`, and handed it back unmasked from
+  `GET /config/pass_through_endpoint`. Two rows were live and the MiniMax one had never served a
+  read. The catalog is read from the control plane DIRECTLY now, at the two moments the operator
+  has just handed it the key, and any leftover row is deleted the next time a key is added, rolled
+  or a catalog refreshed.
+- every plan model carries **`inputCostPerToken`**, **`outputCostPerToken`**, **`priced`** and
+  **`pricedWhy`**, and every key's `spend` carries **`priced`**. LiteLLM has no built-in price for a
+  Z.AI or Alibaba model id, so an unpriced deployment bills every request at zero: on the R750
+  2026-09-08, 654 Z.AI spend rows all read `spend 0.000000` and a customer at 665,915 tokens showed
+  `$0.00`. The page prints **not priced** rather than a dollar sign in front of a zero.
+- a provider's `health` has THREE states and `reachable` may be **`null`**, meaning nothing has
+  checked. Nothing checks in the background on this install (`background_health_checks: false`, on
+  purpose), and `GET /health/latest` answered `{"latest_health_checks":{},"total_models":0}` on the
+  R750, so the old `keys.every(row => row.lastError == null)` could only ever be `true`. `false`
+  comes from failures counted in the proxy's own request log; `true` from traffic with no failures,
+  or from `POST /v1/admin/providers/:id/health`, which makes one real request per deployment and is
+  a button because each one costs the vendor a request. `checkedAt` is stamped from the evidence,
+  never from `now()`.
+- **`POST /v1/admin/providers/:id/keys` and `.../roll` PROVE the value with the vendor first** and
+  refuse with the vendor's own sentence, storing nothing and leaving a serving pool untouched.
+  Measured on the R750 2026-09-08 on a throwaway slot: an unchecked swap 401s on the very next
+  request 0.3 s later and then puts the deployment in the router's 30 s cooldown, with the old value
+  overwritten in place and nothing to undo it with.
 - `GET /v1/admin/providers` carries **`window.month`**, the spend window the per-key numbers and the
   quota bars are measured over.
 - `POST /v1/admin/clients/<slug>/model` answers with **`wrote`**, the relay's own evidence: names,

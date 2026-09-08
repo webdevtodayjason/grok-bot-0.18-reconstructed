@@ -280,7 +280,28 @@ Four things it holds, and where each number comes from:
 | providers: name, kind, base URL, health | the proxy's own deployment records | not a file on disk |
 | a provider's keys as a pool: add, roll, remove, order, per-key spend, last error | the proxy's credential store, masked on read (`sk****AA`); spend from its spend log | the control plane holds no key value at all |
 | plan models: alias, vendor model, vision fallback, context window, customer label, plans | the proxy's deployment `model_info`, where the product's own `tb_*` fields ride | the alias is a contract with every box already pointed at it and is never renamed |
-| a per-provider model catalog, with Refresh | the vendor's own `/models`, read through a pass-through so the control plane holds no vendor key | **names and only names.** Context window, vision and the customer label are facts a human sets, and the page says so in those words |
+| a per-provider model catalog, with Refresh | the vendor's own `/models`, read directly at the moment a key is added, rolled or pasted into Refresh, and the names stored | **names and only names.** Context window, vision and the customer label are facts a human sets, and the page says so in those words |
+| a price per input and output token on each plan model | typed in, written into the deployment's `litellm_params`, which is what the proxy bills from | LiteLLM carries no price for a Z.AI or Alibaba model id, so an unpriced model reports **not priced** everywhere rather than $0.00 |
+| how many boxes are behind on the name their Titan says | each tenant's own `box-secrets.json`, read off `/data/titanbot` | not a guess and not a null: a red chip counts the boxes whose label is not the plan model's |
+
+**Five rules this panel is built on, each of them a defect it used to have.**
+
+1. **A key is proved before it is stored, and before a serving slot is patched.** The add and the
+   roll both ask the vendor first and refuse with the vendor's own sentence. Measured on the R750
+   2026-09-08: an unchecked swap 401s on the very next request 0.3 s later and then puts the
+   deployment in the router's 30 s cooldown, with the old value overwritten in place.
+2. **A vendor key is never persisted anywhere but the proxy's encrypted credentials table.** The
+   catalog is read directly, holding the key for that one request. The pass-through this used to go
+   through stored it in `LiteLLM_Config` in cleartext and handed it back unmasked.
+3. **Health has three states and one of them is "not checked".** Nothing on this install checks in
+   the background, so a green light is either real traffic with no failures inside the window or a
+   *Check now* somebody pressed. It used to be `true` always, with a fresh timestamp on it.
+4. **Which workspaces run a model is joined on the deployment id.** The spend log records the VENDOR
+   model, so matching the alias against it hid two live customers, one of them paying, from the
+   guard that refuses to delete a model people are on.
+5. **Pushing a label always asks which workspaces.** The relay door it drives writes seven names
+   including the model, so a push moves a workspace onto that plan model. The page sends an empty
+   request, renders the candidates the route answers with, and posts only what the operator ticked.
 
 **The ledger is never pruned, and that is said here so nobody trims it later.** `admin_actions`
 records who changed what, when, and from which address, for every change made on this panel. Sign-in
@@ -351,9 +372,16 @@ the hash stays comparable, so an operator chasing a leaked key can still match a
 the row holding one. The same redaction runs on the conversation outline's shell rows, which the
 console draws, because a ledger-only fix would have left the credential on a screen.
 
-**Lines written before 2026-09-08 predate this and were never rewritten.** Nothing sweeps them, on
-purpose: deleting a receipt to chase a key is the wrong trade in the other direction. If a key was in
-a ledger, the answer is to rotate the key, not to edit the history of what was done with it.
+**The lines that already carried one were swept once, on 2026-09-08, by replacement rather than
+deletion.** The two rows in Jason's box became `<redacted:9165ce2daa86>` in place: 352 lines before,
+352 lines after, 0 occurrences left, and the other two boxes scanned clean. Replacing rather than
+deleting is the point — a receipt of what a tool did is worth keeping and the credential in it is
+not, and deleting a receipt to chase a key is the wrong trade in the other direction. The sweep
+refuses to write if the ledger is appended to while it runs, because it is a live append-only file.
+
+Sweeping is not the fix and was never the fix. A key that has been in a ledger has been readable, so
+the answer is to rotate it; the sweep only stops the copy in the receipt from being one more place
+it lives.
 
 Only values of 12 characters or more with no whitespace are redacted. Those files also hold a model
 name, a context window and a boolean, and redacting `1` or `gpt-4` would mangle every row while
