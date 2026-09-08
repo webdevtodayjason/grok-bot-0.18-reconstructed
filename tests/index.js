@@ -91,6 +91,9 @@ import "./cp-store.test.mjs";
 import "./cp-provision.test.mjs";
 import "./cp-server.test.mjs";
 import "./control-plane-deploy.test.mjs";
+// PROXY-1. The proxy's deploy: the compose properties the design rests on, the two scripts held to
+// running twice, and the isolation rule that opens one address and port to a box.
+import "./proxy-deploy.test.mjs";
 import "./cursor-free.test.mjs";
 
 // Everything below was in tests/ and NOT in this list, so `node --test tests/` did not run it.

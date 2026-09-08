@@ -22,6 +22,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { OPTIONAL_KEYS } from "../deploy/r750/control-plane-coolify.mjs";
+
 const run = promisify(execFile);
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALL = path.join(repo, "deploy/r750/control-plane-install.sh");
@@ -34,6 +36,9 @@ const FAKE_SESSION_SECRET = randomBytes(32).toString("hex");
 const FAKE_ADMIN_TOKEN = randomBytes(24).toString("hex");
 const FAKE_RELAY_TOKEN = randomBytes(32).toString("hex");
 const FAKE_API_KEY = `${randomBytes(24).toString("base64url")}|fake`;
+// PROXY-1. sk- prefixed, the shape deploy/r750/proxy-install.sh generates, because half of
+// LiteLLM's own tooling and error messages assume it.
+const FAKE_PROXY_MASTER_KEY = `sk-${randomBytes(24).toString("hex")}`;
 const temps = [];
 function tempTree() {
   const root = mkdtempSync(path.join(tmpdir(), "cp-deploy-"));
@@ -337,7 +342,16 @@ test("the Coolify tool creates the service, sets the environment, sets the addre
     // deliberate differences from the file.
     const composeKeys = [...readFileSync(COMPOSE, "utf8").matchAll(/^ {6}([A-Z][A-Z0-9_]*):/gm)].map((m) => m[1]);
     assert.ok(composeKeys.length >= 16, `the compose names ${composeKeys.length} environment keys`);
-    for (const key of composeKeys) assert.ok(fake.state.envs.has(key), `${key} was not set on the service`);
+    // PROXY-1. Four of them are OPTIONAL, and this run does not set them: unset is the proxy feature
+    // switched off, which is the shape every install is in until the proxy has been stood up. They
+    // get a test of their own below, in both directions.
+    for (const key of composeKeys) {
+      if (OPTIONAL_KEYS.has(key)) {
+        assert.equal(fake.state.envs.has(key), false, `${key} is optional and nothing supplied it, so it must not be written`);
+        continue;
+      }
+      assert.ok(fake.state.envs.has(key), `${key} was not set on the service`);
+    }
     assert.equal(fake.state.envs.get("COOLIFY_ENVIRONMENT_UUID"), "env-uuid", "the uuid the compose does not carry");
     assert.equal(fake.state.envs.get("CP_ALLOW_NEW_TENANTS"), "1", "on, because this is the operator standing it up");
     assert.equal(fake.state.envs.get("CP_SESSION_SECRET"), FAKE_SESSION_SECRET);
@@ -399,6 +413,51 @@ test("a second run of the Coolify tool updates rather than duplicating, and is q
     const third = await run("node", [COOLIFY_TOOL], { env: toolEnv(url) });
     assert.match(third.stdout, /0 added, 1 corrected, 24 already right/);
     assert.equal(fake.state.envs.get("CP_BASE_DOMAIN"), "titanium.bot");
+  } finally { fake.server.close(); }
+});
+
+// PROXY-1. The control plane learns about the proxy through two values, and the whole design rests
+// on BOTH shapes working: with them, it mints a virtual key per tenant; without them, every surface
+// behaves exactly as it did before this wave. Making them required would have been the easy thing
+// and would stop the control plane deploying for every existing customer, Jason's own console
+// included, the moment somebody forgot one.
+test("the proxy keys are optional, and unset means the feature is off rather than a failed deploy", async () => {
+  const fake = fakeCoolify();
+  const url = await listenOn(fake.server);
+  try {
+    const { stdout } = await run("node", [COOLIFY_TOOL], { env: toolEnv(url) });
+    for (const key of OPTIONAL_KEYS) {
+      assert.equal(fake.state.envs.has(key), false, `${key} was not supplied, so nothing should have been written`);
+    }
+    assert.match(stdout, /not set, so the proxy feature stays off: CP_PROXY_URL/);
+    // And the deploy still happened, which is the whole point.
+    assert.equal(fake.state.started, 1);
+  } finally { fake.server.close(); }
+});
+
+test("and set, they reach the service, with the master key never printed", async () => {
+  const fake = fakeCoolify();
+  const url = await listenOn(fake.server);
+  try {
+    const env = {
+      ...toolEnv(url),
+      CP_PROXY_URL: "http://titanbot-proxy:4000/v1",
+      CP_PROXY_MASTER_KEY: FAKE_PROXY_MASTER_KEY,
+      CP_PROXY_ALLOWANCE_USD: "25",
+    };
+    const { stdout } = await run("node", [COOLIFY_TOOL], { env });
+    assert.equal(fake.state.envs.get("CP_PROXY_URL"), "http://titanbot-proxy:4000/v1");
+    assert.equal(fake.state.envs.get("CP_PROXY_MASTER_KEY"), FAKE_PROXY_MASTER_KEY);
+    assert.equal(fake.state.envs.get("CP_PROXY_ALLOWANCE_USD"), "25");
+    // Still off, because enforcement is a separate switch and this wave observes rather than stops.
+    assert.equal(fake.state.envs.has("CP_PROXY_ENFORCE"), false);
+
+    // The master key opens /key/generate on the proxy, which is every tenant's budget and every
+    // tenant's key in one string. It is a secret and it is printed by length only.
+    assert.equal(stdout.includes(FAKE_PROXY_MASTER_KEY), false, "the proxy master key reached the terminal");
+    assert.match(stdout, /CP_PROXY_MASTER_KEY\s+\(set, \d+ characters, not printed\)/);
+    // The url is not a secret and is printed, because an operator checking the plan has to see it.
+    assert.match(stdout, /CP_PROXY_URL\s+http:\/\/titanbot-proxy:4000\/v1/);
   } finally { fake.server.close(); }
 });
 

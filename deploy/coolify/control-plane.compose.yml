@@ -158,6 +158,36 @@ services:
       # Adopting an instance that already exists is not affected by this and works either way.
       CP_ALLOW_NEW_TENANTS: ${CP_ALLOW_NEW_TENANTS}
 
+      # ---- the proxy (PROXY-1) ---------------------------------------------------------------------
+      # All four are OPTIONAL, and unset is the whole feature off: with no CP_PROXY_URL the control
+      # plane mints no virtual key, the registry carries no `included` object, and every surface
+      # behaves exactly as it did before this wave. That is deliberate and it is not a configProblem:
+      # `required` here would stop the control plane booting for every existing customer, Jason's own
+      # console included, the moment somebody forgot a value.
+      #
+      # deploy/r750/proxy-coolify.mjs and deploy/r750/proxy-install.sh set the proxy up; the second
+      # of those, run as `--pin-url`, MEASURES the network alias docker gave the proxy and writes
+      # CP_PROXY_URL into cp.env with the /v1 postfix. Read it from there into your shell before
+      # running deploy/r750/control-plane-coolify.mjs; do not assume the alias from a compose file.
+      #
+      #   http://titanbot-proxy:4000/v1  -- an address only titanbot-net has. No port is published
+      #   and no Domain is set on that service, so it is not reachable from the internet at all.
+      CP_PROXY_URL: ${CP_PROXY_URL}
+      # The proxy's own master key, which opens /key/generate. It exists in exactly two places: the
+      # proxy's environment as LITELLM_MASTER_KEY, and here. Never a box, never git, never the sync
+      # payload. Generated once on the server by deploy/r750/proxy-install.sh as PROXY_MASTER_KEY in
+      # /home/sem/titanbot/cp.env, and never rewritten.
+      CP_PROXY_MASTER_KEY: ${CP_PROXY_MASTER_KEY}
+      # What one tenant's plan includes in a month, in dollars, as the number the 80 percent chip and
+      # the admin console's Spend panel are measured against. Unset falls back to the control plane's
+      # own default; a customer never sees the figure, only the percentage and plain words.
+      CP_PROXY_ALLOWANCE_USD: ${CP_PROXY_ALLOWANCE_USD}
+      # Observe first. Unset (the default this wave) mints soft_budget only, which by LiteLLM's own
+      # definition never fails a request but does produce the number the chip reads. Set it to 1 and
+      # the mint plus a /key/update sweep set max_budget, and a customer over their allowance is
+      # stopped rather than counted. Arming it is not part of this wave.
+      CP_PROXY_ENFORCE: ${CP_PROXY_ENFORCE}
+
       # ---- who may sign themselves up -------------------------------------------------------------
       # Off unless this is 1, and off is the shape the product is in today: the operator adds a
       # customer with `node cp/cli.mjs signup add <email> <company>`, which always works because it

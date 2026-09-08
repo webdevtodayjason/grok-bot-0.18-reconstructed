@@ -167,15 +167,32 @@ export function composeEnvironment(text) {
 // uuid is a constant in this file, the project uuid is looked up from the project's name, and the
 // environment uuid is looked up from the project. All three read as ${VAR} in the compose, because
 // the compose is also a thing an operator can paste by hand.
+// PROXY-1. The four the control plane may legitimately run without. Unset is not a mistake for
+// these: it is the proxy feature switched off, which is the shape every install is in until the
+// proxy has been stood up, and it has to stay a shape the deploy can produce. An absent value here
+// is SKIPPED and named rather than added to `missing`, because `missing` stops the run -- and a
+// control plane that will not deploy for want of a proxy nobody has built yet would take Jason's
+// own console with it.
+//
+// Skipped means the key is not written to the service at all, so a value already there is left
+// alone. Clearing one is a deliberate act in the Coolify UI, not a side effect of an unset shell.
+export const OPTIONAL_KEYS = new Set([
+  "CP_PROXY_URL", "CP_PROXY_MASTER_KEY", "CP_PROXY_ALLOWANCE_USD", "CP_PROXY_ENFORCE",
+]);
+
 export function resolveEnvironment(entries, env, supplied = {}) {
   const resolved = [];
   const missing = [];
+  const skipped = [];
   for (const [key, raw] of entries) {
     const reference = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(raw);
     let value;
     if (reference) {
       value = env[reference[1]] || supplied[reference[1]] || "";
-      if (value === "") { missing.push(reference[1]); continue; }
+      if (value === "") {
+        (OPTIONAL_KEYS.has(reference[1]) ? skipped : missing).push(reference[1]);
+        continue;
+      }
     } else {
       // A literal in the file, which your shell may still override. This is how
       // CP_ALLOW_NEW_TENANTS gets to be 1 without editing the file everybody reads.
@@ -183,12 +200,17 @@ export function resolveEnvironment(entries, env, supplied = {}) {
     }
     resolved.push({ key, value });
   }
-  return { resolved, missing };
+  return { resolved, missing, skipped };
 }
 
 // Which of them must never reach the terminal. Everything else is a path, a domain, a port or a
 // list of networks, and printing those is how an operator checks the plan before it runs.
-const SECRET_KEYS = new Set(["CP_SESSION_SECRET", "CP_ADMIN_TOKEN", "CP_RELAY_TOKEN", "COOLIFY_API_KEY", "COOLIFY_URL", "CP_COOLIFY_URL"]);
+const SECRET_KEYS = new Set([
+  "CP_SESSION_SECRET", "CP_ADMIN_TOKEN", "CP_RELAY_TOKEN", "COOLIFY_API_KEY", "COOLIFY_URL", "CP_COOLIFY_URL",
+  // PROXY-1. The proxy's master key opens /key/generate, so it is every tenant's budget and every
+  // tenant's key in one string. CP_PROXY_URL is not a secret and is printed.
+  "CP_PROXY_MASTER_KEY",
+]);
 
 // ---- talking to Coolify ------------------------------------------------------------------------
 // The same shape as cp/provision.mjs's client, deliberately: same base handling, same bearer in the
@@ -314,7 +336,7 @@ async function main() {
   say(`environment  ${environment.uuid || "-"} (${environment.from})`);
   say(`server       ${SERVER_UUID}`);
 
-  const { resolved, missing } = resolveEnvironment(entries, env, {
+  const { resolved, missing, skipped } = resolveEnvironment(entries, env, {
     CP_ALLOW_NEW_TENANTS: "1",
     COOLIFY_SERVER_UUID: SERVER_UUID,
     COOLIFY_PROJECT_UUID: project.uuid,
@@ -354,6 +376,13 @@ async function main() {
   for (const one of willSet) {
     const shown = SECRET_KEYS.has(one.key) ? `(set, ${one.value.length} characters, not printed)` : one.value;
     say(`${one.key.padEnd(26)}${shown}`);
+  }
+  if (skipped.length > 0) {
+    say("");
+    say(`not set, so the proxy feature stays off: ${skipped.join(", ")}`);
+    say("CP_PROXY_URL is written into cp.env by `proxy-install.sh --pin-url` once the proxy is up,");
+    say("and CP_PROXY_MASTER_KEY is PROXY_MASTER_KEY from the same file. Read both into your shell");
+    say("and run this again to turn it on. Nothing already set on the service is cleared by this.");
   }
 
   if (DRY_RUN) {

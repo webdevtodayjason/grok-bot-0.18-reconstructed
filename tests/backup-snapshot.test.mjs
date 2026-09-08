@@ -39,7 +39,27 @@ esac
 case "$1" in
   inspect) [ "$2" = "the-box" ] || exit 1; printf 'the-box\\n'; exit 0 ;;
   pause|unpause) printf '%s\\n' "$1 $2" >> "${root}/docker-calls"; exit 0 ;;
-  ps) case "$*" in *control-plane*) printf 'the-cp\\n' ;; esac; exit 0 ;;
+  ps)
+    case "$*" in
+      *control-plane*) printf 'the-cp\\n' ;;
+      # PROXY-1. Only when a test asks for one, so every other run in this file is still an honest
+      # "no proxy on this host" and keeps proving that shape.
+      *proxy-db*) [ -n "$STUB_PROXY_DB" ] && printf '%s\\n' "$STUB_PROXY_DB" ;;
+    esac
+    exit 0 ;;
+  exec)
+    shift
+    printf 'exec %s\\n' "$*" >> "${root}/docker-calls"
+    shift
+    if [ "$1" = "pg_dump" ]; then
+      if [ "$STUB_PG_DUMP_FAILS" = 1 ]; then
+        echo "pg_dump: error: connection to server failed" >&2
+        exit 1
+      fi
+      printf -- '-- a logical copy of the proxy database\\nCREATE TABLE "LiteLLM_VerificationToken" (token text);\\n'
+      exit 0
+    fi
+    exit 0 ;;
 esac
 exit 0
 `, { mode: 0o755 });
@@ -62,6 +82,11 @@ mkdirSync(path.join(relayRoot, "ui"), { recursive: true });
 mkdirSync(path.join(relayRoot, "profile"), { recursive: true });
 writeFileSync(path.join(relayRoot, "ui", "auth.json"), '{"placeholder":true}\n');
 writeFileSync(path.join(relayRoot, "profile", "local-docker-vm.json"), '{"token":"placeholder"}\n');
+// cp.env. It has held CP_SESSION_SECRET, CP_ADMIN_TOKEN and CP_RELAY_TOKEN since TENANT-1 and was in
+// no snapshot at all until PROXY-1 added the proxy's three to the same file. Lose it and every
+// customer is signed out of every instance with no way to put the master back, because the session
+// key each tenant relay holds is DERIVED from it.
+writeFileSync(path.join(relayRoot, "cp.env"), "CP_SESSION_SECRET=placeholder\nPROXY_MASTER_KEY=sk-placeholder\n", { mode: 0o600 });
 
 // The tenant root: the control plane's own sqlite store and one directory per customer. Nothing
 // under it was in a snapshot until 2026-09-07, so losing this disk meant losing every account and
@@ -121,7 +146,15 @@ test("a snapshot pauses the box, copies all five sources, and writes a manifest 
   // paused pass retakes may say "paused".
   assert.deepEqual(Object.fromEntries(manifest.volumes.map((entry) => [entry.name, entry.capturedWhile])),
     { workspace: "paused", data: "paused", store: "live", chrome: "live" });
-  assert.deepEqual(manifest.relay.map((entry) => entry.path).sort(), ["profile", "ui/auth.json"]);
+  // cp.env is on this list as of PROXY-1, and it is the one file here that cannot be rebuilt from
+  // anything: the session key every tenant relay holds is derived from the master inside it.
+  assert.deepEqual(manifest.relay.map((entry) => entry.path).sort(), ["cp.env", "profile", "ui/auth.json"]);
+  assert.equal(readFileSync(path.join(dir, "relay/cp.env"), "utf8").includes("CP_SESSION_SECRET"), true);
+
+  // No proxy on this host, which is the shape of every install until PROXY-1 is deployed, and it is
+  // not a failure: the snapshot is still complete.
+  assert.equal(manifest.proxy, "absent");
+  assert.equal(manifest.mode, "consistent");
 
   assert.equal(manifest.storeDbCount, 2);
   for (const agent of agents) {
@@ -177,6 +210,76 @@ test("a host with no tenant root says so and is still a complete snapshot", () =
   assert.equal(manifest.controlPlane, "absent");
   assert.equal(manifest.tenantCount, 0);
   assert.equal(manifest.mode, "consistent");
+});
+
+// ---- the proxy (PROXY-1) --------------------------------------------------------------------------
+
+test("the proxy is captured as a pg_dump, not as a file copy, and needs no pause", () => {
+  // A database copied from underneath a running server restores without complaint and is still
+  // wrong, which is the same reason the control plane's sqlite is retaken frozen. A logical dump is
+  // consistent by construction and costs nobody's inference a pause.
+  const output = snapshot({
+    TITANBOT_BACKUP_REQUIRE_MOUNT: "0",
+    TITANBOT_INSTANCE: "with-proxy",
+    TITANBOT_TENANT_ROOT: tenantRoot,
+    STUB_PROXY_DB: "titanbot-proxy-db-abc123",
+  });
+  const snaps = execFileSync("ls", ["-1", path.join(dest, "with-proxy")], { encoding: "utf8" }).trim().split("\n");
+  const dir = path.join(dest, "with-proxy", snaps[0]);
+  const manifest = JSON.parse(readFileSync(path.join(dir, "manifest.json"), "utf8"));
+
+  assert.equal(manifest.proxy, "dumped");
+  assert.ok(manifest.proxyDumpBytes > 0);
+  assert.match(output, /-> proxy\/litellm\.sql/);
+  const dump = readFileSync(path.join(dir, "proxy/litellm.sql"), "utf8");
+  assert.match(dump, /LiteLLM_VerificationToken/, "the dump is the database's own logical copy");
+
+  // Found by its role label, like everything else Coolify renames, and dumped rather than paused.
+  const calls = readFileSync(path.join(root, "docker-calls"), "utf8");
+  assert.match(calls, /exec titanbot-proxy-db-abc123 pg_dump/);
+  assert.equal(/pause titanbot-proxy-db/.test(calls), false, "a dump needs no pause, so nobody's inference stops for it");
+
+  // It holds every tenant's virtual key.
+  assert.equal(statSync(path.join(dir, "proxy")).mode & 0o077, 0, "no group or other bits on the proxy copy");
+});
+
+test("a proxy whose dump fails is a snapshot that is NOT a restore point, and says so", () => {
+  // The failure has to be loud in the manifest rather than a warning in a log nobody reads: a
+  // snapshot missing every virtual key and every spend row looks exactly like a good one on disk.
+  const output = snapshot({
+    TITANBOT_BACKUP_REQUIRE_MOUNT: "0",
+    TITANBOT_INSTANCE: "broken-proxy",
+    TITANBOT_TENANT_ROOT: tenantRoot,
+    STUB_PROXY_DB: "titanbot-proxy-db-abc123",
+    STUB_PG_DUMP_FAILS: "1",
+  });
+  const snaps = execFileSync("ls", ["-1", path.join(dest, "broken-proxy")], { encoding: "utf8" }).trim().split("\n");
+  const manifest = JSON.parse(readFileSync(path.join(dest, "broken-proxy", snaps[0], "manifest.json"), "utf8"));
+  assert.equal(manifest.proxy, "failed");
+  assert.equal(manifest.mode, "live", "an incomplete copy must never be labelled consistent");
+  assert.match(output, /WARNING: pg_dump of titanbot-proxy-db-abc123 failed/);
+});
+
+test("the tenant loop never sees the proxy, because its storage is a sibling of the tenant root", () => {
+  // /data/titanbot-proxy is deliberately NOT under /data/titanbot. The loop below walks the tenant
+  // root one directory at a time and skips exactly one name, so a proxy directory under there would
+  // be reported as a customer in every manifest and its Postgres data directory taken as a live file
+  // copy: the torn copy the pg_dump pass exists to avoid.
+  const script = readFileSync(path.join(repoRoot, "deploy/backup/snapshot.sh"), "utf8");
+  assert.equal(/TENANT_ROOT.*titanbot-proxy/.test(script), false);
+  assert.match(script, /TENANT_ROOT="\$\{TITANBOT_TENANT_ROOT:-\/data\/titanbot\}"/);
+  // And the run itself: a tenant root with two customers in it reports two, whatever the proxy did.
+  const output = snapshot({
+    TITANBOT_BACKUP_REQUIRE_MOUNT: "0",
+    TITANBOT_INSTANCE: "sibling",
+    TITANBOT_TENANT_ROOT: tenantRoot,
+    STUB_PROXY_DB: "titanbot-proxy-db-abc123",
+  });
+  const snaps = execFileSync("ls", ["-1", path.join(dest, "sibling")], { encoding: "utf8" }).trim().split("\n");
+  const manifest = JSON.parse(readFileSync(path.join(dest, "sibling", snaps[0], "manifest.json"), "utf8"));
+  assert.deepEqual(manifest.tenants.map((one) => one.slug).sort(), ["acme", "demo"]);
+  assert.equal(manifest.tenants.some((one) => one.slug.includes("proxy")), false);
+  assert.equal(output.includes("tenants/titanbot-proxy"), false);
 });
 
 test("the retention sweep keeps the newest and only the newest", () => {

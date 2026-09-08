@@ -1,0 +1,153 @@
+# The proxy's model list and settings (docs/PROXY.md, docs/GAP-ANALYSIS.md PROXY-1).
+#
+# THIS FILE HOLDS NO KEY. Every credential is an os.environ/<NAME> reference, and the values live in
+# the proxy service's Coolify environment, put there by deploy/r750/proxy-coolify.mjs from the
+# operator's ~/.api_keys by exact name. That is why this file is in git, why it can sit
+# world-readable in the bind mount, and why losing LITELLM_SALT_KEY costs budget rows and nothing
+# else.
+#
+# It is copied to /data/titanbot-proxy/config/config.yaml by deploy/r750/proxy-install.sh, which is
+# a DIRECTORY bind: a bind to this file alone would become a Coolify LocalFileVolume and one Save in
+# the Storages UI would write Coolify's stale copy back over it.
+#
+# ---- THE MODEL NAMES ARE A CONTRACT --------------------------------------------------------------
+# plan-zai, plan-minimax and plan-qwen are strings every customer's box is pointed at and every
+# virtual key is scoped to. Renaming one takes every box using it off the air on the next message.
+# They are plan- prefixed so the control plane can tell an included model from a customer's own
+# endpoint row by its id alone (tests/cp-relay-pair.test.mjs asserts the prefix cannot collide).
+#
+# Adding a MODEL is not this wave (MODELS-1). Adding a SUBSCRIPTION to a pool is: copy the entry,
+# keep the same model_name, give it the next PROXY_*_KEY name, and add that name to the compose and
+# to SECRET_KEYS in proxy-coolify.mjs. docs/PROXY.md walks it.
+model_list:
+  # ---- Z.AI, the coding plan, TWO subscriptions pooled -------------------------------------------
+  # Pooling in LiteLLM is repeated model_list entries sharing one model_name. There is no second
+  # place for the second key to live and no console surface it needs, which is also MARKET-5's
+  # answer: one row per provider on the customer's side, however many subscriptions are behind it.
+  #
+  # routing_strategy simple-shuffle picks between them per request, and allowed_fails/cooldown_time
+  # in router_settings below is what drains a dead key to the other one instead of failing the
+  # customer.
+  - model_name: plan-zai
+    litellm_params:
+      model: openai/glm-4.6
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/PROXY_ZAI_KEY_1
+  - model_name: plan-zai
+    litellm_params:
+      model: openai/glm-4.6
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/PROXY_ZAI_KEY_2
+
+  # ---- MiniMax ----------------------------------------------------------------------------------
+  - model_name: plan-minimax
+    litellm_params:
+      model: minimax/MiniMax-M3
+      api_key: os.environ/PROXY_MINIMAX_KEY
+
+  # ---- Qwen, NOT SERVED THIS WAVE ---------------------------------------------------------------
+  # The wave's open question 1 was "is there a Qwen key name". Measured on this Mac 2026-09-08:
+  # ~/.api_keys holds ZAI_API_KEY, ZAI_API_KEY_JASON and MINIMAX_API_KEY, and no Qwen name at all.
+  # The Alibaba token-plan key that answers qwen3.8-max today is the one COPIED INTO THE BOXES
+  # (113 characters, sha256 734e60c2f9de), and harvesting a credential out of a customer's sandbox
+  # to feed the thing built to stop credentials living in sandboxes is not a trade worth making.
+  #
+  # So plan-qwen is written out and left off. A model_list entry whose api_key resolves to nothing
+  # does not fail at startup; it fails at the customer, on their turn, as an upstream 401 -- which
+  # is the worst place to find out. Uncomment both lines below, add PROXY_QWEN_KEY to
+  # deploy/coolify/proxy.compose.yml's environment (it is already there) and to SECRET_KEYS and
+  # API_KEY_NAMES in deploy/r750/proxy-coolify.mjs, and re-run the two deploy scripts.
+  #
+  # - model_name: plan-qwen
+  #   litellm_params:
+  #     model: openai/qwen3.8-max
+  #     api_base: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+  #     api_key: os.environ/PROXY_QWEN_KEY
+
+router_settings:
+  # One request goes to one of the pooled entries at random. Not latency-based: the two Z.AI keys
+  # are the same endpoint and the same model, so there is no latency to route on, and a strategy
+  # that keeps state is a strategy that can be wrong after a restart.
+  routing_strategy: simple-shuffle
+  # A failed call is retried on ANOTHER entry of the same model_name before the customer sees an
+  # error, which is the whole point of holding two subscriptions.
+  num_retries: 2
+  # Three failures take a deployment out for thirty seconds. These are Router constructor
+  # parameters, so they belong here and NOT under litellm_settings: LiteLLM does not reject an
+  # unknown litellm_settings key, it ignores it, and a pool that silently never cools down is
+  # exactly the class of invisible failure this wave is written against.
+  allowed_fails: 3
+  cooldown_time: 30
+
+litellm_settings:
+  # A provider that accepts a request and then holds it open is a customer watching a spinner. Sixty
+  # seconds is longer than any answer this fleet waits for and shorter than a browser's own patience.
+  request_timeout: 60
+
+general_settings:
+  # See the compose: the list is the file, not the database.
+  store_model_in_db: false
+  database_connection_pool_limit: 10
+  # How long spend rows are batched before they are written. LiteLLM's production page suggests 60.
+  # Ten, because the admin console's Spend panel and scripts/verify-proxy.mjs both read this number
+  # back, and a gate that has to wait a minute to see a dollar is a gate nobody runs.
+  proxy_batch_write_at: 10
+  # How long a virtual key's authorisation is cached. Set EXPLICITLY at 30 rather than left at the
+  # default 60, because "revocation takes effect within a minute" is otherwise satisfied by luck.
+  # This is the number scripts/verify-proxy.mjs waits out when it measures a revocation.
+  user_api_key_cache_ttl: 30
+  # Off. A background health check calls every provider on a timer, which spends the operator's
+  # subscription to answer a question nobody asked and can trip a rate limit on its own.
+  background_health_checks: false
+
+# ---- TinyFish, through the same door -------------------------------------------------------------
+# The connector preset and the web-fetch/search backup route (source/host/extensions/inference/
+# web-tools.ts and tinyfish-route.ts, CURSOR-1) keep working when they are pointed here, and the
+# operator's TinyFish key stops living inside every box's connector-env-secrets.json.
+#
+# auth_type is bearer_token, NOT api_key. LiteLLM's api_key mode sends X-API-Key, and
+# agent.tinyfish.ai refuses that header; the two REST endpoints below want x-api-key and get it from
+# a header line instead of from the auth mode.
+#
+# The pass_through blocks carry no `auth` key on purpose, which leaves LiteLLM's default: a virtual
+# key is required. Without one of ours in front, these would be an unauthenticated door to the
+# operator's TinyFish account from anywhere on the bridge.
+#
+# Item D of this wave measures both legs on the R750 and hands this file one line if the MCP entry
+# has to be dropped; that named handoff is the only change anyone outside item A makes here.
+mcp_servers:
+  tinyfish:
+    url: https://agent.tinyfish.ai/mcp
+    transport: http
+    auth_type: bearer_token
+    authorization_token: os.environ/PROXY_TINYFISH_KEY_1
+    description: "TinyFish browser automation, billed to the operator's pooled subscription"
+
+pass_through_endpoints:
+  - path: /tinyfish/fetch
+    target: https://api.fetch.tinyfish.ai
+    headers:
+      x-api-key: os.environ/PROXY_TINYFISH_KEY_1
+      content-type: application/json
+    # Metering. A pass_through call is not a token call, so there is nothing to price from a usage
+    # block; a flat per-request cost is what puts it on the same spend ledger as everything else and
+    # therefore into the admin console's per-client number. TinyFish's own fetch and search are free
+    # on this plan, so the figure is deliberately small and exists to make the call COUNTABLE.
+    cost_per_request: 0.0001
+  - path: /tinyfish/search
+    target: https://api.search.tinyfish.ai
+    headers:
+      x-api-key: os.environ/PROXY_TINYFISH_KEY_1
+      content-type: application/json
+    cost_per_request: 0.0001
+
+# ---- reserved for CLOUD-BROWSER-1 ----------------------------------------------------------------
+# Cloud browsers ride this proxy rather than getting a door of their own: same virtual key, same
+# meter, same revocation. Left commented so the shape is decided now and the credential is not.
+# docs/PROXY.md has the section stub.
+#
+#  - path: /browser/
+#    target: https://api.browserbase.com
+#    headers:
+#      x-bb-api-key: os.environ/PROXY_BROWSER_KEY
+#    cost_per_request: 0.01

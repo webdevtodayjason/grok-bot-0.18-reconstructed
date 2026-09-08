@@ -8,6 +8,13 @@
 # that has not been migrated, and profile/ and credential/). Until this script there was no backup job of any kind on the R750, so a
 # lost volume was a lost instance: every agent, every transcript, every credential.
 #
+# And SEVEN, since PROXY-1: the proxy's Postgres, which holds every tenant's virtual key and every
+# spend row the admin console reports. It is a pg_dump in a pass of its own, and its storage
+# (/data/titanbot-proxy) is deliberately a SIBLING of the tenant root rather than a child, because
+# the tenant loop below walks that root one directory at a time and skips exactly one name: under it
+# the proxy would be reported as a customer in every manifest and its database taken as a torn file
+# copy.
+#
 # And SIX, since 2026-09-07: the tenant root, /data/titanbot. That is the control plane's own sqlite
 # store -- every account, every tenant, the provisioning ledger and the revocation table -- plus one
 # directory per customer holding that customer's whole instance. None of it was in this script:
@@ -255,7 +262,13 @@ mkdir -p "$OUT/relay"
 # the login ledger stops meaning anything, so the record of who knocked survives the restore but the
 # answer to "was that the same password twice" does not.
 # Whichever is absent reports "absent, skipped" and neither is a failure.
-for rel in state ui/auth.json ui/endpoints.json ui/subscriptions.json ui/mail.json ui/mail-inbox.jsonl ui/login-attempts.jsonl ui/login-attempt-salt profile credential; do
+# cp.env is on this list as of PROXY-1, and it was a hole worth naming: it has held
+# CP_SESSION_SECRET, CP_ADMIN_TOKEN and CP_RELAY_TOKEN since TENANT-1 and appeared in NO snapshot at
+# all. Lose that file and every customer is signed out of every instance with no way to put the
+# master back, because the session key each tenant relay holds is DERIVED from it. This wave adds
+# PROXY_MASTER_KEY, PROXY_SALT_KEY and PROXY_DB_PASSWORD to the same file, so the restore of a proxy
+# depends on it too. Pre-existing, in a file this wave was already editing, so it is fixed here.
+for rel in state cp.env ui/auth.json ui/endpoints.json ui/subscriptions.json ui/mail.json ui/mail-inbox.jsonl ui/login-attempts.jsonl ui/login-attempt-salt profile credential; do
   src="$ROOT/$rel"
   if [ ! -e "$src" ]; then say "$rel absent, skipped"; continue; fi
   mkdir -p "$OUT/relay/$(dirname "$rel")"
@@ -326,6 +339,49 @@ fi
 # The account hashes and every customer's credentials are in there.
 chmod -R go-rwx "$OUT/tenants" 2>/dev/null || true
 
+step "the proxy"
+# PROXY-1. The proxy's Postgres holds every tenant's virtual key and every spend row behind the
+# admin console's per-client numbers. It is captured as a pg_dump -- a logical copy the database
+# itself makes consistent -- and NOT as a file copy, for the same reason the control plane's sqlite
+# is retaken under a pause: a database copied from underneath a running server restores without
+# complaint and is still wrong. A dump also needs no pause at all, so nobody's inference stops for it.
+#
+# And it is a pass of its own because /data/titanbot-proxy is a SIBLING of the tenant root, not a
+# child. The loop above walks $TENANT_ROOT one directory at a time and skips exactly one name, so a
+# proxy directory under there would be counted as a customer in every manifest and its Postgres data
+# directory taken as a live file copy -- the torn copy this step exists to avoid.
+PROXY_CAPTURED=absent
+PROXY_BYTES=0
+PROXY_DB_NAME="$(docker ps --filter label=com.titanbot.role=proxy-db --format '{{.Names}}' 2>/dev/null | head -n 1)"
+if [ -z "$PROXY_DB_NAME" ]; then
+  say "no container carrying com.titanbot.role=proxy-db, so there is no proxy database on this host"
+else
+  mkdir -p "$OUT/proxy"
+  # The database and user the compose creates. Overridable for an install that renamed them.
+  PROXY_DB="${TITANBOT_PROXY_DB:-litellm}"
+  PROXY_DB_USER="${TITANBOT_PROXY_DB_USER:-litellm}"
+  # No password on the command line and none in this script: pg_dump inside the container connects
+  # over the local socket as the postgres superuser's peer, which is why -U is enough.
+  if docker exec "$PROXY_DB_NAME" pg_dump -U "$PROXY_DB_USER" -d "$PROXY_DB" > "$OUT/proxy/litellm.sql" 2>"$OUT/proxy/pg_dump.err"; then
+    PROXY_BYTES="$(wc -c < "$OUT/proxy/litellm.sql" | tr -d ' ')"
+    if [ "$PROXY_BYTES" -gt 0 ]; then
+      PROXY_CAPTURED=dumped
+      rm -f "$OUT/proxy/pg_dump.err"
+      say "$PROXY_DB_NAME -> proxy/litellm.sql  ${PROXY_BYTES} bytes, pg_dump"
+    else
+      PROXY_CAPTURED=failed
+      FAILED=yes
+      say "WARNING: pg_dump of $PROXY_DB_NAME produced an empty file"
+    fi
+  else
+    PROXY_CAPTURED=failed
+    FAILED=yes
+    say "WARNING: pg_dump of $PROXY_DB_NAME failed: $(head -c 300 "$OUT/proxy/pg_dump.err" 2>/dev/null | tr '\n' ' ')"
+  fi
+  # It carries every tenant's virtual key.
+  chmod -R go-rwx "$OUT/proxy" 2>/dev/null || true
+fi
+
 step "manifest"
 # Every agent store, by sha256. This is the line a restore drill checks against, and the reason a
 # torn copy cannot pass for a good one.
@@ -368,6 +424,8 @@ cat > "$OUT/manifest.json" <<EOF
   "pauseSeconds": $PAUSE_S,
   "pausedVolumes": ["data", "workspace"],
   "controlPlane": "$CP_CAPTURED",
+  "proxy": "$PROXY_CAPTURED",
+  "proxyDumpBytes": $PROXY_BYTES,
   "tenantCount": $TENANT_COUNT,
   "tenants": [${TENANT_ENTRIES%,}],
   "copyMethod": "$COPY_METHOD",
@@ -378,7 +436,7 @@ cat > "$OUT/manifest.json" <<EOF
   "storeDbs": [${STORE_ENTRIES%,}]
 }
 EOF
-say "$OUT/manifest.json: mode $MODE, ${TOTAL_KB}K, $STORE_COUNT store.db, $TENANT_COUNT tenant(s), control plane $CP_CAPTURED"
+say "$OUT/manifest.json: mode $MODE, ${TOTAL_KB}K, $STORE_COUNT store.db, $TENANT_COUNT tenant(s), control plane $CP_CAPTURED, proxy $PROXY_CAPTURED"
 
 step "retention"
 # Oldest first, keep the newest $KEEP. The names sort lexically because they are
