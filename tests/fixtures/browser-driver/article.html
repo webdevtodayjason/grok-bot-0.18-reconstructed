@@ -1,0 +1,19 @@
+<html lang="en"><head><title>How the backup mesh survived the outage</title>
+<style>.hidden{display:none}</style>
+<script>window.tracker = {send: function(){ return "tracking beacon text that must never be read as page text"; }};</script>
+</head>
+<body class="page">
+<header class="site-header"><a href="/">Titanium Computing</a> <span>Menu</span></header>
+<nav class="primary-nav"><ul><li><a href="/a">Services</a></li><li><a href="/b">Pricing</a></li><li><a href="/c">Contact</a></li><li><a href="/d">About us</a></li></ul></nav>
+<div id="content-wrap">
+<article class="post">
+<h1>How the backup mesh survived the outage</h1>
+<p>The power went out at 4am and the whole rack went with it. What came back up first was the backup mesh, because it is the one thing on the site with its own battery and its own network path.</p>
+<p>Every node writes its snapshot to two other nodes. When the rack came back, the mesh already knew which snapshots were newer than the ones on disk, so the restore was a copy rather than a rebuild.</p>
+<ul><li>Nine nodes, three sites, one schedule.</li><li>Snapshots every fifteen minutes.</li><li>A restore drill every Sunday, whether anyone asks for one or not.</li></ul>
+<p>The part worth copying is the drill. A backup nobody has restored is a rumour, and the Sunday drill is what turns it into a fact. It runs unattended and it files a report either way.</p>
+</article>
+</div>
+<aside class="sidebar promo"><h3>Related</h3><p><a href="/x">Ten things about tape</a></p><p><a href="/y">Why RAID is not a backup</a></p></aside>
+<footer class="site-footer"><p>Copyright 2026 Titanium Computing. All rights reserved. Privacy. Terms. Cookies.</p></footer>
+</body></html>
