@@ -174,6 +174,8 @@ export interface MarketplacePlugin {
    */
   readonly kind?: MarketplacePluginKind;
   readonly credentialHints?: Readonly<Record<string, string>>;
+  /** DERIVED, like the two above: the shell tool this row turns on, or null when it turns on none. */
+  readonly shellToolId?: string | null;
   /**
    * PROXY-1 / PROXY-7. The name this service is mounted under on the proxy's MCP gateway. Present
    * only on a plugin whose upstream the operator holds a subscription to, and read only when a
@@ -1261,23 +1263,30 @@ export function marketplaceCredential(plugin: MarketplacePlugin, field: unknown)
  * shape does. The new fields ride along beside the old ones rather than replacing them, because a
  * console that wants the fan-out needs `credentials` and a console that does not is unaffected.
  */
+/**
+ * One row in that same shape. `getMarketplaceItem` answers with this so a plugin fetched on its own
+ * is the row the list handed out, rather than a differently-shaped cousin of it.
+ */
+export function marketplacePluginWireView(
+  plugin: MarketplacePlugin,
+  options: MarketplaceConnectorEntryOptions = {},
+): MarketplacePlugin {
+  const entry = marketplaceConnectorEntry(plugin, options);
+  return {
+    ...plugin,
+    kind: marketplacePluginKind(plugin),
+    install: plugin.opensEditor === true ? null : entry ?? marketplaceShellToolId(plugin),
+    credentialHints: marketplaceCredentialHints(plugin),
+    shellToolId: marketplaceShellToolId(plugin),
+  } as MarketplacePlugin;
+}
+
 export function marketplaceCatalogWireView(
   catalog: MarketplaceCatalog = MARKETPLACE_CATALOG,
   options: MarketplaceConnectorEntryOptions = {},
-): Record<string, unknown> {
+): MarketplaceCatalog {
   return {
-    plugins: catalog.plugins.map((plugin) => {
-      const kind = marketplacePluginKind(plugin);
-      const entry = marketplaceConnectorEntry(plugin, options);
-      const install = plugin.opensEditor === true ? null : entry ?? marketplaceShellToolId(plugin);
-      return {
-        ...plugin,
-        kind,
-        install,
-        credentialHints: marketplaceCredentialHints(plugin),
-        shellToolId: marketplaceShellToolId(plugin),
-      };
-    }),
+    plugins: catalog.plugins.map((plugin) => marketplacePluginWireView(plugin, options)),
     bots: catalog.bots,
     categories: catalog.categories,
   };

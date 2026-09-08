@@ -1,7 +1,12 @@
 import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { LOCAL_CONNECTORS_FILENAME, readLocalConnectorFile } from "./local-connectors.js";
+import {
+  isRemoteLocalServer,
+  LOCAL_CONNECTORS_FILENAME,
+  readLocalConnectorFile,
+  remoteCredentialFieldNames,
+} from "./local-connectors.js";
 
 /**
  * CP-10. A credential for a local stdio connector used to land in
@@ -114,10 +119,25 @@ export function listConnectorEnvSecretFields(rootDir: string, server: string): s
  */
 export function listConnectorCredentialFields(rootDir: string, server: string): string[] {
   const stored = Object.keys(readConnectorEnvSecrets(rootDir)[server] ?? {});
-  const entryEnv = readLocalConnectorFile(rootDir)[server]?.env ?? {};
-  const empty = Object.entries(entryEnv).flatMap(([field, value]) =>
-    value === "" && isConnectorEnvFieldName(field) ? [field] : []);
-  return [...new Set([...stored, ...empty])].sort();
+  const entry = readLocalConnectorFile(rootDir)[server];
+  // MARKET-6. A REMOTE entry has no env to leave empty. What it has instead is a `${FIELD}`
+  // written into a header value or the url, which says the same thing in the same place: the
+  // operator named the credential and deliberately left the value out.
+  const declared = entry == null
+    ? []
+    : isRemoteLocalServer(entry)
+      ? remoteCredentialFieldNames(entry)
+      : Object.entries(entry.env ?? {}).flatMap(([field, value]) => value === "" ? [field] : []);
+  return [...new Set([...stored, ...declared.filter(isConnectorEnvFieldName)])].sort();
+}
+
+/**
+ * CONNECT-11. Every connector NAME the store holds a value for, whether or not connectors.json
+ * still has an entry under it. This is the one question the strict resolver cannot answer, and it
+ * is the question a stale secret has to be found by.
+ */
+export function listConnectorSecretServers(rootDir: string): string[] {
+  return Object.keys(readConnectorEnvSecrets(rootDir)).sort();
 }
 
 /**

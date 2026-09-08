@@ -2159,10 +2159,23 @@ const server = createServer(async (req, res) => {
         }
         // Reject a config the host would silently drop, rather than accepting it and leaving the
         // operator wondering why their connector never appears.
+        //
+        // MARKET-6. Two shapes are real now, not one. A `url` entry used to be dropped by the host's
+        // own parser, so refusing it here was telling the truth; the host connects to one itself
+        // now, and keeping the refusal would make the console the only door that cannot save what
+        // the box can run. The host's single writer holds the whole rule table (https, no loopback,
+        // no credential in the address, no literal in an auth header) and re-checks every entry on
+        // load; this route checks the SHAPE only, and is due to become a thin delegating call to
+        // that writer rather than a whole-file write over docker exec (design section 3, MARKET-8).
         for (const [name, config] of Object.entries(servers)) {
           if (config == null || typeof config !== "object") return fail(res, 400, `${name}: not an object`);
-          if (typeof config.command !== "string" || config.command.length === 0) {
-            return fail(res, 400, `${name}: stdio connectors need a "command"`);
+          const hasCommand = typeof config.command === "string" && config.command.length > 0;
+          const hasUrl = typeof config.url === "string" && config.url.length > 0;
+          if (!hasCommand && !hasUrl) {
+            return fail(res, 400, `${name}: a connector is either a link (a "url" the box connects to) or a program (a "command" the box runs). Give one of the two.`);
+          }
+          if (hasCommand && hasUrl) {
+            return fail(res, 400, `${name}: give either a "url" or a "command", not both.`);
           }
           // SECRET-2. "shell" is the reserved destination a secret card names to mean the agent's
           // own box shell, so routeSecret returns on it before any connector is consulted: a

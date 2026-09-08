@@ -30,6 +30,12 @@ function fakeWorld() {
       peekStdioServerNames: () => ["probe"],
       getUserServerConfigs: async () => ({}),
       getStdioServerConfigs: async () => ({ probe: { command: "node", args: [] } }),
+      // MARKET-6 split "what the box is responsible for" from "what the dead Cursor backend owns".
+      // A url connector of this box's own is dispatched to the box, which connects to it; an
+      // account url server went to the Dashboard RPC, which answers nothing here. This double has
+      // one stdio server and no account, so both answers follow from that.
+      getBoxServerConfigs: async () => ({ probe: { command: "node", args: [] } }),
+      getBackendHttpServerNames: async () => [],
       ensureConfigLoaded: async () => {},
     },
     lastAccountDisplayConfig: () => null,

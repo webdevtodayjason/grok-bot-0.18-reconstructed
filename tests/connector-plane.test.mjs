@@ -288,3 +288,181 @@ test("CONNECT-4: a refused field is not written to the per-agent channel store",
   assert.equal(accepted.restarted, true);
   assert.equal(existsSync(store.filePath("agent1", "tinyfish")), false);
 });
+
+// ---------------------------------------------------------------------------------------------
+// MARKET-6: the one writer, the native remote shape, and the resolver that survives an uninstall.
+//
+// Three things were measured on grok-bot-local-vm on 8 September 2026 and each of them is the
+// reason for a case below. The box's exec daemon accepts a `{type,url,headers}` server through
+// LoadMcpServers and connects to it directly, so a remote connector no longer has to be an
+// `npx mcp-remote` bridge. The bridge leaked: the daemon expands `${VAR}` in a spawn's arguments
+// BEFORE exec, so a bridged header put the live key into the argument list of three root processes
+// that the agent's own shell in that box can read. And `resolveLocalConnector` threw the moment an
+// entry left connectors.json, which is exactly when the key it left behind most needs clearing.
+
+const remoteRoot = mkdtempSync(path.join(tmpdir(), "connector-plane-remote-"));
+after(() => rmSync(remoteRoot, { recursive: true, force: true }));
+
+test("MARKET-6: a url entry survives the parser instead of being silently dropped", () => {
+  writeFileSync(path.join(remoteRoot, "connectors.json"), JSON.stringify({
+    mcpServers: {
+      docs: { type: "http", url: "https://docs.mcp.cloudflare.com/mcp" },
+      bridged: { command: "npx", args: ["-y", "mcp-remote@0.8.5", "https://example.com/mcp"] },
+    },
+  }), "utf8");
+  const parsed = connectors.readLocalConnectorFile(remoteRoot);
+  // The one `return null` this replaces is why every remote connector on this box was bridged: an
+  // operator could write an endpoint into their own connectors.json and the host would drop it.
+  assert.deepEqual(parsed.docs, { type: "http", url: "https://docs.mcp.cloudflare.com/mcp" });
+  assert.equal(connectors.isRemoteLocalServer(parsed.docs), true);
+  assert.equal(connectors.isRemoteLocalServer(parsed.bridged), false);
+  assert.deepEqual(connectors.localRemoteConnectorNames(remoteRoot), ["docs"]);
+});
+
+test("MARKET-6: a remote header's key is substituted at push time and is in no file", () => {
+  const probe = `PROBE-BEARER-${Math.random().toString(36).slice(2, 10)}`;
+  connectors.writeLocalConnectorEntry(remoteRoot, "acme", {
+    type: "http",
+    url: "https://mcp.acme.example/mcp",
+    headers: { Authorization: "Bearer ${ACME_TOKEN}" },
+  });
+  assert.equal(secrets.writeConnectorEnvSecret(remoteRoot, "acme", "ACME_TOKEN", probe), true);
+
+  // connectors.json holds the NAME of the field. That is the whole custody claim, so read the
+  // bytes rather than the parse.
+  const file = readFileSync(path.join(remoteRoot, "connectors.json"), "utf8");
+  assert.ok(file.includes("${ACME_TOKEN}"), file);
+  assert.ok(!file.includes(probe), "the stored value reached connectors.json");
+
+  const local = connectors.readLocalConnectorFile(remoteRoot);
+  const merged = connectors.mergeLocalConnectors(null, local, {
+    ids: connectors.assignLocalConnectorIds(remoteRoot, Object.keys(local)),
+    secrets: secrets.readConnectorEnvSecrets(remoteRoot),
+  });
+  const row = merged.servers.find((server) => server.name === "acme");
+  // The literal appears exactly once, in the config the host pushes over the control plane, and
+  // nowhere in an `args` array -- which is where the bridged shape put it, in plain sight of
+  // `ps -eo args` inside the box.
+  assert.equal(row.config.headers.Authorization, `Bearer ${probe}`);
+  assert.equal(row.config.args, undefined);
+  assert.equal(row.config.command, undefined);
+
+  // A placeholder with nothing stored is left EXACTLY as written. An empty Authorization header
+  // reads to the far end as a malformed request and comes back as some vendor's own 400; the
+  // untouched placeholder comes back as a 401, which is the answer that says "it needs its key".
+  connectors.writeLocalConnectorEntry(remoteRoot, "unfilled", {
+    type: "http", url: "https://mcp.acme.example/mcp", headers: { Authorization: "Bearer ${NOT_STORED}" },
+  });
+  const second = connectors.readLocalConnectorFile(remoteRoot);
+  const untouched = connectors.mergeLocalConnectors(null, second, {
+    ids: connectors.assignLocalConnectorIds(remoteRoot, Object.keys(second)),
+    secrets: secrets.readConnectorEnvSecrets(remoteRoot),
+  }).servers.find((server) => server.name === "unfilled");
+  assert.equal(untouched.config.headers.Authorization, "Bearer ${NOT_STORED}");
+});
+
+test("MARKET-6: a remote entry's placeholder is a credential field the card can offer", () => {
+  // CONNECT-4 recognises a credential by an EMPTY env value, which a remote entry has no room for.
+  // The placeholder says the same thing in the same place: the operator named the field and left
+  // the value out. Without this the masked box would appear with no field behind it.
+  assert.deepEqual(secrets.listConnectorCredentialFields(remoteRoot, "unfilled"), ["NOT_STORED"]);
+  assert.deepEqual(secrets.listConnectorCredentialFields(remoteRoot, "acme"), ["ACME_TOKEN"]);
+});
+
+test("MARKET-6: the writer's validation table refuses what it must, at every door", () => {
+  const refusal = (name, entry) => connectors.localConnectorEntryRefusal(name, entry);
+  const remote = (url, headers) => ({ type: "http", url, ...(headers === undefined ? {} : { headers }) });
+
+  // Loopback and link-local: inside a box 127.0.0.1 is the exec daemon on 1337 and 1338 and the
+  // host's own gateway on 1340, so an entry pointed there with a header is a credentialled request
+  // into the control plane. This is the load-bearing one.
+  for (const url of [
+    "http://127.0.0.1:1340/api", "https://localhost/mcp", "http://[::1]/mcp",
+    "http://169.254.169.254/latest/meta-data", "http://0.0.0.0:1337/",
+  ]) {
+    assert.match(refusal("probe", remote(url)) ?? "", /points back at the box itself/, url);
+  }
+
+  // Plain http off the private network would put the key on the wire in the clear. A server on the
+  // operator's own LAN is a real thing to connect to and stays allowed.
+  assert.match(refusal("probe", remote("http://mcp.example.com/mcp")) ?? "", /plain http/);
+  assert.equal(refusal("probe", remote("http://10.1.2.3:8080/mcp")), null);
+  assert.equal(refusal("probe", remote("https://mcp.example.com/mcp")), null);
+
+  // A URL is drawn on the page, written to connectors.json in the clear and in every listing, so
+  // it is not a place a credential can live. `userinfo` was already refused; the query string was
+  // not, and that is where every "just append ?api_key=" server puts it.
+  assert.match(refusal("probe", remote("https://u:p@mcp.example.com/mcp")) ?? "", /Take the sign-in out/);
+  assert.match(refusal("probe", remote("https://mcp.example.com/mcp?api_key=sk-live-123")) ?? "", /Take "api_key" out/);
+  assert.match(refusal("probe", remote("https://mcp.example.com/mcp?token=abc")) ?? "", /Take "token" out/);
+  // A placeholder in the query is a named field, not a key, so it is allowed through.
+  assert.equal(refusal("probe", remote("https://mcp.example.com/mcp?api_key=${ACME_TOKEN}")), null);
+
+  // A literal in an auth header undoes the whole custody argument at the easiest door to walk
+  // through. A header that carries no key is left alone, because vendors really do ask for them.
+  assert.match(refusal("probe", remote("https://mcp.example.com/mcp", { Authorization: "Bearer sk-live-1" })) ?? "", /masked box/);
+  assert.equal(refusal("probe", remote("https://mcp.example.com/mcp", { "x-mcp-servers": "acme" })), null);
+  assert.equal(refusal("probe", remote("https://mcp.example.com/mcp", { Authorization: "Bearer ${ACME_TOKEN}" })), null);
+
+  // Not a web address at all.
+  assert.match(refusal("probe", remote("file:///etc/passwd")) ?? "", /has to start with https/);
+  assert.match(refusal("probe", remote("not a url")) ?? "", /is not a web address/);
+
+  // The reserved name, made in ONE place now. It was made in four and enforced in three.
+  assert.match(refusal("shell", { command: "npx" }) ?? "", /reserved/);
+  // Prototype keys: a plain object's membership test answers yes for these, which once routed a
+  // submitted secret at a connector that does not exist.
+  for (const name of ["__proto__", "constructor", "prototype"]) {
+    assert.match(refusal(name, { command: "npx" }) ?? "", /reserved name/, name);
+  }
+  assert.match(refusal("a/b", { command: "npx" }) ?? "", /slash/);
+  assert.match(refusal("  ", { command: "npx" }) ?? "", /needs a name/);
+
+  // A process-control variable is not a credential; setting one runs code rather than carrying a
+  // key, and a connector runs as root in the box at every reload.
+  assert.match(refusal("probe", { command: "npx", env: { LD_PRELOAD: "" } }) ?? "", /run code/);
+  assert.match(refusal("probe", { command: "npx", env: { PATH: "" } }) ?? "", /run code/);
+  assert.equal(refusal("probe", { command: "npx", env: { ACME_TOKEN: "" } }), null);
+});
+
+test("MARKET-6: the one writer refuses rather than writing, so no door can skip the table", () => {
+  const before = readFileSync(path.join(remoteRoot, "connectors.json"), "utf8");
+  assert.throws(
+    () => connectors.writeLocalConnectorEntry(remoteRoot, "leak", {
+      type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer sk-live-2" },
+    }),
+    /masked box/,
+  );
+  assert.throws(() => connectors.writeLocalConnectorEntry(remoteRoot, "shell", { command: "npx" }), /reserved/);
+  assert.equal(readFileSync(path.join(remoteRoot, "connectors.json"), "utf8"), before, "a refused write changed the file");
+});
+
+test("CONNECT-11: a key outlives its entry and can still be found and cleared by name", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "connector-plane-orphan-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, "connectors.json"), JSON.stringify({ mcpServers: {} }), "utf8");
+  const probe = `PROBE-ORPHAN-${Math.random().toString(36).slice(2, 10)}`;
+  // The entry existed when the value was stored; the uninstall took the entry and left the value.
+  // Reproduced twice on the local box: every listing began at the entry, so nothing on the box
+  // could name this key again.
+  writeFileSync(path.join(dir, "connectors.json"), JSON.stringify({ mcpServers: { gone: { command: "npx" } } }), "utf8");
+  assert.equal(secrets.writeConnectorEnvSecret(dir, "gone", "GONE_TOKEN", probe), true);
+  assert.equal(connectors.removeLocalConnectorEntry(dir, "gone"), true);
+
+  assert.deepEqual(connectors.readLocalConnectorFile(dir), {});
+  assert.deepEqual(secrets.listConnectorSecretServers(dir), ["gone"]);
+  assert.deepEqual(secrets.listConnectorEnvSecretFields(dir, "gone"), ["GONE_TOKEN"]);
+  assert.equal(secrets.deleteConnectorEnvSecret(dir, "gone", "GONE_TOKEN"), true);
+  assert.deepEqual(secrets.listConnectorSecretServers(dir), []);
+});
+
+test("CONNECT-11: the orphan listing keeps the prototype-key guard it was bought with", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "connector-plane-proto-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, "connectors.json"), JSON.stringify({ mcpServers: {} }), "utf8");
+  // Nothing was stored, so nothing is listed -- in particular not "constructor", which a plain
+  // truthiness membership test would have answered yes for.
+  assert.deepEqual(secrets.listConnectorSecretServers(dir), []);
+  assert.deepEqual(secrets.listConnectorEnvSecretFields(dir, "constructor"), []);
+  assert.deepEqual(secrets.listConnectorCredentialFields(dir, "toString"), []);
+});

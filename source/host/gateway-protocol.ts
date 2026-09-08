@@ -147,6 +147,24 @@ export const SAND_GATEWAY_COMMANDS = {
   listConnectorSecretFields: (api: GatewayApi, body: string) => api.listConnectorSecretFields(parseCommandArgs(body)),
   setConnectorSecret: (api: GatewayApi, body: string) => api.setConnectorSecret(parseCommandArgs(body)),
   deleteConnectorSecret: (api: GatewayApi, body: string) => api.deleteConnectorSecret(parseCommandArgs(body)),
+  // MARKET-6. The one writer, reached by name. Adding a connector had two doors before this and
+  // they disagreed: the relay read connectors.json out of the box over `docker exec`, edited the
+  // whole map and wrote it back, while the host had its own single-entry write that only the
+  // marketplace install ever called. Read-modify-write of a customer's credential file from
+  // outside the box is not a mechanism worth keeping, and it needed a docker socket the relay does
+  // not always have. These five are the doors now, and every one of them lands on the same write.
+  addLocalConnector: (api: GatewayApi, body: string) => api.addLocalConnector(parseCommandArgs(body)),
+  removeLocalConnector: (api: GatewayApi, body: string) => api.removeLocalConnector(parseCommandArgs(body)),
+  // CONNECT-11. Keys the store still holds for connectors connectors.json no longer names. Nothing
+  // could see these before: every listing began at the entry, so an uninstall left a credential
+  // behind that no surface would ever mention again.
+  listConnectorSecretOrphans: (api: GatewayApi) => api.listConnectorSecretOrphans(),
+  // MARKET-5. One typed value, one write, fanned out to every consumer the plugin declares. The
+  // TinyFish page drew two credential forms for one key, each warning that the other's value did
+  // not reach it; this is the command that makes it one box and one sentence.
+  setPluginCredential: (api: GatewayApi, body: string) => api.setPluginCredential(parseCommandArgs(body)),
+  // One connector's live condition and its tool list, in the words the person who added it uses.
+  probeConnector: (api: GatewayApi, body: string) => api.probeConnector(parseCommandArgs(body)),
   // CONNECT-5. Shell tools: a CLI the agent runs from its own shell with a credential in the
   // environment. CodeRabbit ships no MCP server at all, so none of the connector commands above
   // can carry its key; these are the same shape one layer down.

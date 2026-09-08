@@ -167,7 +167,10 @@ export function createMcpToolsDiscovery(
   async function ensureBoxServersPushed(): Promise<void> {
     const boxMcpExec = boxMcpExecSlot;
     if (boxMcpExec == null) return;
-    const stdioConfigs = await core.definitionSource.getStdioServerConfigs();
+    // MARKET-6. Everything the BOX is responsible for: the programs it spawns, and the remote
+    // endpoints of this box's own that it connects to itself. The daemon takes both shapes in
+    // one LoadMcpServers call, which is what makes a native remote possible at all.
+    const stdioConfigs = await core.definitionSource.getBoxServerConfigs();
     const configJson = JSON.stringify({ mcpServers: stdioConfigs });
     if (configJson === lastPushedBoxConfigJson) return;
     if (Object.keys(stdioConfigs).length === 0 && !hasEverPushedBoxConfig)
@@ -207,16 +210,16 @@ export function createMcpToolsDiscovery(
   }
 
   async function httpServerNamesForBackend(): Promise<string[]> {
-    const userServers = await core.definitionSource.getUserServerConfigs();
-    return Object.entries(userServers)
-      .filter(([, config]: [string, any]) => "url" in config)
-      .map(([name]) => name);
+    // MARKET-6. A remote connector of this box's own is NOT the backend's. Dispatching one there
+    // would hand it to Cursor's Dashboard RPC, which answers nothing on any Titanium Bot box, and
+    // the operator would watch a working endpoint report no tools forever.
+    return core.definitionSource.getBackendHttpServerNames();
   }
 
   async function stdioServerNamesForBox(): Promise<string[]> {
     return boxMcpExecSlot == null
       ? []
-      : Object.keys(await core.definitionSource.getStdioServerConfigs());
+      : Object.keys(await core.definitionSource.getBoxServerConfigs());
   }
 
   async function discoverHttpTools(
@@ -401,6 +404,10 @@ export function createMcpToolsDiscovery(
             (slot: any) => slot.serverIdentifier === providerIdentifier,
           ),
         );
+      // MARKET-6. Asked FIRST by executeToolRaw, so a local remote answering yes here would send
+      // every one of its tool calls to the dead backend instead of to the box that is connected
+      // to it. The box's own list is the authority, echoed row or not.
+      if (await isBoxStdioProvider(providerIdentifier)) return false;
       if (echoedRow != null) return "url" in echoedRow.config;
       return (
         (await core.definitionSource.getServerUrlForIdentifier(
@@ -418,7 +425,7 @@ export function createMcpToolsDiscovery(
     try {
       return (
         providerIdentifier in
-        (await core.definitionSource.getStdioServerConfigs())
+        (await core.definitionSource.getBoxServerConfigs())
       );
     } catch {
       return false;

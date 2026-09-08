@@ -4,11 +4,17 @@ import { createContext } from "../packages/context/core.js";
 import { shellExecutorResource } from "../packages/agent-exec/shell.js";
 import { buildHostShellArgs } from "./box/box-shell-command.js";
 import { getSandRootDir } from "./host-paths.js";
-import { isConnectorEnvFieldName } from "./extensions/mcp/connector-secrets.js";
+import { isConnectorEnvFieldName, readConnectorEnvSecrets } from "./extensions/mcp/connector-secrets.js";
+import {
+  PROXY_MCP_URL_FIELD,
+  catalogForBox,
+  pluginIncludedWithPlan,
+} from "./extensions/mcp/marketplace-plugins.js";
 import {
   findMarketplaceBot,
   findMarketplacePlugin,
   marketplaceCatalogWireView,
+  marketplacePluginWireView,
 } from "../shared/marketplace/catalog.js";
 import {
   SHELL_TOOLS,
@@ -71,6 +77,20 @@ export const DISABLE_SEND_ACCEPT_RETURN_ENV = "SAND_DISABLE_SEND_ACCEPT_RETURN";
 
 /** The awaiting-response tab the job bus owns; `box`, `auto-review` and `turn-question` are the others. */
 export const JOB_BUS_AWAITING_TAB_ID = "job-bus";
+
+/**
+ * PROXY-7's shape. Where this box's copy of a service is mounted on the plan proxy, or null --
+ * which is null on every box today, because the leg that would write it is not built. Read on every
+ * call rather than cached, for the same reason PROXY-1 reads the TinyFish endpoints on every call:
+ * a box moved onto the plan takes effect on the next read, not the next restart.
+ */
+const readBoxProxyMcpUrl = (server: string): string | null => {
+  try {
+    return readConnectorEnvSecrets(getSandRootDir())[server]?.[PROXY_MCP_URL_FIELD] ?? null;
+  } catch {
+    return null;
+  }
+};
 
 const SAND_AGENT_PURPOSES = new Set(["disk-saver", "plugin-auth"]);
 const TEMPLATE_ID_PATTERN = /^[a-z0-9-]{1,64}$/;
@@ -1130,19 +1150,66 @@ export function createHostGatewayApi(
         field: args?.field
       }),
 
+    // ------------------------------------------------- MARKET-6, the one writer of connectors.json
+    // A connector entry is arbitrary code this box runs as root at every reload, outside any turn,
+    // with nobody watching. So there is one write, it holds the whole validation table, and these
+    // are the doors to it: the console's Add, the console's Add your own, the agent's AddMcpServer
+    // and the marketplace install. A caller never sends a credential VALUE through here -- a stdio
+    // entry sends env NAMES and a remote entry sends `${FIELD}` in its header, and the masked card
+    // puts the value in the 0600 store, which is what keeps a key out of the transcript.
+    addLocalConnector: (args: any) =>
+      method(deps.extensions.api("mcp").management, "addLocalConnector")({
+        name: args?.name ?? args?.server,
+        ...(args?.url === undefined ? {} : { url: args.url }),
+        ...(args?.type === undefined ? {} : { type: args.type }),
+        ...(args?.headers === undefined ? {} : { headers: args.headers }),
+        ...(args?.command === undefined ? {} : { command: args.command }),
+        ...(args?.args === undefined ? {} : { args: args.args }),
+        ...(args?.env === undefined ? {} : { env: args.env }),
+        ...(args?.replace === undefined ? {} : { replace: args.replace === true })
+      }),
+    removeLocalConnector: (args: any) =>
+      method(deps.extensions.api("mcp").management, "removeLocalConnector")({
+        server: args?.server ?? args?.serverId ?? args?.name,
+        clearSecrets: args?.clearSecrets === true
+      }),
+    listConnectorSecretOrphans: () =>
+      method(deps.extensions.api("mcp").management, "listConnectorSecretOrphans")(),
+    setPluginCredential: (args: any) =>
+      method(deps.extensions.api("mcp").management, "setPluginCredential")({
+        pluginId: args?.pluginId ?? args?.id,
+        field: args?.field,
+        value: args?.value
+      }),
+    probeConnector: (args: any) =>
+      method(deps.extensions.api("mcp").management, "probeConnector")({
+        server: args?.server ?? args?.serverId ?? args?.name,
+        stopIfStalled: args?.stopIfStalled === true
+      }),
+
     // ------------------------------------------------------------------ MARKET-1, the catalog
     // The Marketplace catalog is bundled into this host, so these two are pure reads with no box,
     // no network and no account behind them: the console draws its Plugins and Bots tabs from
     // exactly the data the agent's SearchPlugins resolves against. Nothing here is per-install
     // state -- "installed", "needs auth" and "ready" come from the connector commands above.
-    listMarketplace: () => marketplaceCatalogWireView(),
+    // MARKET-6 / PROXY-7's shape: not the bundled catalog verbatim any more, but the catalog as
+    // THIS box sees it, in the vocabulary the console already reads. The wire view carries the
+    // pre-MARKET-6 `kind`, `install` and `credentialHints` derived from the new row shape, so a
+    // console on either shape reads the same answer; the per-box pass then says "included" on a
+    // row whose plan carries the service and strips its credentials, so the page draws no key box
+    // for a key nobody has to mint. On every box with no proxy, which is every box today, the two
+    // together are the bundled catalog character for character.
+    listMarketplace: () => catalogForBox(marketplaceCatalogWireView(), readBoxProxyMcpUrl),
     getMarketplaceItem: (args: any) => {
       const kind = typeof args?.kind === "string" ? args.kind : "";
       const id = args?.id;
       if (kind === "plugin") {
         const plugin = findMarketplacePlugin(id);
         if (plugin == null) throw new Error(`no marketplace plugin "${String(id)}"`);
-        return plugin;
+        const row = marketplacePluginWireView(plugin);
+        return pluginIncludedWithPlan(row, readBoxProxyMcpUrl)
+          ? { ...row, includedWithPlan: true, credentialHints: {}, credentials: [] }
+          : row;
       }
       if (kind === "bot") {
         const bot = findMarketplaceBot(id);

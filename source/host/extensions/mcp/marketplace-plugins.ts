@@ -117,6 +117,10 @@ export function marketplacePluginFields(
   reader: MarketplaceInstallReader,
   plugin: MarketplacePlugin,
 ): MarketplacePluginField[] {
+  // PROXY-7's shape. A plugin the plan carries has no field for the operator: the key is the box's
+  // virtual one and the control plane wrote it. Answering nothing here is what stops the agent's
+  // GetPlugin from telling the model to go and ask for a key that does not exist.
+  if ((plugin as { includedWithPlan?: boolean }).includedWithPlan === true) return [];
   const stored = storedFieldsFor(reader, plugin);
   return marketplaceCredentialFields(plugin).map((key) => ({
     key,
@@ -273,6 +277,96 @@ export interface MarketplaceUninstallOutcome {
   readonly reason?: string;
   /** Credential names still in the store afterwards. The uninstall does not clear them. */
   readonly storedFields: readonly string[];
+}
+
+/**
+ * MARKET-5. Where ONE typed value has to go.
+ *
+ * The complaint was literal: the TinyFish page drew two credential forms for one provider, each
+ * warning that the other's value did not reach it. They are genuinely two different processes --
+ * an MCP server the box spawns, and a CLI the agent runs in its shell -- but they are two
+ * CONSUMERS of one credential, not two credentials, and the person minting the key does it once.
+ *
+ * A plugin declares its consumers (the catalog's `credentials` array); a plugin that declares
+ * none gets the honest default read off the shape it already has -- a connector plugin's field
+ * goes to its connector, a shell tool's to the shell. So one write fans out, and the page draws
+ * one masked box with one line under it saying where the value went.
+ */
+export type PluginCredentialConsumer =
+  | { readonly kind: "connector"; readonly connector: string; readonly env: string }
+  | { readonly kind: "shell"; readonly env: string };
+
+interface DeclaredCredential {
+  readonly field: string;
+  readonly consumers?: readonly { readonly kind?: string; readonly env?: string; readonly name?: string }[];
+}
+
+function declaredCredentials(plugin: MarketplacePlugin): readonly DeclaredCredential[] {
+  const declared = (plugin as { credentials?: unknown }).credentials;
+  return Array.isArray(declared) ? declared as readonly DeclaredCredential[] : [];
+}
+
+export function pluginCredentialConsumers(
+  plugin: MarketplacePlugin,
+  field: string,
+): PluginCredentialConsumer[] {
+  const declaration = declaredCredentials(plugin).find((entry) => entry.field === field);
+  const connector = plugin.connectorName;
+  if (declaration != null && declaration.consumers != null) {
+    return declaration.consumers.flatMap((consumer): PluginCredentialConsumer[] => {
+      const env = typeof consumer.env === "string" && consumer.env.length > 0 ? consumer.env : field;
+      // A header or url consumer needs no separate destination: the placeholder in the entry
+      // already names the field, and `asAccountServer` substitutes from the connector's own
+      // section of the store at push time. So it resolves to the connector consumer.
+      if (consumer.kind === "shell") return [{ kind: "shell", env }];
+      return connector == null ? [] : [{ kind: "connector", connector, env }];
+    });
+  }
+  if (plugin.kind === "shell-tool") return [{ kind: "shell", env: field }];
+  return connector == null ? [] : [{ kind: "connector", connector, env: field }];
+}
+
+/**
+ * PROXY-7's SHAPE, and only its shape. The leg itself -- routing a plugin's traffic through the
+ * plan proxy -- is not built here and is a named non-goal of this wave.
+ *
+ * What is built is the one per-box fact the page needs: when the control plane has pointed this
+ * box's copy of a service at the proxy, the operator has nothing to mint and the page must not ask
+ * for a key it will never use. The fact is read out of the SAME 0600 store PROXY-1 already puts
+ * this box's proxy endpoints in, under the section named by the plugin's `proxyMcpServer`, so one
+ * control-plane file write moves the credential, the REST endpoints and this together.
+ *
+ * A URL is not a secret and PROXY-1 says so, but nothing here returns one anyway: the reader is
+ * asked a question and answers a boolean.
+ */
+export const PROXY_MCP_URL_FIELD = "PROXY_MCP_URL";
+
+export type ProxyMcpUrlReader = (server: string) => string | null;
+
+export function pluginIncludedWithPlan(plugin: MarketplacePlugin, readProxyMcpUrl: ProxyMcpUrlReader): boolean {
+  const server = plugin.proxyMcpServer;
+  if (server == null || server.length === 0) return false;
+  const url = readProxyMcpUrl(server);
+  return typeof url === "string" && url.length > 0;
+}
+
+/**
+ * The catalog as THIS box sees it. Identical to the bundled one on every box with no proxy, which
+ * is every box today: `includedWithPlan` is false and the hints are the catalog's own, character
+ * for character. On a box whose plan carries the service, the row says so and carries no credential
+ * hint at all -- the page draws "Included with your plan" and no masked box, because there is
+ * nothing for the person to type.
+ */
+export function catalogForBox<T extends { readonly plugins: readonly MarketplacePlugin[] }>(
+  catalog: T,
+  readProxyMcpUrl: ProxyMcpUrlReader,
+): T {
+  const plugins = catalog.plugins.map((plugin) => pluginIncludedWithPlan(plugin, readProxyMcpUrl)
+    ? { ...plugin, includedWithPlan: true, credentialHints: {}, credentials: [] }
+    : plugin);
+  return plugins.every((plugin, index) => plugin === catalog.plugins[index])
+    ? catalog
+    : { ...catalog, plugins };
 }
 
 /** Removes the entry from connectors.json. The 0600 secret store is deliberately left alone. */
