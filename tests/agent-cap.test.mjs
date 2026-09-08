@@ -1,4 +1,4 @@
-// AGENTS-CAP-1. A box holds Titan plus twelve.
+// AGENTS-CAP-1. A box holds Titan plus ninety-nine (it was twelve until 2026-09-08).
 //
 // Three things had to be true and only the first was. (1) The ceiling was 50, declared twice in
 // two files that were not wired to each other. (2) Groups were counted, so a box with rooms in it
@@ -90,16 +90,16 @@ test("the store the gateway holds can count this box's bots", async () => {
   assert.equal(await store.countCapAgents(), 8, "the room on this box is not one of the bots");
 });
 
-test("the ceiling is Titan plus twelve", () => {
-  assert.equal(agents.SAND_DEFAULT_MAX_AGENTS, 13);
+test("the ceiling is Titan plus ninety-nine", () => {
+  assert.equal(agents.SAND_DEFAULT_MAX_AGENTS, 100);
 });
 
 test("the refusal is plain words and names what to do about it", () => {
   assert.equal(
-    agents.sandAgentLimitMessage(13),
-    "This workspace holds Titan and 12 more bots. Remove one to add another.",
+    agents.sandAgentLimitMessage(100),
+    "This workspace holds Titan and 99 more bots. Remove one to add another.",
   );
-  assert.equal(new agents.SandAgentLimitError(13).message, agents.SAND_AGENT_LIMIT_MESSAGE);
+  assert.equal(new agents.SandAgentLimitError(100).message, agents.SAND_AGENT_LIMIT_MESSAGE);
   // No em dash, no jargon, no "cap" or "limit exceeded".
   assert.doesNotMatch(agents.SAND_AGENT_LIMIT_MESSAGE, /[—–]|limit|cap|quota|maximum/i);
 });
@@ -122,7 +122,7 @@ test("a limit error is recognised by the callers that exist to swallow it", () =
 
 test("SAND_MAX_AGENTS moves the ceiling on a live box, without a recreate", () => {
   useSettingsRoot();
-  assert.equal(boxSetting.resolveSandMaxAgents(), 13, "no override, the default");
+  assert.equal(boxSetting.resolveSandMaxAgents(), 100, "no override, the default");
   writeHostSettings({ SAND_MAX_AGENTS: "20" });
   assert.equal(boxSetting.resolveSandMaxAgents(), 20);
   writeHostSettings({ settings: { SAND_MAX_AGENTS: "4" } });
@@ -133,7 +133,7 @@ test("a nonsense ceiling is ignored rather than locking the box out", () => {
   useSettingsRoot();
   for (const bad of ["0", "-3", "abc", "13.5", ""]) {
     writeHostSettings({ SAND_MAX_AGENTS: bad, filler: bad });
-    assert.equal(boxSetting.resolveSandMaxAgents(), 13, `"${bad}" is not a ceiling`);
+    assert.equal(boxSetting.resolveSandMaxAgents(), 100, `"${bad}" is not a ceiling`);
   }
 });
 
@@ -148,17 +148,17 @@ test("the environment still wins over the file", () => {
   }
 });
 
-test("a fake roster of thirteen bots refuses the fourteenth", async () => {
+test("a fake roster of a hundred bots refuses the next one", async () => {
   useSettingsRoot();
   writeHostSettings({ note: "no override here" });
-  const store = storeFor(rosterRoot(13));
-  assert.equal(await store.countCapAgents(), 13);
+  const store = storeFor(rosterRoot(100));
+  assert.equal(await store.countCapAgents(), 100);
   assert.equal(await store.isAgentCapReached(), true);
   await assert.rejects(
     () => store.mintAgent(async () => "should never run"),
     (error) => {
       assert.equal(agents.isSandAgentLimitError(error), true);
-      assert.equal(error.message, "This workspace holds Titan and 12 more bots. Remove one to add another.");
+      assert.equal(error.message, "This workspace holds Titan and 99 more bots. Remove one to add another.");
       return true;
     },
   );
@@ -183,10 +183,10 @@ test("groups do not count against it", async () => {
   assert.equal(await store.isAgentCapReached(), false);
 });
 
-test("a group is minted even when the box already holds its thirteen bots", async () => {
+test("a group is minted even when the box already holds its hundred bots", async () => {
   useSettingsRoot();
   writeHostSettings({ note: "default ceiling" });
-  const store = storeFor(rosterRoot(13));
+  const store = storeFor(rosterRoot(100));
   assert.equal(await store.isAgentCapReached(), true);
   assert.equal(
     await store.mintAgent(async () => "room", { isExemptFromAgentCap: true }),

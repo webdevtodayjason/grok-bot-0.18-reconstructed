@@ -53,7 +53,9 @@ export function isSandDefaultAgentName(name: string): boolean {
 export const GROUP_MAX_MEMBERS = 6;
 
 /**
- * AGENTS-CAP-1. The crew is Titan plus twelve, so a box holds thirteen bots. An operator can move
+ * AGENTS-CAP-1. A box holds a hundred bots, Titan and ninety-nine more (Jason, 2026-09-08 17:59:
+ * "I need to open up the number of agents that we can have. Can you make it 100?"; it was
+ * thirteen, the size of the mascot crew, which is a drawing decision and not a ceiling). An operator can move
  * the ceiling with SAND_MAX_AGENTS (sand-host-settings.json, or the container env); the host
  * reads it through `resolveSandMaxAgents` and hands the resolved number to the error below, so
  * the refusal always names the number actually in force.
@@ -61,7 +63,7 @@ export const GROUP_MAX_MEMBERS = 6;
  * Groups are not bots and do not count: `SandSessionMaterialization.countCapAgents` skips any
  * agent directory carrying a group config, and a group is minted exempt from the check.
  */
-export const SAND_DEFAULT_MAX_AGENTS = 13;
+export const SAND_DEFAULT_MAX_AGENTS = 100;
 export const SAND_MAX_AGENTS_SETTING = "SAND_MAX_AGENTS";
 
 /** A person reads this, so it is plain words and it names the thing they can do about it. */

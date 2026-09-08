@@ -102,7 +102,7 @@ test("the bundle carries the four real managed skills, frontmatter and all", () 
     assert.match(onboarding.body, new RegExp(`\`${field}\``),
       `the recipe has to name the ${field} field it saves`);
   }
-  assert.match(onboarding.body, /twelve more bots/,
+  assert.match(onboarding.body, /ninety-nine more bots/,
     "the crew size the person is told about is the box's own ceiling");
   assert.ok(!onboarding.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
 });
