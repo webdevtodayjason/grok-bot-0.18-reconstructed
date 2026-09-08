@@ -415,6 +415,68 @@ export function createApp(options = {}) {
     return pending;
   }
 
+  /**
+   * PROVIDERS-1. Put the vision fallback map back if it went missing, once at boot.
+   *
+   * WHY THIS EXISTS AND WHY IT IS AT BOOT. Until this wave the map that sends a screenshot-carrying
+   * turn from plan-zai to plan-zai-vision lived in router_settings.fallbacks in the proxy's config
+   * file. This wave moves it into the proxy's database, and the second of the wave's two restarts
+   * takes it OUT of the file. Between those two facts there is exactly one window where a fallback
+   * can be missing: the file no longer carries it and the database's copy is not there either.
+   * PROXY-10 is what that costs -- a fleet-wide screenshot outage that read as the model being
+   * broken -- so it is worth one read at boot rather than a line in a runbook.
+   *
+   * IT RECONCILES, IT DOES NOT REWRITE. The wanted target is each deployment's own
+   * tb_vision_fallback, which the Providers panel wrote in the same action that wrote the fallback
+   * row, so this is putting back what the operator already said rather than a second opinion about
+   * it. An alias that already lists its target is left alone, and where one has to be written the
+   * entries already there are KEPT behind it, because POST /fallback overwrites the whole list and
+   * an operator who added a second route should not lose it to a restart.
+   *
+   * IT NEVER WRITES A TARGET THE PROXY DOES NOT SERVE. POST /fallback validates that the target
+   * exists and answers 400 with the available list, so a target that is not being served is
+   * reported and skipped rather than becoming a failed write on every boot.
+   *
+   * Nothing here throws and nothing here blocks the listen: a proxy that is down leaves the map as
+   * it is and says so on stdout, which is the same answer as before this function existed.
+   */
+  async function reconcileFallbacks() {
+    if (proxy == null || proxy.configured !== true) {
+      return { ok: false, why: "this control plane has no proxy configured", restored: [], kept: [], skipped: [] };
+    }
+    const listed = await proxy.listModels();
+    if (!listed.ok) {
+      return { ok: false, why: `the proxy could not be asked what it serves (${listed.why})`, restored: [], kept: [], skipped: [] };
+    }
+    const rows = Array.isArray(listed.rows) ? listed.rows : [];
+    const served = new Set(rows.map((row) => String(row?.alias ?? "")).filter((alias) => alias.length > 0));
+    // One alias can be a pool of deployments. They carry the same customer-facing facts, so the
+    // first one that names a target answers for the alias and the rest are the same row again.
+    const wanted = new Map();
+    for (const row of rows) {
+      const alias = String(row?.alias ?? "");
+      const target = String(row?.visionFallback ?? "");
+      if (alias.length === 0 || target.length === 0 || wanted.has(alias)) continue;
+      wanted.set(alias, target);
+    }
+    const restored = [];
+    const kept = [];
+    const skipped = [];
+    for (const [alias, target] of wanted) {
+      if (!served.has(target)) {
+        skipped.push({ alias, target, why: `the proxy does not serve ${target}, so writing this would be refused` });
+        continue;
+      }
+      const current = await proxy.getFallback(alias);
+      if (!current.ok) { skipped.push({ alias, target, why: current.why }); continue; }
+      if (current.fallbacks.includes(target)) { kept.push({ alias, target }); continue; }
+      const written = await proxy.setFallback({ alias, fallbacks: [target, ...current.fallbacks] });
+      if (!written.ok) { skipped.push({ alias, target, why: written.why }); continue; }
+      restored.push({ alias, target, alongside: current.fallbacks });
+    }
+    return { ok: true, why: "", restored, kept, skipped };
+  }
+
   // The extra facts an adoption was given, read back out of the ledger step it wrote. An adopted
   // instance was not built here, so its directories are wherever the operator already had them and
   // there is nothing in the tenant row that would know.
@@ -1087,11 +1149,38 @@ export function createApp(options = {}) {
     }
   }
 
-  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers };
+  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks };
 }
 
 export function createHttpServer(app) {
   return http.createServer((request, response) => { void app.handle(request, response); });
+}
+
+/**
+ * The boot-time fallback reconcile, and what it says on the way past.
+ *
+ * Kept out of main() so the reconcile itself stays a plain function a test can call, and so a proxy
+ * that is down produces one sentence on stdout rather than an unhandled rejection during startup.
+ */
+async function reconcileFallbacksAtBoot(app) {
+  let answer;
+  try { answer = await app.reconcileFallbacks(); }
+  catch (error) {
+    answer = { ok: false, why: String(error?.message ?? error).split("\n")[0], restored: [], kept: [], skipped: [] };
+  }
+  if (!answer.ok) {
+    process.stdout.write(`vision fallbacks: not checked, ${answer.why}\n`);
+    return;
+  }
+  for (const row of answer.restored) {
+    process.stdout.write(`vision fallbacks: ${row.alias} had no route to ${row.target} and now has one\n`);
+  }
+  for (const row of answer.skipped) {
+    process.stdout.write(`vision fallbacks: ${row.alias} still has no route to ${row.target}, ${row.why}\n`);
+  }
+  if (answer.restored.length === 0 && answer.skipped.length === 0) {
+    process.stdout.write(`vision fallbacks: ${answer.kept.length} already in place, nothing written\n`);
+  }
 }
 
 async function main() {
@@ -1113,6 +1202,11 @@ async function main() {
   void app.refreshBoxPeers().catch(() => {});
   const peerTimer = setInterval(() => { void app.refreshBoxPeers().catch(() => {}); }, 60_000);
   peerTimer.unref?.();
+  // PROVIDERS-1. Once at boot, and never on a timer: the vision fallback map is the one thing the
+  // wave's second restart takes out of the config file, and a missing one is a fleet-wide
+  // screenshot outage rather than a slow page. It reads first and writes only what is missing, so
+  // on an ordinary boot it writes nothing and prints one line saying so.
+  void reconcileFallbacksAtBoot(app);
   const server = createHttpServer(app);
   server.listen(config.port, "0.0.0.0", () => {
     process.stdout.write(`control plane listening on ${config.port}, tenants under ${config.tenantRoot}, release ${config.releaseRoot}\n`);

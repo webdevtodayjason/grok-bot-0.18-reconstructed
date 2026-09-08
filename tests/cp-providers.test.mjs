@@ -22,7 +22,9 @@ import { rm } from "node:fs/promises";
 
 import { openStore } from "../cp/store.mjs";
 import { createAdminApi } from "../cp/admin.mjs";
-import { createProxyClient, includedModelRows, servedPlanModels } from "../cp/proxy.mjs";
+import { loadConfig } from "../cp/provision.mjs";
+import { createProxyClient, includedModelRows, servedPlanModels, TB } from "../cp/proxy.mjs";
+import { createApp } from "../cp/server.mjs";
 import { makeTempRoot } from "./cp-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
 
@@ -556,4 +558,103 @@ test("removing a plan model is refused while a box has run it", async () => {
     assert.equal(gone.status, 200, JSON.stringify(gone.body));
     assert.equal(proxy.deployments().some((row) => row.model_name === "plan-zai-vision"), false);
   });
+});
+
+// ---- the vision fallback map after a restart ---------------------------------------------------
+//
+// The wave's second restart takes router_settings.fallbacks OUT of the proxy's config file, and
+// from then on the only copy is the row the panel wrote into the proxy's database. There is exactly
+// one window in which a screenshot-carrying turn can lose its route, and PROXY-10 already measured
+// what that costs: every box in the fleet refusing an image with code 1210, which reads to a
+// customer as the model being broken rather than as a map with a hole in it.
+//
+// So the control plane checks the map once when it starts, against the deployments' own
+// tb_vision_fallback -- the same value the panel wrote in the same action that wrote the fallback
+// row, which is why this is putting back what the operator already said rather than a second
+// opinion about it.
+async function withServer(run, { models = [], fallbacks = {} } = {}) {
+  const root = await makeTempRoot("cp-fallback-");
+  const proxy = await startFakeProxy({ models });
+  const config = loadConfig({
+    CP_PORT: "0", CP_DATA_DIR: `${root}/data`, CP_TENANT_ROOT: `${root}/tenants`,
+    CP_RELEASE_ROOT: `${root}/release`, CP_SESSION_SECRET: "a".repeat(32),
+    CP_ADMIN_TOKEN: OPERATOR, CP_RELAY_TOKEN: "relay-token", CP_BASE_DOMAIN: "titanium.bot",
+    CP_PUBLIC_URL: "https://api.titanium.bot",
+    COOLIFY_URL: "", COOLIFY_API_KEY: "", COOLIFY_PROJECT_UUID: "p", COOLIFY_SERVER_UUID: "s",
+    COOLIFY_ENVIRONMENT_NAME: "production",
+    CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey,
+  });
+  const store = openStore({ dataDir: config.dataDir });
+  const app = createApp({ config, store, probeImpl: () => { throw new Error("there is no docker network in a test"); } });
+  const client = createProxyClient({ config });
+  for (const [alias, targets] of Object.entries(fallbacks)) await client.setFallback({ alias, fallbacks: targets });
+  try { await run({ app, proxy, client }); }
+  finally { store.close(); await proxy.close(); await rm(root, { recursive: true, force: true }); }
+}
+
+const zaiPair = (visionFallback = "plan-zai-vision") => ([
+  {
+    model_name: "plan-zai",
+    litellm_params: { model: "openai/glm-5.3" },
+    model_info: { id: "zai-1", [TB.visionFallback]: visionFallback },
+  },
+  {
+    model_name: "plan-zai-vision",
+    litellm_params: { model: "openai/glm-4.6v" },
+    model_info: { id: "zai-vision-1" },
+  },
+]);
+
+test("a control plane that starts with no fallback row writes the one its deployments name", async () => {
+  await withServer(async ({ app, proxy }) => {
+    assert.deepEqual(proxy.fallbacks(), {}, "the map started with something in it, so this proves nothing");
+
+    const first = await app.reconcileFallbacks();
+    assert.equal(first.ok, true, first.why);
+    assert.deepEqual(first.restored.map((row) => [row.alias, row.target]), [["plan-zai", "plan-zai-vision"]]);
+    assert.deepEqual(proxy.fallbacks(), { "plan-zai": ["plan-zai-vision"] });
+
+    // AND IT IS IDEMPOTENT, which is what makes it safe at boot: an ordinary restart reads, finds
+    // the row already there, and writes nothing at all.
+    const again = await app.reconcileFallbacks();
+    assert.deepEqual(again.restored, []);
+    assert.deepEqual(again.kept.map((row) => row.alias), ["plan-zai"]);
+  }, { models: zaiPair() });
+});
+
+test("reconciling keeps a route an operator added rather than overwriting it", async () => {
+  // POST /fallback replaces the whole list, so a reconcile that wrote only its own target would
+  // quietly undo a second route every time the control plane restarted.
+  await withServer(async ({ app, proxy }) => {
+    const answer = await app.reconcileFallbacks();
+    assert.equal(answer.ok, true, answer.why);
+    assert.deepEqual(proxy.fallbacks()["plan-zai"], ["plan-zai-vision", "plan-minimax"]);
+    assert.deepEqual(answer.restored[0].alongside, ["plan-minimax"]);
+  }, {
+    models: [...zaiPair(), { model_name: "plan-minimax", litellm_params: { model: "openai/MiniMax-M3" }, model_info: { id: "mm-1" } }],
+    fallbacks: { "plan-zai": ["plan-minimax"] },
+  });
+});
+
+test("a fallback target the proxy does not serve is reported, not written", async () => {
+  // The proxy validates the target and answers 400 with the list it does serve. Writing it anyway
+  // would put a failed call in every boot's log, which teaches whoever reads them to ignore it.
+  await withServer(async ({ app, proxy }) => {
+    const answer = await app.reconcileFallbacks();
+    assert.equal(answer.ok, true, answer.why);
+    assert.deepEqual(answer.restored, []);
+    assert.equal(answer.skipped.length, 1);
+    assert.equal(answer.skipped[0].target, "plan-zai-retired");
+    assert.match(answer.skipped[0].why, /does not serve plan-zai-retired/);
+    assert.deepEqual(proxy.fallbacks(), {});
+  }, { models: zaiPair("plan-zai-retired").slice(0, 1) });
+});
+
+test("a proxy that is down leaves the map alone and says why", async () => {
+  await withServer(async ({ app, proxy }) => {
+    await proxy.close();
+    const answer = await app.reconcileFallbacks();
+    assert.equal(answer.ok, false);
+    assert.match(answer.why, /could not be asked what it serves/);
+  }, { models: zaiPair() });
 });
