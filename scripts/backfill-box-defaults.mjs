@@ -20,7 +20,7 @@
 //   node scripts/backfill-box-defaults.mjs --dry-run     say what it would add, change nothing
 //   node scripts/backfill-box-defaults.mjs               add what is missing
 //   node scripts/backfill-box-defaults.mjs --root /data/titanbot --tenant demo
-import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { accessSync, chownSync, constants, existsSync, readdirSync, readFileSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -86,7 +86,18 @@ for (const tenant of tenants) {
     if (DRY) { say(`would add ${name}`); added += 1; continue; }
     writeFileSync(target, readFileSync(path.join(DEFAULTS, name), "utf8"), { mode: 0o600 });
     chmodSync(target, 0o600);
-    say(`added ${name} at 0600`);
+    // Match the directory's owner. This is normally run with sudo (the tenant data directories are
+    // mode 700 owned by the box's user), and a root-owned file in a tree the box's own user owns is
+    // a file the box may not be able to rewrite when the console next changes a switch.
+    let ownership = "";
+    try {
+      const dir = statSync(data);
+      chownSync(target, dir.uid, dir.gid);
+      ownership = `, uid ${dir.uid}`;
+    } catch {
+      ownership = ", owner unchanged";
+    }
+    say(`added ${name} at 0600${ownership}`);
     added += 1;
   }
 }
