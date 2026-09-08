@@ -33,20 +33,37 @@ const withControlPlane = {
 const rowsOn = (relay) => readLedgerFile(path.join(relay.dir, LEDGER_NAME));
 
 /**
- * The lockout row is appended after the 429 has already gone back on the wire, so reading the file
- * the instant the response lands is a race: it passed alone and failed about one run in three under
- * `npm test`, where a dozen suites share the machine. Poll for the row the case is about instead of
- * assuming it is there, and let the assertion below report the rows it did find when the wait runs
- * out, so a real regression still reads as a real regression.
+ * Every ledger row is appended AFTER its own response has gone back on the wire, so reading the
+ * ledger the instant a response lands is a race. Both cases below hit it: they passed when the file
+ * ran alone and failed under `npm test`, where a dozen suites share the machine. These two helpers
+ * wait for the row the case is actually about, up to a bounded time, and then hand back whatever
+ * arrived so the assertion still reports a real regression as a real regression rather than as a
+ * timeout.
  */
-const rowsOnceLocked = async (relay, timeoutMs = 5_000) => {
+const settleWait = async (read, done, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const rows = await rowsOn(relay);
-    if (rows.some((row) => row.outcome === "locked") || Date.now() >= deadline) return rows;
+    const value = await read();
+    if (done(value) || Date.now() >= deadline) return value;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 };
+
+const rowsOnceLocked = (relay) => settleWait(
+  () => rowsOn(relay),
+  (rows) => rows.some((row) => row.outcome === "locked"),
+);
+
+// The admin route's body, once its rows carry what the case is about. The 200 is asserted on every
+// poll, so a route that starts refusing fails here rather than after the wait.
+const waitForRows = (fetchBody, done) => settleWait(
+  async () => {
+    const response = await fetchBody();
+    assert.equal(response.status, 200);
+    return await response.json();
+  },
+  (body) => done(body.rows ?? []),
+);
 
 // Everything the relay wrote into its own directory, as one string. This is the "grep the data
 // directory for the password" check, done in process.
@@ -73,9 +90,15 @@ test("only CP_RELAY_TOKEN opens the ledger, and what it opens holds no password"
     await fetch(`${relay.base}/login`, form({ password: TRIED }));
     await fetch(`${relay.base}/login`, form({ password: RELAY_PASSWORD }));
 
-    const response = await read({ headers: { authorization: `Bearer ${RELAY_TOKEN}` } });
-    assert.equal(response.status, 200);
-    const body = await response.json();
+    // Both rows are appended after their /login response has already gone back on the wire, so
+    // reading the route once is a race: this case passed alone and failed under `npm test`, where a
+    // dozen suites share the machine. Wait for the two rows this case is about, and let the
+    // assertions below report what did arrive when the wait runs out.
+    const body = await waitForRows(
+      () => read({ headers: { authorization: `Bearer ${RELAY_TOKEN}` } }),
+      (rows) => rows.some((row) => row.outcome === "refused" && row.door === "instance")
+        && rows.some((row) => row.outcome === "ok"),
+    );
     assert.equal(body.source, "relay");
     assert.match(body.measuredAt, /^\d{4}-\d\d-\d\dT/, "every number carries when it was measured");
 
