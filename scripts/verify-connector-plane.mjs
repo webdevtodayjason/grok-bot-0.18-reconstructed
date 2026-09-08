@@ -647,14 +647,20 @@ async function runRemoteKeyArm(arm) {
   if (survivors.length > 0) fail(`the key survives the delete in: ${survivors}`);
   ok(`the key is gone from ${DATA}`);
 
+  // The box is put back exactly as it was found, which is not the same as "the entry is gone": this
+  // arm borrows a REAL connector name, and the local box carries an entry under that name already.
+  // Asserting the name had vanished passed only on a box that happened not to have one, and failed
+  // on the box the addendum asked us to fix. What has to be true is that the file is byte-identical
+  // and the probe's own address is no longer what the box is pointed at.
   await saveConnectorsThroughRelay(before.mcpServers ?? {});
   await call("refreshMcp", {});
-  if ((await call("listInstalledMcpServers")).some((server) => server.serverIdentifier === arm.server)) {
-    fail(`${arm.server} survived its removal from connectors.json`);
+  const restored = JSON.parse(await inBox(`cat ${DATA}/connectors.json`)).mcpServers ?? {};
+  if (JSON.stringify(restored[arm.server] ?? null) !== JSON.stringify((before.mcpServers ?? {})[arm.server] ?? null)) {
+    fail(`${arm.server} did not go back to the entry it had before this arm`);
   }
   await stopStub(stubPath);
   stubPath = null;
-  ok("the entry is out of connectors.json and the stub is stopped");
+  ok(`the entry is back to what it was before this arm${(before.mcpServers ?? {})[arm.server] == null ? " (absent)" : ""}, and the stub is stopped`);
 
   await assertFilesRestored(armSnapshot, secretsSnapshot);
   armSnapshot = null;
@@ -1076,7 +1082,11 @@ try {
     if (/is not a function|TypeError/.test(head)) fail(`AddMcpServer died before its body ran: ${head.slice(0, 200)}`);
     ok("AddMcpServer ran and returned something that is not a TypeError");
 
-    if (new RegExp(`Added "${probeName}"`).test(head)) {
+    // MARKET-6. The tool result arrives as JSON, so the sentence it wrote reads `Added \"name\"`
+    // with the quotes escaped. Matching the unescaped form sent every successful run down the
+    // "unrecognised reason" branch, which is how a working tool looked like a broken one.
+    const said = head.replace(/\\"/g, '"');
+    if (new RegExp(`Added "${probeName}"`).test(said)) {
       const installed = (await call("listInstalledMcpServers")).find((server) =>
         server.serverIdentifier === probeName || server.name === probeName);
       if (installed == null) fail(`AddMcpServer reported success but ${probeName} is not in listInstalledMcpServers`);
@@ -1093,7 +1103,7 @@ try {
         fail(`${probeName} survived UninstallMcpServer`);
       }
       ok(`${probeName} is gone from listInstalledMcpServers`);
-    } else if (/inference credential|signed-in Cursor account|Managing MCP servers requires/.test(head)) {
+    } else if (/inference credential|signed-in Cursor account|Managing MCP servers requires/.test(said)) {
       // The write lands on the Cursor account, not on this machine. On a box with no account the
       // tool can only get this far, and getting this far IS the thing CONNECT-1 broke.
       ok("AddMcpServer reached the account write and stopped there: this box has no signed-in account");
@@ -1317,14 +1327,21 @@ try {
     if (survivors.length > 0) fail(`the key survives the delete in: ${survivors}`);
     ok(`the key is gone from ${DATA} and the field is still offered: [${fieldsAfter.fields.join(", ")}]`);
 
+    // Put the box back exactly as it was found, which is not the same as "the name is gone". This
+    // arm borrows a REAL connector name, and a box may already carry an entry under it -- the local
+    // one does, since the addendum asked for its TinyFish row to be fixed to the key preset. So the
+    // check is that the entry went back to the one this arm found, and the byte-identity assertion
+    // below is what proves the rest of the file with it.
     await saveConnectorsThroughRelay(beforeTinyfish.mcpServers ?? {});
     await call("refreshMcp", {});
-    if ((await call("listInstalledMcpServers")).some((server) => server.serverIdentifier === TINYFISH_SERVER)) {
-      fail(`${TINYFISH_SERVER} survived its removal from connectors.json`);
+    const restored = JSON.parse(await inBox(`cat ${DATA}/connectors.json`)).mcpServers ?? {};
+    const held = (beforeTinyfish.mcpServers ?? {})[TINYFISH_SERVER] ?? null;
+    if (JSON.stringify(restored[TINYFISH_SERVER] ?? null) !== JSON.stringify(held)) {
+      fail(`${TINYFISH_SERVER} did not go back to the entry this arm found`);
     }
     await stopStub(stubPath);
     stubPath = null;
-    ok(`the entry is out of connectors.json and the stub is stopped`);
+    ok(`${TINYFISH_SERVER} is back to the entry this arm found${held == null ? " (there was none)" : ""} and the stub is stopped`);
 
     // Byte-identical, not equivalent: the arm went in through the console's own write path, so the
     // file it leaves behind has to be the file it found, key order and whitespace included.
