@@ -264,23 +264,25 @@ It creates its own scratch agent and deletes it, and it puts the endpoint pin, `
 
 Kept apart on purpose. A number with no machine behind it is a plan.
 
-**Measured, on `grok-bot-local-vm` (this Mac), 2026-09-07.**
+**Measured, on `grok-bot-local-vm` (this Mac), 2026-09-08.**
 
 | What | Result |
 |---|---|
-| `node scripts/verify-browser-tools.mjs` **against the box** | **86 PASS, 0 FAIL.** All eleven groups above, on a real turn with a real Chrome |
+| `node scripts/verify-browser-tools.mjs` **against the box** | **106 PASS, 0 FAIL, 0 SKIP.** All twelve groups above, on a real turn with a real Chrome |
 | `https://example.com` | Opened, title "Example Domain", its own body text back, one JPEG 1280x656, 14,764 bytes |
-| `https://www.youtube.com/@TitaniumComputing` | Opened, title "Titanium Computing - YouTube", channel text back, one JPEG 1280x656, 70,204 bytes |
+| `https://www.youtube.com/@TitaniumComputing` | Opened, title "Titanium Computing - YouTube", channel text back, one JPEG 1280x656, 70,103 bytes |
 | the login wall | `needsLogin`, reported in plain words with no flag name and no tool name in the sentence |
-| the 403 page | `blocked`, reported in plain words |
+| the 403 page with a body | `blocked`, reported in plain words |
+| the 403 page with no body | `blocked` as well, one JPEG 1280x656 of Chrome's own refusal page, and no `net::` code anywhere in the words the model reads |
 | typing and clicking | `browser_type` into `input#note` then `browser_click` on "Save note"; the page's own text changed to say both landed |
+| `file:///etc/passwd` and `http://127.0.0.1:7777/` | refused with "I can only open pages on the public web", no picture, no ledger row, and the box never asked |
 | the toolset | chief offered 34 tools, 4 of them `browser_*`, `isSubagentRunner=false`; the request that left carried all 34 |
-| images | 8 results, 8 image parts in the turn history and 8 in the request that left, every one `image/jpeg` 1280 wide |
-| the audit ledger | 5 opens, 5 `browser_navigation` rows, every row with its url and its title |
+| images | 9 results with a picture, 9 image parts in the turn history and 9 in the request that left, every one `image/jpeg` 1280 wide |
+| the audit ledger | 6 opens, 6 `browser_navigation` rows, every row with the address that was asked for and its title |
 | the desktop view | no second Chrome, no display's window count doubled |
 | the switch off | the four withheld, and the toolset line says `browser_tools_off` |
-| `node scripts/verify-browser-tools.mjs --dry-run` | 29 of 29 PASS, no box, no gateway token, under a second |
-| `node --test tests/*.test.mjs` | 1197 tests, 1197 PASS, 0 FAIL, 32 s |
+| `node scripts/verify-browser-tools.mjs --dry-run` | 36 of 36 PASS, no box, no gateway token, under a second |
+| `node --test tests/*.test.mjs` | 1210 tests, 1210 PASS, 0 FAIL |
 
 **How long it takes.** About six minutes against a box, because eight of those steps are real page
 loads in a real browser. It does not fit a 290-second budget: run it detached and read its log.

@@ -979,6 +979,10 @@ try {
     "and the page title it found",
     rows.filter((row) => !(typeof row.pageTitle === "string" && row.pageTitle.length > 0)).length + " row(s) with no title");
   const ledgerUrls = rows.map((row) => String(row.url));
+  check(!ledgerUrls.some((url) => url.startsWith("chrome-error:")),
+    "and it is the address that was asked for, not Chrome's own error page",
+    ledgerUrls.filter((url) => url.startsWith("chrome-error:")).join(", "));
+  check(ledgerUrls.some((url) => url.includes("/refused")), "the bare refusal is in the ledger by its own address");
   check(ledgerUrls.some((url) => url.includes("/login")), "the login wall is in the ledger");
   if (!OFFLINE) check(ledgerUrls.some((url) => url.includes("example.com")), "and so is example.com");
 

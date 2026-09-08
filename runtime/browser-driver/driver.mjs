@@ -454,8 +454,15 @@ export class BrowserDriver {
 
       const page = await this.#readPage(options.cap, { timeoutMs: left(8000) });
       const shot = options.screenshot === false ? null : await this.screenshot({ timeoutMs: left(15000) });
+      // When the site refuses, the tab lands on Chrome's own error page and location.href reads
+      // chrome-error://chromewebdata/. That is no use to anyone: the audit ledger's whole job is
+      // to say what was looked at, so it says the address that was asked for.
+      const landedOn = typeof page.url === "string" && page.url.startsWith("chrome-error://")
+        ? withScheme
+        : page.url;
       return {
         ...page,
+        url: landedOn,
         ...(refused ? { blocked: true } : {}),
         ...(stillLoading ? { stillLoading: true } : {}),
         screenshot: shot,
