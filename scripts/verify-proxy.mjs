@@ -1,21 +1,32 @@
 #!/usr/bin/env node
 // verify-proxy.mjs -- the gate for PROXY-1, the one place the operator's subscriptions live.
 //
-// Four legs, each in its own file under scripts/lib/proxy-legs/, so four people can own one each
+// Five legs, each in its own file under scripts/lib/proxy-legs/, so five people can own one each
 // without touching this runner or each other:
 //
-//   service   the proxy itself, before any tenant exists: readiness, the door, a model, the
-//             two-key pool draining to its second subscription, a config change read from the
-//             directory bind, and a leak check over every response body in the run
-//   tenant    the control plane's side: minting one virtual key per tenant, writing it where the
-//             box reads its provider configuration, and revoking it
-//   box       what a box holds afterwards, proved by name, length and hash prefix, and what it no
-//             longer holds
-//   tinyfish  the passthrough, and the connector preset and web-tools route still working through it
+//   service    the proxy itself, before any tenant exists: readiness, the door, a model, the
+//              two-key pool draining to its second subscription, a config change read from the
+//              directory bind, and a leak check over every response body in the run
+//   providers  the proxy's configuration as a DATABASE rather than a text file (PROVIDERS-1): a
+//              provider added, a second and third key on one plan model, a key rolled with traffic
+//              flowing and zero failures, a key removed, an alias repointed at a new vendor model,
+//              a catalog read without the caller holding the vendor key, spend per deployment, and
+//              a tenant key refused the admin surface by its own allowed_routes
+//   tenant     the control plane's side: minting one virtual key per tenant, writing it where the
+//              box reads its provider configuration, and revoking it
+//   box        what a box holds afterwards, proved by name, length and hash prefix, and what it no
+//              longer holds
+//   tinyfish   the passthrough, and the connector preset and web-tools route still working through it
 //
 //   node scripts/verify-proxy.mjs                    every leg, against the stub
 //   node scripts/verify-proxy.mjs --leg service      one leg
 //   node scripts/verify-proxy.mjs --real --url http://titanbot-proxy:4000 --master-key "$K"
+//
+// TITANBOT_PROXY_UPSTREAM_HOST is read by the providers leg on a --real run only. That leg creates
+// deployments of its own and has to give the proxy somewhere real to send them, so it stands up
+// stand-in subscriptions on THIS machine and needs the name the PROXY can reach this machine by:
+// host.docker.internal from a container on Docker Desktop (the default), and on the R750 the name
+// of whatever container the gate is running in. Everything it makes is deleted again at the end.
 //
 // WHY A STUB IS THE DEFAULT. The real image is a gigabyte, and a gate that pulls it does not fit in
 // the 300 seconds every gate on this project is held to. A gate that does not fit is a gate that
@@ -28,7 +39,7 @@
 // proved less than usual cannot look like a run that proved everything.
 import { createReport, leakCheck } from "./lib/proxy-legs/harness.mjs";
 
-const LEGS = ["service", "tenant", "box", "tinyfish"];
+const LEGS = ["service", "providers", "tenant", "box", "tinyfish"];
 
 const flag = (name) => {
   const inline = process.argv.find((arg) => arg.startsWith(`--${name}=`));

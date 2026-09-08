@@ -44,6 +44,15 @@
 //   PROXY_TINYFISH_KEY_1  <- TINYFISH_API_KEY      (measured 2026-09-08: not in ~/.api_keys)
 //   PROXY_TINYFISH_KEY_2  <- TINYFISH_API_KEY_2    (measured 2026-09-08: not in ~/.api_keys)
 //
+// ---- THESE SIX ARE THE FRESH-INSTALL BOOTSTRAP ONLY, AS OF PROVIDERS-1 --------------------------
+// Providers, their keys, the pools those keys form and the plan models customers run on live in the
+// proxy's own database and are managed live from the Providers panel at api.titanium.bot/admin. What
+// this script sets is what `node cp/cli.mjs proxy seed` reads ONCE on a fresh install, and nothing
+// after that. On a running install, adding a key, rolling one and taking one out are done from the
+// panel, take effect on the next request, and do not come back through here. Re-running this script
+// against an install that has already been seeded changes an environment field nothing reads any
+// more, which is the quiet kind of wrong: if a key needs to change, change it in the panel.
+//
 // A name that is not in that file is SKIPPED and NAMED in the output. It is never guessed at, never
 // looked for in another file, and never posted as an empty value -- an empty provider key is a model
 // that starts cleanly and then 401s on a customer's turn, which is the worst place to find out. Any
@@ -407,6 +416,13 @@ async function main() {
     say("Nothing was guessed at and no other file was read. Set the PROXY_ name in your shell to");
     say("supply one from somewhere else, or add the name above to ~/.api_keys.");
   }
+  // PROVIDERS-1. Said here rather than only in the header, because this is the output an operator
+  // reads at the moment they are thinking about a key.
+  say("");
+  say("These names are the FRESH-INSTALL BOOTSTRAP only. `node cp/cli.mjs proxy seed` reads them once");
+  say("into the proxy's database; after that, a live key is added, rolled and removed from the");
+  say("Providers panel at api.titanium.bot/admin, takes effect on the next request, and never comes");
+  say("back through here. Changing one of these on a seeded install changes a field nothing reads.");
 
   // ---- what will be set --------------------------------------------------------------------------
   // The four the service cannot run without. Everything else may legitimately be absent.

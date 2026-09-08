@@ -1,0 +1,148 @@
+{
+  "schemaVersion": 1,
+  "what": "What a FRESH Titanium Bot install seeds into the proxy's database (PROVIDERS-1). Read once by `node cp/cli.mjs proxy seed`. An install that already has rows is never re-seeded, and after the seed this file is history: providers, keys and plan models are managed from the Providers panel at api.titanium.bot/admin.",
+  "holdsNoValue": "Every credential here is named by its os.environ NAME only. There is no key value in this file, there must never be one, and tests/proxy-deploy.test.mjs fails the build if anything in it looks like a credential. The environment names are the fresh-install bootstrap only; a live key is added, rolled and removed through the panel.",
+  "order": "Seed in this order and nothing else works: credentials, then plan models (deployments), then the fallback map. MEASURED on this Mac 2026-09-08 against litellm-database:v1.100.0, POST /fallback answers 400 'Invalid fallback models' when the fallback target is not a model_name the proxy currently serves, so the vision deployment has to exist before its pair can be registered.",
+
+  "providers": [
+    {
+      "id": "zai",
+      "name": "Z.AI",
+      "kind": "openai-compatible",
+      "apiBase": "https://api.z.ai/api/coding/paas/v4",
+      "catalog": {
+        "source": "live",
+        "path": "/models",
+        "passThroughPath": "/catalog/zai",
+        "note": "The vendor's own /models is the only live list. MEASURED on grok-bot-local-vm 2026-09-08 it answers 10 ids carrying id, object, created and owned_by and NOTHING else: no context window, no vision flag, no label. A Refresh gives the operator names and only names, and the panel says so in those words. It is read through a LiteLLM pass-through carrying the vendor key as a header, so the control plane gets a live catalog while holding no vendor key. Register the pass-through with include_subpath true or the subpath answers 404 (measured)."
+      },
+      "curatedModels": ["glm-5.3", "glm-5.3-flash", "glm-5", "glm-4.7", "glm-4.6", "glm-4.6v"]
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "kind": "minimax",
+      "apiBase": null,
+      "catalog": {
+        "source": "curated",
+        "note": "No /models endpoint is reached through the LiteLLM minimax provider, so the picker is the curated list below and the panel says the list is curated rather than live."
+      },
+      "curatedModels": ["MiniMax-M3", "MiniMax-M2", "MiniMax-Text-01"]
+    },
+    {
+      "id": "qwen",
+      "name": "Alibaba Model Studio",
+      "kind": "openai-compatible",
+      "apiBase": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "seed": false,
+      "catalog": {
+        "source": "live",
+        "path": "/models",
+        "passThroughPath": "/catalog/qwen",
+        "note": "seed false: the provider row is written, no credential and no plan model are. Jason has rotated the Alibaba key and is putting the new one in Bitwarden as QWEN_API_KEY. The moment it is synced to ~/.api_keys the panel's add-key action takes it; nothing here has to change."
+      },
+      "curatedModels": ["qwen3.8-max", "qwen3.8-plus", "qwen3-vl-max"]
+    }
+  ],
+
+  "credentials": [
+    {
+      "credentialName": "zai-1",
+      "provider": "zai",
+      "label": "Z.AI coding plan, first subscription",
+      "order": 1,
+      "env": "PROXY_ZAI_KEY_1"
+    },
+    {
+      "credentialName": "zai-2",
+      "provider": "zai",
+      "label": "Z.AI coding plan, second subscription",
+      "order": 2,
+      "env": "PROXY_ZAI_KEY_2"
+    },
+    {
+      "credentialName": "minimax-1",
+      "provider": "minimax",
+      "label": "MiniMax, first subscription",
+      "order": 1,
+      "env": "PROXY_MINIMAX_KEY"
+    }
+  ],
+
+  "planModels": [
+    {
+      "modelName": "plan-zai",
+      "provider": "zai",
+      "vendorModel": "openai/glm-5.3",
+      "apiBase": "https://api.z.ai/api/coding/paas/v4",
+      "credentials": ["zai-1", "zai-2"],
+      "customerName": "GLM-5.3",
+      "customerLabel": "GLM-5.3",
+      "customerVisible": true,
+      "servedBy": "Z.AI",
+      "contextWindow": 200000,
+      "supportsVision": false,
+      "visionFallback": "plan-zai-vision",
+      "plans": ["starter", "pro"],
+      "note": "model_name is the ALIAS and is a contract with every box already pointed at it: created once, never renamed. vendorModel is the thing that changes when Z.AI retires a model, and POST /model/update merges, so a repoint preserves the credential, the costs and every tb_ key (measured)."
+    },
+    {
+      "modelName": "plan-zai-vision",
+      "provider": "zai",
+      "vendorModel": "openai/glm-5.3-flash",
+      "apiBase": "https://api.z.ai/api/coding/paas/v4",
+      "credentials": ["zai-1", "zai-2"],
+      "customerName": null,
+      "customerLabel": null,
+      "customerVisible": false,
+      "servedBy": "Z.AI",
+      "contextWindow": 128000,
+      "supportsVision": true,
+      "visionFallback": null,
+      "plans": ["starter", "pro"],
+      "note": "A ROUTING TARGET, never a card. customerVisible false and no customer label, and the control plane DROPS a plan model like this from the customer's Settings list rather than falling back to the id. That single rule is what stops a 'plan-zai-vision (included with your plan)' card appearing the next time a workspace is minted."
+    },
+    {
+      "modelName": "plan-minimax",
+      "provider": "minimax",
+      "vendorModel": "minimax/MiniMax-M3",
+      "apiBase": null,
+      "credentials": ["minimax-1"],
+      "customerName": "MiniMax M3",
+      "customerLabel": "MiniMax M3",
+      "customerVisible": true,
+      "servedBy": "MiniMax",
+      "contextWindow": 200000,
+      "supportsVision": true,
+      "visionFallback": "plan-minimax",
+      "plans": ["pro"],
+      "note": "visionFallback points at itself only because this model takes an image itself; the panel requires a vision fallback on every plan model and a model that needs none names itself. POST /fallback refuses a self-pair (400 'cannot be its own fallback'), so the seed writes no fallback row for this one."
+    }
+  ],
+
+  "fallbacks": [
+    {
+      "model": "plan-zai",
+      "fallbackModels": ["plan-zai-vision"],
+      "note": "A request the flagship refuses because it carries an image (Z.AI code 1210) is retried once here before the customer sees anything. The customer's key names plan-zai; the fallback is the router's own move and is not a second model the key has to be allowed."
+    }
+  ],
+
+  "defaults": {
+    "planModel": "plan-zai",
+    "note": "The plan model a NEW workspace is given. The super admin changes it in the Providers panel and it is stored in the control plane's admin_settings, not here: this value is only what a fresh install starts from."
+  },
+
+  "tenantKeyRoutes": {
+    "allowedRoutes": ["/v1/chat/completions", "/chat/completions", "/v1/models", "/models"],
+    "note": "The per-key door list every tenant key is minted with, and the backfill applies to every key already in the field. It is what replaced general_settings.allowed_routes and what closes PROXY-8. MEASURED on this Mac 2026-09-08: a key carrying this list answers 403 on /key/info, /model/info, /model_group/info and /health while chat completions and /v1/models still answer 200. Add a path here only with the same care: a box that needs a route it does not have gets a 403 with no other clue."
+  },
+
+  "reservedPassThroughs": {
+    "note": "PROXY-3, the second TinyFish subscription. A pass-through cannot pool two keys the way a model_name pools two deployments, so a second subscription is a second PAIR of paths and the control plane decides which pair a tenant is given at mint. The names are decided here so nobody invents a third; the pair is not registered until TINYFISH_API_KEY_2 exists, because a pass-through whose os.environ name is unset forwards the literal string 'os.environ/NAME' to the vendor as the key (measured).",
+    "pairs": [
+      { "fetch": "/tinyfish/fetch", "search": "/tinyfish/search", "env": "PROXY_TINYFISH_KEY_1", "declaredIn": "config.yaml" },
+      { "fetch": "/tinyfish/fetch-2", "search": "/tinyfish/search-2", "env": "PROXY_TINYFISH_KEY_2", "declaredIn": "reserved" }
+    ]
+  }
+}
