@@ -2033,7 +2033,12 @@ export function createAdminApi({
       ]);
       if (!credentials.ok) { json(response, 502, { error: "proxy", message: credentials.why }); return true; }
       if (!models.ok) { json(response, 502, { error: "proxy", message: models.why }); return true; }
-      if (models.rows.some((row) => row.alias === alias)) {
+      // IN THE DATABASE, not merely being served. While an install is moving off a file-configured
+      // proxy, /model/info reports the file's deployments beside the database's, so an alias the
+      // file is serving would refuse the very row that replaces it and the seed would leave the
+      // proxy with nothing after the file's half goes away. A file row is not something this route
+      // can change either, which is why it is not treated as one that exists.
+      if (models.rows.some((row) => row.alias === alias && row.fromDb === true)) {
         json(response, 409, { error: "exists", message: `${alias} already exists. Change it instead: the name is what every box already points at.` });
         return true;
       }
