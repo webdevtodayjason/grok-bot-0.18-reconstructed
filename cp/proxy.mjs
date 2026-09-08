@@ -281,16 +281,20 @@ export const TINYFISH_ROUTES = Object.freeze(["/tinyfish/fetch", "/tinyfish/sear
 export function tenantRoutesFor(passThrough) {
   if (passThrough?.ok !== true) return [...TENANT_ALLOWED_ROUTES];
   const rows = Array.isArray(passThrough.rows) ? passThrough.rows : [];
-  const usable = new Set();
-  for (const row of rows) {
-    const set = row?.headerSet ?? {};
-    // Any header holding a value is enough: the credential header is not always called the same
-    // thing, and content-type alone is not a credential, which is why an all-empty row fails this.
-    if (Object.entries(set).some(([name, has]) => has === true && String(name).toLowerCase() !== "content-type")) usable.add(String(row.path));
-  }
+  const carries = (row) => Object.entries(row?.headerSet ?? {})
+    // content-type is not a credential, which is why a row holding only that one fails this.
+    .some(([name, has]) => has === true && String(name).toLowerCase() !== "content-type");
+  const usable = new Set(rows.filter(carries).map((row) => String(row.path)));
+  // The MCP mount is NOT a pass-through: it is `mcp_servers.tinyfish` in config.yaml, and it takes
+  // its credential from the SAME environment name the two TinyFish pass-throughs do. So the
+  // pass-throughs are the readable proxy for whether that name is set, and the mount is dropped
+  // only when TinyFish doors exist and every one of them is empty. When there are none at all --
+  // a proxy configured some other way -- nothing is inferred and the mount stays.
+  const tinyfish = rows.filter((row) => String(row.path ?? "").startsWith("/tinyfish/"));
+  const tinyfishDead = tinyfish.length > 0 && !tinyfish.some(carries);
   return TENANT_ALLOWED_ROUTES.filter((route) => {
     if (!TINYFISH_ROUTES.includes(route)) return true;
-    if (route.startsWith("/mcp")) return usable.size > 0 || rows.length === 0;
+    if (route.startsWith("/mcp")) return !tinyfishDead;
     return usable.has(route);
   });
 }

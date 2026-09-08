@@ -1126,6 +1126,18 @@ function sharedBoxHealth() {
 // hex characters of a sha256, which is enough to prove a specific key is gone from a specific box
 // and not enough to be one.
 const TENANT_ADMIN_ROUTE = /^\/admin\/tenants\/([^/]+)\/(use-included|forget-provider-keys|rollback-included)$/;
+// PROVIDERS-1. WHAT A BOX IS ACTUALLY RUNNING, read rather than assumed. GET only, and it answers
+// with three plain strings and no credential at all.
+//
+// The super admin's Providers panel used to report `labelBehind: null` for every plan model,
+// because the label a customer's Titan says lives in that box's own box-secrets.json and nothing
+// reported it back. The control plane cannot read that file itself: MEASURED ON THE R750
+// 2026-09-08 from inside titanbot-cp, /data/titanbot/<slug>/volumes/data/box-secrets.json answers
+// EACCES for demo and richard-avery (0600, owned by the box user) and ENOENT for the adopted
+// titanium, whose directories are somewhere else entirely. This relay can: it has the docker socket
+// and reads the file through the box the same way the model picker does. So it says so, once per
+// tenant, and the panel counts the boxes that are behind.
+const TENANT_RUNNING_ROUTE = /^\/admin\/tenants\/([^/]+)\/running$/;
 const sha256Hex = (value) => createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 const evidenceOf = (name, value) => ({ name, length: String(value ?? "").length, sha256: sha256Hex(value).slice(0, 12) });
 
@@ -1133,8 +1145,9 @@ async function handleRelayAdmin(req, res, url) {
   const expected = String(RELAY?.relayToken ?? "");
   if (expected.length === 0) return fail(res, 404, "not found");
   const action = TENANT_ADMIN_ROUTE.exec(url.pathname);
+  const running = TENANT_RUNNING_ROUTE.exec(url.pathname);
   // The method refusal still comes before the credential, so a wrong method charges nobody's
-  // lockout and learns nothing. The two reads are GET-only; the two migration doors are POST-only,
+  // lockout and learns nothing. The three reads are GET-only; the two migration doors are POST-only,
   // because each of them changes a file inside somebody's box.
   const allowed = action == null ? "GET" : "POST";
   if (req.method !== allowed) return fail(res, 405, allowed);
@@ -1162,9 +1175,50 @@ async function handleRelayAdmin(req, res, url) {
     return res.end(JSON.stringify(report));
   }
 
+  if (running != null) return await reportRunning(res, decodeURIComponent(running[1]));
+
   if (action != null) return await handleTenantMigration(req, res, decodeURIComponent(action[1]), action[2]);
 
   return fail(res, 404, "not found");
+}
+
+/**
+ * The three names that decide what a customer's Titan says it runs, read out of that box.
+ *
+ * NO CREDENTIAL LEAVES THIS ROUTE. box-secrets.json also holds SAND_OPENAI_COMPATIBLE_API_KEY and
+ * whatever else the operator put there; only these three are read out of it, by name, and the
+ * answer is built field by field rather than by filtering a spread -- a filter is one edit away
+ * from becoming a passthrough.
+ *
+ * A box that cannot be read answers `read: false` with the reason. That is deliberately not the
+ * same as an empty label: "we could not look" and "it says nothing" send an operator to different
+ * places, and reporting the first as the second is how a panel comes to show a green count over a
+ * box nobody checked.
+ */
+async function reportRunning(res, slug) {
+  const t = contextOf(slug);
+  if (t == null) return fail(res, 404, NOT_AVAILABLE_SENTENCE);
+  const answer = (payload) => {
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ slug, measuredAt: new Date().toISOString(), ...payload }));
+  };
+  if (!await dockerAvailable()) {
+    return answer({ read: false, why: "this relay has no docker under it, so it cannot read inside a box", model: "", modelLabel: "", endpointName: "" });
+  }
+  let secrets;
+  try { secrets = await readSecrets(t); }
+  catch (error) { return answer({ read: false, why: `that box's own settings file could not be read (${String(error?.message ?? error).split("\n")[0].slice(0, 120)})`, model: "", modelLabel: "", endpointName: "" }); }
+  const pin = await endpointPin(t);
+  return answer({
+    read: true,
+    why: "",
+    model: String(secrets.SAND_OPENAI_COMPATIBLE_MODEL ?? ""),
+    modelLabel: String(secrets.SAND_OPENAI_COMPATIBLE_MODEL_LABEL ?? ""),
+    endpointName: String(secrets.SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME ?? ""),
+    // A box whose container environment pins the endpoint answers through THAT, whatever the file
+    // says, so a panel reading the file alone would report a label the customer never hears.
+    ...pin,
+  });
 }
 
 // Both migration doors, sharing one resolution of the workspace and one shape of answer.

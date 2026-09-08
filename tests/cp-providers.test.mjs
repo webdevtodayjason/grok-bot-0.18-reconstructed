@@ -49,6 +49,9 @@ async function withPanel(run, { models, storeModelInDb } = {}) {
   // Recorded separately from the relay because "did this write inside a box" and "did this ask the
   // vendor" are different questions and one list could not answer both.
   const vendorCalls = [];
+  const readCalls = [];
+  // What each box would say it is running, keyed by slug. Empty means the fixture has no such box.
+  const boxes = new Map();
   const vendor = { status: 200, models: ["glm-5.3", "glm-5.3-flash", "glm-4.6v"], body: null };
   const config = {
     dataDir: root, tenantRoot: root,
@@ -67,6 +70,19 @@ async function withPanel(run, { models, storeModelInDb } = {}) {
         return new Response(JSON.stringify(vendor.body ?? { error: { message: "token expired or incorrect" } }), { status: vendor.status, headers: { "content-type": "application/json" } });
       }
       return new Response(JSON.stringify({ data: vendor.models.map((id) => ({ id, object: "model" })) }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    // GET /admin/tenants/<slug>/running is a READ. It is what the panel asks to find out what each
+    // box is really pointed at and what its Titan says it runs, because the control plane cannot
+    // read box-secrets.json itself: measured from inside titanbot-cp on the R750 2026-09-08, that
+    // file answers EACCES for a normal tenant (0600, owned by the box user) and ENOENT for an
+    // adopted one. It is recorded separately from the writes, or a leg asserting "this wrote
+    // nothing into a box" would fail on a read.
+    const running = /^\/admin\/tenants\/([^/]+)\/running$/.exec(url.pathname);
+    if (running) {
+      const slug = decodeURIComponent(running[1]);
+      readCalls.push({ path: url.pathname });
+      return new Response(JSON.stringify({ slug, ...(boxes.get(slug) ?? { read: false, why: "no such box in this fixture", model: "", modelLabel: "" }) }),
+        { status: 200, headers: { "content-type": "application/json" } });
     }
     relayCalls.push({ path: url.pathname, body: init.body ? JSON.parse(init.body) : {} });
     return new Response(JSON.stringify({
@@ -102,7 +118,7 @@ async function withPanel(run, { models, storeModelInDb } = {}) {
     return response;
   };
 
-  try { await run({ store, proxy, api, call, keys, relayCalls, vendorCalls, vendor, config, root }); }
+  try { await run({ store, proxy, api, call, keys, relayCalls, readCalls, vendorCalls, vendor, boxes, config, root }); }
   finally { await proxy.close(); store.close(); await rm(root, { recursive: true, force: true }); }
 }
 
@@ -777,22 +793,13 @@ test("which workspaces run a model is joined on the deployment id, not on the ve
  * console said GLM-5.3.
  */
 test("a box that is behind on its label is counted, out of the box's own file", async () => {
-  await withPanel(async ({ call, store, config }) => {
-    const { mkdir, writeFile } = await import("node:fs/promises");
-    const nodePath = (await import("node:path")).default;
-    for (const slug of ["demo", "richard-avery"]) {
-      store.createTenant({ slug, name: slug, status: "running" });
-      const dir = nodePath.join(config.tenantRoot, slug, "volumes", "data");
-      await mkdir(dir, { recursive: true });
-      await writeFile(nodePath.join(dir, "box-secrets.json"), JSON.stringify({
-        version: 1,
-        secrets: {
-          SAND_OPENAI_COMPATIBLE_MODEL: "plan-zai",
-          // demo was pushed; richard-avery was not, which is exactly the live state.
-          ...(slug === "demo" ? { SAND_OPENAI_COMPATIBLE_MODEL_LABEL: "GLM-5.3" } : {}),
-        },
-      }));
-    }
+  await withPanel(async ({ call, store, boxes, relayCalls }) => {
+    for (const slug of ["demo", "richard-avery"]) store.createTenant({ slug, name: slug, status: "running" });
+    // Exactly the live state on the R750 2026-09-08: both boxes point at plan-zai, demo was pushed
+    // the label and richard-avery was not, so his Titan answered with the routing alias while his
+    // own console said GLM-5.3.
+    boxes.set("demo", { read: true, why: "", model: "plan-zai", modelLabel: "GLM-5.3" });
+    boxes.set("richard-avery", { read: true, why: "", model: "plan-zai", modelLabel: "" });
     await seedZai(call);
 
     const answer = await call("GET", "/v1/admin/providers");
@@ -806,6 +813,26 @@ test("a box that is behind on its label is counted, out of the box's own file", 
     const refused = await call("POST", "/v1/admin/plan-models/plan-zai/push-label", {});
     assert.equal(refused.status, 409);
     assert.deepEqual(refused.body.candidates.sort(), ["demo", "richard-avery"]);
+    assert.equal(relayCalls.length, 0, "reading what a box runs wrote inside one");
+  });
+});
+
+/**
+ * A box that could not be read is UNKNOWN, not up to date. The two send an operator to different
+ * places, and reporting the first as the second is how a panel shows a green count over a box
+ * nobody checked -- which is the failure mode the whole of this file's header is about.
+ */
+test("a box the relay cannot read is named, not counted as fine", async () => {
+  await withPanel(async ({ call, store, boxes }) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    boxes.set("demo", { read: false, why: "this relay has no docker under it, so it cannot read inside a box", model: "", modelLabel: "" });
+    await seedZai(call);
+    const answer = await call("GET", "/v1/admin/providers");
+    const plan = answer.body.planModels.find((row) => row.alias === "plan-zai");
+    assert.deepEqual(plan.runningHere, [], "a box that could not be read was counted as running this model");
+    assert.equal(plan.labelBehind, 0);
+    assert.match(plan.labelBehindWhy, /could not be read/);
+    assert.match(plan.labelBehindWhy, /demo/);
   });
 });
 
@@ -943,10 +970,15 @@ test("a tenant key is not given a pass-through whose key is not set", async () =
     assert.equal(record.allowedRoutes.includes("/tinyfish/search"), false);
     assert.ok(minted.key.length > 0);
 
-    // And the moment the key is really there, the same mint puts the doors back with no code change.
-    await proxy.addPassThroughRow({ path: "/tinyfish/fetch-real", target: "https://api.fetch.tinyfish.ai", headers: { "x-api-key": "tf-a-real-key-0123456789" } });
+    // The MCP mount goes with them, because it takes its credential from the SAME environment name
+    // the two doors do (config.yaml's mcp_servers.tinyfish), so an empty pair means an empty mount.
+    assert.equal(record.allowedRoutes.includes("/mcp/"), false, "the MCP mount was handed out with no credential behind it");
+
+    // And the moment the key is really there, the same mint puts them all back with no code change.
+    await proxy.addPassThroughRow({ path: "/tinyfish/fetch", target: "https://api.fetch.tinyfish.ai", headers: { "x-api-key": "tf-a-real-key-0123456789" } });
     const routes = tenantRoutesFor(await client.listPassThrough());
-    assert.equal(routes.includes("/mcp/"), true, "the MCP mount went away with the empty doors");
+    assert.equal(routes.includes("/tinyfish/fetch"), true, "the door stayed shut after the key went in");
+    assert.equal(routes.includes("/mcp/"), true, "the MCP mount stayed shut after the key went in");
     assert.ok(config != null);
   });
 });

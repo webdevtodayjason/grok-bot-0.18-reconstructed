@@ -45,10 +45,6 @@ import path from "node:path";
 // widens the other's blast radius.
 import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.mjs";
 import { normalizeEmail } from "./store.mjs";
-// Read-only, and for one thing: where a tenant's box-secrets.json lives on this server's disk, so
-// the Providers panel can say which boxes are behind on their label instead of reporting null.
-// cp/provision.mjs owns that path shape and nothing here writes through it.
-import { tenantPaths } from "./provision.mjs";
 import {
   PROVIDER_PRESETS,
   PROVIDER_QUOTA,
@@ -1326,28 +1322,48 @@ export function createAdminApi({
    * said GLM-5.3; demo's carried the label. Neither box carried a container-env override, so the
    * file is authoritative for both.
    *
-   * A file that cannot be read is reported as unknown, never as up to date: a green count computed
-   * out of a missing file is the made-up green light this file's header refuses to ship.
+   * IT IS ASKED OF THE RELAY, NOT READ OFF THE DISK, and that is a measurement rather than a
+   * preference. The first shape of this opened /data/titanbot/<slug>/volumes/data/box-secrets.json
+   * directly, which this container does mount. MEASURED FROM INSIDE titanbot-cp 2026-09-08: demo
+   * and richard-avery answer EACCES (the file is 0600 and owned by the box user, which is the whole
+   * point of SECRET-3) and the adopted titanium answers ENOENT, because an adopted workspace's
+   * directories are not under the tenant root at all. The relay has the docker socket and reads
+   * that file through the box already, for the model picker, so it is the one that can answer.
+   *
+   * A box that could not be read is reported as unknown, never as up to date: a green count
+   * computed over a box nobody checked is the made-up green light this file's header refuses to
+   * ship. The answers are cached for the same few seconds the box sweep uses, because one panel
+   * load asks once per plan model.
    */
-  function boxLabels() {
-    const rows = [];
-    for (const tenant of store.listTenants()) {
-      const file = path.join(tenantPaths(tenant.slug, config).data, "box-secrets.json");
-      try {
-        const parsed = JSON.parse(read(file));
-        const secrets = parsed?.secrets ?? parsed ?? {};
+  let boxLabelCache = { at: 0, rows: null, inFlight: null };
+  async function boxLabels() {
+    if (boxLabelCache.rows != null && now() - boxLabelCache.at < BOXES_CACHE_MS) return boxLabelCache.rows;
+    if (boxLabelCache.inFlight != null) return boxLabelCache.inFlight;
+    const pending = (async () => {
+      const rows = [];
+      for (const tenant of store.listTenants()) {
+        const answer = await askRelay(`/admin/tenants/${encodeURIComponent(tenant.slug)}/running`, "");
+        if (!answer.ok) {
+          rows.push({ slug: tenant.slug, model: "", label: "", read: false, why: answer.why });
+          continue;
+        }
+        const body = answer.body ?? {};
         rows.push({
           slug: tenant.slug,
-          model: String(secrets.SAND_OPENAI_COMPATIBLE_MODEL ?? ""),
-          label: String(secrets.SAND_OPENAI_COMPATIBLE_MODEL_LABEL ?? ""),
-          read: true,
-          why: "",
+          model: String(body.model ?? ""),
+          label: String(body.modelLabel ?? ""),
+          read: body.read === true,
+          pinned: body.pinned === true,
+          why: body.read === true ? "" : String(body.why ?? "that workspace did not answer"),
         });
-      } catch (error) {
-        rows.push({ slug: tenant.slug, model: "", label: "", read: false, why: `this workspace's box-secrets.json could not be read (${notMeasured(error)})` });
       }
-    }
-    return rows;
+      return rows;
+    })();
+    boxLabelCache = { ...boxLabelCache, inFlight: pending };
+    return pending.then(
+      (rows) => { boxLabelCache = { at: now(), rows, inFlight: null }; return rows; },
+      (error) => { boxLabelCache = { at: 0, rows: null, inFlight: null }; throw error; },
+    );
   }
 
   /**
@@ -1511,8 +1527,8 @@ export function createAdminApi({
       };
     }
     const [shape, sweep] = await Promise.all([proxyShape(), askProxySpend()]);
-    // One disk read per panel load, shared by every plan model row below.
-    const boxes = boxLabels();
+    // One sweep per panel load, shared by every plan model row below.
+    const boxes = await boxLabels();
     const deployments = shape.deployments.ok ? shape.deployments.rows : [];
     const credentials = shape.credentials.ok ? shape.credentials.rows : [];
     const healthRows = shape.health.ok ? shape.health.rows : [];
@@ -2828,7 +2844,7 @@ export function createAdminApi({
         // it, and the first list is the one that matters: a box on the alias with a stale label is
         // exactly what this route exists to repair, and it may not have sent a request this month.
         const ran = ranAlias(await askProxySpend(), alias, rows.map((row) => row.id));
-        const pointed = boxLabels().filter((row) => row.read && row.model === alias).map((row) => row.slug);
+        const pointed = (await boxLabels()).filter((row) => row.read && row.model === alias).map((row) => row.slug);
         ran.slugs = [...new Set([...pointed, ...ran.slugs])];
         const named = Array.isArray(body?.slugs) ? body.slugs.map(String) : [];
         const targets = named.length > 0 ? named : (body?.all === true ? ran.slugs : []);
@@ -2869,7 +2885,7 @@ export function createAdminApi({
       if (action === "remove") {
         if (String(body?.confirm ?? "") !== alias) { json(response, 400, { error: "confirm", message: `Type ${alias} to remove it. Nothing was changed.` }); return true; }
         const ran = ranAlias(await askProxySpend(), alias, rows.map((row) => row.id));
-        ran.slugs = [...new Set([...boxLabels().filter((row) => row.read && row.model === alias).map((row) => row.slug), ...ran.slugs])];
+        ran.slugs = [...new Set([...(await boxLabels()).filter((row) => row.read && row.model === alias).map((row) => row.slug), ...ran.slugs])];
         if (ran.slugs.length > 0) {
           json(response, 409, {
             error: "in_use",
