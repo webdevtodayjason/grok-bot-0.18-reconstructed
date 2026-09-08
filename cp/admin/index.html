@@ -168,13 +168,18 @@
     </div>
     <form id="addProviderForm" class="stack" hidden>
       <div class="fields">
+        <label>Short name<input id="providerId" type="text" autocomplete="off" placeholder="zai"></label>
         <label>Name<input id="providerName" type="text" autocomplete="off" placeholder="Z.AI"></label>
         <label>Kind<input id="providerKind" type="text" autocomplete="off" placeholder="openai"></label>
         <label>Address<input id="providerBase" type="url" autocomplete="off" placeholder="https://api.example.com/v1"></label>
+        <label>Model list path<input id="providerCatalog" type="text" autocomplete="off" placeholder="/models"></label>
       </div>
-      <p class="quiet">Kind is the shape of the API this provider speaks, which is nearly always
-        openai. Address is the base the requests go to. Add the provider first, then add a key to
-        it, then point a plan model at that key.</p>
+      <p class="quiet">The short name is what every key on this provider is named after, so zai gives
+        zai-1 and zai-2, and it is on every spend row from then on. Kind is the shape of the API this
+        provider speaks, which is nearly always openai. Address is the base the requests go to. The
+        model list path is where the provider publishes what it serves, if it does: leave it empty
+        and the Refresh button stays off and the list stays the one we keep ourselves. Add the
+        provider first, then add a key to it, then point a plan model at that key.</p>
       <div class="controls">
         <button id="addProviderSave" type="submit" class="ghost small">Add this provider</button>
         <button id="addProviderCancel" type="button" class="ghost small">Cancel</button>
@@ -196,7 +201,7 @@
         <label>Name the customer sees<input id="pmCustomerName" type="text" autocomplete="off" placeholder="GLM-5.3"></label>
         <label>What their Titan says it runs<input id="pmCustomerLabel" type="text" autocomplete="off" placeholder="GLM-5.3"></label>
         <label>Provider<select id="pmProvider"></select></label>
-        <label>Key<select id="pmKey"></select></label>
+        <label>Keys it runs on<select id="pmKey" multiple size="3"></select></label>
         <label>Vendor model<select id="pmVendorModel"></select></label>
         <label id="pmVendorOtherWrap" hidden>Vendor model, typed<input id="pmVendorOther" type="text" autocomplete="off" placeholder="openai/glm-5.3"></label>
         <label>If a screenshot is sent, fall back to<select id="pmVision"></select></label>
@@ -206,6 +211,7 @@
       </div>
       <p class="quiet" id="pmAliasNote">The routing name is what a workspace is pointed at. It is
         set once and never changed after, because every workspace already running on it names it.</p>
+      <p class="quiet" id="pmKeyNote"></p>
       <label class="check"><input id="pmVisible" type="checkbox" checked> Show this model to
         customers on their own Settings page</label>
       <label class="check"><input id="pmSelfVision" type="checkbox"> This model takes screenshots

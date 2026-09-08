@@ -379,7 +379,7 @@
     save.addEventListener("click", async () => {
       save.disabled = true;
       try {
-        const result = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/model`, { model: select.value });
+        const result = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/model`, { planModel: select.value });
         banner(String(result.message || `${client.slug} runs on the new model from its next turn.`), true);
         // Both panels, because this change is made here and recorded down there. Reloading only
         // this one leaves What changed a row short of the truth until somebody hits Refresh, and a
@@ -710,35 +710,50 @@
   // render in six stages on a bad connection.
   //
   //   GET /v1/admin/providers
-  //     { configured, why, storeModelInDb, storeModelInDbWhy, measuredAt,
-  //       providers: [{ id, name, kind, baseUrl, reachable, reachableWhy, checkedAt,
-  //                     catalog: { source: "provider"|"curated"|"none", models: [id], readAt, why },
-  //                     keys: [{ name, label, order, mask, parked, lastError, lastErrorAt,
-  //                              usedBy: [alias],
-  //                              spend: { month, monthWhy, today, todayWhy } }] }],
-  //       planModels: [{ id, alias, provider, vendorModel, keyName, customerName, customerLabel,
-  //                      customerVisible, visionFallback, contextWindow, supportsVision, plans,
-  //                      workspaces, workspacesWhy, parked }],
-  //       defaults: { newWorkspaceModel, why },
-  //       ledger: [{ at, actor, via, ip, action, target, detail, outcome }] }
+  //     { configured, why, db: { on, why }, measuredAt,
+  //       providers: [{ id, name, kind, baseUrl, fromPreset, bootstrapEnv,
+  //                     health: { reachable, why, checkedAt },
+  //                     catalog: { models: [id], live, readAt, why, note, ready, wired },
+  //                     keys: [{ slot, label, order, masked, parked, backsCatalog,
+  //                              serves: [alias], lastError: { at, why } | null,
+  //                              spend: { month, requests, why },
+  //                              quota: { unit, window, used, total, remaining, pct, resetAt,
+  //                                       warn, live, why, byWorkspace: [{ slug, requests,
+  //                                       tokens, dollars }] } }] }],
+  //       planModels: [{ alias, provider, vendorModel, customerName, customerLabel, servedBy,
+  //                      contextWindow, supportsVision, visionFallback, vision: { ok, at, why },
+  //                      plans, customerVisible, shownToCustomers,
+  //                      deployments: [{ id, keySlot, fromDb, healthy, why }],
+  //                      workspaces, workspaceSlugs, workspacesWhy, labelBehind,
+  //                      labelBehindWhy }],
+  //       defaults: { planModel, why },
+  //       actions: [{ at, actor, via, ip, action, target, detail, outcome }] }
   //
-  //   POST /v1/admin/providers                                   { name, kind, baseUrl }
-  //   POST /v1/admin/providers/:id/keys                          { label, key }
-  //   POST /v1/admin/providers/:id/keys/:name/roll               { key }
-  //   POST /v1/admin/providers/:id/keys/:name/park               { parked }
-  //   POST /v1/admin/providers/:id/keys/:name/remove             { confirm }
+  //   POST /v1/admin/providers                                   { id, name, kind, baseUrl,
+  //                                                                catalogBaseUrl?, catalogPath? }
+  //   POST /v1/admin/providers/:id/keys                          { label, apiKey, slot?, order? }
+  //   POST /v1/admin/providers/:id/keys/:slot/roll               { apiKey }
+  //   POST /v1/admin/providers/:id/keys/:slot/park               { parked }
+  //   POST /v1/admin/providers/:id/keys/:slot/remove             { confirm: "<slot>" }
+  //   POST /v1/admin/providers/:id/keys/:slot/quota              { total, unit, window, resetAt }
   //   POST /v1/admin/providers/:id/catalog/refresh               {}
-  //   POST /v1/admin/plan-models                                 { alias, provider, keyName,
+  //   POST /v1/admin/plan-models                                 { alias, provider, keySlots: [],
   //                                                                vendorModel, customerName,
-  //                                                                customerLabel, customerVisible,
+  //                                                                customerLabel, servedBy,
+  //                                                                customerVisible, supportsVision,
   //                                                                visionFallback, contextWindow,
   //                                                                plans }
-  //   POST /v1/admin/plan-models/:alias/grant-all                {}
-  //   POST /v1/admin/plan-models/:alias/push-label               {}
-  //   POST /v1/admin/defaults                                    { newWorkspaceModel }
-  //   POST /v1/admin/clients/:slug/model                         { model }
+  //   POST /v1/admin/plan-models/:alias/update                   any of the above but alias
+  //   POST /v1/admin/plan-models/:alias/vision-check             {}
+  //   POST /v1/admin/plan-models/:alias/apply                    {}
+  //   POST /v1/admin/plan-models/:alias/push-label               { all: true } or { slugs: [] }
+  //   POST /v1/admin/defaults                                    { planModel }
+  //   POST /v1/admin/clients/:slug/model                         { planModel, pushLabel? }
   //
-  // Every write answers { ok: true, message } and never a key value.
+  // Every write answers { message } and never a key value. The names above are cp/admin.mjs's own
+  // and cp/PROVIDERS-ROUTES.md's: the panel and the route were written in parallel against that
+  // document, and where this file once used a different word for the same field the panel drew an
+  // empty card against a route that was answering perfectly.
 
   // The three clocks, in the words the operator reads. There is no fourth, and there is no bare
   // "takes effect immediately" anywhere on this page: the proxy, a box and a customer's open tab
@@ -752,7 +767,7 @@
 
   // What the panel holds between renders. Only the answer: no key value is ever kept here, and no
   // form value survives a reload of the panel.
-  let providersAnswer = { providers: [], planModels: [], defaults: {}, ledger: [] };
+  let providersAnswer = { providers: [], planModels: [], defaults: {}, actions: [] };
   let editingAlias = "";
 
   // The one wrapper every action on this panel goes through: disabled in flight, a banner either
@@ -787,6 +802,44 @@
   // A count that might not have been measured. Never a zero standing in for "nobody asked".
   const countWord = (value, one, many) => (value === 1 ? one : many.replace("{n}", String(value)));
 
+  /**
+   * ONE SUBSCRIPTION'S PLAN WINDOW. The vendor sells a window (Alibaba a 7-day token plan, Z.AI
+   * prompts in a 5-hour window and a month, MiniMax its own), and the number that matters is how
+   * much of THAT is gone. Nothing on this build reads it from the vendor, so the total and the
+   * reset are typed in off the vendor's own page and what we count against them is our own count
+   * out of the proxy's request log. The cell says which half is which rather than drawing a bar
+   * that looks measured when half of it was typed.
+   */
+  function quotaCell(key) {
+    const cell = document.createElement("td");
+    const quota = key.quota ?? null;
+    if (quota == null || quota.total == null) {
+      const none = el("span", "quiet", "not set");
+      none.title = String(quota?.why || "No plan size is recorded for this subscription, so there is no window to draw.");
+      cell.appendChild(none);
+      return cell;
+    }
+    const bar = el("div", "quotaBar");
+    const fill = el("div", quota.warn ? "quotaFill warn" : "quotaFill");
+    fill.style.width = `${Math.min(100, Math.max(0, Number(quota.pct ?? 0)))}%`;
+    bar.appendChild(fill);
+    cell.appendChild(bar);
+    const line = el("div", "quiet", `${Number(quota.remaining ?? 0).toLocaleString()} of ${Number(quota.total).toLocaleString()} ${quota.unit} left`);
+    line.title = String(quota.why || "");
+    cell.appendChild(line);
+    if (quota.resetAt) cell.appendChild(el("div", "quiet", `resets ${ago(quota.resetAt)}`));
+    if (quota.warn) cell.appendChild(el("span", "chip refused", `${quota.pct}% used`));
+    // WHICH CUSTOMER used it, inside the same window. The second half of what this was asked for:
+    // a shared subscription with no per-workspace split is a bill nobody can explain.
+    const share = Array.isArray(quota.byWorkspace) ? quota.byWorkspace : [];
+    if (share.length > 0) {
+      const who = el("div", "quiet", share.slice(0, 3).map((one) => `${one.slug} ${one.requests}`).join(", "));
+      who.title = share.map((one) => `${one.slug}: ${one.requests} requests, ${one.tokens.toLocaleString()} tokens`).join("\n");
+      cell.appendChild(who);
+    }
+    return cell;
+  }
+
   /** The quiet line under a plan model that names the routing alias, captioned so it reads as one. */
   const aliasLine = (alias) => {
     const line = el("div", "aliasLine");
@@ -803,14 +856,15 @@
     head.appendChild(el("strong", null, provider.name || provider.id));
     head.appendChild(el("span", "quiet", provider.kind || "kind not recorded"));
     head.appendChild(el("span", "quiet mono", provider.baseUrl || "no address recorded"));
-    if (provider.reachable === true) head.appendChild(el("span", "chip ok", "answering"));
-    else if (provider.reachable === false) {
+    const health = provider.health ?? {};
+    if (health.reachable === true) head.appendChild(el("span", "chip ok", "answering"));
+    else if (health.reachable === false) {
       const chip = el("span", "chip refused", "not answering");
-      chip.title = String(provider.reachableWhy || "");
+      chip.title = String(health.why || "");
       head.appendChild(chip);
     } else {
       const chip = el("span", "quiet", "not measured");
-      chip.title = String(provider.reachableWhy || "this provider has not been asked yet");
+      chip.title = String(health.why || "this provider has not been asked yet");
       head.appendChild(chip);
     }
 
@@ -826,48 +880,61 @@
     // an operator picking a vendor model needs to know which one they are looking at.
     const catalog = provider.catalog ?? {};
     const models = Array.isArray(catalog.models) ? catalog.models : [];
-    const where = catalog.source === "provider"
-      ? `${models.length} model${models.length === 1 ? "" : "s"}, read from the provider ${catalog.readAt ? ago(catalog.readAt) : "at some point"}`
-      : catalog.source === "curated"
-        ? `${models.length} model${models.length === 1 ? "" : "s"}, from our own list, because this provider does not publish one`
-        : "no model list yet";
+    const where = models.length === 0
+      ? "no model list yet"
+      : catalog.live === true
+        ? `${models.length} model${models.length === 1 ? "" : "s"}, read from the provider ${catalog.readAt ? ago(catalog.readAt) : "at some point"}`
+        : `${models.length} model${models.length === 1 ? "" : "s"}, from our own list`;
     const line = el("p", "quiet", where);
     if (catalog.why) line.title = String(catalog.why);
     card.appendChild(line);
-    card.appendChild(el("p", "quiet", "A model list is names and nothing else. The context window, whether it takes a screenshot and what a customer sees it called are set by you on the plan model below."));
+    // The refresh button cannot do anything until the vendor's list has somewhere to be read from
+    // and a key to read it with, and a button that answers "nothing happened" is worse than one
+    // that says why before it is pressed.
+    if (catalog.ready === false) {
+      refresh.disabled = true;
+      refresh.title = "This provider has no model list address recorded, so there is nothing to read. Add one when you register it.";
+    }
+    card.appendChild(el("p", "quiet", String(catalog.note || "A model list is names and nothing else. The context window, whether it takes a screenshot and what a customer sees it called are set by you on the plan model below.")));
 
     const wrap = el("div", "scroll");
     const table = document.createElement("table");
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    for (const label of ["Key", "Order", "Value", "Used by", "This month", "Today", "Last error", ""]) headRow.appendChild(el("th", null, label));
+    for (const label of ["Key", "Order", "Value", "Used by", "This month", "Requests", "Plan window", "Last error", ""]) headRow.appendChild(el("th", null, label));
     thead.appendChild(headRow);
     table.appendChild(thead);
     const body = document.createElement("tbody");
     const keys = Array.isArray(provider.keys) ? provider.keys : [];
-    if (keys.length === 0) body.appendChild(rowSpanning(8, "This provider has no key yet, so nothing can run on it."));
+    if (keys.length === 0) body.appendChild(rowSpanning(9, "This provider has no key yet, so nothing can run on it."));
     for (const key of keys) {
       const tr = document.createElement("tr");
-      tr.dataset.key = key.name;
+      tr.dataset.key = key.slot;
       const name = document.createElement("td");
-      name.appendChild(el("div", null, key.label || key.name));
-      name.appendChild(el("div", "quiet mono", key.name));
+      name.appendChild(el("div", null, key.label || key.slot));
+      name.appendChild(el("div", "quiet mono", key.slot));
       if (key.parked) name.appendChild(el("span", "chip locked", "parked"));
+      if (key.backsCatalog) {
+        const chip = el("span", "chip ok", "reads the model list");
+        chip.title = "The provider's own model list is read through this key. Rolling it keeps working; removing it takes the Refresh button with it.";
+        name.appendChild(chip);
+      }
       tr.appendChild(name);
       tr.appendChild(el("td", "num", key.order ?? "-"));
       // The mask the service reported and nothing else. This page never sees a key value.
-      tr.appendChild(el("td", "mono", key.mask || "not shown"));
-      tr.appendChild(el("td", null, (key.usedBy ?? []).length === 0 ? "nothing yet" : (key.usedBy ?? []).join(", ")));
+      tr.appendChild(el("td", "mono", key.masked || "not shown"));
+      tr.appendChild(el("td", null, (key.serves ?? []).length === 0 ? "nothing yet" : (key.serves ?? []).join(", ")));
       const month = el("td", "num");
-      month.appendChild(measured(dollars(key.spend?.month), key.spend?.monthWhy));
+      month.appendChild(measured(dollars(key.spend?.month), key.spend?.why));
       tr.appendChild(month);
-      const today = el("td", "num");
-      today.appendChild(measured(dollars(key.spend?.today), key.spend?.todayWhy));
-      tr.appendChild(today);
+      const requests = el("td", "num");
+      requests.appendChild(measured(key.spend?.requests, key.spend?.why));
+      tr.appendChild(requests);
+      tr.appendChild(quotaCell(key));
       const error = document.createElement("td");
-      if (String(key.lastError ?? "").length > 0) {
+      if (key.lastError != null && String(key.lastError.why ?? "").length > 0) {
         const chip = el("span", "chip refused", "an error");
-        chip.title = `${key.lastError}${key.lastErrorAt ? ` (${when(key.lastErrorAt)})` : ""}`;
+        chip.title = `${key.lastError.why}${key.lastError.at ? ` (${when(key.lastError.at)})` : ""}`;
         error.appendChild(chip);
       } else {
         error.appendChild(el("span", "quiet", "none"));
@@ -883,14 +950,18 @@
       park.className = "ghost small parkKey";
       park.addEventListener("click", () => act(park, () => api(
         "POST",
-        `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.name)}/park`,
+        `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.slot)}/park`,
         { parked: !key.parked },
       )));
       const remove = el("button", "ghost small", "Remove");
       remove.type = "button";
       remove.className = "ghost small removeKey";
+      const window_ = el("button", "ghost small", "Plan size");
+      window_.type = "button";
+      window_.className = "ghost small quotaKey";
       cell.appendChild(roll);
       cell.appendChild(park);
+      cell.appendChild(window_);
       cell.appendChild(remove);
       tr.appendChild(cell);
       body.appendChild(tr);
@@ -904,8 +975,8 @@
       const rollRow = document.createElement("tr");
       rollRow.hidden = true;
       const rollCell = document.createElement("td");
-      rollCell.colSpan = 8;
-      const rollForm = el("form", "keyForm");
+      rollCell.colSpan = 9;
+      const rollForm = el("form", "keyForm rollForm");
       rollForm.hidden = true;
       const rollField = document.createElement("input");
       rollField.type = "password";
@@ -924,8 +995,8 @@
         rollField.value = "";
         await act(rollGo, () => api(
           "POST",
-          `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.name)}/roll`,
-          { key: value },
+          `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.slot)}/roll`,
+          { apiKey: value },
         ));
       });
       rollCell.appendChild(rollForm);
@@ -938,46 +1009,96 @@
       const confirmField = document.createElement("input");
       confirmField.type = "text";
       confirmField.autocomplete = "off";
-      confirmField.placeholder = provider.name || provider.id;
+      confirmField.placeholder = key.slot;
       confirmField.className = "confirmField";
       const removeGo = el("button", "ghost small", "Remove this key for good");
       removeGo.type = "submit";
       removeForm.appendChild(confirmField);
       removeForm.appendChild(removeGo);
-      removeForm.appendChild(el("span", "why", `Type ${provider.name || provider.id} to confirm. The key value is gone after this and cannot be read back from anywhere, so if it is the last key on this provider every workspace using it stops on the next request.`));
+      // The slot and not the provider's name, because the slot is what the route checks and a
+      // confirmation the service will refuse is a confirmation that teaches nothing.
+      removeForm.appendChild(el("span", "why", `Type ${key.slot} to confirm. The key value is gone after this and cannot be read back from anywhere, so if it is the last key on this provider every workspace using it stops on the next request.`));
       removeForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const typed = confirmField.value.trim();
-        if (typed !== String(provider.name || provider.id)) {
-          banner(`Type ${provider.name || provider.id} in the box to remove this key. Nothing was removed.`);
+        if (typed !== String(key.slot)) {
+          banner(`Type ${key.slot} in the box to remove this key. Nothing was removed.`);
           return;
         }
         confirmField.value = "";
         await act(removeGo, () => api(
           "POST",
-          `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.name)}/remove`,
+          `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.slot)}/remove`,
           { confirm: typed },
         ));
       });
       rollCell.appendChild(removeForm);
+
+      // The vendor's plan window, typed in once off their own page. No endpoint on this build
+      // reports it, which the form says rather than implying the numbers came from the vendor.
+      const quotaForm = el("form", "keyForm quotaForm");
+      quotaForm.hidden = true;
+      const quotaTotal = document.createElement("input");
+      quotaTotal.type = "number";
+      quotaTotal.min = "0";
+      quotaTotal.placeholder = "the plan's total";
+      quotaTotal.className = "quotaTotal";
+      quotaTotal.value = key.quota?.total != null ? String(key.quota.total) : "";
+      const quotaUnit = document.createElement("input");
+      quotaUnit.type = "text";
+      quotaUnit.placeholder = "what it is counted in";
+      quotaUnit.className = "quotaUnit";
+      quotaUnit.value = String(key.quota?.unit ?? "");
+      const quotaReset = document.createElement("input");
+      quotaReset.type = "text";
+      quotaReset.placeholder = "when it resets, e.g. 2026-09-09T22:37:00Z";
+      quotaReset.className = "quotaReset";
+      quotaReset.value = String(key.quota?.resetAt ?? "");
+      const quotaGo = el("button", "ghost small", "Record this plan window");
+      quotaGo.type = "submit";
+      quotaForm.appendChild(quotaTotal);
+      quotaForm.appendChild(quotaUnit);
+      quotaForm.appendChild(quotaReset);
+      quotaForm.appendChild(quotaGo);
+      quotaForm.appendChild(el("span", "why", "Read the total and the reset off the provider's own plan page and type them here. What is counted against them is our own count of what went through this key, which is why the bar says so."));
+      quotaForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        await act(quotaGo, () => api(
+          "POST",
+          `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys/${encodeURIComponent(key.slot)}/quota`,
+          {
+            total: Number(quotaTotal.value) || 0,
+            unit: quotaUnit.value.trim(),
+            window: String(key.quota?.window ?? ""),
+            resetAt: quotaReset.value.trim(),
+          },
+        ));
+      });
+      rollCell.appendChild(quotaForm);
       rollRow.appendChild(rollCell);
       body.appendChild(rollRow);
 
       // The one place the row and the two forms inside it are kept in step. Opening either closes
       // the other, because a key row with a roll field and a delete confirmation open at once is
       // two ways to type into the wrong one.
-      const showRow = () => { rollRow.hidden = rollForm.hidden && removeForm.hidden; };
+      const showRow = () => { rollRow.hidden = rollForm.hidden && removeForm.hidden && quotaForm.hidden; };
       roll.addEventListener("click", () => {
         rollForm.hidden = !rollForm.hidden;
-        if (!rollForm.hidden) removeForm.hidden = true;
+        if (!rollForm.hidden) { removeForm.hidden = true; quotaForm.hidden = true; }
         showRow();
         if (!rollForm.hidden) rollField.focus();
       });
       remove.addEventListener("click", () => {
         removeForm.hidden = !removeForm.hidden;
-        if (!removeForm.hidden) rollForm.hidden = true;
+        if (!removeForm.hidden) { rollForm.hidden = true; quotaForm.hidden = true; }
         showRow();
         if (!removeForm.hidden) confirmField.focus();
+      });
+      window_.addEventListener("click", () => {
+        quotaForm.hidden = !quotaForm.hidden;
+        if (!quotaForm.hidden) { rollForm.hidden = true; removeForm.hidden = true; }
+        showRow();
+        if (!quotaForm.hidden) quotaTotal.focus();
       });
     }
     table.appendChild(body);
@@ -1009,7 +1130,7 @@
       if (value.length === 0) { banner("Type the key before adding it."); return; }
       addValue.value = "";
       addLabel.value = "";
-      await act(addGo, () => api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys`, { label, key: value }));
+      await act(addGo, () => api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys`, { label, apiKey: value }));
     });
     card.appendChild(addForm);
     return card;
@@ -1023,8 +1144,16 @@
     head.appendChild(el("span", "name", model.customerName || model.alias));
     head.appendChild(el("span", "quiet", model.provider || "no provider"));
     head.appendChild(el("span", "quiet mono", model.vendorModel || "no vendor model"));
-    if (model.customerVisible === false) head.appendChild(el("span", "chip locked", "not shown to customers"));
-    if (model.parked) head.appendChild(el("span", "chip locked", "parked"));
+    // shownToCustomers is the route's own answer to the one question that keeps a routing target
+    // off a customer's Settings card: visible AND named on both sides. A row that fails it is drawn
+    // here plainly, because the operator's page is where the reason has to be visible.
+    if (model.shownToCustomers === false) {
+      const chip = el("span", "chip locked", "not shown to customers");
+      chip.title = model.customerVisible === false
+        ? "This model is marked as not for customers, so it stays off their Settings card."
+        : "This model has no customer name or no label, so it would show up as its routing alias. It is kept off the customer's card until both are set.";
+      head.appendChild(chip);
+    }
 
     const actions = el("div", "actions");
     const edit = el("button", "ghost small", "Edit");
@@ -1039,7 +1168,7 @@
       : "Give every workspace access to this model");
     grant.type = "button";
     grant.title = CLOCK.added;
-    grant.addEventListener("click", () => act(grant, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/grant-all`, {})));
+    grant.addEventListener("click", () => act(grant, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/apply`, {})));
     actions.appendChild(grant);
 
     const push = el("button", "ghost small", known
@@ -1047,8 +1176,18 @@
       : "Update what their Titan calls it");
     push.type = "button";
     push.title = CLOCK.label;
-    push.addEventListener("click", () => act(push, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/push-label`, {})));
+    // { all: true }, because the route refuses a push that names nobody: it writes INSIDE a box
+    // and it sets the model as well as the label, so an empty body answers 409 with the candidates.
+    push.addEventListener("click", () => act(push, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/push-label`, { all: true })));
     actions.appendChild(push);
+
+    // Whether this model takes an image is the one fact a model list can never tell us, and getting
+    // it wrong is a fleet-wide screenshot outage rather than a cosmetic error. So it is asked.
+    const check = el("button", "ghost small", "Check screenshots");
+    check.type = "button";
+    check.title = "Sends one image through this model and records what came back.";
+    check.addEventListener("click", () => act(check, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(model.alias)}/vision-check`, {})));
+    actions.appendChild(check);
     head.appendChild(actions);
     card.appendChild(head);
 
@@ -1057,7 +1196,8 @@
     const facts = [];
     facts.push(`their Titan says it runs ${model.customerLabel || "nothing, because no label is set"}`);
     facts.push(model.contextWindow ? `${Number(model.contextWindow).toLocaleString()} tokens of context` : "no context window set");
-    facts.push(`key ${model.keyName || "not set"}`);
+    const slots = [...new Set((model.deployments ?? []).map((one) => String(one.keySlot)).filter((one) => one.length > 0))];
+    facts.push(slots.length === 0 ? "no key behind it" : `${slots.length === 1 ? "key" : "keys"} ${slots.join(", ")}`);
     facts.push((model.plans ?? []).length > 0 ? `part of ${(model.plans ?? []).join(", ")}` : "no plan named");
     card.appendChild(el("p", "quiet", facts.join(" . ")));
 
@@ -1072,6 +1212,11 @@
       vision.appendChild(text(`a screenshot falls back to ${visionName?.customerName || model.visionFallback}`));
     } else if (model.supportsVision === true) {
       vision.appendChild(text("this one takes screenshots itself, so nothing falls back"));
+      if (model.vision?.ok === false) {
+        const chip = el("span", "chip refused", "it refused an image when asked");
+        chip.title = String(model.vision?.why || "");
+        vision.appendChild(chip);
+      }
     } else {
       vision.appendChild(el("span", "chip off", "no screenshot route"));
       vision.appendChild(text(" Every Titan conversation carries screenshots, so a workspace on this model fails on its next turn."));
@@ -1099,13 +1244,27 @@
     $("pmAlias").value = editingAlias;
     $("pmAlias").readOnly = editingAlias.length > 0;
     $("pmVisible").checked = model ? model.customerVisible !== false : true;
+    $("pmAliasNote").hidden = false;
     $("pmSelfVision").checked = model ? model.supportsVision === true : false;
 
     const providers = answer.providers ?? [];
     fill($("pmProvider"), providers.map((one) => ({ value: one.id, label: one.name || one.id })), model?.provider ?? providers[0]?.id ?? "");
     const refreshKeys = () => {
       const chosen = providers.find((one) => one.id === $("pmProvider").value);
-      fill($("pmKey"), (chosen?.keys ?? []).map((one) => ({ value: one.name, label: one.label || one.name })), model?.keyName ?? "");
+      // EVERY KEY, PRESELECTED. A plan model is a pool: one deployment per key, all sharing the
+      // alias. That is what makes a second subscription carry load and what makes a rate limit on
+      // one key survivable. A single-key picker here is how a pool quietly becomes one key.
+      const keySelect = $("pmKey");
+      const running = new Set((model?.deployments ?? []).map((one) => String(one.keySlot)));
+      clear(keySelect);
+      for (const one of chosen?.keys ?? []) {
+        const node = document.createElement("option");
+        node.value = one.slot;
+        node.appendChild(text(`${one.label || one.slot} (${one.slot})`));
+        node.selected = running.size === 0 ? !one.parked : running.has(String(one.slot));
+        keySelect.appendChild(node);
+      }
+      keySelect.disabled = editingAlias.length > 0;
       const catalogModels = Array.isArray(chosen?.catalog?.models) ? chosen.catalog.models : [];
       const options = catalogModels.map((one) => ({ value: one, label: one }));
       options.push({ value: "__other__", label: "something else, typed in" });
@@ -1127,6 +1286,12 @@
       visionOptions.push({ value: one.alias, label: one.customerName || one.alias });
     }
     fill($("pmVision"), visionOptions, model?.visionFallback ?? "");
+    // The keys a model runs on are its pool at the proxy. Changing that is adding or removing a
+    // deployment, which is not what this form does, so on an edit the picker shows what is really
+    // there and does not pretend to change it.
+    $("pmKeyNote").textContent = editingAlias.length > 0
+      ? "These are the keys this model runs on now. To change the pool, add or remove a key on the provider above."
+      : "It runs on every key selected here, one deployment each. That is what makes a second subscription share the load.";
 
     form.hidden = false;
     $("pmCustomerName").focus();
@@ -1140,14 +1305,21 @@
   $("addProviderForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const name = $("providerName").value.trim();
-    const kind = $("providerKind").value.trim();
+    const kind = $("providerKind").value.trim() || "openai";
     const baseUrl = $("providerBase").value.trim();
+    // The short name is the handle every key slot is named after (zai-1, zai-2) and it is on every
+    // spend row forever, so it is typed rather than guessed from a display name.
+    const id = $("providerId").value.trim().toLowerCase();
+    const catalogPath = $("providerCatalog").value.trim();
     if (name.length === 0 || baseUrl.length === 0) { banner("A provider needs a name and an address."); return; }
+    if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(id)) { banner("The short name is lower case letters, numbers and dashes, and it is what every key slot on this provider is named after."); return; }
     const button = $("addProviderSave");
-    await act(button, () => api("POST", "/v1/admin/providers", { name, kind, baseUrl }));
+    await act(button, () => api("POST", "/v1/admin/providers", { id, name, kind, baseUrl, catalogPath }));
+    $("providerId").value = "";
     $("providerName").value = "";
     $("providerKind").value = "";
     $("providerBase").value = "";
+    $("providerCatalog").value = "";
     $("addProviderForm").hidden = true;
   });
 
@@ -1171,13 +1343,15 @@
     }
     if (alias.length === 0) { banner("A plan model needs a routing name."); return; }
     if (vendorModel.length === 0) { banner("Pick the vendor model this points at, or type one in."); return; }
-    const body = {
-      alias,
+    const customerLabel = $("pmCustomerLabel").value.trim();
+    const shared = {
       provider: $("pmProvider").value,
-      keyName: $("pmKey").value,
       vendorModel,
       customerName: $("pmCustomerName").value.trim(),
-      customerLabel: $("pmCustomerLabel").value.trim(),
+      customerLabel,
+      // What the customer's Titan says it is served by follows the label unless somebody says
+      // otherwise. One less field on the form, and never an empty string reaching a box.
+      servedBy: customerLabel,
       customerVisible: $("pmVisible").checked,
       supportsVision,
       visionFallback,
@@ -1185,7 +1359,15 @@
       plans: $("pmPlans").value.split(",").map((one) => one.trim()).filter((one) => one.length > 0),
     };
     const button = $("planModelSave");
-    await act(button, () => api("POST", "/v1/admin/plan-models", body));
+    // AN EDIT IS AN EDIT. The alias is a contract with every box already pointed at it, so the
+    // create route refuses one that exists; sending an edit there answered 409 and changed nothing.
+    if (editingAlias.length > 0) {
+      await act(button, () => api("POST", `/v1/admin/plan-models/${encodeURIComponent(editingAlias)}/update`, shared));
+    } else {
+      const keySlots = [...$("pmKey").selectedOptions].map((one) => one.value);
+      if (keySlots.length === 0) { banner("Pick at least one key for it to run on."); return; }
+      await act(button, () => api("POST", "/v1/admin/plan-models", { alias, keySlots, ...shared }));
+    }
     $("planModelForm").hidden = true;
     editingAlias = "";
   });
@@ -1199,12 +1381,12 @@
     select.id = "defaultModel";
     const options = (answer.planModels ?? []).map((one) => ({ value: one.alias, label: one.customerName || one.alias }));
     if (options.length === 0) options.push({ value: "", label: "nothing, because there is no plan model yet" });
-    fill(select, options, answer.defaults?.newWorkspaceModel ?? "");
+    fill(select, options, answer.defaults?.planModel ?? "");
     row.appendChild(select);
     const save = el("button", "ghost small", "Save");
     save.type = "button";
     save.id = "defaultModelSave";
-    save.addEventListener("click", () => act(save, () => api("POST", "/v1/admin/defaults", { newWorkspaceModel: select.value })));
+    save.addEventListener("click", () => act(save, () => api("POST", "/v1/admin/defaults", { planModel: select.value })));
     row.appendChild(save);
     host.appendChild(row);
     const note = el("p", "quiet", `This is what a workspace provisioned from now on runs on. It changes nothing about a workspace that already exists: those are set one at a time on their own row under Clients and users. ${CLOCK.customerPage}`);
@@ -1247,8 +1429,13 @@
       note.push(`${(answer.providers ?? []).length} provider${(answer.providers ?? []).length === 1 ? "" : "s"}`);
       note.push(`${(answer.planModels ?? []).length} plan model${(answer.planModels ?? []).length === 1 ? "" : "s"}`);
       note.push(`measured ${when(answer.measuredAt)}`);
-      if (answer.storeModelInDb === false) {
-        note.push(`the proxy is still reading its models out of its own file, so a change made here will not stick: ${answer.storeModelInDbWhy || "store_model_in_db is off"}`);
+      // THE HALF-STATE, SAID OUT LOUD. With the proxy reading its models out of its file, a key
+      // added here really persists and a plan model refuses, so half of what this page does works
+      // and the page would otherwise look fine. null is "cannot be told apart yet", not false.
+      if (answer.db?.on === false) {
+        note.push(`the proxy is still reading its models out of its own file, so a change made here will not stick: ${answer.db.why || "store_model_in_db is off"}`);
+      } else if (answer.db?.on == null && answer.db?.why) {
+        note.push(String(answer.db.why));
       }
     }
     $("providersNote").textContent = note.join(" - ");
@@ -1266,7 +1453,7 @@
     for (const model of planModels) models.appendChild(renderPlanModelCard(model, answer));
 
     renderDefaults(answer);
-    renderLedger(answer.ledger ?? []);
+    renderLedger(answer.actions ?? []);
   }
 
   // ---- everything at once ----------------------------------------------------------------------

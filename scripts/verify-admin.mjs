@@ -239,58 +239,122 @@ const nowIso = () => new Date().toISOString();
 const maskOf = (value) => `sk-****${String(value).slice(-4)}`;
 const shortHash = (value) => createHmac("sha256", "gate").update(String(value)).digest("hex").slice(0, 12);
 
+// THE FIXTURE SPEAKS cp/admin.mjs's OWN WORDS. It was once written in a vocabulary of its own --
+// key.name, key.mask, catalog.source, defaults.newWorkspaceModel, ledger -- while the route it
+// stands in for answered slot, masked, catalog.live, defaults.planModel and actions. Every check
+// below passed and the panel drew an empty card against a route that was answering perfectly. So
+// the shape here is copied from cp/PROVIDERS-ROUTES.md, and the route-contract leg above measures
+// the real route against the same names.
 const providersFixture = {
   configured: true,
   why: "",
-  storeModelInDb: true,
-  storeModelInDbWhy: "",
+  db: { on: true, why: "a deployment at the proxy carries db_model true, so a change made here sticks" },
   measuredAt: nowIso(),
   providers: [
     {
       id: "zai", name: "Z.AI", kind: "openai", baseUrl: "https://api.z.ai/api/coding/paas/v4",
-      reachable: true, reachableWhy: "", checkedAt: nowIso(),
+      fromPreset: true, bootstrapEnv: ["PROXY_ZAI_KEY_1", "PROXY_ZAI_KEY_2"],
+      health: { reachable: true, why: "", checkedAt: nowIso() },
       catalog: {
-        source: "provider",
         models: ["glm-5.3", "glm-5.3-flash", "glm-5", "glm-4.7", "glm-4.6", "glm-4.6v"],
+        live: true,
         readAt: nowIso(),
         why: "",
+        note: "This is a list of names. The context window and whether a model takes an image are things you set.",
+        ready: true,
+        wired: true,
       },
       keys: [
-        { name: "zai-1", label: "Z.AI subscription one", order: 1, mask: "sk-****4f2a", parked: false, usedBy: ["plan-zai", "plan-zai-vision"], spend: { month: 12.41, monthWhy: "", today: 0.62, todayWhy: "" }, lastError: "", lastErrorAt: null },
-        { name: "zai-2", label: "Z.AI subscription two", order: 2, mask: "sk-****9c11", parked: false, usedBy: ["plan-zai", "plan-zai-vision"], spend: { month: 11.08, monthWhy: "", today: 0.55, todayWhy: "" }, lastError: "", lastErrorAt: null },
+        {
+          slot: "zai-1", label: "Z.AI subscription one", order: 1, masked: "sk-****4f2a", parked: false,
+          backsCatalog: true, serves: ["plan-zai", "plan-zai-vision"], lastError: null,
+          spend: { month: 12.41, requests: 4120, why: "" },
+          quota: {
+            unit: "prompts", window: "5 hours", used: 120, total: 400, remaining: 280, pct: 30,
+            resetAt: new Date(Date.now() + 3 * 3600 * 1000).toISOString(), warn: false, live: false,
+            why: "Our own count of what went through this key, 120 of 400 prompts.",
+            byWorkspace: [{ slug: "demo", requests: 90, tokens: 412_000, dollars: 0.41 }],
+          },
+        },
+        {
+          slot: "zai-2", label: "Z.AI subscription two", order: 2, masked: "sk-****9c11", parked: false,
+          backsCatalog: false, serves: ["plan-zai", "plan-zai-vision"], lastError: null,
+          spend: { month: 11.08, requests: 3980, why: "" },
+          quota: {
+            unit: "prompts", window: "5 hours", used: 340, total: 400, remaining: 60, pct: 85,
+            resetAt: new Date(Date.now() + 3 * 3600 * 1000).toISOString(), warn: true, live: false,
+            why: "Our own count of what went through this key, 340 of 400 prompts.",
+            byWorkspace: [],
+          },
+        },
       ],
     },
     {
       id: "minimax", name: "MiniMax", kind: "openai", baseUrl: "https://api.minimax.io/v1",
-      reachable: null, reachableWhy: "this provider has not been asked since the last restart", checkedAt: null,
-      catalog: { source: "curated", models: ["MiniMax-M3", "MiniMax-M2"], readAt: nowIso(), why: "MiniMax does not publish a model list, so this is our own" },
+      fromPreset: true, bootstrapEnv: ["PROXY_MINIMAX_KEY"],
+      health: { reachable: null, why: "no key here yet, so there is nothing to reach", checkedAt: "" },
+      catalog: {
+        models: ["MiniMax-M3", "MiniMax-M2"], live: false, readAt: "",
+        why: "This is the short list this product has actually run. Refresh reads the vendor's own list once a key is in.",
+        note: "This is a list of names. The context window and whether a model takes an image are things you set.",
+        ready: false, wired: false,
+      },
       keys: [
-        { name: "minimax-1", label: "MiniMax subscription", order: 1, mask: "sk-****77ab", parked: false, usedBy: ["plan-minimax"], spend: { month: null, monthWhy: "the proxy reported this key with no numbers on it", today: null, todayWhy: "the proxy reported this key with no numbers on it" }, lastError: "", lastErrorAt: null },
+        {
+          slot: "minimax-1", label: "MiniMax subscription", order: 1, masked: "sk-****77ab", parked: false,
+          backsCatalog: false, serves: ["plan-minimax"], lastError: null,
+          spend: { month: null, requests: null, why: "the proxy reported this key with no numbers on it" },
+          quota: {
+            unit: "requests", window: "", used: 0, total: null, remaining: null, pct: null, resetAt: "",
+            warn: false, live: false,
+            why: "Nothing is set for this subscription's plan size yet, so there is no bar to draw.",
+            byWorkspace: [],
+          },
+        },
       ],
     },
   ],
   planModels: [
     {
-      id: "pm-zai", alias: "plan-zai", provider: "zai", vendorModel: "openai/glm-5.3", keyName: "zai-1",
-      customerName: "GLM-5.3", customerLabel: "GLM-5.3", customerVisible: true,
-      visionFallback: "plan-zai-vision", contextWindow: 200_000, supportsVision: false,
-      plans: ["included"], workspaces: 3, workspacesWhy: "", parked: false,
+      alias: "plan-zai", provider: "zai", vendorModel: "openai/glm-5.3",
+      customerName: "Z.AI GLM (included with your plan)", customerLabel: "GLM-5.3", servedBy: "Z.AI GLM",
+      contextWindow: 200_000, supportsVision: false, visionFallback: "plan-zai-vision",
+      vision: { ok: false, at: nowIso(), why: "messages.content.type is invalid" },
+      plans: ["included"], customerVisible: true, shownToCustomers: true,
+      deployments: [
+        { id: "tb-plan-zai-zai-1", keySlot: "zai-1", fromDb: true, healthy: true, why: "" },
+        { id: "tb-plan-zai-zai-2", keySlot: "zai-2", fromDb: true, healthy: true, why: "" },
+      ],
+      workspaces: 3, workspaceSlugs: ["demo", "richard-avery", "titanium"], workspacesWhy: "",
+      labelBehind: null, labelBehindWhy: "the label a customer's Titan says lives inside each box, and nothing reports it back to this service.",
     },
     {
-      id: "pm-zai-vision", alias: "plan-zai-vision", provider: "zai", vendorModel: "openai/glm-5.3-flash", keyName: "zai-1",
-      customerName: "", customerLabel: "", customerVisible: false,
-      visionFallback: "", contextWindow: 128_000, supportsVision: true,
-      plans: ["included"], workspaces: 3, workspacesWhy: "", parked: false,
+      // The model everything else falls back TO. It has no fallback of its own and never will, and
+      // it must never reach a customer's card, which is what shownToCustomers false says here.
+      alias: "plan-zai-vision", provider: "zai", vendorModel: "openai/glm-5.3-flash",
+      customerName: "", customerLabel: "", servedBy: "",
+      contextWindow: 128_000, supportsVision: true, visionFallback: "",
+      vision: { ok: true, at: nowIso(), why: "" },
+      plans: ["included"], customerVisible: false, shownToCustomers: false,
+      deployments: [
+        { id: "tb-plan-zai-vision-zai-1", keySlot: "zai-1", fromDb: true, healthy: true, why: "" },
+        { id: "tb-plan-zai-vision-zai-2", keySlot: "zai-2", fromDb: true, healthy: true, why: "" },
+      ],
+      workspaces: 3, workspaceSlugs: ["demo", "richard-avery", "titanium"], workspacesWhy: "",
+      labelBehind: null, labelBehindWhy: "",
     },
     {
-      id: "pm-minimax", alias: "plan-minimax", provider: "minimax", vendorModel: "openai/MiniMax-M3", keyName: "minimax-1",
-      customerName: "MiniMax-M3", customerLabel: "MiniMax-M3", customerVisible: true,
-      visionFallback: "plan-zai-vision", contextWindow: 200_000, supportsVision: false,
-      plans: ["included"], workspaces: 0, workspacesWhy: "", parked: false,
+      alias: "plan-minimax", provider: "minimax", vendorModel: "openai/MiniMax-M3",
+      customerName: "MiniMax-M3", customerLabel: "MiniMax-M3", servedBy: "MiniMax",
+      contextWindow: 200_000, supportsVision: false, visionFallback: "plan-zai-vision",
+      vision: { ok: false, at: "", why: "this model has never been asked whether it takes an image" },
+      plans: ["included"], customerVisible: true, shownToCustomers: true,
+      deployments: [{ id: "tb-plan-minimax-minimax-1", keySlot: "minimax-1", fromDb: true, healthy: null, why: "" }],
+      workspaces: 0, workspaceSlugs: [], workspacesWhy: "", labelBehind: null, labelBehindWhy: "",
     },
   ],
-  defaults: { newWorkspaceModel: "plan-zai", why: "" },
-  ledger: [],
+  defaults: { planModel: "plan-zai", why: "" },
+  actions: [],
 };
 
 // Every mutation appends the pool size AFTER it, per provider. A roll that never leaves a gap reads
@@ -303,7 +367,7 @@ const recordPool = (id) => {
 };
 
 const fixtureLedger = (action, target, detail, outcome = "ok") => {
-  providersFixture.ledger.unshift({
+  providersFixture.actions.unshift({
     at: nowIso(), actor: BOSS_EMAIL, via: "console", ip: "127.0.0.1", action, target, detail, outcome,
   });
 };
@@ -327,11 +391,18 @@ function providersFixtureAnswer(method, pathname, body) {
     return [200, providersFixture];
   }
   if (method === "POST" && pathname === "/v1/admin/providers") {
-    const id = String(body?.name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    // The id is TYPED, not derived: it is what every key slot on this provider is named after.
+    const id = String(body?.id ?? "").trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(id)) return [400, { message: "A provider needs a short name in lower case letters, numbers and dashes." }];
     providersFixture.providers.push({
       id, name: String(body?.name ?? ""), kind: String(body?.kind ?? "openai"), baseUrl: String(body?.baseUrl ?? ""),
-      reachable: null, reachableWhy: "this provider has not been asked yet", checkedAt: null,
-      catalog: { source: "none", models: [], readAt: null, why: "nobody has read this provider's model list yet" },
+      fromPreset: false, bootstrapEnv: [],
+      health: { reachable: null, why: "no key here yet, so there is nothing to reach", checkedAt: "" },
+      catalog: {
+        models: [], live: false, readAt: "", why: "nobody has read this provider's model list yet",
+        note: "This is a list of names. The context window and whether a model takes an image are things you set.",
+        ready: String(body?.catalogPath ?? "").length > 0, wired: false,
+      },
       keys: [],
     });
     fixtureLedger("added a provider", id, `${body?.kind ?? "openai"} at ${body?.baseUrl ?? ""}`);
@@ -343,93 +414,141 @@ function providersFixtureAnswer(method, pathname, body) {
     if (provider == null) return [404, { message: "no provider by that name" }];
     if (method === "POST" && at[2] === "catalog" && at[3] === "refresh") {
       provider.catalog.readAt = nowIso();
+      provider.catalog.live = true;
       fixtureLedger("read a provider's model list", provider.id, `${provider.catalog.models.length} names, and names are all a model list carries`);
       return [200, { ok: true, message: `${provider.name} lists ${provider.catalog.models.length} models. That is names and nothing else: the context window and whether it takes a screenshot are yours to set.` }];
     }
     if (method === "POST" && at[2] === "keys" && at.length === 3) {
-      const value = String(body?.key ?? "");
+      const value = String(body?.apiKey ?? "");
       if (value.length === 0) return [400, { message: "a key was not sent" }];
       recordPool(provider.id); // the size before, so the history reads as a sequence and not a result
       provider.keys.push({
-        name: `${provider.id}-${provider.keys.length + 1}`,
+        slot: `${provider.id}-${provider.keys.length + 1}`,
         label: String(body?.label ?? "") || `${provider.name} key ${provider.keys.length + 1}`,
         order: provider.keys.length + 1,
-        mask: maskOf(value),
-        parked: false, usedBy: [], lastError: "", lastErrorAt: null,
-        spend: { month: 0, monthWhy: "", today: 0, todayWhy: "" },
+        masked: maskOf(value),
+        parked: false, backsCatalog: false, serves: [], lastError: null,
+        spend: { month: 0, requests: 0, why: "" },
+        quota: { unit: "requests", window: "", used: 0, total: null, remaining: null, pct: null, resetAt: "", warn: false, live: false, why: "Nothing is set for this subscription's plan size yet.", byWorkspace: [] },
       });
       recordPool(provider.id);
-      fixtureLedger("added a key", `${provider.id}/${provider.keys[provider.keys.length - 1].name}`, `${value.length} characters, ${shortHash(value)}`);
-      return [200, { ok: true, message: `A key was added to ${provider.name} as ${provider.keys[provider.keys.length - 1].name} (${shortHash(value)}). The proxy uses it on the next request.` }];
+      fixtureLedger("added a key", `${provider.id}/${provider.keys[provider.keys.length - 1].slot}`, `${value.length} characters, ${shortHash(value)}`);
+      return [200, { ok: true, message: `A key was added to ${provider.name} as ${provider.keys[provider.keys.length - 1].slot} (${shortHash(value)}). The proxy uses it on the next request.` }];
     }
     if (method === "POST" && at[2] === "keys" && at.length >= 5) {
-      const key = provider.keys.find((one) => one.name === decodeURIComponent(at[3]));
+      const key = provider.keys.find((one) => one.slot === decodeURIComponent(at[3]));
       if (key == null) return [404, { message: "no key by that name" }];
       if (at[4] === "roll") {
-        const value = String(body?.key ?? "");
+        const value = String(body?.apiKey ?? "");
         if (value.length === 0) return [400, { message: "a key was not sent" }];
         // IN FIRST, THEN OUT. The pool history is what proves there was never a moment with fewer
         // keys than it started with: it reads two, three, two. A delete-then-add would read two,
         // one, two, and from the answer alone the two are indistinguishable.
         recordPool(provider.id);
-        const replacement = { ...key, name: `${key.name}-new`, mask: maskOf(value), order: provider.keys.length + 1 };
+        const replacement = { ...key, slot: `${key.slot}-new`, masked: maskOf(value), order: provider.keys.length + 1 };
         provider.keys.push(replacement);
         recordPool(provider.id);
-        provider.keys = provider.keys.filter((one) => one.name !== key.name);
-        replacement.name = key.name;
+        provider.keys = provider.keys.filter((one) => one.slot !== key.slot);
+        replacement.slot = key.slot;
         replacement.order = key.order;
         provider.keys.sort((a, b) => a.order - b.order);
         recordPool(provider.id);
-        fixtureLedger("rolled a key", `${provider.id}/${key.name}`, `${value.length} characters, ${shortHash(value)}, the old one came out after the new one answered`);
+        fixtureLedger("rolled a key", `${provider.id}/${key.slot}`, `${value.length} characters, ${shortHash(value)}, the old one came out after the new one answered`);
         return [200, { ok: true, message: `${key.label} was replaced (${shortHash(value)}). The new key went in beside the old one and the old one came out after it answered, so nothing failed in between.` }];
       }
       if (at[4] === "park") {
         key.parked = body?.parked === true;
-        fixtureLedger(key.parked ? "parked a key" : "put a key back in use", `${provider.id}/${key.name}`, "");
+        fixtureLedger(key.parked ? "parked a key" : "put a key back in use", `${provider.id}/${key.slot}`, "");
         return [200, { ok: true, message: key.parked ? `${key.label} is parked and takes no more requests.` : `${key.label} is back in use from the next request.` }];
       }
+      if (at[4] === "quota") {
+        key.quota = {
+          ...key.quota,
+          unit: String(body?.unit ?? key.quota?.unit ?? "requests"),
+          window: String(body?.window ?? ""),
+          total: Number(body?.total) > 0 ? Number(body.total) : null,
+          resetAt: String(body?.resetAt ?? ""),
+        };
+        key.quota.remaining = key.quota.total == null ? null : Math.max(0, key.quota.total - key.quota.used);
+        key.quota.pct = key.quota.total == null ? null : Math.round((key.quota.used / key.quota.total) * 100);
+        key.quota.warn = key.quota.pct != null && key.quota.pct >= 80;
+        fixtureLedger("recorded a plan window", `${provider.id}/${key.slot}`, `${key.quota.total ?? "none"} ${key.quota.unit}`);
+        return [200, { ok: true, message: `The plan window for ${key.label} is recorded. What is counted against it is our own count of what went through this key.` }];
+      }
       if (at[4] === "remove") {
-        if (String(body?.confirm ?? "") !== provider.name) {
-          fixtureLedger("tried to remove a key", `${provider.id}/${key.name}`, "the confirmation did not match", "refused");
-          return [400, { message: `Type ${provider.name} to confirm. Nothing was removed.` }];
+        // The SLOT, which is what cp/admin.mjs checks. A confirmation the service would refuse is a
+        // confirmation that teaches the operator the wrong word.
+        if (String(body?.confirm ?? "") !== key.slot) {
+          fixtureLedger("tried to remove a key", `${provider.id}/${key.slot}`, "the confirmation did not match", "refused");
+          return [400, { message: `Type ${key.slot} to confirm. Nothing was removed.` }];
         }
-        provider.keys = provider.keys.filter((one) => one.name !== key.name);
+        provider.keys = provider.keys.filter((one) => one.slot !== key.slot);
         recordPool(provider.id);
-        fixtureLedger("removed a key", `${provider.id}/${key.name}`, "the value is gone and cannot be read back");
+        fixtureLedger("removed a key", `${provider.id}/${key.slot}`, "the value is gone and cannot be read back");
         return [200, { ok: true, message: `${key.label} is gone. The proxy stops using it on the next request.` }];
       }
     }
   }
+  const planModelRow = (alias, body, existing) => ({
+    alias,
+    provider: String(body?.provider ?? existing?.provider ?? ""),
+    vendorModel: String(body?.vendorModel ?? existing?.vendorModel ?? ""),
+    customerName: String(body?.customerName ?? existing?.customerName ?? ""),
+    customerLabel: String(body?.customerLabel ?? existing?.customerLabel ?? ""),
+    servedBy: String(body?.servedBy ?? existing?.servedBy ?? ""),
+    customerVisible: body?.customerVisible !== undefined ? body.customerVisible !== false : (existing?.customerVisible !== false),
+    visionFallback: String(body?.visionFallback ?? existing?.visionFallback ?? ""),
+    contextWindow: body?.contextWindow ?? existing?.contextWindow ?? null,
+    supportsVision: body?.supportsVision !== undefined ? body.supportsVision === true : existing?.supportsVision === true,
+    vision: existing?.vision ?? { ok: false, at: "", why: "this model has never been asked whether it takes an image" },
+    plans: Array.isArray(body?.plans) ? body.plans : (existing?.plans ?? []),
+    deployments: existing?.deployments ?? (Array.isArray(body?.keySlots) ? body.keySlots.map((slot) => ({ id: `tb-${alias}-${slot}`, keySlot: String(slot), fromDb: true, healthy: true, why: "" })) : []),
+    workspaces: existing?.workspaces ?? 0,
+    workspaceSlugs: existing?.workspaceSlugs ?? [],
+    workspacesWhy: "",
+    labelBehind: null,
+    labelBehindWhy: "",
+  });
+  const withShown = (row) => ({
+    ...row,
+    // The one rule that keeps a routing target off a customer's card, computed here the way
+    // cp/admin.mjs computes it, so the panel is drawn against the same answer.
+    shownToCustomers: row.customerVisible === true && String(row.customerLabel ?? "").length > 0 && String(row.customerName ?? "").length > 0,
+  });
   if (method === "POST" && pathname === "/v1/admin/plan-models") {
     const alias = String(body?.alias ?? "");
     if (alias.length === 0) return [400, { message: "a plan model needs a routing name" }];
+    if (providersFixture.planModels.some((one) => one.alias === alias)) {
+      return [409, { message: `${alias} already exists. Change it instead: the name is what every box already points at.` }];
+    }
     if (String(body?.visionFallback ?? "").length === 0 && body?.supportsVision !== true) {
       return [400, { message: "a plan model needs somewhere for a screenshot to go" }];
     }
-    const existing = providersFixture.planModels.find((one) => one.alias === alias);
-    const row = {
-      id: existing?.id ?? `pm-${alias}`,
-      alias,
-      provider: String(body?.provider ?? ""),
-      vendorModel: String(body?.vendorModel ?? ""),
-      keyName: String(body?.keyName ?? ""),
-      customerName: String(body?.customerName ?? ""),
-      customerLabel: String(body?.customerLabel ?? ""),
-      customerVisible: body?.customerVisible !== false,
-      visionFallback: String(body?.visionFallback ?? ""),
-      contextWindow: body?.contextWindow ?? null,
-      supportsVision: body?.supportsVision === true,
-      plans: Array.isArray(body?.plans) ? body.plans : [],
-      workspaces: existing?.workspaces ?? 0,
-      workspacesWhy: "",
-      parked: false,
-    };
-    if (existing) Object.assign(existing, row);
-    else providersFixture.planModels.push(row);
-    fixtureLedger(existing ? "changed a plan model" : "added a plan model", alias, `${row.vendorModel} on ${row.keyName}`);
+    const row = withShown(planModelRow(alias, body, null));
+    providersFixture.planModels.push(row);
+    fixtureLedger("added a plan model", alias, `${row.vendorModel} across ${row.deployments.length} key(s)`);
     return [200, { ok: true, message: `${row.customerName || alias} is saved. The proxy uses it on the next request and a workspace picks it up on its next turn.` }];
   }
-  if (method === "POST" && at[0] === "plan-models" && at[2] === "grant-all") {
+  if (method === "POST" && at[0] === "plan-models" && at[2] === "update") {
+    const alias = decodeURIComponent(at[1]);
+    const existing = providersFixture.planModels.find((one) => one.alias === alias);
+    if (existing == null) return [404, { message: `The proxy serves nothing called ${alias}.` }];
+    if (String(body?.visionFallback ?? existing.visionFallback ?? "").length === 0 && !(body?.supportsVision ?? existing.supportsVision)) {
+      return [400, { message: "a plan model needs somewhere for a screenshot to go" }];
+    }
+    Object.assign(existing, withShown(planModelRow(alias, body, existing)));
+    fixtureLedger("changed a plan model", alias, existing.vendorModel);
+    return [200, { ok: true, message: `${existing.customerName || alias} is saved. The proxy uses it on the next request and a workspace picks it up on its next turn.` }];
+  }
+  if (method === "POST" && at[0] === "plan-models" && at[2] === "vision-check") {
+    const alias = decodeURIComponent(at[1]);
+    const row = providersFixture.planModels.find((one) => one.alias === alias);
+    if (row == null) return [404, { message: `The proxy serves nothing called ${alias}.` }];
+    row.vision = { ok: row.supportsVision === true, at: nowIso(), why: row.supportsVision ? "" : "messages.content.type is invalid" };
+    fixtureLedger("asked a model whether it takes an image", alias, row.vision.ok ? "it took the image" : "it refused the image");
+    return [200, { ok: true, message: row.vision.ok ? `${alias} took an image part.` : `${alias} refused an image part. It needs a vision fallback.` }];
+  }
+  if (method === "POST" && at[0] === "plan-models" && at[2] === "apply") {
     const alias = decodeURIComponent(at[1]);
     fixtureLedger("gave every workspace access to a model", alias, "");
     return [200, { ok: true, message: `Every workspace can reach ${alias} now. It shows up in their own list within a minute.` }];
@@ -437,17 +556,28 @@ function providersFixtureAnswer(method, pathname, body) {
   if (method === "POST" && at[0] === "plan-models" && at[2] === "push-label") {
     const alias = decodeURIComponent(at[1]);
     const row = providersFixture.planModels.find((one) => one.alias === alias);
+    // The route refuses a push that names nobody, because it writes inside a box AND sets the
+    // model. The fixture refuses it too, or the page could ship sending an empty body forever.
+    const named = Array.isArray(body?.slugs) ? body.slugs.map(String) : [];
+    const targets = named.length > 0 ? named : (body?.all === true ? (row?.workspaceSlugs ?? []) : []);
+    if (targets.length === 0) {
+      return [409, {
+        error: "name_them",
+        candidates: row?.workspaceSlugs ?? [],
+        message: `Say which workspaces. This writes inside a box and it sets the model as well as the label, so it is never done to a workspace nobody named.`,
+      }];
+    }
     fixtureLedger("pushed a model label to the workspaces running it", alias, String(row?.customerLabel ?? ""));
-    return [200, { ok: true, message: `${row?.workspaces ?? 0} workspaces will call it ${row?.customerLabel ?? ""} from their next turn.` }];
+    return [200, { ok: true, message: `${targets.length} workspace(s) will call it ${row?.customerLabel ?? ""} from their next turn.` }];
   }
   if (method === "POST" && pathname === "/v1/admin/defaults") {
-    providersFixture.defaults.newWorkspaceModel = String(body?.newWorkspaceModel ?? "");
-    fixtureLedger("changed what a new workspace starts on", providersFixture.defaults.newWorkspaceModel, "");
-    return [200, { ok: true, message: `A workspace made from now on starts on ${providersFixture.defaults.newWorkspaceModel}.` }];
+    providersFixture.defaults.planModel = String(body?.planModel ?? "");
+    fixtureLedger("changed what a new workspace starts on", providersFixture.defaults.planModel, "");
+    return [200, { ok: true, message: `A workspace made from now on starts on ${providersFixture.defaults.planModel}.` }];
   }
   if (method === "POST" && at[0] === "clients" && at[2] === "model") {
     const slug = decodeURIComponent(at[1]);
-    const alias = String(body?.model ?? "");
+    const alias = String(body?.planModel ?? "");
     // The banner a person reads names the model the way a person names it. The alias belongs in the
     // ledger row, where the operator is looking at plumbing on purpose, and nowhere else.
     const named = providersFixture.planModels.find((one) => one.alias === alias);
@@ -991,7 +1121,7 @@ step("the providers route contract");
     const body = answer.json ?? {};
     check(Array.isArray(body.providers), "it carries a list of providers");
     check(Array.isArray(body.planModels), "and a list of plan models");
-    check(Array.isArray(body.ledger), "and the ledger the panel draws under What changed");
+    check(Array.isArray(body.actions), "and the ledger the panel draws under What changed");
     check(body.defaults != null && typeof body.defaults === "object", "and the defaults block");
     const provider = (body.providers ?? [])[0];
     if (provider != null) {
@@ -1211,10 +1341,10 @@ if (!WANT_BROWSER) {
   check(!(await page.locator("#addProviderForm").isVisible()) && !(await page.locator("#planModelForm").isVisible()),
     "the add forms are closed until somebody asks for them");
   await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] .rollKey').click();
-  check(await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] + tr .keyForm:not(.danger)').isVisible(),
+  check(await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] + tr .keyForm.rollForm').isVisible(),
     "and Roll opens the one under that key");
   await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] .rollKey').click();
-  check(!(await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] + tr .keyForm:not(.danger)').isVisible()),
+  check(!(await page.locator('.provider[data-provider="zai"] tr[data-key="zai-1"] + tr .keyForm.rollForm').isVisible()),
     "and closes it again");
 
   // ADD A KEY, through the masked field, with a real value.
@@ -1240,8 +1370,8 @@ if (!WANT_BROWSER) {
   // rather than believed: two, then three while both are in, then two again.
   const zai = page.locator('.provider[data-provider="zai"]');
   await zai.locator('tr[data-key="zai-1"] .rollKey').click();
-  await zai.locator('tr[data-key="zai-1"] + tr .keyForm:not(.danger) .keyValue').fill(PLANTED_KEY_ROLL);
-  await zai.locator('tr[data-key="zai-1"] + tr .keyForm:not(.danger) button[type=submit]').click();
+  await zai.locator('tr[data-key="zai-1"] + tr .keyForm.rollForm .keyValue').fill(PLANTED_KEY_ROLL);
+  await zai.locator('tr[data-key="zai-1"] + tr .keyForm.rollForm button[type=submit]').click();
   await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("was replaced") === true, null, { timeout: 15_000 })
     .catch(() => {});
   const rollBanner = await page.locator("#banner").textContent();
@@ -1257,14 +1387,14 @@ if (!WANT_BROWSER) {
   await page.locator('#planModels .planModel[data-alias="plan-minimax"] .actions button', { hasText: "Edit" }).first().click();
   await page.selectOption("#pmVision", "");
   await page.uncheck("#pmSelfVision");
-  const modelWritesBefore = providersFixture.ledger.filter((row) => String(row.action).includes("plan model")).length;
+  const modelWritesBefore = providersFixture.actions.filter((row) => String(row.action).includes("plan model")).length;
   await page.click("#planModelSave");
   await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("screenshot") === true, null, { timeout: 10_000 })
     .catch(() => {});
   const visionBanner = await page.locator("#banner").textContent();
   check(String(visionBanner).startsWith("Pick where a screenshot falls back to"),
     "a plan model with no screenshot route is refused in words a person reads", String(visionBanner).replace(/\s+/g, " ").slice(0, 90));
-  check(providersFixture.ledger.filter((row) => String(row.action).includes("plan model")).length === modelWritesBefore,
+  check(providersFixture.actions.filter((row) => String(row.action).includes("plan model")).length === modelWritesBefore,
     "and nothing was written, so the refusal is a refusal and not a warning");
   check(!(await page.locator("#planModelForm").isHidden()), "the form stays open on what was typed");
   // Put the route back and save it properly, so the panel's happy path is measured too.
@@ -1353,7 +1483,7 @@ if (!WANT_BROWSER) {
   check(savedBanner.includes("from its next turn"), "and saving it says which turn it lands on", savedBanner.replace(/\s+/g, " ").slice(0, 70));
   check(savedBanner.includes("MiniMax-M3") && !savedBanner.includes("plan-"),
     "in the customer's name for the model and not the routing one", savedBanner.replace(/\s+/g, " ").slice(0, 70));
-  check(providersFixture.ledger.some((row) => row.action === "changed one workspace's model" && row.detail === "plan-minimax"),
+  check(providersFixture.actions.some((row) => row.action === "changed one workspace's model" && row.detail === "plan-minimax"),
     "with a row under What changed naming the workspace and the model");
   // ON THE SCREEN, not just in the answer. This change is made on the clients panel and recorded on
   // the providers one, and reloading only the panel that was clicked left the ledger a row short of

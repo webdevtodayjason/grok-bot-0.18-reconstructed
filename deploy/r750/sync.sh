@@ -165,10 +165,12 @@ step "ship the control plane"
 # box.compose.yml in particular: without it the image builds and then every provisioning run fails
 # on the compose step with ENOENT, which is a deploy that looks fine until the first customer.
 #
-# cp/*.mjs by glob and the Dockerfile by name, never the directory: cp/.data is the local sqlite
-# store with account rows in it, and a directory copy would carry it to the server.
+# cp/*.mjs and cp/*.md by glob and the Dockerfile by name, never the directory: cp/.data is the
+# local sqlite store with account rows in it, and a directory copy would carry it to the server.
+# The markdown glob is what stops the next document written beside the code being left behind: it
+# is how PROVIDERS-1 added cp/PROVIDERS-ROUTES.md and the build context on the server stayed whole.
 ssh "$HOST" "mkdir -p '$ROOT/cp' '$ROOT/cp/admin' '$ROOT/deploy/coolify'"
-rsync -a "$REPO"/cp/*.mjs "$REPO/cp/Dockerfile" "$REPO/cp/README.md" "$HOST:$ROOT/cp/"
+rsync -a "$REPO"/cp/*.mjs "$REPO"/cp/*.md "$REPO/cp/Dockerfile" "$HOST:$ROOT/cp/"
 # ADMIN-1. The super admin console's three files. A directory of its own, with --delete, because it
 # is the one place under cp/ that is a whole directory and nothing in it is a secret: the page shell
 # carries no customer data at all, and everything it renders arrives from a route that refuses
@@ -186,7 +188,7 @@ rsync -a "$REPO/deploy/coolify/docker-compose.yml" "$REPO/deploy/coolify/box.com
 # missing config.yaml, which is the right failure and still a failure.
 ssh "$HOST" "mkdir -p '$ROOT/deploy/coolify/proxy-config'"
 rsync -a --delete "$REPO/deploy/coolify/proxy-config/" "$HOST:$ROOT/deploy/coolify/proxy-config/"
-say "cp/{$(cd "$REPO/cp" && ls *.mjs | tr '\n' ',')Dockerfile,README.md}, cp/admin/ and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml,proxy.compose.yml,proxy-config/}"
+say "cp/{$(cd "$REPO/cp" && ls *.mjs *.md | tr '\n' ',')Dockerfile}, cp/admin/ and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml,proxy.compose.yml,proxy-config/}"
 # The control plane's own store is never shipped. It lives on the server under /data/titanbot and
 # holds every customer's password hash.
 say "cp/.data is not shipped"

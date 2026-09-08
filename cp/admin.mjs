@@ -902,6 +902,39 @@ export function createAdminApi({
     // provisioning plan everywhere else in cp/.
     const spending = await spend();
     const byTenant = new Map(spending.clients.map((row) => [row.slug, row]));
+    // PROVIDERS-1. WHAT THIS WORKSPACE RUNS ON, and the models it could be put on, on the same row
+    // as the customer. Without this block the Clients panel drew "not measured" beside every
+    // workspace and the one control the wave promised -- set a customer's model from their row --
+    // had nothing to render. The current model is read out of the proxy's own request log rather
+    // than out of a stored field, because the stored field is what a box was TOLD and the log is
+    // what it actually ran; where the log cannot be read that is said rather than guessed.
+    const modelChoices = [];
+    const runningBySlug = new Map();
+    let modelWhy = spending.configured ? "" : spending.why;
+    if (spending.configured) {
+      const shape = await proxyShape();
+      const sweep = await askProxySpend();
+      const seen = new Set();
+      for (const row of (shape.deployments.ok ? shape.deployments.rows : [])) {
+        if (!isPlanModel(row.alias) || seen.has(row.alias)) continue;
+        seen.add(row.alias);
+        // Only what a customer could be told they are on. A routing target with no customer name
+        // is not a choice: putting a workspace on one is how "plan-zai" reached a Settings card.
+        if (row.customerVisible !== true || String(row.customerLabel ?? "").length === 0 || String(row.customerName ?? "").length === 0) continue;
+        modelChoices.push({ alias: row.alias, name: row.customerName, label: row.customerLabel });
+      }
+      modelChoices.sort((a, b) => a.alias.localeCompare(b.alias));
+      if (sweep?.month?.ok) {
+        for (const key of sweep.month.keys ?? []) {
+          const alias = String(key.alias ?? "");
+          if (!alias.startsWith("titanbot-")) continue;
+          const ran = (key.models ?? []).map((one) => String(one.model)).filter((one) => isPlanModel(one));
+          if (ran.length > 0) runningBySlug.set(alias.slice("titanbot-".length), ran);
+        }
+      } else {
+        modelWhy = sweep?.month?.why ?? "the proxy's request log could not be read";
+      }
+    }
     // The last time each person actually got in, out of the sign-in record. Read ONCE for the whole
     // fleet rather than per account: the rows come back newest first, so the first one seen for an
     // address is that person's most recent sign-in. "never" is a real answer and reads as one -- an
@@ -917,12 +950,26 @@ export function createAdminApi({
         ...publicAccount(account),
         lastSignInAt: lastSignIn.get(account.email) ?? null,
       }));
+      const ran = runningBySlug.get(tenant.slug) ?? [];
+      // The flagship first when a workspace ran both it and its vision fallback, because the
+      // fallback is not a thing anybody chose and is not what this workspace is "on".
+      const current = ran.find((one) => modelChoices.some((row) => row.alias === one)) ?? ran[0] ?? "";
       rows.push({
         ...view,
         users,
         // Named rather than left out, because a fact that could not be measured has to read as one
         // and never as an empty column.
         spend: byTenant.get(tenant.slug) ?? null,
+        model: {
+          current,
+          label: modelChoices.find((row) => row.alias === current)?.name ?? "",
+          choices: modelChoices,
+          why: modelWhy.length > 0
+            ? modelWhy
+            : current.length > 0
+              ? "read out of the proxy's request log: this is what this workspace has actually run inside the current window."
+              : "this workspace has run nothing through the proxy inside the current window, so what it is pointed at cannot be read from here. Its own file is the only place that says, and this service cannot read inside a box.",
+        },
       });
     }
     return { clients: rows, proxy: { configured: spending.configured, why: spending.why }, measuredAt: new Date(now()).toISOString() };
@@ -2293,12 +2340,21 @@ export function createAdminApi({
         const answer = await pointWorkspaceAt(slug, planModel);
         if (!answer.ok) { ledger.failed(answer.why); json(response, 502, { error: "relay", message: answer.why }); return true; }
         ledger.done(`${slug} is on ${planModel}`);
+        // PINNED IS NOT A SUCCESS. The relay writes the file either way, but a box whose container
+        // environment carries SAND_OPENAI_COMPATIBLE_* keeps answering through that until it is
+        // recreated, so reporting "runs it from its next message" would be a claim the box will
+        // not honour. The relay measured it; this says it in the operator's own words.
+        const pinned = answer.body?.pinned === true;
         json(response, 200, {
           slug,
           planModel,
+          pinned,
+          pinnedBy: answer.body?.pinnedBy ?? null,
           // Names, lengths and hash prefixes, out of the relay's own answer. No value comes back.
           wrote: answer.body?.wrote ?? [],
-          message: `${slug} runs ${planModel} from its next message, and its Titan says the name that goes with it. Their open page shows the change on its next load.`,
+          message: pinned
+            ? `${slug} was written, and it will keep running what its container environment pins: ${String(answer.body?.pinnedBy ?? "SAND_OPENAI_COMPATIBLE_* is set on the container")}. Nothing this console does takes effect there until that is gone.`
+            : `${slug} runs ${planModel} from its next message, and its Titan says the name that goes with it. Their open page shows the change on its next load.`,
         });
         return true;
       }
