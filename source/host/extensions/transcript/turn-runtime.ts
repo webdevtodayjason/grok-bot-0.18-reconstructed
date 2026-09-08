@@ -41,6 +41,7 @@ import {
   type SendMessage,
 } from "./send-message-shaping.js";
 import { nextEntryId } from "./transcript-entry-ids.js";
+import { buildTurnFailedEntry } from "./turn-failed-entry.js";
 import type {
   TranscriptEntry,
   TranscriptManagerLike,
@@ -644,6 +645,20 @@ export class TurnRuntime {
           classifyAgentError(error),
           sandErrorDetail(error),
         );
+        // UX-ERR-1. The console reads the conversation, not the tray and not this log line, so a
+        // failed turn that writes only here is a turn that ends in silence on the page. One entry,
+        // plain words, no stack: the detail is above, in the log, where an operator can read it.
+        // Wrapped because a store that is itself the failure must not turn a failed turn into a
+        // crashed host -- that is the BOX-6 shape exactly.
+        try {
+          session.db.appendTranscriptEntry(buildTurnFailedEntry({
+            agentName: typeof session.db.get("name") === "string" ? session.db.get("name") as string : undefined,
+            error,
+            turnId: turnStartEntryId,
+          }));
+        } catch (writeError) {
+          console.error(`[sand][turn] could not write the turn-failed entry for ${session.id}`, writeError);
+        }
         markTurnTraceError(turnTrace, error);
         if (epoch === this.tm.sendPipeline.currentTurnEpoch(session)) {
           const description = describeAgentRunError(error);

@@ -425,21 +425,30 @@ export async function runBoxCopyIn(deps: {
         existsSync(join(deps.targetDir, "home/box/sand-data/agents", agentId, "store.db")),
       ).length;
   const legacyStoreDbsComplete = restoredStoreDbEntries >= advertisedStoreDbEntries;
+  // BOX-6. A live agent database is not a missing file.
+  //
+  // The completeness test is `files === manifestEntries`, and the guard in box-store-download
+  // deliberately restores fewer files than the manifest advertises: every agent database already on
+  // the persistent mount is skipped. Measured on grok-bot-local-vm the first time the guard ran:
+  // 1639 of 1659 restored, 20 databases left alone, 0 failures -- and the copy-in called that a
+  // partial hydrate and retried eight times. The denominator is the number of CANDIDATES, not the
+  // number of manifest entries; the summary still reports manifest.size, which is what it is.
+  const copyInCandidates = manifest.size - summary.agentDatabasesLeftAlone.length;
   const fullyHydrated =
     isBoxStoreFullyHydrated({
       hydrateSource: (downloadFromLegacy ? "legacy" : undefined)!,
       failures: summary.failures,
-      manifestEntries: manifest.size,
+      manifestEntries: copyInCandidates,
       files: summary.files,
       verified: summary.verified,
       authoritativeStoreDbEntries: advertisedStoreDbEntries,
       restoredStoreDbEntries,
     }) && (hydrateSource !== "legacy" || legacyStoreDbsComplete);
   if (!fullyHydrated) {
-    log(`partial hydrate: ${summary.files}/${manifest.size} files, ${summary.failures.length} failures`);
+    log(`partial hydrate: ${summary.files}/${copyInCandidates} files, ${summary.failures.length} failures`);
     const reason = hydrateSource === "legacy" && !legacyStoreDbsComplete
-      ? `${INCOMPLETE_LEGACY_HYDRATE_REASON} advertised_store_db=${advertisedStoreDbEntries} restored_store_db=${restoredStoreDbEntries} advisory_advertised_files=${manifest.size} advisory_restored_files=${summary.files}`
-      : `partial hydrate (${summary.files}/${manifest.size} files, ${summary.failures.length} failures)`;
+      ? `${INCOMPLETE_LEGACY_HYDRATE_REASON} advertised_store_db=${advertisedStoreDbEntries} restored_store_db=${restoredStoreDbEntries} advisory_advertised_files=${copyInCandidates} advisory_restored_files=${summary.files}`
+      : `partial hydrate (${summary.files}/${copyInCandidates} files, ${summary.failures.length} failures)`;
     return {
       outcome: "failed",
       reason,

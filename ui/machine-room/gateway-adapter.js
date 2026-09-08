@@ -331,9 +331,16 @@
   const isAttachmentEntry = (e) => e.kind === "user-attachment" || (e.kind === "send-message" && e.message?.type === "attachment");
   function messagesOf(transcript, fallbackName, outline, partial = false) {
     return collapseAgentExchanges(weaveToolRows(transcript, outline, partial), fallbackName)
-      .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || e.kind === "agent-exchange" || e.kind === "user-attachment" || (e.kind === "message" && e.role === "user"))
+      // UX-ERR-1. turn-failed is in this list because a filter that drops an entry kind it does
+      // not know is how a failed turn came to show nothing at all: the host wrote the line and the
+      // console threw it away one function before the renderer.
+      .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || e.kind === "agent-exchange" || e.kind === "user-attachment" || e.kind === "turn-failed" || (e.kind === "message" && e.role === "user"))
       .map((e, i) => {
         if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text, detail: e.detail ?? "" };
+        // The host owns this sentence. It knows the agent's name and what actually went wrong, and
+        // one copy of the wording is the only way the words on the page and the words in the gate
+        // stay the same words. No detail field: there is no stack to open.
+        if (e.kind === "turn-failed") return { id: e.id, type: "turn-failed", text: String(e.text ?? ""), cause: String(e.cause ?? ""), time: timeOf(Number(e.timestampMs) || Date.now()) };
         if (e.kind === "agent-exchange") return { id: e.id, type: "system", text: `${e.count} message${e.count === 1 ? "" : "s"} with ${e.peer}`, peer: e.peer, self: e.self, exchange: e.exchange };
         const mine = e.kind !== "send-message";
         const card = mine ? null : cardOf(e);

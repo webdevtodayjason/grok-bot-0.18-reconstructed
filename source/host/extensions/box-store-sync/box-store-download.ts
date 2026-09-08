@@ -38,17 +38,61 @@ export const COPY_IN_LARGE_BLOB_CONCURRENCY = 4;
 export const COPY_IN_WAVE_SIZE = 500;
 export const BOX_STORE_RESTORE_TMP_SUFFIX = ".box-store-part-";
 export const LARGE_OBJECT_FREE_SPACE_FACTOR = 2;
+// BOX-6. store.db and conversation-blobs.db USED TO BE HERE and are deliberately gone.
+//
+// Measured on the R750 2026-09-07 and again 2026-09-08: a container recreate ran the copy-in, the
+// copy-in wrote the box store's copy of each agent database over the live one under the
+// bind-mounted sand-data, and every turn after that failed with `database disk image is malformed`.
+// The store's copy is stale by construction -- box-store-sync cannot snapshot a busy SQLite file
+// and logs `snapshot failed; uncaptured` every cycle -- so what it restores is pages that no longer
+// match the live WAL. The one skip that existed, localFileMatches, compares sha256 and a live
+// database never matches, so it never fired.
+//
+// Naming them critical made it worse rather than better: the critical phase is the one that runs
+// FIRST and alone, so the stale pages landed before anything else. They are not in this set any
+// more, and isAgentDatabaseRelPath below keeps them out of every other phase too whenever a live
+// file is already on the persistent mount. The bind mount is the truth for an agent database; the
+// store is the truth only for a box that has none yet.
 export const COPY_IN_CRITICAL_BASENAMES = new Set([
-  "store.db",
-  "conversation-blobs.db",
   "Cookies",
   "Login Data",
   "Web Data",
   "source-map.json",
 ]);
 
+// The agent databases and their SQLite sidecars. Restoring a -wal or a -shm over a live database is
+// the same corruption by a different door, so they travel together.
+export const AGENT_DATABASE_BASENAMES = new Set([
+  "store.db",
+  "conversation-blobs.db",
+]);
+const SQLITE_COPY_IN_SIDECARS = ["-wal", "-shm", "-journal"] as const;
+
+export function basenameOfRelPath(relPath: string): string {
+  return relPath.slice(relPath.lastIndexOf("/") + 1);
+}
+
+export function isAgentDatabaseRelPath(relPath: string): boolean {
+  const base = basenameOfRelPath(relPath);
+  if (AGENT_DATABASE_BASENAMES.has(base)) return true;
+  for (const suffix of SQLITE_COPY_IN_SIDECARS) {
+    if (base.endsWith(suffix) && AGENT_DATABASE_BASENAMES.has(base.slice(0, -suffix.length))) return true;
+  }
+  return false;
+}
+
+// A live file, not a symlink and not a directory. lstat rather than stat on purpose: a symlink
+// named store.db is not an agent database and must not silently protect whatever it points at.
+export async function isExistingRegularFile(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function isCriticalRelPath(relPath: string): boolean {
-  return COPY_IN_CRITICAL_BASENAMES.has(relPath.slice(relPath.lastIndexOf("/") + 1));
+  return COPY_IN_CRITICAL_BASENAMES.has(basenameOfRelPath(relPath));
 }
 
 type ManifestFileEntry = Exclude<BoxStoreManifestEntry, { kind: "symlink" }>;
@@ -95,6 +139,10 @@ export interface BoxStoreDownloadSummary {
   readonly bytes: number;
   readonly verified: number;
   readonly failures: string[];
+  // BOX-6. The agent databases the copy-in found already living on the persistent mount and did
+  // not touch. Named rather than counted, because the one question an operator asks after a
+  // recreate is which agent's store survived.
+  readonly agentDatabasesLeftAlone: string[];
 }
 
 export interface BoxStoreDownloadOptionsPort {
@@ -147,6 +195,7 @@ export class BoxStoreDownload {
     }
 
     const failures: string[] = [];
+    const agentDatabasesLeftAlone: string[] = [];
     let files = 0;
     let bytes = 0;
     let verified = 0;
@@ -651,6 +700,21 @@ export class BoxStoreDownload {
     const bulkSmall = new Map<string, BoxStoreBlobGroup>();
     const bulkLarge = new Map<string, BoxStoreBlobGroup>();
     for (const [relPath, entry] of fileEntries) {
+      // BOX-6. An agent database that is already on disk is never a copy-in candidate.
+      //
+      // sand-data is a persistent mount, so a file being here means a live box wrote it and the
+      // store's copy is at best older and at worst a set of pages that do not match the live WAL.
+      // The check is existence, not mtime: a store copy that happens to carry a newer stamp is
+      // still the stale snapshot of a busy file, and there is no reading of the clock that makes
+      // overwriting a live database right. A box with no sand-data yet has no such file, and
+      // hydrates exactly as it always did.
+      if (isAgentDatabaseRelPath(relPath)) {
+        const destPath = destinationPaths.get(relPath);
+        if (destPath != null && await isExistingRegularFile(destPath)) {
+          agentDatabasesLeftAlone.push(relPath);
+          continue;
+        }
+      }
       const isLarge = entry.size >= this.largeObjectThreshold;
       const phase = isCriticalRelPath(relPath)
         ? isLarge ? criticalLarge : criticalSmall
@@ -714,7 +778,14 @@ export class BoxStoreDownload {
       reportTrace("symlink-phase-finished");
     }
 
-    return { manifestEntries: manifest.size, files, bytes, verified, failures };
+    if (agentDatabasesLeftAlone.length > 0) {
+      this.log(
+        `copy-in left ${agentDatabasesLeftAlone.length} live agent database(s) as they are: ` +
+          `${agentDatabasesLeftAlone.slice(0, 8).join(", ")}` +
+          `${agentDatabasesLeftAlone.length > 8 ? ", ..." : ""}`,
+      );
+    }
+    return { manifestEntries: manifest.size, files, bytes, verified, failures, agentDatabasesLeftAlone };
   }
 }
 

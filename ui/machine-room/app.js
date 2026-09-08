@@ -1003,6 +1003,16 @@
   }
 
   function messageMarkup(message) {
+    // UX-ERR-1. A failed turn, in one quiet line under the message it failed on.
+    //
+    // Jason's report was "it popped up like he was talking, then it went away. I don't see any
+    // errors" -- the failure existed only in the host log. This is deliberately not a toast and
+    // not a red banner: it stays in the transcript where the conversation is, so it is still there
+    // when he scrolls back tomorrow. The host wrote the sentence; nothing is composed here, and
+    // there is no stack to reveal.
+    if (message.type === "turn-failed") {
+      return `<article class="message-row is-turn-failed" data-message-id="${escapeHtml(message.id)}" data-turn-failed="1"><div class="message-bubble turn-failed-note">${escapeHtml(message.text)}</div></article>`;
+    }
     if (message.type === "system") {
       // SHOT-4: a tool row the adapter summarised in words carries the verbatim command and output
       // as its detail. The row opens to show them, so the receipt is one click away and never gone.
