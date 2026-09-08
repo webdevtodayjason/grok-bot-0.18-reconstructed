@@ -112,11 +112,14 @@ test("every bot names real plugins, a declared category and at least one skill",
 
 // ---------------------------------------------------------------- 2. nothing in it is a secret
 
+// A remote row's entry is the daemon's own {type, url, headers} shape and has no env at all: it
+// runs no process, and the fields it owes are named as ${FIELD} placeholders in its headers, which
+// the no-credential test below reads. Only a program has an environment to check here.
 test("no env value in any entry is non-empty except a declared configuration key", () => {
   for (const plugin of catalog.MARKETPLACE_PLUGINS) {
     const entry = catalog.marketplaceConnectorEntry(plugin);
-    if (entry == null) continue;
-    for (const [field, value] of Object.entries(entry.env)) {
+    if (entry == null || entry.command === undefined) continue;
+    for (const [field, value] of Object.entries(entry.env ?? {})) {
       assert.ok(
         value === "" || catalog.MARKETPLACE_CONFIGURATION_ENV_KEYS.includes(field),
         `plugin ${plugin.id} gives env ${field} a non-empty value`,
@@ -263,10 +266,14 @@ test("InstallPlugin writes the entry through the host path and answers with the 
   assert.equal(outcome.installed, true);
   assert.equal(outcome.refused, undefined);
 
-  // The file now carries the catalog's entry verbatim, with the credential still empty.
+  // The file now carries the catalog's entry verbatim, and the credential is still only a name.
+  // TinyFish is an endpoint, so what lands is the address and its headers, and the field the
+  // operator owes is the ${...} in the Authorization header rather than an empty env key -- the
+  // host reads the name back out of exactly that placeholder.
   const written = JSON.parse(readFileSync(CONNECTORS, "utf8")).mcpServers.tinyfish;
   assert.deepEqual(written, catalog.marketplaceConnectorEntry(catalog.findMarketplacePlugin("tinyfish")));
-  assert.equal(written.env.TINYFISH_API_KEY, "");
+  assert.equal(written.headers.Authorization, "Bearer ${TINYFISH_API_KEY}");
+  assert.equal(written.env, undefined, "a remote entry has no process, so it has no environment");
 
   // And the answer names the field the operator must fill, with nothing stored behind it.
   assert.deepEqual(outcome.fields.map((field) => [field.key, field.isStored]), [["TINYFISH_API_KEY", false]]);

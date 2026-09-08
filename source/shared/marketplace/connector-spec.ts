@@ -60,12 +60,18 @@ export interface StdioConnectorEntry {
   readonly env: Readonly<Record<string, string>>;
 }
 
-/** The connectors.json entry of an endpoint, in the box daemon's own `remoteMcpServer` shape. */
+/**
+ * The connectors.json entry of an endpoint, in the box daemon's own `remoteMcpServer` shape.
+ *
+ * No `env`. A remote entry has no process to give an environment to, and the fields it owes are
+ * already named where they are used: a `${FIELD}` in a header value or in the url. The host reads
+ * the credential names back out of exactly those placeholders, so carrying an env map beside them
+ * would be a second copy of the same fact, and the two would eventually disagree.
+ */
 export interface RemoteConnectorEntry {
   readonly type: "http" | "sse";
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
-  readonly env: Readonly<Record<string, string>>;
 }
 
 export type ConnectorEntry = StdioConnectorEntry | RemoteConnectorEntry;
@@ -73,10 +79,22 @@ export type ConnectorEntry = StdioConnectorEntry | RemoteConnectorEntry;
 export type RemoteConnectorMode = "bridge-argv" | "bridge-header-file" | "native";
 
 /**
- * The rung this tree materialises a remote row on. `bridge-argv` until the custody spike says
- * otherwise; changing this constant migrates every remote row at once and no row is edited.
+ * The rung this tree materialises a remote row on. Changing this constant migrates every remote row
+ * at once and no row is edited, which is the whole reason it exists.
+ *
+ * `native`, since the spike answered on grok-bot-local-vm on 8 September 2026: the box's exec
+ * daemon takes `{type, url, headers}` through LoadMcpServers and connects to the endpoint itself.
+ * Measured there, a remote row reached `connected` with its tools listed 128 ms after its key was
+ * stored, and the stored value appeared in none of the 186 process argument lists in that box. On
+ * `bridge-argv` the same value was in three of them, because the daemon expands `${VAR}` into a
+ * spawn's arguments before it execs and the agent's own shell in a box is root. There is no reason
+ * left to run a bridge: it costs an npm fetch at spawn, a 60-second stall instead of a fast honest
+ * 401, and the custody this wave is about.
+ *
+ * Entries already written on a live box are untouched by this and keep working; each one moves to
+ * the native shape the next time it is written.
  */
-export const DEFAULT_REMOTE_CONNECTOR_MODE: RemoteConnectorMode = "bridge-argv";
+export const DEFAULT_REMOTE_CONNECTOR_MODE: RemoteConnectorMode = "native";
 
 /** The bridge, pinned. A bare `mcp-remote` resolves to whatever npm published this morning. */
 export const MCP_REMOTE_PACKAGE = "mcp-remote@0.8.5";
@@ -255,7 +273,7 @@ export function connectorEntryFromSpec(spec: ConnectorSpec, options: ConnectorEn
   }
   const mode = options.remoteMode ?? DEFAULT_REMOTE_CONNECTOR_MODE;
   if (mode === "native") {
-    return { type: spec.transport, url: spec.url, headers: { ...spec.headers }, env: { ...spec.env } };
+    return { type: spec.transport, url: spec.url, headers: { ...spec.headers } };
   }
   if (mode === "bridge-header-file") {
     const name = options.connectorName;

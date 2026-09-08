@@ -318,7 +318,7 @@ test("Add reaches the host's writer where the box has one, and an address goes a
           install: { url: "https://docs.mcp.cloudflare.com/mcp", type: "http" },
         }],
       },
-      addLocalConnector: (args) => { written.push(args.spec); return { added: true, message: "added" }; },
+      addLocalConnector: (args) => { written.push(args); return { added: true, message: "added" }; },
     }),
     { connectors: { mcpServers: { localfiles: CONNECTORS.mcpServers.localfiles } } },
   );
@@ -327,13 +327,13 @@ test("Add reaches the host's writer where the box has one, and an address goes a
 
   await adapter.addMarketplacePlugin(catalog.plugins.find((p) => p.id === "tinyfish"));
   assert.equal(written.length, 1);
-  assert.equal(written[0].shape, "program");
-  assert.deepEqual(written[0].envNames, ["TINYFISH_API_KEY"]);
+  assert.equal(written[0].command, "npx");
+  assert.deepEqual(written[0].env, ["TINYFISH_API_KEY"]);
 
   const remote = await adapter.addMarketplacePlugin(catalog.plugins.find((p) => p.id === "cloudflare-docs"));
   assert.equal(remote.accepted, true);
-  assert.equal(written[1].shape, "remote");
   assert.equal(written[1].url, "https://docs.mcp.cloudflare.com/mcp");
+  assert.equal(written[1].type, "http");
   assert.equal(Object.hasOwn(written[1], "command"), false);
 
   // And the customer's connector file was never rewritten wholesale to do either of them.

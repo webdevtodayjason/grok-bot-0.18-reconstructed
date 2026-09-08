@@ -291,27 +291,36 @@ async function writeConnectors(t, next) {
 const sameConnectorEntry = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 // An entry as it sits in the file, said in the shape the host's one writer takes. A command is a
 // program; an address is a remote server, and which way the box opens one is the host's decision,
-// not something a whole-map POST gets to state. Credential values are never carried: the env map
-// goes across as NAMES with empty values, the same contract the file itself keeps.
+// not something a whole-map POST gets to state.
+//
+// Credential values are never carried. A file's env map already holds names against empty values --
+// that emptiness is how this box marks a credential the operator still owes -- so the names cross
+// as an array and the values stay where they are. A header value crosses exactly as written, which
+// for a credential header is the `${NAME}` placeholder the host substitutes out of the 0600 store
+// at push time; the host refuses a literal in an auth header, so a caller cannot smuggle one
+// through this route either.
 function connectorSpecFromEntry(name, config) {
-  const envNames = Object.keys(config?.env ?? {});
+  const env = config?.env ?? {};
+  const envNames = Object.keys(env);
+  const values = envNames.filter((field) => String(env[field] ?? "").length > 0);
   const url = String(config?.url ?? "").trim();
   if (url) {
     return {
       name,
-      shape: "remote",
       url,
-      transport: String(config?.type ?? config?.transport ?? "http"),
-      headers: Object.entries(config?.headers ?? {}).map(([header, value]) => ({ name: header, secret: false, value: String(value ?? "") })),
-      envNames,
+      type: String(config?.type ?? config?.transport ?? "http") === "sse" ? "sse" : "http",
+      ...(config?.headers == null ? {} : { headers: config.headers }),
+      // A configuration variable the operator already answered keeps its value; a credential field
+      // is empty and crosses as a name. Sending the whole map when any value is set is what lets an
+      // entry like MCP_REMOTE_CONFIG_DIR survive a resave.
+      env: values.length === 0 ? envNames : env,
     };
   }
   return {
     name,
-    shape: "program",
     command: String(config?.command ?? ""),
     args: Array.isArray(config?.args) ? config.args.map((one) => String(one)) : [],
-    envNames,
+    env: values.length === 0 ? envNames : env,
   };
 }
 async function delegateConnectorChanges(t, held, submitted) {
@@ -327,8 +336,8 @@ async function delegateConnectorChanges(t, held, submitted) {
   for (const change of changed) {
     const command = change.op === "add" ? "addLocalConnector" : "removeLocalConnector";
     const args = change.op === "add"
-      ? { spec: connectorSpecFromEntry(change.name, change.config), replace: true }
-      : { name: change.name };
+      ? { ...connectorSpecFromEntry(change.name, change.config), replace: true }
+      : { server: change.name, name: change.name };
     let answer;
     try { answer = await jobBusCall(t, command, args); } catch { return { handled: false }; }
     let body;

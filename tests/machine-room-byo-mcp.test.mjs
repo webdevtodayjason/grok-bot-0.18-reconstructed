@@ -348,8 +348,12 @@ test("Add goes to the host's own writer where the box has one", async () => {
   const result = await adapter.addConnector({ name: "notion", command: "npx", args: ["-y", "@notionhq/notion-mcp-server@2.5.1"], envNames: ["NOTION_TOKEN"] });
   assert.equal(result.accepted, true);
   assert.equal(written.length, 1);
-  assert.equal(written[0].spec.shape, "program");
-  assert.deepEqual(written[0].spec.envNames, ["NOTION_TOKEN"]);
+  // The host's own argument shape, which is the entry it is about to write: a program says its
+  // command, and the credential crosses as a NAME, never a value.
+  assert.equal(written[0].name, "notion");
+  assert.equal(written[0].command, "npx");
+  assert.deepEqual(written[0].env, ["NOTION_TOKEN"]);
+  assert.equal(Object.hasOwn(written[0], "url"), false);
   // The whole-file write through the relay is no longer how a customer's connectors get edited.
   assert.equal(posts.length, 0);
   assert.equal(calls.filter((c) => c.method === "addLocalConnector").length, 1);
@@ -378,7 +382,7 @@ test("Uninstall asks the host to clear the values and drop the entry in one call
   const adapter = createGatewayAdapter(seed());
   const result = await adapter.removeConnector("tinyfish", { clearSecrets: true });
   assert.equal(result.accepted, true);
-  assert.deepEqual(asked, [{ name: "tinyfish", clearSecrets: true }]);
+  assert.deepEqual(asked, [{ server: "tinyfish", name: "tinyfish", clearSecrets: true }]);
   assert.equal(result.clearedCredentials, 2);
   assert.match(result.message, /2 stored values cleared/);
   // The ordering -- values first, then the entry -- lives in the host now, so the console makes
@@ -688,19 +692,26 @@ test("the relay asks the host for each key that actually moved, and for nothing 
   assert.equal(result.handled, true);
   assert.deepEqual(result.changed, ["add airtable", "remove notion"]);
   assert.deepEqual(shim.seen.map((one) => one.command), ["addLocalConnector", "removeLocalConnector"]);
-  assert.equal(shim.seen[0].args.spec.shape, "program");
-  assert.equal(shim.seen[0].args.spec.command, "npx");
-  assert.deepEqual(shim.seen[0].args.spec.envNames, ["AIRTABLE_API_KEY"]);
-  assert.deepEqual(shim.seen[1].args, { name: "notion" });
+  assert.equal(shim.seen[0].args.command, "npx");
+  assert.equal(shim.seen[0].args.name, "airtable");
+  assert.deepEqual(shim.seen[0].args.env, ["AIRTABLE_API_KEY"]);
+  assert.equal(shim.seen[0].args.replace, true);
+  assert.deepEqual(shim.seen[1].args, { server: "notion", name: "notion" });
 });
 
-test("an address in the file goes to the host as a remote spec, not as a command", async () => {
+test("an address in the file goes to the host as a remote server, not as a command", async () => {
   const shim = await loadShim();
   const spec = shim.connectorSpecFromEntry("cloudflare-docs", { url: "https://docs.mcp.cloudflare.com/mcp", type: "http", env: {} });
-  assert.equal(spec.shape, "remote");
   assert.equal(spec.url, "https://docs.mcp.cloudflare.com/mcp");
-  assert.equal(spec.transport, "http");
+  assert.equal(spec.type, "http");
   assert.equal(Object.hasOwn(spec, "command"), false, "which way the box opens an address is the host's decision");
+
+  // A credential field crosses as a name with no value; a configuration variable the operator has
+  // already answered keeps its value, or a resave would wipe it.
+  const program = shim.connectorSpecFromEntry("notion", { command: "npx", args: ["-y", "x"], env: { NOTION_TOKEN: "" } });
+  assert.deepEqual(program.env, ["NOTION_TOKEN"]);
+  const configured = shim.connectorSpecFromEntry("bridge", { command: "npx", args: [], env: { MCP_REMOTE_CONFIG_DIR: "/home/box/sand-data/.mcp-auth", A_TOKEN: "" } });
+  assert.deepEqual(configured.env, { MCP_REMOTE_CONFIG_DIR: "/home/box/sand-data/.mcp-auth", A_TOKEN: "" });
 });
 
 test("a box too old for the host writer falls back, and a host refusal does not", async () => {

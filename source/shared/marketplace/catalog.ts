@@ -38,6 +38,7 @@ import {
   type ConnectorEntry,
   type ConnectorSpec,
   type RemoteConnectorMode,
+  DEFAULT_REMOTE_CONNECTOR_MODE,
   connectorEntryFromSpec,
   connectorSpecCredentialFields,
   connectorSpecProblems,
@@ -1193,18 +1194,30 @@ function proxyConnectorSpec(spec: ConnectorSpec, server: string, proxyMcpUrl: st
 export function marketplaceConnectorEntry(
   plugin: MarketplacePlugin,
   options: MarketplaceConnectorEntryOptions = {},
-): MarketplaceConnectorEntry | null {
+): ConnectorEntry | null {
   const declared = marketplaceConnectorSpec(plugin);
   if (declared == null) return null;
   const proxyMcpUrl = options.proxyMcpUrl ?? null;
   const spec = proxyMcpUrl != null && proxyMcpUrl.length > 0 && plugin.proxyMcpServer != null
     ? proxyConnectorSpec(declared, plugin.proxyMcpServer, proxyMcpUrl)
     : declared;
+  // PROXY-7's mount is inside the tenant's own docker network on plain http, and the host's writer
+  // refuses exactly that address shape for a native remote -- rightly, because a private plain-http
+  // endpoint is where a box's own control ports live. So a proxied row is still materialised as a
+  // bridge, which is a program and not an address, and the rule does not apply to it. The leg is
+  // not built and no box has a proxy mount configured, so nothing ships on this path today; it is
+  // MARKET-11 to move it onto the native rung before it does, because a bridge puts the header on
+  // the command line.
+  const proxied = spec !== declared;
   const entry = connectorEntryFromSpec(spec, {
-    ...(options.remoteMode == null ? {} : { remoteMode: options.remoteMode }),
+    remoteMode: options.remoteMode ?? (proxied ? "bridge-argv" : DEFAULT_REMOTE_CONNECTOR_MODE),
     ...(plugin.connectorName == null ? {} : { connectorName: plugin.connectorName }),
   });
-  if (!("command" in entry)) return null;
+  // A native remote entry is already what lands on the box: an address, its headers and the fields
+  // those headers resolve against. Nothing to add, and nothing to drop -- this function returned
+  // null on it while the bridge was the default, which quietly made every remote row uninstallable
+  // the moment the default moved.
+  if (!("command" in entry)) return entry;
   const bridged = isRemoteSpec(spec);
   return {
     command: entry.command,
@@ -1213,18 +1226,28 @@ export function marketplaceConnectorEntry(
   };
 }
 
-/** The full entry, including the native remote shape when that is the mode. For the host. */
+/**
+ * The same answer. Kept because callers written while `marketplaceConnectorEntry` could only speak
+ * the command shape reach for this name to mean "whatever shape it really is", and that is now what
+ * both of them mean.
+ */
 export function marketplaceConnectorEntryOrRemote(
   plugin: MarketplacePlugin,
   options: MarketplaceConnectorEntryOptions = {},
 ): ConnectorEntry | null {
-  const spec = marketplaceConnectorSpec(plugin);
-  if (spec == null) return null;
-  if (options.remoteMode !== "native") return marketplaceConnectorEntry(plugin, options);
-  return connectorEntryFromSpec(spec, {
-    remoteMode: "native",
-    ...(plugin.connectorName == null ? {} : { connectorName: plugin.connectorName }),
-  });
+  return marketplaceConnectorEntry(plugin, options);
+}
+
+/**
+ * The command shape only: a row a four-field connector form can be filled from. A remote row has no
+ * command to put in such a form, and answers null rather than a half-built one.
+ */
+export function marketplaceStdioConnectorEntry(
+  plugin: MarketplacePlugin,
+  options: MarketplaceConnectorEntryOptions = {},
+): MarketplaceConnectorEntry | null {
+  const entry = marketplaceConnectorEntry(plugin, options);
+  return entry != null && "command" in entry ? entry : null;
 }
 
 /** The shell tool id of a plugin, or null when it installs no CLI. */

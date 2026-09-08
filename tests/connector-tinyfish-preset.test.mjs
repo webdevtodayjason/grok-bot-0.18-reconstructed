@@ -281,13 +281,21 @@ test("the catalog's TinyFish entry is the public one until a proxy is configured
   const catalog = await loadCatalogModule();
   const tinyfish = catalog.findMarketplacePlugin("tinyfish");
 
-  // No proxy: the public endpoint, the bearer header, the unexpanded placeholder.
-  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish).args, TINYFISH_CATALOG_ARGS);
-  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, {}).args, TINYFISH_CATALOG_ARGS);
-  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: null }).args, TINYFISH_CATALOG_ARGS);
-  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: "" }).args, TINYFISH_CATALOG_ARGS);
+  // No proxy: the public endpoint, the bearer header, the unexpanded placeholder. The box opens
+  // that address itself now, so what the catalog materialises is the address and its headers and
+  // there is no bridge to run -- which is the point: a bridge's header value lands in argv.
+  const public_ = catalog.marketplaceConnectorEntry(tinyfish);
+  assert.deepEqual(public_, { type: "http", url: "https://agent.tinyfish.ai/mcp", headers: { Authorization: "Bearer ${TINYFISH_API_KEY}" } });
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, {}), public_);
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: null }), public_);
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: "" }), public_);
+  // The bridged shape is still reachable by asking for it, and still pinned.
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { remoteMode: "bridge-argv" }).args, TINYFISH_CATALOG_ARGS);
 
-  // With a proxy: the mount, the key header the bridge does not own, and the server name.
+  // With a proxy: the mount, the key header the bridge does not own, and the server name. The
+  // proxy's mount is a private plain-http address inside the tenant's own network, which the host's
+  // writer refuses for a native remote, so a proxied row stays bridged. The leg is not built and no
+  // box has a mount configured; MARKET-11 is to move it onto the native rung before it ships.
   const tenant = catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: "http://titanbot-proxy:4000/mcp/" });
   assert.deepEqual(tenant.args, [
     "-y", "mcp-remote@0.8.5", "http://titanbot-proxy:4000/mcp/", "--transport", "http-only",

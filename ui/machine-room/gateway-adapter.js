@@ -3398,6 +3398,38 @@
       byoRemoteSpec, byoProgramSpec, byoRefusal, byoParsePasted, byoPreview,
       byoEnvNameFor, byoNameFromUrl,
 
+      // The host's own argument shape for that one writer, built from the spec the doors produce.
+      // The doors speak in rows a form can draw -- a header is a row that knows whether it is a
+      // secret -- and the host speaks in the entry it is about to write. A secret header crosses as
+      // the NAME it is stored under wrapped in braces, never a value: the host substitutes it out of
+      // the 0600 store at the moment it hands the server to the box, so no value passes through
+      // here, through the page, or through the file. Env names cross as an array, which is how this
+      // box says "a credential the operator still owes" and what makes the masked card offer it.
+      hostConnectorArgs: (spec) => {
+        const envNames = Array.isArray(spec?.envNames) ? spec.envNames.map(String) : [];
+        if (spec?.shape === "remote") {
+          const headers = {};
+          for (const row of Array.isArray(spec.headers) ? spec.headers : []) {
+            const name = String(row?.name ?? "").trim();
+            if (!name) continue;
+            headers[name] = row?.secret === true ? `\${${String(row?.env ?? "").trim()}}` : String(row?.value ?? "");
+          }
+          return {
+            name: spec.name,
+            url: String(spec.url ?? ""),
+            type: spec.transport === "sse" ? "sse" : "http",
+            ...(Object.keys(headers).length === 0 ? {} : { headers }),
+            env: envNames,
+          };
+        }
+        return {
+          name: spec?.name,
+          command: String(spec?.command ?? ""),
+          args: Array.isArray(spec?.args) ? spec.args.map(String) : [],
+          env: envNames,
+        };
+      },
+
       // ONE validated writer. addLocalConnector is the host's: it owns the reserved name, the
       // env-name rule, the empty-credential rule and the remote-address rule, so the console, the
       // agent's own AddMcpServer and installMarketplacePlugin cannot drift apart. A box whose
@@ -3406,7 +3438,8 @@
       async addLocalConnector(spec) {
         const refusal = byoRefusal(spec);
         if (refusal) return { accepted: false, message: refusal };
-        const answer = await tryCall("addLocalConnector", { spec }).catch((error) => ({ __failed: error }));
+        const answer = await tryCall("addLocalConnector", { ...this.hostConnectorArgs(spec), replace: true })
+          .catch((error) => ({ __failed: error }));
         if (answer && answer.__failed) return { accepted: false, message: `${spec.name} was not added: ${answer.__failed.message}` };
         if (answer !== null) {
           await refreshConnectors();
@@ -3423,7 +3456,8 @@
       },
       async removeLocalConnector(name, options) {
         const clearSecrets = options?.clearSecrets === true;
-        const answer = await tryCall("removeLocalConnector", { name, clearSecrets }).catch((error) => ({ __failed: error }));
+        const answer = await tryCall("removeLocalConnector", { server: name, name, clearSecrets })
+          .catch((error) => ({ __failed: error }));
         if (answer && answer.__failed) return { accepted: false, message: `${name} was not removed: ${answer.__failed.message}` };
         if (answer !== null) {
           await refreshConnectors();

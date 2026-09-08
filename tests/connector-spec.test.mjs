@@ -146,10 +146,20 @@ test("a package argument with no version is refused, for both package managers",
   assert.equal(spec.unpinnedPackageArgument("/usr/bin/my-server", ["--flag"]), null);
 });
 
+// A remote row runs no package at all on the native rung, so there is nothing to pin; what has to
+// stay pinned is every entry that IS a program, on whichever rung produced it.
 test("every package argument in the catalog is pinned", () => {
   for (const plugin of catalog.MARKETPLACE_PLUGINS) {
+    for (const mode of REMOTE_MODES) {
+      const bridged = catalog.marketplaceConnectorEntry(plugin, { remoteMode: mode });
+      if (bridged == null || bridged.command === undefined) continue;
+      assert.equal(
+        spec.unpinnedPackageArgument(bridged.command, bridged.args), null,
+        `plugin ${plugin.id} runs an unpinned package under ${mode}; it is a different program every few weeks`,
+      );
+    }
     const entry = catalog.marketplaceConnectorEntry(plugin);
-    if (entry == null) continue;
+    if (entry == null || entry.command === undefined) continue;
     assert.equal(
       spec.unpinnedPackageArgument(entry.command, entry.args), null,
       `plugin ${plugin.id} runs an unpinned package; it is a different program every few weeks`,
@@ -164,9 +174,11 @@ test("every credential env value in the catalog is the empty string, and configu
     for (const [field, value] of Object.entries(declared.env)) {
       assert.equal(value, "", `plugin ${plugin.id} gives env ${field} a value in its spec`);
     }
-    // The materialised entry may add configuration, and only what the catalog declares as such.
+    // The materialised entry may add configuration, and only what the catalog declares as such. A
+    // remote entry has no env at all on the native rung, so there is nothing here to check: the
+    // fields it owes are ${FIELD} placeholders in its headers, which the refusal tests cover.
     const entry = catalog.marketplaceConnectorEntry(plugin);
-    for (const [field, value] of Object.entries(entry.env)) {
+    for (const [field, value] of Object.entries(entry?.env ?? {})) {
       assert.ok(
         value === "" || catalog.MARKETPLACE_CONFIGURATION_ENV_KEYS.includes(field),
         `plugin ${plugin.id} gives env ${field} a non-empty value that is not declared configuration`,
@@ -332,11 +344,16 @@ test("the wire view still speaks kind, install and credentialHints", () => {
   assert.equal(wire.plugins.length, catalog.MARKETPLACE_PLUGINS.length);
   const byId = Object.fromEntries(wire.plugins.map((plugin) => [plugin.id, plugin]));
 
-  // A connector row: install is the entry the box would write.
+  // A connector row: install is the entry the box would write. Linear is an endpoint, and on the
+  // native rung that entry is the address and its headers rather than a bridge to run.
   assert.equal(byId.linear.kind, "connector");
   assert.equal(typeof byId.linear.install, "object");
-  assert.equal(byId.linear.install.command, "npx");
+  assert.equal(byId.linear.install.url, "https://mcp.linear.app/mcp");
+  assert.equal(byId.linear.install.type, "http");
   assert.ok(byId.linear.credentialHints.LINEAR_API_KEY.length > 0);
+
+  // A program row still says the program.
+  assert.equal(byId.notion.install.command, "npx");
 
   // A shell-tool row: install is the shell tool's id, which is what the console's Add routes on.
   assert.equal(byId.coderabbit.kind, "shell-tool");
