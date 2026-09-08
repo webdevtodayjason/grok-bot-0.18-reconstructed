@@ -1061,7 +1061,67 @@
   // state the handoff app draws with a secure input; the value goes to the relay's 0600 store and
   // never through chat. Codex and MiniMax adopt from their CLI stores on a typed "adopt".
   const SUB_CATEGORY = { key: "Provider · paste a key", endpoint: "Provider · CLI login", runtime: "Provider · next contract", none: "Provider · not usable here" };
-  function subscriptionPlugins(rows, liveEndpointId) {
+
+  // MODELS-1. The model picker for one provider card, and where its list came from.
+  //
+  // Two sources, never merged and never silently swapped. The LIVE list is what that provider
+  // answered when the relay last probed it: ui/server.mjs's probe() fetches `<baseUrl>/models` on
+  // every catalog row and puts the ids on `health.models`, and until this wave nothing read them.
+  // The CURATED list is what ui/subscriptions.mjs ships for that provider, and it is the only
+  // answer for a provider with no list to read -- Codex is transport "responses" and is never
+  // probed at all. The card says which of the two it is showing, in one plain line, because "this
+  // is what your provider says it has" and "this is the list we shipped" are different claims.
+  //
+  // The curated row is also where the FACTS about a model live: a context window we have actually
+  // measured, and whether it takes an image. A live list is names and only names -- measured on
+  // grok-bot-local-vm 2026-09-08, the Z.AI coding plan endpoint answers ten ids carrying id,
+  // object, created and owned_by and nothing else -- so a live option is drawn with whatever the
+  // curated row for the same id knows, and with nothing where there is no such row.
+  function modelChoices(sub, catalog) {
+    if (!sub || sub.endpointId == null) return null;
+    const curated = (Array.isArray(sub.models) ? sub.models : []).map((row) => ({
+      id: String(row?.id ?? ""), label: String(row?.label ?? row?.id ?? ""),
+      contextWindow: Number.isFinite(row?.contextWindow) ? row.contextWindow : null,
+      vision: row?.vision === true ? true : row?.vision === false ? false : null,
+    })).filter((row) => row.id.length > 0);
+    const catalogRow = (Array.isArray(catalog?.endpoints) ? catalog.endpoints : [])
+      .find((row) => row?.id === sub.endpointId) ?? null;
+    const health = catalogRow?.health ?? null;
+    // Codex answers no model list and is reported as "verified on use" rather than probed, so it
+    // has no live answer to prefer and must never be described as though it had one.
+    const probed = catalogRow != null && catalogRow.transport !== "responses";
+    const live = Array.isArray(health?.models) ? health.models.map(String).filter((id) => id.length > 0) : [];
+    const factsFor = (id) => curated.find((row) => row.id === id) ?? null;
+    const useLive = probed && live.length > 0;
+    const options = useLive
+      ? live.map((id) => ({ id, ...(factsFor(id) ?? { label: id, contextWindow: null, vision: null }) }))
+      : curated;
+    const current = String(sub.model ?? sub.defaultModel ?? "").trim();
+    // The model the box is on is always in the list, even when the provider stopped listing it.
+    // A picker that silently reads back a model the box is NOT running is the failure this whole
+    // wave is about.
+    const rows = current.length > 0 && !options.some((row) => row.id === current)
+      ? [{ ...(factsFor(current) ?? { contextWindow: null, vision: null }), id: current, label: `${current} (in use)` }, ...options]
+      : options;
+    if (rows.length === 0) return null;
+    const source = useLive ? "live" : "curated";
+    const sourceNote = useLive
+      ? `This is ${sub.name}'s own list, read when this page last checked the endpoint.`
+      : !probed
+        ? `${sub.name} publishes no model list, so this is the list we ship for it.`
+        : `${sub.name}'s own list could not be read just now, so this is the list we ship for it.`;
+    const chosen = rows.find((row) => row.id === current) ?? null;
+    return {
+      source, sourceNote, current, options: rows,
+      // PROXY-10 in one sentence on the card. A text-only model is not a slower box, it is a box
+      // that answers 400 on the first real turn, because Titan sends screenshots on most of them.
+      warning: chosen?.vision === false
+        ? "This one does not take screenshots. Titan sends them on most turns, so pick one that does if you can."
+        : "",
+    };
+  }
+
+  function subscriptionPlugins(rows, liveEndpointId, catalog) {
     return (Array.isArray(rows) ? rows : []).map((sub) => {
       const facts = [sub.identity, sub.expiresAt ? `expires ${new Date(sub.expiresAt).toLocaleDateString()}` : null, sub.note].filter(Boolean).join(" · ");
       const status = sub.adopted ? "connected" : sub.route === "key" || (sub.route === "endpoint" && sub.usable) ? "installed" : "available";
@@ -1077,6 +1137,9 @@
           : "Nothing is read from this box: the relay copies the credential the provider's own CLI already stored on this Mac into its 0600 store. It never enters chat or model context.",
         group: "Providers", route: sub.route ?? null,
         endpointId: sub.endpointId ?? null, live: sub.endpointId != null && sub.endpointId === liveEndpointId,
+        // MODELS-1: null on a card with no endpoint to point at, which is what the runtime and
+        // not-usable providers are. The panel draws nothing for null rather than an empty picker.
+        modelChoices: modelChoices(sub, catalog),
         // Only a card that can be adopted RIGHT NOW gets a button. A key card always can (the
         // form is the adoption). A CLI-login card can only when the provider's own CLI already
         // holds a usable login on this Mac for the relay to copy -- route alone is not enough:
@@ -1119,7 +1182,11 @@
       name: row.name,
       icon: String(row.servedBy || row.name || "?").trim().charAt(0).toUpperCase() || "?",
       category: "Included with your plan",
-      description: `${row.model}${row.contextWindow ? ` · ${Math.round(row.contextWindow / 1000)}k context` : ""}. Part of what you already pay for.`,
+      // The LABEL, never the routing alias. `plan-zai` is a string that exists so the proxy can
+      // pick a pool; printing it here hands a customer a fact about our plumbing and calls it the
+      // name of their model. Falls back to the model for a row the control plane sent no label
+      // for, which is exactly what this line did before the label existed.
+      description: `${row.modelLabel || row.model}${row.contextWindow ? ` · ${Math.round(row.contextWindow / 1000)}k context` : ""}. Part of what you already pay for.`,
       // "connected" is the state that draws the plain line and the switch, and it is the truthful
       // one: this is reachable right now with no action from anybody.
       status: "connected",
@@ -1147,7 +1214,11 @@
     // box pointed at the plan as an unknown extra row wearing the model id -- two things on one
     // screen disagreeing about the same fact, which is what this function exists to stop.
     const included = Array.isArray(catalog?.included) ? catalog.included : [];
-    const entry = (e, provider) => ({ id: e.id, name: `${e.name} · ${e.model}`, provider, context: e.contextWindow ? `${Math.round(e.contextWindow / 1000)}k` : "" });
+    // The same label rule as the plan card, and it matters more here: this entry's `name` is what
+    // app.js prints on the always-visible agent context card and in the agent profile panel, so
+    // `e.model` put "plan-zai" on the customer's screen without them opening Settings at all. A
+    // catalog row carries no modelLabel and falls through to its own model, unchanged.
+    const entry = (e, provider) => ({ id: e.id, name: `${e.name} · ${e.modelLabel || e.model}`, provider, context: e.contextWindow ? `${Math.round(e.contextWindow / 1000)}k` : "" });
     const available = [
       ...included.map((e) => entry(e, "plan")),
       ...rows.map((e) => entry(e, e.subscription ? "subscription" : e.baseUrl)),
@@ -1475,7 +1546,7 @@
       // The plan first, because it is what most customers answer through and the one group that
       // needs nothing done to it; then the providers a user connects, the box's own connectors, and
       // the chat listeners the host reports.
-      plugins: [...includedPlugins(catalog?.included, models.default), ...subscriptionPlugins(subscriptions, models.default), ...connectors, ...pluginsOf(integrations)],
+      plugins: [...includedPlugins(catalog?.included, models.default), ...subscriptionPlugins(subscriptions, models.default, catalog), ...connectors, ...pluginsOf(integrations)],
       models,
     };
   }
@@ -1550,7 +1621,7 @@
       if (live?.model) state.models = endpointModels(live, catalog);
       state.plugins = [
         ...includedPlugins(catalog?.included, state.models.default),
-        ...subscriptionPlugins(subscriptions, state.models.default),
+        ...subscriptionPlugins(subscriptions, state.models.default, catalog),
         ...state.plugins.filter((p) => !String(p.id).startsWith("sub:") && !String(p.id).startsWith("plan:")),
       ];
       for (const w of state.workers) w.model = state.models.default;
@@ -3102,6 +3173,62 @@
           })
           .catch((error) => failed(`Switching to ${chosen.name} failed: ${error.message}`));
         return emit("settings:model", { workerId, modelId });
+      },
+      // MODELS-1. The model a provider card is pointed at.
+      //
+      // No new route: POST /subscriptions/adopt already takes {id, apiKey, model} and a re-adopt
+      // with no key keeps the stored one (both measured on this Mac 2026-09-08), so choosing a
+      // model is that same POST with the key left out. What it changes is the endpoints.json row.
+      //
+      // THREE CLOCKS, and the caller is told which one it got, because "takes effect immediately"
+      // is three different sentences here. The catalog row moves as soon as this resolves. The BOX
+      // moves only when it is pointed at this endpoint -- so a card the box is already answering
+      // through is re-applied here, and one it is not waits for the Use button beside it. And the
+      // box that is re-applied answers on its NEXT TURN, because the host re-reads box-secrets.json
+      // on every stream; nothing restarts and no message already in flight changes model.
+      setEndpointModel(pluginId, modelId) {
+        const card = state.plugins.find((plugin) => plugin.id === pluginId) ?? null;
+        const id = String(pluginId ?? "").startsWith("sub:") ? String(pluginId).slice(4) : "";
+        const model = String(modelId ?? "").trim();
+        if (card == null || id.length === 0 || model.length === 0) {
+          return Promise.resolve({ accepted: false, message: "This card has no model to set." });
+        }
+        const applying = card.live === true;
+        return relayFetch("/subscriptions/adopt", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, model }),
+        })
+          .then(async (res) => {
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              const why = body?.detail ?? body?.error ?? res.status;
+              failed(`${card.name} could not be set to ${model}: ${why}`);
+              return { accepted: false, message: `${card.name} could not be set to ${model}: ${why}` };
+            }
+            // The box only follows if it is on this endpoint. Pointing it at an endpoint it is not
+            // using would be a switch the person did not ask for.
+            if (applying && card.endpointId) {
+              const used = await relayFetch("/endpoints/use", {
+                method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: card.endpointId }),
+              });
+              if (!used.ok) {
+                const detail = await used.json().catch(() => ({}));
+                failed(`${card.name} now points at ${model}, but this box could not be moved onto it: ${detail?.detail ?? detail?.error ?? used.status}`);
+                await refreshSubscriptions();
+                return { accepted: false, applied: false, model, message: `${card.name} now points at ${model}, but this box was not moved onto it.` };
+              }
+            }
+            await refreshSubscriptions();
+            return {
+              accepted: true, applied: applying, model,
+              message: applying
+                ? `${card.name} answers with ${model} from the next turn.`
+                : `${card.name} is set to ${model}. Choose it above to point this box at it.`,
+            };
+          })
+          .catch((error) => {
+            failed(`${card.name} could not be set to ${model}: ${error.message}`);
+            return { accepted: false, message: `${card.name} could not be set to ${model}: ${error.message}` };
+          });
       },
       setAutoReview(enabled, rule) {
         const current = state.settings.autoReview ?? { allow: [], block: [] };

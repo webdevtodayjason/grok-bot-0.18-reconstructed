@@ -1517,6 +1517,36 @@
     return `<div class="setting-row" data-channel-state="${escapeHtml(plugin.id)}"><div><strong>For ${escapeHtml(lead ? lead.name : "this agent")}</strong><small>${escapeHtml(line)}</small></div><span class="status-pill${channel?.connected ? " success" : ""}">${channel ? (channel.connected ? "connected" : "not connected") : "unknown"}</span></div>`;
   }
 
+  // MODELS-1. The model picker on a provider card the person brought themselves.
+  //
+  // Drawn only where there is a list and only on a card that is connected: an unadopted provider
+  // has no stored row to point at a model, and a picker over a credential that does not exist yet
+  // is a control that cannot do anything. The source line is not decoration -- "this is what your
+  // provider says it has" and "this is the list we ship" are different claims and a person acts on
+  // them differently -- so it is always drawn, in plain words, right under the field.
+  //
+  // The two clocks are said apart, because they are genuinely different: the box takes the new
+  // model on its NEXT TURN (the host re-reads box-secrets.json on every stream, nothing restarts),
+  // and this page does not redraw itself until it next hydrates, because the console only refreshes
+  // after something is done on it and nothing pushes at it.
+  function providerModelMarkup(plugin) {
+    const choices = plugin?.modelChoices ?? null;
+    if (!choices || !Array.isArray(choices.options) || choices.options.length === 0) return "";
+    if (plugin.status !== "connected") return "";
+    if (typeof adapter.setEndpointModel !== "function") return "";
+    const options = choices.options.map((row) => {
+      const window = Number.isFinite(row.contextWindow) && row.contextWindow > 0
+        ? ` · ${Math.round(row.contextWindow / 1000)}k context` : "";
+      return `<option value="${escapeHtml(row.id)}"${row.id === choices.current ? " selected" : ""}>${escapeHtml(row.label || row.id)}${escapeHtml(window)}</option>`;
+    }).join("");
+    const effect = plugin.live
+      ? "This box answers through this provider, so a change here is what every agent runs on from the next turn."
+      : "This box is answering somewhere else, so a change here waits until you pick this provider above.";
+    const warning = choices.warning
+      ? `<small data-model-warning="${escapeHtml(plugin.id)}">${escapeHtml(choices.warning)}</small>` : "";
+    return `<div class="setting-row" data-model-row="${escapeHtml(plugin.id)}"><div><strong>Model</strong><small>${escapeHtml(choices.sourceNote)} ${escapeHtml(effect)}</small>${warning}</div><div class="field" style="margin:0"><label class="sr-only" for="provider-model-${escapeHtml(plugin.id)}">Model</label><select class="model-select" id="provider-model-${escapeHtml(plugin.id)}" data-provider-model="${escapeHtml(plugin.id)}">${options}</select></div></div>`;
+  }
+
   function pluginDetailMarkup(plugin) {
     if (!plugin) return `<div class="empty-state">Choose a plugin to inspect its tools and account.</div>`;
     const tools = pluginToolsMarkup(plugin);
@@ -1528,7 +1558,7 @@
     // plan card, because there is no endpoint for the customer to think about -- it is one of the
     // models their plan already includes, and the only decision is which.
     const providerSwitch = plugin.endpointId
-      ? `<div class="provider-switch">${plugin.live ? `<span class="status-pill success">answering now</span>` : plugin.status === "connected" ? `<button class="primary-button" type="button" data-use-endpoint="${escapeHtml(plugin.endpointId)}">${plugin.group === "Plan" ? "Use this one" : "Use this endpoint"}</button>` : ""}</div>`
+      ? `${providerModelMarkup(plugin)}<div class="provider-switch">${plugin.live ? `<span class="status-pill success">answering now</span>` : plugin.status === "connected" ? `<button class="primary-button" type="button" data-use-endpoint="${escapeHtml(plugin.endpointId)}">${plugin.group === "Plan" ? "Use this one" : "Use this endpoint"}</button>` : ""}</div>`
       : "";
     // The Skills section was a heading over an empty div on every card the gateway builds: no
     // plugin here ships skills. It renders only where there are some, or where there is a reason.
@@ -1554,18 +1584,29 @@
       // picker and a Currently answering row naming a container on our bridge. Both groups, plan
       // first, and one lookup used for the row, the pill and the selection.
       const list = [...(catalog.included ?? []), ...(catalog.endpoints ?? [])];
+      // PROVIDERS-1: the same name the agent context card and the agent profile panel print, built
+      // the same way, because a customer reading two different names for one endpoint on two
+      // screens has to work out which of them is lying. modelLabel is what the operator named the
+      // model; a row with no label falls back to its own model, which for a plan row is the
+      // routing alias and is the visible symptom of a model nobody has named yet.
+      const named = (e) => `${e.name} · ${e.modelLabel || e.model}`;
       select.innerHTML = list.map((e) => {
         const on = live.model && e.model === live.model;
         const reach = e.health?.reachable ? "" : " · unreachable";
-        return `<option value="${escapeHtml(e.id)}" ${on ? "selected" : ""}>${escapeHtml(e.name)}${escapeHtml(reach)}</option>`;
+        return `<option value="${escapeHtml(e.id)}" ${on ? "selected" : ""}>${escapeHtml(named(e))}${escapeHtml(reach)}</option>`;
       }).join("") || `<option value="">No endpoints configured</option>`;
       const chosen = list.find((e) => live.model && e.model === live.model);
       // A plan row is named, never located: `live.endpoint` is the base URL's host, which for a
       // plan is the proxy's container name -- our plumbing, on a customer's screen.
+      //
+      // It used to append "(included with your plan)" to a name that already ended in those exact
+      // words, so this row read "Z.AI GLM (included with your plan) (included with your plan)" for
+      // every customer on a plan. Measured in a real browser on this Mac 2026-09-08 by
+      // scripts/verify-models.mjs, which is what a gate that opens the page and reads it is for.
       if (current) current.textContent = !live.model
         ? "The box reports no model. Agents cannot answer until one is set."
         : chosen?.included
-          ? `${chosen.name} (included with your plan)`
+          ? named(chosen)
           : `${live.model} · ${live.endpoint ?? "unknown host"} (from ${live.source ?? "unknown"})`;
       if (health) {
         health.textContent = chosen ? (chosen.health?.reachable ? `${chosen.health.ms}ms` : "unreachable") : "unknown";
@@ -4410,6 +4451,28 @@
     } catch (error) {
       if (note) note.textContent = `Avatar not stored: ${error.message}`;
       showToast(`Avatar not stored: ${error.message}`);
+    }
+  });
+  // MODELS-1: the provider card's model picker. The adapter does the writing; this only reports
+  // what it says happened, and puts the select back where it was if it did not happen -- a picker
+  // showing a model the box is not on is the exact failure this wave exists to end.
+  elements.panelContent.addEventListener("change", async (event) => {
+    const select = event.target.closest("[data-provider-model]");
+    if (!select) return;
+    const pluginId = select.dataset.providerModel;
+    const before = state.plugins.find((plugin) => plugin.id === pluginId)?.modelChoices?.current ?? "";
+    const chosen = select.value;
+    if (!chosen || chosen === before) return;
+    select.disabled = true;
+    try {
+      const answer = await adapter.setEndpointModel(pluginId, chosen);
+      showToast(answer?.message ?? `${chosen} saved`);
+      if (answer?.accepted !== true && before) select.value = before;
+    } catch (error) {
+      showToast(`That model could not be set: ${error.message}`);
+      if (before) select.value = before;
+    } finally {
+      select.disabled = false;
     }
   });
   elements.panelContent.addEventListener("submit", handlePanelSubmit);

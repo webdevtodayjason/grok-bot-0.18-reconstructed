@@ -176,6 +176,10 @@ test("the included object is pinned field for field, and its id is its model", a
       const row = (await asRelay(plane)).body.tenants[0];
       // These names are read by the relay. A rename on either side is the failure cp-relay-pair
       // exists to catch, and this is the control plane's own half of the same pin.
+      //
+      // Being read by the relay is not the same as being KEPT by it. modelLabel was pinned here
+      // and dropped by ui/tenant-registry.mjs's includedOf on arrival, which no assertion on this
+      // side could see. tests/relay-tenant-endpoints.test.mjs holds the other half.
       assert.deepEqual(Object.keys(row.included).sort(), ["baseUrl", "enforced", "key", "keyId", "models"]);
       assert.equal(row.included.baseUrl, `${proxy.url}/v1`);
       // The key off the disk, not one this answer invented, and the same one the box will present.

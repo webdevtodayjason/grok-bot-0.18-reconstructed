@@ -17,11 +17,11 @@
 //   profileDir  /data/titanbot/<slug>/profile -- the job bus token file.
 //   included    PROXY-1. The models this tenant's plan already pays for, and the virtual key that
 //               reaches them: {baseUrl, key, keyId, models: [{id, model, name, contextWindow,
-//               servedBy}], enforced}. Minted per tenant by the control plane and handed to this
-//               relay on the same route as the rest of the row. NULL IS A REAL ANSWER meaning the
-//               feature is off here, which is what keeps a developer Mac and a single-box install
-//               byte-identical to today: no included section on the console, no plan rows in the
-//               model menu, and every path below behaves exactly as it did before.
+//               servedBy, modelLabel}], enforced}. Minted per tenant by the control plane and
+//               handed to this relay on the same route as the rest of the row. NULL IS A REAL
+//               ANSWER meaning the feature is off here, which is what keeps a developer Mac and a
+//               single-box install byte-identical to today: no included section on the console, no
+//               plan rows in the model menu, and every path below behaves exactly as it did before.
 //
 // Three rules shape everything below.
 //
@@ -69,6 +69,18 @@ const str = (value) => (typeof value === "string" ? value.trim() : "");
 // id EQUALS model, on purpose and pinned by the design: one string rather than two that can drift,
 // and the plan- prefix on it is what POST /endpoints drops and POST /endpoints/use resolves, so a
 // customer's own row can never be mistaken for one of these or the other way round.
+//
+// modelLabel is carried, and this line is the whole of PROVIDERS-1's first fix. The control plane
+// has sent it since 611fc9c -- it is what the customer's own Titan says it runs, "GLM-5.3" rather
+// than the routing alias "plan-zai" -- and this function used to normalise it away. Measured on
+// this Mac 2026-09-08 at af8c1ff: a row arriving with modelLabel "GLM-5.3" left here as five
+// fields with the label gone, ui/server.mjs's includedRows read `row.modelLabel` and got undefined,
+// and both R750 boxes therefore carried no SAND_OPENAI_COMPATIBLE_MODEL_LABEL and told their
+// customers they run plan-zai. A panel that lets an operator NAME a model is worth nothing if the
+// name never arrives, so the name arrives here.
+//
+// Empty is a real answer and means "no label": ui/server.mjs deletes the box variable for it and
+// the console falls back to the model, which is what every row did before the field existed.
 function includedOf(value) {
   if (typeof value !== "object" || value == null || Array.isArray(value)) return null;
   const baseUrl = str(value.baseUrl).replace(/\/+$/, "");
@@ -86,6 +98,8 @@ function includedOf(value) {
       contextWindow: Number.isFinite(context) && context > 0 ? Math.trunc(context) : null,
       // What the box tells a person it answers through, so Titan never names a container.
       servedBy: str(row?.servedBy),
+      // What the box tells a person it IS. See the note above this function.
+      modelLabel: str(row?.modelLabel),
     };
   }).filter((row) => row != null);
   if (models.length === 0) return null;

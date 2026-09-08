@@ -175,11 +175,27 @@ function startFakeProxy() {
 // included set on the customer's row. The proxy's address is a loopback one on purpose: it is
 // exactly the shape tenantEndpointRefusal exists to refuse, so a bypass that leaked would show up
 // here as a probe that succeeded rather than as a theory.
+// PROVIDERS-1. The labels are added HERE rather than in the shared includedSet, because the point
+// of this file is the relay's own half of the modelLabel pin and the two halves must be able to
+// disagree for the pin to catch anything. The control plane has sent modelLabel since 611fc9c and
+// tests/cp-relay-registry.test.mjs pins that it does; ui/tenant-registry.mjs's includedOf then
+// normalised it away, so both halves were green while every box on the R750 told its customer it
+// ran "plan-zai". This is the half that was missing.
+//
+// One row deliberately carries NO label: plan-qwen. That is the honest state of a plan model
+// nobody has named yet, and the box has to fall back to the alias for it rather than write an
+// empty name -- see the no-label test at the bottom of this section.
+function labelledSet(options) {
+  const set = includedSet(options);
+  const labels = { "plan-zai": "GLM-5.3", "plan-minimax": "MiniMax M3" };
+  return { ...set, models: set.models.map((row) => (labels[row.id] ? { ...row, modelLabel: labels[row.id] } : row)) };
+}
+
 async function startPlanConsole() {
   const proxy = await startFakeProxy();
   const demo = tenantRow("demo");
   const stub = boxStub([demo.row.box]);
-  const included = includedSet({ baseUrl: proxy.url, key: "sk-virtual-for-demo-only" });
+  const included = labelledSet({ baseUrl: proxy.url, key: "sk-virtual-for-demo-only" });
   const relay = await startRelay({
     CP_URL: "http://127.0.0.1:1",
     CP_RELAY_TOKEN: RELAY_TOKEN,
@@ -201,6 +217,20 @@ test("the included rows are listed beside the catalog, with no key and one probe
     // id EQUALS model. One string, so the two can never drift apart between here and the box.
     for (const row of body.included) assert.equal(row.id, row.model, "id and model are one string");
     for (const row of body.included) assert.match(row.id, /^plan-/, "the prefix is what the drop and the resolve both key on");
+
+    // PROVIDERS-1, THE RELAY'S HALF OF THE modelLabel PIN. The control plane's half is in
+    // tests/cp-relay-registry.test.mjs and tests/cp-relay-pair.test.mjs; this is the end of the
+    // wire, where the field is finally read. It travelled the whole way and was dropped one
+    // function short of being used: ui/tenant-registry.mjs's includedOf rebuilt each row as five
+    // fields and modelLabel was not one of them, so ui/server.mjs's includedRows read undefined,
+    // no box was ever given SAND_OPENAI_COMPATIBLE_MODEL_LABEL, and demo's and Richard's Titan
+    // both told their customer they run "plan-zai". Nothing above this line could see that.
+    const byId = Object.fromEntries(body.included.map((row) => [row.id, row]));
+    assert.equal(byId["plan-zai"].modelLabel, "GLM-5.3", "the name the customer's own Titan says it runs");
+    assert.equal(byId["plan-minimax"].modelLabel, "MiniMax M3");
+    // Empty is a real answer and means nobody has named this model. The card and the box both fall
+    // back to the alias for it, which is visible and fixable; an invented name would be neither.
+    assert.equal(byId["plan-qwen"].modelLabel, "");
 
     // The key is never in the answer, under any name. The word "included" stands where a value
     // would be, the same way the catalog's own rows say "set".
@@ -277,7 +307,7 @@ test("the guard still refuses a private address on a customer's own row, and the
   } finally { relay.stop(); await proxy.stop(); }
 });
 
-test("using an included model writes the six names into the box, at 0600", async () => {
+test("using an included model writes the seven names into the box, at 0600", async () => {
   const { relay, proxy, stub } = await startPlanConsole();
   try {
     const cookie = await signInAsTenant(relay, "demo");
@@ -303,12 +333,41 @@ test("using an included model writes the six names into the box, at 0600", async
     assert.equal(secrets.SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME, "Z.AI GLM (included with your plan)");
     assert.equal(secrets.SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW, "200000");
     assert.equal(secrets.SAND_OPENAI_COMPATIBLE_SERVED_BY, "Z.AI");
+    // The seventh name, and the whole reason PROVIDERS-1 touches this file. SERVED_BY is who
+    // answers; this is WHAT answers, and it is what the host puts in the persona fact the customer
+    // reads. Without it Titan reports the routing alias, which is a string that exists so the
+    // operator's proxy can pick a pool and is not the name of anybody's model.
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_MODEL_LABEL, "GLM-5.3");
     assert.equal(secrets.CODERABBIT_API_KEY, "a shell credential", "the other credential plane in this file survives");
 
     // SECRET-3, first half. Measured on the R750 2026-09-08 at 0644 box:box on all three boxes,
     // because this writer was a bare `cat` with no mode while the host's own writer for the same
     // file uses 0o600. The mode below is one a shell actually produced.
     assert.equal(statSync(stub.fileOf("titanbot-box-demo", "box-secrets.json")).mode & 0o777, 0o600);
+  } finally { relay.stop(); await proxy.stop(); }
+});
+
+// A plan model nobody has named yet, and a box that was on one that had been named. Two things
+// have to be true at once here and only one of them is obvious: the unnamed row writes no label,
+// AND the previous row's label is taken back out. A stale label is worse than none, because the
+// box keeps confidently telling its customer it runs a model it no longer runs -- which is the
+// same class of quiet lie the whole label path exists to end.
+test("a plan model with no label writes none, and takes the last one back out with it", async () => {
+  const { relay, proxy, stub } = await startPlanConsole();
+  try {
+    const cookie = await signInAsTenant(relay, "demo");
+    const use = (id) => fetch(`${relay.base}/endpoints/use`, {
+      method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ id }),
+    });
+
+    assert.equal((await use("plan-zai")).status, 200);
+    assert.equal(stub.secretsOf("titanbot-box-demo").SAND_OPENAI_COMPATIBLE_MODEL_LABEL, "GLM-5.3");
+
+    const res = await use("plan-qwen");
+    assert.equal(res.status, 200, await res.text());
+    const secrets = stub.secretsOf("titanbot-box-demo");
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_MODEL, "plan-qwen", "the box did move");
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_MODEL_LABEL, undefined, "GLM-5.3 must not outlive the model it named");
   } finally { relay.stop(); await proxy.stop(); }
 });
 
@@ -334,6 +393,7 @@ test("switching back to a customer's own key takes the plan's wording with it", 
     assert.equal(res.status, 200);
     const secrets = stub.secretsOf("titanbot-box-demo");
     assert.equal(secrets.SAND_OPENAI_COMPATIBLE_SERVED_BY, undefined, "the plan's name must not outlive the plan");
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_MODEL_LABEL, undefined, "and neither must the plan model's own name");
     assert.equal(secrets.SAND_OPENAI_COMPATIBLE_API_KEY, "a key the customer owns");
   } finally { relay.stop(); await proxy.stop(); }
 });
