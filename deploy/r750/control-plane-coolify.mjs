@@ -178,6 +178,10 @@ export function composeEnvironment(text) {
 // alone. Clearing one is a deliberate act in the Coolify UI, not a side effect of an unset shell.
 export const OPTIONAL_KEYS = new Set([
   "CP_PROXY_URL", "CP_PROXY_MASTER_KEY", "CP_PROXY_ALLOWANCE_USD", "CP_PROXY_ENFORCE",
+  // The per-workspace rate limit joins them for the same reason: it is part of the proxy feature,
+  // and a control plane that refuses to deploy because nobody has picked a requests-a-minute
+  // number yet is a control plane that takes the whole console down over a knob.
+  "CP_PROXY_RPM_LIMIT",
 ]);
 
 export function resolveEnvironment(entries, env, supplied = {}) {
