@@ -42,11 +42,23 @@ export type OpenAiCompatibleSettings = {
   readonly originator?: string | null;
   /** The operator-facing name of the endpoint, so the agent can say truthfully what it runs on. */
   readonly endpointName?: string | null;
+  /**
+   * PROXY-1. Who is actually serving this model, when the base URL cannot say so honestly.
+   *
+   * Pointed at the plan proxy, the base URL's host is `titanbot-proxy`: a container name on our
+   * own bridge, which means nothing to the person asking and names our plumbing to a customer.
+   * This is the name the box was told to say instead. It is also the marker for the plan-worded
+   * refusals, so a box answering on a customer's own key never gets plan wording.
+   *
+   * Absent unless configured, so settings stay byte-equal for every endpoint that does not set it.
+   */
+  readonly servedBy?: string | null;
 };
 export const OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV = "SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME";
 export const OPENAI_COMPATIBLE_TRANSPORT_ENV = "SAND_OPENAI_COMPATIBLE_TRANSPORT";
 export const OPENAI_COMPATIBLE_ACCOUNT_ID_ENV = "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID";
 export const OPENAI_COMPATIBLE_ORIGINATOR_ENV = "SAND_OPENAI_COMPATIBLE_ORIGINATOR";
+export const OPENAI_COMPATIBLE_SERVED_BY_ENV = "SAND_OPENAI_COMPATIBLE_SERVED_BY";
 
 export type OpenAiCompatibleEvent =
   | { readonly type: "text-delta"; readonly delta: string }
@@ -96,6 +108,7 @@ export function resolveOpenAiCompatibleSettings(env: Readonly<Record<string, str
     ...(configured(OPENAI_COMPATIBLE_ACCOUNT_ID_ENV).length > 0 ? { accountId: configured(OPENAI_COMPATIBLE_ACCOUNT_ID_ENV) } : {}),
     ...(configured(OPENAI_COMPATIBLE_ORIGINATOR_ENV).length > 0 ? { originator: configured(OPENAI_COMPATIBLE_ORIGINATOR_ENV) } : {}),
     ...(configured(OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV).length > 0 ? { endpointName: configured(OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV) } : {}),
+    ...(configured(OPENAI_COMPATIBLE_SERVED_BY_ENV).length > 0 ? { servedBy: configured(OPENAI_COMPATIBLE_SERVED_BY_ENV) } : {}),
   };
 }
 

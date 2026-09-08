@@ -323,3 +323,124 @@ test("the operator's own row being skipped by the control plane is not reported 
   // And the operator is still served, which is the whole reason the skip is expected.
   assert.equal(registry.get(OPERATOR_SLUG)?.box, "titanbot-box-operator");
 });
+
+
+// ---- PROXY-1: the included set on an entry -----------------------------------------------------
+//
+// One field, and three rules that decide whether a console is safe to point at a proxy at all:
+// absent is a real answer, a re-minted key rebuilds the entry, and the operator's own row is the
+// single exception to "never merge a control plane row onto the seed" -- because Jason's workspace
+// is a tenant of the proxy like everybody else and his box is one of the three the copied operator
+// key is leaving.
+import { includedSet } from "./relay-proxy-support.mjs";
+
+test("an included set is normalised, and anything unusable in it is no set at all", async () => {
+  const cp = fakeCp([{ body: { tenants: [
+    row("full", { included: includedSet({ key: "sk-full" }) }),
+    // A trailing slash on the base URL would double every path the box builds from it.
+    row("slash", { included: { baseUrl: "http://titanbot-proxy:4000/v1/", key: "k", models: [{ model: "plan-zai" }] } }),
+    // No key, so there is no way to use it: not a degraded set, no set.
+    row("keyless", { included: { baseUrl: "http://titanbot-proxy:4000/v1", models: [{ model: "plan-zai" }] } }),
+    // No models, same answer.
+    row("modelless", { included: { baseUrl: "http://titanbot-proxy:4000/v1", key: "k", models: [] } }),
+    // Shapes a wrong control plane could send. None of them becomes a half-built set.
+    row("wrong", { included: "yes" }),
+    row("listy", { included: [1, 2] }),
+    row("none"),
+  ] } }]);
+  const registry = createTenantRegistry({
+    operator: OPERATOR, cpUrl: "https://api.titanium.bot", relayToken: "a-relay-token", ...cp, log: () => {},
+  });
+  await registry.refresh();
+
+  const full = registry.get("full").included;
+  assert.equal(full.baseUrl, "http://titanbot-proxy:4000/v1");
+  assert.equal(full.key, "sk-full");
+  assert.equal(full.enforced, false, "observe mode is the default, and absent means observe");
+  assert.deepEqual(full.models.map((m) => m.id), ["plan-zai", "plan-minimax", "plan-qwen"]);
+  // id EQUALS model. One string, pinned by the design, so nothing downstream can carry two.
+  for (const m of full.models) assert.equal(m.id, m.model);
+  assert.equal(full.models[0].contextWindow, 200000);
+  assert.equal(full.models[0].servedBy, "Z.AI");
+
+  assert.equal(registry.get("slash").included.baseUrl, "http://titanbot-proxy:4000/v1");
+  // A row given only a model name still resolves: the id is the model.
+  assert.deepEqual(registry.get("slash").included.models, [
+    { id: "plan-zai", model: "plan-zai", name: "plan-zai", contextWindow: null, servedBy: "" },
+  ]);
+
+  // Absent is a real answer, and every unusable shape lands on it. This is what keeps a developer
+  // Mac and a single-box install byte-identical to today.
+  for (const slug of ["keyless", "modelless", "wrong", "listy", "none"]) {
+    assert.equal(registry.get(slug).included, null, `${slug} should carry no included set`);
+  }
+});
+
+test("a re-minted key rebuilds the entry, so the console stops handing out the old one", async () => {
+  const first = includedSet({ key: "sk-before" });
+  const cp = fakeCp([
+    { body: { tenants: [row("demo", { included: first })] } },
+    { body: { tenants: [row("demo", { included: first })] } },
+    { body: { tenants: [row("demo", { included: includedSet({ key: "sk-after" }) })] } },
+    { body: { tenants: [row("demo")] } },
+  ]);
+  const registry = createTenantRegistry({
+    operator: OPERATOR, cpUrl: "https://api.titanium.bot", relayToken: "a-relay-token", ...cp, log: () => {},
+  });
+  await registry.refresh();
+  const before = registry.get("demo");
+  await registry.refresh();
+  assert.equal(registry.get("demo"), before, "an unchanged key must not churn the cached context");
+  await registry.refresh();
+  assert.notEqual(registry.get("demo"), before, "a re-minted key has to invalidate it");
+  assert.equal(registry.get("demo").included.key, "sk-after");
+  // Revocation is the same movement in the other direction: the set goes away and the entry moves.
+  await registry.refresh();
+  assert.equal(registry.get("demo").included, null);
+});
+
+test("the operator's row is still dropped, except for the included set, which is merged onto the seed", async () => {
+  const included = includedSet({ key: "sk-for-jason" });
+  const cp = fakeCp([
+    { body: { tenants: [row(OPERATOR_SLUG, {
+      box: "somebody-elses-box", token: "not-the-operators", gateway: "http://somebody-else:1340",
+      sessionKey: "not-his", stateDir: "/somebody/else/state", profileDir: "/somebody/else/profile",
+      included,
+    })] } },
+    { body: { tenants: [row(OPERATOR_SLUG, { box: "somebody-elses-box" })] } },
+  ]);
+  const said = [];
+  const registry = createTenantRegistry({
+    operator: OPERATOR, cpUrl: "https://api.titanium.bot", relayToken: "a-relay-token", ...cp,
+    log: (line) => said.push(line),
+  });
+  await registry.refresh();
+
+  const seed = registry.get(OPERATOR_SLUG);
+  // Everything a wrong control plane field could have moved is still this relay's own environment.
+  assert.equal(seed.box, "titanbot-box-jason");
+  assert.equal(seed.token, "operator-gateway-token");
+  assert.equal(seed.gateway, "http://titanbot-box:1340");
+  assert.equal(seed.sessionKey, "");
+  assert.equal(seed.stateDir, "/state");
+  assert.equal(seed.profileDir, "/profile");
+  // And the one field that could only have come from the control plane did.
+  assert.equal(seed.included.key, "sk-for-jason");
+  assert.deepEqual(seed.included.models.map((m) => m.id), ["plan-zai", "plan-minimax", "plan-qwen"]);
+  assert.equal(said.some((line) => line.includes("uses its own environment")), false,
+    "a row carrying something worth merging is not a fault to report every sixty seconds");
+
+  // Turning the proxy off on the control plane turns the section off here, rather than leaving a
+  // dead key on Jason's console; and THAT row, with nothing on it, is the one worth a line.
+  await registry.refresh();
+  assert.equal(registry.get(OPERATOR_SLUG).included, null);
+  assert.equal(registry.get(OPERATOR_SLUG).box, "titanbot-box-jason");
+  assert.equal(said.some((line) => line.includes("uses its own environment")), true);
+});
+
+test("a console with no control plane has no included set anywhere, and never asks for one", async () => {
+  const registry = createTenantRegistry({ operator: OPERATOR, log: () => {} });
+  await registry.refresh();
+  assert.equal(registry.operator().included, null);
+  assert.equal(operatorEntry({ env: {}, gateway: "g", token: "t" }).included, null);
+});

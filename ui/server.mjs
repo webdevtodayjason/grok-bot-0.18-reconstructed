@@ -78,6 +78,7 @@ import {
 } from "./tenant-registry.mjs";
 import { NOT_AVAILABLE, createDockerProbe, notAvailable } from "./docker-edge.mjs";
 import { chmod, chown, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
@@ -134,15 +135,33 @@ const readSecrets = async (t) => {
   const raw = await dockerOut(["exec", t.box, "cat", SECRETS_PATH]);
   try { return JSON.parse(raw).secrets ?? {}; } catch { return {}; }
 };
-// Merge, never replace: this file is also where the operator's real secrets live.
-async function writeSecrets(t, next) {
-  const body = JSON.stringify({ version: 1, secrets: next });
+// One writer for every file this console puts inside a box. 0600 on all of them, and the mode is
+// set two ways because neither alone is enough: `umask 077` decides the mode of a file this write
+// CREATES, and `chmod` fixes one that already exists at the wrong mode -- which is every box on the
+// R750, measured 2026-09-08 at 0644 box:box while the host's own writer for the same file uses
+// 0o600. SECRET-3. The redirection is what truncates, so a shorter document never leaves a tail of
+// the old one behind.
+async function writeBoxFile(t, filePath, body) {
   return new Promise((resolve, reject) => {
-    const child = execFile("docker", ["exec", "-i", t.box, "sh", "-c", `cat > ${SECRETS_PATH}`],
+    const child = execFile("docker", ["exec", "-i", t.box, "sh", "-c",
+      `umask 077 && cat > ${filePath} && chmod 600 ${filePath}`],
       (err) => (err ? reject(err) : resolve()));
     child.stdin.end(body);
   });
 }
+// Merge, never replace: this file is also where the operator's real secrets live.
+async function writeSecrets(t, next) {
+  return await writeBoxFile(t, SECRETS_PATH, JSON.stringify({ version: 1, secrets: next }));
+}
+// The other half of the box's credential plane (CONNECT-5): connector env values, keyed by the
+// connector they belong to. Read and written here only so the migration can take the operator's
+// copied TinyFish key back out of a customer's box.
+const CONNECTOR_SECRETS_PATH = "/home/box/sand-data/connector-env-secrets.json";
+const readConnectorSecrets = async (t) => {
+  const raw = await dockerOut(["exec", t.box, "cat", CONNECTOR_SECRETS_PATH]);
+  if (raw == null || String(raw).trim().length === 0) return null;
+  try { const parsed = JSON.parse(raw); return typeof parsed === "object" && parsed != null && !Array.isArray(parsed) ? parsed : null; } catch { return null; }
+};
 const CONNECTORS_PATH = "/home/box/sand-data/connectors.json";
 
 // The connector file lives in the box's sand-data, which is a docker VOLUME -- there is no path on
@@ -218,10 +237,62 @@ async function tenantEndpointRefusal(t, baseUrl) {
   return null;
 }
 
+// ---- what a plan already includes (PROXY-1) ---------------------------------------------------
+//
+// These rows CANNOT live in a tenant's endpoints.json, and that is the whole design rather than an
+// inconvenience. The proxy answers on http://titanbot-proxy:4000/v1 -- plain http, a name on this
+// server's own bridge -- which tenantEndpointRefusal above refuses twice over, and rightly: that
+// guard is the thing stopping a customer aiming this relay at the machine every other customer is
+// on. Relaxing it to let one address through would relax it for every address that resolves the
+// same way.
+//
+// So the rows are COMPUTED from the registry on each request, returned in an array of their own,
+// and the virtual key is rendered as the literal word "included" everywhere it would otherwise be
+// printed. A tenant with no included set gets an empty array and every path below behaves exactly
+// as it did before this existed.
+const PLAN_PREFIX = "plan-";
+const isPlanId = (id) => String(id ?? "").startsWith(PLAN_PREFIX);
+function includedRows(t) {
+  const included = t?.entry?.included ?? null;
+  if (included == null) return [];
+  return included.models.map((row) => ({
+    id: row.id, name: row.name, model: row.model, baseUrl: included.baseUrl,
+    contextWindow: row.contextWindow, servedBy: row.servedBy,
+    // Set HERE, out of the registry, and stripped from anything a request body carries before a
+    // catalog is written. It is the flag probe() reads to skip the tenant guard, so where it can
+    // come from is the whole of that bypass's safety.
+    included: true, enforced: included.enforced,
+  }));
+}
+
+// One probe for the whole included set. Three rows are one question -- same proxy, same base URL,
+// same key -- so probing per row would be three requests to say one thing. Cached briefly because
+// the console asks for this list twice on a single page load (hydrate, then the settings refresh).
+const PROXY_PROBE_CACHE_MS = 10_000;
+const proxyProbes = new Map();
+async function probeIncluded(t) {
+  const included = t?.entry?.included ?? null;
+  if (included == null) return null;
+  // Keyed on a HASH of the credential, not on keyId: a re-mint is exactly the moment a cached
+  // "reachable" becomes a lie, and nothing says the control plane changes the id when it changes
+  // the key. Nothing key-shaped goes into a map this way either.
+  const key = `${t.slug}\n${included.baseUrl}\n${sha256Hex(included.key)}`;
+  const hit = proxyProbes.get(key);
+  if (hit != null && Date.now() - hit.at < PROXY_PROBE_CACHE_MS) return hit.health;
+  const health = await probe(t, { baseUrl: included.baseUrl, apiKey: included.key, model: null, included: true });
+  proxyProbes.set(key, { at: Date.now(), health });
+  return health;
+}
+
 // A saved endpoint is only useful if it is actually up, so say so rather than implying it.
 async function probe(t, endpoint) {
   const started = Date.now();
-  const refusal = await tenantEndpointRefusal(t, endpoint?.baseUrl);
+  // PROXY-1. The one bypass of the tenant guard, and it is not reachable from a request body: the
+  // flag is set by includedRows out of the registry, POST /endpoints drops every plan- row and
+  // strips this field from the rest before a catalog is written, so there is no path by which a
+  // customer types it into a saved endpoint and gets the relay to fetch an address of their
+  // choosing. The guard itself and isPrivateAddress are not touched.
+  const refusal = endpoint?.included === true ? null : await tenantEndpointRefusal(t, endpoint?.baseUrl);
   if (refusal != null) return { reachable: false, detail: refusal, ms: Date.now() - started };
   try {
     const res = await fetch(`${endpoint.baseUrl.replace(/\/+$/, "")}/models`,
@@ -857,10 +928,27 @@ function sharedBoxHealth() {
   return pending;
 }
 
+// PROXY-1. The migration's two doors, and they are on this relay for the same reason the other two
+// are: writing inside a box needs the docker socket, and the control plane's container deliberately
+// has none. The control plane drives the migration, this relay is the only thing that can touch a
+// box's files, and CP_RELAY_TOKEN is the one credential between them.
+//
+// Neither answers with a value. What leaves this process is a NAME, a LENGTH and the first twelve
+// hex characters of a sha256, which is enough to prove a specific key is gone from a specific box
+// and not enough to be one.
+const TENANT_ADMIN_ROUTE = /^\/admin\/tenants\/([^/]+)\/(use-included|forget-provider-keys)$/;
+const sha256Hex = (value) => createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
+const evidenceOf = (name, value) => ({ name, length: String(value ?? "").length, sha256: sha256Hex(value).slice(0, 12) });
+
 async function handleRelayAdmin(req, res, url) {
   const expected = String(RELAY?.relayToken ?? "");
   if (expected.length === 0) return fail(res, 404, "not found");
-  if (req.method !== "GET") return fail(res, 405, "GET");
+  const action = TENANT_ADMIN_ROUTE.exec(url.pathname);
+  // The method refusal still comes before the credential, so a wrong method charges nobody's
+  // lockout and learns nothing. The two reads are GET-only; the two migration doors are POST-only,
+  // because each of them changes a file inside somebody's box.
+  const allowed = action == null ? "GET" : "POST";
+  if (req.method !== allowed) return fail(res, 405, allowed);
   const header = String(req.headers.authorization ?? "");
   const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
   // Constant time over the value and over the length, the same compare the registry uses on a
@@ -885,7 +973,119 @@ async function handleRelayAdmin(req, res, url) {
     return res.end(JSON.stringify(report));
   }
 
+  if (action != null) return await handleTenantMigration(req, res, decodeURIComponent(action[1]), action[2]);
+
   return fail(res, 404, "not found");
+}
+
+// Both migration doors, sharing one resolution of the workspace and one shape of answer.
+async function handleTenantMigration(req, res, slug, step) {
+  const t = contextOf(slug);
+  if (t == null) return fail(res, 404, NOT_AVAILABLE_SENTENCE);
+  if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.endpointsUse);
+  let body;
+  try { body = JSON.parse(await readBody(req, 64 * 1024) || "{}"); } catch { return fail(res, 400, "that was not JSON"); }
+  const answer = (payload) => {
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ slug, measuredAt: new Date().toISOString(), ...payload }));
+  };
+  return step === "use-included"
+    ? await useIncluded(res, t, body, answer)
+    : await forgetProviderKeys(res, t, body, answer);
+}
+
+// Point this box at one of its included models, keeping the way back. The snapshot is taken FIRST
+// and to a 0600 file in the tenant's own profile directory, because from the moment the copied
+// operator key leaves this box the proxy is the only thing answering for it: a rollback that
+// depends on remembering what was there is not a rollback.
+const ROLLBACK_NAME = "model-proxy-rollback.json";
+async function useIncluded(res, t, body, answer) {
+  const included = t.entry?.included ?? null;
+  if (included == null) return fail(res, 409, `no included set for ${t.slug}`);
+  const wanted = String(body?.model ?? "").trim();
+  const plan = wanted.length > 0
+    ? includedRows(t).find((row) => row.id === wanted)
+    : includedRows(t)[0];
+  if (plan == null) return fail(res, 404, `no included model named ${wanted}`);
+  if (String(t.profileDir ?? "").length === 0) return fail(res, 409, `${t.slug} has no profile directory to keep a rollback in`);
+
+  const before = await readSecrets(t);
+  const rollbackFile = path.join(t.profileDir, ROLLBACK_NAME);
+  await writeFile(rollbackFile, JSON.stringify({ version: 1, secrets: before }), { mode: 0o600 });
+  // writeFile's mode applies only when it creates the file, and this one is rewritten per tenant
+  // on every migration attempt, so the mode is set again rather than assumed.
+  await chmod(rollbackFile, 0o600).catch(() => {});
+
+  const next = { ...before, SAND_OPENAI_COMPATIBLE_BASE_URL: plan.baseUrl, SAND_OPENAI_COMPATIBLE_MODEL: plan.model, SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: plan.name, SAND_OPENAI_COMPATIBLE_API_KEY: included.key };
+  for (const key of ["SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR"]) delete next[key];
+  if (plan.servedBy) next.SAND_OPENAI_COMPATIBLE_SERVED_BY = plan.servedBy;
+  else delete next.SAND_OPENAI_COMPATIBLE_SERVED_BY;
+  if (plan.contextWindow) next.SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW = String(plan.contextWindow);
+  await writeSecrets(t, next);
+  return answer({
+    using: plan.id, endpointName: plan.name, rollbackFile,
+    // Names, lengths and hash prefixes. The key itself has already gone into the box and does not
+    // come back out through this answer.
+    wrote: Object.keys(next).filter((name) => name.startsWith("SAND_OPENAI_COMPATIBLE_")).sort()
+      .map((name) => evidenceOf(name, next[name])),
+  });
+}
+
+// Take a specific credential back out of this box, by hash and by hash alone.
+//
+// A prefix rather than a value on purpose: the caller proves it knows WHICH key without this route
+// ever accepting one, and a typo deletes nothing rather than something. Three files, because the
+// operator's copies landed in three places -- the endpoint pin, the tenant's own saved endpoint
+// rows, and the connector env store TinyFish reads. Both box files are left present and valid; a
+// file this box never had is not created by a removal.
+async function forgetProviderKeys(res, t, body, answer) {
+  const prefix = String(body?.prefix ?? "").trim().toLowerCase();
+  if (!/^[0-9a-f]{6,64}$/.test(prefix)) return fail(res, 400, "prefix must be at least six hex characters of a sha256");
+  const matches = (value) => String(value ?? "").length > 0 && sha256Hex(value).startsWith(prefix);
+  const removed = [];
+
+  const secrets = await readSecrets(t);
+  const keptSecrets = {};
+  for (const [name, value] of Object.entries(secrets)) {
+    if (matches(value)) removed.push({ file: "box-secrets.json", ...evidenceOf(name, value) });
+    else keptSecrets[name] = value;
+  }
+  if (removed.length > 0) await writeSecrets(t, keptSecrets);
+
+  // The tenant's saved catalog. The ROW stays -- it is the customer's own endpoint definition and
+  // deleting it would be deleting their configuration, not a credential -- and its key is cleared,
+  // which is the thing the proof reads for.
+  const catalog = await readCatalog(t);
+  let catalogChanged = false;
+  const endpoints = (catalog.endpoints ?? []).map((row) => {
+    if (!matches(row?.apiKey)) return row;
+    catalogChanged = true;
+    removed.push({ file: "endpoints.json", ...evidenceOf(`${row.id}.apiKey`, row.apiKey) });
+    return { ...row, apiKey: "" };
+  });
+  if (catalogChanged) {
+    t.ensureDir();
+    await writeFile(t.endpointsFile, JSON.stringify({ endpoints }, null, 2));
+    await ownLikeParent(t.endpointsFile);
+  }
+
+  const connectorSecrets = await readConnectorSecrets(t);
+  const servers = connectorSecrets?.servers;
+  let connectorsChanged = false;
+  if (typeof servers === "object" && servers != null && !Array.isArray(servers)) {
+    for (const [server, fields] of Object.entries(servers)) {
+      if (typeof fields !== "object" || fields == null || Array.isArray(fields)) continue;
+      for (const [field, value] of Object.entries(fields)) {
+        if (!matches(value)) continue;
+        delete fields[field];
+        connectorsChanged = true;
+        removed.push({ file: "connector-env-secrets.json", ...evidenceOf(`servers.${server}.${field}`, value) });
+      }
+    }
+  }
+  if (connectorsChanged) await writeBoxFile(t, CONNECTOR_SECRETS_PATH, JSON.stringify(connectorSecrets));
+
+  return answer({ prefix, removed, removedCount: removed.length });
 }
 
 function handleLogout(req, res) {
@@ -1867,8 +2067,14 @@ const server = createServer(async (req, res) => {
           : await probe(t, { ...e, apiKey: resolved.apiKey });
         return { ...e, apiKey: "subscription", health };
       }));
+      // PROXY-1. The plan's own rows, in an array of their own so nothing that reads `endpoints`
+      // has to learn to skip them, and with the virtual key rendered as the literal word
+      // "included" -- the value is never sent to a browser, the same rule the catalog's own
+      // apiKey: "set" follows. One probe for the set, attached to every row in it.
+      const includedHealth = await probeIncluded(t);
+      const included = includedRows(t).map((row) => ({ ...row, apiKey: "included", health: includedHealth }));
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify({ endpoints, live, pinned,
+      return res.end(JSON.stringify({ endpoints, included, live, pinned,
         pinnedBy: pinned ? "container env; recreate the box without SAND_OPENAI_COMPATIBLE_* to unpin" : null,
         // Present only when it is true, so nothing has to read it on Jason's instance.
         ...(hasDocker ? {} : { liveNote: NOT_AVAILABLE.liveModel, switchable: false }) }));
@@ -1877,15 +2083,26 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/endpoints") {
       const next = JSON.parse(await readBody(req) || "{}");
       if (!Array.isArray(next.endpoints)) return fail(res, 400, "endpoints must be an array");
+      // PROXY-1, BEFORE the guard loop and not after it. The included rows are on screen with the
+      // customer's own, so a save sends them back, and the guard runs over EVERY row in the body:
+      // without this drop a customer editing a key they DO own is refused because of a row they
+      // cannot edit and did not touch. They are also never written -- a plan row lives in the
+      // registry, and one in a catalog file would be a stale copy of a key that gets re-minted.
+      const offered = next.endpoints.filter((e) => !isPlanId(e?.id));
       // On a tenant, before anything is written: an address inside this server's own network is
       // not a provider, it is a port scan with a saved bearer aimed at it. See tenantEndpointRefusal.
-      for (const e of next.endpoints) {
+      for (const e of offered) {
         const refusal = await tenantEndpointRefusal(t, e?.baseUrl);
         if (refusal != null) return fail(res, 400, refusal);
       }
       const current = await readCatalog(t);
       // A key the browser never received back comes in as "set"; keep the stored one.
-      const merged = next.endpoints.map((e) => ({ ...e,
+      //
+      // `included` and `enforced` are dropped from every surviving row, which is what makes the
+      // probe bypass above safe to state as a fact: the flag exists only on rows this process
+      // computed from the registry, so a body carrying {included: true} and an address on this
+      // server's network is saved without it and probed under the guard like anything else.
+      const merged = offered.map(({ included: _plan, enforced: _enforced, ...e }) => ({ ...e,
         apiKey: e.apiKey === "set"
           ? (current.endpoints ?? []).find((c) => c.id === e.id)?.apiKey ?? "" : (e.apiKey ?? "") }));
       t.ensureDir();
@@ -1903,12 +2120,21 @@ const server = createServer(async (req, res) => {
       // a closed answer. TENANT-2.
       if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.endpointsUse);
       const catalog = await readCatalog(t);
-      const chosen = (catalog.endpoints ?? []).find((e) => e.id === id);
+      // PROXY-1. A third branch, resolved from the registry rather than from any file: this is the
+      // one place on the relay side that reads the virtual key, and the only place it is written.
+      const plan = includedRows(t).find((row) => row.id === id) ?? null;
+      const chosen = plan ?? (catalog.endpoints ?? []).find((e) => e.id === id);
       if (chosen == null) return fail(res, 404, `no endpoint named ${id}`);
       const secrets = await readSecrets(t);
       const next = { ...secrets, SAND_OPENAI_COMPATIBLE_BASE_URL: chosen.baseUrl, SAND_OPENAI_COMPATIBLE_MODEL: chosen.model, SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: chosen.name };
-      for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR"]) delete next[key];
-      if (chosen.subscription) {
+      // SERVED_BY joins the four that are deleted on every switch. It has to: it is what makes
+      // Titan say a plan's name instead of the base URL's host AND what turns on the plan-worded
+      // refusals, so a box moving BACK to a customer's own key must not keep either.
+      for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR", "SAND_OPENAI_COMPATIBLE_SERVED_BY"]) delete next[key];
+      if (plan != null) {
+        next.SAND_OPENAI_COMPATIBLE_API_KEY = t.entry.included.key;
+        if (plan.servedBy) next.SAND_OPENAI_COMPATIBLE_SERVED_BY = plan.servedBy;
+      } else if (chosen.subscription) {
         // A subscription row names a credential in the OPERATOR's own home directory, so only the
         // operator's console can resolve one. A tenant never has such a row: the scan that writes
         // them answers empty for a tenant.
@@ -1928,11 +2154,15 @@ const server = createServer(async (req, res) => {
       await writeSecrets(t, next);
       // A subscription row has no key of its own and the Codex backend serves no /models; report
       // it the way the listing does instead of probing it into a false "down".
-      const health = chosen.subscription
-        ? (chosen.transport === "responses"
-          ? { reachable: true, serves: null, ms: null, detail: "subscription; verified on use" }
-          : await probe(t, { ...chosen, apiKey: next.SAND_OPENAI_COMPATIBLE_API_KEY }))
-        : await probe(t, chosen);
+      const health = plan != null
+        // The plan row carries the registry-set flag, so this probe reaches the proxy on the
+        // bridge rather than meeting the guard that would refuse its own address.
+        ? await probe(t, { ...plan, apiKey: t.entry.included.key })
+        : chosen.subscription
+          ? (chosen.transport === "responses"
+            ? { reachable: true, serves: null, ms: null, detail: "subscription; verified on use" }
+            : await probe(t, { ...chosen, apiKey: next.SAND_OPENAI_COMPATIBLE_API_KEY }))
+          : await probe(t, chosen);
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ using: chosen.name, health }));
     }

@@ -15,6 +15,13 @@
 //               token without ever holding the control plane's master key.
 //   stateDir    /data/titanbot/<slug>/state -- endpoints.json, mail.json, mail-inbox.jsonl.
 //   profileDir  /data/titanbot/<slug>/profile -- the job bus token file.
+//   included    PROXY-1. The models this tenant's plan already pays for, and the virtual key that
+//               reaches them: {baseUrl, key, keyId, models: [{id, model, name, contextWindow,
+//               servedBy}], enforced}. Minted per tenant by the control plane and handed to this
+//               relay on the same route as the rest of the row. NULL IS A REAL ANSWER meaning the
+//               feature is off here, which is what keeps a developer Mac and a single-box install
+//               byte-identical to today: no included section on the console, no plan rows in the
+//               model menu, and every path below behaves exactly as it did before.
 //
 // Three rules shape everything below.
 //
@@ -55,6 +62,36 @@ export const NOT_AVAILABLE_SENTENCE = "That workspace is not available right now
 
 const str = (value) => (typeof value === "string" ? value.trim() : "");
 
+// PROXY-1. The included set, normalised or null. Null covers every "off" there is: the control
+// plane has no proxy configured, the row predates the wave, the mint failed, or somebody sent a
+// shape this does not recognise. Nothing downstream ever has to ask which.
+//
+// id EQUALS model, on purpose and pinned by the design: one string rather than two that can drift,
+// and the plan- prefix on it is what POST /endpoints drops and POST /endpoints/use resolves, so a
+// customer's own row can never be mistaken for one of these or the other way round.
+function includedOf(value) {
+  if (typeof value !== "object" || value == null || Array.isArray(value)) return null;
+  const baseUrl = str(value.baseUrl).replace(/\/+$/, "");
+  const key = str(value.key);
+  // A set with no way to reach it, or no credential, is not a degraded set: it is no set.
+  if (baseUrl.length === 0 || key.length === 0) return null;
+  const models = (Array.isArray(value.models) ? value.models : []).map((row) => {
+    const model = str(row?.model) || str(row?.id);
+    if (model.length === 0) return null;
+    const context = Number(row?.contextWindow);
+    return {
+      id: model,
+      model,
+      name: str(row?.name) || model,
+      contextWindow: Number.isFinite(context) && context > 0 ? Math.trunc(context) : null,
+      // What the box tells a person it answers through, so Titan never names a container.
+      servedBy: str(row?.servedBy),
+    };
+  }).filter((row) => row != null);
+  if (models.length === 0) return null;
+  return { baseUrl, key, keyId: str(value.keyId), models, enforced: value.enforced === true };
+}
+
 // One entry, from whatever the control plane (or the test override file) sent. Everything is
 // normalised here so no caller downstream has to ask whether a field might be a number or a null.
 function normalize(row, { operator = false } = {}) {
@@ -72,6 +109,7 @@ function normalize(row, { operator = false } = {}) {
     stateDir: str(row?.stateDir),
     profileDir: str(row?.profileDir),
     status: str(row?.status) || "running",
+    included: includedOf(row?.included),
     operator,
     // Set by the docker sweep below. Until one has run, every entry is taken at its word: refusing
     // a tenant because the first `docker ps` has not come back yet would make a cold start look
@@ -86,6 +124,9 @@ function normalize(row, { operator = false } = {}) {
 const signature = (entry) => JSON.stringify([
   entry.slug, entry.name, entry.box, entry.gateway, entry.token, entry.sessionKey,
   entry.stateDir, entry.profileDir, entry.status, entry.operator, entry.reachable,
+  // PROXY-1: a re-minted or revoked virtual key has to rebuild the entry, or the console keeps
+  // handing out the old one until something unrelated about the tenant happens to move.
+  entry.included,
 ]);
 
 /**
@@ -227,7 +268,27 @@ export function createTenantRegistry({
         // The operator's box, token and directories come from this relay's own environment and
         // from nowhere else. A row for it is dropped rather than merged, because a control plane
         // that got one field wrong would otherwise point Jason's console at somebody else's box.
-        log(`reg  the control plane returned a row for ${seed.slug}; this relay uses its own environment for that one`);
+        //
+        // ONE EXCEPTION, PROXY-1: the included set. Jason's workspace is a tenant of the proxy
+        // like everybody else -- the control plane mints it a virtual key the same way, and that
+        // key arrives on this row and on no other route -- so treating his console as the one
+        // place the plan cannot reach would mean his own box keeps a copied operator key, which
+        // is the exact thing this wave ends. It is MERGED onto the env-seeded entry: box, token,
+        // sessionKey, stateDir and profileDir are not read from this row at all, so the reason
+        // the row is dropped is untouched. Assigned unconditionally so turning the proxy off on
+        // the control plane turns the section off here too, rather than serving a dead key.
+        //
+        // In place rather than by replacement, because `seed` is what operator() and the boot
+        // path hold: every reader reaches the entry through the registry or through the request
+        // context's own `entry`, so one object staying one object is what keeps them agreeing.
+        seed.included = entry.included;
+        // Said only when there is nothing on the row worth merging, which is exactly the case the
+        // line was written for. A row carrying a virtual key is this relay doing its job, and a
+        // line that reads as a fault every sixty seconds on a console that is working perfectly is
+        // worse than no line at all.
+        if (entry.included == null) {
+          log(`reg  the control plane returned a row for ${seed.slug}; this relay uses its own environment for that one`);
+        }
         continue;
       }
       next.set(entry.slug, entry);
@@ -310,6 +371,9 @@ export function operatorEntry({
     stateDir: String(stateDir ?? ""),
     profileDir: String(profileDir ?? ""),
     status: "running",
+    // PROXY-1. Nothing in this relay's own environment can mint a virtual key, so the seed starts
+    // with none and a refresh merges one on if the control plane has one for this slug.
+    included: null,
   };
 }
 

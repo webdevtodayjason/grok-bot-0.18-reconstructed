@@ -357,3 +357,199 @@ test("inference readiness stops requiring a Cursor token once a local provider i
   cursor.bindExecutor({ isInferenceReady: () => readiness("cursor", null), createRunner: () => ({}), createGroupMemberRunner: () => ({}) });
   assert.equal(await cursor.isRunReady(), false);
 });
+
+
+// ---- PROXY-1: the name a customer reads, and the words a refusal gets ---------------------------
+//
+// Two things a customer sees change when a box answers through the plan proxy, and both of them are
+// decided by the HOST rather than by the model.
+//
+//   The persona note. It is the one thing standing between a model and inventing its own vendor,
+//   and it printed the base URL's HOST. Pointed at the proxy that host is `titanbot-proxy`, a
+//   container name on our own bridge: our plumbing, told to a customer, in the sentence they are
+//   most likely to ask for.
+//
+//   The refusal. A provider body forwarded through the proxy names an alias, a dollar figure, a
+//   vendor and sometimes a container. None of that is a customer's business or true in their
+//   words, so four sentences replace it -- and only when servedBy is set, which is the marker the
+//   relay writes with a plan endpoint and never with a customer's own key.
+
+const PLAN_ENV = {
+  SAND_OPENAI_COMPATIBLE_MODEL: "plan-zai",
+  SAND_OPENAI_COMPATIBLE_API_KEY: "sk-a-virtual-key",
+  SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: "Z.AI GLM (included with your plan)",
+  SAND_OPENAI_COMPATIBLE_SERVED_BY: "Z.AI",
+};
+
+// Swaps the whole SAND_OPENAI_COMPATIBLE_ family for the turn and puts it back afterwards, so a
+// case that sets SERVED_BY cannot leak it into the case that measures its absence.
+function withEnv(t, values) {
+  const names = ["SAND_DATA_ROOT", "SAND_OPENAI_COMPATIBLE_BASE_URL", "SAND_OPENAI_COMPATIBLE_MODEL",
+    "SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME",
+    "SAND_OPENAI_COMPATIBLE_SERVED_BY", "SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW"];
+  const restore = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  t.after(() => { for (const name of names) { if (restore[name] === undefined) delete process.env[name]; else process.env[name] = restore[name]; } });
+  for (const name of names) delete process.env[name];
+  for (const [name, value] of Object.entries(values)) process.env[name] = value;
+}
+
+// One failed turn, taken through the executor the runner actually uses rather than through
+// runRoutedProviderText. Not a preference: a failed turn rejects five promises at once (usage,
+// extended usage, metadata, the response and the stream), runRoutedProviderText awaits two of
+// them, and the other three land as unhandled rejections that fail the whole file. The runner
+// holds all five. So does this.
+async function failedTurn(session) {
+  const executor = session.module.createProviderPromptSession("openai-compatible")
+    .getExecutor([{ role: "user", content: "hello" }]);
+  const result = executor.stream(null, "an-invocation-id");
+  for (const settled of [result.response, result.usage, result.extendedUsage, result.providerMetadata]) {
+    settled.catch(() => {});
+  }
+  try { for await (const _event of result.fullStream) { /* drained */ } } catch (error) { return error; }
+  return null;
+}
+
+// A server that refuses every chat turn with one status and one body, and still answers /models so
+// the context window probe does not become the failure under test.
+async function serveRefusal(status, body) {
+  const server = createServer((request, response) => {
+    request.on("data", () => {});
+    request.on("end", () => {
+      if (request.method === "GET") {
+        response.writeHead(200, { "content-type": "application/json" });
+        return response.end(JSON.stringify({ data: [] }));
+      }
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(typeof body === "string" ? body : JSON.stringify(body));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { baseUrl: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+test("SERVED_BY is resolved by the same env-then-secrets rule and is absent unless it is set", async () => {
+  const { resolveOpenAiCompatibleSettings, DEFAULT_OPENAI_COMPATIBLE_BASE_URL } = await loadTransport();
+  // Byte-equal for an endpoint that does not set one: the key is not present as null, it is not
+  // present at all, which is what keeps every existing endpoint's settings exactly as they were.
+  assert.deepEqual(
+    resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_MODEL: "qwen3-coder:30b" }),
+    { baseUrl: DEFAULT_OPENAI_COMPATIBLE_BASE_URL, model: "qwen3-coder:30b", apiKey: null, contextWindow: null },
+  );
+  assert.equal(resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_MODEL: "m", SAND_OPENAI_COMPATIBLE_SERVED_BY: " Z.AI " }).servedBy, "Z.AI");
+  // The secrets file is where the relay actually writes it, and env still wins over it.
+  assert.equal(resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_MODEL: "m" }, { SAND_OPENAI_COMPATIBLE_SERVED_BY: "MiniMax" }).servedBy, "MiniMax");
+  assert.equal(resolveOpenAiCompatibleSettings({ SAND_OPENAI_COMPATIBLE_MODEL: "m", SAND_OPENAI_COMPATIBLE_SERVED_BY: "env" }, { SAND_OPENAI_COMPATIBLE_SERVED_BY: "secret" }).servedBy, "env");
+});
+
+test("the persona note names the plan, never the container the proxy runs in", async (t) => {
+  const server = await serveOpenAiCompatible(() => TEXT_TURN);
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), "sand-plan-persona-"));
+  const session = await loadProviderSession();
+  t.after(async () => { await session.cleanup(); await server.close(); await rm(dataRoot, { recursive: true, force: true }); });
+  withEnv(t, { ...PLAN_ENV, SAND_DATA_ROOT: dataRoot, SAND_OPENAI_COMPATIBLE_BASE_URL: server.baseUrl });
+
+  await session.module.runRoutedProviderText("openai-compatible", [{ role: "user", content: "what do you run on" }]);
+  const note = server.requests[0].body.messages[0].content;
+  assert.match(note, /answering through "Z\.AI GLM \(included with your plan\)", model 'plan-zai' at Z\.AI\./);
+  // The base URL's host is a loopback address here and `titanbot-proxy` on the R750. Neither is a
+  // thing to tell a customer, and the assertion is the address rather than the name so it measures
+  // the substitution rather than a string that happens not to appear.
+  assert.equal(note.includes("127.0.0.1"), false, "the persona note must not name where the proxy lives");
+  assert.match(note, /never claim to be Grok, xAI, or any other model or vendor/, "the anti-hallucination fact is intact");
+});
+
+test("with no SERVED_BY the persona note is exactly the sentence it always was", async (t) => {
+  const server = await serveOpenAiCompatible(() => TEXT_TURN);
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), "sand-own-persona-"));
+  const session = await loadProviderSession();
+  t.after(async () => { await session.cleanup(); await server.close(); await rm(dataRoot, { recursive: true, force: true }); });
+  withEnv(t, {
+    SAND_DATA_ROOT: dataRoot, SAND_OPENAI_COMPATIBLE_BASE_URL: server.baseUrl,
+    SAND_OPENAI_COMPATIBLE_MODEL: "glm-4.6", SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: "my own provider",
+  });
+
+  await session.module.runRoutedProviderText("openai-compatible", [{ role: "user", content: "hi" }]);
+  const note = server.requests[0].body.messages[0].content;
+  const host = new URL(server.baseUrl).host;
+  assert.match(note, new RegExp(`answering through "my own provider", model 'glm-4\\.6' at ${host.replace(".", "\\.")}\\.`));
+});
+
+test("a plan refusal reaches the customer as one plain sentence, with no alias, no dollars and no vendor", async (t) => {
+  const session = await loadProviderSession();
+  t.after(() => session.cleanup());
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), "sand-plan-refusal-"));
+  t.after(() => rm(dataRoot, { recursive: true, force: true }));
+
+  // The three shapes, and the sentence each becomes. The bodies are the shape a proxy actually
+  // forwards: an alias, a dollar figure and a vendor name in every one of them.
+  const cases = [
+    { status: 400, body: { error: { message: "Budget has been exceeded! Current cost: 12.4, Max budget: 10.0", type: "budget_exceeded" } },
+      sentence: "You have used everything your plan includes this month. Add your own key under Settings and I will keep going, or ask for more." },
+    { status: 429, body: { error: { message: "Max parallel request limit reached for key titanbot-demo" } },
+      sentence: "That is more than the plan allows right now. Give me a moment and ask again." },
+    { status: 503, body: { error: { message: "litellm.APIConnectionError: Z.AI is unreachable" } },
+      sentence: "The model I answer through is not responding. Nothing you sent is lost. Try again in a minute, or pick a different model in Settings." },
+  ];
+
+  for (const item of cases) {
+    const server = await serveRefusal(item.status, item.body);
+    try {
+      withEnv(t, { ...PLAN_ENV, SAND_DATA_ROOT: dataRoot, SAND_OPENAI_COMPATIBLE_BASE_URL: server.baseUrl });
+      const failure = await failedTurn(session);
+      assert.notEqual(failure, null, `HTTP ${item.status} should still fail the turn`);
+      assert.equal(failure.message, item.sentence, `HTTP ${item.status}`);
+      // The wording rule, checked against the message rather than trusted: no alias, no dollars,
+      // no vendor, no tool name, and never "may be temporary".
+      for (const forbidden of ["titanbot", "budget", "$", "12.4", "Z.AI", "litellm", "may be temporary", String(item.status)]) {
+        assert.equal(failure.message.includes(forbidden), false, `"${forbidden}" reached the customer on HTTP ${item.status}`);
+      }
+      // The provider's own body is still readable by the host log, as the cause.
+      assert.equal(typeof failure.cause?.message, "string");
+      assert.match(failure.cause.message, new RegExp(String(item.status)));
+    } finally { await server.close(); }
+  }
+});
+
+test("a box on its own key keeps its own wording, and an error the plan does not recognise keeps its", async (t) => {
+  const session = await loadProviderSession();
+  t.after(() => session.cleanup());
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), "sand-own-refusal-"));
+  t.after(() => rm(dataRoot, { recursive: true, force: true }));
+
+  // The fourth case, unchanged: a customer's own key rejected by their own provider still names the
+  // knob to fix, which is the only actionable thing to say to somebody who owns the key.
+  const denied = await serveRefusal(401, { error: { message: "invalid api key" } });
+  try {
+    withEnv(t, {
+      SAND_DATA_ROOT: dataRoot, SAND_OPENAI_COMPATIBLE_BASE_URL: denied.baseUrl,
+      SAND_OPENAI_COMPATIBLE_MODEL: "glm-4.6", SAND_OPENAI_COMPATIBLE_API_KEY: "a key the customer owns",
+    });
+    const failure = await failedTurn(session);
+    assert.match(failure.message, /rejected SAND_OPENAI_COMPATIBLE_API_KEY/);
+  } finally { await denied.close(); }
+
+  // And on the plan, a shape the translator does not recognise passes through as it always did. A
+  // wrong plain sentence hides a real fault better than a raw one ever could.
+  const malformed = await serveRefusal(200, "data: not json\n\n");
+  try {
+    withEnv(t, { ...PLAN_ENV, SAND_DATA_ROOT: dataRoot, SAND_OPENAI_COMPATIBLE_BASE_URL: malformed.baseUrl });
+    const failure = await failedTurn(session);
+    assert.match(failure.message, /malformed SSE JSON|did not contain any completion chunks/);
+  } finally { await malformed.close(); }
+});
+
+test("a token overflow on the plan is still a token overflow, so compaction still fires", async (t) => {
+  // The compact-and-retry rescue keys on InputTokenLimitError. Translating an overflow into "try
+  // again in a minute" would take compaction off the turn and leave every following turn failing
+  // identically, which is the exact bug the classifier was written to end.
+  const session = await loadProviderSession();
+  t.after(() => session.cleanup());
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), "sand-plan-overflow-"));
+  t.after(() => rm(dataRoot, { recursive: true, force: true }));
+  const server = await serveRefusal(400, { error: { message: "This model's maximum prompt length is 200000 but the request contains 244118 tokens." } });
+  try {
+    withEnv(t, { ...PLAN_ENV, SAND_DATA_ROOT: dataRoot, SAND_OPENAI_COMPATIBLE_BASE_URL: server.baseUrl });
+    const failure = await failedTurn(session);
+    assert.equal(failure.name, "InputTokenLimitError", `an overflow became ${failure.name}: ${failure.message}`);
+  } finally { await server.close(); }
+});

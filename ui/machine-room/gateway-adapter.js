@@ -1095,12 +1095,64 @@
       };
     });
   }
+  // PROXY-1. What a plan already includes, as cards of their own.
+  //
+  // These are NOT providers a customer connects, and the whole card is shaped by that: no secret
+  // field, no Connect form, no account to name. There is nothing to paste, because the credential
+  // behind them is minted per box by the control plane and never reaches a browser -- GET
+  // /endpoints answers the literal word "included" where a key would be. What is left is a name, a
+  // model, one plain line and one action.
+  //
+  // Dollars are deliberately absent. A customer sees what their plan includes in words; the money
+  // is in the admin console and nowhere else.
+  function includedUsageLine(row) {
+    return row.enforced
+      ? "Included with your plan. When you have used everything it includes this month, Titan will say so and you can add your own key."
+      : "Included with your plan. There is no key to paste and nothing to set up.";
+  }
+  function includedPlugins(rows, liveEndpointId) {
+    return (Array.isArray(rows) ? rows : []).map((row) => ({
+      // Prefixed so this card cannot collide with a connector or a subscription card, the same way
+      // "sub:" and "mcp:" already keep those apart. The ENDPOINT id underneath stays bare, because
+      // that is the string the relay resolves and the model menu carries.
+      id: `plan:${row.id}`,
+      name: row.name,
+      icon: String(row.servedBy || row.name || "?").trim().charAt(0).toUpperCase() || "?",
+      category: "Included with your plan",
+      description: `${row.model}${row.contextWindow ? ` · ${Math.round(row.contextWindow / 1000)}k context` : ""}. Part of what you already pay for.`,
+      // "connected" is the state that draws the plain line and the switch, and it is the truthful
+      // one: this is reachable right now with no action from anybody.
+      status: "connected",
+      account: "Included with your plan",
+      // No secret field, no secretFields: pluginSecretsMarkup draws nothing, and a form promising a
+      // credential nobody can supply is worse than no form.
+      secretField: null, secretHint: null, secretFields: [],
+      group: "Plan", route: null,
+      endpointId: row.id, live: row.id === liveEndpointId,
+      connectable: false,
+      connectedNote: includedUsageLine(row),
+      connectNote: null,
+      health: row.health ?? null,
+      tools: [], toolsNote: "A model is an inference endpoint, not a toolset. The tools an agent holds come from its own built-ins and from the Connectors below.",
+      skills: [], skillsNote: null,
+    }));
+  }
+
   // Every endpoint in the catalog, adopted subscriptions included, as a model-menu entry. The
   // switch is box-wide; the app's per-worker menu is the only affordance it offers for it.
   function endpointModels(live, catalog) {
     const rows = Array.isArray(catalog?.endpoints) ? catalog.endpoints : [];
-    const available = rows.map((e) => ({ id: e.id, name: `${e.name} · ${e.model}`, provider: e.subscription ? "subscription" : e.baseUrl, context: e.contextWindow ? `${Math.round(e.contextWindow / 1000)}k` : "" }));
-    const current = rows.find((e) => e.baseUrl === catalog?.live?.baseUrl && e.model === catalog?.live?.model);
+    // PROXY-1: the plan's rows belong in this menu too. They are computed by the relay per request
+    // and are deliberately NOT in catalog.endpoints, so a menu built from that array alone showed a
+    // box pointed at the plan as an unknown extra row wearing the model id -- two things on one
+    // screen disagreeing about the same fact, which is what this function exists to stop.
+    const included = Array.isArray(catalog?.included) ? catalog.included : [];
+    const entry = (e, provider) => ({ id: e.id, name: `${e.name} · ${e.model}`, provider, context: e.contextWindow ? `${Math.round(e.contextWindow / 1000)}k` : "" });
+    const available = [
+      ...included.map((e) => entry(e, "plan")),
+      ...rows.map((e) => entry(e, e.subscription ? "subscription" : e.baseUrl)),
+    ];
+    const current = [...included, ...rows].find((e) => e.baseUrl === catalog?.live?.baseUrl && e.model === catalog?.live?.model);
     if (live?.model && !current) available.unshift({ id: live.model, name: live.model, provider: live.endpoint ?? "box", context: "" });
     return { default: current?.id ?? live?.model ?? "default", available };
   }
@@ -1420,9 +1472,10 @@
             return routinesOf([entry.automation], { kind: owner.isGroup ? "room" : "worker", id: owner.id });
           })
         : loaded.routines,
-      // Providers first: they are what a user connects; the box's own connectors follow, then the
-      // chat listeners the host reports.
-      plugins: [...subscriptionPlugins(subscriptions, models.default), ...connectors, ...pluginsOf(integrations)],
+      // The plan first, because it is what most customers answer through and the one group that
+      // needs nothing done to it; then the providers a user connects, the box's own connectors, and
+      // the chat listeners the host reports.
+      plugins: [...includedPlugins(catalog?.included, models.default), ...subscriptionPlugins(subscriptions, models.default), ...connectors, ...pluginsOf(integrations)],
       models,
     };
   }
@@ -1495,7 +1548,11 @@
         relayFetch("/model").then((r) => r.json()).catch(() => null),
       ]);
       if (live?.model) state.models = endpointModels(live, catalog);
-      state.plugins = [...subscriptionPlugins(subscriptions, state.models.default), ...state.plugins.filter((p) => !String(p.id).startsWith("sub:"))];
+      state.plugins = [
+        ...includedPlugins(catalog?.included, state.models.default),
+        ...subscriptionPlugins(subscriptions, state.models.default),
+        ...state.plugins.filter((p) => !String(p.id).startsWith("sub:") && !String(p.id).startsWith("plan:")),
+      ];
       for (const w of state.workers) w.model = state.models.default;
       // "plugin:" is the prefix the app redraws its panels for; anything else only refreshes the transcript.
       emit("plugin:state", {});
