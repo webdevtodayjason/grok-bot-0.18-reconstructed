@@ -67,7 +67,11 @@ export class CdpConnection {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
-        reject(new Error(`the browser did not answer ${method} within ${Math.round(timeoutMs / 1000)} seconds`));
+        // No method name in the sentence. "Page.navigate" in front of a person is jargon, and this
+        // message is handed to the model and repeated. The name stays on the error for the log.
+        const failure = new Error(`the browser did not answer within ${Math.round(timeoutMs / 1000)} seconds`);
+        failure.cdpMethod = method;
+        reject(failure);
       }, timeoutMs);
       this.#pending.set(id, { resolve, reject, timer, method });
       try {

@@ -253,9 +253,16 @@ test("a command that is never answered gives up in plain words", async () => {
   const browser = await fakeBrowser(() => {});
   try {
     const connection = await CdpConnection.open(browser.port);
+    // The sentence carries no CDP method name: it is handed to the model and repeated to a
+    // person, and "Page.navigate" in that sentence is jargon. The name rides on the error instead.
     await assert.rejects(
       connection.send("Page.navigate", { url: "https://example.com" }, { timeoutMs: 300 }),
-      /the browser did not answer Page\.navigate within 0 seconds/,
+      (error) => {
+        assert.match(error.message, /the browser did not answer within 0 seconds/);
+        assert.ok(!error.message.includes("Page.navigate"), error.message);
+        assert.equal(error.cdpMethod, "Page.navigate");
+        return true;
+      },
     );
     // waitFor is the other half: it resolves undefined rather than throwing, because a page that
     // never fires load is a page we still want to read.

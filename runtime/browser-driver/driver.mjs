@@ -7,6 +7,7 @@
 //
 // Every action has a deadline of 30 seconds and fails in plain words.
 
+import { lookup } from "node:dns/promises";
 import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { CdpConnection } from "./cdp.mjs";
@@ -15,6 +16,9 @@ import { analyzePage, TEXT_CAP } from "./page-text.mjs";
 
 export const ACTION_TIMEOUT_MS = 30000;
 export const SCREENSHOT_WIDTH = 1280;
+// How much of an action's budget is kept back for reading the page and photographing it, so a page
+// that never finishes loading still comes back with something in it.
+export const LOAD_RESERVE_MS = 14000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -62,6 +66,97 @@ async function withDeadline(label, ms, work) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---------------------------------------------------------------- where the browser may go
+//
+// An address comes from the model, and the model is told things by pages it read, by peers and by
+// pasted text. Without this check "open file:///etc/passwd" reads the box's own files and "open
+// http://127.0.0.1:9232" reads the services sitting beside it, and both come back to the provider
+// as page text plus a picture. Measured on grok-bot-local-vm 2026-09-07: both worked.
+//
+// So: the public web only. http and https, and an address that does not land on this machine, this
+// network, or the computer the box runs on. Names are resolved before we go, because a name is
+// free to point at 127.0.0.1. An operator who wants an internal site read names it in the host
+// setting SAND_BROWSER_ALLOW_HOSTS, which travels in the request beside the address and never
+// comes from the model's own arguments.
+export const NOT_PUBLIC_WEB = "I can only open pages on the public web.";
+
+const PRIVATE_HOST_NAMES = new Set([
+  "localhost", "ip6-localhost", "ip6-loopback", "host.docker.internal", "gateway.docker.internal",
+]);
+
+function isPrivateIpv4(address) {
+  const parts = address.split(".");
+  if (parts.length !== 4) return false;
+  const numbers = parts.map((part) => Number(part));
+  if (numbers.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) return false;
+  const [a, b] = numbers;
+  if (a === 0 || a === 10 || a === 127) return true;                 // this host, private, loopback
+  if (a === 172 && b >= 16 && b <= 31) return true;                  // private
+  if (a === 192 && b === 168) return true;                           // private
+  if (a === 192 && b === 0) return true;                             // protocol assignments
+  if (a === 169 && b === 254) return true;                           // link local, and cloud metadata
+  if (a === 100 && b >= 64 && b <= 127) return true;                 // carrier grade nat, where a tailnet lives
+  if (a >= 224) return true;                                         // multicast and reserved
+  return false;
+}
+
+function isPrivateIpv6(address) {
+  const plain = address.toLowerCase().split("%")[0];
+  if (plain === "::" || plain === "::1") return true;
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(plain);
+  if (mapped !== null) return isPrivateIpv4(mapped[1]);
+  return /^(fe8|fe9|fea|feb|fc|fd)/.test(plain);
+}
+
+/** True when this literal address belongs to the box, its network, or the machine underneath it. */
+export function isPrivateAddress(address) {
+  const plain = String(address ?? "").trim();
+  if (plain.length === 0) return true;
+  return plain.includes(":") ? isPrivateIpv6(plain) : isPrivateIpv4(plain);
+}
+
+/**
+ * The address we are willing to open, or a refusal in plain words. Returns the address with a
+ * scheme on it, so callers do not have to guess one twice.
+ */
+export async function checkPublicWebUrl(url, options = {}) {
+  const target = String(url ?? "").trim();
+  if (target.length === 0) throw new Error("no address was given to open");
+  const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target) ? target : `https://${target}`;
+  let parsed;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    throw new Error(`${NOT_PUBLIC_WEB} That is not a web address.`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(NOT_PUBLIC_WEB);
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host.length === 0) throw new Error(NOT_PUBLIC_WEB);
+
+  const allowed = new Set(
+    (options.allowHosts ?? []).map((entry) => String(entry).trim().toLowerCase()).filter((entry) => entry.length > 0),
+  );
+  if (allowed.has(host)) return withScheme;
+
+  if (PRIVATE_HOST_NAMES.has(host) || host.endsWith(".localhost") || host.endsWith(".internal")) {
+    throw new Error(NOT_PUBLIC_WEB);
+  }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":")) {
+    if (isPrivateAddress(host)) throw new Error(NOT_PUBLIC_WEB);
+    return withScheme;
+  }
+  let addresses;
+  try {
+    addresses = await (options.resolve ?? lookup)(host, { all: true });
+  } catch {
+    // A name that will not resolve is the browser's to report, in its own words, a moment from now.
+    return withScheme;
+  }
+  const found = Array.isArray(addresses) ? addresses : [addresses];
+  if (found.some((entry) => isPrivateAddress(entry?.address ?? entry))) throw new Error(NOT_PUBLIC_WEB);
+  return withScheme;
 }
 
 // Runs in the page. Finds an element by CSS selector first, then by what a person would read on it.
@@ -243,6 +338,14 @@ export class BrowserDriver {
       this.#sessionId = null;
       this.#targetId = null;
       forgetState(this.#port, this.#env);
+      // And close it. Forgetting a wedged tab without closing it leaves it open in the browser the
+      // person is watching, still loading, and the next call opens another beside it: measured on
+      // grok-bot-local-vm 2026-09-07, the tab count climbed one per failed open and never came down.
+      try {
+        await this.#browserSend("Target.closeTarget", { targetId: reuse }, { timeoutMs: 5000 });
+      } catch {
+        // Already gone, or the browser will not talk about it. Either way we are making a new one.
+      }
       const made = await this.#newTab();
       await this.#attach(made);
       return made;
@@ -250,10 +353,13 @@ export class BrowserDriver {
   }
 
   async #evaluate(expression, options = {}) {
+    // timeoutMs is ours, not the page's: leaving it in the params sends Runtime.evaluate a field
+    // it does not have.
+    const { timeoutMs, ...params } = options;
     const result = await this.#send(
       "Runtime.evaluate",
-      { expression, returnByValue: true, awaitPromise: true, ...options },
-      { timeoutMs: options.timeoutMs ?? 20000 },
+      { expression, returnByValue: true, awaitPromise: true, ...params },
+      { timeoutMs: timeoutMs ?? 20000 },
     );
     if (result.exceptionDetails !== undefined) {
       const detail = result.exceptionDetails?.exception?.description ?? result.exceptionDetails?.text ?? "the page rejected it";
@@ -262,7 +368,7 @@ export class BrowserDriver {
     return result.result?.value;
   }
 
-  async #readPage(cap) {
+  async #readPage(cap, options = {}) {
     const raw = await this.#evaluate(
       `(() => ({
         url: location.href,
@@ -270,6 +376,7 @@ export class BrowserDriver {
         html: document.documentElement ? document.documentElement.outerHTML.slice(0, 3000000) : "",
         innerText: document.body ? document.body.innerText.slice(0, 200000) : ""
       }))()`,
+      options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
     );
     // null, not 0, when this process did not do the loading: a click that changes a page in place
     // never produces a document response, and neither does attaching to a tab that is already open.
@@ -314,31 +421,46 @@ export class BrowserDriver {
 
   /** Go to a page and read it back. */
   async open(url, options = {}) {
-    const target = String(url ?? "").trim();
-    if (target.length === 0) throw new Error("no address was given to open");
-    const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target) ? target : `https://${target}`;
+    const withScheme = await checkPublicWebUrl(url, { allowHosts: options.allowHosts ?? [] });
+    const budget = options.timeoutMs ?? ACTION_TIMEOUT_MS;
 
-    return await withDeadline(`opening ${withScheme}`, options.timeoutMs ?? ACTION_TIMEOUT_MS, async () => {
+    return await withDeadline(`opening ${withScheme}`, budget, async () => {
       await this.#ownTab();
       this.#statusByFrame.clear();
+      const endsAt = Date.now() + budget;
+      const left = (most) => Math.max(1500, Math.min(most, endsAt - Date.now() - 500));
 
+      // The load wait is capped so the read and the picture still fit inside the action's budget.
+      // A page whose load event never fires is exactly the page a fetch could not get, so it must
+      // come back with its words and its picture rather than with nothing at all.
+      const loadWaitMs = Math.max(2000, Math.min(options.loadWaitMs ?? 20000, budget - LOAD_RESERVE_MS));
       const loaded = this.#connection.waitFor(
         "Page.loadEventFired",
         (_params, sessionId) => sessionId === this.#sessionId,
-        options.loadWaitMs ?? 20000,
+        loadWaitMs,
       );
       const navigation = await this.#send("Page.navigate", { url: withScheme }, { timeoutMs: 20000 });
+      // A refusal with no body to render arrives here rather than as a page, so it is read as a
+      // refusal instead of thrown away: a bare 403 never reached the block detector before.
+      let refused = false;
       if (typeof navigation.errorText === "string" && navigation.errorText.length > 0) {
-        throw new Error(`the browser could not open that address: ${plainNavigationError(navigation.errorText)}`);
+        if (isRefusalNavigationError(navigation.errorText)) refused = true;
+        else throw new Error(`the browser could not open that address: ${plainNavigationError(navigation.errorText)}`);
       }
       if (typeof navigation.frameId === "string") this.#mainFrameId = navigation.frameId;
-      await loaded;
+      const stillLoading = (await loaded) === undefined;
       // A short settle so a page that paints its text on load has done it before we read.
-      await sleep(options.settleMs ?? 400);
+      if (!stillLoading) await sleep(options.settleMs ?? 400);
 
-      const page = await this.#readPage(options.cap);
-      const shot = options.screenshot === false ? null : await this.screenshot({ timeoutMs: 15000 });
-      return { ...page, screenshot: shot, tabId: this.#targetId };
+      const page = await this.#readPage(options.cap, { timeoutMs: left(8000) });
+      const shot = options.screenshot === false ? null : await this.screenshot({ timeoutMs: left(15000) });
+      return {
+        ...page,
+        ...(refused ? { blocked: true } : {}),
+        ...(stillLoading ? { stillLoading: true } : {}),
+        screenshot: shot,
+        tabId: this.#targetId,
+      };
     });
   }
 
@@ -447,16 +569,34 @@ function notFoundMessage(wanted, nearby) {
   return `${base}. What is on the page: ${nearby.slice(0, 8).join(", ")}`;
 }
 
+/**
+ * The site said no rather than the network failing: an error status with nothing to render, or a
+ * block Chrome applied itself. Those are pages the block detector should get a look at, not
+ * failures, so the model can say "the site would not show me this" and move on.
+ */
+function isRefusalNavigationError(errorText) {
+  const code = String(errorText ?? "");
+  return code === "net::ERR_HTTP_RESPONSE_CODE_FAILURE" || code.startsWith("net::ERR_BLOCKED_BY");
+}
+
 function plainNavigationError(errorText) {
   const map = {
     "net::ERR_NAME_NOT_RESOLVED": "that address does not exist",
     "net::ERR_CONNECTION_REFUSED": "the site refused the connection",
     "net::ERR_CONNECTION_TIMED_OUT": "the site did not answer",
+    "net::ERR_TIMED_OUT": "the site did not answer",
+    "net::ERR_ADDRESS_UNREACHABLE": "the site could not be reached",
     "net::ERR_INTERNET_DISCONNECTED": "the box has no network right now",
-    "net::ERR_CERT_AUTHORITY_INVALID": "the site's certificate did not check out",
+    "net::ERR_EMPTY_RESPONSE": "the site answered with nothing",
+    "net::ERR_TOO_MANY_REDIRECTS": "the site kept sending us somewhere else and never landed",
+    "net::ERR_SSL_PROTOCOL_ERROR": "the secure connection to the site failed",
     "net::ERR_ABORTED": "the page stopped loading partway",
   };
-  return map[errorText] ?? errorText;
+  const known = map[errorText];
+  if (known !== undefined) return known;
+  if (/^net::ERR_CERT/.test(String(errorText))) return "the site's certificate did not check out";
+  // Whatever else it was, it is not going in front of a person as a net:: code.
+  return "the site did not load";
 }
 
 export { TEXT_CAP };

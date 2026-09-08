@@ -30,7 +30,9 @@
  */
 import { z } from "zod";
 import {
+  assertBrowsableUrl,
   createSandBrowserTools,
+  SAND_BROWSER_NOT_PUBLIC_WEB,
   type BrowserDriverDependencies,
   type BrowserToolDefinition,
   type BrowserToolSpec,
@@ -58,7 +60,14 @@ export const DIRECT_BROWSER_TOOL_SPECS: readonly BrowserToolSpec[] = [
       + " If the answer says the page wants a sign-in, tell the person they can sign in on the computer's screen and that you will carry on after.",
     schema: { required: ["url"] },
     parameters: z.object({
-      url: z.string().describe("The full web address, including https://"),
+      // The same check the box driver makes, made here first. An address that reads the box's own
+      // files or the services beside it never leaves the host: the browser is for the public web.
+      url: z.string()
+        .describe("The full web address of a page on the public web, including https://")
+        .refine(
+          (value) => { try { assertBrowsableUrl(value); return true; } catch { return false; } },
+          { message: SAND_BROWSER_NOT_PUBLIC_WEB },
+        ),
     }),
     canNavigate: true,
     recordsNavigation: true,

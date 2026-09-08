@@ -69,7 +69,13 @@ async function run(request) {
     let page;
     switch (request.op) {
       case "open":
-        page = await driver.open(request.url, actionOptions);
+        // allowHosts is the operator's list of internal names the browser may still open. It is
+        // read from the request and never from the model's arguments: the host writes it after
+        // the arguments are spread, so an "allowHosts" the model made up is overwritten.
+        page = await driver.open(request.url, {
+          ...actionOptions,
+          allowHosts: Array.isArray(request.allowHosts) ? request.allowHosts : [],
+        });
         break;
       case "click":
         page = await driver.click(request.target, actionOptions);
@@ -93,6 +99,9 @@ async function run(request) {
     if (typeof page.text === "string" && page.text.length > 0) result.text = page.text;
     if (page.needsLogin === true) result.needsLogin = true;
     if (page.blocked === true) result.blocked = true;
+    // The page was still loading when we read it. Better than nothing, and the model has to know
+    // it is looking at a page mid-flight rather than at all of it.
+    if (page.stillLoading === true) result.stillLoading = true;
     if (saved !== null) {
       result.screenshot = true;
       result.mimeType = saved.mimeType;

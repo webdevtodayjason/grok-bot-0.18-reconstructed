@@ -15,12 +15,16 @@
 //   3. the system prompt tells the model when to use them and how to hand a login back
 //   4. a real page comes back as words: example.com, and a YouTube channel title
 //   5. a login-walled page says so in plain words, with needsLogin set
-//   6. a challenge page says so, with blocked set
+//   6. a challenge page says so, with blocked set -- both the one that serves a body and the bare
+//      refusal that serves none, which is the one a real site sends
 //   7. typing and clicking change a page this gate serves itself
 //   8. every result is text plus exactly ONE image part, a JPEG 1280 wide
 //   9. the audit ledger gained one browser_navigation row per open, with url and title
 //  10. the desktop view still shows the SAME Chrome: no new profile, no doubled window count
 //  11. with SAND_BROWSER_TOOLS off the four are withheld and the line says why
+//  12. an address that is not on the public web is refused: a local file, and this box's own
+//      loopback. Without that check a page can talk the model into reading the box's files and
+//      the services beside it, and both come back as page text plus a picture.
 //
 // HOW IT DRIVES. Not a real model. A stub OpenAI-compatible server on this Mac answers with a
 // scripted sequence of browser tool calls (the pattern in scripts/verify-loop.mjs and
@@ -77,6 +81,10 @@ const STUB_MODEL = "probe-browser-tools-model";
 // The four Titan gets. The other eleven stay with the browserUse subagent.
 const TITAN_BROWSER_TOOLS = ["browser_open", "browser_click", "browser_type", "browser_screenshot"];
 const BROWSER_TOOLS_SETTING = "SAND_BROWSER_TOOLS";
+// The operator's list of names the browser may open even though they are not on the public web.
+// This gate's fixtures live on this Mac, which the box reaches as host.docker.internal -- a docker
+// host address, and therefore refused like any other private address unless it is on this list.
+const ALLOW_HOSTS_SETTING = "SAND_BROWSER_ALLOW_HOSTS";
 // The contract's screenshot: one JPEG, resized to 1280 wide, per action.
 const SHOT_WIDTH = 1280;
 const SHOT_MIME = "image/jpeg";
@@ -292,6 +300,11 @@ function startFixtures(port) {
     };
     if (path === "/login") return send(200, FIXTURE_LOGIN);
     if (path === "/blocked") return send(403, FIXTURE_BLOCKED);
+    // A refusal with NOTHING to render, which is what a real site sends. Chrome shows its own
+    // error page for this and reports the navigation as failed, so the page reader never sees it
+    // and the block detector never runs -- unless the driver treats that failure as a refusal.
+    // The leg above measures the case that already worked; this one measures the case that did not.
+    if (path === "/refused") return send(403, "");
     if (path === "/health") return send(200, "ok", "text/plain; charset=utf-8");
     return send(200, FIXTURE_PAGE);
   });
@@ -470,10 +483,15 @@ const PLAN = [
   ]),
   { label: "the login wall", tool: "browser_open", args: { url: `${FIXTURE_BASE}/login` } },
   { label: "the challenge page", tool: "browser_open", args: { url: `${FIXTURE_BASE}/blocked` } },
+  { label: "the bare refusal", tool: "browser_open", args: { url: `${FIXTURE_BASE}/refused` } },
   { label: "the test page", tool: "browser_open", args: { url: `${FIXTURE_BASE}/` } },
   { label: "typing the note", tool: "browser_type", args: { target: "#note", text: NOTE_TEXT, submit: false } },
   { label: "clicking Save note", tool: "browser_click", args: { target: "Save note" } },
   { label: "a screenshot", tool: "browser_screenshot", args: {} },
+  // The two the browser must refuse. `refuses` marks them: they never reach the box, so they come
+  // back as words with no picture and leave no row in the ledger.
+  { label: "a local file", tool: "browser_open", args: { url: "file:///etc/passwd" }, refuses: true },
+  { label: "this box's own loopback", tool: "browser_open", args: { url: "http://127.0.0.1:7777/" }, refuses: true },
 ];
 
 const stubState = {
@@ -488,6 +506,7 @@ let previousEndpoint = null;
 let endpointsTouched = false;
 let previousTrace;
 let previousBrowserSetting;
+let previousAllowHosts;
 let settingsTouched = false;
 
 // The plan runs in order and each step produces one result, so position identifies it -- but only
@@ -647,6 +666,10 @@ if (DRY_RUN) {
     const blockedPage = await get("/blocked");
     check(blockedPage.status === 403 && /Access Denied/.test(blockedPage.body), "the challenge page answers 403 with a title the classifier knows",
       String(blockedPage.status));
+    const refusedPage = await get("/refused");
+    check(refusedPage.status === 403 && refusedPage.body.length === 0,
+      "and the bare refusal answers 403 with nothing to render, which is the case Chrome fails outright",
+      `${refusedPage.status}, ${refusedPage.body.length} bytes`);
   } finally {
     await new Promise((resolve) => dryStub.close(resolve));
     await new Promise((resolve) => fixtureServer.close(resolve));
@@ -672,8 +695,14 @@ try {
   step("the setting");
   previousTrace = await readSetting("SAND_TOOL_TRACE");
   previousBrowserSetting = await readSetting(BROWSER_TOOLS_SETTING);
+  previousAllowHosts = await readSetting(ALLOW_HOSTS_SETTING);
   settingsTouched = true;
   if (previousTrace !== "1") await writeSetting("SAND_TOOL_TRACE", "1");
+  // Named, not switched off: the refusal legs below still have to fail on a local file and on
+  // loopback while the fixtures on this Mac open normally.
+  await writeSetting(ALLOW_HOSTS_SETTING, "host.docker.internal");
+  check(await readSetting(ALLOW_HOSTS_SETTING) === "host.docker.internal",
+    `${ALLOW_HOSTS_SETTING} names only this Mac, so the fixtures open and nothing else private does`);
   // Default ON is the contract, so the ON leg runs with the setting ABSENT rather than pinned to
   // "1". A gate that writes "1" first would pass just as well against a default-off build.
   if (previousBrowserSetting !== undefined) await writeSetting(BROWSER_TOOLS_SETTING, null);
@@ -863,6 +892,19 @@ try {
   check(/blocked|refused|denied|challenge/i.test(blockedText + (blocked?.raw ?? "")),
     "a page that refuses us is reported as blocked", oneLine(blockedText, 120));
 
+  // The same verdict about a refusal with NO body, which is what a real site sends. Chrome fails
+  // the navigation outright for that one, so before this it came back as
+  // "net::ERR_HTTP_RESPONSE_CODE_FAILURE" with blocked never set and the page never read.
+  const bare = resultsFor("the bare refusal");
+  const bareText = textOf(bare);
+  info(`the bare refusal: ${oneLine(bareText)}`);
+  check(bare != null && bare.parsed?.isError !== true,
+    "a refusal with no page to show still comes back as an answer", oneLine(bareText, 120));
+  check(/would not show this page|blocked|refused|denied/i.test(bareText + (bare?.raw ?? "")),
+    "and it is reported as blocked, not as a failure", oneLine(bareText, 120));
+  check(!/net::|ERR_[A-Z_]+/.test(bareText), "with no browser error code in the words the model reads",
+    oneLine(bareText, 120));
+
   // ---------------------------------------------------------- 7: click and type change the page
   step("typing and clicking");
   const page = resultsFor("the test page");
@@ -892,6 +934,9 @@ try {
   // ---------------------------------------------------------- 8: text plus exactly one image
   step("text plus one image, every time");
   for (const entry of PLAN) {
+    // A refused address never reaches the box, so there is no picture of it to check. Leg 12 is
+    // where those are measured.
+    if (entry.refuses === true) continue;
     const result = resultsFor(entry.label);
     if (result == null) { check(false, `${entry.label}: a result came back`, "nothing"); continue; }
     const images = imagesOf(result);
@@ -926,7 +971,7 @@ try {
   }).filter((row) => row.type === "browser_navigation");
   info(`browser_navigation rows for this agent: ${rows.length}`);
   for (const row of rows) info(`  ${oneLine(row.url, 90)} — ${oneLine(row.pageTitle, 50)}`);
-  const opens = PLAN.filter((entry) => entry.tool === "browser_open").length;
+  const opens = PLAN.filter((entry) => entry.tool === "browser_open" && entry.refuses !== true).length;
   check(rows.length >= opens, `one browser_navigation row per open (${opens} opens)`, `${rows.length} row(s)`);
   check(rows.every((row) => typeof row.url === "string" && row.url.length > 0),
     "every row carries the url it opened");
@@ -951,6 +996,32 @@ try {
   });
   check(doubled.length === 0, "and no display's window count doubled",
     doubled.length === 0 ? "" : doubled.map(([d, n]) => `${d}: ${before.windows.get(d)} -> ${n}`).join(", "));
+
+  // ------------------------------------------------- 12: an address that is not on the public web
+  //
+  // The browser reads pages with the person's own logins, on a machine that also runs their files
+  // and the console. An address the model was talked into -- by a page it just read, by a peer, by
+  // pasted text -- must not be able to point either of those at the provider. Measured on
+  // grok-bot-local-vm 2026-09-07 before this check existed: file:///etc/passwd came back as page
+  // text plus a JPEG, and so did the console on host.docker.internal:7777.
+  step("addresses the browser refuses");
+  for (const entry of PLAN.filter((plan) => plan.refuses === true)) {
+    const result = resultsFor(entry.label);
+    const text = `${textOf(result)} ${result?.raw ?? ""}`;
+    info(`${entry.label}: ${oneLine(textOf(result))}`);
+    check(result != null, `${entry.label}: the model got an answer about it`, "nothing came back");
+    check(/only open pages on the public web/i.test(text), `${entry.label}: refused in plain words`,
+      oneLine(textOf(result), 120));
+    check(imagesOf(result).length === 0, `${entry.label}: and no picture of it came back`,
+      `${imagesOf(result).length} image part(s)`);
+  }
+  // The two things those addresses would have handed over if the check were not there.
+  const everyResultText = stubState.results.map((r) => `${textOf(r)} ${r.raw ?? ""}`).join("\n");
+  check(!/root:x:0:0/.test(everyResultText), "no line of the box's password file reached the model");
+  check(!/webSocketDebuggerUrl|Machine Room/.test(everyResultText),
+    "and neither did the browser's own debug endpoint or the operator console");
+  check(!ledgerUrls.some((url) => url.startsWith("file:") || url.includes("127.0.0.1")),
+    "and nothing refused was written into the audit ledger");
 
   // ---------------------------------------------------------- 11: the setting off
   if (SKIP_OFF_LEG) {
@@ -1021,6 +1092,8 @@ try {
   if (settingsTouched) {
     await writeSetting(BROWSER_TOOLS_SETTING, previousBrowserSetting ?? null)
       .catch((error) => info(`${BROWSER_TOOLS_SETTING} NOT restored: ${error.message}`));
+    await writeSetting(ALLOW_HOSTS_SETTING, previousAllowHosts ?? null)
+      .catch((error) => info(`${ALLOW_HOSTS_SETTING} NOT restored: ${error.message}`));
     if (previousTrace !== "1") {
       await writeSetting("SAND_TOOL_TRACE", previousTrace ?? null)
         .catch((error) => info(`SAND_TOOL_TRACE NOT restored: ${error.message}`));

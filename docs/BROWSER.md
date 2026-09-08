@@ -126,6 +126,35 @@ This is a different switch from `SAND_BROWSER_USE`, which is the older one and g
 subagent* and its fifteen tools. The two are independent: Titan's four can be on while the subagent
 is off, which is the shipping default.
 
+### Where the browser may go
+
+The public web, and nothing else.
+
+The address in a `browser_open` comes from the model, and the model is told things by the pages it
+just read, by peers, and by text a person pasted. Without a check, "open file:///etc/passwd" reads
+the box's own files and "open http://127.0.0.1:9232" reads the services sitting beside it, and both
+come back to the provider as page text plus a picture. Measured on `grok-bot-local-vm` 2026-09-07,
+before the check existed, both worked, and so did the operator console on
+`host.docker.internal:7777`.
+
+So two refusals, in plain words, on the same rule:
+
+- **In the host**, before the box is touched at all. Only `http` and `https`. No loopback, no
+  link-local, no private network, no `.internal` or `.localhost` name, no `host.docker.internal`.
+- **In the box driver**, next to Chrome, which also resolves the name first. A name is free to
+  point at `127.0.0.1`, and the host's check cannot see that.
+
+The model is told *"I can only open pages on the public web."* and nothing else.
+
+`SAND_BROWSER_ALLOW_HOSTS` is the way past it, and it is the operator's alone: a comma separated
+list of host names, in the same settings file, read live. It never comes from the model's
+arguments, and it is written into the request after them, so an `allowHosts` the model made up is
+overwritten rather than added to. An operator who wants their own internal wiki read names it here:
+
+```sh
+docker exec grok-bot-local-vm node -e 'const f=require("fs"),p="/home/box/sand-data/sand-host-settings.json";const d=JSON.parse(f.readFileSync(p,"utf8"));d.SAND_BROWSER_ALLOW_HOSTS="wiki.example.internal";f.writeFileSync(p,JSON.stringify(d),{mode:0o600})'
+```
+
 ## 5. The files
 
 | Where | What |
@@ -138,13 +167,14 @@ is off, which is the shipping default.
 | `source/host/runner/tools/sand-browser-tools.ts` | The shared machinery under both sets of tools: the shell call into the box, the auto-review preflight, the screenshot pulled back, the audit row. |
 | `source/host/runner/tools/turn-toolset.ts` | The one predicate that decides whether Titan is offered them. |
 | `source/host/runner/bot-block-detection.ts` | The 21-signature table for challenge pages. Unchanged by this wave, and still the authority. |
-| `source/host/sand-box-setting.ts` | `SAND_BROWSER_TOOLS`, resolved live. |
+| `source/host/sand-box-setting.ts` | `SAND_BROWSER_TOOLS` and `SAND_BROWSER_ALLOW_HOSTS`, resolved live. |
 | `deploy/r750/sync.sh` | Ships `runtime/browser-driver/` as a directory. |
 | `scripts/build-host.mjs --deploy` | The same thing for the local Mac box. |
 | `scripts/verify-browser-tools.mjs` | The gate. |
 | `tests/browser-driver-extraction.test.mjs` | The unit tests for reading a page: the article, the cap, the innerText fallback, the login wall, the challenge page. |
 | `tests/browser-tools.test.mjs` | The unit tests for the seam: what the driver catches that the host-side classifier cannot, and the shape of a tool result. |
-| `tests/browser-direct-tools.test.mjs` | The unit tests for the four tools: one image, one audit row, plain words for a wall. |
+| `tests/browser-direct-tools.test.mjs` | The unit tests for the four tools: one image, one audit row, plain words for a wall, and an address off the public web refused before the box is touched. |
+| `tests/browser-driver-address-guard.test.mjs` | The unit tests for the second refusal, the one next to Chrome, including a name that resolves to loopback. |
 
 ### Two detectors, on purpose
 
@@ -199,30 +229,36 @@ the product's rather than the model's mood. The stub is also the measurement sur
 hands every tool result back in the next request, so the stub reads the exact text and the exact
 image parts the model was given. Nothing else in this repo can see that.
 
-It serves its own fixtures on `host.docker.internal` (a form page, a login wall and a 403) so the
-click, the typing, the login hand-off and the blocked flag are measured against pages the gate
-controls rather than whatever the open web did that morning.
+It serves its own fixtures on `host.docker.internal` (a form page, a login wall, a 403 with a body
+and a 403 with none) so the click, the typing, the login hand-off and the blocked flag are measured
+against pages the gate controls rather than whatever the open web did that morning. Those fixtures
+are on a private address, so the run names `host.docker.internal` in `SAND_BROWSER_ALLOW_HOSTS`
+for its length and puts the setting back after.
 
-Eleven things it asserts:
+Twelve things it asserts:
 
 1. The four tools are in the **chief's** own toolset line, not a subagent's.
 2. They leave for the provider: the `[sand][wire]` line carries them, `sent == offered`.
 3. The system prompt says when to use them, when to delegate, and how to hand a login back.
 4. `https://example.com` comes back as its own words; the YouTube channel comes back with its title.
 5. A login-walled page reports needing a login, in plain words, not a flag name.
-6. A page that refuses us is reported as blocked.
+6. A page that refuses us is reported as blocked. Both the refusal that serves a body, and the bare
+   one that serves none, which is what a real site sends and which Chrome fails outright.
 7. Typing and clicking change the gate's own page the way that page says they should.
 8. Every result is text plus exactly **one** image part, a JPEG 1280 wide.
 9. The audit ledger gained one `browser_navigation` row per open, with the address and the title.
 10. The desktop view still shows the same Chrome: no new profile, no display's window count doubled.
 11. With `SAND_BROWSER_TOOLS` off, the four are withheld and the trace line says why.
+12. An address that is not on the public web is refused in plain words, with no picture and no
+    ledger row: a local file, and the box's own loopback. No line of the box's password file and no
+    part of the operator console reaches the model.
 
 Flags: `--dry-run` is the no-box run above, `--offline` skips the two public pages, `--no-off-leg`
 skips 11, `--keep` leaves the scratch agent behind. Exit 0 nothing failed, 1 something failed,
 2 nothing could be measured.
 
-It creates its own scratch agent and deletes it, and it puts the endpoint pin, `SAND_TOOL_TRACE`
-and `SAND_BROWSER_TOOLS` back the way it found them whatever happened.
+It creates its own scratch agent and deletes it, and it puts the endpoint pin, `SAND_TOOL_TRACE`,
+`SAND_BROWSER_TOOLS` and `SAND_BROWSER_ALLOW_HOSTS` back the way it found them whatever happened.
 
 ### What is measured, and what is not
 

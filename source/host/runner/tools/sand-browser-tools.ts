@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { buildHostShellArgs } from "../../box/box-shell-command.js";
 import { navigationProbeCommand, normalizeNavigationUrl, parseNavigationProbeOutput } from "../sand-action-audit.js";
 import { SAND_BOX_NO_MONITOR_AVAILABLE_MESSAGE } from "../../ports/box.js";
+import { readSandBoxSetting } from "../../sand-box-setting.js";
 import { shellExecutorResource } from "../../../packages/agent-exec/shell.js";
 import type { ResourceAccessor } from "../../../packages/agent-exec/resource-provider.js";
 import type { RemoteExecManager } from "../../../packages/agent-exec/remote.js";
@@ -31,6 +32,77 @@ export const BOX_CDP_PORT_BASE = 9_222;
  */
 export const SAND_BROWSER_RUNTIME_DRIVER_PATH = "/opt/titanbot-runtime/browser-driver/host-op.mjs";
 export const PENDING_SCREENSHOT_CAP = 32;
+
+/**
+ * BROWSER-1. Where the browser may go.
+ *
+ * The address in a browser_open comes from the model, and the model is told things by the pages it
+ * reads, by peers, and by text a person pasted. Measured on grok-bot-local-vm 2026-09-07, with no
+ * check anywhere on the path, `file:///etc/passwd` and `http://127.0.0.1:9232` both came back as
+ * page text plus a JPEG. So the check is here as well as in the box driver: this one refuses
+ * before anything runs, and the driver next to Chrome resolves the name and refuses again.
+ *
+ * `SAND_BROWSER_ALLOW_HOSTS` is the operator's list of internal names the browser may still open,
+ * comma separated. It is host-owned: it never comes from the model's arguments.
+ */
+export const SAND_BROWSER_ALLOW_HOSTS_SETTING = "SAND_BROWSER_ALLOW_HOSTS";
+export const SAND_BROWSER_NOT_PUBLIC_WEB = "I can only open pages on the public web.";
+
+const PRIVATE_BROWSER_HOSTS = new Set([
+  "localhost", "ip6-localhost", "ip6-loopback", "host.docker.internal", "gateway.docker.internal",
+]);
+
+export function readAllowedBrowserHosts(): readonly string[] {
+  return (readSandBoxSetting(SAND_BROWSER_ALLOW_HOSTS_SETTING) ?? "")
+    .split(",")
+    .map(entry => entry.trim().toLowerCase())
+    .filter(entry => entry.length > 0);
+}
+
+function isPrivateBrowserAddress(host: string): boolean {
+  if (host.includes(":")) {
+    const plain = host.split("%")[0] ?? "";
+    if (plain === "::" || plain === "::1") return true;
+    const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(plain);
+    if (mapped != null) return isPrivateBrowserAddress(mapped[1] ?? "");
+    return /^(fe8|fe9|fea|feb|fc|fd)/.test(plain);
+  }
+  const parts = host.split(".").map(part => Number(part));
+  if (parts.length !== 4 || parts.some(value => !Number.isInteger(value) || value < 0 || value > 255)) return false;
+  const [a, b] = parts as [number, number];
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && (b === 168 || b === 0)) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return a >= 224;
+}
+
+/** Refuse anything that is not an ordinary page on the public web, in plain words. */
+export function assertBrowsableUrl(
+  value: unknown,
+  allowHosts: readonly string[] = readAllowedBrowserHosts(),
+): void {
+  if (typeof value !== "string" || value.trim().length === 0) return;
+  const target = value.trim();
+  const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target) ? target : `https://${target}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    throw new SandBrowserDriverError(`${SAND_BROWSER_NOT_PUBLIC_WEB} That is not a web address.`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new SandBrowserDriverError(SAND_BROWSER_NOT_PUBLIC_WEB);
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host.length === 0) throw new SandBrowserDriverError(SAND_BROWSER_NOT_PUBLIC_WEB);
+  if (allowHosts.includes(host)) return;
+  if (PRIVATE_BROWSER_HOSTS.has(host) || host.endsWith(".localhost") || host.endsWith(".internal")) {
+    throw new SandBrowserDriverError(SAND_BROWSER_NOT_PUBLIC_WEB);
+  }
+  if (isPrivateBrowserAddress(host)) throw new SandBrowserDriverError(SAND_BROWSER_NOT_PUBLIC_WEB);
+}
 
 const pendingScreenshots = new Map<string, string>();
 
@@ -94,6 +166,12 @@ export interface BrowserDriverResponse {
   readonly needsLogin?: boolean | undefined;
   readonly blocked?: boolean | undefined;
   /**
+   * BROWSER-1. The page had not finished loading when the driver read it. It reads it anyway --
+   * a page that never goes quiet is exactly the page a fetch could not get -- and says so, so the
+   * model knows it is looking at a page mid-flight rather than at all of it.
+   */
+  readonly stillLoading?: boolean | undefined;
+  /**
    * BROWSER-1. What the picture actually is. The older driver only ever took PNGs, so the host
    * stamped every shot "image/png"; Titan's driver takes a JPEG resized to 1280 wide, and a
    * provider told png over jpeg bytes fails to decode with nothing worth reading in the message.
@@ -152,6 +230,9 @@ export function toDriverResponse(
     ...(optionalBoolean(parsed, "blocked") == null
       ? {}
       : { blocked: optionalBoolean(parsed, "blocked") }),
+    ...(optionalBoolean(parsed, "stillLoading") == null
+      ? {}
+      : { stillLoading: optionalBoolean(parsed, "stillLoading") }),
     ...(optionalString(parsed, "mimeType") == null
       ? {}
       : { mimeType: optionalString(parsed, "mimeType") }),
@@ -201,6 +282,15 @@ export const SAND_BROWSER_NEEDS_LOGIN_NOTE =
   "This page wants a sign-in before it shows anything. Tell the person they can sign in on the computer's screen, and say you will pick the page back up once they have.";
 export const SAND_BROWSER_BLOCKED_NOTE =
   "The site would not show this page: it answered with a security check or a refusal instead of the real content. Say so plainly and try another source.";
+export const SAND_BROWSER_STILL_LOADING_NOTE =
+  "The page had not finished loading when this was read, so it may not be all of it. Look again with a fresh picture if something seems missing.";
+/**
+ * BROWSER-1. The one thing on this path that is not in the host bundle is the driver itself: it
+ * lives in the box's runtime mount. A box whose mount is older than its bundle answered with a
+ * Node stack trace before this, because the shell's stderr went straight into the tool result.
+ */
+export const SAND_BROWSER_NOT_INSTALLED_NOTE =
+  "The browser is not set up on this computer yet. Tell the person their computer needs its browser tools installed before I can open pages on it.";
 
 export interface BrowserDriverDependencies<Context> {
   readonly resourceAccessor: { get(resource: unknown): unknown };
@@ -334,6 +424,9 @@ export class SandBrowserDriver<Context = unknown> {
       viewId: typeof requestedViewId === "string" && requestedViewId.length > 0
         ? requestedViewId
         : this.dependencies.getDefaultViewId(),
+      // After the arguments, always, so an allowHosts the model made up is overwritten by the
+      // operator's own list rather than adding to it.
+      allowHosts: readAllowedBrowserHosts(),
       ...(screenshotPath == null ? {} : { screenshotPath }),
     };
     const encoded = Buffer.from(
@@ -350,23 +443,29 @@ export class SandBrowserDriver<Context = unknown> {
       workingDirectory: "/workspace",
       toolCallId: `sand-browser-${input.op}-${sanitizeForBoxPath(input.toolCallId)}`,
     });
+    // The cause goes to the host log, never into the tool result. Whatever the box printed is a
+    // Node stack trace as often as it is a sentence, and the tool result is text the model is
+    // handed and may repeat to a person.
+    const failure = (why: string, detail: string): SandBrowserDriverError => {
+      console.warn(`[sand][browser] ${why}: ${detail.replace(/\s+/g, " ").trim().slice(0, 600)}`);
+      return new SandBrowserDriverError(
+        /Cannot find module|MODULE_NOT_FOUND|No such file or directory/.test(detail)
+          ? SAND_BROWSER_NOT_INSTALLED_NOTE
+          : "The browser on this computer did not answer. Try again in a moment, and say so plainly if it keeps failing.",
+      );
+    };
     if (shell.case !== "success") {
-      // Whatever the shell layer knows about the failure, in the message. "failed (failure)" was
-      // all a person or a gate could see before, and it named no cause at all.
-      const why = (shell.stderr ?? "").trim().slice(0, 300);
-      throw new SandBrowserDriverError(
-        `The browser could not be reached on the box (${shell.case || "unknown"})${why.length > 0 ? `: ${why}` : ""}`,
+      throw failure(
+        `the browser shell failed (${shell.case || "unknown"})`,
+        `${shell.stderr ?? ""} ${shell.stdout ?? ""}`,
       );
     }
 
     const response = parseDriverResponse(shell.stdout ?? "");
     if (response === undefined) {
-      const detail = [shell.stderr ?? "", shell.stdout ?? ""]
-        .map((part) => part.trim().slice(-400))
-        .filter((part) => part.length > 0)
-        .join(" | ");
-      throw new SandBrowserDriverError(
-        `Browser driver produced no result (exit ${shell.exitCode ?? "unknown"})${detail.length > 0 ? `: ${detail}` : ""}`,
+      throw failure(
+        `the browser driver printed no result (exit ${shell.exitCode ?? "unknown"})`,
+        `${shell.stderr ?? ""} ${shell.stdout ?? ""}`,
       );
     }
     if (!response.ok) {
@@ -393,6 +492,9 @@ export class SandBrowserDriver<Context = unknown> {
     }
     if (response.blocked === true) {
       parts.push(SAND_BROWSER_BLOCKED_NOTE);
+    }
+    if (response.stillLoading === true) {
+      parts.push(SAND_BROWSER_STILL_LOADING_NOTE);
     }
 
     const imageB64 = response.screenshot === true && screenshotPath != null
@@ -563,7 +665,12 @@ export function toBrowserReviewAction(
     viewId: stringValue("viewId") ?? defaultViewId,
     ...(stringValue("url") == null ? {} : { url: stringValue("url") }),
     ...(stringValue("ref") == null ? {} : { ref: stringValue("ref") }),
-    ...(stringValue("element") == null ? {} : { element: stringValue("element") }),
+    // BROWSER-1. Titan's four tools name what they act on with `target` -- the words on a button,
+    // or a CSS selector -- and the classifier reads `element`. Without this the reviewer saw a
+    // bare op and a view id, so "Delete account" and "Next page" were the same click to it.
+    ...((stringValue("element") ?? stringValue("target")) == null
+      ? {}
+      : { element: stringValue("element") ?? stringValue("target") }),
     ...(stringValue("text") == null ? {} : { text: stringValue("text") }),
     ...(stringValue("value") == null ? {} : { value: stringValue("value") }),
     ...(stringArray("values") == null ? {} : { values: stringArray("values") }),
@@ -752,6 +859,9 @@ export function createSandBrowserTools<Context>(
     async execute(context, args, metadata) {
       try {
         validateArguments(spec.schema ?? {}, args);
+        // Before anything runs, and again in the box driver next to Chrome. An address the model
+        // was talked into is the whole risk here, and it costs one call to refuse it.
+        assertBrowsableUrl(args.url);
         if (dependencies.autoReview !== undefined) {
           const exactAction = toBrowserReviewAction(spec.op, args, dependencies.getDefaultViewId());
           await runSandBrowserAutoReviewPreflight({

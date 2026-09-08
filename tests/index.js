@@ -106,6 +106,7 @@ import "./cursor-free.test.mjs";
 import "./agent-cap.test.mjs";
 import "./box-health-sweep.test.mjs";
 import "./browser-direct-tools.test.mjs";
+import "./browser-driver-address-guard.test.mjs";
 import "./browser-driver-extraction.test.mjs";
 import "./browser-driver-protocol.test.mjs";
 import "./browser-tools-prompt.test.mjs";

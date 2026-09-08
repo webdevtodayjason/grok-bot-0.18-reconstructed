@@ -36,6 +36,7 @@ test.after(async () => {
 });
 
 const tools = await bundle("source/host/runner/tools/sand-browser-direct-tools.ts");
+const shared = await bundle("source/host/runner/tools/sand-browser-tools.ts");
 const driverSource = await bundle("source/host/runner/tools/sand-browser-driver-source.ts");
 const setting = await bundle("source/host/sand-box-setting.ts");
 const MARKER = driverSource.SAND_BROWSER_RESULT_MARKER;
@@ -221,4 +222,122 @@ test("SAND_BROWSER_TOOLS is on unless an operator writes it off", () => {
   assert.equal(setting.resolveBrowserToolsEnabled("false"), false);
   assert.equal(setting.resolveBrowserToolsEnabled("False"), false);
   assert.equal(setting.SAND_BROWSER_TOOLS_SETTING, "SAND_BROWSER_TOOLS");
+});
+
+// ---------------------------------------------------------------- where the browser may go
+//
+// The address in a browser_open comes from the model, and the model is told things by the pages it
+// reads, by peers, and by text a person pasted. Measured on grok-bot-local-vm 2026-09-07 with no
+// check anywhere on the path, `file:///etc/passwd` came back as page text plus a JPEG, and so did
+// another seat's Chrome banner on 127.0.0.1:9232 and the operator console on host.docker.internal.
+// The refusal has to happen before the box is touched at all.
+const OFF_LIMITS = [
+  "file:///etc/passwd",
+  "file:///home/box/sand-data/box-secrets.json",
+  "http://127.0.0.1:9232/json/version",
+  "http://localhost:6080/",
+  "http://host.docker.internal:7777/",
+  "http://192.168.48.5/",
+  "http://10.0.0.1/",
+  "http://172.20.1.4/",
+  "http://169.254.169.254/latest/meta-data/",
+  "http://[::1]:7777/",
+  "chrome://net-internals",
+  "data:text/html,<h1>hi</h1>",
+];
+
+test("an address that is not on the public web is refused, and the box is never asked", async () => {
+  for (const address of OFF_LIMITS) {
+    const fake = fakeDependencies({ ok: true, summary: "Opened the page.", screenshot: true });
+    const open = byName(tools.createSandDirectBrowserTools(fake.dependencies)).get("browser_open");
+    const output = await open.execute({}, { url: address }, { toolCallId: "guard" });
+    assert.equal(output.isError, true, `${address} was opened`);
+    assert.ok(output.text.includes("only open pages on the public web"), `${address}: ${output.text}`);
+    assert.equal(fake.calls.shell.length, 0, `${address} reached the box`);
+    assert.deepEqual(fake.calls.navigations, [], `${address} was written to the ledger`);
+  }
+});
+
+test("an ordinary public page still opens", async () => {
+  const fake = fakeDependencies({ ok: true, summary: "Opened the page.", url: "https://example.com/", screenshot: true });
+  const open = byName(tools.createSandDirectBrowserTools(fake.dependencies)).get("browser_open");
+  const output = await open.execute({}, { url: "example.com" }, { toolCallId: "ok" });
+  assert.equal(output.isError, undefined, output.text);
+  assert.equal(fake.calls.shell.length, 1);
+});
+
+test("the operator's own list is the only way to an internal address, and it is not the model's to write", async () => {
+  process.env.SAND_BROWSER_ALLOW_HOSTS = "wiki.example.internal";
+  try {
+    const fake = fakeDependencies({ ok: true, summary: "Opened the page.", screenshot: true });
+    const open = byName(tools.createSandDirectBrowserTools(fake.dependencies)).get("browser_open");
+    const allowed = await open.execute({}, { url: "http://wiki.example.internal/handbook" }, { toolCallId: "allow" });
+    assert.equal(allowed.isError, undefined, allowed.text);
+    // The list the box driver is handed is the operator's, written after the model's arguments,
+    // so an allowHosts the model made up is overwritten rather than added to.
+    const request = decodeRequest(fake.calls.shell[0]);
+    assert.deepEqual(request.allowHosts, ["wiki.example.internal"]);
+
+    const spoofed = fakeDependencies({ ok: true, summary: "Opened the page.", screenshot: true });
+    const spoofedOpen = byName(tools.createSandDirectBrowserTools(spoofed.dependencies)).get("browser_open");
+    const refused = await spoofedOpen.execute(
+      {},
+      { url: "http://127.0.0.1:7777/", allowHosts: ["127.0.0.1"] },
+      { toolCallId: "spoof" },
+    );
+    assert.equal(refused.isError, true);
+    assert.equal(spoofed.calls.shell.length, 0);
+  } finally {
+    delete process.env.SAND_BROWSER_ALLOW_HOSTS;
+  }
+});
+
+test("a box whose browser is not installed says so in plain words, never a Node stack", async () => {
+  const fake = fakeDependencies({ ok: true });
+  fake.dependencies.executeShell = async (_context, input) => {
+    fake.calls.shell.push(input);
+    return {
+      case: "success",
+      exitCode: 1,
+      stdout: "",
+      stderr: "Error: Cannot find module '/opt/titanbot-runtime/browser-driver/host-op.mjs'\n"
+        + "    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)\n"
+        + "  code: 'MODULE_NOT_FOUND', requireStack: [] }\nNode.js v20.19.2",
+    };
+  };
+  const open = byName(tools.createSandDirectBrowserTools(fake.dependencies)).get("browser_open");
+  const output = await open.execute({}, { url: "https://example.com" }, { toolCallId: "missing" });
+  assert.equal(output.isError, true);
+  assert.ok(output.text.includes("browser is not set up on this computer yet"), output.text);
+  for (const jargon of ["MODULE_NOT_FOUND", "Cannot find module", "Node.js v", "loader:"]) {
+    assert.ok(!output.text.includes(jargon), `the result still carries ${jargon}: ${output.text}`);
+  }
+});
+
+test("a page that had not finished loading says so, and still returns its words", async () => {
+  const fake = fakeDependencies({
+    ok: true, summary: "Opened the page.", url: "https://www.theguardian.com/international",
+    title: "News, sport and opinion", text: "The headlines, as far as they had painted.",
+    stillLoading: true, screenshot: true,
+  });
+  const open = byName(tools.createSandDirectBrowserTools(fake.dependencies)).get("browser_open");
+  const output = await open.execute({}, { url: "https://www.theguardian.com/international" }, { toolCallId: "slow" });
+  assert.equal(output.isError, undefined);
+  assert.ok(output.text.includes("The headlines"), output.text);
+  assert.ok(output.text.includes("had not finished loading"), output.text);
+  assert.equal(typeof output.imageB64, "string");
+});
+
+test("the words being clicked reach auto-review, so two different clicks are two different actions", () => {
+  const clicking = shared.toBrowserReviewAction("click", { target: "Delete account" }, "view-1");
+  assert.equal(clicking.element, "Delete account");
+  const paging = shared.toBrowserReviewAction("click", { target: "Next page" }, "view-1");
+  assert.equal(paging.element, "Next page");
+  assert.notDeepEqual(clicking, paging);
+  // Typing names its field the same way, and an explicit element still wins.
+  assert.equal(shared.toBrowserReviewAction("type", { target: "Search", text: "bread" }, "v").element, "Search");
+  assert.equal(
+    shared.toBrowserReviewAction("click", { target: "Buy", element: "the buy button" }, "v").element,
+    "the buy button",
+  );
 });
