@@ -12,11 +12,13 @@
 // is not on the disk.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { LEDGER_NAME, readLedgerFile } from "../ui/login-ledger.mjs";
-import { RELAY_PASSWORD, RELAY_TOKEN, form, startRelay, tenantsFile } from "./relay-tenant-support.mjs";
+import { RELAY_PASSWORD, RELAY_TOKEN, form, startRelay, tenantRow, tenantsFile } from "./relay-tenant-support.mjs";
+import { boxStub, includedSet } from "./relay-proxy-support.mjs";
 
 // A password no source file in this repo contains, so finding it on disk can only mean the ledger
 // wrote it. That is the whole point of the string.
@@ -162,5 +164,189 @@ test("neither route exists when this console has no control plane", async () => 
   try {
     assert.equal((await fetch(`${relay.base}/admin/login-attempts`, { headers: { authorization: `Bearer ${RELAY_TOKEN}` } })).status, 404);
     assert.equal((await fetch(`${relay.base}/admin/boxes`, { headers: { authorization: `Bearer ${RELAY_TOKEN}` } })).status, 404);
+  } finally { relay.stop(); }
+});
+
+
+// ---- PROXY-1: the migration's two doors --------------------------------------------------------
+//
+// These are the routes the control plane drives the migration through, and they are on this relay
+// for the same reason the two reads above are: writing inside a box needs the docker socket, and
+// the control plane's container deliberately has none.
+//
+// What makes them worth their own cases is not that they work. It is that the whole security claim
+// of this wave -- "the copied operator key is gone from that box" -- is a claim these routes make,
+// and a route that answers with a key would be a route that hands the thing it is proving absent
+// to whoever asked. So: names, lengths and twelve hex characters of a sha256, and nothing else.
+
+const OPERATOR_KEY = "an-operator-provider-key-copied-into-every-box";
+const OPERATOR_TINYFISH = "an-operator-tinyfish-key-copied-the-same-way";
+const sha12 = (value) => createHash("sha256").update(value, "utf8").digest("hex").slice(0, 12);
+
+// One customer, one box that is a directory on this Mac, one included set.
+async function startMigrationConsole() {
+  const demo = tenantRow("demo");
+  const stub = boxStub([demo.row.box]);
+  const included = includedSet({ key: "sk-virtual-for-demo" });
+  // Exactly what the R750 boxes hold today: one copied operator provider key in the endpoint pin,
+  // and the same operator's TinyFish key in the connector store.
+  stub.writeSecrets(demo.row.box, {
+    SAND_OPENAI_COMPATIBLE_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    SAND_OPENAI_COMPATIBLE_MODEL: "qwen3.8-max",
+    SAND_OPENAI_COMPATIBLE_API_KEY: OPERATOR_KEY,
+    SAND_OPENAI_COMPATIBLE_ENDPOINT_NAME: "Qwen",
+    CODERABBIT_API_KEY: "a shell credential that is the customer's own",
+  });
+  stub.writeConnectorSecrets(demo.row.box, {
+    servers: { tinyfish: { TINYFISH_API_KEY: OPERATOR_TINYFISH }, other: { OTHER_KEY: "not the one" } },
+    shell: { CODERABBIT_API_KEY: "a shell credential that is the customer's own" },
+  });
+  const relay = await startRelay({
+    CP_URL: "http://127.0.0.1:1",
+    CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([{ ...demo.row, included }]),
+    ...stub.env,
+  }, { prefix: "relay-admin-migrate-", pathValue: stub.pathValue });
+  return { relay, demo, stub, box: demo.row.box };
+}
+
+const post = (relay, url, body, init = {}) => fetch(`${relay.base}${url}`, {
+  method: "POST", headers: { "content-type": "application/json", ...(init.headers ?? {}) },
+  body: JSON.stringify(body ?? {}),
+});
+const asAdmin = (relay, url, body) => post(relay, url, body, { headers: { authorization: `Bearer ${RELAY_TOKEN}` } });
+
+test("both migration doors answer only CP_RELAY_TOKEN, and only POST", async () => {
+  const { relay } = await startMigrationConsole();
+  try {
+    for (const step of ["use-included", "forget-provider-keys"]) {
+      const path = `/admin/tenants/demo/${step}`;
+      // The method refusal still comes before the credential, so a wrong method charges nobody's
+      // lockout and learns nothing about whether the route is there.
+      assert.equal((await fetch(`${relay.base}${path}`)).status, 405, `${step} is POST-only`);
+      assert.equal((await post(relay, path, {})).status, 401, `${step} without a credential`);
+      assert.equal((await post(relay, path, {}, { headers: { authorization: `Bearer ${RELAY_TOKEN}x` } })).status, 401,
+        `${step} with a credential that is nearly right`);
+      // And a console session is not a credential for this door: it is not even a console route.
+      const signedIn = await fetch(`${relay.base}/login`, form({ password: RELAY_PASSWORD }));
+      const cookie = /(?:^|,\s*)(gb_session=[^;]+)/.exec(signedIn.headers.get("set-cookie") ?? "")?.[1] ?? "";
+      assert.equal((await post(relay, path, {}, { headers: { cookie } })).status, 401, `${step} with a console cookie`);
+    }
+    // A workspace this console does not serve is a plain sentence, not a stack trace.
+    assert.equal((await asAdmin(relay, "/admin/tenants/nobody/use-included", {})).status, 404);
+  } finally { relay.stop(); }
+});
+
+test("use-included points the box at a plan model, keeps the way back, and answers with no key", async () => {
+  const { relay, demo, stub, box } = await startMigrationConsole();
+  try {
+    const res = await asAdmin(relay, "/admin/tenants/demo/use-included", { model: "plan-zai" });
+    const raw = await res.text();
+    assert.equal(res.status, 200, raw);
+    const body = JSON.parse(raw);
+    assert.equal(body.slug, "demo");
+    assert.match(body.measuredAt, /^\d{4}-\d\d-\d\dT/, "every number carries when it was measured");
+    assert.equal(body.using, "plan-zai");
+
+    // Names, lengths and hash prefixes. Not the key, not on any field, not anywhere in the answer.
+    assert.equal(raw.includes("sk-virtual-for-demo"), false, "the answer must not carry the virtual key");
+    const wrote = new Map(body.wrote.map((entry) => [entry.name, entry]));
+    assert.equal(wrote.get("SAND_OPENAI_COMPATIBLE_API_KEY").length, "sk-virtual-for-demo".length);
+    assert.equal(wrote.get("SAND_OPENAI_COMPATIBLE_API_KEY").sha256, sha12("sk-virtual-for-demo"));
+    assert.equal(wrote.get("SAND_OPENAI_COMPATIBLE_SERVED_BY").sha256, sha12("Z.AI"));
+
+    const secrets = stub.secretsOf(box);
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_API_KEY, "sk-virtual-for-demo");
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_MODEL, "plan-zai");
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_SERVED_BY, "Z.AI");
+    assert.equal(secrets.CODERABBIT_API_KEY, "a shell credential that is the customer's own",
+      "the other credential plane in this file survives the switch");
+    assert.equal(statSync(stub.fileOf(box, "box-secrets.json")).mode & 0o777, 0o600);
+
+    // The way back, written BEFORE the switch and at 0600. From the moment the copied operator key
+    // leaves this box the proxy is the only thing answering for it, so a rollback that depends on
+    // remembering what was there is not a rollback.
+    const rollback = path.join(demo.profile, "model-proxy-rollback.json");
+    assert.equal(body.rollbackFile, rollback);
+    assert.equal(statSync(rollback).mode & 0o777, 0o600);
+    const kept = JSON.parse(readFileSync(rollback, "utf8")).secrets;
+    assert.equal(kept.SAND_OPENAI_COMPATIBLE_API_KEY, OPERATOR_KEY, "the snapshot is what was there before");
+    assert.equal(kept.SAND_OPENAI_COMPATIBLE_MODEL, "qwen3.8-max");
+
+    // A model that is not in the plan is a plain refusal, not a half-done switch.
+    assert.equal((await asAdmin(relay, "/admin/tenants/demo/use-included", { model: "plan-nothing" })).status, 404);
+  } finally { relay.stop(); }
+});
+
+test("forget-provider-keys deletes only the hash it was given, in all three places, and leaves both files valid", async () => {
+  const { relay, stub, box, demo } = await startMigrationConsole();
+  try {
+    // A row of the customer's own carrying the same copied key, which is the third place it landed.
+    const catalog = path.join(demo.state, "endpoints.json");
+    writeFileSync(catalog, JSON.stringify({ endpoints: [
+      { id: "qwen", name: "Qwen", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen3.8-max", apiKey: OPERATOR_KEY },
+      { id: "mine", name: "my own", baseUrl: "https://93.184.216.34/v1", model: "m", apiKey: "a key the customer owns" },
+    ] }, null, 2));
+
+    // A prefix that matches nothing removes nothing, which is what makes a typo safe.
+    const nothing = JSON.parse(await (await asAdmin(relay, "/admin/tenants/demo/forget-provider-keys", { prefix: "0123456789ab" })).text());
+    assert.equal(nothing.removedCount, 0);
+    assert.equal(stub.secretsOf(box).SAND_OPENAI_COMPATIBLE_API_KEY, OPERATOR_KEY);
+
+    // A value rather than a hash is refused: this route never accepts a credential.
+    assert.equal((await asAdmin(relay, "/admin/tenants/demo/forget-provider-keys", { prefix: OPERATOR_KEY })).status, 400);
+    assert.equal((await asAdmin(relay, "/admin/tenants/demo/forget-provider-keys", { prefix: "abc" })).status, 400);
+
+    const res = await asAdmin(relay, "/admin/tenants/demo/forget-provider-keys", { prefix: sha12(OPERATOR_KEY) });
+    const raw = await res.text();
+    assert.equal(res.status, 200, raw);
+    const body = JSON.parse(raw);
+    assert.equal(raw.includes(OPERATOR_KEY), false, "the answer must not carry what it deleted");
+    assert.deepEqual(body.removed.map((entry) => `${entry.file}:${entry.name}`).sort(), [
+      "box-secrets.json:SAND_OPENAI_COMPATIBLE_API_KEY",
+      "endpoints.json:qwen.apiKey",
+    ]);
+    for (const entry of body.removed) assert.equal(entry.sha256, sha12(OPERATOR_KEY));
+    for (const entry of body.removed) assert.equal(entry.length, OPERATOR_KEY.length);
+
+    // Gone from the box, and nothing else went with it.
+    const secrets = stub.secretsOf(box);
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_API_KEY, undefined);
+    assert.equal(secrets.SAND_OPENAI_COMPATIBLE_BASE_URL, "https://dashscope.aliyuncs.com/compatible-mode/v1");
+    assert.equal(secrets.CODERABBIT_API_KEY, "a shell credential that is the customer's own");
+    assert.equal(statSync(stub.fileOf(box, "box-secrets.json")).mode & 0o777, 0o600);
+
+    // The customer's ROW survives with its key cleared: the row is their configuration, the key is
+    // the operator's. Their own key on their own row is untouched.
+    const written = JSON.parse(readFileSync(catalog, "utf8"));
+    assert.deepEqual(written.endpoints.map((r) => r.id), ["qwen", "mine"]);
+    assert.equal(written.endpoints[0].apiKey, "");
+    assert.equal(written.endpoints[1].apiKey, "a key the customer owns");
+    assert.equal(readFileSync(catalog, "utf8").includes(OPERATOR_KEY), false);
+
+    // And the connector store, which is the same operator's TinyFish key under its own name.
+    const tinyfish = await asAdmin(relay, "/admin/tenants/demo/forget-provider-keys", { prefix: sha12(OPERATOR_TINYFISH) });
+    const tinyfishBody = JSON.parse(await tinyfish.text());
+    assert.deepEqual(tinyfishBody.removed.map((entry) => `${entry.file}:${entry.name}`), [
+      "connector-env-secrets.json:servers.tinyfish.TINYFISH_API_KEY",
+    ]);
+    const connectors = stub.connectorSecretsOf(box);
+    assert.deepEqual(connectors.servers.tinyfish, {}, "the file stays present and valid");
+    assert.equal(connectors.servers.other.OTHER_KEY, "not the one", "another connector's value is not touched");
+    assert.equal(connectors.shell.CODERABBIT_API_KEY, "a shell credential that is the customer's own",
+      "and neither is the shell section");
+    assert.equal(statSync(stub.fileOf(box, "connector-env-secrets.json")).mode & 0o777, 0o600);
+  } finally { relay.stop(); }
+});
+
+test("neither migration door exists when this console has no control plane", async () => {
+  const relay = await startRelay({}, { prefix: "relay-admin-migrate-solo-" });
+  try {
+    for (const step of ["use-included", "forget-provider-keys"]) {
+      const res = await fetch(`${relay.base}/admin/tenants/demo/${step}`, {
+        method: "POST", headers: { authorization: `Bearer ${RELAY_TOKEN}`, "content-type": "application/json" }, body: "{}",
+      });
+      assert.equal(res.status, 404, `${step} should not exist without a control plane`);
+    }
   } finally { relay.stop(); }
 });

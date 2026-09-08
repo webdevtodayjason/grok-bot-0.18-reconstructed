@@ -452,8 +452,78 @@ function openRouterExecutor(messages: readonly ProviderMessage[], invocationId: 
 function withBackendNote(instructions: string, settings: OpenAiCompatibleSettings): string {
   let host = settings.baseUrl;
   try { host = new URL(settings.baseUrl).host; } catch { /* keep the raw value */ }
+  // PROXY-1. Pointed at the plan proxy the base URL's host is `titanbot-proxy`, so this note --
+  // the one thing standing between a model and inventing its own vendor -- would have had Titan
+  // tell a customer it runs at a container on our bridge. servedBy is what the box was told to
+  // say instead; with none set the host is still the answer, so the sentence is byte-equal for
+  // every endpoint that does not set one.
+  const where = (settings.servedBy ?? "").length > 0 ? settings.servedBy : host;
   const through = settings.endpointName ? `"${settings.endpointName}"` : "an OpenAI-compatible endpoint";
-  return `${instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${through}, model '${settings.model}' at ${host}. If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`;
+  return `${instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${through}, model '${settings.model}' at ${where}. If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`;
+}
+
+/**
+ * PROXY-1. What a customer on the included plan reads when the plan itself refuses the turn.
+ *
+ * Every one of these is decided by the HOST, never by the model: a provider body forwarded through
+ * the proxy names an alias, a dollar figure, a vendor and sometimes a container, and none of that
+ * is a customer's business or true in their words. Four sentences, and no fifth -- an error this
+ * does not recognise passes through exactly as it did before, because a wrong plain sentence hides
+ * a real fault better than a raw one ever could.
+ *
+ * Active only when servedBy is set, which is the marker the relay writes with the plan endpoint
+ * and never with a customer's own key. A box on its own key keeps today's wording, including the
+ * "check the key in Settings" one, which is the fourth case and needs nothing done to it here.
+ *
+ * The wording rule from TOOLS-FETCH-1 holds: no alias, no dollars, no vendor, no tool name, and
+ * never "may be temporary".
+ */
+const PLAN_REFUSAL = {
+  spent: "You have used everything your plan includes this month. Add your own key under Settings and I will keep going, or ask for more.",
+  rateLimited: "That is more than the plan allows right now. Give me a moment and ask again.",
+  down: "The model I answer through is not responding. Nothing you sent is lost. Try again in a minute, or pick a different model in Settings.",
+} as const;
+
+/** The status the transport put in its message: `... (429: {body})` or `... (503)`. */
+function providerFailureStatus(message: string): number | null {
+  const found = /\((\d{3})[:)]/.exec(message);
+  const status = found == null ? Number.NaN : Number(found[1]);
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
+// A failure with no status at all: DNS, a refused connection, a dead socket, or our own abort.
+// Matched by name rather than assumed, so a malformed-SSE or step-limit error -- which are faults
+// worth reading, not outages -- keeps its own words.
+const TRANSPORT_FAILURE = /fetch failed|timed out|TimeoutError|AbortError|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|other side closed|terminated/i;
+
+function planRefusalSentence(message: string): string | null {
+  const status = providerFailureStatus(message);
+  // The proxy refuses a spent budget with 400 and a body that says so, and refuses a key it no
+  // longer holds with 401. Revocation is the second one, and this wave mints soft budgets only --
+  // so on the R750 today 401 is the only way this sentence is reached. Both are the same thing to
+  // the person reading it, and the two actions it names are right either way.
+  if (status === 401 || status === 403) return PLAN_REFUSAL.spent;
+  if (status === 400 && /budget|exceed|quota|spend|limit/i.test(message)) return PLAN_REFUSAL.spent;
+  if (status === 429) return PLAN_REFUSAL.rateLimited;
+  if (status != null && status >= 500) return PLAN_REFUSAL.down;
+  return status == null && TRANSPORT_FAILURE.test(message) ? PLAN_REFUSAL.down : null;
+}
+
+/**
+ * The classified failure, then the plan's own words over it. Order matters: the compact-and-retry
+ * rescue keys on InputTokenLimitError, so anything the classifier recognised is passed straight
+ * through -- translating an overflow into "try again in a minute" would take compaction off the
+ * turn and leave every following turn failing identically.
+ */
+function translateProviderFailure(raw: unknown, settings: OpenAiCompatibleSettings): unknown {
+  const classified = classifyProviderFailure(raw);
+  if (classified !== raw || !(raw instanceof Error)) return classified;
+  if ((settings.servedBy ?? "").length === 0) return classified;
+  const sentence = planRefusalSentence(raw.message);
+  if (sentence == null) return classified;
+  // The provider's own body is kept as the cause, so the host log still says what actually
+  // happened while the person reads a sentence written for them.
+  return Object.assign(new Error(sentence), { cause: raw });
 }
 
 function openAiCompatibleSettings(): OpenAiCompatibleSettings {
@@ -608,7 +678,7 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
         resultResponse.resolve(response(text, invocationId, settings.model));
       }
     } catch (raw) {
-      const error = classifyProviderFailure(raw);
+      const error = translateProviderFailure(raw, settings);
       usage.reject(error); extendedUsage.reject(error); metadata.reject(error); resultResponse.reject(error); throw error;
     }
   })();

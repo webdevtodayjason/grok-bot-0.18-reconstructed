@@ -1524,15 +1524,18 @@
     const account = pluginAccountMarkup(plugin, lead);
     const connectorSecrets = pluginSecretsMarkup(plugin);
     const channelRow = pluginChannelRowMarkup(plugin, lead);
+    // PROXY-1: the same switch, in the words of whichever group the card is in. "Use this one" on a
+    // plan card, because there is no endpoint for the customer to think about -- it is one of the
+    // models their plan already includes, and the only decision is which.
     const providerSwitch = plugin.endpointId
-      ? `<div class="provider-switch">${plugin.live ? `<span class="status-pill success">answering now</span>` : plugin.status === "connected" ? `<button class="primary-button" type="button" data-use-endpoint="${escapeHtml(plugin.endpointId)}">Use this endpoint</button>` : ""}</div>`
+      ? `<div class="provider-switch">${plugin.live ? `<span class="status-pill success">answering now</span>` : plugin.status === "connected" ? `<button class="primary-button" type="button" data-use-endpoint="${escapeHtml(plugin.endpointId)}">${plugin.group === "Plan" ? "Use this one" : "Use this endpoint"}</button>` : ""}</div>`
       : "";
     // The Skills section was a heading over an empty div on every card the gateway builds: no
     // plugin here ships skills. It renders only where there are some, or where there is a reason.
     const skillsSection = plugin.skills.length
       ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="tag-list">${plugin.skills.map((skill) => `<span class="tag">✦ ${escapeHtml(skill)}</span>`).join("")}</div></section>`
       : plugin.skillsNote ? `<section><div class="plugin-section-title"><span>Skills in package</span></div><div class="empty-state">${escapeHtml(plugin.skillsNote)}</div></section>` : "";
-    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${connectorSecrets}${providerSwitch}${channelRow}${connectorRemoveRow(plugin)}</section>${plugin.shellTool ? shellToolMarkup(plugin, lead) : ""}<section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
+    return `<div class="plugin-hero"><span class="plugin-icon">${escapeHtml(plugin.icon)}</span><div class="plugin-hero-copy"><h3>${escapeHtml(plugin.name)}</h3><p>${escapeHtml(plugin.description)}</p></div><span class="status-pill ${plugin.status === "connected" ? "success" : ""}">${escapeHtml(pluginStatusLabel(plugin.status))}</span></div><div class="plugin-sections"><section><div class="plugin-section-title"><span>${plugin.group === "Providers" ? "Provider account" : plugin.group === "Plan" ? "Included with your plan" : "Global account"}</span><span>${escapeHtml(plugin.category)}</span></div>${account}${connectorSecrets}${providerSwitch}${channelRow}${connectorRemoveRow(plugin)}</section>${plugin.shellTool ? shellToolMarkup(plugin, lead) : ""}<section><div class="plugin-section-title"><span>Tools available for assignment</span>${plugin.tools.length ? `<span>${plugin.tools.filter((tool) => tool.enabled).length}/${plugin.tools.length} enabled</span>` : ""}</div><div class="plugin-list">${tools}</div></section>${skillsSection}</div>`;
   }
 
   // The relay holds the endpoint catalogue and probes each one; the box holds which is in use.
@@ -1546,17 +1549,25 @@
       fetch("/endpoints").then((r) => r.json()).catch(() => ({ endpoints: [] })),
       fetch("/model").then((r) => r.json()).catch(() => ({})),
     ]).then(([catalog, live]) => {
-      const list = catalog.endpoints ?? [];
+      // PROXY-1: the plan's rows are computed by the relay and answered in their own array, so a
+      // list built from catalog.endpoints alone left a box pointed at the plan with an empty
+      // picker and a Currently answering row naming a container on our bridge. Both groups, plan
+      // first, and one lookup used for the row, the pill and the selection.
+      const list = [...(catalog.included ?? []), ...(catalog.endpoints ?? [])];
       select.innerHTML = list.map((e) => {
         const on = live.model && e.model === live.model;
         const reach = e.health?.reachable ? "" : " · unreachable";
         return `<option value="${escapeHtml(e.id)}" ${on ? "selected" : ""}>${escapeHtml(e.name)}${escapeHtml(reach)}</option>`;
       }).join("") || `<option value="">No endpoints configured</option>`;
-      if (current) current.textContent = live.model
-        ? `${live.model} · ${live.endpoint ?? "unknown host"} (from ${live.source ?? "unknown"})`
-        : "The box reports no model. Agents cannot answer until one is set.";
+      const chosen = list.find((e) => live.model && e.model === live.model);
+      // A plan row is named, never located: `live.endpoint` is the base URL's host, which for a
+      // plan is the proxy's container name -- our plumbing, on a customer's screen.
+      if (current) current.textContent = !live.model
+        ? "The box reports no model. Agents cannot answer until one is set."
+        : chosen?.included
+          ? `${chosen.name} (included with your plan)`
+          : `${live.model} · ${live.endpoint ?? "unknown host"} (from ${live.source ?? "unknown"})`;
       if (health) {
-        const chosen = list.find((e) => live.model && e.model === live.model);
         health.textContent = chosen ? (chosen.health?.reachable ? `${chosen.health.ms}ms` : "unreachable") : "unknown";
         health.className = `status-pill${chosen?.health?.reachable ? " success" : ""}`;
       }
@@ -2318,7 +2329,12 @@
   function pluginGroupSection(group, title, blurb, empty) {
     const members = state.plugins.filter((plugin) => (plugin.group ?? "Connectors") === group);
     const head = `<h3>${escapeHtml(title)}</h3><p>${escapeHtml(blurb)}</p>`;
-    if (!members.length) return `<section class="settings-section" data-plugin-group="${escapeHtml(group)}">${head}<div class="empty-state">${escapeHtml(empty)}</div></section>`;
+    // PROXY-1: an empty string for `empty` means draw nothing at all. A console with no plan --
+    // a developer Mac, a single-box install, a customer whose control plane has no proxy -- must
+    // not show a heading called "Included with your plan" over an empty box, because that heading
+    // is a promise and there is nothing behind it. Every other group keeps its sentence, which is
+    // information rather than a promise: the relay looked and there were none.
+    if (!members.length) return empty ? `<section class="settings-section" data-plugin-group="${escapeHtml(group)}">${head}<div class="empty-state">${escapeHtml(empty)}</div></section>` : "";
     // One selection on the page, one open card. Falling back to each section's own first member
     // put TWO detail panes on Settings at once: the Slack listener's Connect form, its masked
     // token input and its Cursor-route button sat beside every provider card, which is a change
@@ -2344,7 +2360,7 @@
     const updates = typeof adapter.getHostStatus === "function"
       ? `<section class="settings-section" data-updates-panel><h3>Updates</h3><p>The host bundle this box runs, as getHostStatus reports it. The host itself is not updated from this page: updateHostNow would fetch a bundle from S3 over the locally patched one this box runs, so that command is left unwired here on purpose.</p><div class="setting-row"><div><strong>Host version</strong><small data-host-version>Reading from the host…</small></div><span class="status-pill" data-host-update>…</span></div>${boxAgent ? `<div class="setting-row"><div><strong>Update ${escapeHtml(boxAgent.name)}'s computer</strong><small>Moves the box to a fresh instance and keeps files and logins. Two clicks.</small></div><button class="ghost-button" type="button" data-update-box="${escapeHtml(boxAgent.id)}"${typeof adapter.updateBox === "function" ? "" : " disabled"}>Update</button></div><div class="setting-row"><div><strong>Reset ${escapeHtml(boxAgent.name)}'s computer</strong><small>Restores the box from its last snapshot. Recent unsynced work can be lost — prefer Update. Two clicks.</small></div><button class="danger-button" type="button" data-reset-box="${escapeHtml(boxAgent.id)}"${typeof adapter.resetBox === "function" ? "" : " disabled"}>Reset</button></div>` : ""}</section>`
       : "";
-    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Providers", "Providers", "Every endpoint this box could answer through, as the relay reports them. Adopting one stores its credential in the relay's 0600 store on this Mac; switching one is the endpoint row above.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${jobBusSection()}${mailSection()}${updates}</div>`;
+    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Plan", "Included with your plan", "Models your plan already pays for. There is no key to paste and nothing to connect \u2014 pick one and every agent on this box answers through it from the next message.", "")}${pluginGroupSection("Providers", "Your own keys", "A provider you bring yourself. Adopting one stores its credential in the relay's 0600 store; switching one is the endpoint row above. Your own key always wins over what your plan includes.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${jobBusSection()}${mailSection()}${updates}</div>`;
   }
 
   function openSettingsPanel() {
@@ -4190,6 +4206,11 @@
     // MARKET-1: the install states are derived from the connector cards, so a connector the host
     // has finished launching moves "Connecting" to "Ready" without the operator reopening the panel.
     if (event.type.startsWith("plugin:") && elements.panelDialog.open && openPluginSurface === "marketplace") refreshMarketplace(true);
+    // A provider or plan card's own switch goes through adapter.setModel, which re-reads the box
+    // and then emits. The endpoint row is not redrawn by renderAll, so without this it kept saying
+    // what the box was on before the click: true a second ago, wrong now, on the one row whose
+    // whole job is to say what is actually answering.
+    if ((event.type.startsWith("plugin:") || event.type === "settings:model") && elements.panelDialog.open && openPluginSurface === "settings") fillEndpoints();
     if (event.type === "desktop:pause") renderDesktop();
     // Not renderDesktop: that remounts the VNC frame. Only the hand-back control follows state.
     else if (elements.desktopDialog.open) renderHandBack();

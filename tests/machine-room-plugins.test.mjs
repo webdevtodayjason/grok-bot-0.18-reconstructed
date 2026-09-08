@@ -27,7 +27,7 @@ async function loadAdapterInternals() {
   const body = source.slice(source.indexOf("(function attachGatewayAdapter"));
   const exposed = body.replace(
     "  global.__bootMachineRoom =",
-    "  global.__test = { messagesOf, subscriptionPlugins, connectorPlugins, pluginsOf, routinesOf };\n  global.__bootMachineRoom =",
+    "  global.__test = { messagesOf, subscriptionPlugins, connectorPlugins, pluginsOf, routinesOf, includedPlugins, endpointModels };\n  global.__bootMachineRoom =",
   );
   const window = {
     createDemoAdapter: () => ({}),
@@ -49,7 +49,7 @@ async function loadAdapterInternals() {
   return fn(window, fetchStub);
 }
 
-const { messagesOf, subscriptionPlugins, connectorPlugins, pluginsOf, routinesOf } = await loadAdapterInternals();
+const { messagesOf, subscriptionPlugins, connectorPlugins, pluginsOf, routinesOf, includedPlugins, endpointModels } = await loadAdapterInternals();
 
 test("a connector card carries the box's real server and its real tools", async () => {
   const cards = await connectorPlugins();
@@ -137,4 +137,89 @@ test("an evidence verdict rides on the reply it judged, never as a line of its o
   // The missing token stays in the stamp, for the Claim provenance panel, and is never text on a row.
   assert.deepEqual(rows[1].evidence.missing, ["/workspace/report.md"]);
   assert.ok(!rows.some((r) => r.text.includes("/workspace/report.md")));
+});
+
+
+// ---- PROXY-1: the plan's own cards, and the section they live in -------------------------------
+//
+// The included rows are the one thing on Settings a customer neither owns nor can edit, and the
+// card has to say so by what it does NOT have. Every field asserted below is a thing a provider
+// card carries and this one must not: a secret field, a Connect form, an account to name, a
+// dollar figure.
+
+// What GET /endpoints answers in its `included` array. The relay computes these from the registry
+// per request; the key is never in them, which is why there is nothing key-shaped to assert.
+const INCLUDED = [
+  { id: "plan-zai", model: "plan-zai", name: "Z.AI GLM (included with your plan)", baseUrl: "http://titanbot-proxy:4000/v1", contextWindow: 200000, servedBy: "Z.AI", apiKey: "included", enforced: false, health: { reachable: true } },
+  { id: "plan-minimax", model: "plan-minimax", name: "MiniMax M3 (included with your plan)", baseUrl: "http://titanbot-proxy:4000/v1", contextWindow: 1000000, servedBy: "MiniMax", apiKey: "included", enforced: true, health: { reachable: true } },
+];
+
+test("a plan card has nothing to paste, nothing to connect and no money on it", () => {
+  const cards = includedPlugins(INCLUDED, "plan-zai");
+  assert.equal(cards.length, 2);
+  const [zai, minimax] = cards;
+
+  assert.equal(zai.group, "Plan");
+  // Prefixed so it cannot collide with a connector or a subscription card, while the ENDPOINT id
+  // underneath stays bare -- that string is what the relay resolves and the model menu carries.
+  assert.equal(zai.id, "plan:plan-zai");
+  assert.equal(zai.endpointId, "plan-zai");
+  assert.equal(zai.live, true, "the one the box answers through says so");
+  assert.equal(minimax.live, false);
+
+  // No key form, on any card, in any state. There is no credential for a customer to supply here.
+  for (const card of cards) {
+    assert.equal(card.secretField, null);
+    assert.deepEqual(card.secretFields, []);
+    assert.equal(card.connectable, false, "there is nothing to connect");
+    assert.equal(card.status, "connected", "and nothing to do before it works");
+    assert.match(card.toolsNote, /not a toolset/);
+  }
+
+  // One plain line, in words. Percent and words on the customer's side; dollars live in the admin
+  // console and are not a thing a customer is shown here.
+  assert.match(zai.connectedNote, /^Included with your plan\./);
+  assert.match(minimax.connectedNote, /Titan will say so/, "an enforced plan says what happens at the end of it");
+  for (const card of cards) {
+    for (const forbidden of ["$", "dollar", "USD", "budget", "titanbot", "proxy", "sk-"]) {
+      const text = `${card.name} ${card.description} ${card.connectedNote} ${card.account} ${card.category}`;
+      assert.equal(text.includes(forbidden), false, `"${forbidden}" is on a card a customer reads`);
+    }
+  }
+
+  // Nothing at all when the plan is off, which is a developer Mac and a single-box install.
+  assert.deepEqual(includedPlugins(undefined, null), []);
+  assert.deepEqual(includedPlugins([], null), []);
+});
+
+test("the endpoint menu carries the plan rows, so Currently answering matches when the box is on one", () => {
+  const catalog = {
+    endpoints: [{ id: "mine", name: "my own provider", model: "glm-4.6", baseUrl: "https://example.test/v1", contextWindow: 128000 }],
+    included: INCLUDED,
+    live: { baseUrl: "http://titanbot-proxy:4000/v1", model: "plan-zai" },
+  };
+  const models = endpointModels({ model: "plan-zai" }, catalog);
+  // The plan first, and its rows are real menu entries rather than an unknown extra one.
+  assert.deepEqual(models.available.map((m) => m.id), ["plan-zai", "plan-minimax", "mine"]);
+  assert.equal(models.available[0].provider, "plan");
+  assert.equal(models.available[0].context, "200k");
+  // The thing this test exists for: without the plan rows in the list, `current` was undefined and
+  // the menu grew a row called "plan-zai" with the box's own name on it, beside a picker that
+  // disagreed with it.
+  assert.equal(models.default, "plan-zai");
+  assert.equal(models.available.filter((m) => m.provider === "box").length, 0);
+
+  // A customer on their own key still resolves to their own row, and the plan rows stay available.
+  const own = endpointModels({ model: "glm-4.6" }, { ...catalog, live: { baseUrl: "https://example.test/v1", model: "glm-4.6" } });
+  assert.equal(own.default, "mine");
+});
+
+test("a console with no plan builds the same menu it always did", () => {
+  const catalog = {
+    endpoints: [{ id: "mine", name: "my own provider", model: "glm-4.6", baseUrl: "https://example.test/v1" }],
+    live: { baseUrl: "https://example.test/v1", model: "glm-4.6" },
+  };
+  const models = endpointModels({ model: "glm-4.6" }, catalog);
+  assert.deepEqual(models.available.map((m) => m.id), ["mine"]);
+  assert.equal(models.default, "mine");
 });

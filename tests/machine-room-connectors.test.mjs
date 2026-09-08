@@ -699,6 +699,10 @@ test("the credential form sends a shell tool's value to setShellSecret, not setC
   // MARKET-1: the one grouped nav became two surfaces. The Marketplace draws connectors and shell
   // tools; providers and chat listeners are sections in Settings, built from the same cards.
   assert.match(source, /group === "Connectors" \|\| group === "Shell tools"/);
-  assert.match(source, /pluginGroupSection\("Providers", "Providers"/);
+  // PROXY-1 renamed the heading and added a third section above it: what a plan includes is not a
+  // provider you connect, and once there are two kinds on one page "Providers" stopped being the
+  // word for either. The GROUP names are the contract with the cards and did not move.
+  assert.match(source, /pluginGroupSection\("Plan", "Included with your plan"/);
+  assert.match(source, /pluginGroupSection\("Providers", "Your own keys"/);
   assert.match(source, /pluginGroupSection\("Listeners", "Chat listeners"/);
 });
