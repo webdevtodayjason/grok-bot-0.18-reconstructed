@@ -19,6 +19,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { transform } from "esbuild";
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const OAUTH_TINYFISH = {
@@ -234,6 +236,67 @@ test("a host that answers no stored list leaves the card claiming nothing is hel
   const [card] = await connectorPlugins();
   assert.deepEqual(card.secretFields, ["TINYFISH_API_KEY"]);
   assert.deepEqual(card.storedFields, []);
+});
+
+/* ------------------------------------------------------------------------------------------- *
+ * PROXY-1, leg one: the same preset, bridged to the proxy instead of the public endpoint.
+ *
+ * ONE catalog entry serves an operator install and a tenant box. With no proxy configured the
+ * entry is the public one character for character -- that is the first assertion below and it is
+ * the one that keeps an operator install unchanged. With a proxy configured the far end and the
+ * two headers move, and the placeholder now expands to that BOX's virtual key rather than the
+ * operator's TinyFish key, so the migration can take the operator's key out of the box and the
+ * connector keeps working.
+ *
+ * Measured against LiteLLM v1.100.0 on this Mac, 2026-09-08 (docker, stub upstream): mcp-remote
+ * connects to the mount, initializes and lists tools with exactly these two headers.
+ * ------------------------------------------------------------------------------------------- */
+test("the catalog's TinyFish entry is the public one until a proxy is configured, and then it bridges to the proxy", async () => {
+  const source = await readFile(path.join(repoRoot, "source/shared/marketplace/catalog.ts"), "utf8");
+  const { code } = await transform(source, { format: "esm", loader: "ts", target: "es2022" });
+  const catalog = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const tinyfish = catalog.findMarketplacePlugin("tinyfish");
+
+  // No proxy: byte for byte what an operator install has always had.
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish).args, TINYFISH_ARGS);
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, {}).args, TINYFISH_ARGS);
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: null }).args, TINYFISH_ARGS);
+  assert.deepEqual(catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: "" }).args, TINYFISH_ARGS);
+
+  // With a proxy: the mount, the key header the bridge does not own, and the server name.
+  const tenant = catalog.marketplaceConnectorEntry(tinyfish, { proxyMcpUrl: "http://titanbot-proxy:4000/mcp/" });
+  assert.deepEqual(tenant.args, [
+    "-y", "mcp-remote", "http://titanbot-proxy:4000/mcp/", "--transport", "http-only",
+    "--header", "x-litellm-api-key:Bearer ${TINYFISH_API_KEY}",
+    "--header", "x-mcp-servers:tinyfish",
+  ]);
+  // The credential name does not move, so the box's own 0600 store and the card keep one name.
+  assert.deepEqual(tenant.env, { TINYFISH_API_KEY: "" });
+  // Authorization stays free: mcp-remote uses it for its own OAuth discovery, which is why the
+  // proxy's alternate header name exists at all.
+  assert.equal(tenant.args.some((a) => a.startsWith("Authorization:")), false);
+  // Still no key anywhere, still the unexpanded placeholder.
+  assert.equal(JSON.stringify(tenant).includes("${TINYFISH_API_KEY}"), true);
+
+  // A plugin that is not on a plan is untouched by the option: only a declared mount is bridged.
+  const github = catalog.findMarketplacePlugin("github");
+  assert.deepEqual(
+    catalog.marketplaceConnectorEntry(github, { proxyMcpUrl: "http://titanbot-proxy:4000/mcp/" }),
+    catalog.marketplaceConnectorEntry(github),
+  );
+});
+
+test("the credential card says a customer on a plan needs no key of their own", async () => {
+  const source = await readFile(path.join(repoRoot, "source/shared/marketplace/catalog.ts"), "utf8");
+  const { code } = await transform(source, { format: "esm", loader: "ts", target: "es2022" });
+  const catalog = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const hint = catalog.findMarketplacePlugin("tinyfish").credentialHints.TINYFISH_API_KEY;
+  assert.match(hint, /included with your plan you need no key here at all/);
+  // Plain words on the customer's side: no vendor of ours, no dollars, no tool name.
+  assert.equal(/LiteLLM|virtual key|proxy/i.test(hint), false);
+  // And the console's own preset row carries the same sentence, or the two drift.
+  const adapter = await readFile(path.join(repoRoot, "ui/machine-room/gateway-adapter.js"), "utf8");
+  assert.equal(adapter.includes("included with your plan you need no key here at all"), true);
 });
 
 // -- app.js's half, asserted on the source: both are inside the delegated click and submit

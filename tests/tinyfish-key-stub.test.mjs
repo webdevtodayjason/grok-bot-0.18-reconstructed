@@ -10,9 +10,12 @@
 // one.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
+
+import { transform } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STUB = path.join(repoRoot, "scripts", "lib", "mcp-bearer-stub.mjs");
@@ -171,4 +174,155 @@ test("MCP_STUB_HEADERS: a request missing or mismatching a required header is re
   } finally {
     second.kill("SIGKILL");
   }
+});
+
+/* ------------------------------------------------------------------------------------------- *
+ * PROXY-1. Where the REST leg dials and which header it carries.
+ *
+ * The credential and the two endpoints come out of ONE 0600 store, so a box that has been moved
+ * onto the proxy and a box that has not are the same code path with different file contents. Three
+ * claims, and the first of them is the one that matters most: a box with nothing set behaves
+ * exactly as it did before this wave, byte for byte.
+ *
+ * Nothing here reads a real credential either. The keys are invented, both TinyFish and the proxy
+ * are functions in this file, and the only endpoints asserted are the strings the code would dial.
+ * ------------------------------------------------------------------------------------------- */
+
+const routeSource = await readFile(path.join(repoRoot, "source/host/extensions/inference/tinyfish-route.ts"), "utf8");
+const { code: routeCode } = await transform(routeSource, { format: "esm", loader: "ts", target: "es2022" });
+const route = await import(`data:text/javascript;base64,${Buffer.from(routeCode).toString("base64")}`);
+
+/** Records what was dialled and answers the two payload shapes the parsers expect. */
+function recordingFetch(requests) {
+  return async (url, init) => {
+    requests.push({ url: String(url), init });
+    const body = String(url).includes("search")
+      ? JSON.stringify({ results: [{ title: "R", url: "https://r.example/", snippet: "snip" }] })
+      : JSON.stringify({ results: [{ url: "https://p.example/", title: "P", text: "body" }] });
+    return { ok: true, status: 200, headers: { get: () => "application/json" }, text: async () => body };
+  };
+}
+
+test("a box with nothing set still calls api.fetch and api.search with X-API-Key", async () => {
+  const invented = `tf-invented-${Math.random().toString(36).slice(2, 10)}`;
+  const requests = [];
+  const resolved = route.resolveWebFallback({
+    listConnectors: () => [],
+    readApiKey: () => invented,
+    // The two readers exist and answer null, which is what a box that has never seen the proxy
+    // has: the fields are simply absent from its connector-env-secrets.json.
+    readFetchEndpoint: () => null,
+    readSearchEndpoint: () => null,
+    connectorTools: () => null,
+    fetchImpl: recordingFetch(requests),
+  });
+  await resolved.fetchPage("https://p.example/");
+  await resolved.search("bank holidays");
+
+  assert.equal(requests[0].url, route.TINYFISH_FETCH_ENDPOINT);
+  assert.equal(requests[0].url, "https://api.fetch.tinyfish.ai");
+  assert.equal(requests[0].init.headers["x-api-key"], invented);
+  assert.equal(requests[0].init.headers.authorization, undefined, "TinyFish's own REST takes the key header, never a bearer");
+  assert.equal(requests[1].url, "https://api.search.tinyfish.ai?query=bank%20holidays");
+  assert.equal(requests[1].init.headers["x-api-key"], invented);
+  assert.equal(requests[1].init.headers.authorization, undefined);
+
+  // A field present and blank is "not set", not an empty URL: a half-written migration must not
+  // point a box at nothing.
+  const blank = [];
+  const blanked = route.resolveWebFallback({
+    listConnectors: () => [],
+    readApiKey: () => invented,
+    readFetchEndpoint: () => "   ",
+    readSearchEndpoint: () => "",
+    connectorTools: () => null,
+    fetchImpl: recordingFetch(blank),
+  });
+  await blanked.fetchPage("https://p.example/");
+  assert.equal(blank[0].url, "https://api.fetch.tinyfish.ai");
+  assert.equal(blank[0].init.headers["x-api-key"], invented);
+});
+
+test("a box pointed at the proxy calls /tinyfish/fetch and /tinyfish/search with a bearer and no X-API-Key", async () => {
+  // The virtual key is that box's own: metered, budgeted and revocable. The OPERATOR's TinyFish
+  // key is added by the proxy on the far side and is on nothing this process holds.
+  const virtual = `sk-invented-${Math.random().toString(36).slice(2, 10)}`;
+  const base = "http://titanbot-proxy:4000";
+  const requests = [];
+  const resolved = route.resolveWebFallback({
+    listConnectors: () => [],
+    readApiKey: () => virtual,
+    readFetchEndpoint: () => `${base}${route.PROXY_TINYFISH_FETCH_PATH}`,
+    readSearchEndpoint: () => `${base}${route.PROXY_TINYFISH_SEARCH_PATH}`,
+    connectorTools: () => null,
+    fetchImpl: recordingFetch(requests),
+  });
+  await resolved.fetchPage("https://p.example/");
+  await resolved.search("bank holidays");
+
+  assert.equal(route.PROXY_TINYFISH_FETCH_PATH, "/tinyfish/fetch");
+  assert.equal(route.PROXY_TINYFISH_SEARCH_PATH, "/tinyfish/search");
+  assert.equal(requests[0].url, "http://titanbot-proxy:4000/tinyfish/fetch");
+  assert.equal(requests[0].init.method, "POST");
+  assert.equal(requests[0].init.headers.authorization, `Bearer ${virtual}`);
+  assert.equal(requests[0].init.headers["x-api-key"], undefined, "the pass-through authenticates on the bearer");
+  // The body is unchanged: the proxy forwards it, it does not translate it.
+  assert.equal(JSON.parse(requests[0].init.body).urls[0], "https://p.example/");
+  assert.equal(requests[1].url, "http://titanbot-proxy:4000/tinyfish/search?query=bank%20holidays");
+  assert.equal(requests[1].init.headers.authorization, `Bearer ${virtual}`);
+  assert.equal(requests[1].init.headers["x-api-key"], undefined);
+
+  // The rule is the endpoint's host, not a flag anyone has to keep in step: a box pointed back at
+  // TinyFish takes the key header again with no other change.
+  const back = [];
+  const returned = route.resolveWebFallback({
+    listConnectors: () => [],
+    readApiKey: () => virtual,
+    readFetchEndpoint: () => "https://api.fetch.tinyfish.ai",
+    readSearchEndpoint: () => "https://api.search.tinyfish.ai",
+    connectorTools: () => null,
+    fetchImpl: recordingFetch(back),
+  });
+  await returned.fetchPage("https://p.example/");
+  assert.equal(back[0].init.headers["x-api-key"], virtual);
+  assert.equal(back[0].init.headers.authorization, undefined);
+});
+
+test("the connector route is still preferred over REST when tinyfish is in connectors.json", async () => {
+  // CURSOR-1 pinned this order and PROXY-1 does not move it. The endpoints are set, the key is set,
+  // and the connector still wins -- so a tenant box with the connector installed reaches TinyFish
+  // through the bridge and the REST leg stays the backup behind it.
+  const requests = [];
+  const seen = [];
+  const resolved = route.resolveWebFallback({
+    listConnectors: () => ["tinyfish"],
+    readApiKey: () => "sk-invented-should-not-be-used",
+    readFetchEndpoint: () => `http://titanbot-proxy:4000${route.PROXY_TINYFISH_FETCH_PATH}`,
+    readSearchEndpoint: () => `http://titanbot-proxy:4000${route.PROXY_TINYFISH_SEARCH_PATH}`,
+    connectorTools: () => ({
+      callTool: async (request) => {
+        seen.push(request);
+        return JSON.stringify({ results: [{ url: "https://x.example/", title: "X", text: "the page text" }], errors: [] });
+      },
+    }),
+    fetchImpl: recordingFetch(requests),
+  });
+  assert.equal(resolved.route, "connector");
+  await resolved.fetchPage("https://x.example/");
+  assert.equal(requests.length, 0, "the REST leg was dialled while the connector was available");
+  assert.equal(seen[0].server, "tinyfish");
+  assert.equal(seen[0].tool, "fetch_content");
+
+  // And with the connector gone the same box falls to the proxy's REST leg, not to TinyFish direct.
+  const withoutConnector = route.resolveWebFallback({
+    listConnectors: () => [],
+    readApiKey: () => "sk-invented-should-not-be-used",
+    readFetchEndpoint: () => `http://titanbot-proxy:4000${route.PROXY_TINYFISH_FETCH_PATH}`,
+    readSearchEndpoint: () => `http://titanbot-proxy:4000${route.PROXY_TINYFISH_SEARCH_PATH}`,
+    connectorTools: () => null,
+    fetchImpl: recordingFetch(requests),
+  });
+  assert.equal(withoutConnector.route, "api");
+  await withoutConnector.fetchPage("https://x.example/");
+  assert.equal(requests[0].url, "http://titanbot-proxy:4000/tinyfish/fetch");
 });

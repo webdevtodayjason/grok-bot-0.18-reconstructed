@@ -79,6 +79,15 @@ export interface MarketplacePlugin {
   readonly credentialHints: Readonly<Record<string, string>>;
   /** True only for the Custom MCP server card, which opens the existing connector editor. */
   readonly opensEditor?: boolean;
+  /**
+   * PROXY-1. The name this service is mounted under on the proxy's MCP gateway. Present only on a
+   * plugin whose upstream the operator holds a subscription to, and read only when a proxy is
+   * configured: `marketplaceConnectorEntry(plugin, {proxyMcpUrl})` then bridges to the proxy
+   * instead of the public endpoint, carrying the box's own virtual key. With no proxy the entry is
+   * the public one, character for character, so ONE catalog serves an operator install and a
+   * tenant box.
+   */
+  readonly proxyMcpServer?: string;
 }
 
 export interface MarketplaceBotSkill {
@@ -280,9 +289,12 @@ const PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       ]),
       env: Object.freeze({ TINYFISH_API_KEY: "" }),
     }),
+    // PROXY-1. Web search and page fetch are part of a plan, so a tenant box bridges to the proxy's
+    // mount of this same service with its own virtual key instead of holding the operator's.
+    proxyMcpServer: "tinyfish",
     credentialHints: Object.freeze({
       TINYFISH_API_KEY:
-        "Your TinyFish account's API key, carried to https://agent.tinyfish.ai/mcp as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. The key is account-wide; it carries no separate scopes.",
+        "Your TinyFish account's API key, carried to https://agent.tinyfish.ai/mcp as an Authorization bearer — X-API-Key is the REST-side name and this endpoint refuses it. The key is account-wide; it carries no separate scopes. If web search and page fetch are included with your plan you need no key here at all: your box is given one of its own and this card stays empty.",
     }),
   }),
   Object.freeze({
@@ -616,11 +628,58 @@ export function searchMarketplacePlugins(query: unknown): readonly MarketplacePl
     `${plugin.name} ${plugin.tagline} ${plugin.category}`.toLowerCase().includes(needle));
 }
 
+/**
+ * PROXY-1. The proxy's MCP mount, when this box has one. `null` and an absent option are the same
+ * thing and are the default everywhere: an operator install, the console's preset row, the
+ * marketplace card and every existing caller pass nothing and get exactly the entry they got
+ * before.
+ */
+export interface MarketplaceConnectorEntryOptions {
+  readonly proxyMcpUrl?: string | null;
+}
+
+/**
+ * The tenant form of a bridged connector. `mcp-remote` still spawns in the box and still expands
+ * `${...}` in a header value from its own environment; what moves is the far end and the header
+ * names. `x-litellm-api-key` rather than `Authorization` because the bridge owns the Authorization
+ * header for its own OAuth flow, and `x-mcp-servers` because the proxy mounts several services at
+ * one URL and this names the one this connector is.
+ *
+ * An `http://` far end is fine here and is not the endpoint guard's business: that guard lives in
+ * the relay's endpoint save, and an included route never goes through it.
+ */
+function proxyConnectorEntry(entry: MarketplaceConnectorEntry, server: string, proxyMcpUrl: string): MarketplaceConnectorEntry {
+  const credentialField = Object.entries(entry.env).find(([, value]) => value === "")?.[0] ?? null;
+  if (credentialField == null) return entry;
+  return Object.freeze({
+    command: entry.command,
+    args: Object.freeze([
+      "-y",
+      "mcp-remote",
+      proxyMcpUrl,
+      "--transport",
+      "http-only",
+      "--header",
+      `x-litellm-api-key:Bearer \${${credentialField}}`,
+      "--header",
+      `x-mcp-servers:${server}`,
+    ]),
+    env: entry.env,
+  });
+}
+
 /** The connector entry of a plugin, or null for a shell tool and for the editor card. */
-export function marketplaceConnectorEntry(plugin: MarketplacePlugin): MarketplaceConnectorEntry | null {
-  return plugin.kind === "connector" && plugin.install != null && typeof plugin.install !== "string"
+export function marketplaceConnectorEntry(
+  plugin: MarketplacePlugin,
+  options: MarketplaceConnectorEntryOptions = {},
+): MarketplaceConnectorEntry | null {
+  const entry = plugin.kind === "connector" && plugin.install != null && typeof plugin.install !== "string"
     ? plugin.install
     : null;
+  if (entry == null) return null;
+  const proxyMcpUrl = options.proxyMcpUrl ?? null;
+  if (proxyMcpUrl == null || proxyMcpUrl.length === 0 || plugin.proxyMcpServer == null) return entry;
+  return proxyConnectorEntry(entry, plugin.proxyMcpServer, proxyMcpUrl);
 }
 
 /** The shell tool id of a plugin, or null when it is not a shell tool. */

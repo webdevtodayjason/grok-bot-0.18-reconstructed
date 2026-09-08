@@ -9,7 +9,9 @@ import type { InferenceExtensionContext } from "./extension.js";
 import {
   resolveWebFallback,
   TINYFISH_CONNECTOR_NAME,
+  TINYFISH_FETCH_ENDPOINT_FIELD,
   TINYFISH_KEY_FIELD,
+  TINYFISH_SEARCH_ENDPOINT_FIELD,
   type ConnectorToolCaller,
 } from "./tinyfish-route.js";
 import { createSandWebFetchService, createSandWebSearchService } from "./web-tools.js";
@@ -30,10 +32,19 @@ export function createInferenceProductionExtras(
    * any turn can run a tool.
    */
   let connectorTools: ConnectorToolCaller | null = null;
+  /**
+   * PROXY-1. The credential and the two endpoints come out of the SAME 0600 store and are read on
+   * every tool call, exactly as the key already was: the control plane writes all three in one
+   * file, so a box moved onto the proxy takes effect on the next call rather than the next restart,
+   * and a box with only the key behaves as it did before.
+   */
+  const tinyfishSection = () => readConnectorEnvSecrets(getSandRootDir())[TINYFISH_CONNECTOR_NAME] ?? {};
   const webToolsOptions = {
     resolveFallback: () => resolveWebFallback({
       listConnectors: () => Object.keys(readLocalConnectorFile(getSandRootDir())),
-      readApiKey: () => readConnectorEnvSecrets(getSandRootDir())[TINYFISH_CONNECTOR_NAME]?.[TINYFISH_KEY_FIELD] ?? null,
+      readApiKey: () => tinyfishSection()[TINYFISH_KEY_FIELD] ?? null,
+      readFetchEndpoint: () => tinyfishSection()[TINYFISH_FETCH_ENDPOINT_FIELD] ?? null,
+      readSearchEndpoint: () => tinyfishSection()[TINYFISH_SEARCH_ENDPOINT_FIELD] ?? null,
       connectorTools: () => connectorTools,
     }),
     createError: (fields: ConstructorParameters<typeof ToolCallError>[0]) => new ToolCallError(fields),

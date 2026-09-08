@@ -84,6 +84,17 @@ thing to check before trusting anything on screen.
 - **The desktop pane shows the wrong app.** Browser and Terminal share that worker's screen;
   whichever was raised last is on top. Click the surface again.
 - **Everything looks perfect and nothing responds.** Check the red demo banner first.
+- **Every agent, on every customer, errors at once.** That is the proxy, and it is the one thing in
+  this system that can do that: since the migration it is a single point of failure for everybody's
+  inference. Check it in this order. (1) `docker ps | grep titanbot-proxy` — if it is not running,
+  `docker start titanbot-proxy` and every box recovers on its next message, with no restart and no
+  recreate. (2) `curl -s http://titanbot-proxy:4000/health/readiness` from inside the relay
+  container — `{"status":"healthy","db":"connected"}` is the answer; anything mentioning the
+  database means `titanbot-proxy-db` and not the proxy. (3) `deploy/r750/box-isolation.sh --verify`
+  — a missing rule shows as boxes erroring while the proxy is healthy, and the timer reapplies
+  within 60 s. (4) If it is genuinely broken and a customer cannot wait, `cp/cli.mjs proxy rollback
+  <slug>` puts that one box back on its pre-migration credential; it takes effect on their next
+  message. Full failure table: `docs/PROXY.md` §9.
 
 ## Verify it yourself
 
@@ -453,3 +464,46 @@ tree and never seeded. After you stand up your own instance, restore them one of
 Agents keep the ability to write skills themselves: the model's `update_state` tool with target
 `workflow` is on the wire (it is how the learn-from-demonstration recipe saves what it learned),
 and a saved skill shows in the Skills panel and runs by `@name` mention or from the panel.
+
+## The proxy: install, migrate, roll back
+
+The whole design and every measured number is in `docs/PROXY.md`. This is the short operator path.
+
+**Install.** Once, on the R750, and it touches no running customer:
+
+```sh
+ssh dell-remote TITANBOT_DRY_RUN=1 bash /home/sem/titanbot/deploy/proxy-install.sh   # read it first
+ssh dell-remote bash /home/sem/titanbot/deploy/proxy-install.sh
+node deploy/r750/proxy-coolify.mjs                                                   # from the Mac, ~/.api_keys sourced
+```
+
+Then deploy the service in Coolify and check three things before going further: the network alias
+answers `/health/readiness` from inside the relay container, `docker port` shows **nothing**
+published, and `deploy/r750/box-isolation.sh --verify` passes. `PROXY_TINYFISH_KEY_1` is the one
+value the installer cannot fill in for you — there is no TinyFish name in `~/.api_keys` — so set it
+by hand in Coolify or the web fetch route stays on the old path.
+
+**Migrate**, one customer at a time, and this is the only step that changes what anybody uses:
+
+```sh
+cp/cli.mjs proxy migrate --dry-run          # prints what each box holds now, by name, length and hash prefix
+cp/cli.mjs proxy migrate demo               # nobody is using demo, so it goes first
+cp/cli.mjs proxy migrate richard-avery      # tell Richard BEFORE, not after
+cp/cli.mjs proxy migrate titanium           # your own instance last
+```
+
+After each one, check four things on that box and not on any other: the operator key's hash prefix
+is gone from `box-secrets.json` and `connector-env-secrets.json`, the new key's prefix differs from
+every other tenant's, both files are 0600, and the box answers a message. The migration takes effect
+on the next message — the host re-reads that file every turn, so no restart and no recreate, which
+is what BOX-6 requires.
+
+**Roll back**, per customer, from the 0600 snapshot the migration took:
+
+```sh
+cp/cli.mjs proxy rollback richard-avery
+```
+
+Keep those snapshots for the first week and then delete them. From the migration onward the proxy is
+a single point of failure for every customer's inference — see the entry above under "When something
+is wrong".

@@ -96,6 +96,51 @@ Every part of that is load-bearing:
 - One TinyFish per box. Filling the preset over an entry already called `tinyfish` — the OAuth one
   — replaces it whole, `MCP_REMOTE_CONFIG_DIR` included.
 
+## The tenant entry: the same preset, bridged to the proxy (PROXY-1)
+
+Everything above is the operator install and stays the operator install. A customer whose plan
+includes web search and page fetch gets a different far end from the **same catalog entry**, so
+there is one preset and not two lists that drift:
+
+    "tinyfish": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://titanbot-proxy:4000/mcp/",
+               "--transport", "http-only",
+               "--header", "x-litellm-api-key:Bearer ${TINYFISH_API_KEY}",
+               "--header", "x-mcp-servers:tinyfish"],
+      "env": { "TINYFISH_API_KEY": "" }
+    }
+
+Three deliberate differences and one deliberate sameness.
+
+- **`x-litellm-api-key`, not `Authorization`.** `mcp-remote` owns the `Authorization` header for its
+  own OAuth discovery, which is exactly why the proxy offers a second name. Measured on this Mac
+  2026-09-08 against LiteLLM v1.100.0: it accepts the key with or without the `Bearer ` prefix, and
+  also accepts `Authorization` directly; the entry uses the documented form.
+- **`x-mcp-servers: tinyfish`** names which of the services mounted at that one URL this connector
+  is.
+- **`http://`, not `https://`.** That is fine here and is not the endpoint guard's business: the
+  guard lives in the relay's endpoint save, and an included route never passes through it.
+- **The env name does not move.** `TINYFISH_API_KEY` still holds the credential; what changes is
+  whose it is. On a tenant box it holds that box's own virtual key, minted per customer, budgeted
+  and revocable, and the operator's real TinyFish key is added by the proxy on the far side and
+  never enters the box at all.
+
+**Measured, and worth knowing before you rely on it** (this Mac, 2026-09-08, LiteLLM v1.100.0 in
+Docker with a stub upstream, no real TinyFish key involved):
+
+| claim | result |
+| --- | --- |
+| `mcp-remote` 0.8.4 carries unchanged | connects, initializes and lists tools, about 1 s from spawn |
+| a virtual key with no MCP permission | **empty tool list, HTTP 200, no error.** The mint must carry `object_permission: {mcp_servers: ["tinyfish"]}`; `allowed_mcp_servers` is silently ignored |
+| the tool names | listed **prefixed**: `tinyfish-search`, `tinyfish-fetch_content`. A `tools/call` on the unprefixed name still resolves and the upstream receives the unprefixed name |
+| revocation | 401 immediately after `/key/delete` |
+| metering | **none.** Spend stayed 0 after three tool calls; the REST pass-through recorded 0.004 for two |
+
+So this route keeps a customer's TinyFish *tools* alive once the operator's key leaves their box,
+and the REST pass-through behind WebFetch and WebSearch is the route that counts. Both are in
+[docs/PROXY.md](PROXY.md) §7, with the two gap rows the measurement opened (PROXY-4, PROXY-5).
+
 ## Operator: paste the key
 
 **Marketplace** → *Plugins* → **Add** on the TinyFish card, or the **Add or remove a connector**
