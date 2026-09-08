@@ -259,7 +259,15 @@ const entryText = (entry) => {
 const ASK = "I need to sign in to something on your computer myself. Hand the computer over to me "
   + "for the sign-in with a one-line instruction and wait for me. Do not try to sign in yourself.";
 const OPEN_PAGE = `Open the local file file://${PAGE_PATH} in the browser on your computer, so it is on the screen. Do not fill anything in. Reply with one short line when it is up, or one short line saying you could not.`;
+// Measured during the integration run on grok-bot-local-vm: this best-effort turn is not free.
+// Three --console runs in a row, the first produced a hand-off and the next two did not, and the
+// difference each time was an agent left mid-browser by this ask that then kept trying the sign-in
+// itself instead of handing over. The picture no longer depends on it either -- the card falls back
+// to the shared seat on display :1, which paints whatever is on the screen. So it can be turned off
+// for a run that is about the card rather than about what is drawn on the screen behind it.
+const SKIP_PAGE = process.env.GROK_BOT_HANDOFF_SKIP_PAGE === "1";
 const putThePageUp = async () => {
+  if (SKIP_PAGE) { info("the gate's sign-in page was not put on screen (GROK_BOT_HANDOFF_SKIP_PAGE=1); the thumbnail reads whatever the screen holds"); return; }
   const startedAt = Date.now();
   const before = agentReplies(await tailOf(agentId)).length;
   await gw("sendPrompt", { agentId, prompt: OPEN_PAGE }).catch((e) => info(`the page-open ask was rejected (${e.message})`));

@@ -3587,6 +3587,21 @@
     } catch { /* the in-memory copy is still the frame this session draws */ }
   }
 
+  // The screen this card shows is the screen Take over would open, and nothing else. An agent with
+  // no forever box of its own still HAS one: the shared seat on display :1, which is exactly what
+  // ensureDesktop falls back to when ensureForeverBox hands back no token, and what the desktop
+  // view then paints. Measured on grok-bot-local-vm during the integration run: an agent told to
+  // browse still reported state "absent" with vncUrl null 95 s later, so reading the display off
+  // the passive status alone meant the ordinary hand-off never showed a picture at all -- the card
+  // sat on "Bringing the screen up" for the whole step. Falling back is not showing somebody
+  // else's screen: the product's own words for display :1 are "the shared screen -- every agent on
+  // this box sees it".
+  const BOX_HANDOFF_SHARED_DISPLAY = 1;
+  function boxHandoffDisplayOf(record) {
+    const own = Number(record?.boxDisplay);
+    return Number.isFinite(own) && own > 0 ? own : BOX_HANDOFF_SHARED_DISPLAY;
+  }
+
   // What only the live page can answer, handed to handoffCardMarkup so that function stays pure.
   function boxHandoffView(message) {
     const lead = contextLead();
@@ -3596,10 +3611,10 @@
       live: lead?.handoff ?? null,
       agentId,
       frame: boxHandoffFrame(agentId, requestId),
-      // Only ever false when the box has told us it has no screen: an unread box is not a box
-      // without one, and saying "no screen to show" about a screen that is coming is a lie the
-      // person cannot check.
-      hasScreen: lead && lead.boxState != null && lead.boxDisplay == null ? false : true,
+      // There is always a screen to try now that the shared seat is the fallback, so the plate says
+      // the picture is coming rather than that there is none. The other wording stays in the markup
+      // for a caller that knows the box has no screen at all.
+      hasScreen: true,
     };
   }
 
@@ -3741,8 +3756,8 @@
     const lead = activeContext()?.kind === "worker" ? contextRecord() : null;
     const live = lead?.handoff ?? null;
     const openId = lead?.id ?? null;
-    const display = Number(lead?.boxDisplay);
-    if (live && Number.isFinite(display) && display > 0) boxHandoffEnsureThumb(openId, live.requestId, display);
+    const display = boxHandoffDisplayOf(lead);
+    if (live) boxHandoffEnsureThumb(openId, live.requestId, display);
     // A render that happens to carry no display is NOT the hand-off ending. The roster is rebuilt
     // from listAgents and the box status is a separate read, so the record is briefly without a
     // display between the two -- and tearing the reader down there restarted noVNC's 1.3 s
