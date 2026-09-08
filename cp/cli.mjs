@@ -439,19 +439,28 @@ async function proxyMigrate(args) {
       out(`  key ${minted.record.alias} ${minted.minted ? "minted" : "already there"}`);
 
       const used = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/use-included`, {});
-      out(`  the box now answers through the plan: ${String(used.message ?? "switched")}`);
+      out(`  the box now answers through the plan: ${String(used.endpointName ?? used.using ?? "switched")}`);
+      if (used.rollbackFile) out(`  the way back is kept at ${used.rollbackFile}`);
 
       if (!prefix) {
         out("  nothing was deleted, because no --forget <sha256 prefix> was given. Run again with it once you have read what the box holds.");
         continue;
       }
-      const forgotten = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/forget-provider-keys`, { sha256Prefix: prefix });
-      // Names, lengths and hash prefixes of what is left. Never a value, so this output is safe to
-      // paste into a ticket, which is exactly what it is for.
+      // The field is `prefix`, which is what the relay route reads. It is a PREFIX and never a
+      // value, so this call proves the caller knows WHICH credential without the route ever
+      // accepting one, and a typo deletes nothing rather than something.
+      const forgotten = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/forget-provider-keys`, { prefix });
+      // Names, lengths and hash prefixes, of what went and of what is left. Never a value, so this
+      // output is safe to paste into a ticket, which is exactly what it is for. The remaining list
+      // is the absence proof: the operator reads it and sees the hash they asked to remove is not
+      // in it, rather than taking a count on trust.
+      for (const line of forgotten.removed ?? []) {
+        out(`  removed ${line.file}.${line.name}: ${line.length} chars, sha256 ${String(line.sha256 ?? "").slice(0, 12)}`);
+      }
       for (const line of forgotten.remaining ?? []) {
         out(`  remaining ${line.where}.${line.name}: ${line.length} chars, sha256 ${String(line.sha256 ?? "").slice(0, 12)}`);
       }
-      out(`  removed ${forgotten.removed ?? 0} value${forgotten.removed === 1 ? "" : "s"} matching ${prefix}`);
+      out(`  removed ${forgotten.removedCount ?? 0} value${forgotten.removedCount === 1 ? "" : "s"} matching ${prefix}`);
     }
   } finally { store.close(); }
 }
@@ -465,7 +474,7 @@ async function proxyRollback(args) {
   try {
     for (const row of proxyTargets(store, args)) {
       const answer = await askRelay("POST", `/admin/tenants/${encodeURIComponent(row.slug)}/rollback-included`, {});
-      out(`${pad(row.slug, 20)}${String(answer.message ?? "restored")}`);
+      out(`${pad(row.slug, 20)}${answer.restoredFrom ? `restored from ${answer.restoredFrom}` : String(answer.message ?? "restored")}`);
       out("  it takes effect on that workspace's next message, with no restart and no recreate");
     }
   } finally { store.close(); }

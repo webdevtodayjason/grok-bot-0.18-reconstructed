@@ -63,9 +63,13 @@ async function startFakeRelay(token) {
     const presented = String(request.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
     calls.push({ route: `${request.method} ${url.pathname}`, body, authorized: presented === token });
     const text = JSON.stringify({
-      message: "switched",
-      removed: body?.sha256Prefix ? 1 : 0,
-      remaining: [{ where: "connector-env-secrets.json", name: "TINYFISH_API_KEY", length: 44, sha256: "9165ce2daa8600000000" }],
+      // The relay's real answer shape, so this stub cannot drift from the route the CLI talks to:
+      // `prefix` in, a `removed` ARRAY and a `removedCount` out, plus the absence proof.
+      endpointName: "Z.AI GLM (included with your plan)",
+      using: "plan-zai",
+      removed: body?.prefix ? [{ file: "box-secrets.json", name: "SAND_OPENAI_COMPATIBLE_API_KEY", length: 113, sha256: "734e60c2f9de" }] : [],
+      removedCount: body?.prefix ? 1 : 0,
+      remaining: [{ where: "connector-env-secrets.json", name: "TINYFISH_API_KEY", length: 44, sha256: "9165ce2daa86" }],
     });
     response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
     response.end(text);
@@ -323,7 +327,7 @@ export async function run(context = {}) {
       const armed = await runCli(["proxy", "migrate", "legacy", "--forget", "734e60c2"], env);
       assert.equal(armed.code, 0, armed.stderr);
       const sent = relay.calls.filter((call) => call.route.endsWith("/forget-provider-keys")).at(-1);
-      assert.deepEqual(sent.body, { sha256Prefix: "734e60c2" });
+      assert.deepEqual(sent.body, { prefix: "734e60c2" });
       assert.equal(sent.authorized, true, "the relay route was opened without the relay's own credential");
       return "no prefix, no delete; with one, exactly that prefix";
     });

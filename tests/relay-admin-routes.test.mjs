@@ -216,10 +216,10 @@ const post = (relay, url, body, init = {}) => fetch(`${relay.base}${url}`, {
 });
 const asAdmin = (relay, url, body) => post(relay, url, body, { headers: { authorization: `Bearer ${RELAY_TOKEN}` } });
 
-test("both migration doors answer only CP_RELAY_TOKEN, and only POST", async () => {
+test("all three migration doors answer only CP_RELAY_TOKEN, and only POST", async () => {
   const { relay } = await startMigrationConsole();
   try {
-    for (const step of ["use-included", "forget-provider-keys"]) {
+    for (const step of ["use-included", "forget-provider-keys", "rollback-included"]) {
       const path = `/admin/tenants/demo/${step}`;
       // The method refusal still comes before the credential, so a wrong method charges nobody's
       // lockout and learns nothing about whether the route is there.
@@ -278,6 +278,37 @@ test("use-included points the box at a plan model, keeps the way back, and answe
   } finally { relay.stop(); }
 });
 
+test("rollback-included puts the box back from the snapshot, and refuses when there is nothing to replay", async () => {
+  const { relay, stub, box, demo } = await startMigrationConsole();
+  try {
+    // Nothing to replay is a plain sentence and no write at all. A box that was never moved onto a
+    // plan must not be "restored" into some default somebody guessed at.
+    const early = await asAdmin(relay, "/admin/tenants/demo/rollback-included", {});
+    assert.equal(early.status, 409, await early.text());
+    assert.equal(stub.secretsOf(box).SAND_OPENAI_COMPATIBLE_API_KEY, OPERATOR_KEY, "a refused rollback wrote something");
+
+    await asAdmin(relay, "/admin/tenants/demo/use-included", { model: "plan-zai" });
+    assert.equal(stub.secretsOf(box).SAND_OPENAI_COMPATIBLE_MODEL, "plan-zai");
+
+    const res = await asAdmin(relay, "/admin/tenants/demo/rollback-included", {});
+    const raw = await res.text();
+    assert.equal(res.status, 200, raw);
+    const body = JSON.parse(raw);
+    assert.equal(body.restoredFrom, path.join(demo.profile, "model-proxy-rollback.json"));
+    // Names, lengths and hash prefixes on the way out, the same as every other door here.
+    assert.equal(raw.includes(OPERATOR_KEY), false, "the answer must not carry the key it put back");
+    assert.equal(raw.includes("sk-virtual-for-demo"), false);
+
+    // The box is byte for byte what it was before the switch, and still 0600.
+    const back = stub.secretsOf(box);
+    assert.equal(back.SAND_OPENAI_COMPATIBLE_API_KEY, OPERATOR_KEY);
+    assert.equal(back.SAND_OPENAI_COMPATIBLE_MODEL, "qwen3.8-max");
+    assert.equal(Object.hasOwn(back, "SAND_OPENAI_COMPATIBLE_SERVED_BY"), false,
+      "plan wording must not survive a rollback onto the customer's own key");
+    assert.equal(statSync(stub.fileOf(box, "box-secrets.json")).mode & 0o777, 0o600);
+  } finally { relay.stop(); }
+});
+
 test("forget-provider-keys deletes only the hash it was given, in all three places, and leaves both files valid", async () => {
   const { relay, stub, box, demo } = await startMigrationConsole();
   try {
@@ -309,6 +340,16 @@ test("forget-provider-keys deletes only the hash it was given, in all three plac
     for (const entry of body.removed) assert.equal(entry.sha256, sha12(OPERATOR_KEY));
     for (const entry of body.removed) assert.equal(entry.length, OPERATOR_KEY.length);
 
+    // The absence proof. The migration is judged on what is LEFT in the box, not on a removal
+    // count, so the answer lists every credential still there by name, length and hash prefix, and
+    // the hash that was asked for is not among them.
+    assert.equal(body.remaining.some((entry) => entry.sha256 === sha12(OPERATOR_KEY)), false,
+      "the hash that was removed is still being reported as present");
+    assert.equal(body.remaining.some((entry) => entry.where === "connector-env-secrets.json"
+      && entry.sha256 === sha12(OPERATOR_TINYFISH)), true,
+      "a credential this call was not asked about must still be reported as present");
+    assert.equal(raw.includes(OPERATOR_TINYFISH), false, "the remaining list must carry no value either");
+
     // Gone from the box, and nothing else went with it.
     const secrets = stub.secretsOf(box);
     assert.equal(secrets.SAND_OPENAI_COMPATIBLE_API_KEY, undefined);
@@ -339,10 +380,10 @@ test("forget-provider-keys deletes only the hash it was given, in all three plac
   } finally { relay.stop(); }
 });
 
-test("neither migration door exists when this console has no control plane", async () => {
+test("no migration door exists when this console has no control plane", async () => {
   const relay = await startRelay({}, { prefix: "relay-admin-migrate-solo-" });
   try {
-    for (const step of ["use-included", "forget-provider-keys"]) {
+    for (const step of ["use-included", "forget-provider-keys", "rollback-included"]) {
       const res = await fetch(`${relay.base}/admin/tenants/demo/${step}`, {
         method: "POST", headers: { authorization: `Bearer ${RELAY_TOKEN}`, "content-type": "application/json" }, body: "{}",
       });

@@ -74,8 +74,16 @@ export const PLAN_MODELS = Object.freeze({
 // the alias is the handle, and a handle you can compute is a handle that cannot go stale.
 export const proxyKeyAlias = (slug) => `titanbot-${String(slug ?? "").trim()}`;
 
-// The tag every key carries, which is what the spend report is grouped and filtered by.
-export const proxyKeyTag = (slug) => `tenant:${String(slug ?? "").trim()}`;
+// THERE IS NO TAG ON A KEY, and this comment is here so nobody adds one back. The merged design
+// said the mint would carry tags: ["tenant:<slug>"]. Measured at integration on 2026-09-08 against
+// the real image: /key/generate with `tags` answers 403, "only available for LiteLLM Enterprise
+// users: tags", so on the open source build that provisioning step cannot succeed at all. The
+// tenant travels in key_alias and metadata instead, which is where the spend panel reads it from
+// anyway, and the spend report is grouped by api_key rather than by tag.
+
+// The MCP servers a tenant's virtual key is allowed to reach, which must match the names in the
+// proxy's own config.yaml. One today.
+export const MCP_SERVERS = Object.freeze(["tinyfish"]);
 
 // The one place that knows a key belongs to a plan model rather than to a customer's own provider.
 export const isPlanModel = (id) => String(id ?? "").startsWith(PLAN_MODEL_PREFIX);
@@ -192,9 +200,15 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
       const alias = proxyKeyAlias(slug);
       const body = {
         key_alias: alias,
-        tags: [proxyKeyTag(slug)],
         models: [...models],
         metadata: { slug: String(slug), box: String(box ?? "") },
+        // The MCP grant. Measured at integration on 2026-09-08 against the real
+        // docker.litellm.ai/berriai/litellm-database:v1.100.0: a key minted WITHOUT this sees an
+        // EMPTY tool list over the /mcp/ mount and gets HTTP 200 while doing it, so a customer's
+        // TinyFish connector would report healthy and offer nothing. `allowed_mcp_servers` is
+        // accepted by the mint and then silently ignored; `object_permission` is the one that
+        // works. Anything that mints a key here must assert a non-empty tool list rather than a 200.
+        object_permission: { mcp_servers: [...MCP_SERVERS] },
       };
       if (Number(rpmLimit) > 0) body.rpm_limit = Number(rpmLimit);
       if (Number(allowanceUsd) > 0) {

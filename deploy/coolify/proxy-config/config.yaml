@@ -120,7 +120,7 @@ mcp_servers:
     url: https://agent.tinyfish.ai/mcp
     transport: http
     auth_type: bearer_token
-    authorization_token: os.environ/PROXY_TINYFISH_KEY_1
+    authentication_token: os.environ/PROXY_TINYFISH_KEY_1
     description: "TinyFish browser automation, billed to the operator's pooled subscription"
 
 pass_through_endpoints:

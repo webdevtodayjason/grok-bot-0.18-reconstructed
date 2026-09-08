@@ -30,7 +30,7 @@ import {
   isoDay,
   monthStartDay,
   proxyKeyAlias,
-  proxyKeyTag,
+  MCP_SERVERS,
 } from "../cp/proxy.mjs";
 import {
   ensureProxyKey,
@@ -65,11 +65,10 @@ async function withProxy(run, options = {}) {
 
 // ---- the names that cannot change ---------------------------------------------------------------
 
-test("the alias, the tag and the plan prefix are what every other piece computes", () => {
+test("the alias and the plan prefix are what every other piece computes", () => {
   // Derivable from the slug, which is the whole reason this wave adds no column to the store:
   // /key/delete takes aliases, so a handle you can compute is a handle that cannot go stale.
   assert.equal(proxyKeyAlias("richard-avery"), "titanbot-richard-avery");
-  assert.equal(proxyKeyTag("richard-avery"), "tenant:richard-avery");
   assert.equal(isPlanModel("plan-zai"), true);
   // The prefix is how the console tells a row it owns from a row the customer owns, so a customer's
   // own endpoint id must never look like one of ours.
@@ -208,13 +207,20 @@ test("the key file is 0600 and carries no more than the box and the registry nee
   });
 });
 
-test("what the mint sends is the tenant's own alias, tag and metadata, and nobody else's", async () => {
+test("what the mint sends is the tenant's own alias and metadata, and never an enterprise-only tag", async () => {
   await withProxy(async ({ proxy, config }) => {
     await ensureProxyKey(SLUG, config, { box: "titanbot-box-svc-acme" });
     const sent = proxy.callsTo("POST /key/generate")[0].body;
     assert.equal(sent.key_alias, "titanbot-acme");
-    assert.deepEqual(sent.tags, ["tenant:acme"]);
+    // Measured at integration 2026-09-08 against docker.litellm.ai/berriai/litellm-database:v1.100.0:
+    // a mint carrying `tags` answers 403 "only available for LiteLLM Enterprise users: tags", which
+    // would fail the provisioning step outright on the build we actually run. The tenant travels in
+    // the alias and the metadata, which is where the spend panel reads it from anyway.
+    assert.equal(Object.hasOwn(sent, "tags"), false, "a tag on the mint is a 403 on the open source build");
     assert.deepEqual(sent.metadata, { slug: "acme", box: "titanbot-box-svc-acme" });
+    // Without this grant the key sees an EMPTY MCP tool list and a 200 while doing it, so a
+    // customer's TinyFish connector reports healthy and offers nothing.
+    assert.deepEqual(sent.object_permission, { mcp_servers: [...MCP_SERVERS] });
     assert.deepEqual([...sent.models].sort(), ["plan-minimax", "plan-zai"]);
   });
 });

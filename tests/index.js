@@ -89,6 +89,7 @@ import "./titan-crew.test.mjs";
 import "./cp-session.test.mjs";
 import "./cp-store.test.mjs";
 import "./cp-provision.test.mjs";
+import "./cp-proxy.test.mjs";
 import "./cp-server.test.mjs";
 import "./control-plane-deploy.test.mjs";
 // PROXY-1. The proxy's deploy: the compose properties the design rests on, the two scripts held to
@@ -108,6 +109,7 @@ import "./cursor-free.test.mjs";
 // has already started, so the run stops after the first file or two. Static imports are hoisted
 // and all resolve before this module's body runs, which is why they work and nothing else does.
 import "./agent-cap.test.mjs";
+import "./box-secrets-preserve.test.mjs";
 import "./box-health-sweep.test.mjs";
 import "./browser-direct-tools.test.mjs";
 import "./browser-driver-address-guard.test.mjs";

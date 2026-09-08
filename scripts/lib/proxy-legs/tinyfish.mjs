@@ -271,6 +271,41 @@ export async function runTinyFishLeg(context) {
   return { checks: record.checks, measurements };
 }
 
+/**
+ * The name scripts/verify-proxy.mjs imports. It hands every leg {report, real, baseUrl, masterKey}.
+ *
+ * This leg is the one that cannot run against the stub proxy, and saying so is the point. What it
+ * measures is that LiteLLM's own pass_through swaps the caller's virtual key for the OPERATOR's
+ * pooled TinyFish credential on the way out, and meters the request against the caller. The stub
+ * models the routes but not that swap -- it has no configured upstream credential at all -- so
+ * running this against it would measure the stub's forwarding and report a green light for
+ * something nobody tested. An INCONCLUSIVE that names the command to run is worth more than that.
+ *
+ * Against a real proxy (--real) it runs for real. The TinyFish upstream is a stub either way: the
+ * operator's own TinyFish key lives in a file this tree is not allowed to read.
+ */
+export async function run({ report, real, baseUrl, masterKey }) {
+  report.step("tinyfish");
+  if (!real) {
+    return report.unresolved("the tinyfish leg",
+      "it measures LiteLLM's own pass_through credential swap, which the stub does not model. "
+      + "Run it against a real proxy: node scripts/lib/proxy-legs/tinyfish.mjs --proxy <url> --master-key <key> --operator-key <key>");
+  }
+  const operatorKey = process.env.PROXY_TINYFISH_KEY_1 ?? "";
+  if (operatorKey.length === 0) {
+    return report.unresolved("the tinyfish leg",
+      "PROXY_TINYFISH_KEY_1 is not in this environment, so there is no operator credential for the pass-through to swap in");
+  }
+  const { checks } = await runTinyFishLeg({
+    proxyUrl: baseUrl,
+    masterKey,
+    restStubUrl: process.env.PROXY_TINYFISH_REST_STUB ?? "http://127.0.0.1:8791",
+    operatorKey,
+    skipMcp: process.env.PROXY_TINYFISH_SKIP_MCP === "1",
+  });
+  for (const check of checks) report.check(check.pass, check.name, check.detail ?? "");
+}
+
 function argOf(name, fallback = null) {
   const index = process.argv.indexOf(`--${name}`);
   return index === -1 ? fallback : process.argv[index + 1];

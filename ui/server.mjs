@@ -936,7 +936,7 @@ function sharedBoxHealth() {
 // Neither answers with a value. What leaves this process is a NAME, a LENGTH and the first twelve
 // hex characters of a sha256, which is enough to prove a specific key is gone from a specific box
 // and not enough to be one.
-const TENANT_ADMIN_ROUTE = /^\/admin\/tenants\/([^/]+)\/(use-included|forget-provider-keys)$/;
+const TENANT_ADMIN_ROUTE = /^\/admin\/tenants\/([^/]+)\/(use-included|forget-provider-keys|rollback-included)$/;
 const sha256Hex = (value) => createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 const evidenceOf = (name, value) => ({ name, length: String(value ?? "").length, sha256: sha256Hex(value).slice(0, 12) });
 
@@ -989,9 +989,9 @@ async function handleTenantMigration(req, res, slug, step) {
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     return res.end(JSON.stringify({ slug, measuredAt: new Date().toISOString(), ...payload }));
   };
-  return step === "use-included"
-    ? await useIncluded(res, t, body, answer)
-    : await forgetProviderKeys(res, t, body, answer);
+  if (step === "use-included") return await useIncluded(res, t, body, answer);
+  if (step === "rollback-included") return await rollbackIncluded(res, t, answer);
+  return await forgetProviderKeys(res, t, body, answer);
 }
 
 // Point this box at one of its included models, keeping the way back. The snapshot is taken FIRST
@@ -1085,7 +1085,46 @@ async function forgetProviderKeys(res, t, body, answer) {
   }
   if (connectorsChanged) await writeBoxFile(t, CONNECTOR_SECRETS_PATH, JSON.stringify(connectorSecrets));
 
-  return answer({ prefix, removed, removedCount: removed.length });
+  // What is STILL in this box afterwards, by name, length and hash prefix. This is the absence
+  // proof the migration is judged on: the operator reads it and sees that the hash they asked to
+  // remove is not in the list, rather than taking a removal count on trust. Names only, never a
+  // value, which is what makes the output safe to paste into a ticket.
+  const remaining = [
+    ...Object.entries(keptSecrets).map(([name, value]) => ({ where: "box-secrets.json", ...evidenceOf(name, value) })),
+    ...endpoints.filter((row) => String(row?.apiKey ?? "").length > 0)
+      .map((row) => ({ where: "endpoints.json", ...evidenceOf(`${row.id}.apiKey`, row.apiKey) })),
+    ...Object.entries(connectorSecrets?.servers ?? {}).flatMap(([server, fields]) =>
+      (typeof fields === "object" && fields != null && !Array.isArray(fields))
+        ? Object.entries(fields).map(([field, value]) => ({ where: "connector-env-secrets.json", ...evidenceOf(`servers.${server}.${field}`, value) }))
+        : []),
+  ];
+
+  return answer({ prefix, removed, removedCount: removed.length, remaining });
+}
+
+// Putting one box back the way it was, from the snapshot use-included took before it moved.
+//
+// This is the third door rather than a flag on use-included on purpose. If rollback were a flag and
+// somebody wired it wrong, the box would be pointed AT the proxy instead of away from it, which is
+// a wrong action that answers 200. A route of its own either exists or answers 404, and a 404 is
+// something an operator can act on at three in the morning.
+async function rollbackIncluded(res, t, answer) {
+  if (String(t.profileDir ?? "").length === 0) return fail(res, 409, `${t.slug} has no profile directory to read a rollback from`);
+  const rollbackFile = path.join(t.profileDir, ROLLBACK_NAME);
+  let saved;
+  try { saved = JSON.parse(await readFile(rollbackFile, "utf8")); }
+  catch { return fail(res, 409, `there is no rollback to replay for ${t.slug}; this box was never moved onto a plan`); }
+  const secrets = saved?.secrets;
+  if (typeof secrets !== "object" || secrets == null || Array.isArray(secrets)) {
+    return fail(res, 409, `the rollback kept for ${t.slug} is not readable`);
+  }
+  // Through the same writer as every other change to this file, so it lands 0600 like its
+  // neighbours and takes effect on that workspace's next message with no restart and no recreate.
+  await writeSecrets(t, secrets);
+  return answer({
+    restoredFrom: rollbackFile,
+    wrote: Object.keys(secrets).sort().map((name) => evidenceOf(name, secrets[name])),
+  });
 }
 
 function handleLogout(req, res) {
