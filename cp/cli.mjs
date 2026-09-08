@@ -776,7 +776,12 @@ async function proxySeed(args) {
   let plan;
   try { plan = JSON.parse(readFileSync(file, "utf8")); }
   catch (error) { return die(`could not read ${file}: ${String(error?.message ?? error)}`); }
-  if (Number(plan?.version) !== 1) die(`${file} is version ${plan?.version ?? "unknown"}; this build seeds version 1`);
+  // THE FILE'S OWN SCHEMA, read as it is written rather than as this reader once assumed. Item A
+  // shipped bootstrap.json with schemaVersion, a top-level credentials list and modelName on a plan
+  // model; this function was reading version, provider.keys and alias, so on the R750 it stopped on
+  // "version unknown" and would have written nothing had it got past that. tests/proxy-deploy.test.mjs
+  // pins the file's shape, so the file is the contract and this is the side that moves.
+  if (Number(plan?.schemaVersion) !== 1) die(`${file} is schema version ${plan?.schemaVersion ?? "unknown"}; this build seeds version 1`);
 
   const state = await askAdmin("GET", "/v1/admin/providers");
   if (state.configured !== true) die(state.why || "this control plane has no proxy configured");
@@ -788,35 +793,84 @@ async function proxySeed(args) {
   }
   say(`seeding from ${file}${dryRun ? " (dry run, nothing is written)" : ""}`);
 
+  // A provider that is already a preset in cp/proxy.mjs is registered by being a preset; the file
+  // only has to register one that is not.
   for (const provider of plan.providers ?? []) {
     const existing = state.providers.find((row) => row.id === provider.id);
-    if (existing == null) {
-      say(`  provider ${provider.id}: register`);
-      if (!dryRun) await askAdmin("POST", "/v1/admin/providers", provider);
-    } else {
-      say(`  provider ${provider.id}: already here`);
+    if (existing != null) { say(`  provider ${provider.id}: already here`); continue; }
+    say(`  provider ${provider.id}: register`);
+    if (!dryRun) {
+      await askAdmin("POST", "/v1/admin/providers", {
+        id: provider.id,
+        name: provider.name,
+        // The file says what the vendor's API looks like; the route wants the litellm prefix a new
+        // plan model gets, and openai-compatible is spelled openai there.
+        kind: String(provider.kind ?? "openai") === "openai-compatible" ? "openai" : String(provider.kind ?? "openai"),
+        baseUrl: String(provider.apiBase ?? ""),
+        catalogBaseUrl: String(provider.catalog?.baseUrl ?? provider.apiBase ?? ""),
+        catalogPath: String(provider.catalog?.path ?? ""),
+        curated: Array.isArray(provider.curatedModels) ? provider.curatedModels : [],
+      });
     }
-    for (const slot of provider.keys ?? []) {
-      if (existing?.keys.some((row) => row.slot === slot.slot)) { say(`    ${slot.slot}: already holds a key`); continue; }
-      const value = String(process.env[String(slot.env ?? "")] ?? "");
-      if (value.length === 0) {
-        say(`    ${slot.slot}: EMPTY. Its value would come from ${slot.env}, which this container does not carry. Add the key in the Providers panel.`);
-        continue;
-      }
-      say(`    ${slot.slot}: adding a key from ${slot.env} (${evidenceLine(value)})`);
-      if (!dryRun) await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys`, { slot: slot.slot, label: slot.label, apiKey: value });
+  }
+
+  // THE KEYS, from the environment names the file records and never from a value in the file. A
+  // name this container does not carry is said out loud and skipped: the Providers panel is where
+  // that key goes, and a seed that invented one would be worse than one that stopped.
+  for (const slot of plan.credentials ?? []) {
+    const name = String(slot.credentialName ?? "");
+    const provider = String(slot.provider ?? "");
+    if (state.providers.find((row) => row.id === provider)?.keys.some((row) => row.slot === name)) {
+      say(`    ${name}: already holds a key`);
+      continue;
+    }
+    const value = String(process.env[String(slot.env ?? "")] ?? "");
+    if (value.length === 0) {
+      say(`    ${name}: EMPTY. Its value would come from ${slot.env}, which this container does not carry. Add the key in the Providers panel.`);
+      continue;
+    }
+    say(`    ${name}: adding a key from ${slot.env} (${evidenceLine(value)})`);
+    if (!dryRun) {
+      await askAdmin("POST", `/v1/admin/providers/${encodeURIComponent(provider)}/keys`, {
+        slot: name, label: slot.label, order: slot.order, apiKey: value,
+      });
     }
   }
 
   // The plan models in the file's own order, which is how a vision route comes before the model
   // that falls back to it: POST /fallback validates that its target exists.
   for (const model of plan.planModels ?? []) {
-    if (state.planModels.some((row) => row.alias === model.alias)) { say(`  ${model.alias}: already served`); continue; }
-    say(`  ${model.alias}: create on ${model.vendorModel} across ${(model.keySlots ?? []).join(", ") || "every key this provider has"}`);
+    const alias = String(model.modelName ?? "");
+    if (state.planModels.some((row) => row.alias === alias)) { say(`  ${alias}: already served`); continue; }
+    const slots = Array.isArray(model.credentials) ? model.credentials.map(String) : [];
+    say(`  ${alias}: create on ${model.vendorModel} across ${slots.join(", ") || "every key this provider has"}`);
     if (!dryRun) {
-      const made = await askAdmin("POST", "/v1/admin/plan-models", model);
+      const made = await askAdmin("POST", "/v1/admin/plan-models", {
+        alias,
+        provider: model.provider,
+        vendorModel: model.vendorModel,
+        keySlots: slots,
+        customerName: model.customerName,
+        customerLabel: model.customerLabel,
+        servedBy: model.servedBy,
+        customerVisible: model.customerVisible,
+        supportsVision: model.supportsVision,
+        visionFallback: model.visionFallback,
+        contextWindow: model.contextWindow,
+        plans: model.plans,
+      });
       for (const row of made.deployments ?? []) if (!row.ok) say(`    ${row.slot}: NOT created, ${row.why}`);
     }
+  }
+
+  // The fallback map is set by each plan model's own visionFallback as it is created, which is the
+  // order POST /fallback needs. This loop is the check that it landed, not a second way to write it.
+  for (const pair of plan.fallbacks ?? []) {
+    const after = await askAdmin("GET", "/v1/admin/providers");
+    const row = after.planModels.find((one) => one.alias === String(pair.model ?? ""));
+    const wanted = String((pair.fallbackModels ?? [])[0] ?? "");
+    if (dryRun) { say(`  fallback ${pair.model} -> ${wanted}: would be set when ${pair.model} is created`); continue; }
+    say(`  fallback ${pair.model} -> ${wanted}: ${row?.visionFallback === wanted ? "set" : `NOT set, the proxy says ${row?.visionFallback || "nothing"}`}`);
   }
   say("");
   say(dryRun ? "nothing was written" : "done. Run proxy providers to see what is there now.");
