@@ -362,6 +362,13 @@ there is none, and takes none at all from a box that is already on a plan; its a
 anybody a rollback: `kept` is a true pre-migration state, `on-proxy` is a snapshot that would leave
 the box on the proxy, `none` is a workspace with no snapshot at all.
 
+**demo's snapshot was retired on the R750, 2026-09-08.** It held the state its FIRST migration left
+— a revoked virtual key pointed at the proxy — so `proxy rollback demo` would have taken the box off
+the air and reported success. It is now
+`/data/titanbot/demo/profile/model-proxy-rollback.json.was-a-plan-state-20260908`, which the
+rollback door does not read, so demo answers the honest 409 and rolls back through Settings like
+`titanium`. Delete the retired file when the week is up.
+
 **Jason's own workspace (`titanium`) has no snapshot and is not getting one.** Its pre-migration
 state was the copied operator key that this wave exists to remove and that has to be rotated at the
 vendor, so replaying it would put a dead credential back. `titanium` rolls back by picking an
