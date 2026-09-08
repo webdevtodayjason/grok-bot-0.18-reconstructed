@@ -841,7 +841,16 @@ async function proxySeed(args) {
   // that falls back to it: POST /fallback validates that its target exists.
   for (const model of plan.planModels ?? []) {
     const alias = String(model.modelName ?? "");
-    if (state.planModels.some((row) => row.alias === alias)) { say(`  ${alias}: already served`); continue; }
+    // IN THE DATABASE, not merely being served. During the move the proxy serves the file's own
+    // deployments AND the database's, and /model/info reports both, so "is this alias served" says
+    // yes to a file row that stage 2 is about to delete. A plan model counts as seeded only when a
+    // deployment behind it came out of the database, which is what fromDb answers.
+    const already = state.planModels.find((row) => row.alias === alias);
+    if (already != null && (already.deployments ?? []).some((row) => row.fromDb === true)) {
+      say(`  ${alias}: already in the database`);
+      continue;
+    }
+    if (already != null) say(`  ${alias}: served from the file only, so it is created in the database now`);
     const slots = Array.isArray(model.credentials) ? model.credentials.map(String) : [];
     say(`  ${alias}: create on ${model.vendorModel} across ${slots.join(", ") || "every key this provider has"}`);
     if (!dryRun) {
