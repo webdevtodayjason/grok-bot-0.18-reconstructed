@@ -8,7 +8,8 @@
 
   The panels are in the order Jason asked for them, which is also the order an operator opens them
   in on a bad morning: who has been knocking, then who the customers are, then whether their boxes
-  are up, then whether the machine is, then the money that is not wired in yet.
+  are up, then whether the machine is, then the money that is not wired in yet. Providers is sixth
+  because it is the one panel you open to CHANGE something rather than to find out what happened.
 -->
 <html lang="en">
 <head>
@@ -136,6 +137,98 @@
     </tr></thead><tbody></tbody></table></div>
     <p class="placeholder">Taking the money is not connected yet. Plan pricing and invoices appear
       here when Stripe is wired in.</p>
+  </section>
+
+  <!-- 6. Providers, keys and plan models ----------------------------------------------------- -->
+  <!--
+    PROVIDERS-1. The panel that stops this being a text file and a restart.
+
+    Everything here is a live change: a key added, rolled, parked or removed, a plan model pointed
+    at a different vendor model, a catalog read again, the model a new workspace starts on. Each
+    control says which clock its change runs on, because there are three of them and "takes effect
+    immediately" is true of none.
+
+    The key fields are write-only. A value typed into one goes out in the body of one request and is
+    cleared from the field on the way back. No route on this service reads a key value back, nothing
+    on this page holds one, and the banner names the slot and a short hash and never a fragment of
+    the value itself.
+  -->
+  <section class="panel" id="panel-providers" data-panel="providers">
+    <h2>Providers, keys and plan models</h2>
+    <p class="quiet">Who supplies the models, which keys open them, and what each plan runs on.
+      Nothing on this page needs a restart. What it does need is a moment: the proxy picks a change
+      up on the next request, a workspace on its next turn, and a customer's open page the next time
+      that page loads.</p>
+    <p id="providersNote" class="quiet"></p>
+
+    <h3>Providers and their keys</h3>
+    <div id="providers" class="providers"></div>
+    <div class="controls">
+      <button id="addProviderShow" type="button" class="ghost small">Add a provider</button>
+    </div>
+    <form id="addProviderForm" class="stack" hidden>
+      <div class="fields">
+        <label>Name<input id="providerName" type="text" autocomplete="off" placeholder="Z.AI"></label>
+        <label>Kind<input id="providerKind" type="text" autocomplete="off" placeholder="openai"></label>
+        <label>Address<input id="providerBase" type="url" autocomplete="off" placeholder="https://api.example.com/v1"></label>
+      </div>
+      <p class="quiet">Kind is the shape of the API this provider speaks, which is nearly always
+        openai. Address is the base the requests go to. Add the provider first, then add a key to
+        it, then point a plan model at that key.</p>
+      <div class="controls">
+        <button id="addProviderSave" type="submit" class="ghost small">Add this provider</button>
+        <button id="addProviderCancel" type="button" class="ghost small">Cancel</button>
+      </div>
+    </form>
+
+    <h3>Plan models</h3>
+    <p class="quiet">One row per model a plan includes. The name and the label are what a customer
+      reads and what their Titan says it runs on. The vendor model underneath is the thing that
+      changes when a provider retires one, and changing it leaves the customer's workspace pointed
+      at the same place.</p>
+    <div id="planModels" class="planModels"></div>
+    <div class="controls">
+      <button id="addPlanModelShow" type="button" class="ghost small">Add a plan model</button>
+    </div>
+    <form id="planModelForm" class="stack" hidden>
+      <p id="planModelWhich" class="quiet"></p>
+      <div class="fields">
+        <label>Name the customer sees<input id="pmCustomerName" type="text" autocomplete="off" placeholder="GLM-5.3"></label>
+        <label>What their Titan says it runs<input id="pmCustomerLabel" type="text" autocomplete="off" placeholder="GLM-5.3"></label>
+        <label>Provider<select id="pmProvider"></select></label>
+        <label>Key<select id="pmKey"></select></label>
+        <label>Vendor model<select id="pmVendorModel"></select></label>
+        <label id="pmVendorOtherWrap" hidden>Vendor model, typed<input id="pmVendorOther" type="text" autocomplete="off" placeholder="openai/glm-5.3"></label>
+        <label>If a screenshot is sent, fall back to<select id="pmVision"></select></label>
+        <label>Context window<input id="pmContext" type="number" min="0" step="1000" autocomplete="off"></label>
+        <label>Plans that include it<input id="pmPlans" type="text" autocomplete="off" placeholder="included"></label>
+        <label>Routing name<input id="pmAlias" type="text" autocomplete="off" placeholder="plan-something"></label>
+      </div>
+      <p class="quiet" id="pmAliasNote">The routing name is what a workspace is pointed at. It is
+        set once and never changed after, because every workspace already running on it names it.</p>
+      <label class="check"><input id="pmVisible" type="checkbox" checked> Show this model to
+        customers on their own Settings page</label>
+      <label class="check"><input id="pmSelfVision" type="checkbox"> This model takes screenshots
+        itself, so it is the place other models fall back to</label>
+      <div class="controls">
+        <button id="planModelSave" type="submit" class="ghost small">Save this plan model</button>
+        <button id="planModelCancel" type="button" class="ghost small">Cancel</button>
+      </div>
+    </form>
+
+    <h3>Defaults</h3>
+    <div id="providerDefaults" class="defaults"></div>
+
+    <h3>What changed</h3>
+    <p class="quiet">Every change made from this console, who made it and where from. This list is
+      never pruned.</p>
+    <div class="scroll"><table id="adminLedger"><thead><tr>
+      <th>Time</th><th>Who</th><th>From</th><th>What</th><th>Which one</th><th>Detail</th><th>Outcome</th>
+    </tr></thead><tbody></tbody></table></div>
+
+    <p class="placeholder">The keys and models on this page are held by the proxy that sits in front
+      of every workspace, which is LiteLLM. That name is here once, for you, and it is on no page a
+      customer can open.</p>
   </section>
 
   <footer class="foot">
