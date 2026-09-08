@@ -58,6 +58,7 @@ import "./machine-room-marketplace.test.mjs";
 import "./machine-room-byo-mcp.test.mjs";
 import "./connector-tinyfish-preset.test.mjs";
 import "./connector-preset-catalog.test.mjs";
+import "./connector-spec.test.mjs";
 import "./plugin-credential-fanout.test.mjs";
 import "./managed-seed-skills.test.mjs";
 import "./workflow-injected-body.test.mjs";

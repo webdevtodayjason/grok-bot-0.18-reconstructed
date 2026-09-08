@@ -2248,8 +2248,10 @@ const server = createServer(async (req, res) => {
         // now, and keeping the refusal would make the console the only door that cannot save what
         // the box can run. The host's single writer holds the whole rule table (https, no loopback,
         // no credential in the address, no literal in an auth header) and re-checks every entry on
-        // load; this route checks the SHAPE only, and is due to become a thin delegating call to
-        // that writer rather than a whole-file write over docker exec (design section 3, MARKET-8).
+        // load, so on any box carrying this bundle the shim above has already handled the write and
+        // nothing below runs. What is left here is the old whole-file path, reached only by a box
+        // whose bundle predates the two commands, kept honest enough to refuse a shape that box
+        // would drop on the floor.
         for (const [name, config] of Object.entries(servers)) {
           if (config == null || typeof config !== "object") return fail(res, 400, `${name}: not an object`);
           const hasCommand = typeof config.command === "string" && config.command.length > 0;

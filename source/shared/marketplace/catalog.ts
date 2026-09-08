@@ -1233,8 +1233,16 @@ export function marketplaceShellToolId(plugin: MarketplacePlugin): string | null
 }
 
 /** Every credential field of a plugin: the name each stored value is written under. */
+/**
+ * A row's credential fields. `credentials` is the authority, but a row that speaks only the
+ * pre-MARKET-6 vocabulary -- one carrying `credentialHints` and no declaration, which is what an
+ * older cached catalog row and every hand-built fixture is -- still answers, because the two
+ * vocabularies have to overlap for as long as anything holds a row from before the seam.
+ */
 export function marketplaceCredentialFields(plugin: MarketplacePlugin): readonly string[] {
-  return plugin.credentials.map((credential) => credential.field);
+  return plugin.credentials == null
+    ? Object.keys(plugin.credentialHints ?? {})
+    : plugin.credentials.map((credential) => credential.field);
 }
 
 /**
@@ -1243,6 +1251,7 @@ export function marketplaceCredentialFields(plugin: MarketplacePlugin): readonly
  * change to WHERE one value goes, not to what the operator is told about it.
  */
 export function marketplaceCredentialHints(plugin: MarketplacePlugin): Record<string, string> {
+  if (plugin.credentials == null) return { ...(plugin.credentialHints ?? {}) };
   const hints: Record<string, string> = {};
   for (const credential of plugin.credentials) hints[credential.field] = credential.hint;
   return hints;
@@ -1250,22 +1259,13 @@ export function marketplaceCredentialHints(plugin: MarketplacePlugin): Record<st
 
 /** The credential a stored field belongs to, so a write knows every consumer it has to reach. */
 export function marketplaceCredential(plugin: MarketplacePlugin, field: unknown): MarketplaceCredential | null {
-  return plugin.credentials.find((credential) => credential.field === field) ?? null;
+  return plugin.credentials?.find((credential) => credential.field === field) ?? null;
 }
 
 /**
- * The catalog in the shape the console and the verify scripts already read.
- *
- * `listMarketplace` served this module verbatim, so the row shape WAS the wire shape and changing
- * one changed the other. This is the seam: rows carry `install.connector` as a spec and
- * `credentials` as a list, and the wire keeps carrying `kind`, `install` and `credentialHints`
- * derived from them, so nothing in ui/machine-room or scripts/ has to change on the day the row
- * shape does. The new fields ride along beside the old ones rather than replacing them, because a
- * console that wants the fan-out needs `credentials` and a console that does not is unaffected.
- */
-/**
- * One row in that same shape. `getMarketplaceItem` answers with this so a plugin fetched on its own
- * is the row the list handed out, rather than a differently-shaped cousin of it.
+ * One row in the shape the console and the verify scripts already read. `getMarketplaceItem`
+ * answers with this, so a plugin fetched on its own is the row the list handed out rather than a
+ * differently-shaped cousin of it.
  */
 export function marketplacePluginWireView(
   plugin: MarketplacePlugin,
@@ -1281,6 +1281,16 @@ export function marketplacePluginWireView(
   } as MarketplacePlugin;
 }
 
+/**
+ * The whole catalog in that shape.
+ *
+ * `listMarketplace` served this module verbatim, so the row shape WAS the wire shape and changing
+ * one changed the other. This is the seam: rows carry `install.connector` as a spec and
+ * `credentials` as a list, and the wire keeps carrying `kind`, `install` and `credentialHints`
+ * derived from them, so nothing in ui/machine-room or scripts/ has to change on the day the row
+ * shape does. The new fields ride along beside the old ones rather than replacing them, because a
+ * console that wants the fan-out needs `credentials` and a console that does not is unaffected.
+ */
 export function marketplaceCatalogWireView(
   catalog: MarketplaceCatalog = MARKETPLACE_CATALOG,
   options: MarketplaceConnectorEntryOptions = {},
