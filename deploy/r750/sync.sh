@@ -97,6 +97,7 @@ rsync -a --delete "$BUILD/box-exec-daemon/" "$HOST:$ROOT/runtime/box-exec-daemon
 #
 # --delete, like the daemon above, because a stale module left behind by an older ship is a file
 # node will happily import.
+[ -d "$REPO/runtime/browser-driver" ] || die "$REPO/runtime/browser-driver is missing; the box has no browser driver to mount"
 rsync -a --delete "$REPO/runtime/browser-driver/" "$HOST:$ROOT/runtime/browser-driver/"
 say "runtime/host-main.cjs, runtime/sand-host-bundle-latest.version, runtime/box-exec-daemon/ and runtime/browser-driver/"
 

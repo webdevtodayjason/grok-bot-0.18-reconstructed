@@ -29,6 +29,7 @@ thing to check before trusting anything on screen.
 | **Routines → ＋ New routine** | `createAgentAutomation`. Seven trigger kinds — schedule, Slack, Git, Linear, Sentry, PagerDuty, Teams — and several at once become a group. The host validates and describes them back. |
 | Routines → Test run | `runAgentAutomationNow`, then the card shows the host's own outcome and measured duration. |
 | **Browser / Terminal** | That worker's own X display when it has a desktop session; otherwise the shared screen, and the caption says which. |
+| **Ask a worker to read a web page** | It opens the page in the box's own Chrome, the same one the Browser tab shows and on the same profile, and tells you what the page says. It tries a plain web fetch first because that is faster. The browser is for a page that refused the fetch, one that needs your login, or one you need to see. If the page wants a sign-in it says so and waits: sign in yourself in the Browser tab and tell it to carry on. Long multi-step jobs still go to a desktop worker. Switch it off per box with `SAND_BROWSER_TOOLS=0` in `sand-host-settings.json`; it is on by default. The whole design: [docs/BROWSER.md](BROWSER.md). |
 | **Learn this task** | ffmpeg records that worker's screen on the box, and the dialog opens only once the host reports the recording running. Finish recording queues the video and dispatches the learning turn; Discard and Escape both stop the recording on the box. Clicking outside the dialog does nothing, on purpose: the dialog is modal, so a mis-aimed click anywhere on the page used to land on it and throw a live demonstration away. The dialog opens with a cover where the screen goes and **no client behind it**, so the note, Escape and the buttons all get your keys. Clicking the cover connects the live screen, and from then on the keyboard is the box's, Escape included, so stop with the buttons; clicking anywhere else in the dialog disconnects it and takes the keys back. Needs `SAND_TEACH=1` in `sand-host-settings.json` and a desktop window for that agent. |
 | **Marketplace → Plugins → Add** | Writes that plugin's connector entry into `connectors.json` and calls `refreshMcp`, then opens the plugin page; the key goes into that page's Accounts card, never into the entry. Providers and chat listeners are Settings sections now. The whole surface: [docs/MARKETPLACE.md](MARKETPLACE.md). |
 | **Settings → Model** | Switches the whole box's inference endpoint. Takes effect on the next message. |
@@ -94,8 +95,18 @@ SAND_PROFILE_DIRS=... node scripts/verify-local-turn.mjs --rounds 5
 node scripts/verify-agent-identity.mjs
 node scripts/verify-onboarding.mjs
 node scripts/verify-admin.mjs
-node --test tests/
+SAND_PROFILE_DIRS=... node scripts/verify-browser-tools.mjs
+node --test tests/*.test.mjs
 ```
+
+**The glob matters, and it used to be missing here.** `node --test tests/*.test.mjs` is what
+`npm test` runs and it gives each suite its own process. `node --test tests/` loads
+`tests/index.js` instead, a hand-written list of imports that had drifted: measured on this Mac
+2026-09-07 it named 79 of the 101 suites, so the directory form ran 891 tests where the glob ran
+1101. The 210 in the gap were not failing and not skipped, they simply were not run, and the
+coverage read as green. The list is complete now and `tests/test-index-covers-the-suite.test.mjs`
+fails the suite if it drifts again, but the glob is still the form to use: the directory form runs
+every suite in one process, where a file that awaits at the top can lose the registration race.
 
 `verify-agent-identity` is worth re-running after any model switch: on the frontier model both
 agents name themselves correctly; on Nemotron they do not answer the question at all, which is
@@ -118,6 +129,18 @@ the name only, because writing a real zone on this Mac moves the scheduler). It 
 back, and its box arm points the box at a stub model on this Mac for one turn and repins the
 endpoint it found. Run it on its own, not alongside another gate. The whole design is
 [docs/ONBOARDING.md](ONBOARDING.md).
+
+`verify-browser-tools` measures the browser a worker now drives itself: that the four tools reach
+the main agent and leave for the provider, that a real page comes back as words and one picture,
+that a login-walled page says so in plain words, that typing and clicking change a page the gate
+serves itself, that the audit ledger gained a row per page, and that the Browser tab still shows
+the same Chrome rather than a second one nobody can see. It repins the box's model endpoint for the
+length of the run and points it at a stub on this Mac, so **run it on its own**, not alongside
+another gate; it puts the pin, `SAND_TOOL_TRACE` and `SAND_BROWSER_TOOLS` back whatever happened.
+Pass `--offline` to skip the two public pages. `--dry-run` needs no box at all and proves the gate
+itself works before you spend seven minutes on one. The whole design is
+[docs/BROWSER.md](BROWSER.md). **Not yet run against a box.** The row in
+[docs/GAP-ANALYSIS.md](GAP-ANALYSIS.md) says so and carries the next action.
 
 An existing box never enters the first run. The migration rule marks any box done at the first read
 if it holds more than one agent or any conversation with a person's message in it, so no agent on a

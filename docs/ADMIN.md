@@ -331,7 +331,9 @@ somewhere else if yours is elsewhere, or pass `--no-browser`.
 Exit 0 every leg passed, 1 a leg failed, 2 nothing was measured.
 
 The unit tests are `tests/login-ledger.test.mjs` and `tests/cp-admin.test.mjs`, in
-`node --test tests/`.
+`node --test tests/*.test.mjs`. Use the glob. Both of those files were missing from
+`tests/index.js`, so the directory form `node --test tests/` did not run either of them until
+2026-09-07; the count in this document's own gap row was taken with them absent.
 
 ---
 

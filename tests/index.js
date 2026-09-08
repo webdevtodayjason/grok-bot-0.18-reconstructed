@@ -91,3 +91,38 @@ import "./cp-provision.test.mjs";
 import "./cp-server.test.mjs";
 import "./control-plane-deploy.test.mjs";
 import "./cursor-free.test.mjs";
+
+// Everything below was in tests/ and NOT in this list, so `node --test tests/` did not run it.
+// Measured on this Mac 2026-09-07: the list named 79 files, the directory held 101, and the
+// directory form ran 891 tests where `node --test tests/*.test.mjs` ran 1101. The 210 tests in the
+// gap were not failing and not skipped; as far as the command the runbook gives an operator was
+// concerned they did not exist, and 22 files' worth of coverage read as green because nothing ran
+// it. tests/test-index-covers-the-suite.test.mjs now fails the suite when this list drifts again,
+// which is the only reason a hand-written list of files is allowed to stay hand-written.
+//
+// The list cannot become a readdir: a dynamic `await import` registers its tests after the runner
+// has already started, so the run stops after the first file or two. Static imports are hoisted
+// and all resolve before this module's body runs, which is why they work and nothing else does.
+import "./agent-cap.test.mjs";
+import "./box-health-sweep.test.mjs";
+import "./browser-tools.test.mjs";
+import "./cp-admin.test.mjs";
+import "./cp-relay-pair.test.mjs";
+import "./cp-relay-registry.test.mjs";
+import "./login-ledger.test.mjs";
+import "./machine-room-onboarding.test.mjs";
+import "./mail-edge-routing.test.mjs";
+import "./onboarding-first-agent.test.mjs";
+import "./onboarding-state.test.mjs";
+import "./relay-admin-routes.test.mjs";
+import "./relay-command-status.test.mjs";
+import "./relay-docker-absent.test.mjs";
+import "./relay-mail-tenant-claim.test.mjs";
+import "./relay-one-console.test.mjs";
+import "./relay-state-dir.test.mjs";
+import "./relay-state-out-of-ui.test.mjs";
+import "./relay-tenant-endpoints.test.mjs";
+import "./relay-tenant-login.test.mjs";
+import "./relay-tenant-registry.test.mjs";
+import "./session-token.test.mjs";
+import "./test-index-covers-the-suite.test.mjs";
