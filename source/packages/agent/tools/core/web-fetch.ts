@@ -64,8 +64,11 @@ function truncateContent(content: string): string {
 function localNetworkRejection(url: URL): string | undefined {
   const host = url.hostname.toLowerCase();
   const display = url.port.length > 0 ? `${host}:${url.port}` : host;
-  if (host === "localhost" || host.endsWith(".localhost") || isLoopbackIpHost(host)) return `Cannot fetch from localhost (${display}) because this tool runs from an isolated server.`;
-  if (isPrivateIpHost(host)) return `Cannot fetch from private IP (${display}) because this tool runs from an isolated server.`;
+  // CURSOR-1. The refusal stays and now matters more, because the fetch runs on this machine
+  // rather than on somebody else's server: a request to localhost would reach services inside the
+  // box itself, and one to a private address would reach the network the box sits on.
+  if (host === "localhost" || host.endsWith(".localhost") || isLoopbackIpHost(host)) return `Cannot fetch from localhost (${display}) because this tool reads public web pages, not services running on this machine.`;
+  if (isPrivateIpHost(host)) return `Cannot fetch from private IP (${display}) because this tool reads public web pages, not addresses on a private network.`;
   return undefined;
 }
 
@@ -75,10 +78,10 @@ function description(promptVersion: string, minimal: boolean): string {
 
 - The URL must be a fully-formed, valid URL.
 - This tool is read-only and will not work for requests intended to have side effects.
-- This fetch tries to return live results but may return previously cached content.
+- This fetch reads the page live from this machine.
 - Authentication is not supported, and an error will be returned if the URL requires authentication.
 - If the URL is returning a non-200 status code, the tool will not return the content and will instead return an error message.
-- This fetch runs from an isolated server. Hosts like localhost or private IPs will not work.
+- This fetch reads public web pages only. Hosts like localhost or private IPs will not work.
 - This tool does not support fetching binary content, e.g. media or PDFs.
 `;
 }

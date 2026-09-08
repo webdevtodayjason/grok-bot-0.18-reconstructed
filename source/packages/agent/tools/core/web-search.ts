@@ -81,6 +81,10 @@ function normalizeArgs(args: { readonly search_term: string; readonly explanatio
 
 const API_REQUEST_FAILED_STATUS_REGEX = /\bAPI request failed:\s*(\d{3})\b/i;
 
+/** No tool name, no service name, no vendor name: the person asked a question, not for a tool. */
+export const WEB_SEARCH_PROVIDER_ERROR_MESSAGE =
+  "Could not run that search. The web search service on this machine did not answer. Trying again will not help. Search for it in your browser instead.";
+
 function getErrorMessage(error: unknown): string | undefined {
   if (error instanceof Error) return error.message;
   if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") return error.message;
@@ -104,9 +108,13 @@ function classifyWebSearchProviderError(error: unknown): CustomToolCallError | u
   for (const message of messages) {
     const status = parseProviderStatusFromMessage(message);
     if (status === undefined || status !== 429 && status < 500) continue;
+    // CURSOR-1. "this may be temporary. Please try again." is the sentence Richard saw eleven
+    // times on the R750 while every search was failing against a backend that answers 401. It
+    // tells the person nothing they can act on and it tells the model to retry a call that cannot
+    // succeed, so the agent loops. Say what happened and name the one thing that still works.
     return new CustomToolCallError(ToolErrorClassification.PROVIDER_ERROR, {
-      clientVisibleErrorMessage: "The web search provider returned an error; this may be temporary. Please try again.",
-      modelVisibleErrorMessage: "The web search provider returned an error; this may be temporary. Please try again.",
+      clientVisibleErrorMessage: WEB_SEARCH_PROVIDER_ERROR_MESSAGE,
+      modelVisibleErrorMessage: WEB_SEARCH_PROVIDER_ERROR_MESSAGE,
       error: `${message}. provider_status=${status}`,
     });
   }
