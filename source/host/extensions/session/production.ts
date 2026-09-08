@@ -1,3 +1,4 @@
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HostExtensionContext } from "../../../internal/host-extensions.js";
 import { computerUseExecutorResource } from "../../../packages/agent-exec/computer-use.js";
@@ -19,7 +20,7 @@ import { getSandAgentsRootDir } from "../../storage/agent-paths.js";
 import { getSandAgentDbWriteGeneration, liveDbHandleCount } from "../../storage/store-db.js";
 import { SandAgentSessionStore, type ConversationStatePort } from "./agent-session.js";
 import type { SandAgentDb } from "./agent-db.js";
-import type { BoxHandoffDeps } from "./box-handoff-service.js";
+import type { BoxHandoffDeps, PersistedHandoff } from "./box-handoff-service.js";
 import { scheduleConversationSizeMaintenance, type ConversationGcVerdict } from "./conversation-size-limits.js";
 import type { SessionExtensionContext } from "./extension.js";
 import {
@@ -133,6 +134,42 @@ async function runMaintenance(
   );
 }
 
+/**
+ * HANDBACK-1. The pending hand-off used to live in a bare Map, so a host restart forgot that the
+ * person still owed a step: the roster pill came back (awaiting state is in the agent's own db) with
+ * no card behind it. This is the sidecar that keeps the two together. Reads and writes are
+ * synchronous on purpose: the status path that asks for a pending hand-off is not async, and making
+ * it async ripples into every status read.
+ */
+const BOX_HANDOFFS_FILENAME = "box-handoffs.json";
+
+function readPersistedHandoffs(path: string): Record<string, PersistedHandoff> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as Record<string, PersistedHandoff>;
+  } catch {
+    // A missing or half-written file means nobody is owed a step. Never throw: this runs in a constructor.
+    return {};
+  }
+}
+
+function writePersistedHandoffs(path: string, records: Record<string, PersistedHandoff>): void {
+  try {
+    if (Object.keys(records).length === 0) {
+      rmSync(path, { force: true });
+      return;
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    const temp = `${path}.${process.pid}.tmp`;
+    writeFileSync(temp, JSON.stringify(records), { mode: 0o600 });
+    renameSync(temp, path);
+  } catch {
+    // Losing the sidecar costs the card its pending state, which the console draws honestly as
+    // "no longer waiting". It must never take a hand-off down with it.
+  }
+}
+
 async function grabHandoffScreenshot(
   box: SessionProductionDeps["forever-box"]["box"],
   context: ReturnType<typeof createContext>,
@@ -231,7 +268,10 @@ export function createSessionProductionExtras(
     },
     createHandoffDeps(): BoxHandoffDeps {
       const box = context.deps["forever-box"].box;
+      const handoffsPath = join(rootDir, BOX_HANDOFFS_FILENAME);
       return {
+        loadPersisted: () => readPersistedHandoffs(handoffsPath),
+        savePersisted: records => writePersistedHandoffs(handoffsPath, records),
         grabScreenshot: agentId => grabHandoffScreenshot(box, requestContext, agentId),
         onStarted: event => {
           void context.host.events.emit("session.box-handoff-started", event);

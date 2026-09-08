@@ -1,8 +1,5 @@
-import {
-  decideBoxHandBack,
-  type SandBoxHandoff,
-} from "../../../shared/forever-box.js";
 import { formatMcpAccountDisplayName } from "../../../shared/mcp.js";
+import { aliasBoxResolution } from "../session/box-handoff-service.js";
 import { sandErrorDetail } from "../../ports/telemetry.js";
 import { describeAgentRunError } from "./agent-run-error.js";
 import { classifyAgentError } from "./turn-runtime.js";
@@ -22,23 +19,31 @@ export interface AwaitingStateSink {
   ): void;
 }
 
+/** How the hand-off ended. The resolution decides what the agent is told; the trigger only says how. */
+export interface BoxHandoffOutcome {
+  readonly resolution?: string | null;
+  readonly trigger?: string | null;
+}
+
+/**
+ * HANDBACK-1. Keyed off the RESOLUTION, never a raw trigger string. The pair used to disagree: a skip
+ * wrote "cancelled" on the transcript entry and still resumed the agent with "the user handed the box
+ * back", so a skipped step was indistinguishable from a done one. The wording is the original's.
+ */
+export function resumeBoxHandoffPrompt(outcome: BoxHandoffOutcome): string {
+  if (aliasBoxResolution(outcome.resolution) === "dismissed") {
+    return "[The user dismissed your box help request without doing the step you asked for. Treat it as declined: do not assume the step happened, and do not immediately request the box again for the same step. Continue the task without it if you can — skip the step or find another way. If the task cannot proceed without it, send the user a brief message saying what is blocked, then stop and wait for their reply.]";
+  }
+  if (outcome.trigger === "viewer-closed") {
+    return "[The user closed the box desktop viewer without explicitly handing control back, so they may or may not have finished the step you asked for. Start with the read-only Screenshot tool to check the current state of the box desktop. If the step is clearly done, continue the task. If you can't tell, send the user a brief message asking whether they finished so you can keep going.]";
+  }
+  return "[The user handed the box back to you. Please continue your task — start with the read-only Screenshot tool to see the current state of the box desktop.]";
+}
+
 export class BoxHandoffResume {
-  readonly boxHandoffs = new Map<string, SandBoxHandoff>();
-  readonly foreverBoxListeners = new Set<(value: unknown) => void>();
   readonly awaitingSink = this.createAwaitingStateSink();
 
   constructor(readonly tm: TranscriptManagerLike) {}
-
-  subscribeForeverBox(listener: (value: unknown) => void): () => void {
-    this.foreverBoxListeners.add(listener);
-    return () => this.foreverBoxListeners.delete(listener);
-  }
-
-  withBoxHandoff<T extends { agentId: string }>(
-    status: T,
-  ): T & { handoff: SandBoxHandoff | null } {
-    return { ...status, handoff: this.boxHandoffs.get(status.agentId) ?? null };
-  }
 
   createAwaitingStateSink(): AwaitingStateSink {
     return {
@@ -87,47 +92,15 @@ export class BoxHandoffResume {
     }
   }
 
-  async handBackForeverBox(agentId: string, trigger: string): Promise<void> {
-    const decision = decideBoxHandBack(this.boxHandoffs.get(agentId), trigger);
-    if (decision.kind === "none") return;
-    this.boxHandoffs.delete(agentId);
-    this.awaitingSink.clear(agentId);
-    await this.tm.resolveBoxRequestEntry(
-      agentId,
-      decision.requestId,
-      decision.resolution,
-    );
-    await this.tm.emitForeverBoxStatus(agentId);
-    await this.tm.resumeAfterBoxHandoff(agentId, decision.trigger);
-  }
-
-  async emitForeverBoxStatus(agentId: string): Promise<void> {
-    try {
-      const status = this.withBoxHandoff(
-        await this.tm.foreverBox.getStatus({ id: agentId }),
-      );
-      for (const listener of this.foreverBoxListeners) listener(status);
-    } catch {
-      // Status listeners are best effort while boxes are being recreated.
-    }
-  }
-
   async resumeAfterBoxHandoff(
     agentId: string,
-    trigger = "button",
+    outcome: BoxHandoffOutcome | string = {},
   ): Promise<void> {
-    let prompt =
-      "[The user handed the box back to you. Please continue your task — start with the read-only Screenshot tool to see the current state of the box desktop.]";
-    if (trigger === "dismissed") {
-      prompt =
-        "[The user dismissed your box help request without doing the step you asked for. Treat it as declined: do not assume the step happened, and do not immediately request the box again for the same step. Continue the task without it if you can — skip the step or find another way. If the task cannot proceed without it, send the user a brief message saying what is blocked, then stop and wait for their reply.]";
-    } else if (trigger === "viewer-closed") {
-      prompt =
-        "[The user closed the box desktop viewer without explicitly handing control back, so they may or may not have finished the step you asked for. Start with the read-only Screenshot tool to check the current state of the box desktop. If the step is clearly done, continue the task. If you can't tell, send the user a brief message asking whether they finished so you can keep going.]";
-    }
     await this.resumeWithHiddenPrompt(
       agentId,
-      prompt,
+      resumeBoxHandoffPrompt(
+        typeof outcome === "string" ? { trigger: outcome } : outcome,
+      ),
       "Agent failed to resume after box handoff",
     );
   }
