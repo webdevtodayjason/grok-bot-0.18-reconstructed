@@ -906,12 +906,26 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
      * well as in the path, which the merged design did not have. Both are sent.
      */
     async patchCredential({ name, apiKey = "", baseUrl = "", info = null, values = {} }) {
+      // ALL THREE FIELDS, ALWAYS. MEASURED ON THE R750 2026-09-08 against the running v1.100.0:
+      // PATCH /credentials/{name} answers 422 "Field required" for credential_name AND for
+      // credential_info, whichever one is missing, so a roll that sent only the value never landed
+      // and the panel's zero-gap roll answered "the proxy answered 422" with nothing to act on.
+      // credential_info is therefore read back off the credential and sent again unchanged when the
+      // caller has nothing to say about it, because an empty object here would take tb_provider,
+      // tb_key_label and tb_key_order off the slot and the panel would lose the pool it belongs to.
       const body = { credential_name: String(name) };
       const nextValues = { ...values };
       if (apiKey) nextValues.api_key = String(apiKey);
       if (baseUrl) nextValues.api_base = String(baseUrl);
       if (Object.keys(nextValues).length > 0) body.credential_values = nextValues;
       if (info !== null) body.credential_info = { ...info };
+      else {
+        const seen = await this.listCredentials();
+        const row = seen.ok ? (seen.rows ?? []).find((one) => one.name === String(name)) : null;
+        body.credential_info = row == null ? {} : {
+          [TB.provider]: row.provider, [TB.keyLabel]: row.label, [TB.keyOrder]: row.order, tb_parked: row.parked,
+        };
+      }
       const answer = await call("PATCH", `/credentials/${encodeURIComponent(String(name))}`, { body });
       if (!answer.ok) return answer;
       return { ok: true, name: String(name) };
