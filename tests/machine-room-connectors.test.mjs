@@ -30,6 +30,18 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const CONNECTORS = { mcpServers: { localfiles: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"], env: {} } } };
 const UNKNOWN = (method) => new Error(`unknown gateway method: ${method}`);
 
+// MARKET-6: the console asks the HOST to write a connector where the box has that command, and
+// falls back to the relay's whole-file POST /connectors where it does not. This is the second
+// case, which is every box on today's bundle, so the guards below keep testing the path they were
+// written for; a test that wants the host path answers these itself.
+const HOST_WITHOUT_MARKET6 = {
+  addLocalConnector: () => UNKNOWN("addLocalConnector"),
+  removeLocalConnector: () => UNKNOWN("removeLocalConnector"),
+  previewLocalConnector: () => UNKNOWN("previewLocalConnector"),
+  setPluginCredential: () => UNKNOWN("setPluginCredential"),
+  listConnectorSecretOrphans: () => UNKNOWN("listConnectorSecretOrphans"),
+};
+
 async function loadAdapter(answers = {}, options = {}) {
   const source = await readFile(path.join(repoRoot, "ui/machine-room/gateway-adapter.js"), "utf8");
   const body = source.slice(source.indexOf("(function attachGatewayAdapter"));
@@ -50,7 +62,7 @@ async function loadAdapter(answers = {}, options = {}) {
     crypto: { randomUUID: () => "nonce-0001" },
     open: () => {},
   };
-  const defaults = { listAgents: [], getTrays: [], getAgentAutomations: [], getAgentWorkflows: [], getConversationOutline: [], getAgentTranscriptTail: { entries: [] } };
+  const defaults = { listAgents: [], getTrays: [], getAgentAutomations: [], getAgentWorkflows: [], getConversationOutline: [], getAgentTranscriptTail: { entries: [] }, ...HOST_WITHOUT_MARKET6 };
   const fetchStub = async (url, init) => {
     const target = String(url);
     if (target === "/connectors") {
@@ -245,12 +257,15 @@ test("adding a connector writes connectors.json with env NAMES only and calls re
 });
 
 test("a connector with no command is refused here rather than by the relay", async () => {
-  const { createGatewayAdapter, posts } = await loadAdapter();
+  const { createGatewayAdapter, posts, calls } = await loadAdapter();
   const adapter = createGatewayAdapter(seed());
   const result = await adapter.addConnector({ name: "probe", command: "" });
   assert.equal(result.accepted, false);
-  assert.match(result.message, /needs a command/);
+  // MARKET-6: the refusal is now one plain sentence naming what to do, and it is made before the
+  // spec goes anywhere -- not by the relay's 400, and not by the host either.
+  assert.equal(result.message, "Give the command the box should run. Without one there is nothing to start.");
   assert.equal(posts.length, 0);
+  assert.equal(calls.filter((c) => c.method === "addLocalConnector").length, 0);
 });
 
 test("removing a connector drops it from the file and refreshes the host", async () => {

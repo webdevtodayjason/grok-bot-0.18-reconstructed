@@ -712,8 +712,87 @@
   // what the field is without knowing which preset put it there. Env names are unique across the
   // catalog; a connector added by hand under a different name still gets the hint for the value it
   // declares, which is the point -- the hint is about the credential, not about the entry.
-  const CREDENTIAL_HINTS = Object.fromEntries(CONNECTOR_PRESETS.flatMap((p) => Object.entries(p.hints ?? {})));
-  const credentialHintsFor = (fields) => Object.fromEntries(fields.flatMap((f) => (CREDENTIAL_HINTS[f] ? [[f, CREDENTIAL_HINTS[f]]] : [])));
+  // MARKET-6. The five above are a PINNED COPY, not the source: they exist so this console still
+  // says what a credential is with no gateway behind it, and so docs/connectors/ stays held to
+  // them character for character. Everything else comes from the catalog the host already served
+  // and this adapter already cached -- because the catalog grew from ten rows to twenty-two, and
+  // under the old rule every new row needed its preset and its hint restated here by hand. A row
+  // added to the catalog alone used to draw a masked box with no sentence under it, which is the
+  // one thing CONNECT-4 was about.
+  //
+  // A catalog row declares its credentials one of two ways. `credentials` is the MARKET-5 shape --
+  // one field, one hint, and the list of processes that field feeds -- and `credentialHints` is
+  // the older env-name-to-line map. Both are read, the newer one first, so this works on a host
+  // whose bundle is either side of that change.
+  const catalogPluginCredentials = (item) => {
+    const declared = Array.isArray(item?.credentials) ? item.credentials : [];
+    if (declared.length) {
+      return declared.map((credential) => ({
+        field: String(credential?.field ?? ""),
+        label: String(credential?.label ?? credential?.field ?? ""),
+        hint: String(credential?.hint ?? ""),
+        consumers: Array.isArray(credential?.consumers) ? credential.consumers : [],
+      })).filter((credential) => credential.field.length > 0);
+    }
+    return Object.entries(item?.credentialHints ?? {}).map(([field, hint]) => ({
+      field: String(field),
+      label: String(field),
+      hint: String(hint ?? ""),
+      // The old shape says nothing about where a value goes, and a guess here would be the same
+      // lie MARKET-5 exists to remove. An empty list means "this page does not know", and the
+      // credential card says nothing rather than something wrong.
+      consumers: [],
+    }));
+  };
+  const PINNED_CREDENTIAL_HINTS = Object.fromEntries(CONNECTOR_PRESETS.flatMap((p) => Object.entries(p.hints ?? {})));
+  function credentialHintMap() {
+    const hints = {};
+    for (const item of marketplaceCatalogCache?.plugins ?? []) {
+      for (const credential of catalogPluginCredentials(item)) {
+        if (credential.hint) hints[credential.field] = credential.hint;
+      }
+    }
+    // The pinned copy wins, so a hint the existing suites hold cannot be moved by a catalog edit.
+    return { ...hints, ...PINNED_CREDENTIAL_HINTS };
+  }
+  const credentialHintsFor = (fields) => {
+    const hints = credentialHintMap();
+    return Object.fromEntries(fields.flatMap((f) => (hints[f] ? [[f, hints[f]]] : [])));
+  };
+
+  // The editor's preset row, from the same place. A catalog row with a stdio entry of its own is a
+  // preset: clicking it fills the form with that entry and its hints, exactly as the five pinned
+  // ones do. A row with no command (a remote server, or the Add-your-own card itself) is not --
+  // there is nothing to fill four fields with, and its Add is the card on the Marketplace.
+  function catalogConnectorPresets() {
+    const rows = [];
+    for (const item of marketplaceCatalogCache?.plugins ?? []) {
+      if (item?.kind === "shell-tool" || item?.opensEditor === true) continue;
+      const entry = item?.install;
+      if (entry == null || typeof entry !== "object" || typeof entry.command !== "string" || entry.command.length === 0) continue;
+      const name = String(item.connectorName ?? item.id ?? "");
+      if (!name || name.toLowerCase() === "shell") continue;
+      rows.push({
+        id: String(item.id ?? name),
+        label: String(item.name ?? name),
+        name,
+        entry: { command: entry.command, args: Array.isArray(entry.args) ? [...entry.args] : [], env: { ...(entry.env ?? {}) } },
+        hints: Object.fromEntries(catalogPluginCredentials(item).flatMap((c) => (c.hint ? [[c.field, c.hint]] : []))),
+        replaces: item?.replaces === true,
+        note: PRESET_CREDENTIAL_NOTE,
+      });
+    }
+    return rows;
+  }
+  // The pinned five, then everything the catalog adds that they do not already cover. Pinned wins
+  // on id AND on connector name: two buttons that write the same entry under the same name is a
+  // way to make an operator wonder which one is real.
+  function connectorPresetCatalog() {
+    const pinned = CONNECTOR_PRESETS.map((preset) => ({ ...preset }));
+    const ids = new Set(pinned.map((p) => p.id));
+    const names = new Set(pinned.map((p) => p.name));
+    return [...pinned, ...catalogConnectorPresets().filter((p) => !ids.has(p.id) && !names.has(p.name))];
+  }
 
   // A header argument carries a space ("Authorization:Bearer ${TINYFISH_API_KEY}") and the
   // editor's argument field is one line of text that used to be split on whitespace alone -- so
@@ -743,6 +822,268 @@
   // docs/connectors/ already fixes. argsText is here rather than derived twice: it is the exact
   // text the editor's one-line argument field carries for that entry.
   global.__connectorPresets = CONNECTOR_PRESETS.map((preset) => ({ ...preset, argsText: joinConnectorArgs(preset.entry.args) }));
+
+
+  // ------------------------------------------------------------------- MARKET-6: add your own
+  // Three doors onto one entry, because that is how a person actually arrives: with a LINK a
+  // vendor published, with a PROGRAM a README says to run, or with a CONFIG BLOCK they copied out
+  // of a docs page. The old editor offered the middle one alone, so a hosted server -- which is
+  // most of them now -- could not be added from this console at all.
+  //
+  // What this half decides is nothing about transport. It builds a SPEC and hands it to the host,
+  // which materialises the entry in one place (connectorEntryFromSpec): whether a remote server is
+  // reached natively or through a bridge is a property of the box, it changes, and a form that
+  // baked it in would go stale silently. What this half DOES decide is the refusals, because they
+  // have to arrive before the operator has typed a key, not sixty seconds later as a stack trace.
+  //
+  // No value ever enters a spec. A header the operator ticks as secret carries an env NAME and an
+  // empty value; the value goes through the masked card on the plugin page afterwards, into the
+  // host's 0600 store. That is the same promise the connector key form has always made, extended
+  // to the one field that used to have no home.
+  const BYO_REFUSAL = {
+    reservedName: '"shell" is reserved for the agent\'s own box shell environment, so a connector cannot use that name. Rename it (for example shell-mcp) and add it again.',
+    insecure: "Give the address as https. Over plain http the key would travel in the clear, so this box will not open one.",
+    privateHost: "That address is inside this box's own network, where its gateway and its tool daemons listen. Give the server's address on the internet instead.",
+    credentialInUrl: "That address carries the key inside it. Take the key out of the address and add it as a header below, where it is stored instead of written down.",
+    oauth: "This server signs you in through a browser, and that has to be done on this box's own desktop before it will answer. Open the desktop, sign in there, and add it again afterwards.",
+  };
+
+  // Loopback, the private ranges, link-local, and the names that resolve to them. A bridge pointed
+  // at one of these runs beside the gateway on 127.0.0.1:1340 and the exec daemons on 1337/1338,
+  // so this is not tidiness: it is the one address family a connector must never be aimed at.
+  function byoPrivateHost(host) {
+    const name = String(host ?? "").toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+    if (!name) return true;
+    if (name === "localhost" || name.endsWith(".localhost") || name.endsWith(".local") || name.endsWith(".internal") || name.endsWith(".home.arpa")) return true;
+    if (name === "::1" || name === "::") return true;
+    if (/^f[cd][0-9a-f]{2}:/.test(name) || /^fe[89ab][0-9a-f]:/.test(name)) return true;
+    const parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(name);
+    if (!parts) return false;
+    const [a, b] = parts.slice(1, 3).map(Number);
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+
+  // A query parameter named like a credential means the LINK ITSELF is the key: it would sit in
+  // connectors.json in plaintext, in the box's process list, and in anything that ever logs a URL.
+  // There is no way to store that value separately, so the door refuses it rather than pretending.
+  const BYO_CREDENTIAL_PARAM = /^(api[-_]?key|apikey|key|token|access[-_]?token|auth|authorization|secret|password|passwd|pwd|sig|signature|session|sessionid|credential)$/i;
+  const BYO_NOT_AN_ADDRESS = "That is not an address this box can open. Paste the whole address, starting with https://.";
+  function byoUrlProblem(raw) {
+    let url;
+    try { url = new URL(String(raw ?? "").trim()); } catch { return BYO_NOT_AN_ADDRESS; }
+    if (url.protocol !== "https:" && url.protocol !== "http:") return BYO_NOT_AN_ADDRESS;
+    if (url.protocol !== "https:") return BYO_REFUSAL.insecure;
+    if (byoPrivateHost(url.hostname)) return BYO_REFUSAL.privateHost;
+    if (url.username || url.password) return BYO_REFUSAL.credentialInUrl;
+    for (const name of url.searchParams.keys()) if (BYO_CREDENTIAL_PARAM.test(name)) return BYO_REFUSAL.credentialInUrl;
+    return null;
+  }
+
+  // The env name a secret header is stored under: the vendor out of the address, then what the
+  // header is for. mcp.notion.com + Authorization -> NOTION_TOKEN; api.exa.ai + x-api-key ->
+  // EXA_API_KEY. Derived rather than asked for, because the operator is here to paste a link, not
+  // to name a variable -- and editable, because a derivation is a guess and this one is on screen.
+  const BYO_HOST_NOISE = new Set(["www", "mcp", "api", "docs", "app", "server", "gateway", "remote", "cloud", "com", "net", "org", "io", "ai", "dev", "co", "uk", "so", "sh"]);
+  function byoVendorFromUrl(raw) {
+    let host = "";
+    try { host = new URL(String(raw ?? "")).hostname; } catch { host = ""; }
+    const labels = host.split(".").filter(Boolean);
+    const meaningful = labels.filter((label) => !BYO_HOST_NOISE.has(label.toLowerCase()));
+    const pick = meaningful.length ? meaningful[meaningful.length - 1] : (labels[0] ?? "server");
+    return String(pick).replace(/[^a-z0-9]+/gi, "_").toUpperCase() || "SERVER";
+  }
+  const byoHeaderSuffix = (header) => {
+    const name = String(header ?? "").trim();
+    if (/^authorization$/i.test(name)) return "TOKEN";
+    const cleaned = name.replace(/^x[-_]/i, "").replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "").toUpperCase();
+    return cleaned || "TOKEN";
+  };
+  function byoEnvNameFor(url, header, taken = []) {
+    const base = `${byoVendorFromUrl(url)}_${byoHeaderSuffix(header)}`;
+    if (!taken.includes(base)) return base;
+    for (let n = 2; n < 50; n += 1) if (!taken.includes(`${base}_${n}`)) return `${base}_${n}`;
+    return base;
+  }
+
+  // A connector name out of the address, for the same reason: the operator did not come here to
+  // invent one. Lowercased, and never the reserved word -- that refusal exists for a name someone
+  // typed on purpose, not for one this function handed them.
+  function byoNameFromUrl(url) {
+    const vendor = byoVendorFromUrl(url).toLowerCase().replace(/_/g, "-");
+    return vendor === "shell" ? "shell-mcp" : (vendor || "mcp-server");
+  }
+
+  const BYO_TRANSPORTS = [
+    { id: "http", label: "Streamable HTTP (what almost every server uses)" },
+    { id: "sse", label: "SSE (older; only if the server's docs say so)" },
+  ];
+
+  // A header value that came off a docs page is a placeholder far more often than a key -- and on
+  // the occasion it IS a key, keeping it would write it into connectors.json, which is the one
+  // thing this whole plane exists to stop. So a pasted value is never carried: the header becomes
+  // a secret with a minted env name and the card says the value was not kept.
+  const BYO_PLACEHOLDER = /^(\$\{[^}]*\}|\$[A-Z0-9_]+|<[^>]*>|your[-_ ].*|xxx+|\.\.\.|.*(api[-_]?key|token|secret|password)\s*(here)?)$/i;
+  const byoLooksLikeSecretHeader = (name, value) => /^(authorization|proxy-authorization|x-api-key|api-key|apikey|x-auth-token|auth|x-[\w-]*-key|x-[\w-]*-token)$/i.test(String(name ?? "").trim())
+    || BYO_PLACEHOLDER.test(String(value ?? "").trim());
+
+  // The spec, from what the LINK door holds. `headers` arrives as rows the form drew:
+  // { name, secret, env?, value? }. A secret row keeps its NAME and its env name and drops any
+  // value it was given; a plain row keeps a literal, which is what an "X-MCP-Readonly: true" is.
+  function byoRemoteSpec(input) {
+    const name = String(input?.name ?? "").trim();
+    const url = String(input?.url ?? "").trim();
+    const transport = BYO_TRANSPORTS.some((t) => t.id === input?.transport) ? String(input.transport) : "http";
+    const rows = Array.isArray(input?.headers) ? input.headers : [];
+    const taken = [];
+    const headers = rows
+      .map((row) => ({ name: String(row?.name ?? "").trim(), secret: row?.secret === true, env: String(row?.env ?? "").trim(), value: String(row?.value ?? "") }))
+      .filter((row) => row.name.length > 0)
+      .map((row) => {
+        // `secret` is stated on every row, both ways round. A reader that had to treat an absent
+        // key as false would treat a typo as false too, and the false case is the one that puts a
+        // literal in a file.
+        if (!row.secret) return { name: row.name, secret: false, value: row.value };
+        const env = row.env || byoEnvNameFor(url, row.name, taken);
+        taken.push(env);
+        return { name: row.name, secret: true, env };
+      });
+    return {
+      name: name || byoNameFromUrl(url),
+      shape: "remote",
+      url,
+      transport,
+      headers,
+      // The names, restated where a caller that only reads env can find them. Every value is
+      // empty: that emptiness is what CONNECT-4 reads to know a field is a credential.
+      envNames: headers.filter((h) => h.secret === true).map((h) => h.env),
+      auth: input?.auth === "oauth" ? "oauth" : "header",
+    };
+  }
+
+  function byoProgramSpec(input) {
+    const args = Array.isArray(input?.args) ? input.args.map((a) => String(a)) : splitConnectorArgs(input?.argsText ?? "");
+    return {
+      name: String(input?.name ?? "").trim(),
+      shape: "program",
+      command: String(input?.command ?? "").trim(),
+      args,
+      envNames: (Array.isArray(input?.envNames) ? input.envNames : String(input?.envNames ?? "").split(","))
+        .map((n) => String(n).trim()).filter(Boolean),
+    };
+  }
+
+  // Every refusal the door makes, in the order an operator meets them, as ONE sentence each. A
+  // caller renders whatever comes back verbatim: the words are the contract, not a class name.
+  function byoRefusal(spec) {
+    const name = String(spec?.name ?? "").trim();
+    if (!name) return "Give this server a name. It is the name the box files it under and the name the agent will see.";
+    if (name.toLowerCase() === "shell") return BYO_REFUSAL.reservedName;
+    if (spec?.shape === "remote") {
+      if (spec?.auth === "oauth") return BYO_REFUSAL.oauth;
+      return byoUrlProblem(spec?.url);
+    }
+    if (!String(spec?.command ?? "").trim()) return "Give the command the box should run. Without one there is nothing to start.";
+    return null;
+  }
+
+  // The PASTE door. A vendor's docs page carries { "mcpServers": { "<name>": { ... } } }, and that
+  // block is what a person has in their clipboard when they arrive. Accepted in the three shapes
+  // it comes in -- the wrapper, a bare name-to-entry map, and a single entry -- and resolved into
+  // whichever of the other two doors it actually is, so what happens next is the form they can
+  // read rather than a write they cannot.
+  const BYO_NOT_A_BLOCK = 'That is not the config block. Copy the whole { "mcpServers": { … } } object from the server\'s own page, braces included.';
+  function byoParsePasted(text) {
+    let parsed;
+    try { parsed = JSON.parse(String(text ?? "").trim()); } catch { return { ok: false, message: BYO_NOT_A_BLOCK }; }
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, message: BYO_NOT_A_BLOCK };
+    const isEntry = (value) => value != null && typeof value === "object" && !Array.isArray(value)
+      && (value.command != null || value.url != null || value.serverUrl != null || value.httpUrl != null);
+    const map = parsed.mcpServers ?? parsed.servers ?? parsed;
+    let name = "";
+    let entry = null;
+    if (map && typeof map === "object" && !Array.isArray(map)) {
+      const named = Object.keys(map).filter((key) => isEntry(map[key]));
+      if (named.length > 1) return { ok: false, message: `That block holds ${named.length} servers. Paste one at a time, so you can read what each will do before it is added.` };
+      if (named.length === 1) { name = named[0]; entry = map[named[0]]; }
+    }
+    if (!entry && isEntry(parsed)) entry = parsed;
+    if (!entry) return { ok: false, message: "That block names no server this box can start: an entry needs either a command to run or an address to open." };
+    const dropped = (pairs) => pairs
+      .filter(([key, value]) => byoLooksLikeSecretHeader(key, value) && String(value ?? "").trim().length > 0)
+      .map(([key]) => key);
+    // Said out loud, because a value silently discarded is worse than one refused: the operator
+    // would press Add believing the key came along.
+    const droppedNote = (names) => (names.length
+      ? `The value on ${names.join(" and ")} was not kept. Nothing typed into this form is stored, so put it in the key box on this server's page once it is added.`
+      : null);
+    const url = String(entry.url ?? entry.serverUrl ?? entry.httpUrl ?? "").trim();
+    if (url) {
+      const declared = String(entry.type ?? entry.transport ?? "").toLowerCase();
+      const pairs = Object.entries(entry.headers ?? {});
+      const rows = pairs.map(([header, value]) => ({
+        name: header,
+        secret: byoLooksLikeSecretHeader(header, value),
+        value: byoLooksLikeSecretHeader(header, value) ? "" : String(value ?? ""),
+      }));
+      const spec = byoRemoteSpec({
+        name: name || byoNameFromUrl(url),
+        url,
+        transport: declared.includes("sse") ? "sse" : "http",
+        headers: rows,
+        auth: entry.auth === "oauth" ? "oauth" : "header",
+      });
+      return { ok: true, door: "link", spec, note: droppedNote(dropped(pairs)) };
+    }
+    const envPairs = Object.entries(entry.env ?? {});
+    const spec = byoProgramSpec({
+      name: name || String(entry.command ?? "server"),
+      command: entry.command,
+      args: Array.isArray(entry.args) ? entry.args : [],
+      envNames: Object.keys(entry.env ?? {}),
+    });
+    return { ok: true, door: "program", spec, note: droppedNote(envPairs.filter(([, value]) => String(value ?? "").trim().length > 0).map(([key]) => key)) };
+  }
+
+  // What the operator reads before pressing Add. The host owns the entry, so where it can be asked
+  // (previewLocalConnector) this is the host's own answer; where it cannot, it is the spec in the
+  // words that were typed, and the line under it says the box decides how it opens the address.
+  // Either way the operator sees the whole of what is about to be written, and never a key.
+  async function byoPreview(spec) {
+    const asked = await tryCall("previewLocalConnector", { spec }).catch(() => null);
+    if (asked && typeof asked === "object" && asked.entry) {
+      return { entry: asked.entry, fromHost: true, note: typeof asked.note === "string" ? asked.note : null };
+    }
+    if (spec?.shape === "remote") {
+      const headers = {};
+      for (const header of spec.headers ?? []) headers[header.name] = header.secret === true ? `(stored under ${header.env})` : String(header.value ?? "");
+      return {
+        entry: { type: spec.transport === "sse" ? "sse" : "http", url: spec.url, headers, env: Object.fromEntries((spec.envNames ?? []).map((n) => [n, ""])) },
+        fromHost: false,
+        note: "The box decides how it opens this address when it is added. Whichever way it does, the key stays in the host's own store.",
+      };
+    }
+    return {
+      entry: { command: spec?.command ?? "", args: spec?.args ?? [], env: Object.fromEntries((spec?.envNames ?? []).map((n) => [n, ""])) },
+      fromHost: false,
+      note: null,
+    };
+  }
+
+  // The old editor's four fields, as a spec. Every caller that used to build {name, command, args,
+  // envNames} keeps working and goes through the same one writer as the new doors.
+  const byoSpecFromFields = (spec) => ({
+    name: String(spec?.name ?? "").trim(),
+    shape: "program",
+    command: String(spec?.command ?? "").trim(),
+    args: Array.isArray(spec?.args) ? spec.args.map(String) : [],
+    envNames: (Array.isArray(spec?.envNames) ? spec.envNames : []).map((n) => String(n).trim()).filter(Boolean),
+    replace: spec?.replace === true,
+  });
 
   // ui/server.mjs readConnectors answers { mcpServers: {} } for BOTH an empty file and a box it
   // could not `docker exec cat` into (the catch on a null read), so an empty map is ambiguous --
@@ -855,6 +1196,14 @@
         // page that knows -- the host answers names, not what they mean.
         secretHints: credentialHintsFor(secretFields),
         secretHint: `Stored by the host for ${name} in its own 0600 store and merged into the connector's environment when the box launches it. It never enters connectors.json, chat, model context or this page's markup.`,
+        // MARKET-6. What an operator saw when a connector failed was several hundred characters of
+        // Node stack. The host maps its own {status, statusDetail} to ONE plain sentence and this
+        // carries it through untouched: the console renders it and never parses a statusDetail,
+        // because the day it starts matching on that string is the day it starts guessing. The raw
+        // text rides along for the disclosure under it, and a host with no sentence yet leaves the
+        // card exactly as it was.
+        statusSentence: typeof server.statusSentence === "string" && server.statusSentence.length > 0 ? server.statusSentence : null,
+        statusDetail: typeof server.statusDetail === "string" && server.statusDetail.length > 0 ? server.statusDetail : null,
         skills: [], skillsNote: null,
       };
     }));
@@ -1009,6 +1358,12 @@
     return marketplaceCatalogCache;
   }
 
+  // The catalog row for an id, out of the cache alone. Used where a caller has an id and needs the
+  // row's declaration -- its credentials and their consumers -- and a network read would be a
+  // second source of truth for something already on the page.
+  const marketplaceItemFromCache = (id) => (marketplaceCatalogCache?.plugins ?? [])
+    .find((item) => String(item?.id ?? "") === String(id ?? "")) ?? null;
+
   // Which card on this page a catalog plugin is: a connector is its entry's name in
   // connectors.json (the catalog's own id, unless it carries a connectorName of its own), a shell
   // tool is the shell-tool id its `install` names.
@@ -1028,30 +1383,97 @@
   //   READY      installed, nothing left to authenticate, and the box reports it connected.
   // Anything installed that is neither is CONNECTING: the box has the entry and has not finished
   // launching it, which is a real state and must not be painted as ready.
+  // MARKET-6: a plugin can now install MORE THAN ONE THING. TinyFish is a connector and a CLI,
+  // GitHub is a connector and a CLI, and folding them into one row was the point of MARKET-5 --
+  // one page, one key box. So the state is computed per COMPONENT and then rolled up, rather than
+  // per plugin: without the roll-up a folded plugin appears twice in the installed strip and its
+  // page draws two of everything, which is exactly the complaint.
+  //
+  // A row that declares no components is one component, from its own kind and install, so a host
+  // serving the older catalog shape lands in the same code with the same answers.
+  const marketplaceComponents = (item) => {
+    const declared = Array.isArray(item?.components) ? item.components : [];
+    if (declared.length) {
+      return declared.map((component) => ({
+        kind: component?.kind === "shell-tool" ? "shell-tool" : "connector",
+        connectorName: component?.kind === "shell-tool" ? "" : String(component?.connectorName ?? component?.name ?? marketplaceConnectorName(item)),
+        shellToolId: component?.kind === "shell-tool" ? String(component?.shellToolId ?? component?.install ?? component?.id ?? "") : "",
+        install: component?.install ?? null,
+      }));
+    }
+    const kind = item?.kind === "shell-tool" ? "shell-tool" : "connector";
+    return [{
+      kind,
+      connectorName: kind === "connector" ? marketplaceConnectorName(item) : "",
+      shellToolId: kind === "shell-tool" ? marketplaceShellToolId(item) : "",
+      install: item?.install ?? null,
+    }];
+  };
+  const marketplaceComponentCardId = (component) => (component.kind === "shell-tool"
+    ? `shell:${component.shellToolId}`
+    : `mcp:${component.connectorName}`);
+
   function marketplaceInstallState(items, cards) {
     const byId = new Map((Array.isArray(cards) ? cards : []).map((card) => [card.id, card]));
     return (Array.isArray(items) ? items : []).map((item) => {
-      const kind = item?.kind === "shell-tool" ? "shell-tool" : "connector";
-      const cardId = marketplaceCardId(item);
-      const card = byId.get(cardId) ?? null;
-      const installed = card != null && (kind === "shell-tool"
-        ? card.shellTool?.installed === true
-        : card.removable === true);
-      const stored = new Set(Array.isArray(card?.storedFields) ? card.storedFields.map(String) : []);
-      const missing = (Array.isArray(card?.secretFields) ? card.secretFields.map(String) : []).filter((field) => !stored.has(field));
-      const needsAuth = installed && missing.length > 0;
-      const ready = installed && !needsAuth && (card?.boxStatus === "connected" || card?.status === "connected");
+      const components = marketplaceComponents(item).map((component) => {
+        const cardId = marketplaceComponentCardId(component);
+        const card = byId.get(cardId) ?? null;
+        const installed = card != null && (component.kind === "shell-tool"
+          ? card.shellTool?.installed === true
+          : card.removable === true);
+        const stored = new Set(Array.isArray(card?.storedFields) ? card.storedFields.map(String) : []);
+        const missing = (Array.isArray(card?.secretFields) ? card.secretFields.map(String) : []).filter((field) => !stored.has(field));
+        const needsAuth = installed && missing.length > 0;
+        const ready = installed && !needsAuth && (card?.boxStatus === "connected" || card?.status === "connected");
+        return {
+          ...component,
+          cardId,
+          installed,
+          needsAuth,
+          ready,
+          missingCredentials: missing,
+          storedCredentials: [...stored],
+          // C's one plain sentence for whatever state the box reports, rendered verbatim. The
+          // console must never parse a statusDetail: what it holds is a Node stack.
+          statusSentence: typeof card?.statusSentence === "string" ? card.statusSentence : null,
+          statusDetail: typeof card?.statusDetail === "string" ? card.statusDetail : null,
+        };
+      });
+      // PROXY-7's shape, and only its shape: where the box carries this provider on its plan the
+      // row comes back with no credential fields at all and the page draws no key box. Whether the
+      // proxy actually carries it is the host's answer, not a guess made here.
+      const includedWithPlan = item?.includedWithPlan === true;
+      const connector = components.find((component) => component.kind === "connector") ?? null;
+      // Installed means EVERY component this plugin installs is on the box: a page that said
+      // "Added" with half of itself missing is what sent an operator looking for a tool that was
+      // never installed. Needs auth and ready roll up the same way.
+      const installed = components.length > 0 && components.every((component) => component.installed);
+      const partly = components.some((component) => component.installed);
+      const needsAuth = installed && components.some((component) => component.needsAuth);
+      const ready = installed && !needsAuth && components.every((component) => component.ready);
+      const missing = [...new Set(components.flatMap((component) => component.missingCredentials))];
+      const storedCredentials = [...new Set(components.flatMap((component) => component.storedCredentials))];
       return {
         id: String(item?.id ?? ""),
         name: String(item?.name ?? item?.id ?? ""),
-        kind,
-        connectorName: kind === "connector" ? marketplaceConnectorName(item) : "",
-        shellToolId: kind === "shell-tool" ? marketplaceShellToolId(item) : "",
-        cardId,
+        // The plugin's own kind stays what it always was, so a caller that switches on it is
+        // unchanged; `components` is the new, fuller answer beside it.
+        kind: item?.kind === "shell-tool" ? "shell-tool" : "connector",
+        connectorName: connector ? connector.connectorName : "",
+        shellToolId: components.find((component) => component.kind === "shell-tool")?.shellToolId ?? "",
+        // The card the installed strip draws this plugin ONCE under: its connector where it has
+        // one, its shell tool otherwise.
+        cardId: connector ? connector.cardId : (components[0]?.cardId ?? marketplaceCardId(item)),
+        cardIds: components.map((component) => component.cardId),
+        components,
+        includedWithPlan,
         installed, needsAuth, ready,
-        missingCredentials: missing,
-        storedCredentials: [...stored],
-        label: !installed ? "Not installed" : needsAuth ? "Needs auth" : ready ? "Ready" : "Connecting",
+        missingCredentials: includedWithPlan ? [] : missing,
+        storedCredentials,
+        label: includedWithPlan && !installed ? "Included with your plan"
+          : !installed ? (partly ? "Half installed" : "Not installed")
+          : needsAuth ? "Needs auth" : ready ? "Ready" : "Connecting",
       };
     });
   }
@@ -2881,14 +3303,48 @@
       // object the presets already carry -- and env NAMES only: connectors.json is plaintext on
       // the box, so the values go through the credential card on the plugin page afterwards. A
       // shell tool is installed in the box by the host's own installer.
-      addMarketplacePlugin(item, agentId) {
-        if (item?.kind === "shell-tool") return this.installShellTool(marketplaceShellToolId(item), agentId);
-        const entry = item?.install ?? {};
+      //
+      // MARKET-6: a row may install more than one thing. TinyFish is a connector AND a shell tool
+      // -- one provider, one key, two processes -- and Add has to mean both, or the page says
+      // Added while half of it was never installed. One component behaves exactly as before.
+      async addMarketplacePlugin(item, agentId) {
+        const components = marketplaceComponents(item);
+        if (components.length > 1) {
+          const results = [];
+          for (const component of components) results.push(await this.addMarketplaceComponent(item, component, agentId));
+          const bad = results.find((result) => result?.accepted === false);
+          return bad ?? { accepted: true, message: `${String(item?.name ?? item?.id ?? "It")} added — ${results.length} components` };
+        }
+        return this.addMarketplaceComponent(item, components[0] ?? null, agentId);
+      },
+      addMarketplaceComponent(item, component, agentId) {
+        const kind = component?.kind ?? (item?.kind === "shell-tool" ? "shell-tool" : "connector");
+        if (kind === "shell-tool") {
+          return this.installShellTool(component?.shellToolId || marketplaceShellToolId(item), agentId);
+        }
+        const entry = component?.install ?? item?.install ?? {};
+        const name = component?.connectorName || marketplaceConnectorName(item);
+        // A catalog row that names an ADDRESS rather than a command is a remote server. Which way
+        // the box opens one is the host's business (connectorEntryFromSpec), so the console hands
+        // it the same spec its own Add-your-own link door builds and does not decide the transport.
+        const url = String(entry?.url ?? "").trim();
+        if (url) {
+          return this.addLocalConnector(byoRemoteSpec({
+            name,
+            url,
+            transport: String(entry?.type ?? entry?.transport ?? "http"),
+            headers: Object.entries(entry?.headers ?? {}).map(([header, value]) => ({
+              name: header,
+              secret: byoLooksLikeSecretHeader(header, value),
+              value: byoLooksLikeSecretHeader(header, value) ? "" : String(value ?? ""),
+            })),
+          }));
+        }
         if (typeof entry.command !== "string" || entry.command.length === 0) {
-          return Promise.resolve({ accepted: false, message: "This catalog entry has no connector command; add it with the connector editor." });
+          return Promise.resolve({ accepted: false, message: "This catalog entry names neither a command to run nor an address to open, so there is nothing to add. Use Add your own." });
         }
         return this.addConnector({
-          name: marketplaceConnectorName(item),
+          name,
           command: entry.command,
           args: Array.isArray(entry.args) ? entry.args : [],
           envNames: Object.keys(entry.env ?? {}),
@@ -2915,7 +3371,7 @@
       // CONNECT-3: the preset buttons that editor draws, as data. A click fills the form, the
       // operator reads what it filled in, and nothing is written until Add connector is pressed.
       connectorPresets() {
-        return CONNECTOR_PRESETS.map((preset) => ({
+        return connectorPresetCatalog().map((preset) => ({
           id: preset.id, label: preset.label, name: preset.name,
           command: preset.entry.command,
           args: [...preset.entry.args],
@@ -2929,13 +3385,150 @@
         }));
       },
       splitConnectorArgs,
+      // Its inverse, so a pasted block's arguments go back into the editor's one-line field with
+      // the quotes that make them survive a re-read. Without it a --header argument that holds a
+      // space would come back as two arguments the next time the form was submitted.
+      joinConnectorArgs,
+
+      // -- MARKET-6: the three doors, and the one writer behind them ----------------------------
+      // The pure halves, exposed so the page can refuse before it writes and preview before it
+      // asks. Nothing here touches the network except byoPreview, which asks the host what it
+      // would write and degrades to the spec when the host has no answer for that yet.
+      byoTransports() { return BYO_TRANSPORTS.map((t) => ({ ...t })); },
+      byoRemoteSpec, byoProgramSpec, byoRefusal, byoParsePasted, byoPreview,
+      byoEnvNameFor, byoNameFromUrl,
+
+      // ONE validated writer. addLocalConnector is the host's: it owns the reserved name, the
+      // env-name rule, the empty-credential rule and the remote-address rule, so the console, the
+      // agent's own AddMcpServer and installMarketplacePlugin cannot drift apart. A box whose
+      // bundle predates it answers "unknown gateway method", and this falls back to the relay's
+      // whole-file write so a console in front of an older box keeps working instead of refusing.
+      async addLocalConnector(spec) {
+        const refusal = byoRefusal(spec);
+        if (refusal) return { accepted: false, message: refusal };
+        const answer = await tryCall("addLocalConnector", { spec }).catch((error) => ({ __failed: error }));
+        if (answer && answer.__failed) return { accepted: false, message: `${spec.name} was not added: ${answer.__failed.message}` };
+        if (answer !== null) {
+          await refreshConnectors();
+          return {
+            accepted: answer?.added !== false,
+            message: answer?.message ?? `${spec.name} added — the host wrote it and re-read its servers`,
+            entry: answer?.entry ?? null,
+          };
+        }
+        if (spec?.shape === "remote") {
+          return { accepted: false, message: "This box is on a version that can only start a connector from a command, so it cannot open an address on its own yet. Update the box and add it again." };
+        }
+        return this.writeOneConnector(spec);
+      },
+      async removeLocalConnector(name, options) {
+        const clearSecrets = options?.clearSecrets === true;
+        const answer = await tryCall("removeLocalConnector", { name, clearSecrets }).catch((error) => ({ __failed: error }));
+        if (answer && answer.__failed) return { accepted: false, message: `${name} was not removed: ${answer.__failed.message}` };
+        if (answer !== null) {
+          await refreshConnectors();
+          const cleared = Number(answer?.clearedCredentials ?? 0);
+          return {
+            accepted: answer?.removed !== false,
+            message: answer?.message ?? `${name} removed${cleared ? `, and ${cleared} stored value${cleared === 1 ? "" : "s"} cleared` : ""}`,
+            clearedCredentials: cleared,
+          };
+        }
+        // The old ordering, kept for a box that has not landed the host half: the values have to
+        // go BEFORE the entry, because deleteConnectorSecret resolves the server through
+        // connectors.json and cannot reach its own store once the row has left the file.
+        let cleared = 0;
+        if (clearSecrets && typeof this.listConnectorSecretFields === "function") {
+          const fields = await tryCall("listConnectorSecretFields", { server: name }).catch(() => null);
+          const held = (Array.isArray(fields?.stored) ? fields.stored : []).map(String);
+          for (const field of held) {
+            const gone = await this.deleteConnectorSecret(name, field);
+            if (gone?.accepted) cleared += 1;
+          }
+        }
+        const removed = await this.removeOneConnector(name);
+        return { ...removed, clearedCredentials: cleared };
+      },
+      // A credential typed once, landing everywhere the plugin says it is used. MARKET-5: the
+      // TinyFish page carried two forms for one key, each warning that the other's value did not
+      // reach it. The host fans out; where it cannot yet, this does the same fan-out from the
+      // catalog's own declaration so the page's promise is kept either way.
+      async setPluginCredential(pluginId, field, value, plugin) {
+        const answer = await tryCall("setPluginCredential", { pluginId, field, value }).catch((error) => ({ __failed: error }));
+        if (answer && answer.__failed) return { accepted: false, message: `${field} was not stored: ${answer.__failed.message}` };
+        if (answer !== null) {
+          await refreshConnectors();
+          return {
+            accepted: answer?.stored !== false,
+            message: answer?.message ?? `${field} stored on the host.`,
+            wentTo: Array.isArray(answer?.wentTo) ? answer.wentTo : [],
+            pendingWindows: Array.isArray(answer?.pendingWindows) ? answer.pendingWindows : [],
+          };
+        }
+        const consumers = catalogPluginCredentials(plugin ?? marketplaceItemFromCache(pluginId))
+          .find((credential) => credential.field === field)?.consumers ?? [];
+        const results = [];
+        const wentTo = [];
+        for (const consumer of consumers) {
+          if (consumer?.kind === "shell") {
+            results.push(await this.setShellSecret(pluginId, String(consumer.env ?? field), value));
+            wentTo.push("the agent's shell");
+          } else if (consumer?.kind === "connector" || consumer?.kind === "header" || consumer?.kind === "url") {
+            const server = String(consumer.server ?? plugin?.connectorName ?? pluginId);
+            results.push(await this.setConnectorSecret(server, String(consumer.env ?? field), value));
+            wentTo.push("the connector");
+          }
+        }
+        if (!results.length) {
+          const server = String(plugin?.connectorName ?? pluginId);
+          results.push(await this.setConnectorSecret(server, field, value));
+          wentTo.push("the connector");
+        }
+        const bad = results.find((r) => r && r.accepted === false);
+        return {
+          accepted: bad == null,
+          message: bad?.message ?? `${field} stored on the host.`,
+          wentTo: [...new Set(wentTo)],
+          pendingWindows: [],
+        };
+      },
+      // CONNECT-11: the values the store still holds for a connector nobody has any more. The old
+      // resolver went through connectors.json for list, set AND delete, so once an entry left the
+      // file its stored value could not be named, let alone cleared -- it sat there for the life
+      // of the box. A host without the command answers null and the strip is simply not drawn.
+      async listConnectorSecretOrphans() {
+        const answer = await tryCall("listConnectorSecretOrphans", {}).catch(() => null);
+        if (answer == null) return null;
+        const rows = Array.isArray(answer) ? answer : (Array.isArray(answer?.orphans) ? answer.orphans : []);
+        return rows.map((row) => ({
+          server: String(row?.server ?? row?.name ?? row ?? ""),
+          fields: (Array.isArray(row?.fields) ? row.fields : []).map(String),
+        })).filter((row) => row.server.length > 0);
+      },
+      async clearConnectorSecretOrphan(server) {
+        const answer = await tryCall("deleteConnectorSecret", { server, all: true }).catch((error) => ({ __failed: error }));
+        if (answer && answer.__failed) return { accepted: false, message: `${server} was not cleared: ${answer.__failed.message}` };
+        if (answer === null) return { accepted: false, message: `This host has no deleteConnectorSecret command yet, so ${server}'s values are still in its store.` };
+        const removed = Number(answer?.removed === true ? 1 : answer?.removed ?? 0);
+        return { accepted: removed > 0, message: removed > 0 ? `${server}'s stored values cleared.` : `The host held nothing for ${server}.` };
+      },
       listConnectors() {
         return connectorConfig().then((c) => Object.entries(c?.mcpServers ?? {}).map(([name, spec]) => ({
           name, command: spec?.command ?? null, argCount: Array.isArray(spec?.args) ? spec.args.length : 0,
           envNames: Object.keys(spec?.env ?? {}),
         })));
       },
-      async addConnector(spec) {
+      // The old four-field editor's entry point, kept because the Marketplace's Add, the agent's
+      // integration prompt and the gate all call it. It is now a thin shape change onto the one
+      // writer: a name, a command, its arguments and env NAMES are a program spec.
+      addConnector(spec) {
+        return this.addLocalConnector(byoSpecFromFields(spec));
+      },
+      // The relay's whole-file write, which is what a box too old for addLocalConnector still
+      // needs. It is the LAST caller of it: everything else goes through the host, where the
+      // validation lives and where a read-modify-write of a customer's connector file over docker
+      // exec stops being the mechanism.
+      async writeOneConnector(spec) {
         const name = String(spec?.name ?? "").trim();
         const command = String(spec?.command ?? "").trim();
         if (!name) return { accepted: false, message: "A connector needs a name." };
@@ -2944,9 +3537,7 @@
         // the agent's own box shell environment, so a connector called that could never be handed
         // a credential. The host and the relay refuse it too; saying so here is what makes the
         // refusal readable instead of a 400.
-        if (name.toLowerCase() === "shell") {
-          return { accepted: false, message: '"shell" is reserved for the agent\'s own box shell environment, so a connector cannot use that name. Rename it (for example shell-mcp) and add it again.' };
-        }
+        if (name.toLowerCase() === "shell") return { accepted: false, message: BYO_REFUSAL.reservedName };
         const args = Array.isArray(spec?.args) ? spec.args.map((a) => String(a)) : [];
         const envNames = (Array.isArray(spec?.envNames) ? spec.envNames : []).map((n) => String(n).trim()).filter(Boolean);
         // Never a map derived from a read that may have failed: this POST REPLACES the file.
@@ -2964,7 +3555,14 @@
         servers[name] = { command, args, env: Object.fromEntries(envNames.map((n) => [n, ""])) };
         return this.writeConnectors(servers, `${name} ${replacing ? "replaced" : "added"}`);
       },
-      async removeConnector(name) {
+      // The old front door, now the one that goes through the host. `clearSecrets` rides along so
+      // the ordering -- values first, then the entry -- lives in ONE place (the host's own
+      // removeLocalConnector) instead of being the console's private knowledge.
+      removeConnector(name, options) {
+        return this.removeLocalConnector(name, options);
+      },
+      // The relay's whole-file write, kept for a box whose bundle predates removeLocalConnector.
+      async removeOneConnector(name) {
         const held = await readableConnectorServers();
         if (held == null) return { accepted: false, message: connectorsNote ?? CONNECTORS_UNREADABLE };
         const servers = { ...held };
