@@ -1910,9 +1910,20 @@ if (!WANT_BROWSER) {
   //
   // The rows the API leg above planted, drawn. What matters on the screen is the pair of facts the
   // panel exists to carry: that both gates are real, and that the stored token is nowhere on it.
+  // THE PANEL IS A PANEL AND NOT A WRAPPER. cp/admin/index.html carried eight section opens and
+  // seven closes: #panel-feedback never closed, so the browser parsed #panel-marketplace as its
+  // CHILD. Nothing on the screen looked wrong and every check below passed, because a child panel
+  // renders exactly where a sibling would. It matters the moment one panel is hidden at a time:
+  // hiding feedback would take marketplace off the screen with it. Asked of the browser's own tree
+  // rather than counted in the source, because counting tags is what missed it for two days.
+  const nested = await page.evaluate(() => document.getElementById("panel-feedback")
+    ?.contains(document.getElementById("panel-marketplace")) === true);
+  check(!nested, "the marketplace panel is a sibling of the feedback panel and not a child of it");
   const feedbackText = await page.locator("#panel-feedback").textContent();
   check(String(feedbackText).includes("shown to the workspace operator"),
     "the Feedback panel says on the page that the operator saw the report first");
+  check(!String(feedbackText).includes("Cloud browsing sessions"),
+    "and reading that panel reads that panel, not the one that used to be inside it");
   const feedbackCards = await page.locator("#feedbackRows .feedbackCard").count();
   check(feedbackCards >= 2, "and draws the reports the intake took", String(feedbackCards));
   check((await page.locator("#panel-feedback .chip.attack").count()) >= 1,
