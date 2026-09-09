@@ -151,15 +151,16 @@ if (!traceOn) {
 pass("the trace switch is on, so an absent wire line would be a real absence");
 
 // The gateway's port answers before the host behind it will take a command, so a run started right
-// after a restart dies on createAgent with a closed socket. Wait for the surface, not the port.
+// after a restart dies on createAgent with a closed socket. Wait for the surface, not the port. The
+// roster command is listAgents; there is no getAgents, and asking for one 404s for ever.
 step("the gateway is ready to take a command");
 let ready = false;
 for (let attempt = 0; attempt < 24 && !ready; attempt += 1) {
-  ready = await call("getAgents").then(() => true).catch(() => false);
+  ready = await call("listAgents").then(() => true).catch(() => false);
   if (!ready) await sleep(5_000);
 }
 if (!ready) { console.error("  the gateway never became ready, so nothing can be measured"); process.exit(2); }
-pass("the gateway answers getAgents");
+pass("the gateway answers listAgents");
 
 const idOf = (created) => created?.id ?? created?.agentId ?? created?.agent?.id ?? null;
 let ownedAgentId = null;
