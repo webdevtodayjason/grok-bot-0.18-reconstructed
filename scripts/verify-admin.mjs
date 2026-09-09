@@ -1474,6 +1474,87 @@ step("the providers route contract");
   }
 }
 
+// ---- the routes the page was written against, in their own words -------------------------------
+//
+// THIS IS THE LEG THE FIXTURE CANNOT BE. The page leg below drives the panel against this gate's own
+// fixture, which is the only way to repeat a write; but a fixture is written by the same hand as the
+// page, so the two can agree perfectly while the real route answers something else. That is not a
+// hypothetical: this file once served key.name, key.mask and defaults.newWorkspaceModel while the
+// route answered slot, masked and defaults.planModel, every check passed, and the panel drew an
+// empty card against a route that was working.
+//
+// So each of the three answers this wave added is asked for the FIELD NAMES the page reads, and the
+// refusals are asked for the SENTENCES the page prints without rewording. A route that has not
+// landed in this tree yet is a SKIP with the reason, never a pass.
+step("the routes the page reads");
+{
+  // SIGNIN-1. The gate marker, and the three things a summary needs to say what it set aside.
+  const signIns = await call("GET", "/v1/admin/sign-ins?hours=24", { token: bossToken });
+  check(signIns.status === 200, "GET /v1/admin/sign-ins answers", `status ${signIns.status}`);
+  const gates = signIns.json?.gates;
+  if (gates == null) {
+    console.log("  SKIP  this tree's sign-ins route carries no gates block yet, so the panel's grey rows are measured against the fixture only");
+  } else {
+    check(typeof gates.rows === "number", "the sign-ins answer says how many rows were set aside as our own gates", String(gates.rows));
+    check(Array.isArray(gates.scripts), "and which scripts they were");
+    check(typeof gates.setAsideNote === "string" && gates.setAsideNote.length > 0,
+      "and carries the sentence the panel prints", String(gates.setAsideNote).slice(0, 70));
+    const address = (signIns.json?.addresses ?? [])[0];
+    if (address != null) {
+      check("gateRows" in address, "an address summary says how many of its rows were set aside");
+      check("yourAddress" in address, "and whether it is one of ours");
+    }
+  }
+
+  // PROVIDERS-8. The two windows the chip and the amber line are drawn from.
+  const providers = await call("GET", "/v1/admin/providers", { token: bossToken });
+  const health = (providers.json?.providers ?? [])[0]?.health;
+  if (health == null) {
+    console.log("  SKIP  no proxy is configured on this control plane, so provider health carries nothing to measure");
+  } else {
+    check(health.recent != null && typeof health.recent === "object",
+      "provider health carries the recent window the chip is decided on");
+    check(health.month != null && typeof health.month === "object",
+      "and the month window the amber count is drawn from");
+    for (const field of ["requests", "failures", "lastFailureAt"]) {
+      check(health.month != null && field in health.month, `and the month window carries ${field}`);
+    }
+  }
+
+  // PROVIDERS-9. The route exists and it refuses rather than 404s, which is the difference between
+  // a control that is off and a control that is wired to nothing.
+  const removed = await call("DELETE", "/v1/admin/providers/not-a-provider", { token: bossToken, body: { confirm: "not-a-provider" } });
+  if (removed.status === 404 && String(removed.json?.error ?? "") !== "not_found") {
+    console.log("  SKIP  this tree does not serve DELETE /v1/admin/providers/<id> yet");
+  } else {
+    check(removed.status === 404 || removed.status === 409 || removed.status === 400,
+      "DELETE /v1/admin/providers refuses a provider that is not there rather than doing something",
+      `status ${removed.status}`);
+    check(String(removed.json?.message ?? "").length > 0, "in a sentence, which is what the panel puts on the screen",
+      String(removed.json?.message ?? "").slice(0, 70));
+  }
+
+  // ADMIN-2. The two refusals the form can produce without provisioning anything, in the words the
+  // panel prints unchanged. The happy path writes a container and is measured on the R750.
+  const dup = await call("POST", "/v1/admin/clients", { token: bossToken, body: { email: BOSS_EMAIL, company: "Anything At All" } });
+  if (dup.status === 404) {
+    console.log("  SKIP  this tree does not serve POST /v1/admin/clients yet, so the add-client form is measured against the fixture only");
+  } else {
+    check(dup.status === 409, "an address that already has an account is refused", `status ${dup.status}`);
+    check(String(dup.json?.error ?? "") === "duplicate_email", "by name", String(dup.json?.error));
+    // The exact string the page leg below reads off the banner. If these two ever drift the operator
+    // meets one sentence from the CLI and another from the console for the same refusal.
+    check(String(dup.json?.message ?? "") === "That email address already has an account. Sign in instead.",
+      "in the sentence the console prints unchanged", String(dup.json?.message ?? "").slice(0, 80));
+    const noName = await call("POST", "/v1/admin/clients", { token: bossToken, body: { email: `fresh+${randomBytes(4).toString("hex")}@example.com`, company: "!!!" } });
+    check(noName.status === 400 && String(noName.json?.error ?? "") === "bad_company",
+      "a company name with nothing in it to name a workspace after is refused", `status ${noName.status} ${noName.json?.error}`);
+    check(String(noName.json?.message ?? "").length > 0, "with the reason in words", String(noName.json?.message ?? "").slice(0, 80));
+    check((await call("POST", "/v1/admin/clients", { body: { email: "x@example.com", company: "X" } })).status === 401,
+      "and the whole door refuses a caller with no session");
+  }
+}
+
 // ---- the feedback channel (FEEDBACK-1) --------------------------------------------------------
 //
 // The intake, the panel, the two decisions and the issue door, over HTTP the way the relay and the
