@@ -440,7 +440,7 @@ receipt told a customer that Slack "is not something we carry yet, so you would 
 apps this box carries and may already have installed. Roughly 177 of the 244 app entries across the
 65 community rows carry a plugin id and every one of them was misreported.
 
-BOTS-4's own review wave found the same thing on the same evening, from the other end — one press
+BOTS-4b found the same thing on the same evening, from the other end — one press
 of Add on `mr-toms` on the R750 demo tenant — and fixed the console's reader by normalising both
 spellings in `appsOf`. The two fixes are not a duplicate: theirs keeps the page honest for as long
 as the page reads a row itself, and this one moves the reading into the box, where both doors get it.
