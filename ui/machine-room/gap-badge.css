@@ -1,0 +1,127 @@
+/* The between-chats badge (CONSOLE-4, item 2).
+ *
+ * One collapsed row where a run of system rows used to be. On Atera Triage, grok-bot-local-vm,
+ * the largest gap was 47 rows and 1,618 px tall in a 668 px viewport: the reader scrolled past
+ * three screens of tool rows to reach the next thing anyone said. Collapsed it is one pill.
+ *
+ * The badge is a .message-row, so it inherits the transcript's centring and its float-in. What it
+ * has to undo is the row's own flex axis: .message-row is `display: flex; align-items: flex-end`,
+ * which would sit the head and the body side by side. */
+
+.gap-badge {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 100%;
+}
+
+.gap-badge-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  align-self: center;
+  max-width: 100%;
+  margin: 0;
+  padding: 6px 13px 6px 11px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  background: rgba(16, 25, 30, 0.6);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+
+.gap-badge-head:hover {
+  color: var(--text-primary);
+  background: rgba(16, 25, 30, 0.85);
+}
+
+.gap-badge-head:focus-visible {
+  outline: 2px solid var(--teal-500);
+  outline-offset: 2px;
+}
+
+.gap-badge-mark {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--stone-500);
+}
+
+/* The live gap. It is forced open while the host says the agent is running, so the dot is the only
+   thing saying why this one is different from the badges above it. */
+.gap-badge.is-live .gap-badge-mark {
+  background: var(--teal-500);
+  box-shadow: 0 0 0 3px rgba(49, 182, 184, 0.18);
+}
+
+.gap-badge-words {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 8px;
+  min-width: 0;
+}
+
+.gap-badge-title {
+  overflow-wrap: anywhere;
+}
+
+.gap-badge-kinds {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+/* A chevron drawn in CSS: an <img> here would be one more thing that can 404 into a broken-image
+   glyph in the middle of the transcript, which is the defect item 3 of this wave is fixing. */
+.gap-badge-chevron {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-left: 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  opacity: 0.5;
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.gap-badge[data-gap-open="1"] .gap-badge-chevron {
+  transform: rotate(-135deg) translate(-1px, -1px);
+}
+
+.gap-badge-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+/* .message-row carries `display: flex`, and a UA sheet's `[hidden] { display: none }` loses to a
+   class selector on specificity -- that is exactly how the rail tile came to paint a broken image
+   while marked hidden. The body is not a .message-row, but nothing here is going to repeat that
+   trap on a hunch about which sheet wins. */
+.gap-badge-body[hidden] {
+  display: none !important;
+}
+
+/* Every row in an open body is a .message-row, and .message-row animates float-in on every render.
+   The transcript is rebuilt on each tick, so without this, expanding the 47-row gap floats 47 rows
+   at once, and every rebuild during a live turn does it again. */
+.gap-badge-body .message-row {
+  animation: none;
+  max-width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gap-badge-head,
+  .gap-badge-chevron {
+    transition: none;
+  }
+}

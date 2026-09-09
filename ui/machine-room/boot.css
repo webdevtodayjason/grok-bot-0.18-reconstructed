@@ -1,0 +1,115 @@
+/*
+ * The boot cover. Owner: CONSOLE-4 item A.
+ * ----------------------------------------
+ * Jason, 2026-09-08: "when you first load the page, you see a sprite or something like a loading
+ * console, then it loads everything in the background, and then, boom, everything is as it should
+ * be."
+ *
+ * Its own file, next to onboarding.css, for the reason onboarding.css was split out: three waves
+ * are editing styles.css and none of them should land on these lines.
+ *
+ * It is opaque over the whole shell on purpose. index.html ships seed copy -- "MSP Team",
+ * "3 members · ready", "2h 14m", "Atera Triage's desktop" -- which is fiction on a real box and
+ * was all on screen at 500 ms today on a box that has none of it. A translucent cover would let a
+ * person read it.
+ */
+
+#boot-cover {
+  position: fixed;
+  z-index: 10000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  /* Brand Midnight, flat and opaque. The plate bg-boot.js chose is behind this and is what the
+     person sees the moment it lifts, so the cover deliberately does not show it: a plate fading up
+     under a cover fading out is two crossfades reading as a flicker. */
+  background: #090d14;
+  opacity: 1;
+  transition: opacity 420ms ease;
+}
+
+#boot-cover[data-boot-state="lifting"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.boot-cover-inner {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+
+.boot-sprite {
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  animation: boot-sprite-breathe 2600ms ease-in-out infinite;
+}
+
+/* The live crew element, once titan-mascot.js has upgraded it. Same box as the still it replaces,
+   so nothing moves when the swap happens. */
+.boot-sprite-live {
+  display: block;
+  width: 96px;
+  height: 96px;
+}
+
+.boot-line {
+  color: #e6ebf2;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.boot-step {
+  min-height: 16px;
+  color: rgba(230, 235, 242, 0.58);
+  font-size: 12px;
+}
+
+/* A hint, not a percentage. Nothing here knows how far along the boot is, and a bar that claims to
+   is the kind of number that reads as a promise. */
+.boot-track {
+  position: relative;
+  width: 168px;
+  height: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(230, 235, 242, 0.1);
+}
+
+.boot-track span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, #00c8f0, transparent);
+  animation: boot-track-sweep 1500ms ease-in-out infinite;
+}
+
+/* The cover could not reach the box. It says so rather than sitting friendly over the red DEMO
+   DATA bar it is about to uncover. */
+#boot-cover[data-boot-fault="1"] .boot-step {
+  color: #ff9db0;
+}
+
+@keyframes boot-sprite-breathe {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-4px) scale(1.02); }
+}
+
+@keyframes boot-track-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* No pulse, no sweep, and the lift is a removal rather than a fade -- the IIFE in index.html
+     takes the node out immediately rather than waiting for a transitionend that would never come. */
+  #boot-cover { transition: none; }
+  .boot-sprite { animation: none; }
+  .boot-track span { animation: none; width: 100%; opacity: 0.4; }
+}

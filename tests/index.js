@@ -33,6 +33,7 @@ import "./routine-run-failure.test.mjs";
 import "./machine-room-decisions.test.mjs";
 import "./machine-room-trigger-availability.test.mjs";
 import "./machine-room-transcript-fold.test.mjs";
+import "./machine-room-gap-badge.test.mjs";
 import "./openai-compatible-images.test.mjs";
 import "./machine-room-markdown.test.mjs";
 import "./ui-views-render.test.mjs";
@@ -153,3 +154,10 @@ import "./test-index-covers-the-suite.test.mjs";
 
 // HANDBACK-1: the computer hand-off card, the rail and the takeover banner.
 import "./machine-room-handoff.test.mjs";
+
+// CONSOLE-4: the plate before the first pixel, the boot cover, the transcript that settles, the
+// adapter's data shapes, the four seams, the rail tile's reader and its plate, the badge that folds
+// a gap of work into one row, and files that open -- the viewer, the download and the /files route.
+import "./machine-room-boot.test.mjs";
+import "./machine-room-screen-tile.test.mjs";
+import "./machine-room-files.test.mjs";

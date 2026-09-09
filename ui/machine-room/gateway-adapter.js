@@ -269,7 +269,11 @@
     const detail = headline
       ? [`${label} · ${String(item.summary ?? "").trim()}`, String(item.output ?? "").trim(), typeof item.exitCode === "number" ? `exit ${item.exitCode}` : ""].filter(Boolean).join("\n\n")
       : "";
-    return { text, detail };
+    // CONSOLE-4: `kind` is the step's own word, so the badge can say "shell 6, browser 3, read 5"
+    // without re-parsing `text`. It comes straight off the TOOL_LABELS table above -- the same
+    // table the row is headlined from -- because a summary that reads the headline back would go
+    // wrong the moment shellHeadline turns "Shell · cat > notes.md" into "Wrote notes.md".
+    return { text, detail, kind: label };
   }
   const messageKey = (message) => (message?.type === "text" ? `a:${String(message.content ?? "").trim()}` : `a:${JSON.stringify(message ?? null)}`);
   const userText = (e) => (typeof e.content === "string" ? e.content : e.content?.map?.((c) => c.text ?? "").join("") ?? "");
@@ -298,7 +302,10 @@
     let cursor = 0;
     let pending = [];
     for (const item of items) {
-      if (item?.kind === "tool-call") { const row = toolRowText(item); pending.push({ kind: "tool-row", id: `tool-${item.id}`, text: row.text, detail: row.detail }); continue; }
+      // `toolKind` and not `kind`: `kind` on a woven entry is already "tool-row", the entry's own
+      // shape. messagesOf lifts this one onto the message as `kind`, which is where the badge
+      // reads it (CONSOLE-4).
+      if (item?.kind === "tool-call") { const row = toolRowText(item); pending.push({ kind: "tool-row", id: `tool-${item.id}`, text: row.text, detail: row.detail, toolKind: row.kind }); continue; }
       const key = item ? outlineKey(item) : null;
       if (key == null) continue;
       let at = -1;
@@ -347,7 +354,13 @@
     const name = fileName || path.split("/").pop();
     return { path, name, kind: IMAGE_EXT.test(name) || IMAGE_EXT.test(path) ? "image" : "file" };
   }
-  const isAttachmentEntry = (e) => e.kind === "user-attachment" || (e.kind === "send-message" && e.message?.type === "attachment");
+  // CONSOLE-4: the OTHER carrier. `{type:"text", images:[{url, alt}]}` is what SendMessage's own
+  // schema tells the model to use for a file it wants to show alongside a sentence, and it is how
+  // ten of Titan's eleven transcript files actually arrive -- `{type:"attachment"}` accounted for
+  // one of them. Nothing in the console read `.images` anywhere, which is why the Files list showed
+  // one file where there were eleven.
+  const imagesOf = (e) => (e.kind === "send-message" && Array.isArray(e.message?.images) ? e.message.images.filter((i) => i && i.url) : []);
+  const isAttachmentEntry = (e) => e.kind === "user-attachment" || (e.kind === "send-message" && e.message?.type === "attachment") || imagesOf(e).length > 0;
   function messagesOf(transcript, fallbackName, outline, partial = false) {
     return collapseAgentExchanges(weaveToolRows(transcript, outline, partial), fallbackName)
       // UX-ERR-1. turn-failed is in this list because a filter that drops an entry kind it does
@@ -355,7 +368,7 @@
       // console threw it away one function before the renderer.
       .filter((e) => e.kind === "send-message" || e.kind === "tool-row" || e.kind === "agent-exchange" || e.kind === "user-attachment" || e.kind === "turn-failed" || (e.kind === "message" && e.role === "user"))
       .map((e, i) => {
-        if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text, detail: e.detail ?? "" };
+        if (e.kind === "tool-row") return { id: e.id, type: "system", text: e.text, detail: e.detail ?? "", kind: e.toolKind ?? "" };
         // The host owns this sentence. It knows the agent's name and what actually went wrong, and
         // one copy of the wording is the only way the words on the page and the words in the gate
         // stay the same words. No detail field: there is no stack to open.
@@ -368,10 +381,19 @@
         // the card and no text. The agent's own lead-in ("handing you the computer now") is a
         // different entry and is untouched.
         const boxHandoff = mine || card ? null : boxHandoffOf(e);
-        const attachment = isAttachmentEntry(e)
-          ? attachmentOf(e.kind === "user-attachment" ? e.file_path : (e.message.url ?? e.message.file_path), e.kind === "user-attachment" ? e.file_name : e.message.file_name)
-          : null;
-        const text = attachment ? (e.kind === "send-message" ? e.message.alt ?? "" : "")
+        // CONSOLE-4: an images carrier is a LIST, and it keeps its own sentence. Both are handed
+        // to the view: `attachment` stays the first one so nothing that reads it has to change,
+        // and `attachments` carries all of them for the renderer that draws every figure.
+        const images = imagesOf(e);
+        const attachments = images.length
+          ? images.map((i) => attachmentOf(i.url, undefined)).filter(Boolean)
+          : (isAttachmentEntry(e)
+            ? [attachmentOf(e.kind === "user-attachment" ? e.file_path : (e.message.url ?? e.message.file_path), e.kind === "user-attachment" ? e.file_name : e.message.file_name)].filter(Boolean)
+            : []);
+        const attachment = attachments[0] ?? null;
+        // A {type:"attachment"} entry carries its words in `alt`; an images carrier keeps its own
+        // `content`, which is the sentence the agent wrote around the file and must not be dropped.
+        const text = attachment ? (images.length ? String(e.message?.content ?? "") : (e.kind === "send-message" ? e.message.alt ?? "" : ""))
           : e.kind === "send-message"
           ? (typeof e.message?.content === "string" ? e.message.content : "")
           : (typeof e.content === "string" ? e.content : e.content?.map?.((c) => c.text ?? "").join("") ?? "");
@@ -382,9 +404,14 @@
           type: card ? "decision" : boxHandoff ? "handoff" : attachment ? "attachment" : "text",
           ...(card ? { card } : {}),
           ...(boxHandoff ? { handoff: boxHandoff } : {}),
-          ...(attachment ? { attachment } : {}),
+          ...(attachment ? { attachment, attachments } : {}),
           text: boxHandoff ? "" : String(text).trim(),
           time: timeOf(Number(e.timestampMs ?? e.createdAt)),
+          // CONSOLE-4: the raw milliseconds beside the minute-resolution string. The badge needs a
+          // span ("Worked for 2 min") and `time` is already formatted for a person, so it cannot
+          // be subtracted. No tool row carries a timestamp at all, which is why a badge can only
+          // give a duration where BOTH bounding chat entries exist.
+          timestampMs: Number(e.timestampMs ?? e.createdAt) || 0,
           ...(e.evidence ? { evidence: e.evidence } : {}),
         };
       })
@@ -433,15 +460,30 @@
   // construction: it comes out of that agent's own transcript, which is the only per-agent file
   // record the host actually keeps. The UI says as much, because "files" implying a private
   // working directory would be the same lie in a new place.
+  //
+  // CONSOLE-4 changed two things here, both of which Jason could see. It read only
+  // `{type:"attachment"}`, and ten of the eleven files in Titan's conversation ride the
+  // `{type:"text", images:[…]}` carrier instead -- so the list showed one file where there were
+  // eleven. And it stored the raw `file://` URL, for which the host answers null (four bytes on
+  // the wire) while the bare path answers the file: every path returned goes through localPathOf
+  // now, the same unwrap the transcript's own attachments have always used.
   function filesOf(transcript) {
     const seen = new Set();
     return (transcript ?? []).flatMap((e) => {
       if (e.kind === "user-attachment" && e.file_path) {
-        return [{ name: e.file_name || String(e.file_path).split("/").pop(), path: e.file_path, from: "you", at: Number(e.timestampMs) || 0, bytes: Number(e.byteSize) || 0 }];
+        const path = localPathOf(e.file_path);
+        return [{ name: e.file_name || path.split("/").pop(), path, from: "you", at: Number(e.timestampMs) || 0, bytes: Number(e.byteSize) || 0 }];
       }
       if (e.kind === "send-message" && e.message?.type === "attachment") {
-        const url = e.message.url ?? e.message.file_path;
-        if (url) return [{ name: e.message.file_name || String(url).split("/").pop(), path: url, from: "the worker", at: Number(e.timestampMs) || 0, bytes: Number(e.message.byteSize) || 0 }];
+        const path = localPathOf(e.message.url ?? e.message.file_path);
+        if (path) return [{ name: e.message.file_name || path.split("/").pop(), path, from: "the worker", at: Number(e.timestampMs) || 0, bytes: Number(e.message.byteSize) || 0 }];
+      }
+      const images = imagesOf(e);
+      if (images.length) {
+        return images.map((image) => {
+          const path = localPathOf(image.url);
+          return { name: path.split("/").pop() || path, path, from: "the worker", at: Number(e.timestampMs) || 0, bytes: 0 };
+        }).filter((f) => f.path);
       }
       return [];
     })
@@ -1795,7 +1837,14 @@
     return token ? Number(token) : null;
   }
 
-  async function loadContext(context, name) {
+  // CONSOLE-4: how stale the outline may be while the agent is at work. An agent doing tool calls
+  // writes NO transcript entry, so the tail signature below does not move and the cache answered
+  // the same outline for the whole turn -- measured on grok-bot-local-vm, seven shell steps over
+  // 48 s added zero rows and then all landed in one paint. That is a badge with nothing to move
+  // in it. Five seconds is chosen against the two costs it sits between: the /events tick is
+  // debounced at 900 ms, and the long-lived agent's outline is 1,578 items and 211 ms.
+  const OUTLINE_WORKING_MAX_AGE_MS = 5000;
+  async function loadContext(context, name, status) {
     const [tail, automations, workflows, channels, box] = await Promise.all([
       call("getAgentTranscriptTail", { id: context.id, limit: TAIL_LIMIT }).catch(() => null),
       call("getAgentAutomations", { id: context.id }).catch(() => null),
@@ -1810,10 +1859,14 @@
     const last = entries.at(-1);
     const sig = `${entries.length}:${last?.id ?? ""}:${last?.timestampMs ?? ""}`;
     const cached = outlineCache.get(context.id);
-    let outline = cached?.sig === sig ? cached.outline : null;
+    // The cache is kept, not dropped: it is what stops a 1,578-item outline being re-read on every
+    // 900 ms tick. It is only ignored while this agent is actually working, and then only once the
+    // held copy is older than five seconds.
+    const stale = status === "working" && Date.now() - (cached?.at ?? 0) > OUTLINE_WORKING_MAX_AGE_MS;
+    let outline = cached?.sig === sig && !stale ? cached.outline : null;
     if (outline == null) {
       outline = await call("getConversationOutline", { id: context.id }).catch(() => null);
-      outlineCache.set(context.id, { sig, outline });
+      outlineCache.set(context.id, { sig, outline, at: Date.now() });
     }
     return {
       ...shapeWindow(context.id, name, outline),
@@ -2007,7 +2060,7 @@
     const activeRecord = (active.kind === "worker" ? workers : rooms).find((r) => r.id === active.id);
     const openContexts = (seed.openContexts ?? []).filter(exists).map((c) => ({ kind: c.kind, id: c.id }));
     if (!openContexts.some((c) => c.kind === active.kind && c.id === active.id)) openContexts.push(active);
-    const loaded = await loadContext(active, activeRecord.name);
+    const loaded = await loadContext(active, activeRecord.name, activeRecord.status);
     applyLoaded(activeRecord, loaded);
 
     // One call covers every agent. Fetching per-context left every other row showing zero
@@ -2080,7 +2133,7 @@
       if (!r) return;
       state.activeContext = { kind, id };
       if (!state.openContexts.some((c) => same(c, state.activeContext))) state.openContexts.push({ kind, id });
-      const loaded = await loadContext(state.activeContext, r.name).catch(() => null);
+      const loaded = await loadContext(state.activeContext, r.name, r.status).catch(() => null);
       if (loaded) { applyLoaded(r, loaded); applyAwaiting(state.activeContext, r, loaded.latestAgentMs); }
     };
     const record = (c) => (c.kind === "worker" ? state.workers : state.rooms).find((r) => r.id === c.id);
@@ -2311,7 +2364,7 @@
       const r = record(state.activeContext);
       if (!r) { publishRoster(); return; }
       let loaded;
-      try { loaded = await loadContext(state.activeContext, r.name); }
+      try { loaded = await loadContext(state.activeContext, r.name, r.status); }
       catch (error) { publishRoster(); throw error; }
       // Emit only when something the transcript shows actually changed. Every emit makes the app
       // rebuild the whole conversation, and an unconditional one on each stream event and each
@@ -2408,7 +2461,7 @@
         state.activeContext = context;
         if (!state.openContexts.some((c) => same(c, context))) state.openContexts.push(context);
         const snapshot = emit("context:selected", { context });
-        const load = loadContext(context, r.name).then(async (loaded) => {
+        const load = loadContext(context, r.name, r.status).then(async (loaded) => {
           applyLoaded(r, loaded);
           applyAwaiting(context, r, loaded.latestAgentMs);
           state.routines = [...state.routines.filter((x) => !same(x.scope, context)), ...loaded.routines];

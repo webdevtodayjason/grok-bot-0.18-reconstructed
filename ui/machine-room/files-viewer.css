@@ -1,0 +1,178 @@
+/*
+ * The file viewer's own styles (CONSOLE-4, item 4).
+ *
+ * Split out of styles.css the way onboarding.css was, and for the same reason: three other hands
+ * are editing the shared stylesheet this wave. It is pulled in by files-viewer.js itself, so it
+ * needs no line in index.html; a <link> added there anyway is a no-op.
+ *
+ * Everything here uses the console's own tokens. A file opened from a chat has to look like it
+ * came out of the same product as the chat, so the markdown branch deliberately inherits the
+ * message body's type rather than inventing a document style of its own.
+ */
+
+.file-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.file-viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.file-viewer-meta {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+/* An anchor, not a button: <a download> is what makes the browser save the file with the name the
+   relay puts in content-disposition. Styled as the console's ghost button so it reads as the
+   control it is. */
+.file-download {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.file-download:hover {
+  border-color: var(--teal-500);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.file-download:focus-visible {
+  outline: 2px solid var(--teal-500);
+  outline-offset: 2px;
+}
+
+.file-viewer-body {
+  min-height: 120px;
+  max-height: min(60vh, 560px);
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.file-viewer-markdown {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.file-viewer-markdown p,
+.file-viewer-markdown ul,
+.file-viewer-markdown ol {
+  margin: 0 0 10px;
+}
+
+.file-viewer-markdown ul,
+.file-viewer-markdown ol {
+  padding-left: 20px;
+}
+
+.file-viewer-markdown li {
+  margin-bottom: 4px;
+}
+
+/* paragraphMarkup renders a heading as <p class="message-heading"><strong>, so the weight is
+   already there and this only has to give it the space a heading needs. */
+.file-viewer-markdown .message-heading {
+  margin: 16px 0 6px;
+  font-size: 14px;
+}
+
+.file-viewer-markdown .message-heading:first-child {
+  margin-top: 0;
+}
+
+.file-viewer-markdown code {
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.08);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* Wrapped, not scrolled sideways. A log line is read by a person, and a horizontal scrollbar
+   inside a modal is a line nobody reads the end of. */
+.file-viewer-text {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.file-viewer-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+}
+
+/* Short enough that the sentence UNDER it is on screen with it.
+   Measured in real Chrome on grok-bot-local-vm at 1280x900: at min(60vh, 520px) the embed filled
+   the body's whole visible height and the fallback line sat just past the fold -- so the one
+   reader who needed it, the one whose browser had painted nothing, was the one who could not see
+   it. The check that passed on it was checking the DOM, not the page. */
+.file-viewer-pdf {
+  display: block;
+  width: 100%;
+  height: min(48vh, 420px);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.file-viewer-body .field-hint {
+  margin: 10px 0 0;
+}
+
+/* The desktop Files tile is a button now. It was a <div>, which is the whole of why clicking a
+   file did nothing, so the button has to look exactly like the tile did and behave like a
+   control: full width, left aligned, and a visible focus ring for a keyboard. */
+.file-tile {
+  display: block;
+  width: 100%;
+  padding: 14px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.045);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-tile:hover {
+  border-color: var(--glass-edge);
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.file-tile:focus-visible {
+  outline: 2px solid var(--teal-500);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .file-tile,
+  .file-download {
+    transition: background 140ms ease, border-color 140ms ease;
+  }
+}
