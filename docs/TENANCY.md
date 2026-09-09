@@ -774,6 +774,25 @@ R750 2026-09-08 before the backfill: `gates.json` was missing from all three of
 `/data/titanbot/{demo,richard-avery,north-bay-roofing}/volumes/data`, and
 `sand-host-settings.json` was missing from `north-bay-roofing`.
 
+**It discovers boxes, not directory trees, and that is not a detail.** The first version listed
+`/data/titanbot/*/volumes/data`, and Jason's own box does not live there: its sand-data is the named
+docker volume `titanbot-box-data` at `/data/docker/volumes/titanbot-box-data/_data`. So the one box
+the backfill could never see was the operator's, and it was the only box on the R750 still without a
+`gates.json` — which means the CURSOR-1 pins, `sand_auto_review: false` among them, were not applied
+on it. It now enumerates `docker ps --filter label=com.titanbot.role=box` and resolves each box's own
+`/home/box/sand-data` mount `Source` out of `docker inspect`, and keeps the tenant-tree walk as a
+second source so a tenant that is provisioned but not running is still covered; duplicates fold by
+resolved path, and the report says which source found each one. A missing `/data/titanbot` is a note
+rather than a failure, because a host with running boxes on named volumes and no tenant tree is
+exactly the host this has to work on.
+
+**Measured on the R750 2026-09-09.** The dry run named four targets: `north-bay-roofing` (tenant
+tree), the demo box and Richard's (running box, tenant tree — the same directory found twice and
+folded), and Jason's box (running box, the named volume). It would add one file. The run added it:
+`gates.json` at 0600, uid 1000 to match the directory's owner, on
+`/data/docker/volumes/titanbot-box-data/_data`, 645 bytes, carrying `sand_auto_review` and the other
+seventeen pins. Everything else skipped, nothing restarted, nothing recreated.
+
 ---
 
 ## 15. What changed from TENANT-2, and why

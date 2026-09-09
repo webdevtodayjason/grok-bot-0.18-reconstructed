@@ -464,6 +464,73 @@ you administer this machine from, and the way back in would be that same panel.
 If the exemption cannot be resolved the script installs **nothing** and exits non-zero, on purpose. A
 half-installed drop set is worse than none.
 
+### An exemption is bound to the bridge its address lives on (2026-09-09)
+
+Until this date the exemptions accepted on source address alone with no input interface, and
+`coolify-proxy` holds an address on the same bridge as a customer's box (192.168.32.3 where the demo
+box is .2). Docker grants NET_RAW by default and these boxes drop no capabilities, so a tenant with
+root inside its own box could have claimed an exempt source on a segment it already shares. Each
+exemption is now emitted as `iifname "<bridge>" ip saddr <addr> accept`, one line per bridge, and a
+bridge name that is not an interface on this host trips the fail-closed latch. The control plane is
+unaffected: its default route is 192.168.16.1, not titanbot-net.
+
+### NFS and SMB are dropped for boxes only (2026-09-09)
+
+Measured from inside the demo box on the R750: the host answered a customer's sandbox on **2049
+(NFS) and 445 (SMB) on all seven of its addresses**, including the tailnet address. Those two cannot
+go into the blanket drop set — about sixty containers on this host belong to other products and
+their counters are not zero — so they are dropped for the **box addresses only**, in the same
+`guarded` chain:
+
+```sh
+TITANBOT_HOST_GUARD_BOX_DROP_PORTS=2049,445     # the default
+```
+
+11434 (this machine's own model server) and 5000 (an unidentified python service) stay watch-only
+until 5000 is identified. **After the change, same probe, same box:** 2049 and 445 refused on all
+seven host addresses; 80, 443, 11434 and 5000 still answer, which is what watch-only means; 22,
+47291 and 8000 still refused; the 1.1.1.1:443 sanity leg still open; a new connection from inside
+the coolify container to `10.0.0.1:22` still opens; console.titanium.bot 401, api.titanium.bot 404,
+titanium.bot 200, unchanged either side; all three boxes' `StartedAt` unchanged.
+
+### --verify knocks on every door, not only the bridge gateways (2026-09-09)
+
+The box-to-host leg used to probe only what a box can work out from inside itself — its default
+gateway and each attached subnet's `.1` — so every address it named was a bridge gateway and the
+tailnet and LAN doors were never touched. It now also discovers the host's own addresses on the host
+side (`ip -o -4 addr show`, minus bridge, veth, docker0 and lo) and probes them in the same loop.
+On the R750 that took the leg from 6 probes to **18** across three boxes.
+
+## A box started before the entrypoint that repairs its windows (TENANT-4)
+
+`/usr/local/bin/start-window` in the box image treats a live X server as a live desktop, so a forked
+agent on an unrepaired box gets a black screen and nothing ever fixes it. The repair is applied by
+the box's own entrypoint on every start, from `/opt/titanbot-runtime/apply-start-window-fix.sh`,
+which every box mounts read-only. A box that was **started before that entrypoint existed** does not
+have it, and a container recreate is what picks up the new command.
+
+Until you redeploy, put it in effect without one. The script runs inside the box and uses no docker
+socket — the boxes have no docker CLI at all, which is what makes it socket-free rather than merely
+socket-less:
+
+```sh
+for B in $(docker ps --filter label=com.titanbot.role=box --format '{{.Names}}'); do
+  docker exec -e TITANBOT_IN_BOX=1 "$B" sh /opt/titanbot-runtime/apply-start-window-fix.sh
+  docker exec "$B" sh -c 'md5sum /usr/local/bin/start-window; grep -c session_alive /usr/local/bin/start-window'
+done
+```
+
+It is idempotent (a second run says `already patched` for every step), it keeps the original beside
+it as `start-window.orig`, and it syntax-checks what it wrote. A repaired file reads
+`99a90e45a5b5c18ec18da4c5c61a08e4` with 3 hits; the stock one reads `d69219afc86a297d16bee3d97b120095`
+with 0. The edit is a filesystem change in the container, so a recreate throws it away — which is why
+the entrypoint reapplies it on every start.
+
+`scripts/verify-deploy.mjs` reports this per box by name, so the gate says which boxes carry it
+rather than assuming the fleet does. **Measured on the R750 2026-09-09:** all three boxes were stock
+before, all three read `99a90e45` with 3 hits after, and the gate went from
+`3 of 3 box(es) run the stock start-window` to naming all three repaired.
+
 ## Backups (BACKUP-1)
 
 `deploy/backup/snapshot.sh` copies all six places an instance lives — the four volumes, the relay

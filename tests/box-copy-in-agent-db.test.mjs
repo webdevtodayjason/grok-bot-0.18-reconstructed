@@ -36,7 +36,7 @@ writeFileSync(bundlePath, result.outputFiles[0].text, "utf8");
 const download = createRequire(import.meta.url)(bundlePath);
 
 test("an agent database is never a critical copy-in basename", () => {
-  for (const name of ["store.db", "conversation-blobs.db"]) {
+  for (const name of ["store.db", "conversation-blobs.db", "search-index.db"]) {
     assert.equal(download.COPY_IN_CRITICAL_BASENAMES.has(name), false,
       `${name} is back in the critical phase, so a recreate writes the store's stale copy over the live one first`);
   }
@@ -46,6 +46,14 @@ test("an agent database is never a critical copy-in basename", () => {
   assert.equal(download.COPY_IN_CRITICAL_BASENAMES.has("Login Data"), true);
 });
 
+// A unit test over the restore functions cannot see a name being ADDED back, and it cannot see a
+// name being left out either. This is the whole set, so a fourth database on that mount fails here
+// rather than in a customer's console.
+test("all three databases the host keeps on the persistent mount are in the set", () => {
+  assert.deepEqual([...download.AGENT_DATABASE_BASENAMES].sort(),
+    ["conversation-blobs.db", "search-index.db", "store.db"]);
+});
+
 test("the agent database matcher covers the databases and their SQLite sidecars", () => {
   for (const rel of [
     "home/box/sand-data/agents/abc/store.db",
@@ -53,6 +61,11 @@ test("the agent database matcher covers the databases and their SQLite sidecars"
     "home/box/sand-data/agents/abc/store.db-wal",
     "home/box/sand-data/agents/abc/conversation-blobs.db-shm",
     "home/box/sand-data/agents/abc/store.db-journal",
+    // The third one. content-search puts it at getSandRootDir(), the same bind-mounted volume the
+    // other two live on, and sand_global_search defaults true, so the day the index exists a
+    // recreate reproduces this row's corruption for it.
+    "home/box/sand-data/search-index.db",
+    "home/box/sand-data/search-index.db-wal",
   ]) assert.equal(download.isAgentDatabaseRelPath(rel), true, `${rel} is not protected`);
   for (const rel of [
     "home/box/sand-data/agents/abc/profile.json",
