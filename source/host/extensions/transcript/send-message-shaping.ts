@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import {
-  imageMimeFromPath,
+  attachmentImageMimeFromPath,
   videoMimeFromPath,
 } from "../../../shared/media/image-mime.js";
 import { filePathFromFileUrl } from "../../../shared/node/paths.js";
@@ -267,7 +267,10 @@ export function splitAttachmentPathsByChannel(paths: readonly string[]): {
   videoAttachmentPaths: string[];
   fileAttachmentPaths: string[];
 } {
-  const isImage = (path: string) => imageMimeFromPath(path) !== undefined,
+  // attachmentImageMimeFromPath, not imageMimeFromPath: an iPhone screenshot is .heic, the console
+  // renders it, and the narrower resolver said it was not a picture, so it went down the plain-file
+  // channel and could never reach the model as an image no matter what the wire did.
+  const isImage = (path: string) => attachmentImageMimeFromPath(path) !== undefined,
     isVideo = (path: string) => videoMimeFromPath(path) !== undefined;
   return {
     imageAttachmentPaths: paths.filter(isImage),

@@ -35,6 +35,7 @@ import "./machine-room-trigger-availability.test.mjs";
 import "./machine-room-transcript-fold.test.mjs";
 import "./machine-room-gap-badge.test.mjs";
 import "./openai-compatible-images.test.mjs";
+import "./provider-image-parts.test.mjs";
 import "./machine-room-markdown.test.mjs";
 import "./ui-views-render.test.mjs";
 import "./local-schedule-tick.test.mjs";

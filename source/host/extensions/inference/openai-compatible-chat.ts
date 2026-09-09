@@ -270,13 +270,20 @@ async function repairToolCall(
   return schemaProblems(parsed, tool.parameters).length === 0 ? parsed : undefined;
 }
 
+/** Read once. The image guard has to see the body BEFORE deciding whether this is an error at all. */
+async function bodyText(response: Response): Promise<string> {
+  try { return (await response.text()).slice(0, 4_096).trim(); } catch { return ""; }
+}
+
 async function responseError(response: Response, hasApiKey: boolean): Promise<Error> {
-  let detail = "";
-  try { detail = (await response.text()).slice(0, 4_096).trim(); } catch {}
-  const suffix = `(${response.status}${detail.length === 0 ? "" : `: ${detail}`})`;
+  return errorFromResponse(response.status, await bodyText(response), hasApiKey);
+}
+
+function errorFromResponse(status: number, detail: string, hasApiKey: boolean): Error {
+  const suffix = `(${status}${detail.length === 0 ? "" : `: ${detail}`})`;
   // A key-guarded server (LM Studio, a fronted vLLM) answers 401/403 rather than anything
   // provider-shaped, so the actionable instruction has to be synthesized here.
-  if (response.status === 401 || response.status === 403) {
+  if (status === 401 || status === 403) {
     return new Error(hasApiKey
       ? `The OpenAI-compatible endpoint rejected ${OPENAI_COMPATIBLE_API_KEY_ENV}. Check the key in Settings → Router. ${suffix}`
       : `The OpenAI-compatible endpoint needs ${OPENAI_COMPATIBLE_API_KEY_ENV}. Add it in Settings → Router. ${suffix}`);
@@ -369,8 +376,12 @@ function requestTools(tools: readonly OpenAiCompatibleTool[] | undefined): Loose
  * which is the shape every OpenAI-compatible vision endpoint accepts. The base64 is stripped from
  * the tool message itself -- sending it twice would double an already large payload.
  *
- * Blast radius is exactly the broken path: only computer-use tool results carry images, so an
- * endpoint with no vision support sees no change on any turn that works today.
+ * The note here used to say the blast radius was exactly the broken path, because only computer-use
+ * tool results carried images and an endpoint with no vision therefore saw no change on a turn that
+ * works today. MEASURED FALSE on grok-bot-local-vm, 2026-09-09: a person's own attachment now takes
+ * this same channel, and glm-5.3 answers an image_url part with 400 code 1210 "messages.content.type
+ * is invalid, allowed values: ['text']" -- three times out of three, killing the turn with nothing
+ * written to the transcript. That is what the refusal memory further down exists to survive.
  */
 const IMAGE_BYTES_MAX = 6_000_000;
 
@@ -415,7 +426,7 @@ async function executeToolCalls(calls: readonly PendingToolCall[], toolsByName: 
   for (const call of calls) {
     const result = (output: string): Loose => ({ role: "tool", tool_call_id: call.id, name: call.name, content: output });
     const selected = toolsByName.get(call.name);
-    if (selected == null) { results.push(result(safeJson({ isError: true, error: `Unknown Grok Bot tool: ${call.name}` }))); continue; }
+    if (selected == null) { results.push(result(safeJson({ isError: true, error: `Unknown Titanium Bot tool: ${call.name}` }))); continue; }
     let args: unknown = {};
     try { args = call.arguments.trim().length > 0 ? JSON.parse(call.arguments) : {}; }
     catch { results.push(result(safeJson({ isError: true, error: "Tool arguments were not valid JSON." }))); continue; }
@@ -437,6 +448,66 @@ async function executeToolCalls(calls: readonly PendingToolCall[], toolsByName: 
     });
   }
   return results;
+}
+
+/**
+ * The per-image ceiling, named for the request builder that has to respect it. Kept as a separate
+ * export so IMAGE_BYTES_MAX itself stays a plain const: tests/openai-compatible-images.test.mjs
+ * lifts the helpers above out of this file and runs them, and an `export` in that slice is a syntax
+ * error inside the function it builds.
+ */
+export const IMAGE_PART_BYTES_MAX = IMAGE_BYTES_MAX;
+
+/**
+ * An endpoint that will not read a picture is remembered for the life of this host process, keyed by
+ * base URL and model, so the next turn does not spend the bytes and the round trip to learn it
+ * again. Deliberately NOT persisted: a restart re-measures rather than inheriting a verdict about an
+ * endpoint that may have been given vision since, and nothing here writes a file another wave owns.
+ */
+const imageRefusals = new Set<string>();
+const refusalKey = (baseUrl: string, model: string): string => `${baseUrl.trim().replace(/\/+$/, "")} :: ${model.trim()}`;
+export function endpointRefusesImages(baseUrl: string, model: string): boolean { return imageRefusals.has(refusalKey(baseUrl, model)); }
+export function noteEndpointRefusesImages(baseUrl: string, model: string): void { imageRefusals.add(refusalKey(baseUrl, model)); }
+/** For tests and gates, so one case cannot decide the next. */
+export function forgetImageRefusals(): void { imageRefusals.clear(); }
+
+/**
+ * How a server says it will not take a picture. Only consulted on a 400 for a request that actually
+ * carried one, so a 400 about anything else can never be read as a vision refusal. The first pattern
+ * is the measured glm-5.3 wording; the rest are how other servers put it.
+ */
+const IMAGE_REFUSAL_PATTERNS: readonly RegExp[] = [
+  /content\.type is invalid/i,
+  /image[_ ]?url/i,
+  /unsupported[^.]{0,32}image/i,
+  /image[^.]{0,32}not supported/i,
+  /(?:does not|doesn't) support[^.]{0,16}(?:image|vision)/i,
+  /invalid[^.]{0,16}content type/i,
+];
+export function looksLikeImageRefusal(status: number, body: string): boolean {
+  return status === 400 && IMAGE_REFUSAL_PATTERNS.some(pattern => pattern.test(body));
+}
+
+/** True when this request would hand the server a picture. */
+export function carriesImageParts(messages: readonly Loose[]): boolean {
+  return messages.some(message => Array.isArray(message.content) && message.content.some((part: unknown) => record(part)?.type === "image_url"));
+}
+/**
+ * The same request with the pictures taken out and one plain line put where they were, so the model
+ * is told what it cannot see instead of the turn dying. Plain words on purpose: this sentence is what
+ * the agent then repeats to the person.
+ */
+export function withoutImageParts(messages: readonly Loose[]): Loose[] {
+  return messages.map(message => {
+    if (!Array.isArray(message.content)) return message;
+    const kept = message.content.filter((part: unknown) => record(part)?.type !== "image_url");
+    const dropped = message.content.length - kept.length;
+    if (dropped === 0) return message;
+    const text = kept.map((part: unknown) => { const held = record(part); return typeof held?.text === "string" ? held.text : ""; }).filter(Boolean).join("\n");
+    const one = dropped === 1;
+    const note = `[The ${one ? "picture" : "pictures"} attached here could not be sent to this model, which does not accept images, so you cannot see ${one ? "it" : "them"}. Any file path listed above is where ${one ? "it is" : "they are"} on this box. Tell the person plainly that you cannot see ${one ? "it" : "them"} rather than guessing what ${one ? "it shows" : "they show"}.]`;
+    return { ...message, content: text.length > 0 ? `${text}\n\n${note}` : note };
+  });
 }
 
 // --- the Responses transport: the same events, spoken to the OpenAI Responses API ----------------
@@ -586,7 +657,7 @@ async function* streamOpenAiResponses(options: OpenAiCompatibleOptions): AsyncGe
       ...await executeToolCalls(calls, toolsByName, options.executeTool),
     ];
   }
-  throw new Error(`The OpenAI Responses endpoint exceeded Grok Bot's ${maxSteps}-step tool limit.`);
+  throw new Error(`The OpenAI Responses endpoint exceeded Titanium Bot's ${maxSteps}-step tool limit.`);
 }
 
 export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptions): AsyncGenerator<OpenAiCompatibleEvent> {
@@ -600,30 +671,48 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
   let text = "";
   let usage: OpenAiCompatibleUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
+  const post = (payload: readonly Loose[]) => options.fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      "user-agent": "grok-bot-router/1",
+      // Local runtimes usually serve unauthenticated, so an absent key must not become an empty bearer.
+      ...(apiKey.length === 0 ? {} : { authorization: `Bearer ${apiKey}` }),
+    },
+    body: JSON.stringify({
+      model: options.model,
+      messages: payload,
+      ...(declaredTools == null ? {} : { tools: declaredTools, tool_choice: "auto" }),
+      // Reasoning models burn the whole budget thinking unless told not to, and the switch
+      // lives here rather than at the top level, where it is silently ignored.
+      ...(process.env.SAND_OPENAI_COMPATIBLE_THINKING?.trim() === "1"
+        ? {}
+        : { chat_template_kwargs: { enable_thinking: false } }),
+      stream: true,
+      stream_options: { include_usage: true },
+    }),
+  });
+
   for (let step = 0; step < maxSteps; step += 1) {
-    const response = await options.fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "text/event-stream",
-        "user-agent": "grok-bot-router/1",
-        // Local runtimes usually serve unauthenticated, so an absent key must not become an empty bearer.
-        ...(apiKey.length === 0 ? {} : { authorization: `Bearer ${apiKey}` }),
-      },
-      body: JSON.stringify({
-        model: options.model,
-        messages,
-        ...(declaredTools == null ? {} : { tools: declaredTools, tool_choice: "auto" }),
-        // Reasoning models burn the whole budget thinking unless told not to, and the switch
-        // lives here rather than at the top level, where it is silently ignored.
-        ...(process.env.SAND_OPENAI_COMPATIBLE_THINKING?.trim() === "1"
-          ? {}
-          : { chat_template_kwargs: { enable_thinking: false } }),
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-    });
-    if (!response.ok) throw await responseError(response, apiKey.length > 0);
+    // Known refusal: skip the bytes with no round trip. The picture is replaced by the sentence
+    // before the request is built, so the model still knows a file was attached.
+    if (endpointRefusesImages(options.baseUrl, options.model) && carriesImageParts(messages)) messages = withoutImageParts(messages);
+    let response = await post(messages);
+    if (!response.ok) {
+      const detail = await bodyText(response);
+      // The turn does not get to die because the endpoint has no eyes. Remember the refusal, put the
+      // sentence where the picture was, and ask the same question again -- once.
+      if (carriesImageParts(messages) && looksLikeImageRefusal(response.status, detail)) {
+        noteEndpointRefusesImages(options.baseUrl, options.model);
+        console.info(`[sand-host] ${options.model} refused an attached picture, so it travels as a sentence from here on (${detail.slice(0, 200)})`);
+        messages = withoutImageParts(messages);
+        response = await post(messages);
+        if (!response.ok) throw errorFromResponse(response.status, await bodyText(response), apiKey.length > 0);
+      } else {
+        throw errorFromResponse(response.status, detail, apiKey.length > 0);
+      }
+    }
 
     const pending = new Map<number, PendingToolCall>();
     let stepUsage: OpenAiCompatibleUsage | null = null;
@@ -677,5 +766,5 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
       ...await executeToolCalls(calls, toolsByName, options.executeTool),
     ];
   }
-  throw new Error(`The OpenAI-compatible endpoint exceeded Grok Bot's ${maxSteps}-step tool limit.`);
+  throw new Error(`The OpenAI-compatible endpoint exceeded Titanium Bot's ${maxSteps}-step tool limit.`);
 }

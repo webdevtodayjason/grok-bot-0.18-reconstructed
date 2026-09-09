@@ -391,6 +391,17 @@ export class SendPipeline {
       const selectedImages =
         await loadSelectedImageInputs(imageAttachmentPaths);
       const selectedVideos = buildSelectedVideos(videoAttachmentPaths);
+      // ATTACH-1/B4. The floor under everything else here: the model is TOLD the file exists.
+      // buildAttachedFilesNote is built from attachedFilePaths, which was filled from the non-image
+      // list only, so an attached picture produced a dropped image part AND no note at all -- the
+      // agent was left hunting the filesystem with find for a file it was never told about. Images
+      // are named here with their real on-box path, whether or not the endpoint can see them.
+      // Only on the direct-turn path: on the group path fileAttachmentPaths is what actually gets
+      // uploaded, and the images already travel there as selectedImages.
+      const notedAttachmentPaths = [
+        ...fileAttachmentPaths,
+        ...imageAttachmentPaths,
+      ];
       if (
         this.tm.groupChat.isRemoteRoomSession(session) ||
         this.tm.groupChat.isGroupSession(session)
@@ -435,7 +446,7 @@ export class SendPipeline {
           : { replyContext: threading.replyContext }),
         selectedImages,
         selectedVideos,
-        fileAttachmentPaths,
+        fileAttachmentPaths: notedAttachmentPaths,
         attachedFileSizes: sizes,
         ...(sendTrace?.context == null ? {} : { traceCtx: sendTrace.context }),
         acceptedAtMs,

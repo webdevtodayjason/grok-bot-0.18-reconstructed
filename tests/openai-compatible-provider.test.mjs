@@ -281,7 +281,9 @@ test("a routed openai-compatible turn streams, calls a Grok Bot tool and records
   assert.deepEqual(executed, [{ providerIdentifier: "user-Gmail", toolName: "search_threads", args: { query: "newer_than:1d" }, toolCallId: "call_1" }]);
   assert.equal(server.requests.length, 2);
   assert.equal(server.requests[0].body.model, "qwen3-coder:30b");
-  assert.match(server.requests[0].body.messages[0].content, /You are Grok Bot/);
+  // Renamed with the rest of what the model reads and says (ATTACH-1/B6). NAME-1 covers the
+  // constant behind SAND_PRODUCT_DISPLAY_NAME, which still carries the old name.
+  assert.match(server.requests[0].body.messages[0].content, /You are Titanium Bot/);
 
   const stored = JSON.parse(await readFile(path.join(dataRoot, "settings.json"), "utf8"));
   const recorded = stored.inferenceRouterUsage.providers["openai-compatible"];
