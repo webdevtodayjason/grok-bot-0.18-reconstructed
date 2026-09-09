@@ -2162,6 +2162,16 @@ if (!WANT_BROWSER) {
   // included, had not run since. The wait is bounded now as well as correct, so a future rename is
   // a FAIL with the reason on it rather than a dead gate.
   await openPanel("panel-spend");
+  // A ZERO FROM A PROXY NOBODY ASKED. This control plane has no proxy configured and the route says
+  // so in words at the top of the panel, and every row under it drew $0.00 all the same. On this
+  // fixture the two sat an inch apart and the wrong one was the one that looked like data.
+  const spendTable = String(await page.locator("#spend").textContent());
+  const spendNote = String(await page.locator("#spendNote").textContent());
+  if (spendNote.includes("Not measured")) {
+    check(!spendTable.includes("$0.00"), "a panel that says the proxy was never asked draws no dollar figure under it",
+      spendTable.replace(/\s+/g, " ").slice(0, 90));
+    check(spendTable.includes("not measured"), "it says not measured in the cell as well as in the note");
+  }
   const spendPlaceholder = await page.locator("#panel-spend .placeholder").textContent({ timeout: 10_000 })
     .catch((error) => `NOT FOUND: ${String(error?.message ?? error).split("\n")[0]}`);
   check(String(spendPlaceholder).replace(/\s+/g, " ").trim()

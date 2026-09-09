@@ -236,9 +236,6 @@ button.small { margin-top: 0; padding: 4px 9px; font-size: 12px; }
 .stat .k { font-size: 11px; color: var(--quiet); text-transform: uppercase; letter-spacing: 0.06em; }
 .stat .v { font-family: var(--mono); font-size: 18px; line-height: 1.25; }
 .stat .v.unmeasured { font-family: var(--sans); font-size: 13px; color: var(--quiet); }
-/* A figure that is a word rather than a number: "reachable", "not answering". Monospaced 18px is
-   for comparing digits down a column, which a word is not. */
-.stat .v.word { font-family: var(--sans); font-size: 15px; font-weight: 600; }
 .stat .d { font-size: 12px; color: var(--quiet); white-space: normal; }
 .stat.warn { border-color: #5A4326; }
 .stat.bad { border-color: #4A2630; }

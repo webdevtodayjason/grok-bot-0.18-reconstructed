@@ -176,7 +176,6 @@
       value.className = "v unmeasured";
       value.appendChild(text("not measured"));
     } else {
-      if (chip.word) value.className = "v word";
       value.appendChild(text(String(chip.value)));
     }
     node.appendChild(value);
@@ -1137,20 +1136,32 @@
     return node;
   };
 
+  // A SUMMARY AND NOT A SECOND COPY. The cards below already say Coolify, the relay and the stuck
+  // builds one by one, and repeating four of them in a strip above is furniture. What the card grid
+  // cannot say is how much of ITSELF is real: this container reads some of these facts off the host
+  // and cannot see the rest, so "9 of 12 measured" is the number that tells an operator whether the
+  // screen below is a health report or mostly a list of reasons.
   function systemChips(answer) {
     const stuck = (answer.stuckProvisioning ?? []).length;
+    const facts = [
+      answer.load?.one != null,
+      answer.memory?.availableBytes != null,
+      ...(answer.disks ?? []).map((one) => one.freeBytes != null),
+      answer.backup?.measured === true,
+      answer.isolation?.measured === true,
+      answer.signInRecord?.signing === true,
+    ];
+    const read = facts.filter(Boolean).length;
+    const down = [answer.coolify?.reachable, answer.relay?.reachable].filter((one) => one !== true).length;
     return [
       {
-        label: "Coolify", word: true,
-        value: answer.coolify?.reachable ? "reachable" : "not answering",
-        tone: answer.coolify?.reachable ? "good" : "bad",
-        why: String(answer.coolify?.why || answer.coolify?.url || ""),
+        label: "Facts measured", value: `${read} of ${facts.length}`,
+        tone: read === facts.length ? "good" : "warn",
+        detail: read === facts.length ? "" : "the rest say why on their own card",
       },
       {
-        label: "Console relay", word: true,
-        value: answer.relay?.reachable ? "reachable" : "not answering",
-        tone: answer.relay?.reachable ? "good" : "bad",
-        why: String(answer.relay?.why || answer.relay?.url || ""),
+        label: "Not answering", value: down, tone: down === 0 ? "good" : "bad",
+        detail: "Coolify and the console relay",
       },
       { label: "Builds stuck", value: stuck, tone: stuck === 0 ? "good" : "bad" },
       { label: "Sign-ins in the last day", value: answer.counts?.signInsLastDay ?? null },
@@ -1273,10 +1284,16 @@
       who.appendChild(el("div", "quiet", client.slug));
       tr.appendChild(who);
 
+      // A ZERO FROM A PROXY NOBODY ASKED IS NOT A ZERO. With no proxy configured this route still
+      // answers a row per customer with 0.00 on it, and the table drew $0.00 and "0 requests" beside
+      // a note that says in words that nothing was measured. Two answers to one question an inch
+      // apart, and the wrong one is the one that looks like data. Found on this Mac 2026-09-09 in a
+      // screenshot of this panel, with the summary strip above it reading not measured.
+      const asked = answer.configured !== false;
       const window = (one) => {
         const cell = document.createElement("td");
-        cell.appendChild(measured(dollars(one.dollars), one.why || client.why));
-        cell.appendChild(el("div", "quiet", one.requests === null || one.requests === undefined
+        cell.appendChild(measured(asked ? dollars(one.dollars) : null, one.why || client.why || answer.why));
+        cell.appendChild(el("div", "quiet", !asked || one.requests === null || one.requests === undefined
           ? "requests not measured"
           : `${one.requests} request${one.requests === 1 ? "" : "s"}`));
         return cell;
