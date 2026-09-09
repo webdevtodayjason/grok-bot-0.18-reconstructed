@@ -112,6 +112,29 @@ any network whose API needs an app review a small business will not pass. When a
 person (a code, a captcha, an identity check) the bot hands it to you with a live view and picks up
 after you hand it back.
 
+There are two of those browsers now, behind the same four tools and the same driver, so a bot never
+knows which one it got and a result never changes shape:
+
+- **The one in the box.** Free, always there, and it comes from this server's address. That address
+  is what a sign-up page refuses.
+- **A cloud browser** at Browser Use or Browserbase, on a residential exit. This is what gets past
+  the refusal, and it is what carries a saved login that survives the box being rebuilt.
+
+Which one runs is decided in that order: the engine you pinned for the workspace, then the site
+list (instagram.com, facebook.com and linkedin.com are on it out of the box), then — at most once
+per tool call — an automatic escalation when the box's own browser came back with a page that had
+nothing on it. That last trigger exists because of a measurement rather than a theory: on
+2026-09-09 a public Instagram profile answered the in-box browser in 3.26 s with HTTP 200, no login
+wall, no block, and Meta's footer as its entire content. Nothing failed, so nothing would ever have
+escalated on the exact page the cloud engine exists for.
+
+**The keys are yours and they cost money.** Bring your own for both vendors; each is a masked box on
+its Marketplace row and the value is read only by the host, never by a connector and never by
+anything the agent's shell can see. Browser time is cents an hour and the residential proxy is
+dollars a gigabyte, which is why every session is written to a ledger the super admin reads with
+the workspace, the vendor, the minutes and the proxy bytes on it. Where a vendor publishes no
+traffic figure that column says so instead of showing a zero, because a zero there reads as free.
+
 **The client's own developer app.** Their tokens, their app, their review. The Marketplace rows for
 Meta, X and LinkedIn say "bring your own app" because that is the truth, and the first-run page
 names the two prerequisites that strand people:
@@ -170,6 +193,8 @@ the roster.
 | The row's invariants as a unit test | `tests/marketing-pack.test.mjs` |
 | The gate, in a real browser against a real box | `scripts/verify-marketing.mjs` |
 | The Marketplace rows for the marketing vendors | `docs/CONNECTORS.md` |
+| The cloud browser: routing, custody, the ledger, the hand-off | `docs/CLOUD-BROWSER.md` |
+| The weekly re-read of the vendors' own documentation | `cp/verification.mjs` |
 
 Roadmap, deliberately not built in this release: roster grouping and sub-coordinators (TEAMS-1),
 a per-tenant OAuth callback for Meta, X and LinkedIn, and a Canva row.

@@ -43,6 +43,7 @@ import {
 import { CONNECT_TIMEOUT_SENTENCE, describeConnectorHealth } from "./connector-health.js";
 import { OAUTH_REMOTE_REFUSAL, probeRemoteMcpOAuth } from "./remote-oauth-probe.js";
 import { isShellEnvSecretField } from "../shell-tools/shell-secret-field.js";
+import { writeCloudBrowserSecret } from "../inference/cloud-browser/secrets.js";
 import { pushShellEnvSecretsToBox, writeShellEnvSecret } from "../shell-tools/shell-secrets.js";
 import { createContext } from "../../../packages/context/core.js";
 import {
@@ -566,6 +567,14 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
           }
           went.push("the connector");
           restarted = await restartLocalConnector(consumer.connector) || restarted;
+        } else if (consumer.kind === "cloud-browser") {
+          // Same root, same 0600 file, a different section of it. writeCloudBrowserSecret
+          // holds a closed allowlist of field names, so a row that declares a field the
+          // cloud browser does not read is refused here rather than stored as an orphan.
+          if (!writeCloudBrowserSecret(root, consumer.env, args.value)) {
+            throw new Error(`the cloud browser does not hold ${consumer.env}`);
+          }
+          went.push("the cloud browser");
         } else {
           if (deps.shellSecretSink == null) throw new Error("this host has no shell to push a credential into");
           if (!deps.shellSecretSink.write(consumer.env, args.value)) {
@@ -581,9 +590,11 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
         ...(shell == null ? {} : { applied: shell.applied, ...(shell.pendingWindows.length === 0 ? {} : { pendingWindows: [...shell.pendingWindows] }) }),
         // The one line the page prints under the single masked box.
         sentence: `Stored once. Used by ${where}.`,
-        consumers: consumers.map((consumer) => consumer.kind === "connector"
-          ? { kind: "connector", connector: consumer.connector, env: consumer.env }
-          : { kind: "shell", env: consumer.env }),
+        consumers: consumers.map((consumer) => {
+          if (consumer.kind === "connector") return { kind: "connector", connector: consumer.connector, env: consumer.env };
+          if (consumer.kind === "cloud-browser") return { kind: "cloud-browser", engine: consumer.engine, env: consumer.env };
+          return { kind: "shell", env: consumer.env };
+        }),
       };
     },
     /**

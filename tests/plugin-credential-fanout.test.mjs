@@ -161,3 +161,41 @@ test("plan inclusion needs BOTH the plugin's mount and a configured url", () => 
   assert.equal(plugins.pluginIncludedWithPlan(withMount, () => null), false);
   assert.equal(plugins.pluginIncludedWithPlan(connectorPlugin(), () => "http://titanbot-proxy:4000/mcp/"), false);
 });
+
+
+// CLOUD-BROWSER-1. THE THIRD DESTINATION, AND THE ROW THAT HAS ONLY THAT ONE.
+//
+// Browserbase ships as a credential-only row: no MCP connector (its server is archived and its key
+// travels as a URL query parameter the door refuses) and no shell tool, so `connectorName` is
+// absent. Before this, a declared cloud-browser consumer fell through the connector fallback and
+// resolved to NOTHING: the page drew a masked box, the person typed a key into it, and the answer
+// came back saying it was stored. That is the worst of the three possible bugs here, because the
+// only symptom is a session that will not start weeks later.
+test("a cloud-browser consumer resolves on a row that has no connector at all", () => {
+  const row = { id: "browserbase", name: "Browserbase", kind: "connector", credentials: [
+    { field: "BROWSERBASE_API_KEY", consumers: [{ kind: "cloud-browser", engine: "browserbase" }] },
+    { field: "BROWSERBASE_PROJECT_ID", consumers: [{ kind: "cloud-browser", engine: "browserbase" }] },
+  ] };
+  assert.deepEqual(plugins.pluginCredentialConsumers(row, "BROWSERBASE_API_KEY"),
+    [{ kind: "cloud-browser", engine: "browserbase", env: "BROWSERBASE_API_KEY" }]);
+  // The project id is not a secret and rides in the same section anyway: a key without it opens
+  // nothing, and two places to look is two places to forget.
+  assert.deepEqual(plugins.pluginCredentialConsumers(row, "BROWSERBASE_PROJECT_ID"),
+    [{ kind: "cloud-browser", engine: "browserbase", env: "BROWSERBASE_PROJECT_ID" }]);
+});
+
+test("a cloud-browser consumer with no engine named resolves to nothing rather than to a guess", () => {
+  const row = { id: "x", name: "X", kind: "connector", connectorName: "x",
+    credentials: [{ field: "X_TOKEN", consumers: [{ kind: "cloud-browser" }] }] };
+  assert.deepEqual(plugins.pluginCredentialConsumers(row, "X_TOKEN"), []);
+});
+
+test("the shipped Browserbase row declares both fields and no connector", () => {
+  const row = catalog.MARKETPLACE_PLUGINS.find((plugin) => plugin.id === "browserbase");
+  assert.ok(row != null, "the catalog no longer carries the browserbase row");
+  assert.equal(row.connectorName, undefined, "browserbase has no honest connector and must not claim one");
+  for (const field of ["BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID"]) {
+    const resolved = plugins.pluginCredentialConsumers(row, field);
+    assert.deepEqual(resolved, [{ kind: "cloud-browser", engine: "browserbase", env: field }], field);
+  }
+});

@@ -19,14 +19,22 @@ import test from "node:test";
 import { startControlPlane } from "./cp-support.mjs";
 import { VERIFICATION_RUN_SETTING, VERIFICATION_SETTING_PREFIX } from "../cp/verification.mjs";
 
-/** A relay that answers the cloud-browser ledger route with rows in the written contract's shape. */
+/**
+ * A relay that answers the cloud-browser ledger route with rows in the written contract's shape.
+ *
+ * ONE ROUTE PER TENANT -- /admin/tenants/<slug>/cloud-browser -- because that is what the relay
+ * serves: the ledger is a file inside that tenant's own container and a container is what a slug
+ * resolves to. It also stamps the slug it resolved by over whatever the box called itself, so this
+ * fake answers rows for the slug in the path and the panel's grouping is measured against that.
+ */
 async function startFakeRelay(rows, { status = 200 } = {}) {
   const { createServer } = await import("node:http");
   const seen = [];
   const server = createServer((request, response) => {
     seen.push({ url: request.url, authorization: String(request.headers.authorization ?? "") });
     if (status !== 200) { response.writeHead(status); response.end("{}"); return; }
-    const body = JSON.stringify({ rows });
+    const slug = /^\/admin\/tenants\/([^/]+)\/cloud-browser$/.exec(new URL(request.url, "http://relay.invalid").pathname)?.[1] ?? "";
+    const body = JSON.stringify({ slug, read: true, why: "", rows: rows.filter((row) => row.tenant === slug) });
     response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
     response.end(body);
   });
@@ -121,6 +129,8 @@ test("the ledger says 'not reported by this vendor' rather than a zero, and neve
   const relay = await startFakeRelay(LEDGER_ROWS);
   try {
     await withPlane(async (plane) => {
+      // The panel asks per tenant, so a tenant has to exist for there to be anything to ask about.
+      plane.store.createTenant({ slug: "demo", name: "Demo", status: "running" });
       const answer = await plane.admin("GET", "/v1/admin/marketplace");
       assert.equal(answer.status, 200);
       const ledger = answer.body.ledger;
@@ -160,12 +170,16 @@ test("a relay with no ledger route yet is 'not measured' and says why, and is ne
   const relay = await startFakeRelay([], { status: 404 });
   try {
     await withPlane(async (plane) => {
+      plane.store.createTenant({ slug: "demo", name: "Demo", status: "running" });
       const answer = await plane.admin("GET", "/v1/admin/marketplace");
       const ledger = answer.body.ledger;
       assert.equal(ledger.measured, false);
       assert.match(ledger.why, /answered 404/);
       assert.deepEqual(ledger.rows, []);
       assert.deepEqual(ledger.tenants, []);
+      // Named, not counted: an operator has to be able to see WHICH workspace is missing from a
+      // total, or a partial answer reads as a whole one.
+      assert.deepEqual(ledger.unread.map((row) => row.tenant), ["demo"]);
     }, { relay });
   } finally { await relay.close(); }
 });

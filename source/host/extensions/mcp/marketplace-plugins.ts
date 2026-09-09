@@ -294,11 +294,18 @@ export interface MarketplaceUninstallOutcome {
  */
 export type PluginCredentialConsumer =
   | { readonly kind: "connector"; readonly connector: string; readonly env: string }
-  | { readonly kind: "shell"; readonly env: string };
+  | { readonly kind: "shell"; readonly env: string }
+  // CLOUD-BROWSER-1. The third destination, and the reason it is not one of the other two.
+  // A cloud browser's key is not an MCP server's environment (Browserbase has no honest
+  // connector to hang one on) and it is emphatically not the agent shell's environment,
+  // which is merged into every /bin/sh the agent runs. It goes to the host-only
+  // `cloudBrowser` section, read in this process by the two vendor adapters and merged
+  // into no child environment ever.
+  | { readonly kind: "cloud-browser"; readonly engine: string; readonly env: string };
 
 interface DeclaredCredential {
   readonly field: string;
-  readonly consumers?: readonly { readonly kind?: string; readonly env?: string; readonly name?: string }[];
+  readonly consumers?: readonly { readonly kind?: string; readonly env?: string; readonly name?: string; readonly engine?: string }[];
 }
 
 function declaredCredentials(plugin: MarketplacePlugin): readonly DeclaredCredential[] {
@@ -319,6 +326,13 @@ export function pluginCredentialConsumers(
       // already names the field, and `asAccountServer` substitutes from the connector's own
       // section of the store at push time. So it resolves to the connector consumer.
       if (consumer.kind === "shell") return [{ kind: "shell", env }];
+      // A row may declare a cloud-browser consumer and no connector at all -- Browserbase
+      // is exactly that row -- so this branch has to come before the connector fallback or
+      // the field falls through to `[]` and the page reports a key it never stored.
+      if (consumer.kind === "cloud-browser") {
+        const engine = typeof consumer.engine === "string" ? consumer.engine : "";
+        return engine.length === 0 ? [] : [{ kind: "cloud-browser", engine, env }];
+      }
       return connector == null ? [] : [{ kind: "connector", connector, env }];
     });
   }

@@ -3563,6 +3563,16 @@
       // CP-10 item 1: a connector's own env credential. The host names the fields
       // (listConnectorSecretFields) and stores the value (setConnectorSecret); this page holds it
       // only for the length of the call and never paints it into the DOM.
+      // CLOUD-BROWSER-1. The cloud browser's own key store, which is neither a connector's
+      // environment nor the agent shell's. A host that predates the cloud leg answers null, and
+      // the sentence says the value was not stored rather than pretending it was.
+      setCloudBrowserKey(field, value) {
+        return tryCall("setCloudBrowserKey", { field, value })
+          .then((answer) => (answer === null
+            ? { accepted: false, message: `This host has no cloud browser yet, so ${field} was not stored.` }
+            : { accepted: answer?.stored !== false, message: `${field} stored on the host.` }))
+          .catch((error) => ({ accepted: false, message: `${field} was not stored: ${error.message}` }));
+      },
       setConnectorSecret(server, field, value) {
         return tryCall("setConnectorSecret", { server, field, value })
           .then((answer) => {
@@ -3890,6 +3900,12 @@
           if (consumer?.kind === "shell") {
             results.push(await this.setShellSecret(pluginId, String(consumer.env ?? field), value));
             wentTo.push("the agent's shell");
+          } else if (consumer?.kind === "cloud-browser") {
+            // CLOUD-BROWSER-1. Its own gateway command, because its own store: this value is
+            // read in the host process by the vendor adapters and is merged into no child
+            // environment, which is the whole difference between it and the two above.
+            results.push(await this.setCloudBrowserKey(String(consumer.env ?? field), value));
+            wentTo.push("the cloud browser");
           } else if (consumer?.kind === "connector" || consumer?.kind === "header" || consumer?.kind === "url") {
             const server = String(consumer.server ?? plugin?.connectorName ?? pluginId);
             results.push(await this.setConnectorSecret(server, String(consumer.env ?? field), value));

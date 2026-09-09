@@ -328,21 +328,32 @@ export interface MarketplaceBot {
    * genuinely disjoint file lists; source/shared/marketplace/marketing-team.ts fills it.
    */
   readonly members?: readonly MarketplaceBotMember[];
-  /** What the operator must supply before the pack is any use, said once on import. */
-  readonly firstRun?: string;
+  /**
+   * What the operator must supply before the pack is any use, said once, BEFORE the Import
+   * button rather than after it: the two prerequisites in here take somebody else's days.
+   */
+  readonly firstRun?: {
+    readonly headline: string;
+    /** One line per thing to supply: a key, an Add, a document. */
+    readonly needs: readonly string[];
+    /** The ones that strand people, said before they hit them. */
+    readonly prerequisites: readonly string[];
+    readonly body: string;
+  };
 }
 
 /** One specialist inside a pack: its own persona, its own skills, its own integrations. */
 export interface MarketplaceBotMember {
   readonly id: string;
-  readonly name: string;
-  /** One line: what this one is for. */
+  /** The roster name is the pack's agent prefix plus this. */
   readonly role: string;
+  /** One line: what this one is for, on the members list of the pack page. */
+  readonly summary: string;
   readonly instructions: string;
   readonly skills: readonly MarketplaceBotSkill[];
   readonly integrations: readonly string[];
-  /** The member this one reports to, by its id in this pack. Absent on the coordinator. */
-  readonly reportsTo?: string;
+  /** The member this one reports to, by its id in this pack; null on the coordinator. */
+  readonly reportsTo?: string | null;
 }
 
 export interface MarketplaceCatalog {
@@ -1291,6 +1302,14 @@ const DECLARED_PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
         field: "BROWSERBASE_API_KEY",
         label: "Browserbase API key",
         hint: "A key from the Browserbase dashboard under Settings. It is read only by the host process, out of its own 0600 store, and is put into no connector, no request from this page and no environment the agent's shell can read. Without a paid plan this is a cloud Chrome with NO residential proxy and a session that ends after 15 minutes, which is not the thing that gets past a sign-up page.",
+        consumers: Object.freeze([
+          Object.freeze({ kind: "cloud-browser", engine: "browserbase" }),
+        ]),
+      }),
+      Object.freeze({
+        field: "BROWSERBASE_PROJECT_ID",
+        label: "Browserbase project id",
+        hint: "The project id from the same Settings page. It is not a secret and it is kept beside the key anyway, because a key without it opens no session at all and two places to look is two places to forget. Until both are here this engine is not offered to the workspace.",
         consumers: Object.freeze([
           Object.freeze({ kind: "cloud-browser", engine: "browserbase" }),
         ]),

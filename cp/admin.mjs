@@ -3556,19 +3556,51 @@ export function createAdminApi({
    * the same state a relay that is simply down would produce -- which is correct, because from here
    * the two are the same fact.
    */
-  const cloudLedgerPath = String(config.cloudLedgerPath ?? process.env.CP_CLOUD_LEDGER_PATH ?? "/admin/cloud-browser-ledger");
+  //
+  // ONE TENANT AT A TIME, because that is the shape the relay serves:
+  // `/admin/tenants/<slug>/cloud-browser`. Reading the ledger means reading a file inside that
+  // tenant's own container, and a container is what a slug resolves to, so there is no fleet-wide
+  // route -- and there should not be one. A single answer covering every box would have to fold the
+  // boxes it could not read into the same list as the boxes it could, and a box nobody read
+  // contributing 0 minutes to a total is the made-up number this whole panel exists to refuse.
+  // So: ask per tenant, keep the failures by name, and let the panel say which workspaces are
+  // counted and which are not.
+  const cloudLedgerRoute = (slug) => (config.cloudLedgerPath ?? process.env.CP_CLOUD_LEDGER_PATH ?? "/admin/tenants/{slug}/cloud-browser")
+    .replace("{slug}", encodeURIComponent(slug));
   async function cloudBrowserLedger() {
-    const answer = await askRelay(cloudLedgerPath);
-    if (!answer.ok) {
+    const tenants = store.listTenants();
+    const rows = [];
+    const unread = [];
+    for (const tenant of tenants) {
+      const answer = await askRelay(cloudLedgerRoute(tenant.slug));
+      if (!answer.ok) {
+        unread.push({ tenant: tenant.slug, why: answer.why });
+        continue;
+      }
+      if (answer.body?.read === false) {
+        unread.push({ tenant: tenant.slug, why: String(answer.body?.why ?? "the relay could not read inside this box") });
+        continue;
+      }
+      // The relay stamps the slug it resolved the container by over whatever the box called
+      // itself, and this keeps that one rather than the row's own field, for the same reason:
+      // nothing pushes a control-plane slug into a box, so the box's copy is a guess.
+      for (const row of Array.isArray(answer.body?.rows) ? answer.body.rows : []) {
+        rows.push({ ...row, tenant: tenant.slug });
+      }
+    }
+    // Nothing readable anywhere is "not measured", never an empty ledger: a workspace that has
+    // opened a hundred cloud browsers and a relay that cannot be reached look identical from here
+    // and only one of them means nobody spent anything.
+    if (tenants.length > 0 && unread.length === tenants.length) {
       return {
         measured: false,
-        why: answer.why,
+        why: unread[0].why,
+        unread,
         rows: [],
         tenants: [],
-        note: "No cloud browsing session has been counted here yet. Either the relay has no ledger route on it, or it could not be reached.",
+        note: "No workspace's ledger could be read. Either the relay has no ledger route on it yet, or it could not be reached.",
       };
     }
-    const rows = Array.isArray(answer.body?.rows) ? answer.body.rows : [];
     const byTenant = new Map();
     for (const row of rows) {
       const tenant = String(row?.tenant ?? "unknown");
@@ -3590,6 +3622,9 @@ export function createAdminApi({
     return {
       measured: true,
       measuredAt: new Date(now()).toISOString(),
+      // Named, not counted. An operator looking at a total needs to know which workspaces are
+      // behind it and which are missing from it.
+      unread,
       rows: rows.map((row) => ({
         tenant: String(row?.tenant ?? ""),
         agentId: String(row?.agentId ?? ""),
