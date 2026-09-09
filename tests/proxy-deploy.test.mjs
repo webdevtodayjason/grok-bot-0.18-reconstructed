@@ -398,6 +398,35 @@ test("and --verify measures both halves: every box reaches the proxy, nothing re
   assert.match(script, /^PROXY_DB_PORT="\$\{TITANBOT_PROXY_DB_PORT:-5432\}"$/m);
 });
 
+test("the host guard exempts a container on every address family it holds, not just IPv4", () => {
+  // The bug this pins, measured on the R750 2026-09-09 with the guard ALREADY in drop mode: the
+  // exemption was one `ip saddr` line, and `ip saddr` in an inet table matches IPv4 only. The two
+  // drop lines match on iifname, which has no family, so they cover v6 as well. An exempt container
+  // therefore got past on v4 and fell into the drop on v6 -- and the coolify bridge really does
+  // carry a global v6 prefix, its gateway address really is fib-local, and sshd really does listen
+  // on [::]:22. The one container that must never be cut off is the one the machine is administered
+  // from, and the way back in would have been the panel that had just stopped answering.
+  const script = readFileSync(ISOLATION, "utf8");
+  assert.match(script, /GlobalIPv6Address/, "the v6 addresses have to be read before they can be exempted");
+  assert.match(script, /ip6 saddr \{ %s \} counter accept/, "and emitted as their own rule, because one rule cannot carry both families");
+  // The drop stays family-agnostic on purpose. A v6 carve-out there would be a hole in the boundary
+  // itself, which is the opposite of the fix.
+  assert.equal(/ip6 daddr|ip6 saddr .*drop/.test(script), false, "only the exemption grew; the drop must stay family-agnostic");
+});
+
+test("and a container with no IPv6 contributes no IPv6 rule, because docker prints an absent one as text", () => {
+  // `docker inspect` renders a missing address as Go's "invalid IP". A set built from that string
+  // is a rule that matches nothing while reading as though it worked, so the filter is a grep for
+  // an actual colon rather than a non-empty test.
+  const script = readFileSync(ISOLATION, "utf8");
+  assert.match(script, /grep -E '\^\[0-9a-fA-F:\]\+:\[0-9a-fA-F:\]\*\$'/);
+  // And an absent v6 address must never trip the fail-closed latch: most containers here are v4
+  // only, and refusing to install the boundary over that would take the boundary away for no fault.
+  const guardBlock = script.slice(script.indexOf("exempt_container() {"), script.indexOf("if [ \"$HOST_GUARD\" != off ]"));
+  const v6Block = guardBlock.slice(guardBlock.indexOf("found6"));
+  assert.equal(/HOST_GUARD_BLOCKED/.test(v6Block), false, "a container with no v6 is not a fault and must not block the install");
+});
+
 test("and --verify no longer throws away the count of boxes the console cannot reach", () => {
   // Pre-existing, found while adding the proxy legs: `broken` was incremented with no starting value
   // and never read, so a run with a customer's console dead still exited PASS. It is initialised and

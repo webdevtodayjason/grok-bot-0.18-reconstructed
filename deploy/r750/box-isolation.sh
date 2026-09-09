@@ -70,8 +70,13 @@
 # docker-proxy on 8000 (Coolify), smbd on 445, ollama on 11434, a python service on 5000 and NFS on
 # 2049. Between a customer's agent and the machine that runs every other customer there was nothing
 # but two login prompts, the hosting panel, the machine's file exports and its local model server.
-# The box has no IPv6 default route today, so v6 is a future path rather than a current one -- but
-# sshd and Coolify both listen on [::], so it becomes one the moment a bridge gets v6.
+# The box has no IPv6 default route today, so v6 is not a current path OUT of a box -- but a bridge
+# on this host already has v6, and that turned out to matter in the other direction. Measured on the
+# R750 2026-09-09: the coolify bridge carries a global IPv6 prefix, its gateway address on that
+# bridge answers `fib daddr type local`, and sshd listens on [::]:22 and [::]:47291 with
+# docker-proxy on [::]:8000. So the guard's DROP already covers v6 (it matches on iifname, which has
+# no family) while its EXEMPTION did not (`ip saddr` in an inet table is IPv4 only). That asymmetry
+# is why addrs6_of_container exists; see the note there.
 #
 # WHY IT IS PREROUTING AND NOT INPUT, which is the part the docs got wrong. For 22 and 47291 the
 # INPUT reasoning is right: a packet from a container to its own gateway address terminates on the
@@ -231,11 +236,30 @@ PROXY_ADDR="$(address_of "$PROXY_NAME")"
 # a host with no Coolify has nothing to exempt. Unreadable is not.
 HOST_GUARD_BLOCKED=""
 EXEMPT_ADDRS=()
+EXEMPT_ADDRS6=()
 
 # Every IPv4 address a container holds, across every network it is on.
 addrs_of_container() {
   docker inspect "$1" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{println}}{{end}}' 2>/dev/null \
     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u
+}
+
+# And every GLOBAL IPv6 address, the same way. This is not decoration and it is not symmetry for its
+# own sake: `ip saddr` in an inet table matches IPv4 ONLY, while the two drop lines below match on
+# iifname and so cover both families. An exemption written only as `ip saddr` therefore lets an
+# exempt container past on IPv4 and drops it on IPv6 -- the one asymmetry that can take away the
+# panel this machine is administered from, with the way back in being the panel that just stopped
+# working. Measured on the R750 2026-09-09 while the guard was already in drop mode: the coolify
+# bridge carries a global IPv6 prefix, its own gateway address on that bridge is `fib daddr type
+# local`, sshd listens on [::]:22 and [::]:47291 and docker-proxy on [::]:8000, and five coolify
+# containers hold global IPv6 addresses there. Nothing had hit it yet only because Coolify happens
+# to address this host by its IPv4 address today; one AAAA answer would have changed that.
+# A container with no IPv6 gets no IPv6 line: docker prints an absent address as Go's "invalid IP",
+# and a rule built out of that would match nothing while looking like it worked. The grep for a
+# colon is what keeps that string out.
+addrs6_of_container() {
+  docker inspect "$1" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.GlobalIPv6Address}}{{println}}{{end}}' 2>/dev/null \
+    | grep -E '^[0-9a-fA-F:]+:[0-9a-fA-F:]*$' | sort -u
 }
 
 exempt_container() {
@@ -247,6 +271,13 @@ exempt_container() {
     return 0
   fi
   for a in "${found[@]}"; do EXEMPT_ADDRS+=("$a"); say "exempt $a ($why, $name)"; done
+  # An absent IPv6 address is not a failure and must never trip the fail-closed latch: most
+  # containers on this host have none, and refusing to install the guard because a container is
+  # IPv4-only would take the boundary away for a reason that is not a fault.
+  mapfile -t found6 < <(addrs6_of_container "$name")
+  if [ "${#found6[@]}" -gt 0 ]; then
+    for a in "${found6[@]}"; do EXEMPT_ADDRS6+=("$a"); say "exempt $a ($why, $name, IPv6)"; done
+  fi
 }
 
 if [ "$HOST_GUARD" != off ]; then
@@ -566,6 +597,11 @@ else
     if [ "${#EXEMPT_ADDRS[@]}" -gt 0 ]; then
       EXEMPT_SET="$(IFS=, ; printf '%s' "${EXEMPT_ADDRS[*]}")"
       printf '    ip saddr { %s } counter accept comment "the hosting panel and the control plane keep their way in"\n' "$EXEMPT_SET"
+    fi
+    # One line per address family, because one line cannot cover both. See addrs6_of_container.
+    if [ "${#EXEMPT_ADDRS6[@]}" -gt 0 ]; then
+      EXEMPT_SET6="$(IFS=, ; printf '%s' "${EXEMPT_ADDRS6[*]}")"
+      printf '    ip6 saddr { %s } counter accept comment "the same containers, over IPv6"\n' "$EXEMPT_SET6"
     fi
     # One rule per port so the counters are per port. That is the difference between "something
     # used the guard set 4,000 times" and "nothing has touched 11434 in half an hour".
