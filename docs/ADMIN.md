@@ -200,9 +200,27 @@ timestamp earlier than the cutover constant stamped in the code the day it shipp
 purpose. It cannot grow, it stops mattering as the old rows rotate out, and the comment beside the
 constant says why it exists so that nobody later mistakes it for a rule.
 
-Measured on the R750, replaying the panel's own window logic over the live rows for the address that
-raised Jason's screenshot: at 24 hours the distinct passwords fall from 6 to 1 and Attack goes false;
-at 72 hours they fall from 10 to 3 and Attack goes false.
+**What the ship actually measured, and the half of this that does not work yet.** Measured on the
+R750 on 2026-09-09 between 19:20 and 19:45 UTC, from this Mac, against `api.titanium.bot/admin` in a
+real browser signed in with the operator token.
+
+The panel half is real. The Sign-in attempts panel draws **11 grey rows reading "your own
+verification gate"**, its summary strip reads **YOUR OWN GATES 11, set aside, still listed below**,
+147.136.44.142 carries **"your address"** and **"11 of our own gate rows set aside"** beside it, and
+the sentence under the filters says the same thing in words. Those 11 are the dated clause's rows.
+
+The gate half does not close, and the reason is worth knowing before you read the panel. A real
+`verify-deploy --url https://console.titanium.bot` was run after the ship. Its eleven login and
+lockout rows arrived in the relay's ledger carrying the exact agent `titanbot-gate/verify-deploy`, so
+that part landed and the relay records it with no relay change at all. But every one of those rows
+reads `gate: false`, because condition 2 above was not met: **the deploy gate deliberately holds no
+password.** Its own header says so. It is let in by the gateway bearer, which is a page request that
+writes no ledger row, so it can never produce the successful operator sign-in that the rule requires.
+The rule is right and the gate cannot satisfy it. Until that is closed, the Attack pill stays on a
+normal ship, and the way to clear it by hand is to sign in at `console.titanium.bot` from the same
+machine inside the hour of a gate run. The durable fix is filed as **SIGNIN-1c**: have the relay
+write an `ok` instance-door row when a request carrying the gateway bearer is given a session, which
+is at least as hard to forge as a password and is already the thing the gate proves it holds.
 
 ### The rows this can never label, and why that is right
 
@@ -239,6 +257,20 @@ a rail rather than rewritten.
 Every number carries the moment it was measured. Anything that could not be measured says **"not
 measured"** and why, and never a zero, a dash, or a green tick. That rule is the reason the Overview
 below is a summary and not a scoreboard.
+
+**Measured on the R750 2026-09-09 19:40 UTC**, from this Mac in headless Chromium at 1440x900
+against the live console with three tenants, three provider cards, four plan models and live
+feedback rows behind it: all nine panels were opened by their hash and every one measured
+`document.documentElement.scrollHeight` **900** and `scrollWidth` **1440**, with the open panel's own
+`scrollWidth - clientWidth` at **0**. The body does not scroll, in either direction, on any panel.
+For scale, the same content as one long column measured **4,021 px** against a one-workspace control
+plane on a Mac and **8,403 px** at 1400 wide against the gate's populated fixture.
+
+Two things do scroll on purpose and should: a panel taller than the window scrolls **inside itself**,
+and a wide table scrolls **inside its own box** rather than widening the panel. On the R750 the
+provider key table is 1,534 px wide in a 1,128 px panel, so its last buttons sit past the right edge
+of the box and come into reach by scrolling that table. That is the intended shape, not a defect: the
+alternative is a page that scrolls sideways, which is the thing the rail exists to end.
 
 ### Overview
 
