@@ -163,6 +163,17 @@ run sh -n /usr/local/bin/start-window
 run sh -n /usr/local/bin/stop-window
 echo "start-window and stop-window patched and syntax-checked on $WHERE"
 
+# TENANT-4b (2026-09-08). The live files above are not the only copies. The supervisor installs
+# /home/box/sand-host/box-scripts/* over /usr/local/bin at EVERY host bundle swap (sand-supervisor.mjs
+# BOX_SCRIPTS_SOURCE_DIR -> BOX_SCRIPTS_BIN_DIR), and the bundle a box composes for its next swap is
+# copied from that same directory. Measured on the R750: all three boxes carried the stock file
+# (d69219af) there, so each swap re-installed the stock start-window over the repair, twice in one
+# evening. Patching the bundle copy too is what makes the repair survive a swap, and the composed
+# archive then carries it forward on its own.
+for f in start-window stop-window; do
+  run sh -c "if [ -f /home/box/sand-host/box-scripts/$f ] && ! cmp -s /usr/local/bin/$f /home/box/sand-host/box-scripts/$f; then cp -p /usr/local/bin/$f /home/box/sand-host/box-scripts/$f && echo 'bundle copy of $f patched'; else echo 'bundle copy of $f already matches'; fi"
+done
+
 run_stdin python3 - <<'PY'
 # DISPLAY-4 (2026-09-04). The host is the only allocator of fork windows, so a live seat whose token
 # the host did not issue is one the host lost (a bring-up that outlived its agent's deletion, or a
