@@ -29,6 +29,20 @@ substitutes the stored value into the header at the moment it hands the server t
 entry has no `env`: the field it owes is named by that placeholder, which is where the host reads it
 back from.
 
+**Which of the two link types.** Pick **Streamable HTTP** unless the server's own docs say
+otherwise, which is what the picker says on the card. **SSE** is the older transport and it is
+offered rather than featured: the two are different protocols on the wire, so a server reached with
+the wrong one does not degrade, it fails. Nothing in the catalog uses SSE and no candidate
+researched for MARKET-6 recommended it, so there is no vendor to point a gate at either — the one
+obvious public endpoint answers 410 on its `/sse`. It is therefore proved against a server this
+repository owns: `scripts/lib/mcp-bearer-stub.mjs` serves the older transport under `MCP_STUB_SSE=1`,
+`tests/mcp-stub-sse.test.mjs` pins the server's half of it (the `endpoint` event, answers arriving
+on the stream rather than in the POST's response, both halves needing the bearer, and both
+transports returning byte-identical answers), and `scripts/verify-marketplace.mjs --sse` runs that
+stub inside a box and requires an entry added through the picker to come back `transport=sse` with
+the far end's tools listed. A door that quietly fell back to the modern transport would look
+identical on the page, which is why the arm asserts the transport and not just the connection.
+
 Before MARKET-6 the host dropped a link entry on the floor, so every remote service was bridged
 through a local `mcp-remote` process with `--header "Authorization:Bearer ${NAME}"`. That is where
 the key went wrong: the box's exec daemon expands `${NAME}` in a command line **before** it execs,

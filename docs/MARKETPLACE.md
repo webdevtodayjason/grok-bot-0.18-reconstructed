@@ -356,8 +356,35 @@ field today; the proxy's own routing is `docs/PROXY.md`.
 
 ## 7. How this is proved
 
-Two existing gates gain arms for it. Both are box gates — the integrator runs them, on the shared
-box, through `bash scripts/on-box.sh`.
+Four gates, all of them box gates — the integrator runs them, on the shared box, through
+`bash scripts/on-box.sh`, one at a time, because they share the box, the display and the login
+throttle with every other gate on the machine.
+
+Two of them are this plane's own and were written for it:
+
+- **`scripts/verify-marketplace.mjs`** — the console's half, in a real browser. Every row the host
+  serves has a card, every chip is one of the host's own categories, a chip filters to its own
+  members, every tile is the same square, every logo a row declares actually decoded, and the
+  installed strip draws each plugin once. Then **Add your own**: its three doors in order, a header
+  marked secret minting a stored NAME and drawing no value box, the entry shown before anything is
+  written, the refusals coming back one sentence each, and a pasted vendor block filling the form
+  while its key is dropped and appears nowhere in the page. Then the write: one keyless public
+  server added through the card, connected, tools listed, uninstalled with the clear offer, and
+  `connectors.json` byte-identical to what the run found.
+  `--no-write` drops that last leg on a shared box. `--sse` adds the older transport, which is
+  otherwise only ever *drawn*: it starts this repo's own stub inside the box in SSE mode, adds it
+  through the picker's second option, and requires the row to come back `transport=sse` with the
+  stub's two tools listed and the stored value in no process argument list. There is no vendor to
+  point that arm at — no shipping preset recommends SSE and the obvious public candidate answers
+  410 on its `/sse` — so it is proved against something this repository owns, and the server's own
+  half of it is pinned in `tests/mcp-stub-sse.test.mjs`.
+- **`scripts/verify-connector-host.mjs`** — the host's half, and the arm the wave turns on: a
+  remote connector whose key rides in a header reaches the far end while the value is in neither
+  `connectors.json` nor `ps -eo args` inside the box. It also carries the transport verdict, a
+  stdio server through the same one writer, CONNECT-11's delete-by-name once the entry is gone, and
+  the writer's refusals at the gateway.
+
+Two existing gates gained arms:
 
 - **`scripts/verify-dashboard.mjs`** — the Marketplace opens on Plugins with the catalog's cards,
   category chips and a working search; every card tile is the standard 40px square and the plugin
@@ -374,6 +401,14 @@ box, through `bash scripts/on-box.sh`.
   then a probe agent turn drives the four tools against a connector plugin this box does not already
   have: `SearchPlugins` lists the catalog and names it, `GetPlugin` returns it with its credential
   field, `InstallPlugin` writes the entry, `UninstallPlugin` removes it, byte-identical after.
+- **`scripts/verify-connector-plane.mjs --model-tool`** — the agent's own way in, which used to be
+  green for the wrong reason. The arm passed on the tool's "requires a signed-in account" refusal
+  and then asserted `connectors.json` was byte-identical: both true, and together they said the
+  agent's path reached nothing on this box while the gate stayed green. There is no refusal left
+  that counts as a pass. The claim is the round trip — the agent adds a server, the host connects it
+  and lists its tools, the agent takes it back off — plus the refusal that has to happen: a key
+  typed into an `Authorization` header is refused with the field it wants named and the masked card
+  pointed at, the refusal does not repeat the key back, and the file is untouched across it.
 
 **What the arms actually measured.** `verify-connector-plane.mjs --plugin-tools` passed whole: 27
 checks, 0 failures, the four tools driven through a probe agent turn (the install leg ran against
