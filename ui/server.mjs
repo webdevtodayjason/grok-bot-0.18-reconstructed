@@ -1143,6 +1143,15 @@ const TENANT_ADMIN_ROUTE = /^\/admin\/tenants\/([^/]+)\/(use-included|forget-pro
 // and reads the file through the box the same way the model picker does. So it says so, once per
 // tenant, and the panel counts the boxes that are behind.
 const TENANT_RUNNING_ROUTE = /^\/admin\/tenants\/([^/]+)\/running$/;
+// AGENTS-CAP-2. HOW MANY BOTS A WORKSPACE MAY HOLD, read off the box on a GET and written into the
+// box on a POST. The super admin's Clients panel is the only caller and CP_RELAY_TOKEN is the only
+// credential, the same pair as the two routes above.
+//
+// It is one route with two methods rather than two routes because the answer shape is identical:
+// the write ends by reading the number back through the box's own getAgentCapacity, so "what it is
+// now" is the same computation either way. Reporting the number that was SENT would report a
+// success on a box whose container environment pins something else.
+const TENANT_CEILING_ROUTE = /^\/admin\/tenants\/([^/]+)\/ceiling$/;
 const sha256Hex = (value) => createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 const evidenceOf = (name, value) => ({ name, length: String(value ?? "").length, sha256: sha256Hex(value).slice(0, 12) });
 
@@ -1151,11 +1160,16 @@ async function handleRelayAdmin(req, res, url) {
   if (expected.length === 0) return fail(res, 404, "not found");
   const action = TENANT_ADMIN_ROUTE.exec(url.pathname);
   const running = TENANT_RUNNING_ROUTE.exec(url.pathname);
+  const ceiling = TENANT_CEILING_ROUTE.exec(url.pathname);
   // The method refusal still comes before the credential, so a wrong method charges nobody's
   // lockout and learns nothing. The three reads are GET-only; the two migration doors are POST-only,
-  // because each of them changes a file inside somebody's box.
-  const allowed = action == null ? "GET" : "POST";
-  if (req.method !== allowed) return fail(res, 405, allowed);
+  // because each of them changes a file inside somebody's box. The ceiling is the one route that
+  // reads and writes, so it takes either -- and the two existing branches are untouched: the
+  // expression below still answers exactly "GET" or "POST" for every path they match.
+  const allowed = ceiling != null ? ["GET", "POST"] : (action == null ? "GET" : "POST");
+  if (Array.isArray(allowed) ? !allowed.includes(req.method) : req.method !== allowed) {
+    return fail(res, 405, Array.isArray(allowed) ? allowed.join(" or ") : allowed);
+  }
   const header = String(req.headers.authorization ?? "");
   const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
   // Constant time over the value and over the length, the same compare the registry uses on a
@@ -1181,6 +1195,8 @@ async function handleRelayAdmin(req, res, url) {
   }
 
   if (running != null) return await reportRunning(res, decodeURIComponent(running[1]));
+
+  if (ceiling != null) return await handleTenantCeiling(req, res, decodeURIComponent(ceiling[1]));
 
   if (action != null) return await handleTenantMigration(req, res, decodeURIComponent(action[1]), action[2]);
 
@@ -1224,6 +1240,174 @@ async function reportRunning(res, slug) {
     // says, so a panel reading the file alone would report a label the customer never hears.
     ...pin,
   });
+}
+
+// ---- one problem report, forwarded to the control plane (FEEDBACK-1) ---------------------------
+//
+// The POST shape is ui/tenant-login.mjs's, down to the deadline and the verdict union that never
+// throws, and for the same reason: a control plane that is down is one service on one machine, and
+// a console that threw over it would take the report AND the page with it. What the person gets
+// instead is one plain sentence.
+const FEEDBACK_TIMEOUT_MS = 15_000;
+async function forwardFeedback(req, res, t) {
+  const say = (status, payload) => {
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify(payload));
+  };
+  if (RELAY == null) {
+    return say(503, { sent: false, message: "This console is not connected to the developers, so the report was not sent. Keep it and pass it on to whoever runs this instance." });
+  }
+  let body;
+  try { body = JSON.parse(await readBody(req, 64 * 1024) || "{}"); } catch { return fail(res, 400, "that was not JSON"); }
+
+  let upstream;
+  try {
+    upstream = await fetch(`${RELAY.cpUrl}/v1/feedback`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${RELAY.relayToken}`,
+        "content-type": "application/json",
+        accept: "application/json",
+        // The workspace, out of the registry this process already resolved, and the only place it
+        // is ever set. Whatever the body said about a workspace is not read here or there.
+        "x-titanbot-tenant": t.slug,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FEEDBACK_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return say(502, {
+      sent: false,
+      message: error?.name === "TimeoutError"
+        ? "The developers' service did not answer in time, so the report was not sent. Try again in a minute."
+        : "The developers' service did not answer, so the report was not sent. Try again in a minute.",
+    });
+  }
+  let answer = null;
+  try { answer = await upstream.json(); } catch { answer = null; }
+  if (upstream.status === 201) {
+    return say(201, { sent: true, id: Number(answer?.id ?? 0), tier: String(answer?.tier ?? ""), message: "Sent. It is with the developers now." });
+  }
+  const said = String(answer?.message ?? "").split("\n")[0].slice(0, 200);
+  return say(upstream.status >= 400 && upstream.status < 500 ? 400 : 502, {
+    sent: false,
+    message: said.length > 0 ? said : `The developers' service answered ${upstream.status}, so the report was not sent.`,
+  });
+}
+
+// ---- how many bots a workspace may hold (AGENTS-CAP-2) -----------------------------------------
+//
+// The file, its path, and the two facts about it that decide the shape of everything below.
+//
+// FIRST: the host's settings reader takes a value ONLY when typeof value === "string", so a number
+// written here is silently ignored and the workspace runs on the product default with nothing
+// anywhere saying why. Every write below goes through String().
+//
+// SECOND: writeBoxFile TRUNCATES, and all three live R750 boxes carry SAND_TOOL_TRACE and
+// SAND_SELF_TALK_CAP in this same file. So a write is a read, a merge and a write, never a write of
+// one key. Measured read-only on the R750 2026-09-09: all three boxes hold "SAND_MAX_AGENTS": "100"
+// as a string with an empty container environment.
+const HOST_SETTINGS_PATH = "/home/box/sand-data/sand-host-settings.json";
+// Some hosts nest the values under a "settings" key and some do not. Both are read and the shape
+// that was there is the shape that is written back, because rewriting a nested file as a flat one
+// would drop every other switch in it.
+function settingsContainerOf(parsed) {
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return { document: {}, container: {}, nested: false };
+  const inner = parsed.settings;
+  if (inner != null && typeof inner === "object" && !Array.isArray(inner)) return { document: parsed, container: inner, nested: true };
+  return { document: parsed, container: parsed, nested: false };
+}
+// A box that has no settings file yet gets a FLAT one, which is what every box on the fleet holds.
+// `nested` carries the shape rather than an identity test on two objects: the missing-file case
+// handed back two different empty objects, so the test read false and wrote a nested document into
+// a box that had never had one. grok-bot-local-vm holds no SAND_MAX_AGENTS at all, which is exactly
+// the box this wave measures the default on.
+async function readHostSettings(t) {
+  const raw = await dockerOut(["exec", t.box, "cat", HOST_SETTINGS_PATH]);
+  if (raw == null || String(raw).trim().length === 0) return { document: {}, container: {}, nested: false };
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch { return { document: {}, container: {}, nested: false, unreadable: true }; }
+  return settingsContainerOf(parsed);
+}
+
+/**
+ * What the box itself says its ceiling is, asked of the host rather than read off the file.
+ *
+ * The file is what a box was TOLD; getAgentCapacity is what it resolved, container environment and
+ * all. A panel that read the file would report a number the box does not honour whenever the
+ * environment pins one, which is the pinned-model bug one wave earlier, moved sideways.
+ */
+async function readAgentCapacity(t) {
+  try {
+    const upstream = await fetch(`${t.gateway}/api/getAgentCapacity`, {
+      method: "POST",
+      headers: t.headers({ "content-type": "application/json" }),
+      body: "{}",
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!upstream.ok) return { ok: false, why: `that box's host answered ${upstream.status} to getAgentCapacity` };
+    const body = await upstream.json();
+    const maxAgents = Number(body?.maxAgents);
+    const bots = Number(body?.bots);
+    if (!Number.isFinite(maxAgents)) return { ok: false, why: "that box's host does not report a ceiling yet" };
+    return { ok: true, maxAgents, bots: Number.isFinite(bots) ? bots : null };
+  } catch (error) {
+    return { ok: false, why: error?.name === "TimeoutError" ? "that box did not answer in time" : "that box did not answer" };
+  }
+}
+
+/** Whether the CONTAINER pins the ceiling, in which case nothing written into the file matters. */
+async function ceilingPin(t) {
+  const envOut = await dockerOut(["inspect", t.box, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]);
+  const pinned = (envOut ?? "").split("\n").some((line) => line.startsWith("SAND_MAX_AGENTS="));
+  return {
+    pinned,
+    pinnedBy: pinned ? "container env (SAND_MAX_AGENTS); recreate the box without it to unpin" : null,
+  };
+}
+
+async function handleTenantCeiling(req, res, slug) {
+  const t = contextOf(slug);
+  if (t == null) return fail(res, 404, NOT_AVAILABLE_SENTENCE);
+  const answer = (payload) => {
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ slug, measuredAt: new Date().toISOString(), ...payload }));
+  };
+  if (!await dockerAvailable()) {
+    // read:false with the reason, never a zero and never the default. The two are different facts
+    // and an operator acts on them differently.
+    return answer({ read: false, maxAgents: null, bots: null, pinned: false, pinnedBy: null,
+      why: "this relay has no docker under it, so it cannot read or write inside a box" });
+  }
+
+  const report = async () => {
+    const live = await readAgentCapacity(t);
+    const pin = await ceilingPin(t);
+    if (!live.ok) return answer({ read: false, maxAgents: null, bots: null, ...pin, why: live.why });
+    return answer({ read: true, maxAgents: live.maxAgents, bots: live.bots, ...pin, why: "" });
+  };
+
+  if (req.method === "GET") return await report();
+
+  let body;
+  try { body = JSON.parse(await readBody(req, 64 * 1024) || "{}"); } catch { return fail(res, 400, "that was not JSON"); }
+  const wanted = Number(body?.maxAgents);
+  // The control plane checks the range too, and this is not a duplicate: whichever of the two is
+  // called directly is the one that has to refuse, and a box written with a value its host ignores
+  // is a customer silently dropped to the default.
+  if (!Number.isInteger(wanted) || wanted < 1 || wanted > 1000) {
+    return fail(res, 400, "a ceiling is a whole number from 1 to 1000, and nothing was written");
+  }
+
+  const before = await readHostSettings(t);
+  if (before.unreadable) return fail(res, 409, "that box's settings file is there and is not JSON, so nothing was written over it");
+  // MERGED, and the value is a STRING. Both halves are load-bearing; see the header above.
+  const container = { ...before.container, SAND_MAX_AGENTS: String(wanted) };
+  const document = before.nested ? { ...before.document, settings: container } : container;
+  try { await writeBoxFile(t, HOST_SETTINGS_PATH, JSON.stringify(document)); }
+  catch (error) { return fail(res, 502, `that box's settings file could not be written (${String(error?.message ?? error).split("\n")[0].slice(0, 120)})`); }
+
+  return await report();
 }
 
 // Both migration doors, sharing one resolution of the workspace and one shape of answer.
@@ -2294,6 +2478,21 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && (url.pathname === "/machine-room" || url.pathname === "/machine-room/")) {
       res.writeHead(302, { location: "/" });
       return res.end();
+    }
+    // FEEDBACK-1. A problem report on its way to the developers.
+    //
+    // Here rather than inside the box, and that is the whole design. The agent's tool writes a
+    // PENDING report into its own box and returns a sentence; the console draws it, the person can
+    // edit it or drop it, and this route is what carries the one they chose to send. So the report
+    // never leaves the box without the operator, by topology rather than by a check somebody could
+    // forget, and no control plane credential is ever inside a customer's container -- CP_RELAY_TOKEN
+    // reads every tenant's gateway token, and every exec daemon in a box runs as uid 0.
+    //
+    // THE WORKSPACE IS STAMPED HERE, from `t`, which came from the session's own tenant claim. A
+    // slug in the body is ignored, not refused: the field is simply not read anywhere on this path.
+    if (url.pathname === "/feedback") {
+      if (req.method !== "POST") return fail(res, 405, "POST");
+      return await forwardFeedback(req, res, t);
     }
     // Put an app on the box's X display so the VNC view has something to show. What keeps this
     // safe is the fixed command table below: the operator's string picks a key, never reaches a

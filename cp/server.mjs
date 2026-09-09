@@ -45,6 +45,7 @@ import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, 
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
+import { normalizeReport } from "./feedback.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
   NEW_TENANTS_BLOCKED,
@@ -710,6 +711,65 @@ export function createApp(options = {}) {
   // The order matters. The account is created first and the workspace is built after, so a build
   // that fails leaves somebody who can sign in and be told their workspace is still coming, rather
   // than a workspace nobody owns. Provisioning is idempotent, so finishing it is one retry.
+  // ---- one problem report, stored (FEEDBACK-1) --------------------------------------------------
+  //
+  // THE WORKSPACE COMES FROM THE RELAY'S FORWARDED HEADER AND FROM NOWHERE ELSE. A body that
+  // carries a slug, a tenant or a workspace is not refused, it is IGNORED: refusing would tell a
+  // caller that the field is read, and the honest shape is that this route has no way to be told
+  // which customer it is serving except by the service that already knows.
+  //
+  // The relay is what knows: it resolves the tenant from its own registry before it forwards, so
+  // the name here was never in a request body anywhere on the path.
+  const FEEDBACK_TENANT_HEADER = "x-titanbot-tenant";
+  function handleFeedbackIntake(request, response, body) {
+    const slug = String(request.headers[FEEDBACK_TENANT_HEADER] ?? "").trim().toLowerCase();
+    if (slug.length === 0) {
+      return json(response, 400, { error: "bad_request", message: "the console did not say which workspace this report came from, so nothing was stored" });
+    }
+    if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(slug)) {
+      return json(response, 400, { error: "bad_request", message: "that is not a workspace name, so nothing was stored" });
+    }
+    const normalized = normalizeReport(body);
+    if (!normalized.ok) return json(response, 400, { error: "bad_request", message: normalized.why });
+    const report = normalized.report;
+    // The workspace is written over whatever arrived, rather than merged with it.
+    report.evidence.workspace = slug;
+
+    // A CREDENTIAL IN A REPORT IS THE ONE THING THIS ROUTE REFUSES OUTRIGHT.
+    //
+    // The evidence is built from a conversation, and a conversation can contain anything an agent
+    // ever printed. This service's own three credentials are the ones whose appearance here would
+    // be catastrophic and are also the only ones it can recognise, so those are what it looks for.
+    // It is not a claim that a report can hold no secret at all; docs/FEEDBACK.md says as much in
+    // the words the card shows the person before they press Send.
+    const text = JSON.stringify(report);
+    const ours = [config.sessionSecret, config.adminToken, config.relayToken]
+      .map((one) => String(one ?? "")).filter((one) => one.length >= 16);
+    if (ours.some((secret) => text.includes(secret))) {
+      return json(response, 400, { error: "credential", message: "that report carried a credential, so nothing was stored" });
+    }
+
+    let row;
+    try {
+      row = store.recordFeedback({
+        at: report.at,
+        tenant: slug,
+        agent: report.evidence.agent,
+        agentName: report.evidence.agentName,
+        tier: report.tier,
+        category: report.category,
+        title: report.title,
+        body: report.description,
+        payload: text,
+        state: "new",
+      });
+    } catch (error) {
+      const code = error?.code === "too_large" ? 413 : 400;
+      return json(response, code, { error: error?.code ?? "bad_request", message: String(error?.message ?? "that report could not be stored") });
+    }
+    return json(response, 201, { id: row.id, tier: row.tier, state: row.state });
+  }
+
   async function handleSignup(request, response, body) {
     const isOperator = secretsMatch(bearer(request), config.adminToken);
     if (!isOperator && !config.allowSignup) {
@@ -858,6 +918,18 @@ export function createApp(options = {}) {
       if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       if (!requireRelay(request, response)) return undefined;
       return json(response, 200, await relayRegistry());
+    }
+
+    // ---- a problem report, forwarded by a console (FEEDBACK-1) ---------------------------------
+    // Beside the registry route above and shaped exactly like it: the method refusal first so a
+    // wrong method charges nobody and learns nothing, then CP_RELAY_TOKEN and deliberately not the
+    // admin token. The relay is the only thing that reaches this, because it is the only thing
+    // holding that credential -- a customer's box holds neither, which is what keeps a
+    // control-plane credential out of a container the customer's own agents run as root in.
+    if (segments[1] === "feedback" && segments.length === 2) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      return handleFeedbackIntake(request, response, body);
     }
 
     if (segments[1] === "sessions" && segments[2] === "current" && segments.length === 3) {

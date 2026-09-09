@@ -240,6 +240,17 @@ because each tenant had a console of its own. There is one console for everybody
 password opened nothing, and a credential on disk that looks like a second door and is not one is
 worse than none.
 
+**One secret is HELD here, and it is the only one: the GitHub repository token** (FEEDBACK-1). It is
+pasted once into the admin console's Feedback panel, proved against the repository before it is
+stored, and kept in `admin_settings` under `github.token`. Three rules go with it. `listSettings`
+returns it as an empty value with `redacted: true`, so no route that renders the settings can carry
+it; only `getSetting` hands it over, to the one caller that files an issue. Every answer and every
+ledger row carries `keyEvidence(value)` -- a length and eight hex characters of a digest -- and
+nothing else. And it is never pushed into a box: every exec daemon in a customer's container runs as
+uid 0, so a super admin's token inside one is readable by that customer's own agents through
+`/proc/self/environ`. It is here rather than at the proxy because there is no proxy for a repo token
+to hide behind.
+
 The gate's last leg is a search of every response body for those secrets, including the two ways
 the registry route can be asked with the wrong credential. Keep it that way when you add a route.
 

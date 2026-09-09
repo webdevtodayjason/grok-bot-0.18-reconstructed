@@ -68,7 +68,10 @@ p { margin: 0 0 12px; }
 
 form { display: grid; gap: 6px; margin-top: 18px; }
 label { font-size: 13px; color: var(--quiet); }
-input, select {
+/* textarea is in here rather than left to the browser because FEEDBACK-1 put the first multi-line
+   editable field on this page, and a default one is a white box with black text in the middle of a
+   dark console. Same three colours as every other field; nothing new. */
+input, select, textarea {
   font: inherit;
   color: var(--ink);
   background: #0B121B;
@@ -76,7 +79,8 @@ input, select {
   border-radius: 8px;
   padding: 9px 11px;
 }
-input:focus, select:focus, button:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
+textarea { font: 13px/1.5 var(--mono); resize: vertical; }
+input:focus, select:focus, button:focus, textarea:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
 
 button {
   font: inherit; font-weight: 600;
@@ -162,17 +166,21 @@ td.num { text-align: right; }
 /* ---- clients ---------------------------------------------------------------------------- */
 
 .clients { display: grid; gap: 12px; }
-.client {
+/* FEEDBACK-1's report card is drawn the way a client card is and deliberately does not share its
+   name: a gate counts .client to say how many workspaces the Clients panel drew. */
+.client, .feedbackCard {
   border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px; background: #0C131C;
 }
-.client .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.client .head strong { font-size: 15px; }
+.client .head, .feedbackCard .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.client .head strong, .feedbackCard .head strong { font-size: 15px; }
 .client .actions { margin-left: auto; display: flex; gap: 6px; }
 .client .users { margin-top: 10px; }
 /* PROVIDERS-1. The model this one workspace runs on, under the customer's name. */
-.modelRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-.modelRow select { padding: 5px 9px; font-size: 13px; }
-.modelRow .clock { flex-basis: 100%; margin-top: 0; }
+.modelRow, .capRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.modelRow select, .capRow input { padding: 5px 9px; font-size: 13px; }
+.modelRow .clock, .capRow .clock { flex-basis: 100%; margin-top: 0; }
+/* AGENTS-CAP-2. Wide enough for four digits and no wider: this is a ceiling, not a paragraph. */
+.capRow input.clientCeiling { width: 84px; }
 
 /* ---- providers, keys and plan models ------------------------------------------------------ */
 /* PROVIDERS-1. Two stacks of cards and one form that is reused for adding and for editing.
@@ -246,3 +254,22 @@ form.stack .controls { margin: 0; }
 .quotaBar { width: 88px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .quotaFill { height: 100%; background: var(--good); }
 .quotaFill.warn { background: var(--warm); }
+
+/* FEEDBACK-1. The two blocks this panel prints verbatim: what an agent actually sent, and a
+   prepared issue body when no repository token is stored yet. Both can be long and neither may
+   push the page sideways. */
+#panel-feedback pre {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  background: #0B121B;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: 12.5px/1.5 var(--mono);
+  color: var(--quiet);
+  white-space: pre-wrap;
+}
+.feedbackBody { width: 100%; }
+#panel-feedback details { margin-top: 8px; }
+#panel-feedback summary { cursor: pointer; }

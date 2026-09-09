@@ -9,7 +9,9 @@
   The panels are in the order Jason asked for them, which is also the order an operator opens them
   in on a bad morning: who has been knocking, then who the customers are, then whether their boxes
   are up, then whether the machine is, then the money that is not wired in yet. Providers is sixth
-  because it is the one panel you open to CHANGE something rather than to find out what happened.
+  because it is the one panel you open to CHANGE something rather than to find out what happened,
+  and Feedback is seventh because it is the one somebody else fills in: what the agents reported
+  and their operators chose to send on (FEEDBACK-1).
 -->
 <html lang="en">
 <head>
@@ -244,6 +246,60 @@
     <p class="placeholder">The keys and models on this page are held by the proxy that sits in front
       of every workspace, which is LiteLLM. That name is here once, for you, and it is on no page a
       customer can open.</p>
+  </section>
+
+  <!-- 7. Feedback ---------------------------------------------------------------------------- -->
+  <!--
+    FEEDBACK-1. Jason, 2026-09-07: "Titan tried to cover up failure. We need to instill in the
+    agents that failure must be reported."
+
+    THIS IS THE SECOND OF TWO GATES AND NEVER THE FIRST. Every row here was written by an agent,
+    shown to the workspace operator in their own console, and sent by that person, who could edit
+    it, add to it or drop it first. Nothing arrives here around them. What happens on this panel is
+    the developers' decision: file it, suppress it with the reason on the record, or close it.
+
+    The tiers are filters. They change how loudly a report is drawn and how the digest batches it,
+    and nothing else: critical, quality of life and observation all came through both gates.
+
+    No new CSS. The panel is the controls, the scroll table, the chips and the masked key form this
+    page already has.
+  -->
+  <section class="panel" id="panel-feedback" data-panel="feedback">
+    <h2>Feedback</h2>
+    <p class="quiet" id="feedbackGates">Every report here was written by an agent, shown to the
+      workspace operator, and sent by that person. This is the second gate.</p>
+    <div class="controls">
+      <label for="feedbackTier">Tier</label>
+      <select id="feedbackTier">
+        <option value="">every tier</option>
+        <option value="critical">critical</option>
+        <option value="quality">quality of life</option>
+        <option value="observation">observation</option>
+      </select>
+      <label for="feedbackState">State</label>
+      <select id="feedbackState">
+        <option value="">every state</option>
+        <option value="new">new</option>
+        <option value="approved">approved</option>
+        <option value="filed">issue filed</option>
+        <option value="suppressed">suppressed</option>
+        <option value="closed">closed</option>
+      </select>
+      <span id="feedbackNote" class="quiet"></span>
+    </div>
+    <div id="feedbackRows" class="clients"></div>
+
+    <h3>Where an issue gets filed</h3>
+    <p class="quiet" id="feedbackTokenNote"></p>
+    <form id="githubTokenForm" class="keyForm">
+      <input id="githubRepo" type="text" autocomplete="off" placeholder="owner/name">
+      <input id="githubToken" type="password" autocomplete="off" placeholder="a repository token">
+      <button id="githubTokenSave" type="submit" class="ghost small">Check it and store it</button>
+      <span class="why">GitHub is asked whether it takes this token for that repository before
+        anything is stored, and a token it refuses is not kept. Nothing on this page ever shows the
+        value again: what comes back is a length and eight characters of a digest. This token stays
+        on this service and is never pushed into a customer's box.</span>
+    </form>
   </section>
 
   <footer class="foot">

@@ -517,3 +517,140 @@ test("a second forget still sweeps the store when the three files are already cl
     assert.throws(() => readFileSync(blob, "utf8"));
   } finally { relay.stop(); }
 });
+
+// ---- the ceiling door (AGENTS-CAP-2) -----------------------------------------------------------
+//
+// The one route on this relay that both reads and writes, so it is the one where the deliberate
+// order of the door could most easily be lost: 404 with no control plane, the METHOD refusal before
+// the credential, then a constant-time compare. Its docker half is measured on a real box by
+// scripts/verify-onboarding.mjs --cap; what is worth holding here is the door.
+
+test("the ceiling door keeps its order: no control plane, then the method, then the credential", async () => {
+  const solo = await startRelay({}, { prefix: "relay-ceiling-solo-" });
+  try {
+    // A console with no control plane serves neither read nor write. 404 rather than 401 is the
+    // truthful shape: this route does not exist here.
+    for (const method of ["GET", "POST"]) {
+      const res = await fetch(`${solo.base}/admin/tenants/demo/ceiling`, {
+        method, headers: { authorization: `Bearer ${RELAY_TOKEN}`, "content-type": "application/json" },
+        body: method === "POST" ? "{}" : undefined,
+      });
+      assert.equal(res.status, 404, `${method} should not exist without a control plane`);
+    }
+  } finally { solo.stop(); }
+
+  const { relay } = await startMigrationConsole();
+  try {
+    const url = "/admin/tenants/demo/ceiling";
+    // GET and POST are both this route's, and no third method is. The refusal comes before the
+    // credential so a wrong method charges nobody and learns nothing about whether the door exists.
+    const wrongMethod = await fetch(`${relay.base}${url}`, { method: "DELETE" });
+    assert.equal(wrongMethod.status, 405, "a method that is not this route's");
+    assert.equal((await fetch(`${relay.base}${url}`)).status, 401, "a read with no credential");
+    assert.equal((await post(relay, url, {})).status, 401, "a write with no credential");
+    assert.equal((await post(relay, url, {}, { headers: { authorization: `Bearer ${RELAY_TOKEN}x` } })).status, 401,
+      "a credential that is nearly right");
+    // A console session is not a credential for this door. It is not even a console route.
+    const signedIn = await fetch(`${relay.base}/login`, form({ password: RELAY_PASSWORD }));
+    const cookie = /(?:^|,\s*)(gb_session=[^;]+)/.exec(signedIn.headers.get("set-cookie") ?? "")?.[1] ?? "";
+    assert.equal((await post(relay, url, {}, { headers: { cookie } })).status, 401, "a console cookie");
+    // A workspace this console does not serve is a plain sentence, not a stack trace.
+    assert.equal((await asAdmin(relay, "/admin/tenants/nobody/ceiling", {})).status, 404);
+  } finally { relay.stop(); }
+});
+
+test("a ceiling outside the range never reaches a box, because the host would fail open on it", async () => {
+  const { relay } = await startMigrationConsole();
+  try {
+    // The host takes a settings value only when it is a string inside its own range, and anything
+    // else drops that workspace to the product default with nothing on any screen saying why. So
+    // the number is checked before a file is touched, on this side as well as at the control plane:
+    // whichever of the two is called directly is the one that has to refuse.
+    for (const bad of [0, -1, 1001, 2.5, "forty", null]) {
+      const res = await asAdmin(relay, "/admin/tenants/demo/ceiling", { maxAgents: bad });
+      assert.equal(res.status, 400, `a ceiling of ${JSON.stringify(bad)} was accepted`);
+      const body = await res.json();
+      assert.match(String(body.error), /whole number from 1 to 1000/);
+    }
+  } finally { relay.stop(); }
+});
+
+test("a ceiling write merges the settings file and writes the number as a STRING", async () => {
+  const { relay, stub, box } = await startMigrationConsole();
+  try {
+    // What a live box holds today. MEASURED READ-ONLY ON THE R750 2026-09-09: all three boxes carry
+    // SAND_MAX_AGENTS as a string beside other switches in this same file, and writeBoxFile
+    // truncates, so a write of one key alone would take SAND_TOOL_TRACE and SAND_SELF_TALK_CAP with
+    // it. That is what this case exists to catch.
+    const settings = stub.fileOf(box, "sand-host-settings.json");
+    writeFileSync(settings, JSON.stringify({ SAND_TOOL_TRACE: "1", SAND_SELF_TALK_CAP: "3", SAND_MAX_AGENTS: "100" }));
+
+    const res = await asAdmin(relay, "/admin/tenants/demo/ceiling", { maxAgents: 40 });
+    assert.equal(res.status, 200, await res.text());
+
+    const after = JSON.parse(readFileSync(settings, "utf8"));
+    assert.equal(after.SAND_MAX_AGENTS, "40");
+    // A NUMBER IS SILENTLY IGNORED by the host's settings reader, which takes a value only when
+    // typeof value === "string". A ceiling written as 40 would leave that workspace on the default
+    // with nothing anywhere saying why.
+    assert.equal(typeof after.SAND_MAX_AGENTS, "string");
+    assert.equal(after.SAND_TOOL_TRACE, "1", "the write truncated a neighbour's switch");
+    assert.equal(after.SAND_SELF_TALK_CAP, "3", "the write truncated a neighbour's switch");
+    assert.equal(statSync(settings).mode & 0o777, 0o600, "and the file a box reads is 0600");
+  } finally { relay.stop(); }
+});
+
+test("a box whose host cannot be asked answers read false with a reason, never a number", async () => {
+  const { relay, stub, box } = await startMigrationConsole();
+  try {
+    // There is no gateway behind this box in a test process, so getAgentCapacity cannot be asked.
+    // "We could not look" and "this workspace holds forty" send an operator to different places,
+    // and reporting the first as the second is how a panel comes to show a ceiling over a box
+    // nobody checked.
+    writeFileSync(stub.fileOf(box, "sand-host-settings.json"), JSON.stringify({ SAND_MAX_AGENTS: "100" }));
+    const body = await (await fetch(`${relay.base}/admin/tenants/demo/ceiling`, {
+      headers: { authorization: `Bearer ${RELAY_TOKEN}` },
+    })).json();
+    assert.equal(body.read, false);
+    assert.equal(body.maxAgents, null, "a number was reported for a box that was never asked");
+    assert.ok(String(body.why).length > 0, "and with no reason on it");
+    assert.equal(body.pinned, false, "an empty container environment is not a pin");
+  } finally { relay.stop(); }
+});
+
+test("a box with no settings file at all gets a flat one, not a nested one", async () => {
+  const { relay, stub, box } = await startMigrationConsole();
+  try {
+    // grok-bot-local-vm holds no SAND_MAX_AGENTS at all, which is exactly the box this wave measures
+    // the default on, so the missing-file path is the one that matters most. It wrote a NESTED
+    // document until this case existed, because the shape was decided by an identity test on two
+    // objects that were both empty and both new.
+    const settings = stub.fileOf(box, "sand-host-settings.json");
+    assert.throws(() => readFileSync(settings, "utf8"), "the fixture already has a settings file");
+
+    const res = await asAdmin(relay, "/admin/tenants/demo/ceiling", { maxAgents: 40 });
+    assert.equal(res.status, 200, await res.text());
+
+    const after = JSON.parse(readFileSync(settings, "utf8"));
+    assert.equal(after.SAND_MAX_AGENTS, "40");
+    assert.equal(after.settings, undefined, "a box with no file was given a nested document");
+  } finally { relay.stop(); }
+});
+
+test("a box whose settings are nested keeps them nested", async () => {
+  const { relay, stub, box } = await startMigrationConsole();
+  try {
+    // The other shape the host reads. Rewriting a nested file as a flat one would drop every other
+    // switch in it, which is the same truncation the merge exists to avoid.
+    const settings = stub.fileOf(box, "sand-host-settings.json");
+    writeFileSync(settings, JSON.stringify({ version: 2, settings: { SAND_TOOL_TRACE: "1" } }));
+
+    assert.equal((await asAdmin(relay, "/admin/tenants/demo/ceiling", { maxAgents: 40 })).status, 200);
+
+    const after = JSON.parse(readFileSync(settings, "utf8"));
+    assert.equal(after.settings.SAND_MAX_AGENTS, "40");
+    assert.equal(after.settings.SAND_TOOL_TRACE, "1");
+    assert.equal(after.version, 2, "the document around the settings was dropped");
+    assert.equal(after.SAND_MAX_AGENTS, undefined, "the value was also written flat, where the host would not look for it");
+  } finally { relay.stop(); }
+});
