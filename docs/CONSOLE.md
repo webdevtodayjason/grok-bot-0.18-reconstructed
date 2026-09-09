@@ -580,7 +580,7 @@ the worktree.
 
 Same run on `grok-bot-local-vm`: the stalled boot gives cover at **91 ms**, gone at **8,555 ms**, the
 same three honest lines and nothing else; `npm test` **1,696 PASS / 0 FAIL**; typecheck clean;
-`verify-console-polish --boot --picker --badge --scroll --tile --files` **33 PASS / 0 FAIL / 1 SKIP**
+`verify-console-polish --all` **34 PASS / 0 FAIL / 1 SKIP**
 (the badge leg, because no conversation on that box has a run of two system rows — it is measured on
 Jason's console instead, above); `verify-dashboard` **164 PASS / 13 FAIL**, and not one of the
 thirteen is in a surface this pass touched: three avatar legs and three bot-cap legs are `GATE-14`'s
