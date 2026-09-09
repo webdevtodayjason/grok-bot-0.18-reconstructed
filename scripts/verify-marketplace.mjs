@@ -263,12 +263,39 @@ try {
   const dom = await page.content();
   check(!dom.includes("sk-not-a-real-key"), "the pasted key is nowhere in the page's markup");
 
+  // ---- the sign-in a box cannot do --------------------------------------------------------------
+  // MARKET-18. The OAuth refusal was documented as a door refusal and was unreachable: it fired only
+  // on a literal "auth":"oauth" key in a pasted block, which no vendor writes, so a person pasting
+  // a browser-only server's address went all the way to a written entry and a connector that never
+  // connects. The host now asks the endpoint itself before it writes anything. This leg is the whole
+  // round trip through the form, and it needs the far end to be up: if the endpoint does not answer
+  // its challenge from inside this box the leg says so rather than failing, because a gate that goes
+  // red on somebody else's outage measures their uptime and not our door.
+  const oauthName = `oauthprobe-${Math.random().toString(36).slice(2, 7)}`;
+  const challenge = await inBox(`curl -s -o /dev/null -m 20 -D - -X POST -H 'content-type: application/json' --data '{}' https://mcp.notion.com/mcp 2>/dev/null | tr -d '\\r' | grep -i '^www-authenticate' || true`).catch(() => "");
+  if (!/oauth|resource_metadata/i.test(challenge)) {
+    console.log(`  --  the browser-sign-in leg is skipped: mcp.notion.com did not answer a challenge from this box (${challenge.trim().slice(0, 80) || "no answer"})`);
+  } else {
+    await page.click('[data-byo-door="link"]');
+    await page.waitForTimeout(400);
+    await page.fill("#byo-url", "https://mcp.notion.com/mcp");
+    await page.waitForTimeout(500);
+    await page.fill("#byo-name", oauthName);
+    await page.evaluate(() => document.querySelector("[data-byo-header-remove='0']")?.click());
+    await page.waitForTimeout(400);
+    await page.click("[data-byo-link] button[type=submit]");
+    await page.waitForTimeout(8000);
+    const refusal = await page.$eval("[data-byo-refusal]", (el) => el.textContent.trim()).catch(() => "");
+    check(/sign in through a browser/.test(refusal), "a browser-only server is refused in one sentence, before anything is written", refusal.slice(0, 160));
+    check(!/500|\{|addLocalConnector/.test(refusal), "and that sentence is the whole of what the person reads", refusal.slice(0, 160));
+  }
+
   // Nothing was written by any of that.
   const after = await page.evaluate(async () => {
     const r = await fetch("/connectors");
     return Object.keys((await r.json())?.mcpServers ?? {});
   });
-  check(!after.includes("linear") && !after.includes("notion"), `the box's connectors are untouched (${after.join(", ")})`);
+  check(!after.some((name) => name === "linear" || name === "notion" || name === oauthName), `the box's connectors are untouched (${after.join(", ")})`);
 
   // ---- and then it really adds one ---------------------------------------------------------------
   // Everything above proves the form. This proves the write: the console and the host agreeing on
