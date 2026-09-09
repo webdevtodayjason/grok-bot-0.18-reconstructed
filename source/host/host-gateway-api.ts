@@ -5,6 +5,19 @@ import { shellExecutorResource } from "../packages/agent-exec/shell.js";
 import { buildHostShellArgs } from "./box/box-shell-command.js";
 import { getSandRootDir } from "./host-paths.js";
 import { isConnectorEnvFieldName, readConnectorEnvSecrets } from "./extensions/mcp/connector-secrets.js";
+// CLOUD-BROWSER-1. The cloud leg's own state: its 0600 credential section, its policy file, its
+// ledger, and the process-wide register of sessions that are open right now.
+import {
+  CLOUD_BROWSER_FIELDS,
+  cloudBrowserLiveSessions,
+  listCloudBrowserSecretFields,
+  readCloudBrowserLedger,
+  readCloudBrowserPolicy,
+  storedCloudBrowserVendors,
+  summariseCloudBrowserLedger,
+  writeCloudBrowserPolicy,
+  writeCloudBrowserSecret,
+} from "./extensions/inference/cloud-browser/index.js";
 import {
   PROXY_MCP_URL_FIELD,
   catalogForBox,
@@ -1348,6 +1361,68 @@ export function createHostGatewayApi(
     // install, so the shell is the only authority -- and `stored` is whether the 0600 store holds
     // the key. A key with no program is a command that does not exist; a program with no key is a
     // tool the operator would otherwise be told to install twice.
+    // ---------------------------------------------------------------- CLOUD-BROWSER-1
+    //
+    // The cloud leg of Titan's four browser tools, from the console's side. Four commands, and the
+    // shape of each is the same promise the connector plane already makes: a write takes a value
+    // and answers with NAMES, a read answers with names and never a value.
+    //
+    // Browserbase is a credential-only row -- no connector, no shell tool -- because its MCP repo
+    // is archived and its MCP key travels as a URL query parameter the door refuses. Inventing a
+    // connectors.json entry to hang the key on would ship a connector that can only ever fail,
+    // which is the live CONNECT-13 defect, so the key lands in the cloudBrowser section of the same
+    // 0600 store instead, and this is the door it comes through.
+    setCloudBrowserKey: async (args: any) => {
+      const field = typeof args?.field === "string" ? args.field : "";
+      if (!CLOUD_BROWSER_FIELDS.includes(field)) {
+        throw new Error(`setCloudBrowserKey refuses "${field}": the cloud browser holds ${CLOUD_BROWSER_FIELDS.join(", ")} and nothing else`);
+      }
+      if (typeof args?.value !== "string" || args.value.length === 0) {
+        throw new Error("setCloudBrowserKey needs a non-empty `value`");
+      }
+      if (!writeCloudBrowserSecret(getSandRootDir(), field, args.value)) {
+        throw new Error("the cloud browser secret store could not be written");
+      }
+      return {
+        field,
+        stored: true,
+        fields: listCloudBrowserSecretFields(getSandRootDir()),
+        available: storedCloudBrowserVendors(getSandRootDir())
+      };
+    },
+    // The workspace's engine choice, its cloud site list, and -- beside them -- which engines could
+    // actually run. A pin at a vendor with no key stored is a pin that silently falls back to the
+    // box, so the console has to be able to say which is which.
+    getCloudBrowserPolicy: () => ({
+      ...readCloudBrowserPolicy(getSandRootDir()),
+      fields: listCloudBrowserSecretFields(getSandRootDir()),
+      available: storedCloudBrowserVendors(getSandRootDir())
+    }),
+    setCloudBrowserPolicy: async (args: any) => ({
+      ...writeCloudBrowserPolicy(getSandRootDir(), args ?? {}),
+      fields: listCloudBrowserSecretFields(getSandRootDir()),
+      available: storedCloudBrowserVendors(getSandRootDir())
+    }),
+    /**
+     * The open cloud sessions, and this month's bill in minutes and bytes.
+     *
+     * This is what the console draws its "Take over in the cloud browser" row from, and it carries
+     * `liveViewUrl` because that URL is a fact about the AGENT rather than about the hand-off card.
+     * request_box_help is not touched by this wave and `boxSeat` is never repointed: HANDBACK-2 is
+     * the row where painting the wrong seat showed a person another agent's wallpaper and they made
+     * a decision on it.
+     */
+    listCloudBrowserSessions: () => {
+      const rootDir = getSandRootDir();
+      const monthStart = new Date();
+      monthStart.setUTCDate(1);
+      monthStart.setUTCHours(0, 0, 0, 0);
+      return {
+        sessions: cloudBrowserLiveSessions.all(),
+        usage: summariseCloudBrowserLedger(readCloudBrowserLedger(rootDir), monthStart),
+        available: storedCloudBrowserVendors(rootDir)
+      };
+    },
     listShellTools: async () => {
       const stored = new Set(listShellEnvSecretFields(shellRoot()));
       return Promise.all(SHELL_TOOLS.map(async (tool) => ({

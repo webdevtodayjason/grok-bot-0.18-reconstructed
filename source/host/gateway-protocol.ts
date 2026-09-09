@@ -187,6 +187,14 @@ export const SAND_GATEWAY_COMMANDS = {
   jobBusAudit: (api: GatewayApi, body: string) => api.jobBusAudit(parseCommandArgs(body)),
   jobBusGetSettings: (api: GatewayApi) => api.jobBusGetSettings(),
   jobBusSetSettings: (api: GatewayApi, body: string) => api.jobBusSetSettings(parseCommandArgs(body)),
+  // CLOUD-BROWSER-1. The cloud leg of the four browser tools, from the console's side. Four
+  // commands and no more: one credential (Browserbase's row is credential-only, because that vendor
+  // has no honest connector to hang a key on), the workspace's engine choice both ways, and the
+  // open sessions the Computer card draws a live view from. Nothing here returns a stored value.
+  setCloudBrowserKey: (api: GatewayApi, body: string) => api.setCloudBrowserKey(parseCommandArgs(body)),
+  getCloudBrowserPolicy: (api: GatewayApi) => api.getCloudBrowserPolicy(),
+  setCloudBrowserPolicy: (api: GatewayApi, body: string) => api.setCloudBrowserPolicy(parseCommandArgs(body)),
+  listCloudBrowserSessions: (api: GatewayApi) => api.listCloudBrowserSessions(),
   listShellTools: (api: GatewayApi) => api.listShellTools(),
   listShellSecretFields: (api: GatewayApi) => api.listShellSecretFields(),
   setShellSecret: (api: GatewayApi, body: string) => api.setShellSecret(parseCommandArgs(body)),

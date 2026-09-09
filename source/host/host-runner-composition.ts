@@ -117,6 +117,15 @@ import {
   createHostShellExecutor,
   type HostBrowserBoxOwner,
 } from "./runner/host-computer-tool-dependencies.js";
+import { hostname } from "node:os";
+// CLOUD-BROWSER-1. The cloud leg of the four browser tools. Everything it needs -- the policy, the
+// stored keys, the ledger, the register of open sessions -- lives under the sand root next door.
+import {
+  CloudBrowserService,
+  type CloudBrowserPorts,
+  type CloudBrowserVendor,
+} from "./extensions/inference/cloud-browser/index.js";
+import type { CloudBrowserSeam } from "./runner/tools/sand-browser-tools.js";
 import {
   createRemoteBoxResourceAccessor,
   type RemoteBoxResourceHost,
@@ -1095,6 +1104,10 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       if (typeof event === "object" && event !== null
         && (event as { readonly type?: unknown }).type === "started") {
         localMachineReader.beginTurn(runConversationId);
+        // CLOUD-BROWSER-1. A new turn gets its cloud-session allowance back. Without this the
+        // ceiling would be per host process rather than per turn, and an agent that browsed twice
+        // this morning could never reach a cloud browser again until the box restarted.
+        cloudBrowserService.beginTurn(runConversationId);
       }
       hooks.onRunLifecycle?.(event);
     };
@@ -1115,6 +1128,57 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
      */
     const browserToolsEnabled = (): boolean =>
       resolveBrowserToolsEnabled(readSandBoxSetting(SAND_BROWSER_TOOLS_SETTING));
+    /**
+     * CLOUD-BROWSER-1. The cloud leg of the same four browser tools, resolved live per turn beside
+     * the switch above rather than captured once, so an operator can change which browser a
+     * workspace uses on a running box without a recreate -- the policy file is re-read on every
+     * routing decision, and the stored keys are re-read with it.
+     *
+     * The service is built once because it holds two pieces of live state a per-turn rebuild would
+     * throw away: the register of open cloud sessions the console draws from, and the per-turn
+     * session ceiling. Neither is a setting, and neither survives being reconstructed.
+     *
+     * `tenant` is the best name the box has for itself. A box does not know its control-plane slug
+     * -- nothing pushes it in -- so the relay stamps the authoritative slug onto what it serves,
+     * because the relay is the thing that knows which box belongs to whom.
+     */
+    const cloudBrowserService = new CloudBrowserService({
+      rootDir: getSandRootDir(),
+      fetch: ((input: string, init?: Record<string, unknown>) =>
+        fetch(input, init as RequestInit)) as CloudBrowserPorts["fetch"],
+      getTenant: () => readSandBoxSetting("SAND_TENANT") ?? hostname(),
+      getAgentId: () => session.id,
+      // The gate's loopback endpoint (scripts/verify-browser-tools.mjs --cloud-shape). Read per
+      // call so a gate can set it and clear it without a restart; the module refuses anything that
+      // is not ws:// on 127.0.0.1, so this cannot become a way to point the browser somewhere else.
+      getFakeEndpoint: () => readSandBoxSetting("SAND_CLOUD_BROWSER_LOOPBACK_CDP") ?? null,
+    });
+    // The orphan sweep, once. It asks each vendor what state an unfinished session is in before it
+    // stops anything, and a host that starts with no keys stored finds nothing to ask about.
+    void cloudBrowserService.sweep().catch((error: unknown) => {
+      console.warn(`[sand][cloud-browser] the session sweep did not finish: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    /**
+     * The seam, added to a dependencies object built by somebody else's function. Spread rather
+     * than passed through `createHostBrowserDriverDependencies` on purpose: that projection belongs
+     * to the computer-tool file, `cloudBrowser` is optional on the dependency type, and a browser
+     * built without it behaves exactly as it did before this wave.
+     */
+    const withCloudBrowser = <T extends object>(dependencies: T): T & { cloudBrowser: CloudBrowserSeam } => ({
+      ...dependencies,
+      cloudBrowser: {
+        route: input => cloudBrowserService.route(input),
+        shouldEscalate: verdicts => cloudBrowserService.shouldEscalate(verdicts),
+        open: async input => {
+          const lease = await cloudBrowserService.open({
+            vendor: input.engine as CloudBrowserVendor,
+            route: { engine: input.engine as CloudBrowserVendor, reason: input.reason },
+            url: input.url,
+          });
+          return { cdpUrl: lease.handle.cdpUrl, sessionId: lease.handle.sessionId, close: lease.close };
+        },
+      },
+    });
     const sharedRoomBoxToolsEnabled = (): boolean =>
       !Boolean(method(experiments, "checkFeatureGate")?.(
         "sand_shared_room_box_tools_kill_switch"
@@ -1278,7 +1342,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               isUnicodeTypingEnabled: () =>
                 method(experiments, "isUnicodeTypingEnabled")?.() ?? false,
             }),
-            createBrowserDriverDependencies: () => createHostBrowserDriverDependencies({
+            createBrowserDriverDependencies: () => withCloudBrowser(createHostBrowserDriverDependencies({
               resourceAccessor: input.resourceAccessor,
               box: remoteBox as unknown as HostBrowserBoxOwner<unknown>,
               getBoxId: () => session.id,
@@ -1310,7 +1374,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               ...(persistImageForTurn === undefined
                 ? {}
                 : { getPersistImage: () => persistImageForTurn }),
-            }),
+            })),
             createBoxShellExecutor: () => shell,
           };
           return projection;
@@ -2523,7 +2587,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         const modes = autoReviewGate?.currentModes();
         const autoRunInstructions = autoReviewGate?.userInstructions();
         return {
-          dependencies: createHostBrowserDriverDependencies({
+          dependencies: withCloudBrowser(createHostBrowserDriverDependencies({
             resourceAccessor: accessor as never,
             box: remoteBox as unknown as HostBrowserBoxOwner<unknown>,
             getBoxId: () => session.id,
@@ -2587,7 +2651,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                 action: { kind: "browserNavigation", url, pageTitle: title },
               });
             },
-          }) as unknown as TurnBrowserToolFactoryInput["dependencies"],
+          })) as unknown as TurnBrowserToolFactoryInput["dependencies"],
         };
       },
       createScreenshotToolInputs: (turn, _props) => {

@@ -48,6 +48,10 @@
 //   --stub-port <n>  the stub model's port (default 18792)
 //   --timeout-ms <n> the turn's patience (default 420000)
 //   --no-off-leg     skip leg 11 (a second turn with the setting off)
+//   --cloud-shape    CLOUD-BROWSER-1: run every page through the CLOUD path against this box's own
+//                    browser, so the shape claim is measured without a vendor and without a bill
+//   --cloud-live     CLOUD-BROWSER-1, METERED: one short session per vendor, minutes and proxy
+//                    bytes recorded, each one read back from the vendor to prove it stopped
 //
 // Run it on its own. It repins the box's model endpoint for the length of the run, so a second
 // gate running beside it would be answered by this stub.
@@ -73,6 +77,27 @@ const SKIP_OFF_LEG = process.argv.includes("--no-off-leg");
 // either. Reading the token here and exiting 2 without one is how a dry run stops being runnable
 // on the machine it exists to be runnable on.
 const DRY_RUN = process.argv.includes("--dry-run");
+/**
+ * CLOUD-BROWSER-1, two arms.
+ *
+ * --cloud-shape  routes the four tools through the CLOUD PATH -- the request file, the
+ *                attach-by-URL, the same page reader -- against the box's OWN Chrome debugger, by
+ *                setting SAND_CLOUD_BROWSER_LOOPBACK_CDP. Nothing is minted at a vendor and nothing
+ *                is spent, and the claim that matters is proved on a real box: a page read through
+ *                the cloud path comes back in the same shape as a page read through the box path.
+ *                It also greps every argument list in the box afterwards, which is the MARKET-17
+ *                check: no vendor host, no key and no session id may be in any process's argv.
+ *
+ * --cloud-live   one short session per vendor against the real API, minutes and proxy bytes
+ *                recorded, and each session's state read back from the vendor to prove it stopped.
+ *                Metered. One run per vendor, no loops, and no retry without reading the state
+ *                first. Skipped with a printed reason when no key is stored.
+ */
+const CLOUD_SHAPE = process.argv.includes("--cloud-shape");
+const CLOUD_LIVE = process.argv.includes("--cloud-live");
+const CLOUD_CDP_SETTING = "SAND_CLOUD_BROWSER_LOOPBACK_CDP";
+const CLOUD_ENGINES_FILE = "/home/box/sand-data/browser-engines.json";
+const CLOUD_LEDGER_FILE = "/home/box/sand-data/cloud-browser-ledger.jsonl";
 const FIXTURE_PORT = Number.parseInt(flag("--port", "18791"), 10);
 const STUB_PORT = Number.parseInt(flag("--stub-port", "18792"), 10);
 const TIMEOUT_MS = Number.parseInt(flag("--timeout-ms", "420000"), 10);
@@ -219,6 +244,103 @@ const chromeInventory = async () => {
   }
   return { profiles, windows };
 };
+
+// ---------------------------------------------------------------- CLOUD-BROWSER-1, the readers
+//
+// MARKET-17/MARKET-24 as one grep. A cloud debugger endpoint carries the session's own credential,
+// and argv is readable from any process in the box -- the agent's own shell included. So after a
+// cloud run this walks every process's argument list and fails on anything that looks like a vendor
+// host, a vendor key or a session id. The patterns are deliberately broader than what this product
+// writes: the check is worth having only if it would catch a shape nobody planned.
+const CLOUD_ARGV_OFFENDERS = [
+  /\bwss:\/\//i,
+  /browser-use\.com/i,
+  /browserbase\.com/i,
+  /\bbu_[A-Za-z0-9_-]{8,}/,
+  /\bbb_(live|test)_[A-Za-z0-9_-]{6,}/,
+  /X-Browser-Use-API-Key/i,
+  /X-BB-API-Key/i,
+];
+export function cloudArgvOffenders(text) {
+  const offenders = [];
+  for (const line of String(text ?? "").split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    // The gate's own loopback endpoint is a ws:// on 127.0.0.1 and is not a secret; only wss:// and
+    // the vendor shapes above are offences.
+    if (CLOUD_ARGV_OFFENDERS.some((pattern) => pattern.test(trimmed))) offenders.push(trimmed.slice(0, 160));
+  }
+  return offenders;
+}
+
+/**
+ * WHICH ENGINE ACTUALLY RAN, read from the ledger rather than guessed at.
+ *
+ * The driver stamps `engine` on its own result line, but the host never puts that in the text the
+ * model is handed -- and the model's text is all this stub can see. So the evidence is the thing
+ * the product writes anyway: one row per cloud session in
+ * /home/box/sand-data/cloud-browser-ledger.jsonl. No row means no cloud session, which is what
+ * makes the desktop-invariant leg below unable to pass vacuously: it asserts the browser did not
+ * double AND that a cloud session is on record, so "nothing ran at all" fails instead of passing.
+ *
+ * Two lines per session fold into one row, last write winning, exactly as the host's own reader
+ * folds them.
+ */
+/**
+ * Write a file inside the box without putting its content through a shell.
+ *
+ * The payload is base64 on the command line and decoded in the box, so an apostrophe, a newline or
+ * a dollar sign in a JSON document cannot turn the rest of the command into something else. Nested
+ * quoting through `docker exec sh -lc` is a trap this repo has been bitten by more than once, and
+ * it fails quietly, which is the worst way for a gate's setup to fail.
+ */
+const writeBoxFileB64 = (boxPath, content) =>
+  sh(`printf '%s' '${Buffer.from(String(content), "utf8").toString("base64")}' | base64 -d > ${boxPath} && chmod 600 ${boxPath}`);
+
+/**
+ * The two keys the metered leg needs, by EXACT NAME, out of ~/.api_keys. Nothing else is read from
+ * that file and no value is ever printed: the leg prints minutes, bytes and HTTP statuses.
+ */
+async function readApiKeys() {
+  const wanted = ["BROWSER_USE_API_KEY", "BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID"];
+  const found = {};
+  try {
+    const text = readFileSync(`${process.env.HOME}/.api_keys`, "utf8");
+    for (const line of text.split("\n")) {
+      const match = /^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*["']?([^"'\n#]+)["']?\s*$/.exec(line);
+      if (match != null && wanted.includes(match[1])) found[match[1]] = match[2].trim();
+    }
+  } catch {
+    // No file, or unreadable. The legs above skip with a printed reason.
+  }
+  return found;
+}
+
+/** One vendor request, with a hard deadline and its body parsed. Never retried by this helper. */
+async function vendorCall(url, init = {}) {
+  try {
+    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
+    const text = await response.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = { raw: text.slice(0, 200) }; }
+    return { ok: response.ok, status: response.status, body };
+  } catch (error) {
+    return { ok: false, status: 0, body: { error: String(error?.message ?? error).slice(0, 160) } };
+  }
+}
+
+export function parseCloudLedger(text) {
+  const bySession = new Map();
+  for (const line of String(text ?? "").split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let row;
+    try { row = JSON.parse(trimmed); } catch { continue; }
+    if (row == null || typeof row.sessionId !== "string" || row.sessionId.length === 0) continue;
+    bySession.set(row.sessionId, row);
+  }
+  return [...bySession.values()];
+}
 
 // ---------------------------------------------------------------- reading a JPEG's width
 //
@@ -508,6 +630,12 @@ let previousTrace;
 let previousBrowserSetting;
 let previousAllowHosts;
 let settingsTouched = false;
+// CLOUD-BROWSER-1. Restored in the finally like everything else this gate touches: a run that dies
+// must not leave a box pinned to a cloud engine.
+let previousCloudCdp;
+let previousEngines = "";
+let cloudTouched = false;
+let cloudLedgerBefore = 0;
 
 // The plan runs in order and each step produces one result, so position identifies it -- but only
 // while nothing went missing. The tool name is checked too, so a step the host never ran shifts
@@ -670,6 +798,35 @@ if (DRY_RUN) {
     check(refusedPage.status === 403 && refusedPage.body.length === 0,
       "and the bare refusal answers 403 with nothing to render, which is the case Chrome fails outright",
       `${refusedPage.status}, ${refusedPage.body.length} bytes`);
+
+    // ---------------------------------------------------------- CLOUD-BROWSER-1, on this Mac
+    //
+    // The two readers the cloud legs depend on, checked without a box, because each of them makes
+    // the real run LIE rather than fail if it is wrong: an argv scanner that finds nothing because
+    // its regex is wrong reports a custody check that never ran, and an engine reader that always
+    // says "box" makes the desktop-invariant leg pass vacuously.
+    const argvHit = cloudArgvOffenders(
+      "root 1 node /opt/titanbot-runtime/browser-driver/host-op.mjs --request-file /tmp/.sand-browser/requests/req-x.json\n"
+      + "root 2 node /opt/titanbot-runtime/browser-driver/host-op.mjs eyJvcCI6Im9wZW4ifQ==\n",
+    );
+    check(argvHit.length === 0, "the argv scanner passes a box run and a cloud run that behaved");
+    const argvMiss = cloudArgvOffenders(
+      "root 3 node host-op.mjs --cdp wss://api.browser-use.com/cdp/abc?token=bu_secret\n"
+      + "root 4 curl -H X-BB-API-Key: bb_live_1234 https://api.browserbase.com/v1/sessions\n",
+    );
+    check(argvMiss.length === 2, "and catches a vendor endpoint and a vendor key in an argument list",
+      `${argvMiss.length} caught`);
+
+    const folded = parseCloudLedger(
+      `{"event":"opened","sessionId":"s1","vendor":"browser-use","endedAt":null,"minutes":null,"proxyBytes":null}\n`
+      + `{"event":"closed","sessionId":"s1","vendor":"browser-use","endedAt":"2026-09-09T00:00:00Z","minutes":0.4,"proxyBytes":null}\n`
+      + `not json\n{"no":"session"}\n`
+      + `{"event":"opened","sessionId":"s2","vendor":"browserbase","endedAt":null}\n`,
+    );
+    check(folded.length === 2, "the ledger reader folds two lines per session into one row", `${folded.length} rows`);
+    check(folded[0].endedAt !== null && folded[0].minutes === 0.4, "and the closing line wins");
+    check(folded[1].endedAt === null, "while a session that never closed stays visibly open");
+    check(parseCloudLedger("").length === 0, "and an empty ledger is no sessions, never an error");
   } finally {
     await new Promise((resolve) => dryStub.close(resolve));
     await new Promise((resolve) => fixtureServer.close(resolve));
@@ -709,6 +866,61 @@ try {
   check(await readSetting(BROWSER_TOOLS_SETTING) === undefined,
     `${BROWSER_TOOLS_SETTING} is unset for the on leg, so the default is what is measured`,
     previousBrowserSetting === undefined ? "it was already unset" : `it was ${JSON.stringify(previousBrowserSetting)}, restored at the end`);
+
+  // ---------------------------------------------------------- CLOUD-BROWSER-1, the cloud path
+  //
+  // --cloud-shape sends every one of the four tools down the CLOUD path -- the request file, the
+  // attach-by-URL, the same page reader, the same JPEG, the same verdicts -- against the box's own
+  // Chrome debugger. No vendor is dialled and nothing is spent, and what gets proved is the claim
+  // this wave actually makes: the shape is identical because it is the same code, not because two
+  // implementations agree. The router's loopback guard refuses anything that is not ws:// on
+  // 127.0.0.1, so this setting cannot be turned into a way to point the browser elsewhere.
+  //
+  // The endpoint is asked of Chrome itself rather than assembled from a port, because a browser
+  // that is not up yet has no endpoint and a run against a guessed one fails with nothing to read.
+  if (CLOUD_SHAPE) {
+    step("the cloud path, against this box's own browser");
+    previousCloudCdp = await readSetting(CLOUD_CDP_SETTING);
+    previousEngines = (await sh(`cat ${CLOUD_ENGINES_FILE} 2>/dev/null || true`)).trim();
+    cloudTouched = true;
+    // WARM THE BROWSER FIRST, through the product's own path. Chrome has no debugger endpoint until
+    // it is running, and a cold start is about 45 seconds (measured on this Mac 2026-09-09: 45,561
+    // ms cold against 1,317 ms warm). Warming it here also keeps that 45 seconds out of the timings
+    // every leg below takes.
+    const warm = Buffer.from(JSON.stringify({ op: "screenshot", display: 1, cdpPort: 9223 }), "utf8").toString("base64");
+    const warmed = Date.now();
+    await sh(`node /opt/titanbot-runtime/browser-driver/host-op.mjs ${warm} >/dev/null 2>&1 || true`);
+    info(`browser warmed in ${Date.now() - warmed} ms`);
+    let endpoint = "";
+    const cdpBy = Date.now() + 90_000;
+    while (Date.now() < cdpBy && endpoint.length === 0) {
+      const found = (await sh(
+        `for p in 9222 9223 9224 9225 9226 9227 9228; do`
+        + ` u=$(curl -s -m 2 http://127.0.0.1:$p/json/version 2>/dev/null | tr ',' '\\n' | grep -m1 webSocketDebuggerUrl | sed 's/.*"ws:/ws:/;s/"$//');`
+        + ` [ -n "$u" ] && { echo "$u"; break; }; done`,
+      )).trim();
+      if (found.startsWith("ws://")) { endpoint = found; break; }
+      await sleep(5000);
+    }
+    if (endpoint.length === 0) {
+      skip("the cloud path runs against this box's own browser", "no Chrome debugger endpoint answered on this box");
+    } else {
+      info(`loopback debugger endpoint: ${endpoint.replace(/\/devtools\/browser\/.*/, "/devtools/browser/...")}`);
+      await writeSetting(CLOUD_CDP_SETTING, endpoint);
+      // Pinned to a cloud engine so EVERY page in the plan takes the cloud path, rather than only
+      // the ones on the site list. A partial run would leave the shape claim half-measured.
+      //
+      // Written base64 and decoded in the box. Quoting a JSON document through `docker exec sh -lc`
+      // is the trap this repo has been bitten by more than once: one apostrophe in the payload and
+      // the shell reads the rest as something else entirely, usually silently.
+      await writeBoxFileB64(CLOUD_ENGINES_FILE, JSON.stringify({
+        engine: "browser-use", cloudSites: [], autoEscalate: true, sessionCeilingPerTurn: 20, preferred: "browser-use",
+      }));
+      cloudLedgerBefore = parseCloudLedger(await sh(`cat ${CLOUD_LEDGER_FILE} 2>/dev/null || true`)).length;
+      check(await readSetting(CLOUD_CDP_SETTING) === endpoint, "the box is pointed at its own browser through the cloud path");
+      info(`cloud ledger rows before this run: ${cloudLedgerBefore}`);
+    }
+  }
 
   step("the stub, and the box pointed at it");
   stub = await startStub(STUB_PORT, PLAN, stubState);
@@ -1001,6 +1213,42 @@ try {
   check(doubled.length === 0, "and no display's window count doubled",
     doubled.length === 0 ? "" : doubled.map(([d, n]) => `${d}: ${before.windows.get(d)} -> ${n}`).join(", "));
 
+  // CLOUD-BROWSER-1. The leg above passes trivially if nothing browsed at all, so on a cloud run it
+  // has to learn which engine actually ran. The ledger is the evidence, because it is the thing the
+  // product writes anyway: one row per cloud session, tenant and vendor and minutes on it. No rows
+  // means the cloud path never ran and "the browser did not double" proved nothing.
+  const ledgerRows = parseCloudLedger(await sh(`cat ${CLOUD_LEDGER_FILE} 2>/dev/null || true`));
+  if (CLOUD_SHAPE) {
+    const gained = ledgerRows.length - cloudLedgerBefore;
+    check(gained > 0, "and the cloud path is what ran, on the ledger's own word",
+      `${gained} new session row(s); without one, the invariant above proved nothing`);
+    const closedRows = ledgerRows.filter((row) => row.endedAt != null);
+    check(closedRows.length === ledgerRows.length, "every cloud session in the ledger was closed",
+      `${ledgerRows.length - closedRows.length} still open`);
+    const named = ledgerRows.filter((row) => String(row.tenant ?? "").length > 0 && String(row.vendor ?? "").length > 0);
+    check(named.length === ledgerRows.length, "and every row names a tenant and an engine");
+    info(`cloud sessions on the ledger: ${ledgerRows.length} (${gained} from this run)`);
+  } else {
+    info(`cloud sessions on the ledger: ${ledgerRows.length} (this run used the box's own browser)`);
+  }
+
+  // -------------------------------------------------- MARKET-17: nothing of a vendor's in any argv
+  //
+  // The cloud path exists because a residential exit and a saved login are worth having; the reason
+  // it does not put its endpoint in a command line is that argv is readable from any process in the
+  // box, the agent's own shell included, and a cloud debugger URL carries the session's credential.
+  // This walks EVERY process on the box, not only the driver's, so a leak through some other path
+  // is caught by the same check.
+  step("nothing of a cloud browser's is in any argument list");
+  const argvDump = await sh("ps -eo args 2>/dev/null || ps ax 2>/dev/null || true");
+  const offenders = cloudArgvOffenders(argvDump);
+  check(offenders.length === 0, "no vendor host, key or session id in any process's arguments",
+    offenders.length === 0 ? `${argvDump.split("\n").filter((l) => l.trim().length > 0).length} processes read` : offenders.slice(0, 3).join(" | "));
+  // And the request files the cloud path writes are cleaned up by the driver that reads them.
+  const leftover = (await sh("ls -1 /tmp/.sand-browser/requests 2>/dev/null | wc -l")).trim();
+  check(Number(leftover || "0") === 0, "and no cloud request file was left behind on the box",
+    `${leftover} file(s) in /tmp/.sand-browser/requests`);
+
   // ------------------------------------------------- 12: an address that is not on the public web
   //
   // The browser reads pages with the person's own logins, on a machine that also runs their files
@@ -1093,6 +1341,18 @@ try {
         .catch((error) => info(`box NOT restored: ${error.message}`));
     }
   }
+  if (cloudTouched) {
+    // A box left pinned to a cloud engine would send every later page through a path the operator
+    // never chose, so this is put back before anything else and whatever happened.
+    await writeSetting(CLOUD_CDP_SETTING, previousCloudCdp ?? null)
+      .then(() => info(`${CLOUD_CDP_SETTING} restored`))
+      .catch((error) => info(`${CLOUD_CDP_SETTING} NOT restored: ${error.message}`));
+    await (previousEngines.length > 0
+      ? writeBoxFileB64(CLOUD_ENGINES_FILE, previousEngines)
+      : sh(`rm -f ${CLOUD_ENGINES_FILE}`))
+      .then(() => info(`${CLOUD_ENGINES_FILE} restored`))
+      .catch((error) => info(`${CLOUD_ENGINES_FILE} NOT restored: ${error.message}`));
+  }
   if (settingsTouched) {
     await writeSetting(BROWSER_TOOLS_SETTING, previousBrowserSetting ?? null)
       .catch((error) => info(`${BROWSER_TOOLS_SETTING} NOT restored: ${error.message}`));
@@ -1105,6 +1365,112 @@ try {
   }
   if (stub != null) await new Promise((resolve) => stub.close(resolve));
   if (fixtures != null) await new Promise((resolve) => fixtures.close(resolve));
+}
+
+/* ------------------------------------------------------------------ --cloud-live, metered
+ *
+ * ONE short session per vendor. No loops, no blind retry, and every session's state read back from
+ * the vendor afterwards so "it was stopped" is the vendor's word and not ours -- Browser Use's own
+ * docs say closing the CDP connection does NOT end the browser, so a session nobody asked the
+ * vendor to stop is a browser billing by the hour.
+ *
+ * This runs from this Mac rather than inside the box, because it is measuring the VENDOR, not the
+ * product: what a session costs, what it reports, and whether the stop works. Keys come from
+ * ~/.api_keys by exact name and never appear in this output.
+ *
+ * Skipped, loudly, with no key. A metered leg that silently does nothing is worse than one that
+ * says it did nothing.
+ */
+if (CLOUD_LIVE) {
+  step("one metered session per vendor");
+  const keys = await readApiKeys();
+  const bytes = (n) => (typeof n === "number" ? `${(n / (1024 * 1024)).toFixed(2)} MB` : "not reported by this vendor");
+
+  if (!keys.BROWSER_USE_API_KEY) {
+    skip("Browser Use: one short session", "no BROWSER_USE_API_KEY in ~/.api_keys");
+  } else {
+    const started = Date.now();
+    const created = await vendorCall("https://api.browser-use.com/api/v4/browsers", {
+      method: "POST",
+      headers: { "X-Browser-Use-API-Key": keys.BROWSER_USE_API_KEY, "content-type": "application/json" },
+      body: JSON.stringify({ proxyCountryCode: "us", timeoutSeconds: 300 }),
+    });
+    check(created.ok === true, "Browser Use opened one session", `HTTP ${created.status}`);
+    const sessionId = String(created.body?.id ?? "");
+    if (sessionId.length === 0) {
+      check(false, "and said which session it was", JSON.stringify(created.body).slice(0, 160));
+    } else {
+      check(typeof created.body?.cdpUrl === "string" && created.body.cdpUrl.startsWith("wss://"),
+        "and handed back a wss endpoint the box driver can attach to");
+      // THE STOP, in a finally of its own: whatever happened above, the browser ends here.
+      let stopped = null;
+      try {
+        // Read the state first. Nothing in this wave is retried or stopped without a read.
+        const state = await vendorCall(`https://api.browser-use.com/api/v4/browsers/${sessionId}`, {
+          headers: { "X-Browser-Use-API-Key": keys.BROWSER_USE_API_KEY },
+        });
+        info(`Browser Use session state before the stop: ${String(state.body?.status ?? `HTTP ${state.status}`)}`);
+      } finally {
+        stopped = await vendorCall(`https://api.browser-use.com/api/v4/browsers/${sessionId}`, {
+          method: "PATCH",
+          headers: { "X-Browser-Use-API-Key": keys.BROWSER_USE_API_KEY, "content-type": "application/json" },
+          body: JSON.stringify({ action: "stop" }),
+        });
+      }
+      check(stopped.ok === true || stopped.status === 404 || stopped.status === 409,
+        "and the session was stopped at the vendor", `HTTP ${stopped.status}`);
+      const after = await vendorCall(`https://api.browser-use.com/api/v4/browsers/${sessionId}`, {
+        headers: { "X-Browser-Use-API-Key": keys.BROWSER_USE_API_KEY },
+      });
+      const status = String(after.body?.status ?? "").toLowerCase();
+      check(after.status === 404 || status === "" || !["running", "active", "started"].includes(status),
+        "and the vendor's own answer says it is no longer running", `HTTP ${after.status} ${status || "(no status)"}`);
+      info(`Browser Use: ${((Date.now() - started) / 60_000).toFixed(2)} min, proxy ${bytes(after.body?.proxyBytes)}`);
+    }
+  }
+
+  if (!keys.BROWSERBASE_API_KEY || !keys.BROWSERBASE_PROJECT_ID) {
+    skip("Browserbase: one short session", "no BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID in ~/.api_keys");
+  } else {
+    const started = Date.now();
+    const created = await vendorCall("https://api.browserbase.com/v1/sessions", {
+      method: "POST",
+      headers: { "X-BB-API-Key": keys.BROWSERBASE_API_KEY, "content-type": "application/json" },
+      body: JSON.stringify({ projectId: keys.BROWSERBASE_PROJECT_ID, proxies: true, timeout: 60 }),
+    });
+    check(created.ok === true, "Browserbase opened one session", `HTTP ${created.status}`);
+    const sessionId = String(created.body?.id ?? "");
+    if (sessionId.length === 0) {
+      check(false, "and said which session it was", JSON.stringify(created.body).slice(0, 160));
+    } else {
+      check(typeof created.body?.connectUrl === "string" && created.body.connectUrl.startsWith("wss://"),
+        "and handed back a wss endpoint the box driver can attach to");
+      const live = await vendorCall(`https://api.browserbase.com/v1/sessions/${sessionId}/debug`, {
+        headers: { "X-BB-API-Key": keys.BROWSERBASE_API_KEY },
+      });
+      check(typeof live.body?.debuggerFullscreenUrl === "string" && live.body.debuggerFullscreenUrl.length > 0,
+        "and a live view a person can drive", `HTTP ${live.status}`);
+      // Read, then stop. The proxy figure is only true after the browsing, so it is read here and
+      // not off the create answer, where it is always zero.
+      const before = await vendorCall(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+        headers: { "X-BB-API-Key": keys.BROWSERBASE_API_KEY },
+      });
+      const stopped = await vendorCall(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+        method: "POST",
+        headers: { "X-BB-API-Key": keys.BROWSERBASE_API_KEY, "content-type": "application/json" },
+        body: JSON.stringify({ projectId: keys.BROWSERBASE_PROJECT_ID, status: "REQUEST_RELEASE" }),
+      });
+      check(stopped.ok === true || stopped.status === 404 || stopped.status === 409,
+        "and the session was stopped at the vendor", `HTTP ${stopped.status}`);
+      const after = await vendorCall(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+        headers: { "X-BB-API-Key": keys.BROWSERBASE_API_KEY },
+      });
+      const status = String(after.body?.status ?? "").toUpperCase();
+      check(after.status === 404 || !["RUNNING", "PENDING"].includes(status),
+        "and the vendor's own answer says it is no longer running", `HTTP ${after.status} ${status || "(no status)"}`);
+      info(`Browserbase: ${((Date.now() - started) / 60_000).toFixed(2)} min, proxy ${bytes(after.body?.proxyBytes ?? before.body?.proxyBytes)}`);
+    }
+  }
 }
 
 if (nothingToMeasure.length > 0) {

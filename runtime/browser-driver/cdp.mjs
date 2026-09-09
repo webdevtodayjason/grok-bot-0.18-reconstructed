@@ -51,6 +51,31 @@ export class CdpConnection {
     return connection;
   }
 
+  /**
+   * CLOUD-BROWSER-1. Attach to a websocket endpoint somebody already resolved for us.
+   *
+   * `open` above starts at a loopback PORT and asks /json/version for the socket. A cloud browser
+   * has no loopback port and no reachable /json/version: the vendor hands out one wss:// URL whose
+   * path or query IS the session credential. So this takes the URL and nothing else, and everything
+   * downstream -- the flat sessions, the deadlines, the event fan-out -- is the same object doing
+   * the same work. The browser version is asked for over the socket rather than over HTTP, and a
+   * browser that will not answer that question is still a browser we can drive, so it is not fatal.
+   */
+  static async attachTo(webSocketDebuggerUrl, options = {}) {
+    const url = String(webSocketDebuggerUrl ?? "").trim();
+    if (url.length === 0) throw new Error("no browser endpoint was given to attach to");
+    const socket = await connectWebSocket(url, { timeoutMs: options.timeoutMs ?? 15000 });
+    const connection = new CdpConnection(socket);
+    connection.browserVersion = "unknown";
+    try {
+      const version = await connection.send("Browser.getVersion", {}, { timeoutMs: options.timeoutMs ?? 10000 });
+      if (typeof version?.product === "string") connection.browserVersion = version.product;
+    } catch {
+      // A browser that will not name itself still drives. Nothing below reads this but the log.
+    }
+    return connection;
+  }
+
   get closed() {
     return this.#closedReason !== null;
   }

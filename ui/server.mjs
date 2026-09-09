@@ -1143,6 +1143,19 @@ const TENANT_ADMIN_ROUTE = /^\/admin\/tenants\/([^/]+)\/(use-included|forget-pro
 // and reads the file through the box the same way the model picker does. So it says so, once per
 // tenant, and the panel counts the boxes that are behind.
 const TENANT_RUNNING_ROUTE = /^\/admin\/tenants\/([^/]+)\/running$/;
+// CLOUD-BROWSER-1. WHAT A TENANT SPENT ON CLOUD BROWSERS, read out of that tenant's own box.
+//
+// The host writes one JSONL row per cloud session to /home/box/sand-data/cloud-browser-ledger.jsonl
+// (0600, no secrets, the session id but never the endpoint that carries its credential). That path
+// and that row shape are a written contract with the marketplace panel, which reads this route.
+//
+// It is on the relay rather than the control plane for the same reason box health is: reading a
+// file inside a box needs the docker socket, and the control plane's container deliberately has
+// none. The row's own `tenant` field is whatever the box calls itself, which is not authoritative
+// -- nothing pushes a control-plane slug into a box -- so the answer carries the slug this relay
+// resolved the container by, which is.
+const TENANT_CLOUD_BROWSER_ROUTE = /^\/admin\/tenants\/([^/]+)\/cloud-browser$/;
+const CLOUD_BROWSER_LEDGER_PATH = "/home/box/sand-data/cloud-browser-ledger.jsonl";
 const sha256Hex = (value) => createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 const evidenceOf = (name, value) => ({ name, length: String(value ?? "").length, sha256: sha256Hex(value).slice(0, 12) });
 
@@ -1151,6 +1164,7 @@ async function handleRelayAdmin(req, res, url) {
   if (expected.length === 0) return fail(res, 404, "not found");
   const action = TENANT_ADMIN_ROUTE.exec(url.pathname);
   const running = TENANT_RUNNING_ROUTE.exec(url.pathname);
+  const cloudBrowser = TENANT_CLOUD_BROWSER_ROUTE.exec(url.pathname);
   // The method refusal still comes before the credential, so a wrong method charges nobody's
   // lockout and learns nothing. The three reads are GET-only; the two migration doors are POST-only,
   // because each of them changes a file inside somebody's box.
@@ -1182,9 +1196,80 @@ async function handleRelayAdmin(req, res, url) {
 
   if (running != null) return await reportRunning(res, decodeURIComponent(running[1]));
 
+  if (cloudBrowser != null) return await reportCloudBrowser(res, decodeURIComponent(cloudBrowser[1]));
+
   if (action != null) return await handleTenantMigration(req, res, decodeURIComponent(action[1]), action[2]);
 
   return fail(res, 404, "not found");
+}
+
+/**
+ * One tenant's cloud browser ledger, folded, with the money on it.
+ *
+ * Two lines go into that file per session -- one before the connect so an orphan can be found, one
+ * when it stops -- and this folds them by session id, last write winning. A session with no closing
+ * line comes back with `endedAt: null`, which is exactly what an operator needs to see: it is the
+ * shape of a browser that may still be running on somebody's bill.
+ *
+ * `proxyBytes` stays null where the vendor publishes no figure. Browserbase's session object
+ * carries it; Browser Use documents no per-browser traffic number at all. A zero there would read
+ * as "this session used no proxy", and on a residential exit at $5 a gigabyte that is the most
+ * expensive wrong number this file could print, so the field is null and the panel says
+ * "not reported by this vendor".
+ */
+async function reportCloudBrowser(res, slug) {
+  const t = contextOf(slug);
+  if (t == null) return fail(res, 404, NOT_AVAILABLE_SENTENCE);
+  const answer = (payload) => {
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ slug, measuredAt: new Date().toISOString(), ...payload }));
+  };
+  if (!await dockerAvailable()) {
+    return answer({ read: false, why: "this relay has no docker under it, so it cannot read inside a box", rows: [], totals: null });
+  }
+  const raw = await dockerOut(["exec", t.box, "cat", CLOUD_BROWSER_LEDGER_PATH]);
+  // No file is not a failure: it is a box that has never opened a cloud browser, which is most of
+  // them. "We could not look" and "there is nothing to see" are different answers and only one of
+  // them sends an operator anywhere.
+  if (raw == null) return answer({ read: true, why: "", rows: [], totals: emptyCloudTotals() });
+
+  const bySession = new Map();
+  for (const line of String(raw).split("\n")) {
+    const text = line.trim();
+    if (text.length === 0) continue;
+    let row;
+    try { row = JSON.parse(text); } catch { continue; }
+    if (row == null || typeof row.sessionId !== "string" || row.sessionId.length === 0) continue;
+    const { event: _event, ...rest } = row;
+    // The slug this relay resolved the container by wins over whatever the box calls itself.
+    bySession.set(row.sessionId, { ...rest, tenant: slug });
+  }
+  const rows = [...bySession.values()].sort((a, b) => String(b.startedAt ?? "").localeCompare(String(a.startedAt ?? "")));
+  return answer({ read: true, why: "", rows, totals: cloudTotals(rows) });
+}
+
+const emptyCloudTotals = () => ({ sessions: 0, minutes: 0, proxyBytes: null, proxyReportedBy: [], open: 0 });
+
+function cloudTotals(rows) {
+  let minutes = 0;
+  let bytes = 0;
+  let anyBytes = false;
+  const reporters = new Set();
+  for (const row of rows) {
+    if (Number.isFinite(Number(row.minutes))) minutes += Number(row.minutes);
+    if (Number.isFinite(Number(row.proxyBytes))) {
+      bytes += Number(row.proxyBytes);
+      anyBytes = true;
+      reporters.add(String(row.vendor ?? ""));
+    }
+  }
+  return {
+    sessions: rows.length,
+    minutes: Math.round(minutes * 100) / 100,
+    proxyBytes: anyBytes ? bytes : null,
+    proxyReportedBy: [...reporters].filter((name) => name.length > 0).sort(),
+    open: rows.filter((row) => row.endedAt == null).length,
+  };
 }
 
 /**
