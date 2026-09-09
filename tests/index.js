@@ -122,6 +122,7 @@ import "./cursor-free.test.mjs";
 // and all resolve before this module's body runs, which is why they work and nothing else does.
 import "./agent-cap.test.mjs";
 import "./read-fence.test.mjs";
+import "./problem-report-tool.test.mjs";
 import "./box-secrets-preserve.test.mjs";
 import "./box-store-secret-exclusion.test.mjs";
 import "./box-copy-in-agent-db.test.mjs";
@@ -164,6 +165,7 @@ import "./machine-room-handoff.test.mjs";
 // adapter's data shapes, the four seams, the rail tile's reader and its plate, the badge that folds
 // a gap of work into one row, and files that open -- the viewer, the download and the /files route.
 import "./machine-room-boot.test.mjs";
+import "./machine-room-feedback.test.mjs";
 import "./machine-room-screen-tile.test.mjs";
 import "./machine-room-files.test.mjs";
 
