@@ -193,6 +193,18 @@ test("the catalog is read through the gateway, never from a file beside the page
   assert.equal(calls2.filter((c) => c.method === "listMarketplace").length, 1);
 });
 
+// BOTS-4, measured on grok-bot-local-vm 2026-09-09: opening the Marketplace fetched the whole
+// catalog TWICE, 221,128 B on a box serving seven bots, because the Plugins half and the Bots half
+// both ask before either answer lands and a cache that only holds settled answers is empty for
+// both. With 72 bots in the catalog that is one body or two on every panel opening.
+test("two readers that ask at the same time share one fetch", async () => {
+  const { createGatewayAdapter, calls } = await loadAdapter(answers());
+  const adapter = createGatewayAdapter(seed());
+  const [first, second] = await Promise.all([adapter.listMarketplace(), adapter.listMarketplace()]);
+  assert.equal(calls.filter((c) => c.method === "listMarketplace").length, 1);
+  assert.equal(first, second, "the two readers were handed different catalogs");
+});
+
 test("installed is the name being in connectors.json, not the host running a server by that name", async () => {
   const { byId } = await statesFor();
   assert.equal(byId.tinyfish.installed, true);

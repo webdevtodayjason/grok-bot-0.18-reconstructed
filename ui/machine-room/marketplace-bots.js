@@ -30,6 +30,22 @@
  * description is the template's description followed by its instructions, in that order, and
  * docs say so. `title` is the operator-facing Role and is left for the operator.
  *
+ * BOTS-4, and what changed on this page: a bot is now FOUR blocks, in this order and these words --
+ * Memories "Facts it already knows", Skills "Playbooks it can run", Routines "Jobs that run on
+ * their own", Integrations "Apps it can use". Memories replaced Instructions as the first block
+ * because the 65 community rows carry no instructions at all: their operating rules ARE their
+ * memories, the generator makes the first one the row's `instructions` (so the identity rule above
+ * is unchanged), and adding the bot seeds every one of them into its own memory store. The rail's
+ * words are pinned by tests/machine-room-bots-tab.test.mjs, because "Facts it already knows" is
+ * what a person was shown and a paraphrase of it is a different product.
+ *
+ * THE LIST IS CARDS. listMarketplace answers a card projection -- no memory text, no skill bodies,
+ * no routine summaries -- because the full 72 rows are several hundred kilobytes on a relay that
+ * buffers each body whole. Opening a bot fetches its own row through getMarketplaceItem, which the
+ * host has always served and this console had never called, and the fetched row is what Add works
+ * from, for a pack as much as for a single bot. A row that cannot be fetched refuses the import in
+ * one sentence rather than importing the half of it the list happened to carry.
+ *
  * Optional globals, all of them degradable:
  *   window.__machineRoomAdapter    — the live adapter app.js built (addConnector, installShellTool,
  *                                    selectContext). Absent offline; the page then says which
@@ -41,6 +57,13 @@
  *                                    fallback is adapter.addConnector / adapter.installShellTool,
  *                                    which IS the connector editor's path (POST /connectors +
  *                                    refreshMcp).
+ *   window.__botSetup              — BOTS-4's setup sequence, in its own file so that the page and
+ *                                    the sequence are not one file two builders share:
+ *                                    { alreadyOnRoster(gateway, bot), setUpBot(gateway, bot, opts) }.
+ *                                    Absent on a build that does not carry it, and the page then
+ *                                    falls back to importBot below and says so in plain words:
+ *                                    the agent and its playbooks land, its memories and its
+ *                                    routines do not.
  */
 (function attachMarketplaceBots(global) {
   "use strict";
@@ -70,6 +93,7 @@
 
   const adapterOf = () => global.__machineRoomAdapter ?? null;
   const pluginsTabOf = () => global.__marketplacePlugins ?? null;
+  const botSetupOf = () => global.__botSetup ?? null;
 
   // ------------------------------------------------------------------ small helpers
   const escapeHtml = (value) => String(value ?? "")
@@ -77,6 +101,74 @@
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   const text = (value) => String(value ?? "").trim();
   const listOf = (value) => (Array.isArray(value) ? value : []);
+
+  // ------------------------------------------------------------------ the four blocks, read off a row
+  //
+  // A community row carries `memories`, `routines` and `apps`; the seven first-party rows carry
+  // none of the three and the catalog derives a single memory from their `instructions`, so both
+  // shapes read the same here and the page has no "is this one of ours" branch in it.
+  //
+  // `counts` is what the CARD carries in place of the arrays. The list draws from it; the page
+  // draws from the fetched row. Where a card is all the page has -- a detail fetch that failed --
+  // the block says the row could not be read rather than "this bot has no memories", which is a
+  // different and untrue sentence.
+  const memoriesOf = (bot) => listOf(bot && bot.memories)
+    .map((row) => (typeof row === "string" ? { text: row } : row))
+    .filter((row) => row != null && text(row.text ?? row.description).length > 0);
+  const routinesOf = (bot) => listOf(bot && bot.routines).filter((row) => row != null && typeof row === "object");
+  const countOf = (bot, field, rows) => {
+    if (rows.length > 0) return rows.length;
+    const declared = Number((bot && bot.counts && bot.counts[field]));
+    return Number.isFinite(declared) && declared > 0 ? Math.trunc(declared) : 0;
+  };
+  /** True when the row is the list's card projection rather than the whole thing. */
+  const isCardOnly = (bot) => bot != null && bot.counts != null && memoriesOf(bot).length === 0 && countOf(bot, "memories", []) > 0;
+
+  /**
+   * The apps block, in the upstream's own vocabulary where the row carries one.
+   *
+   * `apps` is what the community rows carry: the name as written on the source page, the label a
+   * person reads, the sentence THIS bot wrote about what it does with that app, the plugin id when
+   * we carry one, and how it is offered. `integrations` (plugin ids, which the validator checks and
+   * SearchPlugins reads) is unchanged and is what a row without `apps` is drawn from, so the seven
+   * first-party rows are untouched.
+   */
+  function appsOf(bot) {
+    const declared = listOf(bot && bot.apps).filter((row) => row != null && typeof row === "object");
+    if (declared.length > 0) {
+      return declared.map((row) => ({
+        name: text(row.name),
+        label: text(row.label) || text(row.name),
+        line: text(row.line ?? row.description),
+        pluginId: text(row.pluginId ?? row.plugin),
+        offer: text(row.offer) || (text(row.pluginId ?? row.plugin) ? "connect" : "byo"),
+      }));
+    }
+    return listOf(bot && bot.integrations).map(text).filter(Boolean)
+      .map((id) => ({ name: id, label: id, line: "", pluginId: id, offer: "connect" }));
+  }
+
+  // The cron the generator emits is one of a handful of shapes, and every one of them carries a
+  // `scheduleNote` in plain words beside it. This is the fallback for a row that carries the
+  // expression and no words: a person reads "Every weekday at 9:00", never "0 9 * * 1-5".
+  const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  function scheduleWords(routine) {
+    const note = text(routine && routine.scheduleNote);
+    if (note) return note;
+    const cron = text(routine && routine.schedule);
+    if (!cron) return "";
+    const [minute, hour, day, month, weekday] = cron.split(/\s+/);
+    const at = /^\d+$/.test(hour) && /^\d+$/.test(minute)
+      ? `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
+      : "";
+    const clock = at ? ` at ${at}` : "";
+    if (weekday === "1-5") return `Every weekday${clock}`;
+    if (/^\d$/.test(weekday ?? "")) return `Every ${DAYS[Number(weekday)] ?? "week"}${clock}`;
+    if (day === "1" && month !== "*") return `Once a quarter${clock}`;
+    if (day === "1") return `Once a month${clock}`;
+    if (day === "*" && weekday === "*") return `Every day${clock}`;
+    return `On the schedule this bot names${clock}`;
+  }
 
   // The tile is drawn, never fetched: the catalog carries { color, shape } and no image URL, so a
   // box with no network still paints the whole Bots tab. The face is two eyes and a mouth in
@@ -450,8 +542,14 @@
     return declared.length ? declared : null;
   }
 
-  const view = { botId: null, page: "instructions", query: "", category: "All", notice: "" };
-  const imports = new Map();  // bot id -> { state: "running" | "done" | "failed", ... }
+  const view = { botId: null, page: "memories", query: "", category: "All", notice: "" };
+  const imports = new Map();  // bot id -> { state: "running" | "done" | "already" | "failed", ... }
+  // The full row for each bot the operator has opened, fetched once through getMarketplaceItem.
+  // The in-flight promise is what is cached, not only the settled answer: opening a bot paints
+  // twice in quick succession and caching the answer alone fetches the row twice.
+  const details = new Map();   // bot id -> the whole row
+  const detailReads = new Map();  // bot id -> the promise in flight
+  const detailErrors = new Map();  // bot id -> why the row could not be read
   let catalog = null;
   let catalogError = null;
   let installed = new Set();
@@ -460,8 +558,10 @@
 
   const botsOf = () => listOf(catalog && catalog.bots);
   const pluginsOf = () => listOf(catalog && catalog.plugins);
-  const botById = (id) => botsOf().find((b) => text(b.id) === text(id)) ?? null;
+  // The fetched row wins over the card: the card carries counts and the row carries the text.
+  const botById = (id) => details.get(text(id)) ?? botsOf().find((b) => text(b.id) === text(id)) ?? null;
   const pluginById = (id) => pluginsOf().find((p) => text(p.id) === text(id)) ?? null;
+  const tagsOf = (bot) => listOf(bot && bot.tags).map(text).filter(Boolean);
 
   // The catalog's own category list where it carries one (either a flat array or { bots, plugins }),
   // and the categories the bots themselves name where it does not. "All" always leads and
@@ -470,7 +570,7 @@
     const raw = catalog && catalog.categories;
     const declared = Array.isArray(raw) ? raw : listOf(raw && raw.bots);
     const named = declared.map((c) => (typeof c === "string" ? c : text(c && c.name))).filter(Boolean);
-    const fromBots = botsOf().map((b) => text(b.category)).filter(Boolean);
+    const fromBots = botsOf().flatMap((b) => [text(b.category), ...tagsOf(b)]).filter(Boolean);
     const featured = botsOf().some((b) => b.featured === true);
     const ordered = [];
     for (const name of [...(named.length ? named : []), ...fromBots]) {
@@ -479,21 +579,27 @@
       if (!ordered.includes(name)) ordered.push(name);
     }
     if (featured && !ordered.includes("Featured")) ordered.unshift("Featured");
-    return ["All", ...ordered];
+    // A CHIP WITH NO MEMBERS IS NOT DRAWN. The host's declared list is a superset of what any one
+    // box serves -- "From Titanbot team" and "Sales" both filtered to nothing on 2026-09-09 -- and
+    // a chip that empties the page is a control that cannot work, which this file does not draw.
+    return ["All", ...ordered.filter((name) => botsOf().some((bot) => inCategory(bot, name)))];
   }
 
   function matches(bot) {
     const query = view.query.trim().toLowerCase();
     if (!query) return true;
-    return [bot.name, bot.description, bot.category, bot.creator]
+    return [bot.name, bot.description, bot.category, bot.creator, ...tagsOf(bot)]
       .map((v) => String(v ?? "").toLowerCase())
       .some((v) => v.includes(query));
   }
 
+  // A community bot carried up to two categories upstream: the first is its own, the second rides
+  // in `tags` so nothing is lost, and the chip reads both -- otherwise a bot filed under Sales and
+  // Marketing would be missing from one of the two chips a person tries.
   function inCategory(bot, category) {
     if (category === "All") return true;
     if (category === "Featured") return bot.featured === true;
-    return text(bot.category) === category;
+    return text(bot.category) === category || tagsOf(bot).includes(category);
   }
 
   // ------------------------------------------------------------------ list view
@@ -503,65 +609,135 @@
   };
 
   function chipsMarkup() {
-    // .palette-chips is a bare flex row with no wrap; six categories plus All need one.
-    return `<div class="palette-chips" role="group" aria-label="Bot categories" style="margin:0 0 14px;flex-wrap:wrap">${categories().map((name) => {
+    // CHIPS, NOT TABS. This row drew `.roster-tab` -- the big underlined pill the panel's own
+    // Plugins/Bots switch uses -- while the Plugins half of the SAME panel drew `.tag` inside
+    // `.marketplace-chips`, against CSS that has been in styles.css since MARKET-1 (3422). With
+    // eight bot categories that read as a run-on line of small caps rather than a filter.
+    return `<div class="palette-chips marketplace-chips" role="group" aria-label="Bot categories" data-bot-chips>${categories().map((name) => {
       const active = view.category === name;
-      return `<button class="roster-tab${active ? " is-active" : ""}" type="button" data-bot-category="${escapeHtml(name)}" aria-pressed="${active}">${escapeHtml(name)}</button>`;
+      return `<button class="tag${active ? " is-active" : ""}" type="button" data-bot-category="${escapeHtml(name)}" aria-pressed="${active}">${escapeHtml(name)}</button>`;
     }).join("")}</div>`;
   }
 
+  /**
+   * A featured bot is a card rather than a row, and it gets the SAME Add.
+   *
+   * Measured on grok-bot-local-vm 2026-09-09: four of the seven rows this box serves are featured,
+   * so they were drawn as cards -- and the Add this wave adds was on none of them. The card is
+   * therefore the same shape as a row: a wrapper that is not a button, the open control, and the
+   * Add as its sibling.
+   */
   function featuredCardMarkup(bot) {
-    return `<button class="plugin-card" type="button" data-bot-id="${escapeHtml(bot.id)}" style="display:grid;gap:10px;text-align:left;cursor:pointer;color:inherit;font:inherit">`
-      + `<span style="display:flex;align-items:center;gap:10px">${tileMarkup(bot, "large")}<span style="display:grid;gap:2px;min-width:0"><strong style="font-size:13px">${escapeHtml(bot.name)}</strong><small>${escapeHtml(text(bot.creator) || "Titanbot team")}’s Bot</small></span></span>`
+    const id = text(bot.id);
+    const outcome = imports.get(id);
+    const onRoster = outcome != null && (outcome.state === "done" || outcome.state === "already");
+    const skills = countOf(bot, "skills", listOf(bot.skills));
+    const add = onRoster
+      ? `<span class="status-pill success marketplace-bot-add-state" data-bot-added="${escapeHtml(id)}">on the roster</span>`
+      : `<button class="marketplace-bot-add" type="button" data-add-bot="${escapeHtml(id)}"`
+        + ` aria-label="Add ${escapeHtml(text(bot.name))} to this box"`
+        + ` title="Add ${escapeHtml(text(bot.name))}: it lands on the roster and starts talking">+</button>`;
+    return `<div class="plugin-card marketplace-bot-card" data-bot-row="${escapeHtml(id)}">`
+      + `<button class="marketplace-bot-card-open" type="button" data-bot-id="${escapeHtml(id)}">`
+      + `<span style="display:flex;align-items:center;gap:10px">${tileMarkup(bot, "large")}<span style="display:grid;gap:2px;min-width:0"><strong style="font-size:13px">${escapeHtml(text(bot.name))}</strong><small>${escapeHtml(creditLine(bot))}</small></span></span>`
       + `<p style="margin:0">${escapeHtml(oneLine(bot.description))}</p>`
-      + `<span class="tag-list" style="margin:0"><span class="tag">${escapeHtml(text(bot.category) || "Bots")}</span><span class="tag">${listOf(bot.skills).length} skill${listOf(bot.skills).length === 1 ? "" : "s"}</span></span>`
-      + `</button>`;
+      + `<span class="tag-list" style="margin:0"><span class="tag">${escapeHtml(text(bot.category) || "Bots")}</span><span class="tag">${skills} skill${skills === 1 ? "" : "s"}</span></span>`
+      + `</button>${add}</div>`;
   }
 
+  /** "by Anoop Baliga, from the community" on a community row; our own rows say only the team. */
+  function creditLine(bot) {
+    const creator = text(bot && bot.creator) || "Titanbot team";
+    const note = text(bot && bot.creatorNote);
+    return note ? `by ${creator}, ${note}` : `by ${creator}`;
+  }
+
+  /**
+   * A row is a DIV with two sibling buttons, never a button inside a button.
+   *
+   * Chrome honours a click on a nested button and fires BOTH handlers, so a nested Add would open
+   * the bot page and start the setup on one press -- and a page.click() on it would pass, which is
+   * exactly why the gate measures the rectangle instead. The wrapper is a grid: tile, copy, Add.
+   */
   function rowMarkup(bot) {
-    const need = listOf(bot.integrations);
-    const missing = need.filter((id) => !installed.has(text(id))).length;
-    return `<button class="plugin-nav-button" type="button" data-bot-id="${escapeHtml(bot.id)}">`
+    const id = text(bot.id);
+    const outcome = imports.get(id);
+    const onRoster = outcome != null && (outcome.state === "done" || outcome.state === "already");
+    const add = onRoster
+      ? `<span class="status-pill success marketplace-bot-add-state" data-bot-added="${escapeHtml(id)}">on the roster</span>`
+      : `<button class="marketplace-bot-add" type="button" data-add-bot="${escapeHtml(id)}"`
+        + ` aria-label="Add ${escapeHtml(text(bot.name))} to this box"`
+        + ` title="Add ${escapeHtml(text(bot.name))}: it lands on the roster and starts talking">+</button>`;
+    return `<div class="marketplace-bot-row" data-bot-row="${escapeHtml(id)}">`
+      + `<button class="marketplace-bot-open" type="button" data-bot-id="${escapeHtml(id)}">`
       + tileMarkup(bot, "small")
-      + `<span><strong>${escapeHtml(bot.name)} by ${escapeHtml(text(bot.creator) || "Titanbot team")}</strong><small>${escapeHtml(oneLine(bot.description))}</small></span>`
-      + `<span class="status-dot ${missing === 0 && need.length > 0 ? "success" : ""}"></span>`
-      + `</button>`;
+      + `<span class="marketplace-bot-copy"><strong>${escapeHtml(text(bot.name))} <span class="marketplace-bot-by">${escapeHtml(creditLine(bot))}</span></strong>`
+      + `<small>${escapeHtml(oneLine(bot.description))}</small></span></button>`
+      + add
+      + `</div>`;
+  }
+
+  /** A row somebody else wrote. The catalog says so with a credit note; ours carry none. */
+  const isCommunity = (bot) => bot != null && (bot.community === true || text(bot.creatorNote).length > 0);
+
+  /** How many rows a topical section shows in the All view before it offers its own chip. */
+  const SECTION_CAP = 6;
+
+  function sectionMarkup(name, members, { capped = false, label = null } = {}) {
+    if (!members.length) return "";
+    const shown = capped && members.length > SECTION_CAP ? members.slice(0, SECTION_CAP) : members;
+    const more = shown.length < members.length
+      ? `<button class="quiet-button" type="button" data-bot-category="${escapeHtml(name)}">See all ${members.length} in ${escapeHtml(label ?? name)}</button>`
+      : "";
+    return `<div class="plugin-section-title"><span>${escapeHtml(label ?? name)}</span><span>${members.length}</span></div>`
+      + `<div class="plugin-list marketplace-bot-list">${shown.map(rowMarkup).join("")}</div>`
+      + (more ? `<div class="marketplace-bot-more">${more}</div>` : "");
   }
 
   function listMarkup() {
     const bots = botsOf().filter((b) => matches(b) && inCategory(b, view.category));
-    const intro = `<div class="panel-intro"><p>A Bot is a template for an agent on this box: a persona, the playbooks it can run, and the plugins those playbooks need. Import Bot creates a NEW agent here with that persona and imports each skill into the box's shared library. Nothing runs until you message it.</p><span class="status-pill">${botsOf().length} template${botsOf().length === 1 ? "" : "s"}</span></div>`;
+    const total = botsOf().length;
+    const intro = `<div class="panel-intro"><p>A Bot is a ready-made agent: the facts it already knows, the playbooks it can run, the jobs it can run on its own, and the apps it uses. Add puts one on this box with all of that in place and it says hello in its own conversation. Its jobs arrive switched off, and nothing it needs is installed without you.</p><span class="status-pill">${total} bot${total === 1 ? "" : "s"}</span></div>`;
     const search = `<div class="field" style="margin:0 0 12px"><label class="sr-only" for="marketplace-bot-search">Search bots</label><input id="marketplace-bot-search" class="search-input" type="search" data-bot-search autocomplete="off" placeholder="Search bots" value="${escapeHtml(view.query)}" /></div>`;
 
     if (bots.length === 0) {
-      const why = botsOf().length === 0
-        ? "This host serves no bot templates yet. listMarketplace is what carries them, and this box answered with none."
-        : "No template matches that search in this category.";
+      const why = total === 0
+        ? "This host serves no bots yet. listMarketplace is what carries them, and this box answered with none."
+        : "No bot matches that search in this category.";
       return `${intro}${search}${chipsMarkup()}<div class="empty-state">${escapeHtml(why)}</div>`;
     }
 
+    const community = bots.some(isCommunity);
     const featured = view.category === "All" ? bots.filter((b) => b.featured === true) : [];
     const featuredSection = featured.length
       ? `<div class="plugin-section-title"><span>Featured</span></div><div class="panel-grid" style="margin-bottom:18px">${featured.map(featuredCardMarkup).join("")}</div>`
       : "";
+    const shown = new Set(featured.map((b) => text(b.id)));
+    // OURS FIRST, and only where there is somebody else's row to be first of. On a box whose
+    // catalog is still only the seven, this section would be the whole page under a heading, so
+    // the ordinary category grouping below is what draws them.
+    const ours = view.category === "All" && community
+      ? bots.filter((b) => !isCommunity(b) && !shown.has(text(b.id)))
+      : [];
+    for (const bot of ours) shown.add(text(bot.id));
+    const oursSection = sectionMarkup("All", ours, { label: "From the Titanium Bot team" });
+
     // Sections per category, in the catalog's own order, so the page reads the way the chips do.
     const groups = view.category === "All"
       ? categories().filter((c) => c !== "All" && c !== "Featured")
       : [view.category];
     const sections = groups.map((name) => {
-      const members = bots.filter((b) => inCategory(b, name));
-      if (!members.length) return "";
-      return `<div class="plugin-section-title"><span>${escapeHtml(name)}</span><span>${members.length}</span></div><div class="plugin-list" style="margin-bottom:16px">${members.map(rowMarkup).join("")}</div>`;
+      const members = bots.filter((b) => inCategory(b, name) && !shown.has(text(b.id)));
+      for (const bot of members) shown.add(text(bot.id));
+      return sectionMarkup(name, members, { capped: view.category === "All" });
     }).join("");
     // A bot whose category is not in the chip list would otherwise vanish from the page entirely
     // -- including one whose category IS "Featured", which no group section covers.
-    const shown = new Set(groups.flatMap((name) => bots.filter((b) => inCategory(b, name)).map((b) => text(b.id))));
-    for (const bot of featured) shown.add(text(bot.id));
     const rest = bots.filter((b) => !shown.has(text(b.id)));
-    const restSection = rest.length
-      ? `<div class="plugin-section-title"><span>More</span><span>${rest.length}</span></div><div class="plugin-list">${rest.map(rowMarkup).join("")}</div>`
-      : "";
-    return `${intro}${search}${chipsMarkup()}${featuredSection}${sections}${restSection}`;
+    const restSection = sectionMarkup("All", rest, { label: "More" });
+    // Its own scroll box. 72 rows in an 810px modal column push the search field and the chips off
+    // the top of the panel, so the filter a person is using scrolls away from them.
+    return `${intro}${search}${chipsMarkup()}<div class="marketplace-bots-scroll" data-bot-scroll>${featuredSection}${oursSection}${sections}${restSection}</div>`;
   }
 
   // ------------------------------------------------------------------ the bot page
@@ -572,57 +748,197 @@
       + `<span class="field-hint">This text becomes the imported agent's description, which is the only field this host feeds the model as an agent's identity. You can edit it afterwards in the agent's own details panel.</span>`;
   }
 
+  /**
+   * MEMORIES: prose, one paragraph after another, no bullets and no headings.
+   *
+   * The upstream memory NAME is the placeholder "memory 1" on all 444 of them, so it is dropped
+   * rather than drawn -- a heading that says "memory 1" is furniture that tells a person nothing.
+   * The footnote says what adding the bot actually does with these, because it is the one thing
+   * on this page that writes to the agent's own store.
+   */
+  function memoriesMarkup(bot) {
+    const memories = memoriesOf(bot);
+    if (!memories.length) {
+      const why = isCardOnly(bot)
+        ? "This bot's own row could not be read from the host, so its memories are not on this page. Close it and open it again."
+        : "This bot knows nothing in advance: it starts with its description and learns as you work with it.";
+      return `<div class="empty-state">${escapeHtml(why)}</div>`;
+    }
+    const paragraphs = memories
+      .map((memory) => `<p class="marketplace-memory">${escapeHtml(text(memory.text ?? memory.description))}</p>`)
+      .join("");
+    return `<div class="panel-card" data-bot-memories>${paragraphs}</div>`
+      + `<span class="field-hint">These are seeded as the bot's own remembered facts when you add it, the first one is also what the bot is told it is, and you can edit or delete any of them from its Memory panel afterwards.</span>`;
+  }
+
   function skillsMarkup(bot) {
     const skills = listOf(bot.skills);
-    if (!skills.length) return `<div class="empty-state">This template has no playbooks; importing it creates the agent and nothing else.</div>`;
-    return `<div class="plugin-list">${skills.map((skill) => `<div class="setting-row"><div><strong>${escapeHtml(text(skill.name))}</strong><small>${escapeHtml(oneLine(skill.description))}</small></div><span class="tag">${text(skill.body).length} chars</span></div>`).join("")}</div>`
-      + `<span class="field-hint">Each is imported as its own SKILL.md through importAgentWorkflowText. The host's workflow library is shared across the box, so a skill imported here is offered to every agent on it.</span>`;
+    if (!skills.length) {
+      const why = isCardOnly(bot)
+        ? "This bot's own row could not be read from the host, so its playbooks are not on this page. Close it and open it again."
+        : "This bot has no playbooks; adding it creates the bot and nothing else.";
+      return `<div class="empty-state">${escapeHtml(why)}</div>`;
+    }
+    return `<div class="plugin-list" data-bot-skills>${skills.map((skill) => `<div class="setting-row"><div><strong>${escapeHtml(text(skill.name))}</strong><small>${escapeHtml(oneLine(skill.description))}</small></div></div>`).join("")}</div>`
+      + `<span class="field-hint">Each one is written into the box's shared library as its own playbook. The library is shared, so a playbook added here is offered to every bot on this box.</span>`;
   }
 
-  function integrationsMarkup(bot, ids = null) {
-    const need = (ids ?? listOf(bot.integrations)).map(text).filter(Boolean);
-    if (!need.length) return `<div class="empty-state">This template needs no plugins: it runs on the box's own built-in tools.</div>`;
-    const rows = need.map((id) => {
-      const plugin = pluginById(id);
-      const name = plugin ? text(plugin.name) : id;
-      const line = plugin ? oneLine(plugin.tagline || plugin.description) : "This plugin is not in the catalog this host serves.";
-      const here = installed.has(id);
-      const control = here
-        ? `<span class="status-pill success">installed</span>`
-        : plugin
-          ? `<button class="ghost-button" type="button" data-add-integration="${escapeHtml(id)}">Add</button>`
-          : `<span class="status-pill attention">not in this catalog</span>`;
-      return `<div class="setting-row" data-integration="${escapeHtml(id)}"><div><strong>${escapeHtml(name)}</strong><small>${escapeHtml(line)}</small></div>${control}</div>`;
+  /**
+   * ROUTINES: what it does on its own, when, and that it arrives switched off.
+   *
+   * A routine whose cadence is an event ("when a deal moves", "continuously") gets no schedule from
+   * the generator and is NOT created by Add: the host's automations are cron and nothing else, and
+   * a routine stored with a trigger it cannot compute a next run for is a job that never runs and
+   * looks like one that does. The page says that here rather than after the click.
+   */
+  function routinesMarkup(bot) {
+    const routines = routinesOf(bot);
+    if (!routines.length) {
+      const why = isCardOnly(bot)
+        ? "This bot's own row could not be read from the host, so its jobs are not on this page. Close it and open it again."
+        : "This bot runs nothing on its own: it works when you ask it to.";
+      return `<div class="empty-state">${escapeHtml(why)}</div>`;
+    }
+    const rows = routines.map((routine) => {
+      // "Disabled by default." leads a lot of the source summaries, and the line under it says so
+      // in our own words, so the sentence would be on the row twice.
+      const summary = oneLine(text(routine.summary).replace(/^disabled by default\.?\s*/i, ""));
+      const words = scheduleWords(routine);
+      const when = text(routine.schedule)
+        ? `${words || "On a schedule"} — off until you switch it on`
+        : words || "This one waits on something this box cannot watch, so adding the bot does not create it.";
+      return `<div class="setting-row" data-bot-routine="${escapeHtml(text(routine.name))}"><div>`
+        + `<strong>${escapeHtml(text(routine.name))}</strong>`
+        + (summary ? `<small>${escapeHtml(summary)}</small>` : "")
+        + `<small class="marketplace-routine-when">${escapeHtml(when)}</small>`
+        + `</div></div>`;
     }).join("");
-    return `<div class="plugin-list">${rows}</div><span class="field-hint">Add writes the plugin's entry the way the Plugins tab does — connectors.json on the box, then refreshMcp — and the credential still goes in the key form on that plugin's own card afterwards.</span>`;
+    const created = routines.filter((routine) => text(routine.schedule)).length;
+    return `<div class="plugin-list" data-bot-routines>${rows}</div>`
+      + `<span class="field-hint">${created === routines.length
+        ? "All of these are created switched off. Nothing runs until you turn one on from the bot's own Routines panel."
+        : `${created} of ${routines.length} are created, switched off; the rest wait on something this box cannot watch, so they are not created at all.`}</span>`;
   }
 
-  function importedMarkup(bot) {
+  /**
+   * INTEGRATIONS: the app as the bot names it, what THIS bot does with it, and one of three
+   * controls -- installed, Add, or a line and no button at all.
+   *
+   * The third is the rule commit 1694a3f already set on the Plugins half: a row that installs
+   * nothing (X, Meta, LinkedIn, Browserbase) gets no Add anywhere, because there is nothing to
+   * add and the press would open a door that writes an entry nothing connects to. An app we carry
+   * no plugin for at all is the same shape with different words: it is named as the bot wrote it,
+   * said to be unavailable, and the door to adding your own server is named in words rather than
+   * drawn as a button this tab cannot open.
+   */
+  function integrationsMarkup(bot, only = null) {
+    const wanted = only == null ? null : new Set(listOf(only).map(text));
+    const apps = appsOf(bot).filter((app) => wanted == null || wanted.has(app.pluginId) || wanted.has(app.name));
+    if (!apps.length) {
+      const why = only != null
+        ? "Nothing else is needed."
+        : isCardOnly(bot)
+          ? "This bot's own row could not be read from the host, so its apps are not on this page. Close it and open it again."
+          : "This bot needs no apps: it runs on the box's own built-in tools.";
+      return `<div class="empty-state">${escapeHtml(why)}</div>`;
+    }
+    let byo = 0;
+    const rows = apps.map((app) => {
+      const plugin = app.pluginId ? pluginById(app.pluginId) : null;
+      const label = plugin ? text(plugin.name) : (app.label || app.name);
+      const line = app.line || (plugin ? oneLine(plugin.tagline || plugin.description) : "");
+      const here = plugin != null && installed.has(text(plugin.id));
+      let control;
+      if (here) {
+        control = `<span class="status-pill success">installed</span>`;
+      } else if (plugin != null && plugin.installsNothing !== true && app.offer !== "page") {
+        control = `<button class="ghost-button" type="button" data-add-integration="${escapeHtml(text(plugin.id))}">Add</button>`;
+      } else if (plugin != null) {
+        // Nothing to install, so no Add and no pill pretending there is a state to reach.
+        control = `<span class="marketplace-app-note">nothing to install — open its card under Plugins</span>`;
+      } else {
+        byo += 1;
+        control = `<span class="status-pill attention">not available yet</span>`;
+      }
+      const key = text(plugin ? plugin.id : app.name);
+      return `<div class="setting-row" data-integration="${escapeHtml(key)}" data-app-offer="${escapeHtml(plugin ? (plugin.installsNothing === true || app.offer === "page" ? "page" : "connect") : "byo")}"><div>`
+        + `<strong>${escapeHtml(label)}</strong>`
+        + (line ? `<small>${escapeHtml(line)}</small>` : "")
+        + `</div>${control}</div>`;
+    }).join("");
+    const hint = byo > 0
+      ? `Add writes the plugin's entry the way the Plugins tab does — the box's connector list, then a refresh — and the key still goes in the form on that plugin's own card afterwards. ${byo === 1 ? "The one this box has no plugin for" : `The ${byo} this box has no plugin for`} can still be connected: Plugins, Add your own, and give it the server's link or command.`
+      : "Add writes the plugin's entry the way the Plugins tab does — the box's connector list, then a refresh — and the key still goes in the form on that plugin's own card afterwards.";
+    return `<div class="plugin-list" data-bot-apps>${rows}</div><span class="field-hint">${escapeHtml(hint)}</span>`;
+  }
+
+  /**
+   * THE OUTCOME CARD: what actually landed, and what could not be connected.
+   *
+   * It is the authoritative receipt. The bot writes its own first message in its own conversation,
+   * but a box with no model configured writes nothing at all -- so what was set up has to be
+   * readable here as well, or a person on such a box sees a silent bot and no record of the work.
+   *
+   * Every number on it comes from the setup's read-back, never from the row that was asked for:
+   * addMemory answers null on a duplicate and the automation store answers 200 on a write it
+   * dropped, so "what we asked for" and "what the box holds" are different lists.
+   */
+  const openControl = (agent) => (adapterOf() != null && typeof adapterOf().selectContext === "function" && text(agent && agent.id)
+    ? `<button class="ghost-button" type="button" data-open-agent="${escapeHtml(text(agent.id))}">Open ${escapeHtml(text(agent.name) || "the bot")}</button>`
+    : "");
+
+  function outcomeMarkup(bot) {
     const outcome = imports.get(text(bot.id));
     if (outcome == null) return "";
-    if (outcome.state === "running") return `<div class="panel-card"><h3>Importing…</h3><p>Creating the agent, then importing ${listOf(bot.skills).length} skill${listOf(bot.skills).length === 1 ? "" : "s"}.</p></div>`;
-    if (outcome.state === "failed") return `<div class="panel-card" style="outline:1px solid var(--amber-500)"><h3>Not imported</h3><p>${escapeHtml(outcome.message)}</p></div>`;
+    if (outcome.state === "running") {
+      const step = text(outcome.step) || "Creating the bot, then its memories, its playbooks and its jobs.";
+      return `<div class="panel-card" data-bot-setup-running><h3>Adding ${escapeHtml(text(bot.name))}…</h3><p>${escapeHtml(step)}</p></div>`;
+    }
+    if (outcome.state === "failed") {
+      return `<div class="panel-card" style="outline:1px solid var(--amber-500)" data-bot-setup-failed><h3>Not added</h3><p>${escapeHtml(text(outcome.message))}</p>`
+        + `<p>${escapeHtml(text(outcome.rolledBack) || "Anything this run had already created was taken back, so the roster is as you found it.")}</p></div>`;
+    }
     const agent = outcome.agent ?? {};
-    const skills = listOf(outcome.skills);
-    const skipped = listOf(outcome.skipped);
-    const missing = listOf(bot.integrations).map(text).filter((id) => !installed.has(id));
-    const open = adapterOf() != null && typeof adapterOf().selectContext === "function"
-      ? `<button class="ghost-button" type="button" data-open-agent="${escapeHtml(agent.id)}">Open ${escapeHtml(agent.name)}</button>`
-      : "";
-    const skillTags = skills.length
-      ? `<div class="tag-list">${skills.map((name) => `<span class="tag">skill · ${escapeHtml(name)}</span>`).join("")}</div>`
-      : `<p>The host imported no skill for this agent.</p>`;
-    const skippedNote = skipped.length
-      ? `<p style="margin-top:8px">Skipped by the host: ${escapeHtml(skipped.map((s) => `${s.source} (${s.reason})`).join("; "))}</p>`
-      : "";
-    // On the Integrations tab those very rows are already on the page above this card, so a
-    // "Still needed" block there would draw every row -- and its Add button -- a second time.
-    const missingRows = view.page === "integrations"
-      ? ""
-      : missing.length
-        ? `<div class="plugin-section-title" style="margin-top:14px"><span>Still needed</span></div>${integrationsMarkup(bot, missing)}`
-        : `<p style="margin-top:8px">Every plugin this Bot needs is already installed on this box.</p>`;
-    return `<div class="panel-card" data-imported-agent="${escapeHtml(agent.id)}"><h3>Imported as “${escapeHtml(agent.name)}”</h3><p>${escapeHtml(oneLine(agent.description))}</p>${skillTags}${skippedNote}${open}</div>${missingRows}`;
+    if (outcome.state === "already") {
+      // The six packs rely on a deliberate second copy ("<name> copy"), so it stays reachable --
+      // behind its own press, which is the difference between a duplicate somebody chose and one
+      // they got by clicking Add twice.
+      return `<div class="panel-card" data-bot-already="${escapeHtml(text(agent.id))}"><h3>Already on the roster</h3>`
+        + `<p>${escapeHtml(text(agent.name) || text(bot.name))} is already on this box, so nothing was created and nothing was changed.</p>`
+        + `${openControl(agent)}<button class="quiet-button" type="button" data-add-copy="${escapeHtml(text(bot.id))}">Add another copy</button></div>`;
+    }
+
+    const memories = outcome.memories ?? {};
+    const skills = outcome.skills ?? {};
+    const routines = outcome.routines ?? {};
+    const apps = outcome.apps ?? {};
+    const line = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    const parts = [];
+    const memoriesAdded = Number(memories.added ?? 0);
+    if (memoriesAdded > 0) parts.push(line(memoriesAdded, "memory", "memories"));
+    const skillsImported = Number(skills.imported ?? listOf(outcome.skills).length ?? 0);
+    if (skillsImported > 0) parts.push(line(skillsImported, "playbook", "playbooks"));
+    const created = listOf(routines.created).length;
+    if (created > 0) parts.push(`${line(created, "job", "jobs")}, switched off`);
+    const summary = parts.length ? `It has ${parts.join(", ")}.` : "It was created with nothing else.";
+
+    const trouble = [];
+    for (const row of listOf(memories.rejected)) trouble.push(`a memory was not stored: ${text(row.why) || "the host refused it"}`);
+    for (const row of listOf(skills.skipped)) trouble.push(`${text(row.source) || "a playbook"} was skipped: ${text(row.reason) || "no reason given"}`);
+    for (const row of listOf(routines.notCreated)) trouble.push(`${text(row.name) || "a job"} was not created: ${text(row.why) || "it names no schedule this box can run"}`);
+    const troubleLine = trouble.length ? `<p data-bot-setup-trouble>${escapeHtml(trouble.join("; "))}</p>` : "";
+
+    // What it still cannot reach, named here as well as in its own first message, because the
+    // first message needs a model behind it and this card does not.
+    const notConnected = [...listOf(apps.addable), ...listOf(apps.byo), ...listOf(apps.informational)].map(text).filter(Boolean);
+    const appsLine = notConnected.length
+      ? `<p data-bot-setup-apps>Not connected yet: ${escapeHtml(notConnected.join(", "))}. It will ask you for the ones it needs.</p>`
+      : `<p data-bot-setup-apps>Every app it uses is already on this box.</p>`;
+    const said = text(outcome.message);
+    return `<div class="panel-card" data-imported-agent="${escapeHtml(text(agent.id))}" data-bot-setup-done><h3>${escapeHtml(text(agent.name) || text(bot.name))} is on this box</h3>`
+      + `<p>${escapeHtml(summary)}</p>${troubleLine}${appsLine}`
+      + (said ? `<p>${escapeHtml(said)}</p>` : "")
+      + `${openControl(agent)}</div>`;
   }
 
   // ------------------------------------------------------------------ the team pages
@@ -672,13 +988,17 @@
       + `<div class="panel-card"><p style="white-space:pre-wrap;margin:0">${escapeHtml(text(firstRun.body))}</p></div>`;
   }
 
+  // THE FOUR BLOCKS, in this order and these words. Jason wrote them; the unit test pins them as
+  // strings, because a paraphrase is a different promise to the person reading the page.
   const PAGES = [
-    { id: "instructions", label: "Instructions", hint: "How this Bot should work", icon: "✎" },
+    { id: "memories", label: "Memories", hint: "Facts it already knows", icon: "◆" },
     { id: "skills", label: "Skills", hint: "Playbooks it can run", icon: "▤" },
-    { id: "integrations", label: "Integrations", hint: "Tools it can use", icon: "✦" },
+    { id: "routines", label: "Routines", hint: "Jobs that run on their own", icon: "◷" },
+    { id: "integrations", label: "Integrations", hint: "Apps it can use", icon: "✦" },
   ];
 
   const TEAM_PAGES = [
+    { id: "memories", label: "Memories", hint: "Facts it already knows", icon: "◆" },
     { id: "members", label: "The team", hint: "Who you get, and what each one does", icon: "☰" },
     { id: "firstrun", label: "What you provide", hint: "Keys, adds, and the two slow ones", icon: "！" },
     { id: "instructions", label: "How it works", hint: "The team, and the approval rule", icon: "✎" },
@@ -737,7 +1057,8 @@
       : page === "firstrun" ? firstRunMarkup(bot)
         : page === "skills" ? skillsMarkup(bot)
           : page === "integrations" ? integrationsMarkup(bot)
-            : instructionsMarkup(bot);
+            : page === "memories" ? memoriesMarkup(bot)
+              : instructionsMarkup(bot);
     const members = packMembersOf(bot);
     // The button is deliberately the same primary-button every other Import is, at the same size,
     // in the same place. The gate measures the rectangle a person has to hit.
@@ -755,21 +1076,31 @@
     if (isTeamPack(bot)) return teamPageMarkup(bot);
     const outcome = imports.get(text(bot.id));
     const busy = outcome != null && outcome.state === "running";
+    const onRoster = outcome != null && (outcome.state === "done" || outcome.state === "already");
     // Offline (index.html fell back to the demo factory) there is no gateway behind this page, so
     // createAgent would fail after the click rather than before it. A button that cannot work is
     // not drawn; the pill says why in its place.
     const canImport = global.__machineRoomLive !== false;
-    const nav = PAGES.map((page) => `<button class="plugin-nav-button${view.page === page.id ? " is-active" : ""}" type="button" data-bot-tab="${page.id}"><span class="plugin-icon">${page.icon}</span><span><strong>${page.label}</strong><small>${page.hint}</small></span></button>`).join("");
-    const body = view.page === "skills" ? skillsMarkup(bot)
-      : view.page === "integrations" ? integrationsMarkup(bot)
-        : instructionsMarkup(bot);
-    const importButton = canImport
-      ? `<button class="primary-button" type="button" data-import-bot="${escapeHtml(bot.id)}"${busy ? " disabled" : ""}>${busy ? "Importing…" : "Import Bot"}</button>`
-      : `<span class="status-pill">offline — no gateway to import through</span>`;
-    return `<div data-bot-page="${escapeHtml(bot.id)}">`
+    const page = PAGES.some((entry) => entry.id === view.page) ? view.page : "memories";
+    const nav = PAGES.map((entry) => `<button class="plugin-nav-button${page === entry.id ? " is-active" : ""}" type="button" data-bot-tab="${entry.id}"><span class="plugin-icon">${entry.icon}</span><span><strong>${entry.label}</strong><small>${entry.hint}</small></span></button>`).join("");
+    const body = page === "skills" ? skillsMarkup(bot)
+      : page === "routines" ? routinesMarkup(bot)
+        : page === "integrations" ? integrationsMarkup(bot)
+          : memoriesMarkup(bot);
+    const importButton = !canImport
+      ? `<span class="status-pill">offline — no gateway to add through</span>`
+      : onRoster
+        ? `<span class="status-pill success" data-bot-on-roster="${escapeHtml(text(bot.id))}">on the roster</span>`
+        : `<button class="primary-button" type="button" data-import-bot="${escapeHtml(text(bot.id))}"${busy ? " disabled" : ""}>${busy ? "Adding…" : "Add bot"}</button>`;
+    const detailError = detailErrors.get(text(bot.id));
+    const detailNote = detailError
+      ? `<div class="panel-card" style="outline:1px solid var(--amber-500)" data-bot-detail-error><p>${escapeHtml(`This bot's own row could not be read from the host, so what is below is only what the list carries and adding it is refused: ${detailError}`)}</p></div>`
+      : "";
+    return `<div data-bot-page="${escapeHtml(text(bot.id))}">`
       + `<button class="quiet-button" type="button" data-bots-back style="margin-bottom:12px">← All bots</button>`
-      + `<div class="plugin-hero">${tileMarkup(bot, "large")}<div class="plugin-hero-copy"><h3>${escapeHtml(bot.name)}</h3><p>By ${escapeHtml(text(bot.creator) || "Titanbot team")} · ${escapeHtml(text(bot.category) || "Bots")}</p><p>${escapeHtml(bot.description)}</p></div><div style="display:grid;gap:6px;align-content:start">${importButton}</div></div>`
-      + `<div class="plugin-browser" style="min-height:300px;margin-top:16px"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail"><div class="plugin-sections">${body}${importedMarkup(bot)}</div></section></div>`
+      + `<div class="plugin-hero">${tileMarkup(bot, "large")}<div class="plugin-hero-copy"><h3>${escapeHtml(text(bot.name))}</h3><p>${escapeHtml(creditLine(bot))} · ${escapeHtml(text(bot.category) || "Bots")}</p><p>${escapeHtml(text(bot.description))}</p></div><div style="display:grid;gap:6px;align-content:start">${importButton}</div></div>`
+      + detailNote
+      + `<div class="plugin-browser" style="min-height:300px;margin-top:16px"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail"><div class="plugin-sections">${body}${outcomeMarkup(bot)}</div></section></div>`
       + `</div>`;
   }
 
@@ -817,7 +1148,14 @@
       // gets the shape the host actually serves. Once the adapter stops flattening, the fallback
       // never fires and this costs nothing.
       let categories = botCategoriesOf(answer);
-      if (categories == null) categories = botCategoriesOf(await gateway.call("listMarketplace", {}).catch(() => null)) ?? [];
+      // The fallback costs a SECOND whole catalog body, which is the larger half of what one
+      // Marketplace open transfers now that the catalog carries 72 rows. So it fires only when
+      // there is nothing else to build a chip row from: where the bots name their own categories,
+      // categories() below reads them off the rows and no second fetch happens at all.
+      if (categories == null && !listOf(answer && answer.bots).some((bot) => text(bot && bot.category))) {
+        categories = botCategoriesOf(await gateway.call("listMarketplace", {}).catch(() => null)) ?? [];
+      }
+      if (categories == null) categories = [];
       catalog = {
         plugins: listOf(answer && answer.plugins),
         bots: listOf(answer && answer.bots),
@@ -839,6 +1177,106 @@
   async function refreshInstalled() {
     if (catalog == null) return;
     installed = await readInstalledIds(relayGateway(), catalog.plugins).catch(() => installed);
+  }
+
+  // ------------------------------------------------------------------ the row behind the card
+  /**
+   * The whole row for one bot, through getMarketplaceItem -- a command the host has served since
+   * MARKET-1 and this console had never called. The list answer is a card projection now (no
+   * memory text, no skill bodies, no routine summaries), so this is where the page's four blocks
+   * and every Add get their material.
+   *
+   * The PROMISE is cached, not only the answer: opening a bot paints immediately and again when
+   * the row lands, and caching the settled answer alone fetches the row twice on one open.
+   */
+  async function readDetail(id) {
+    const key = text(id);
+    if (details.has(key)) return details.get(key);
+    if (detailReads.has(key)) return detailReads.get(key);
+    const adapter = adapterOf();
+    // The stored promise NEVER rejects: a second opener is handed this same promise and awaits it
+    // outside any try of its own, so a rejecting one here is an unhandled rejection in the page.
+    // It resolves to the row, or to null with the reason kept for the page to say.
+    const read = (async () => {
+      const answer = adapter != null && typeof adapter.getMarketplaceItem === "function"
+        ? await adapter.getMarketplaceItem("bot", key)
+        : await relayGateway().call("getMarketplaceItem", { kind: "bot", id: key });
+      if (answer == null || typeof answer !== "object" || text(answer.id) === "") {
+        throw new Error("this host served no row for it");
+      }
+      return answer;
+    })()
+      .then((row) => { details.set(key, row); detailErrors.delete(key); return row; })
+      .catch((error) => { detailErrors.set(key, String(error?.message ?? error)); return null; })
+      .then((row) => { detailReads.delete(key); return row; });
+    detailReads.set(key, read);
+    return read;
+  }
+
+  async function openBot(id) {
+    const key = text(id);
+    view.botId = key;
+    view.page = isTeamPack(botById(key)) ? "members" : "memories";
+    view.notice = "";
+    paint();
+    if (details.has(key)) return;
+    await readDetail(key);
+    paint();
+  }
+
+  // ------------------------------------------------------------------ what Add does, and by whom
+  /** The roster row that already carries this bot's exact name, or null. */
+  async function findOnRoster(gateway, bot) {
+    const name = text(bot && bot.name);
+    if (!name) return null;
+    const roster = agentRecords(await gateway.call("listAgents", {}));
+    return roster.find((agent) => text(agent.name) === name) ?? null;
+  }
+
+  /** Which apps this box can already reach, which it could add, and which it has no plugin for. */
+  function appReport(bot) {
+    const report = { connected: [], addable: [], byo: [], informational: [] };
+    for (const app of appsOf(bot)) {
+      const plugin = app.pluginId ? pluginById(app.pluginId) : null;
+      const label = plugin ? text(plugin.name) : (app.label || app.name);
+      if (plugin != null && installed.has(text(plugin.id))) report.connected.push(label);
+      else if (plugin != null && (plugin.installsNothing === true || app.offer === "page")) report.informational.push(label);
+      else if (plugin != null) report.addable.push(label);
+      else report.byo.push(label);
+    }
+    return report;
+  }
+
+  /**
+   * The setup, when this build carries no bot-setup module.
+   *
+   * It creates the bot and its playbooks -- which is what this page has always done -- and says
+   * plainly, in the receipt, that the memories were not seeded and the jobs were not created.
+   * Silence there would be the worse failure: a bot that looks added and knows nothing.
+   */
+  async function fallbackSetUp(gateway, bot) {
+    const result = await importBot(gateway, bot);
+    const missing = [];
+    if (memoriesOf(bot).length > 0) missing.push(`its ${memoriesOf(bot).length} memories were not seeded`);
+    if (routinesOf(bot).length > 0) missing.push(`its ${routinesOf(bot).length} jobs were not created`);
+    return {
+      state: "done",
+      agent: result.agent,
+      memories: { added: 0, duplicates: 0, rejected: [] },
+      // The names THIS run asked for that the read-back confirmed. Not `result.skills`, which is
+      // the shared library filtered by those names: this box holds several rows under one name,
+      // left by earlier imports, and the receipt read "13 playbooks" for a bot carrying one.
+      skills: {
+        imported: listOf(result.imported).filter((name) => !listOf(result.missing).includes(name)).length,
+        reused: 0,
+        skipped: listOf(result.skipped),
+      },
+      routines: { created: [], notCreated: [] },
+      apps: appReport(bot),
+      message: missing.length
+        ? `This build does not carry the bot setup module, so ${missing.join(" and ")}. The bot and its playbooks are on the box.`
+        : "",
+    };
   }
 
   // ------------------------------------------------------------------ events
@@ -867,11 +1305,24 @@
     };
   }
 
-  async function onImportTeamClick(bot) {
-    const id = text(bot.id);
+  async function onImportTeamClick(listRow) {
+    const id = text(listRow.id);
     imports.set(id, { state: "running", step: "Reading this workspace\'s limit before anything is created." });
     view.notice = "";
     paint();
+    // A pack is imported from its DETAIL row, exactly as a single bot is: the list answer is a card
+    // projection and a pack's members carry their own instructions and their own skill bodies,
+    // which the card does not. Importing off the card would create seven bots with no persona.
+    const bot = details.get(id) ?? await readDetail(id);
+    if (bot == null) {
+      imports.set(id, {
+        state: "failed",
+        message: `This team's own row could not be read from the host, so nothing was created: ${detailErrors.get(id) ?? "the read failed"}.`,
+        members: [],
+      });
+      paint();
+      return;
+    }
     let outcome;
     try {
       outcome = await importMarketingTeam(relayGateway(), bot, (progress) => {
@@ -913,6 +1364,75 @@
     paint();
   }
 
+  /**
+   * ADD, from the round button on a row or the button on the bot page. One press.
+   *
+   * The order matters and is the reason this is not four lines: the detail row is read first
+   * (nothing is created off a card projection), the roster is read next (a second press must not
+   * make a second bot), and the setup itself belongs to window.__botSetup so that the page and the
+   * sequence are not one file two people are editing. When that module is absent the old
+   * importBot still runs and the receipt says which half of the work did not happen.
+   */
+  async function onAddBotClick(botId, options = {}) {
+    const id = text(botId);
+    view.notice = "";
+    imports.set(id, { state: "running", step: "Reading this bot's own row from the host." });
+    paint();
+
+    const bot = details.get(id) ?? await readDetail(id);
+    if (bot == null) {
+      imports.set(id, {
+        state: "failed",
+        message: `This bot's own row could not be read from the host, so nothing was created: ${detailErrors.get(id) ?? "the read failed"}.`,
+        rolledBack: "Nothing was created.",
+      });
+      paint();
+      return;
+    }
+    if (isTeamPack(bot)) { await onImportClick(id); return; }
+
+    const gateway = relayGateway();
+    const setup = botSetupOf();
+    const duplicate = options.duplicate === true;
+    try {
+      if (!duplicate) {
+        const already = typeof setup?.alreadyOnRoster === "function"
+          ? await setup.alreadyOnRoster(gateway, bot)
+          : await findOnRoster(gateway, bot);
+        if (already != null) {
+          imports.set(id, { state: "already", agent: { id: text(already.id), name: text(already.name) } });
+          // Said out loud as well as on the card: the press may have come from the list, where the
+          // card is not on screen and the row alone would just quietly change shape.
+          view.notice = `${text(already.name) || text(bot.name)} is already on the roster, so nothing was created. Open it, or add another copy from its own page.`;
+          paint();
+          return;
+        }
+      }
+      imports.set(id, { state: "running", step: "Creating the bot, then its memories, its playbooks and its jobs." });
+      paint();
+      const outcome = typeof setup?.setUpBot === "function"
+        ? await setup.setUpBot(gateway, bot, {
+          duplicate,
+          onProgress: (progress) => {
+            const step = text(progress && (progress.step ?? progress.phase));
+            imports.set(id, { state: "running", step: step || "Setting it up." });
+            paint();
+          },
+        })
+        : await fallbackSetUp(gateway, bot);
+      imports.set(id, outcome && typeof outcome === "object" ? outcome : { state: "failed", message: "the setup answered with nothing" });
+      // On screen first: the adapter refresh and the connector re-read below are both round trips
+      // to the box, and the new bot must not wait behind them to be drawn.
+      paint();
+      const adapter = adapterOf();
+      if (adapter != null && typeof adapter.refresh === "function") await adapter.refresh().catch(() => {});
+    } catch (error) {
+      imports.set(id, { state: "failed", message: String(error?.message ?? error) });
+    }
+    await refreshInstalled();
+    paint();
+  }
+
   async function onImportClick(botId) {
     const bot = botById(botId);
     if (bot == null) return;
@@ -934,24 +1454,8 @@
       await onImportTeamClick(bot);
       return;
     }
-    imports.set(text(bot.id), { state: "running" });
-    view.notice = "";
-    paint();
-    try {
-      const result = await importBot(relayGateway(), bot);
-      imports.set(text(bot.id), { state: "done", ...result });
-      // On screen first: the adapter refresh and the connectors re-read below are both round trips
-      // to the box, and the imported agent must not wait behind them to be drawn.
-      paint();
-      // The roster on the page behind the panel is stale until the adapter re-reads it, and an
-      // agent the operator cannot see is what "the page shows the new agent" is there to prevent.
-      const adapter = adapterOf();
-      if (adapter != null && typeof adapter.refresh === "function") await adapter.refresh().catch(() => {});
-    } catch (error) {
-      imports.set(text(bot.id), { state: "failed", message: String(error?.message ?? error) });
-    }
-    await refreshInstalled();
-    paint();
+    // A single bot is the setup sequence above, whichever control was pressed.
+    await onAddBotClick(text(bot.id));
   }
 
   async function onAddClick(pluginId) {
@@ -985,6 +1489,12 @@
     if (chip != null) { view.category = chip.dataset.botCategory; paint(); return; }
     const importer = target.closest("[data-import-bot]");
     if (importer != null) { void onImportClick(importer.dataset.importBot); return; }
+    // The round Add on a list row. Its own handler and its own element -- a sibling of the row's
+    // open button, never inside it -- so one press is one action.
+    const addBot = target.closest("[data-add-bot]");
+    if (addBot != null) { void onAddBotClick(addBot.dataset.addBot); return; }
+    const addCopy = target.closest("[data-add-copy]");
+    if (addCopy != null) { void onAddBotClick(addCopy.dataset.addCopy, { duplicate: true }); return; }
     const add = target.closest("[data-add-integration]");
     if (add != null) { void onAddClick(add.dataset.addIntegration); return; }
     const remove = target.closest("[data-remove-team]");
@@ -997,13 +1507,10 @@
     }
     const card = target.closest("[data-bot-id]");
     if (card != null) {
-      view.botId = card.dataset.botId;
-      // A team opens on its members. Measured on screen 2026-09-09: it opened on "How it works"
-      // like a single bot does, so the seven a person is meant to read BEFORE importing were
-      // behind a click nobody is told to make.
-      view.page = isTeamPack(botById(card.dataset.botId)) ? "members" : "instructions";
-      view.notice = "";
-      paint();
+      // A bot opens on its Memories and a team on its members. Measured on screen 2026-09-09: the
+      // team opened on "How it works" like a single bot does, so the seven a person is meant to
+      // read BEFORE importing were behind a click nobody is told to make.
+      void openBot(card.dataset.botId);
     }
   }
 
@@ -1049,6 +1556,54 @@
     },
     renderTeamMembers: (bot) => membersMarkup(bot),
     renderFirstRun: (bot) => firstRunMarkup(bot),
-    reload() { catalog = null; catalogError = null; return load(); },
+    reload() { catalog = null; catalogError = null; details.clear(); detailErrors.clear(); return load(); },
+
+    // BOTS-4. The four blocks as data, so the unit test pins the words a person reads rather than
+    // a copy of them, and the pure render paths, so every state the gate cannot reach in one run
+    // is still rendered by something before it is rendered at a person.
+    BOT_PAGES: PAGES,
+    TEAM_PAGES,
+    scheduleWords,
+    appsOf,
+    findOnRoster,
+    /**
+     * Draw the list or one bot page against a catalog handed in, with nothing kept afterwards.
+     * state: { bots, plugins, categories, installed, category, query, botId, page, outcome }
+     */
+    preview(state, what) {
+      const kept = {
+        catalog, installed, view: { ...view },
+        imports: new Map(imports), details: new Map(details), errors: new Map(detailErrors),
+      };
+      try {
+        catalog = {
+          plugins: listOf(state && state.plugins),
+          bots: listOf(state && state.bots),
+          categories: listOf(state && state.categories),
+        };
+        installed = new Set(listOf(state && state.installed).map(text));
+        view.category = text(state && state.category) || "All";
+        view.query = String((state && state.query) ?? "");
+        view.botId = text(state && state.botId) || null;
+        view.page = text(state && state.page) || "memories";
+        imports.clear();
+        details.clear();
+        detailErrors.clear();
+        if (state && state.outcome != null) imports.set(view.botId, state.outcome);
+        if (state && state.detailError != null) detailErrors.set(view.botId, String(state.detailError));
+        if (what === "page" || (what == null && view.botId)) {
+          const bot = botById(view.botId);
+          return bot == null ? "" : botPageMarkup(bot);
+        }
+        return listMarkup();
+      } finally {
+        catalog = kept.catalog;
+        installed = kept.installed;
+        Object.assign(view, kept.view);
+        imports.clear(); for (const [k, v] of kept.imports) imports.set(k, v);
+        details.clear(); for (const [k, v] of kept.details) details.set(k, v);
+        detailErrors.clear(); for (const [k, v] of kept.errors) detailErrors.set(k, v);
+      }
+    },
   };
 })(typeof window !== "undefined" ? window : globalThis);

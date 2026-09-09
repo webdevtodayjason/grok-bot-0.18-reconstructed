@@ -340,7 +340,7 @@ let copyAgentId = null;
 // outlives the probe and shows up on every production agent. Snapshot the library once the probe
 // exists and delete everything the run added before the probe itself goes.
 let libraryBefore = null;
-// BOTS-1: the agent Import Bot minted, and the box-wide workflow library as it stood before that
+// BOTS-4: the agent Import Bot minted, and the box-wide workflow library as it stood before that
 // import. Both are set while the imported agent exists, so an assertion that throws between the
 // click and the delete still leaves the box the way the run found it.
 let botAgentId = null;
@@ -2184,7 +2184,7 @@ try {
       if (after?.mcpServers?.tinyfish == null) tinyfishAdded = false;
     }
 
-    // -- BOTS-1: the Marketplace's Bots tab, the bot page and Import Bot. The catalog is data in
+    // -- BOTS-4: the Marketplace's Bots tab, the bot page and Import Bot. The catalog is data in
     // the host bundle served by listMarketplace, and this page reads it only through the gateway,
     // so what the tab lists is what the agents' own SearchPlugins sees. Import Bot is a real write
     // on a shared box -- a new agent, and its skills in the box-wide workflow library -- so the
@@ -2203,7 +2203,16 @@ try {
       .filter((id) => !servedBotIds.has(id));
     check(missingBots.length === 0, `listMarketplace serves the bot templates the product shipped (${marketBots.length} on this host)`,
       marketCatalog?.error ?? (missingBots.length ? `missing ${missingBots.join(", ")}` : marketBots.map((b) => b.name).join(", ")));
-    const researchDesk = marketBots.find((b) => String(b?.name ?? "") === "Research desk") ?? null;
+    // BOTS-4. The LIST is a card now: `listMarketplace` serves what the rows and chips are drawn
+    // from plus a count per block, and drops instructions, memories, skills, routines and apps,
+    // because serving 72 rows whole is close to a megabyte per panel opening. The detail comes from
+    // `getMarketplaceItem`, which has always served the whole row. The list row is kept as the
+    // fallback so this gate still passes against a bundle older than the projection.
+    const researchDeskCard = marketBots.find((b) => String(b?.name ?? "") === "Research desk") ?? null;
+    const researchDesk = researchDeskCard == null ? null : {
+      ...researchDeskCard,
+      ...(await gw("getMarketplaceItem", { kind: "bot", id: researchDeskCard.id }).catch(() => ({}))),
+    };
     if (marketBots.length === 0) {
       console.log("  INFO  this host serves no bot catalog; the Bots-tab checks below are skipped");
     } else {
@@ -2218,8 +2227,12 @@ try {
       else if (listed.includes(String(researchDesk.id))) {
         await page.click(`[data-bot-id="${researchDesk.id}"]`); await page.waitForTimeout(1000);
         const tabs = await page.$$eval("[data-bot-tab]", (els) => els.map((e) => e.dataset.botTab));
-        check(["instructions", "skills", "integrations"].every((t) => tabs.includes(t)), "the bot page carries its three left tabs", tabs.join(", "));
-        check((await page.$$(`[data-import-bot="${researchDesk.id}"]`)).length === 1, "and one Import Bot button");
+        // BOTS-4: four blocks now, and Instructions is not one of them -- a bot's operating rules
+        // are its memories, and the first of them is what its identity is composed from. Both halves
+        // of this wave ship together, so the four exact names are asserted rather than either
+        // vocabulary; a bundle from before this wave does not serve this console.
+        check(["memories", "skills", "routines", "integrations"].every((t) => tabs.includes(t)), "the bot page carries its four left blocks", tabs.join(", "));
+        check((await page.$$(`[data-import-bot="${researchDesk.id}"]`)).length === 1, "and one Add button");
         // Tools it can use: one row per integration the template names, each either already
         // installed or carrying the Add that goes through the Plugins tab's own install path.
         await page.click(`[data-bot-tab="integrations"]`).catch(() => {}); await page.waitForTimeout(800);
@@ -3067,7 +3080,7 @@ try {
   check(false, "dashboard gate", error.message);
 } finally {
   await browser.close();
-  // BOTS-1's leftovers first: the imported agent, and the skills that import added to the
+  // BOTS-4's leftovers first: the imported agent, and the skills that import added to the
   // box-wide library. The library sweep uses the imported agent while it still exists, because
   // getAgentWorkflows is addressed by agent id and the library outlives the agent.
   if (botAgentId || botLibraryBefore) {

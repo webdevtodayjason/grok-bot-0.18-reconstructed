@@ -45,6 +45,7 @@ import "./openai-responses-transport.test.mjs";
 import "./token-limit-classifier.test.mjs";
 import "./machine-room-plugins.test.mjs";
 import "./marketing-pack.test.mjs";
+import "./community-bots.test.mjs";
 // gate-pins passes its data root in explicitly, so it is safe in the shared process. Its sibling
 // cursor-loops-off.test.mjs is deliberately NOT here: it moves SAND_DATA_ROOT to prove a live box
 // takes a new backend setting from the settings file, and this runner loads every suite into one
@@ -62,6 +63,7 @@ import "./connector-custody.test.mjs";
 import "./connector-plane.test.mjs";
 import "./machine-room-connectors.test.mjs";
 import "./machine-room-marketplace.test.mjs";
+import "./machine-room-bots-tab.test.mjs";
 import "./machine-room-marketplace-review.test.mjs";
 import "./machine-room-byo-mcp.test.mjs";
 import "./connector-tinyfish-preset.test.mjs";
@@ -203,3 +205,10 @@ import "./mail-directory.test.mjs";
 // walk it a case at a time.
 import "./mail-send-route.test.mjs";
 import "./cp-mail-send.test.mjs";
+
+// BOTS-4: the write path behind Add on a catalog row. The host verb that seeds an agent's own
+// remembered facts and refuses one over the store's ceiling rather than storing it short, and the
+// console module that mints the bot, seeds it, installs its playbooks, creates its jobs switched
+// off, and asks for the introduction last.
+import "./agent-memory-seed.test.mjs";
+import "./bot-setup.test.mjs";

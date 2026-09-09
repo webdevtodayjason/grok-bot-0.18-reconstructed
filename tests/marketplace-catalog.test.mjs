@@ -112,14 +112,27 @@ test("every bot names real plugins, a declared category and at least one skill",
   assert.equal(botIds.size, catalog.MARKETPLACE_BOTS.length, "two bot rows share an id");
   for (const bot of catalog.MARKETPLACE_BOTS) {
     assert.ok(catalog.MARKETPLACE_BOT_CATEGORIES.includes(bot.category), `bot ${bot.id} category "${bot.category}"`);
-    assert.equal(bot.creator, "Titanbot team");
-    assert.ok(bot.integrations.length > 0, `bot ${bot.id} names no integration`);
+    // BOTS-4 scoped the next three to the rows WE WROTE rather than deleting them. A community row
+    // is credited to the person who wrote it, may name no plugin we carry, and may arrive with no
+    // skill at all -- and each of those is still a defect on a first-party template. What holds for
+    // every row is in validateMarketplaceCatalog, and tests/community-bots.test.mjs is where the
+    // community half is checked.
+    if (bot.origin !== "community") {
+      assert.equal(bot.creator, "Titanbot team");
+      assert.ok(bot.integrations.length > 0, `bot ${bot.id} names no integration`);
+      assert.ok(bot.skills.length > 0, `bot ${bot.id} has no skill`);
+    }
     for (const integration of bot.integrations) assert.ok(ids.has(integration), `bot ${bot.id} names "${integration}"`);
-    assert.ok(bot.skills.length > 0, `bot ${bot.id} has no skill`);
     for (const skill of bot.skills) {
       // A skill's body is a SKILL.md: front matter first, so importAgentWorkflowText can read it.
       assert.ok(skill.body.startsWith("---\nname: "), `bot ${bot.id} skill ${skill.name} has no front matter`);
-      assert.match(skill.body, new RegExp(`^---\\nname: ${skill.name}\\n`), `bot ${bot.id} skill name mismatch`);
+      // A first-party row's skill name IS its document name. A community row's is the human label
+      // the page shows in bold, and the document is namespaced by the bot id, because 65 packs that
+      // each ship a "Getting started" would otherwise fight over one document in the shared library.
+      const documentName = bot.origin === "community"
+        ? `${bot.skillPrefix}${skill.name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`
+        : skill.name;
+      assert.match(skill.body, new RegExp(`^---\\nname: ${documentName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`), `bot ${bot.id} skill name mismatch`);
     }
     assert.ok(bot.instructions.length > 0, `bot ${bot.id} has no persona`);
   }
@@ -147,9 +160,17 @@ test("no string in the catalog is shaped like a credential", () => {
   // The prefixes the seeded services actually mint, each demanding a run of key-length characters
   // after it -- so a hint that says "a user token (xoxp-)" is fine and a real token is not. The
   // last two are the generic shapes: a long unbroken base64-ish run, and an obvious assignment.
+  //
+  // BOTS-4 REPLACED THE GENERIC RUN, because it read English as a secret. `[A-Za-z0-9+_-]{40,}`
+  // fires on "account-book-account-brief-before-a-call" (a namespaced skill document name) and on
+  // the path half of "github.com/modelcontextprotocol/servers/tree/main/src/filesystem", and a
+  // test that cries wolf on sixty of those is a test somebody eventually deletes. What a secret
+  // actually is, is a HIGH-ENTROPY run: forty characters that mix case AND carry a digit, or a
+  // long lowercase hex string. A hyphenated English phrase is neither; every real token is one.
   const shapes = [
     /\b(?:xox[bpcdesar]|ghp|gho|ghu|ghs|ghr|github_pat|lin_api|sk|pk|AKIA|AIza|cr)[-_][A-Za-z0-9_-]{16,}/,
-    /[A-Za-z0-9+_-]{40,}={0,2}/,
+    /(?=[A-Za-z0-9+/_-]*[A-Z])(?=[A-Za-z0-9+/_-]*[0-9])[A-Za-z0-9+/_-]{40,}={0,2}/,
+    /\b[0-9a-f]{32,}\b/,
     /\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}/i,
   ];
   const walk = (value, where) => {

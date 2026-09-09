@@ -1594,8 +1594,24 @@
   // A host that has not landed the commands answers "unknown gateway method", tryCall turns that
   // into null, and the panel says the catalog is not on this host rather than drawing an empty one.
   let marketplaceCatalogCache = null;
-  async function marketplaceCatalog(force) {
-    if (marketplaceCatalogCache && force !== true) return marketplaceCatalogCache;
+  // BOTS-4. The read IN FLIGHT, not only the settled answer. Measured on grok-bot-local-vm
+  // 2026-09-09: opening Marketplace fetched listMarketplace TWICE -- 221,128 B on a box serving
+  // seven bots -- because the Plugins half and the Bots half both ask on the same tick and a cache
+  // that only holds settled answers is still empty when the second one arrives. With 72 bots in the
+  // catalog that is the difference between one body and two on a relay that buffers each one whole.
+  // Two builders wrote this fix independently; this is the one that keeps a forced read out of the
+  // shared slot, so a deliberate refresh cannot be handed to a caller that asked for the cache.
+  let marketplaceCatalogInFlight = null;
+  function marketplaceCatalog(force) {
+    if (marketplaceCatalogCache && force !== true) return Promise.resolve(marketplaceCatalogCache);
+    if (marketplaceCatalogInFlight && force !== true) return marketplaceCatalogInFlight;
+    const pending = fetchMarketplaceCatalog().finally(() => {
+      if (marketplaceCatalogInFlight === pending) marketplaceCatalogInFlight = null;
+    });
+    if (force !== true) marketplaceCatalogInFlight = pending;
+    return pending;
+  }
+  async function fetchMarketplaceCatalog() {
     const answer = await tryCall("listMarketplace", {});
     if (answer == null) return null;
     marketplaceCatalogCache = {
@@ -3355,6 +3371,33 @@
       },
       clearMemories(agentId) {
         return call("clearAgentMemories", { id: agentId }).then(() => this.getMemories(agentId));
+      },
+
+      // BOTS-4. The write side of the same store, which the host had no command for until this
+      // wave: adding a bot from the catalog seeds its operating rules as the agent's OWN
+      // remembered facts, not as a document and not as a second copy of the description.
+      //
+      // The host answers { added, duplicates, rejected } and that answer is passed through whole.
+      // A fact longer than the store's cap comes back under `rejected` with the reason rather than
+      // being written short, so the setup card can say which one did not fit. Read back with
+      // getMemories by the caller, like every other write on this adapter.
+      seedAgentMemories(agentId, memories, kind) {
+        const rows = (Array.isArray(memories) ? memories : []).map((m) => String(m ?? ""));
+        return call("addAgentMemories", { id: agentId, memories: rows, ...(kind ? { kind } : {}) })
+          .then((answer) => ({
+            added: Array.isArray(answer?.added) ? answer.added : [],
+            duplicates: Number(answer?.duplicates) || 0,
+            rejected: Array.isArray(answer?.rejected) ? answer.rejected : [],
+          }));
+      },
+
+      // The agent's own opening message, asked for AFTER its memories and skills are in place so
+      // the introduction is written by an agent that already knows what it is. Nothing else
+      // produces that message: sendPrompt writes a user entry, which permanently suppresses the
+      // introduction the host was holding.
+      kickstartAgent(agentId) {
+        return call("kickstartAgent", { id: agentId })
+          .then((answer) => ({ isIntroductionInFlight: answer?.isIntroductionInFlight === true }));
       },
 
       // AVATAR-1: the operator's crew pick, on the host rather than in this browser -- the face is

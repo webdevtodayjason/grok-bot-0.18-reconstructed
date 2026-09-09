@@ -36,6 +36,13 @@ const BOT = {
   tile: { color: "#31b6b8", shape: "circle" },
   description: "Runs a web research pass and comes back with sourced notes.",
   instructions: "You are a research desk. Search before you answer, and cite every claim with the page you read it on.",
+  // BOTS-4. Every row carries memories now -- the catalog derives one from `instructions` on the
+  // rows that predate the field -- and the first of them is what the identity is composed from.
+  memories: [{ text: "You are a research desk. Search before you answer, and cite every claim with the page you read it on." }],
+  routines: [
+    { name: "Morning sweep", summary: "Disabled by default. Each weekday morning, what changed on the sources you follow.", schedule: "0 9 * * 1-5", scheduleNote: "Every weekday at 09:00" },
+    { name: "Breaking claim watch", summary: "Speaks up when a claim you are tracking is contradicted.", schedule: null, scheduleNote: "" },
+  ],
   skills: [
     { name: "Web research brief", description: "Search, read, summarise.", body: "---\nname: Web research brief\n---\n\nSearch, read the top results, and write the brief." },
     { name: "Source check", description: "Verify a claim.", body: "---\nname: Source check\n---\n\nFind the primary source for the claim and quote it." },
@@ -205,11 +212,17 @@ async function renderedTab(extraWindow = {}) {
       if (route === "/connectors") return { ok: true, json: async () => ({ mcpServers: {} }) };
       const args = init && init.body ? JSON.parse(init.body) : {};
       const body = route === "/api/listMarketplace" ? catalog
-        : route === "/api/listShellTools" ? []
+        // BOTS-4: the list is a card projection and the page fetches the row it opens.
+        : route === "/api/getMarketplaceItem" ? (catalog.bots.find((bot) => bot.id === args.id) ?? {})
+          : route === "/api/listShellTools" ? []
           : route === "/api/listAgents" ? []
             : route === "/api/createAgent" ? { agent: { id: "agent-new", name: args.name, description: args.description } }
               : route === "/api/importAgentWorkflowText" ? { result: { imported: [args.name], skipped: [] } }
-                : route === "/api/getAgentWorkflows" ? BOT.skills.map((s) => ({ id: `wf-${s.name}`, name: s.name, source: "workflow" }))
+                // Each name TWICE on purpose: a real box's shared library holds several rows under
+                // one name, left by earlier imports, and the receipt has to count what THIS run
+                // added rather than the library filtered by those names. Measured on
+                // grok-bot-local-vm 2026-09-09, where it read "13 playbooks" for a bot with one.
+                : route === "/api/getAgentWorkflows" ? [...BOT.skills, ...BOT.skills].map((s, at) => ({ id: `wf-${at}-${s.name}`, name: s.name, source: "workflow" }))
                   : {};
       return { ok: true, text: async () => JSON.stringify(body) };
     },
@@ -222,7 +235,10 @@ async function renderedTab(extraWindow = {}) {
   return { bots, container, win };
 }
 
-test("the Bots tab renders a card per template, and the bot page renders each of its three tabs", async () => {
+/** Opening a bot fetches its own row, so the page settles a tick after the click. */
+const settle = async () => { for (let n = 0; n < 6; n += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
+
+test("the Bots tab renders a row per bot, and the bot page renders each of its four blocks", async () => {
   const { container } = await renderedTab();
   assert.match(container.innerHTML, /data-marketplace-bots/);
   assert.match(container.innerHTML, /data-bot-id="research-desk"/);
@@ -231,13 +247,18 @@ test("the Bots tab renders a card per template, and the bot page renders each of
   assert.ok(!container.innerHTML.includes("<span>More</span>"), container.innerHTML.slice(0, 200));
 
   container.click({ botId: "research-desk" });
+  await settle();
   assert.match(container.innerHTML, /data-bot-page="research-desk"/);
   assert.match(container.innerHTML, /data-import-bot="research-desk"/);
-  for (const tab of ["instructions", "skills", "integrations"]) assert.match(container.innerHTML, new RegExp(`data-bot-tab="${tab}"`));
-  assert.ok(container.innerHTML.includes(BOT.instructions), "the Instructions tab shows the persona the import will write");
+  for (const tab of ["memories", "skills", "routines", "integrations"]) assert.match(container.innerHTML, new RegExp(`data-bot-tab="${tab}"`));
+  assert.ok(container.innerHTML.includes(BOT.memories[0].text), "the Memories block shows the facts the bot already knows");
 
   container.click({ botTab: "skills" });
   for (const skill of BOT.skills) assert.ok(container.innerHTML.includes(skill.name), skill.name);
+
+  container.click({ botTab: "routines" });
+  assert.ok(container.innerHTML.includes("Every weekday at 09:00"), container.innerHTML.slice(-400));
+  assert.ok(container.innerHTML.includes("off until you switch it on"));
 
   // Nothing is installed in this stub's connectors.json, so the one integration offers Add.
   container.click({ botTab: "integrations" });
@@ -264,17 +285,24 @@ test("the imported agent is on screen before the refreshes behind it return", as
   });
 
   container.click({ botId: "research-desk" });
+  await settle();
   container.click({ importBot: "research-desk" });
   await refreshWasCalled;
 
   assert.match(container.innerHTML, /data-imported-agent="agent-new"/);
-  assert.ok(container.innerHTML.includes("Imported as"), container.innerHTML.slice(0, 200));
-  for (const skill of BOT.skills) assert.ok(container.innerHTML.includes(skill.name), skill.name);
+  assert.ok(container.innerHTML.includes("is on this box"), container.innerHTML.slice(-400));
+  // Two skills on the row, four rows in the library under those two names: the receipt counts the
+  // two this run added.
+  assert.ok(container.innerHTML.includes("It has 2 playbooks."), container.innerHTML.slice(-500));
+  // No setup module is on this build, so the receipt says which half of the work did not happen
+  // rather than reporting a bot that quietly knows nothing.
+  assert.ok(container.innerHTML.includes("memories were not seeded"), container.innerHTML.slice(-400));
 });
 
-// With the Integrations tab open, the tab's own rows are already above the imported card, so a
-// "Still needed" block there would draw each row -- and its Add button -- a second time.
-test("the imported card does not draw the integration rows a second time", async () => {
+// The receipt names what could not be connected in words; it does not redraw the rows -- with the
+// Integrations block open those are already on the page, and a second copy of each row and its Add
+// button is what this pins against.
+test("the receipt names the apps that are not connected and draws no second Add", async () => {
   let refreshStarted;
   const refreshWasCalled = new Promise((resolve) => { refreshStarted = resolve; });
   const { container } = await renderedTab({
@@ -284,6 +312,7 @@ test("the imported card does not draw the integration rows a second time", async
   });
 
   container.click({ botId: "research-desk" });
+  await settle();
   container.click({ botTab: "integrations" });
   container.click({ importBot: "research-desk" });
   await refreshWasCalled;
@@ -292,4 +321,5 @@ test("the imported card does not draw the integration rows a second time", async
   const rows = container.innerHTML.match(/data-integration="tinyfish"/g) ?? [];
   assert.equal(rows.length, 1, container.innerHTML.slice(-400));
   assert.equal((container.innerHTML.match(/data-add-integration="tinyfish"/g) ?? []).length, 1);
+  assert.ok(container.innerHTML.includes("Not connected yet: TinyFish (API key)"), container.innerHTML.slice(-500));
 });

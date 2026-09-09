@@ -3506,6 +3506,113 @@ button.evidence-chip[data-verdict]:hover { border-color: var(--glass-edge); colo
 /* The chips wrap onto a second row rather than running past the panel. */
 .marketplace-chips { min-width: 0; row-gap: 6px; }
 .marketplace-chips .tag { max-width: 100%; white-space: nowrap; }
+/* The Bots half draws the same chips as the Plugins half. They used to be `.roster-tab` -- the
+   big underlined pill the panel's own Plugins/Bots switch uses -- so eight bot categories read as
+   a run-on line of small caps rather than as a filter. */
+.marketplace-chips { margin: 0 0 14px; }
+
+/* BOTS-4: the bot list, one row per bot with a round Add at its right.
+   The row is a DIV holding two sibling buttons, never a button inside a button: Chrome fires both
+   handlers on a nested click, so a nested Add would open the page AND start the setup on one
+   press -- and a passing page.click() would prove nothing either way. */
+.marketplace-bots-scroll {
+  /* 72 rows in an 810px modal column push the search field and the chips off the top of the
+     panel, so the filter a person is holding scrolls away from them.
+     The height is chosen against the dialog's own: .dialog-body caps at min(660px, 100dvh - 122px)
+     and the intro, the search field and the chip row take about 250px of it, so 400px keeps the
+     whole panel inside the dialog and leaves ONE scrollbar on screen rather than two nested. */
+  max-height: min(46vh, 400px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.marketplace-bot-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border-radius: 12px;
+}
+
+.marketplace-bot-row:hover { background: rgba(255, 255, 255, 0.03); }
+
+.marketplace-bot-open {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--text-secondary);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.marketplace-bot-copy { display: grid; min-width: 0; gap: 2px; }
+.marketplace-bot-copy strong { color: var(--text-primary); font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+.marketplace-bot-copy small {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* "by Anoop Baliga, from the community" sits beside the name, not under it, and stays quiet. */
+.marketplace-bot-by { color: var(--text-secondary); font-weight: 500; }
+
+.marketplace-bot-add {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-right: 8px;
+  padding: 0;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: 50%;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.marketplace-bot-add:hover { border-color: var(--teal-300); background: rgba(255, 255, 255, 0.1); }
+
+/* A featured bot is a card rather than a row, and carries the same Add in its own corner. */
+.marketplace-bot-card { position: relative; padding: 0; }
+.marketplace-bot-card .marketplace-bot-add,
+.marketplace-bot-card .marketplace-bot-add-state { position: absolute; top: 10px; right: 10px; margin: 0; }
+.marketplace-bot-card-open {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 44px 12px 12px;
+  border: 0;
+  border-radius: inherit;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.marketplace-bot-add-state { margin-right: 8px; }
+.marketplace-bot-more { margin: 2px 0 16px; }
+.marketplace-bot-list { margin-bottom: 4px; }
+
+/* A memory is a paragraph of the bot's own operating rules. Several of them run one after another
+   with no heading between: the upstream name is the placeholder "memory 1" on all 444 of them. */
+.marketplace-memory { margin: 0 0 12px; line-height: 1.55; }
+.marketplace-memory:last-child { margin-bottom: 0; }
+/* When a job runs, in words, under its summary. */
+.marketplace-routine-when { color: var(--teal-300); }
+/* An app with nothing to install gets a line here and no button anywhere. */
+.marketplace-app-note { color: var(--text-secondary); font-size: 10px; text-align: right; }
 
 /* qol/panels: no horizontal scroll or bleed in a panel.
    The Agent details right column ran its Name, Description and Role controls 84px past the card

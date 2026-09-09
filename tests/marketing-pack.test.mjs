@@ -62,7 +62,20 @@ test("the pack is a bot row the catalog serves, in a category the catalog declar
   // Deep, not identity: the catalog and the pack are bundled separately here, so each bundle holds
   // its own copy of the module. What matters is that the row the catalog serves IS the row the
   // module declares, field for field.
-  assert.deepEqual(served, theTeam, "the catalog serves a different row than the module declares");
+  //
+  // BOTS-4 added exactly one exception, and it is a DERIVED field rather than an edit to this
+  // module. Every bot page now opens on a Memories block ("Facts it already knows"), and this pack
+  // predates it: the catalog composes one from the row's `instructions` for any row that declares
+  // none, so the pack gains the block without marketing-team.ts being touched by another wave. The
+  // assertion below is therefore "everything this module declares is served unchanged, and the
+  // memories the catalog adds are that same paragraph and nothing else".
+  const { memories, ...declared } = served;
+  assert.deepEqual(declared, theTeam, "the catalog serves a different row than the module declares");
+  assert.ok(Array.isArray(memories) && memories.length === 1, "the pack should have exactly one derived memory");
+  assert.equal(memories[0].text, theTeam.instructions.trim(),
+    "the derived memory is not the pack's own instructions");
+  assert.equal(memories[0].facts.join(" "), theTeam.instructions.replace(/\s+/g, " ").trim(),
+    "the facts seeded from it do not rejoin to the paragraph");
   assert.ok(catalog.MARKETPLACE_BOT_CATEGORIES.includes(served.category),
     `the pack's category "${served.category}" is not a declared bot category`);
   assert.equal(served.creator, "Titanbot team");

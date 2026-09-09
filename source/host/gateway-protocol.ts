@@ -42,6 +42,7 @@ export const SAND_GATEWAY_COMMANDS = {
   openAgent: (api: GatewayApi, body: string) => api.openAgent(parseCommandArgs(body)),
   setWindowFocused: (api: GatewayApi, body: string) => api.setWindowFocused(parseCommandArgs(body)),
   getAgentMemories: (api: GatewayApi, body: string) => api.getAgentMemories(parseCommandArgs(body)),
+  addAgentMemories: (api: GatewayApi, body: string) => api.addAgentMemories(parseCommandArgs(body)),
   deleteAgentMemory: (api: GatewayApi, body: string) => api.deleteAgentMemory(parseCommandArgs(body)),
   clearAgentMemories: (api: GatewayApi, body: string) => api.clearAgentMemories(parseCommandArgs(body)),
   getAgentAutomations: (api: GatewayApi, body: string) => api.getAgentAutomations(parseCommandArgs(body)),

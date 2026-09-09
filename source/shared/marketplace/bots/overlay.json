@@ -1,0 +1,99 @@
+{
+  "what": "Every human decision that shapes the generated community catalog. bots.json is the scrape and is never edited; this file is where a person's judgement lives, each row carrying the exact string it replaces and why. scripts/build-bot-catalog.mjs FAILS when a `from` is no longer found, so a row cannot rot quietly against a future re-scrape.",
+  "order": "The vendor phrase table in the generator runs FIRST; every `from` below is matched against the text as it stands AFTER that table. That is why some rows read as if the rename had already happened.",
+  "drop": [
+    {
+      "id": "tinkabot",
+      "why": "Its whole job is packaging and publishing plugins into the old vendor's plugin directory. Renaming the vendor out of it leaves skills and memories describing a publishing pipeline this product does not have, which is a broken bot wearing our name."
+    },
+    {
+      "id": "dr-eggbot-v2",
+      "why": "Its job is designing and creating more of the old vendor's bots through their own create-a-bot call, and auditing a fleet of them. Nothing under it survives the rename."
+    },
+    {
+      "id": "researchy",
+      "why": "Its method is shelling out to a signed-in vendor CLI on the machine, pinned to a vendor model. Without that binary it is a research desk with no way to research, and we already ship one that works."
+    },
+    {
+      "id": "alfred",
+      "why": "It governs a fleet of the old vendor's bots: its memories are an operating model for their org, their skills and their routines. There is no honest rename of that."
+    }
+  ],
+  "category": [
+    {
+      "id": "overheard",
+      "category": "Sales",
+      "why": "The scrape gives it no category at all. It watches public channels for mentions of your company and competitors and hands the ones worth a reply to a seller, so Sales is where a person would look for it."
+    },
+    {
+      "id": "tradbot-2",
+      "category": "Personal",
+      "why": "The scrape gives it no category at all. It runs a household: school pickups, the family digest, the kitchen newspaper. Personal is the only chip it belongs under."
+    },
+    {
+      "id": "haggle-bot",
+      "category": "Operations",
+      "why": "Its only scraped category was the team grouping we drop. It works the vendor contract list, renewals and spend, which is the operations desk's job."
+    }
+  ],
+  "replace": [
+    {
+      "id": "cooper",
+      "path": "memories[2]",
+      "from": "SpaceX, Cursor, Anthropic, OpenAI, Cognition",
+      "to": "SpaceX, Anthropic, OpenAI, Cognition",
+      "why": "A watch list of AI companies that happens to name the old upstream. The list is the operator's to edit on day one, and one name out of five costs nothing; keeping it would put that vendor's name on a page a customer reads."
+    },
+    {
+      "id": "dial-bot",
+      "path": "memories[5]",
+      "from": "No plugin in this Marketplace.",
+      "to": "There is no Bland row in this Marketplace yet, so add it yourself as a custom server.",
+      "why": "The phrase table turns the vendor's marketplace into ours, which then reads as a flat refusal. The true sentence names the door that does exist."
+    },
+    {
+      "id": "last30days",
+      "path": "memories[1]",
+      "from": "Register it as a Titanium Bot skill. Do not install it as a marketplace plugin.",
+      "to": "Register it as a skill on this bot. Do not install it as a marketplace plugin.",
+      "why": "\"a Titanium Bot skill\" is the phrase table being literal; a skill belongs to the bot, and that is what the sentence should say."
+    },
+    {
+      "id": "last30days",
+      "path": "memories[4]",
+      "from": " Grok CLI (`grok login --device-auth`) is a valid X path when available; pin LAST30DAYS_X_BACKEND=grok.",
+      "to": "",
+      "why": "The sentence is machinery this product does not have: a signed-in vendor CLI on the box. The two honest paths (sign in on this computer, or skip X) are stated in the sentence before it, so removing this one loses nothing."
+    },
+    {
+      "id": "last30days",
+      "path": "memories[4]",
+      "from": "or they provide an xAI/Xquik key, or skip X.",
+      "to": "or they provide an Xquik key, or skip X.",
+      "why": "Names the old vendor as a key source. Xquik is the third-party path and stays."
+    },
+    {
+      "id": "tech-demos",
+      "path": "memories[6]",
+      "from": "launch a cloud coding agent (Fable 5) into the sticky demo monorepo",
+      "to": "launch a cloud coding agent into the sticky demo monorepo",
+      "why": "The phrase table already replaced the vendor's product name; the model in brackets was theirs to pin and is not ours to promise."
+    }
+  ],
+  "schedule": [
+    {
+      "id": "webby",
+      "routine": "Weekday hourly dashboard book",
+      "cron": "35 * * * 1-5",
+      "note": "Every hour at :35, weekdays, the cadence this routine states.",
+      "why": "The only routine in the pack whose cadence is an intra-day minute mark rather than a daily hour. Read from its own summary, \"refresh at :35 (catch at :40)\"; the generator's hour rules would have quietly turned an hourly job into a 9am one."
+    },
+    {
+      "id": "webby",
+      "routine": "Weekday close dashboard book",
+      "cron": "15 15 * * 1-5",
+      "note": "Weekdays at 3:15 PM, the cadence this routine states.",
+      "why": "\"ship at 3:15 local\" with no am or pm. It is a cash close, so it is the afternoon; written down here rather than guessed by the generator, which requires am or pm before it reads a clock."
+    }
+  ]
+}
