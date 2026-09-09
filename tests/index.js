@@ -52,7 +52,6 @@ import "./sand-host-setting.test.mjs";
 import "./browser-tool-parameters.test.mjs";
 import "./machine-room-gateway.test.mjs";
 import "./machine-room-identity.test.mjs";
-import "./connector-custody.test.mjs";
 import "./connector-health.test.mjs";
 import "./connector-plane.test.mjs";
 import "./machine-room-connectors.test.mjs";
@@ -152,3 +151,6 @@ import "./test-index-covers-the-suite.test.mjs";
 
 // HANDBACK-1: the computer hand-off card, the rail and the takeover banner.
 import "./machine-room-handoff.test.mjs";
+
+// CONSOLE-4: files that open -- the viewer, the download and the relay's /files route.
+import "./machine-room-files.test.mjs";

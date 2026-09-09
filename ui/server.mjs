@@ -1537,6 +1537,131 @@ async function relayAvatar(t, req, res, pathname) {
   res.end(bytes);
 }
 
+// ---- one file out of a box (CONSOLE-4) -------------------------------------------------------
+//
+// GET /files?agent=<id>&path=<absolute path>[&download=1] answers the bytes of one file that
+// passed through an agent's conversation, so a file row in the console can be opened and saved.
+//
+// WHAT AUTHORIZES THIS IS THE GATEWAY'S OWN PATH CHECK, NOT THE CHECK BELOW. readAttachmentChunk
+// derives the owning agent from the path it is given (attachments-service.ts
+// resolveAttachmentOwnerDir) and refuses anything outside that agent's attachments/ or assets/
+// directory; the `agent` parameter here is only the fallback the host uses for a path it cannot
+// place, which our own shape rules out. So `agent` is decorative and must never be described as
+// an access control. The regex below is a second, tighter fence in front of that one: it keeps a
+// malformed request from ever reaching the box, and it means this route can never be pointed at
+// settings.json, box-secrets.json or anything else inside an agent's directory that is not a file
+// the conversation actually carried.
+//
+// The bytes come through the gateway. There is deliberately no `docker exec` here: the relay
+// serves three boxes including a paying customer's, and a route that shells into a container to
+// read a path a browser chose is a different and much worse thing than a route that asks the box's
+// own API for a file it has already agreed to serve.
+//
+// Nesting below attachments/ and assets/ is allowed on purpose. An ingested attachment is written
+// flat (a content hash plus the extension), but a GENERATED image is written to a path the model
+// chose, under an mkdir -p (generate-image-resource-accessor.ts). A flat-only pattern here would
+// have refused those, and the symptom would have been the very thing this wave is fixing: a file
+// in the list that will not open. What is never allowed is a "." or ".." segment, checked
+// separately below so that a file legitimately named "notes..md" still opens.
+const BOX_FILE_PATH = /^(?:\/[^/]+)*\/agents\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(?:attachments|assets)(?:\/[^/]+)+$/i;
+// The host's own per-call ceiling (attachments-service.ts ATTACHMENT_CHUNK_MAX_BYTES). Asking for
+// more than this gets silently clamped, so the paging loop would spin forever on a wrong number.
+const BOX_FILE_CHUNK_BYTES = 8 * 1024 * 1024;
+// And the ceiling on the whole answer. A console tab holding a quarter of a gigabyte because
+// somebody clicked a row is not a download, it is an outage.
+const BOX_FILE_TOTAL_BYTES = 25 * 1024 * 1024;
+// The host reports a mime only for pictures, video and audio (imageMimeFromPath and friends), so
+// for the markdown, text and PDF this route mostly carries, the extension is all there is.
+const BOX_FILE_MIME = {
+  md: "text/markdown", markdown: "text/markdown", mdx: "text/markdown",
+  txt: "text/plain", text: "text/plain", log: "text/plain", csv: "text/csv", tsv: "text/tab-separated-values",
+  json: "application/json", yaml: "text/yaml", yml: "text/yaml", toml: "text/plain", xml: "application/xml",
+  html: "text/html", htm: "text/html", svg: "image/svg+xml", css: "text/css", js: "text/javascript",
+  pdf: "application/pdf", zip: "application/zip",
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  avif: "image/avif", bmp: "image/bmp", ico: "image/x-icon",
+};
+// What may be rendered by the browser in place rather than saved. PDF is the reason this route has
+// an inline mode at all, and pictures come free with it. Everything else is sent as a download,
+// which is what keeps an agent-written .html or .svg from executing on this console's own origin
+// with this console's own session -- the console and the file share a host name, so an inline
+// text/html here would be same-origin script, not a preview.
+const BOX_FILE_INLINE = new Set(["application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp", "text/plain"]);
+const boxFileMime = (filePath, reported) => reported
+  || BOX_FILE_MIME[(/\.([^./]+)$/.exec(filePath)?.[1] ?? "").toLowerCase()]
+  || "application/octet-stream";
+
+async function relayFile(t, req, res, url) {
+  const filePath = url.searchParams.get("path") ?? "";
+  const agentId = url.searchParams.get("agent") || null;
+  const download = url.searchParams.get("download") === "1";
+  // ".." is rejected as a path SEGMENT rather than as a substring: a file legitimately named
+  // "notes..md" is not a traversal, and refusing it would be a bug reported as a missing file.
+  const segments = filePath.split("/");
+  if (segments.includes("..") || segments.includes(".") || !BOX_FILE_PATH.test(filePath)) {
+    return fail(res, 400, "that is not a file from a conversation on this box");
+  }
+
+  const parts = [];
+  let read = 0;
+  let totalSize = 0;
+  let reportedMime = null;
+  for (;;) {
+    const upstream = await fetch(`${t.gateway}/api/readAttachmentChunk`, {
+      method: "POST",
+      headers: t.headers({ "content-type": "application/json" }),
+      body: JSON.stringify({ path: filePath, agentId, offset: read, length: BOX_FILE_CHUNK_BYTES }),
+    });
+    const text = await upstream.text();
+    // The box's refusal is the box's answer to give, with the one exception relayCommand already
+    // makes: its 401 is this relay's bearer being stale, which is a broken deployment and not
+    // something the person clicking a file row can do anything about.
+    if (upstream.status === 401) {
+      return fail(res, 502, "the gateway refused this relay's token: SAND_HOST_GATEWAY_TOKEN is stale or the box was recreated.");
+    }
+    if (!upstream.ok) {
+      res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json", "cache-control": "no-store" });
+      return res.end(text);
+    }
+    let answer;
+    try { answer = JSON.parse(text); } catch { answer = null; }
+    // null is what the host answers for a path it will not serve, and for a file that is gone.
+    // Both are a 404 to the person: the row is stale either way.
+    if (answer == null || typeof answer.bytesBase64 !== "string") {
+      return fail(res, 404, "the box would not serve that file");
+    }
+    totalSize = Number(answer.totalSize) || totalSize;
+    reportedMime = reportedMime ?? (typeof answer.mime === "string" ? answer.mime : null);
+    if (totalSize > BOX_FILE_TOTAL_BYTES) {
+      return fail(res, 413, `that file is ${Math.round(totalSize / (1024 * 1024))} MB; this console serves files up to ${BOX_FILE_TOTAL_BYTES / (1024 * 1024)} MB`);
+    }
+    const chunk = Buffer.from(answer.bytesBase64, "base64");
+    parts.push(chunk);
+    read += chunk.byteLength;
+    // A zero-length answer ends the loop whatever the reported size says. Without it a totalSize
+    // the host revised upward mid-read would spin here forever.
+    if (chunk.byteLength === 0 || read >= totalSize) break;
+  }
+
+  const bytes = Buffer.concat(parts);
+  const mime = boxFileMime(filePath, reportedMime);
+  const name = filePath.split("/").pop() ?? "file";
+  // The filename is quoted and stripped of the two characters that could end the quoting early.
+  // Everything else in it is already constrained: it is one path segment out of the regex above.
+  const filename = name.replace(/["\\]/g, "");
+  const inline = !download && BOX_FILE_INLINE.has(mime);
+  res.writeHead(200, {
+    "content-type": mime,
+    "content-length": bytes.byteLength,
+    // nosniff, always. It is what makes the inline list above the whole list: without it a browser
+    // is free to decide an application/octet-stream is really HTML and run it.
+    "x-content-type-options": "nosniff",
+    "content-disposition": `${inline ? "inline" : "attachment"}; filename="${filename}"`,
+    "cache-control": "no-store",
+  });
+  res.end(bytes);
+}
+
 // ---- the job bus edge -----------------------------------------------------------------------
 // /v1 is the Chief of Staff's surface and nothing else. It carries its own bearer, it never
 // accepts a console session, and it reaches exactly the five jobBus* commands -- so the token CoS
@@ -2634,6 +2759,9 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/events") return await relayEvents(t, req, res, url.search);
     if (req.method === "GET" && url.pathname.startsWith("/avatars/")) return await relayAvatar(t, req, res, url.pathname + url.search);
+    // One file out of this tenant's box, for the console's file rows to open and save. Inside the
+    // same session and the same tenant resolution as everything else here; see relayFile.
+    if (req.method === "GET" && url.pathname === "/files") return await relayFile(t, req, res, url);
     if (req.method === "POST" && url.pathname.startsWith("/api/")) {
       const method = url.pathname.slice("/api/".length);
       if (!/^[A-Za-z][A-Za-z0-9]*$/.test(method)) return fail(res, 400, "bad method name");
