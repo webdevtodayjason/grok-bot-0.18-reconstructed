@@ -22,6 +22,10 @@
 //   node scripts/verify-transcript-repair.mjs --box     grok-bot-local-vm: the verb itself, and a
 //                                                      scratch agent damaged with the marker so the
 //                                                      host's own recovery is what fixes it
+//   node scripts/verify-transcript-repair.mjs --refuse  grok-bot-local-vm: damage the host CANNOT
+//                                                      recover from -- the needs-repair state, the
+//                                                      roster flag, the failed turn's own words,
+//                                                      and the verb answering `cleared`
 //   node scripts/verify-transcript-repair.mjs --all     both, console first
 //
 // The default leg is deliberately box-free. It is the leg that proves what a person sees, it runs
@@ -63,10 +67,10 @@ const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const GATEWAY = process.env.SAND_HOST_GATEWAY_URL ?? "http://127.0.0.1:1340";
 // Every request this gate makes says who it is.
 const UA = "titanbot-gate/verify-transcript-repair";
-const MODE = process.argv.includes("--all") ? "all" : process.argv.includes("--box") ? "box" : "console";
-// The refusal shape adds a fourth model turn, which does not fit the 300 s ceiling beside the
-// other three. Run it on its own: `--box --refuse`.
+// `--refuse` is its own mode, not a flag on the box leg: it needs three model turns of its own and
+// four beside the box leg's three do not fit the 300 s verify-runner ceiling. Run it on its own.
 const REFUSE = process.argv.includes("--refuse");
+const MODE = REFUSE ? "refuse" : process.argv.includes("--all") ? "all" : process.argv.includes("--box") ? "box" : "console";
 
 // The demo Titan's own error, word for word out of that box's /tmp/sand-host.log.
 const DEMO_TITAN_ERROR = "TranscriptJournalCorruptionError: transcript checkpoint must recover before preparing";
@@ -135,9 +139,12 @@ function stubRelay(root) {
     getAgentTranscriptTail: (body) => ({ entries: transcripts[body?.id] ?? [], hasOlder: false, partial: false }),
     getAgentThread: (body) => ({ entries: transcripts[body?.id] ?? [], outline: [], hasOlder: false }),
     listProblemReports: () => ({ reports: [] }),
-    // BOX-6b, the verb. 115 entries is the demo Titan's real count, measured on the R750.
-    // `quarantined: null` is the answer the one real case in production gives: both of its
-    // databases were healthy and there was nothing to move aside.
+    // BOX-6b, the verb -- STUBBED. Everything this function answers is this gate's invention: it
+    // exists to drive the page, and no repair ever produced these numbers. 115 is the demo Titan's
+    // store count measured on the R750, borrowed so the wording is tested against a realistic
+    // figure; it is NOT what a repair returned. `quarantined: null` is the shape the one real case
+    // in production gives: both of its databases were healthy and there was nothing to move aside.
+    // Numbers a real host answered live in the --box and --refuse legs, not here.
     repairAgentTranscript: (body) => {
       repairs.push(body);
       titanFlag = null;
@@ -329,7 +336,11 @@ async function consoleLeg() {
       const section = document.querySelector('[data-repair-for="titan"]');
       return section ? section.textContent : "";
     });
-    check(/keeps every entry it can/.test(promise) && /Nothing is deleted/.test(promise),
+    // The copy has to describe what the button DOES. It sets the stuck state aside so the next
+    // message rebuilds; it does not rebuild anything itself, and a card that promised a rebuild
+    // was the review's own finding against the operator doc.
+    check(/the next message can rebuild/.test(promise) && /Nothing is deleted/.test(promise)
+      && !/Repairing rebuilds it/.test(promise),
       "the control promises what the repair actually does");
     await shot(page, "02-repair-control-on-details-panel");
 
@@ -510,47 +521,30 @@ async function boxLeg() {
     check(created != null, "a scratch agent was created", created ?? "none");
     if (!created) return;
 
-    // Hold a few turns, so there is something a repair can keep or lose.
-    const held = await turnCompletes(created, "Say the single word ready and nothing else.", TOKEN);
-    check(held.ok, "the scratch agent holds a turn before anything is damaged", `${held.before} -> ${held.after} entries`);
-    const baseline = await entryCount(created, TOKEN);
-
     // ---- damage one: the demo Titan's own shape --------------------------------------------------
     // NOT "write a stale copy over the store while a WAL exists" -- that is BOX-6's shape and it
     // produces a different error. What stopped the demo Titan was a two-byte `<id>.journal-mode`
     // marker: it pins the conversation to the journal route for ever, and the first prepare of
     // every host process after that throws because nothing on the turn path ever calls recover().
+    //
+    // BEFORE the agent's first turn, and that ordering is the measurement. A conversation's route is
+    // chosen once and cached for the life of the host process, so a marker written after a turn has
+    // gone through the old writer does NOTHING until the host restarts -- which is how this leg used
+    // to damage an agent, watch the turn sail through, and call it a recovery.
     await runInBox(`#!/bin/sh\nset -e\nmkdir -p ${TRANSCRIPTS}/${created}\nprintf '1\\n' > ${TRANSCRIPTS}/${created}/${created}.journal-mode\nls -l ${TRANSCRIPTS}/${created}\n`, "repair-damage-marker.sh");
     const marked = await runInBox(`#!/bin/sh\nls ${TRANSCRIPTS}/${created} 2>/dev/null\n`, "repair-read-marker.sh");
-    check(/journal-mode/.test(marked), "the scratch agent is damaged the way the demo Titan was", marked.trim().split("\n").join(", "));
+    check(/journal-mode/.test(marked), "the scratch agent is damaged the way the demo Titan was, before its first turn", marked.trim().split("\n").join(", "));
 
     // The host's own recovery is what has to fix this: no button, no verb, just the next turn.
     const recovered = await turnCompletes(created, "Say the single word back and nothing else.", TOKEN);
     check(recovered.ok, "the host recovered on its own and the turn completed", `${recovered.before} -> ${recovered.after} entries`);
-    const kept = await entryCount(created, TOKEN);
-    check(kept != null && baseline != null && kept >= baseline,
-      "and it kept the entries it already had", `${baseline} before the damage, ${kept} after the recovery`);
-
-    // ---- damage two: the shape self-recovery must refuse -----------------------------------------
-    // A pending write-ahead log whose hashes match nothing. recover() throws on it by design
-    // ("pending transcript WAL does not match the durable checkpoint"), so the host must stop, write
-    // the needs-repair state, and let a person press the button. Behind its own flag because three
-    // model turns and a fourth wait do not fit inside the 300 s verify-runner ceiling together.
-    if (REFUSE) {
-      await runInBox(`#!/bin/sh\nset -e\nprintf '{"checkpoint":"nothing-that-exists","entries":[]}\\n' > ${TRANSCRIPTS}/${created}/${created}.journal-pending.json\nprintf '1\\n' > ${TRANSCRIPTS}/${created}/${created}.journal-mode\nls ${TRANSCRIPTS}/${created}\n`, "repair-damage-wal.sh");
-      const refusedTurn = await turnCompletes(created, "Say the single word again and nothing else.", TOKEN, 60_000);
-      if (refusedTurn.ok) {
-        // The host recovered from this one too. That is a better product than the brief expected and
-        // it is not a failure -- but it is not the refusal path either, so it is named as skipped.
-        skip("a store self-recovery refuses reaches the needs-repair state", "the host recovered from the mismatched pending log as well, so the refusal path could not be reached from here");
-      } else {
-        const roster = await call("listAgents", {}, TOKEN).catch(() => []);
-        const row = (Array.isArray(roster) ? roster : []).find((a) => a.id === created);
-        check(row?.transcriptNeedsRepair != null,
-          "the host puts the agent in the needs-repair state, which is what draws the pill and the control",
-          JSON.stringify(row?.transcriptNeedsRepair ?? null));
-      }
-    }
+    const baseline = await entryCount(created, TOKEN);
+    // The conversation file only exists because a recovery built it. Without this the leg cannot
+    // tell a recovery from a turn that never needed one.
+    const built = await runInBox(`#!/bin/sh\nwc -l < ${TRANSCRIPTS}/${created}/${created}.jsonl 2>/dev/null || echo none\n`, "repair-count-jsonl.sh");
+    check(/^\s*[1-9]/.test(built), "and the recovery is what wrote the conversation file", `${built.trim()} lines`);
+    const said = await runInBox(`#!/bin/sh\ngrep "sand\\]\\[transcript" /tmp/sand-host.log 2>/dev/null | grep ${created} | tail -2\n`, "repair-read-log.sh");
+    check(/repaired the conversation store/.test(said), "and the host logged it, in plain words", said.trim().split("\n").pop() ?? "");
 
     // ---- the verb, on demand ----------------------------------------------------------------------
     const repaired = await call("repairAgentTranscript", { id: created, agentId: created }, TOKEN).catch((error) => error);
@@ -592,10 +586,149 @@ async function boxLeg() {
 }
 
 // ================================================================================================
+// The refusal leg. The half of this wave a real host had never run.
+//
+// The old version of this leg wrote a pending write-ahead copy whose hashes matched nothing, which
+// the host sets aside and then recovers from -- so it could never reach the refusal and always
+// reported SKIP. The damage here is one recover() cannot pass twice: a DIRECTORY where the
+// conversation file belongs. `initialize()` has to build that file (there is none), the build ends
+// in a rename onto a directory, and no amount of retrying changes that -- which is exactly the
+// shape the needs-repair state exists for. Root inside the box is why this is a directory rather
+// than a mode: chmod means nothing to the user the host runs as.
+//
+//   node scripts/verify-transcript-repair.mjs --refuse
+//
+// What it proves on the box: the marker lands with its reason, `listAgents` carries
+// transcriptNeedsRepair, the failed turn's own words are the ones the console keys off, the verb
+// answers `cleared` (NOT `recovered` -- clearing is not repairing), and the next message completes.
+// ================================================================================================
+
+async function refuseLeg() {
+  let TOKEN;
+  try { TOKEN = token(); }
+  catch (error) { skip("the refusal leg", error.message); return; }
+
+  const probe = await call("repairAgentTranscript", { id: "does-not-exist", agentId: "does-not-exist" }, TOKEN)
+    .then(() => ({ present: true }))
+    .catch((error) => ({ present: !error.unknownCommand && !error.gatewayDown, error }));
+  if (probe.error?.gatewayDown) { skip("the refusal leg", `the host in ${BOX} is not listening`); return; }
+  if (!probe.present) { skip("the refusal leg", "this box runs a bundle without repairAgentTranscript"); return; }
+
+  let created = null;
+  const sweep = () => {
+    if (!created) process.exit(1);
+    execFile("curl", ["-s", "-m", "5", "-X", "POST", `${GATEWAY}/api/deleteAgent`,
+      "-H", `authorization: Bearer ${TOKEN}`, "-H", "content-type: application/json",
+      "-H", `user-agent: ${UA}`, "-d", JSON.stringify({ id: created })],
+    () => process.exit(1));
+  };
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, sweep);
+  try {
+    const made = await call("createAgent", {
+      name: `Transcript refusal gate ${Date.now()}`,
+      description: "scratch agent for scripts/verify-transcript-repair.mjs --refuse; delete me",
+    }, TOKEN);
+    created = made?.agent?.id ?? null;
+    check(created != null, "a scratch agent was created", created ?? "none");
+    if (!created) return;
+
+    // The damage goes on BEFORE the first turn, and that ordering is the whole trick. The route a
+    // conversation takes is decided once and cached on the journal for the life of the host process
+    // (RoutedTranscriptMirror.route), so a marker written after a turn has already gone through the
+    // old writer changes nothing until the host restarts -- which is how the first version of this
+    // leg damaged an agent, watched the turn sail through, and called it a recovery.
+    //
+    // The damage itself: the route marker, plus a DIRECTORY where the conversation file belongs. The
+    // recovery has to build that file, the build ends in a rename onto a directory, and no number of
+    // retries changes that. Root inside the box is why this is a directory rather than a mode.
+    await runInBox(`#!/bin/sh
+set -e
+dir=${TRANSCRIPTS}/${created}
+mkdir -p "$dir"
+rm -rf "$dir/${created}.jsonl" "$dir/${created}.journal-pending.json" "$dir/${created}.journal-cursor.json"
+mkdir "$dir/${created}.jsonl"
+printf '1\n' > "$dir/${created}.journal-mode"
+ls -a "$dir"
+`, "refuse-damage.sh");
+    const baseline = 0;
+
+    const refused = await turnCompletes(created, "Say the single word again and nothing else.", TOKEN, 90_000);
+
+    // MEASURED on grok-bot-local-vm 2026-09-09, and it is not what the brief assumed. In THIS shape
+    // the person is not left staring at a failed turn: the model ran, SendMessage delivered its
+    // answer straight into the conversation, and only the mirror's checkpoint refused afterwards.
+    // The demo Titan's shape is the other one -- there the refusal came before the answer and every
+    // turn ended with nothing. So what this leg holds the product to is the rule that covers both:
+    // a person is never left silent. Either an answer landed, or the conversation says the store
+    // needs repair, in the words the console keys off.
+    const tail = await call("getAgentTranscript", { id: created, limit: 40 }, TOKEN).catch(() => null);
+    const said = JSON.stringify(Array.isArray(tail) ? tail : tail?.entries ?? []);
+    const answered = /"kind":"send-message"/.test(said);
+    check(answered || /conversation store needs repair/.test(said),
+      "the person is never left silent: an answer landed, or the conversation says the store needs repair",
+      answered ? "the answer landed and the checkpoint refused behind it" : "the turn failed and said why");
+
+    // The marker, wherever it landed: beside the conversation, or at the root of the transcripts
+    // directory when that one could not be written.
+    const marker = await runInBox(`#!/bin/sh
+cat ${TRANSCRIPTS}/${created}/${created}.journal-needs-repair.json 2>/dev/null || cat ${TRANSCRIPTS}/${created}.journal-needs-repair.json 2>/dev/null || echo none
+`, "refuse-read-marker.sh");
+    check(/"reason"/.test(marker), "the host wrote the needs-repair state with its reason", marker.trim().slice(0, 160));
+
+    const roster = await call("listAgents", {}, TOKEN).catch(() => []);
+    const row = (Array.isArray(roster) ? roster : []).find((agent) => agent.id === created);
+    check(row?.transcriptNeedsRepair != null,
+      "listAgents carries transcriptNeedsRepair, which is what draws the pill and the control",
+      JSON.stringify(row?.transcriptNeedsRepair ?? null));
+
+    // The refusal ran, once, and said so in plain words. Without this the leg cannot tell a host
+    // that refused from a host that never tried.
+    const log = await runInBox(`#!/bin/sh\ngrep "sand\\]\\[transcript" /tmp/sand-host.log 2>/dev/null | grep ${created} | tail -3\n`, "refuse-read-log.sh");
+    check(/could not repair the conversation store/.test(log),
+      "the host says it could not repair it, in plain words with no class names",
+      log.trim().split("\n")[0] ?? "");
+    check(!/Error|Transcript[A-Z]/.test((log.trim().split("\n")[0] ?? "").replace(/EISDIR[^"]*/, "")),
+      "and the line a person reads carries no class names");
+
+    // Undo the damage the way a person cannot: the button's job is the state, not the directory.
+    await runInBox(`#!/bin/sh\nrmdir ${TRANSCRIPTS}/${created}/${created}.jsonl 2>/dev/null; ls -a ${TRANSCRIPTS}/${created}\n`, "refuse-undo.sh");
+
+    const repaired = await call("repairAgentTranscript", { id: created, agentId: created }, TOKEN).catch((error) => error);
+    if (repaired instanceof Error) {
+      check(false, "the verb answers on a latched agent", repaired.message);
+    } else {
+      check(repaired?.outcome === "cleared",
+        "the verb says cleared, not repaired: turning the state off is not a repair",
+        JSON.stringify(repaired));
+      check(typeof repaired?.reason === "string" && repaired.reason.length > 0,
+        "and hands back the reason, which is what the console prints", repaired?.reason ?? "");
+    }
+
+    const back = await turnCompletes(created, "Say the single word fixed and nothing else.", TOKEN);
+    check(back.ok, "the next message completes, and the state does not come back", `${back.before} -> ${back.after} entries`);
+    const kept = await entryCount(created, TOKEN);
+    check(kept != null && kept > baseline,
+      "the entries the store held are on the conversation again", `${baseline} at the damage, ${kept} after`);
+    // The conversation file the recovery had to build. Its absence is what "must recover before
+    // preparing" was really about, so its presence is the proof the recovery ran this time.
+    const rebuilt = await runInBox(`#!/bin/sh\nwc -l < ${TRANSCRIPTS}/${created}/${created}.jsonl 2>/dev/null || echo none\n`, "refuse-count.sh");
+    check(/^\s*[1-9]/.test(rebuilt), "and the host rebuilt the conversation file it could not write before", `${rebuilt.trim()} lines`);
+  } catch (error) {
+    check(false, "the refusal leg ran to the end", error.message);
+  } finally {
+    if (created) {
+      await call("deleteAgent", { id: created }, TOKEN).catch(() => {});
+      await runInBox(`#!/bin/sh\nrm -rf ${TRANSCRIPTS}/${created} ${TRANSCRIPTS}/${created}.journal-needs-repair.json\n`, "refuse-clean.sh").catch(() => {});
+    }
+  }
+}
+
+// ================================================================================================
 
 console.log(`verify-transcript-repair: ${MODE}`);
 if (MODE === "console" || MODE === "all") { console.log("\nthe console"); await consoleLeg(); }
 if (MODE === "box" || MODE === "all") { console.log("\nthe box"); await boxLeg(); }
+if (MODE === "refuse") { console.log("\nthe box, the shape recovery must refuse"); await refuseLeg(); }
 
 console.log(`\n${passes} passed, ${failures} failed, ${skips} skipped`);
 process.exit(failures === 0 ? 0 : 1);

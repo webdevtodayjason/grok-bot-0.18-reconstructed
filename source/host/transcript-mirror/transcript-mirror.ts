@@ -8,6 +8,21 @@ import { SandError } from "../../shared/errors/registry.js";
 import { brandedErrno } from "../../shared/errors/bounded.js";
 
 const writeLanes = new Map<string, Promise<unknown>>();
+/**
+ * BOX-6b. The per-conversation write lane, exported so a repair arriving off the gateway runs in the
+ * SAME queue as the journal's own operations instead of racing them. Keyed by the conversation
+ * file's path, which is the key the mirror below serialises on.
+ *
+ * Do not call this from inside an operation already running in the lane: it is a promise chain, not
+ * a reentrant lock, and nesting it deadlocks the conversation.
+ */
+export function runInTranscriptWriteLane<T>(jsonlPath: string, operation: () => Promise<T>): Promise<T> {
+  const previous = writeLanes.get(jsonlPath) ?? Promise.resolve();
+  const current = previous.then(operation, operation);
+  writeLanes.set(jsonlPath, current);
+  void current.finally(() => { if (writeLanes.get(jsonlPath) === current) writeLanes.delete(jsonlPath); }).catch(() => {});
+  return current;
+}
 function safeId(id: string): string { if (/^[A-Za-z0-9._-]+$/.test(id) && id !== "." && id !== "..") return id; throw new TranscriptJournalCorruptionError("unsafe conversation id"); }
 export interface TranscriptOccurrence { id: string; line: string }
 export interface TranscriptDeriver<Store> { derive(ctx: unknown, store: Store, previous: TranscriptCheckpoint, checkpoint: TranscriptCheckpoint, finalize: boolean, deferred?: DeferredTranscriptStep): Promise<{ occurrences: readonly TranscriptOccurrence[]; deferredStep?: DeferredTranscriptStep }>; initial(ctx: unknown, store: Store, checkpoint: TranscriptCheckpoint): Promise<readonly TranscriptOccurrence[]> }
@@ -34,7 +49,7 @@ export class FileTranscriptMirror<Store = unknown> {
   private async installAtomic(path: string, bytes: Uint8Array): Promise<void> { await mkdir(dirname(path), { recursive: true }); const temporary = join(dirname(path), `.transcript.${randomUUID()}.part`); let handle; try { handle = await open(temporary, "wx"); await writeAll(handle, bytes, 0); await handle.sync(); await handle.close(); handle = undefined; await rename(temporary, path); await this.syncParent(path); } catch (error) { await handle?.close().catch(() => {}); await unlink(temporary).catch(() => {}); throw error; } }
   async ownsConversation(id: string): Promise<boolean> { try { await stat(this.modePathFor(id)); return true; } catch (error) { if (isMissingFile(error)) return false; throw error; } }
   async claimConversation(id: string): Promise<void> { const path = this.modePathFor(id); if (await this.ownsConversation(id)) return; await this.installAtomic(path, Buffer.from("1\n")); }
-  private serialize<T>(id: string, operation: () => Promise<T>): Promise<T> { const key = this.jsonlPathFor(id), previous = writeLanes.get(key) ?? Promise.resolve(); const current = previous.then(operation, operation); writeLanes.set(key, current); void current.finally(() => { if (writeLanes.get(key) === current) writeLanes.delete(key); }).catch(() => {}); return current; }
+  private serialize<T>(id: string, operation: () => Promise<T>): Promise<T> { return runInTranscriptWriteLane(this.jsonlPathFor(id), operation); }
   private async readPending(id: string): Promise<PendingTranscriptCheckpoint | null> { try { return parsePendingCheckpoint(await readFile(this.pendingPathFor(id), "utf8")); } catch (error) { if (isMissingFile(error)) return null; throw error; } }
   private async removePending(id: string): Promise<void> { const path = this.pendingPathFor(id); try { await unlink(path); await this.syncParent(path); } catch (error) { if (!isMissingFile(error)) throw error; } }
   private async readDeferred(id: string): Promise<DeferredTranscriptStep | undefined> { try { return parseDeferredStep(JSON.parse(await readFile(this.cursorPathFor(id), "utf8"))); } catch (error) { if (isMissingFile(error)) return undefined; throw error; } }

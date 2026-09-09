@@ -19,23 +19,22 @@
 // delete them) and try once more. Rebuilding a file from a database that is fine would have shipped
 // a fix for damage this agent does not have.
 //
-// TWO RULES. Never lose an entry that could have been kept -- the recovery runs BEFORE anything is
-// set aside, because a valid pending write-ahead copy is exactly what it replays. And never remove
-// the mode marker to "fix" it: that silently moves the conversation back to the old writer behind
-// the operator's back.
+// THREE RULES. Never lose an entry that could have been kept. In the IN-TURN path that means the
+// recovery runs BEFORE anything is set aside, because a valid pending write-ahead copy is exactly
+// what it replays. In the ON-DEMAND path (the console's Repair button) there is no recovery to run
+// first, so the pending copy is PARSED and only a file that cannot be parsed is set aside: renaming
+// a structurally valid write-ahead copy throws away the turn it is holding, and the review measured
+// exactly that -- a three-line conversation came back two lines and the console called it kept.
+// Second, never remove the mode marker to "fix" it: that silently moves the conversation back to
+// the old writer behind the operator's back. Third, clearing the stuck state is not a repair and
+// must not be reported as one: it is `cleared`, it is counted, and the second one is refused.
 import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-import { isMissingFile, TranscriptJournalCorruptionError, type TranscriptCheckpoint } from "./transcript-journal-codec.js";
+import { isMissingFile, parsePendingCheckpoint, TranscriptJournalCorruptionError, type TranscriptCheckpoint } from "./transcript-journal-codec.js";
 
 export const TRANSCRIPT_REPAIR_MARKER_SUFFIX = ".journal-needs-repair.json";
 export const TRANSCRIPTS_DIRNAME = "agent-transcripts";
-
-/** The conversation is stuck and a person has to press Repair. */
-export interface TranscriptRepairNeed {
-  readonly reason: string;
-  readonly at: string;
-}
 
 export interface TranscriptRepairReport {
   readonly conversationId: string;
@@ -44,7 +43,12 @@ export interface TranscriptRepairReport {
   readonly after: number;
   /** Absolute paths of the files set aside. Empty is a normal outcome, not a failure. */
   readonly quarantined: readonly string[];
-  readonly outcome: "recovered" | "already-healthy" | "needs-attention";
+  /**
+   * `cleared` is deliberately its own word rather than a flavour of `recovered`: when the only
+   * thing the on-demand repair could do was turn the stuck state off, nothing was repaired and the
+   * console must not say a count was kept.
+   */
+  readonly outcome: "recovered" | "cleared" | "already-healthy" | "needs-attention";
   readonly reason?: string;
 }
 
@@ -81,40 +85,134 @@ export function transcriptsDirForAgentDir(agentDir: string): string {
   return join(dirname(dirname(agentDir)), TRANSCRIPTS_DIRNAME);
 }
 
-export function transcriptRepairMarkerPath(transcriptsDir: string, conversationId: string): string {
-  return join(transcriptsDir, conversationId, `${conversationId}${TRANSCRIPT_REPAIR_MARKER_SUFFIX}`);
+/** The conversation is stuck and a person has to press Repair. */
+export interface TranscriptRepairNeed {
+  readonly reason: string;
+  readonly at: string;
+  /** How many times a person has already cleared this state. The second clear is refused. */
+  readonly clears?: number;
 }
 
-export async function readTranscriptRepairNeed(transcriptsDir: string, conversationId: string): Promise<TranscriptRepairNeed | null> {
+/** What is actually on disk, including the history of a state that has been cleared. */
+interface TranscriptRepairRecord {
+  readonly reason: string;
+  readonly at: string;
+  readonly clears: number;
+  /** True once a person cleared it: the latch is off, but the count survives. */
+  readonly cleared: boolean;
+  /** Which of the two paths below is holding it. */
+  readonly path: string;
+}
+
+/**
+ * Two places, read in this order. The marker belongs beside the conversation it is about, but the
+ * state it records is often "this directory cannot be written to" -- and a latch that cannot be
+ * written is a turn that fails for ever with no pill, no reason and no button. So the root of the
+ * transcripts directory is the fallback, and both are read and both are cleared.
+ */
+function transcriptRepairMarkerPaths(transcriptsDir: string, conversationId: string): readonly string[] {
+  return [
+    join(transcriptsDir, conversationId, `${conversationId}${TRANSCRIPT_REPAIR_MARKER_SUFFIX}`),
+    join(transcriptsDir, `${conversationId}${TRANSCRIPT_REPAIR_MARKER_SUFFIX}`),
+  ];
+}
+
+export function transcriptRepairMarkerPath(transcriptsDir: string, conversationId: string): string {
+  return transcriptRepairMarkerPaths(transcriptsDir, conversationId)[0]!;
+}
+
+async function readRecordAt(path: string): Promise<TranscriptRepairRecord | null> {
   try {
-    const parsed: unknown = JSON.parse(await readFile(transcriptRepairMarkerPath(transcriptsDir, conversationId), "utf8"));
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     const record = parsed as Record<string, unknown>;
-    const reason = typeof record.reason === "string" && record.reason.length > 0 ? record.reason : "this conversation store needs repair";
-    const at = typeof record.at === "string" ? record.at : new Date(0).toISOString();
-    return { reason, at };
+    const clears = typeof record.clears === "number" && Number.isSafeInteger(record.clears) && record.clears >= 0 ? record.clears : 0;
+    return {
+      reason: typeof record.reason === "string" && record.reason.length > 0 ? record.reason : "this conversation store needs repair",
+      at: typeof record.at === "string" ? record.at : new Date(0).toISOString(),
+      clears,
+      cleared: record.cleared === true,
+      path,
+    };
   } catch { return null; }
 }
 
-export async function writeTranscriptRepairNeed(transcriptsDir: string, conversationId: string, reason: string): Promise<TranscriptRepairNeed> {
-  const need: TranscriptRepairNeed = { reason, at: new Date().toISOString() };
-  const path = transcriptRepairMarkerPath(transcriptsDir, conversationId);
+async function readTranscriptRepairRecord(transcriptsDir: string, conversationId: string): Promise<TranscriptRepairRecord | null> {
+  for (const path of transcriptRepairMarkerPaths(transcriptsDir, conversationId)) {
+    const record = await readRecordAt(path);
+    if (record != null) return record;
+  }
+  return null;
+}
+
+/** The live latch. A state a person has already cleared is history, not a latch, and reads null. */
+export async function readTranscriptRepairNeed(transcriptsDir: string, conversationId: string): Promise<TranscriptRepairNeed | null> {
+  const record = await readTranscriptRepairRecord(transcriptsDir, conversationId);
+  if (record == null || record.cleared) return null;
+  return { reason: record.reason, at: record.at, clears: record.clears };
+}
+
+async function writeRecord(path: string, record: { reason: string; at: string; clears: number; cleared: boolean }): Promise<boolean> {
   try {
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, `${JSON.stringify(need)}\n`, { encoding: "utf8", mode: 0o600 });
-  } catch {}
+    await writeFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+    return true;
+  } catch { return false; }
+}
+
+export async function writeTranscriptRepairNeed(transcriptsDir: string, conversationId: string, reason: string): Promise<TranscriptRepairNeed> {
+  const previous = await readTranscriptRepairRecord(transcriptsDir, conversationId);
+  const need = { reason, at: new Date().toISOString(), clears: previous?.clears ?? 0 };
+  for (const path of transcriptRepairMarkerPaths(transcriptsDir, conversationId)) {
+    if (await writeRecord(path, { ...need, cleared: false })) break;
+  }
   return need;
 }
 
-export async function clearTranscriptRepairNeed(transcriptsDir: string, conversationId: string): Promise<void> {
-  try { await unlink(transcriptRepairMarkerPath(transcriptsDir, conversationId)); }
-  catch (error) { if (!isMissingFile(error)) throw error; }
+/**
+ * Turns the latch off and remembers that a person did it. Returns how many times it has now been
+ * cleared, which is what makes a second clear refusable: on the one case this state exists for the
+ * recovery has already refused twice, so clearing again and answering "repaired" is a loop.
+ */
+export async function clearTranscriptRepairNeed(transcriptsDir: string, conversationId: string): Promise<number> {
+  const previous = await readTranscriptRepairRecord(transcriptsDir, conversationId);
+  if (previous == null) return 0;
+  const clears = previous.clears + 1;
+  const written = await writeRecord(previous.path, { reason: previous.reason, at: new Date().toISOString(), clears, cleared: true });
+  if (!written) {
+    try { await unlink(previous.path); }
+    catch (error) { if (!isMissingFile(error)) throw error; }
+  }
+  return clears;
 }
 
-/** Lines in the conversation file. A file that was never written counts 0, which is not an error. */
+/**
+ * Forgets the whole history, latch and clear count together. Called when a recovery actually works:
+ * the store is back, so the next time it breaks a person gets their clear again.
+ */
+export async function forgetTranscriptRepairHistory(transcriptsDir: string, conversationId: string): Promise<void> {
+  for (const path of transcriptRepairMarkerPaths(transcriptsDir, conversationId)) {
+    try { await unlink(path); }
+    catch (error) { if (!isMissingFile(error)) throw error; }
+  }
+}
+
+/**
+ * Lines in the conversation file. A file that was never written counts 0, which is not an error --
+ * and neither is one that cannot be read at all. This count exists to be REPORTED, so a directory
+ * where the file should be, or a mode that refuses the read, has to come back as "no readable
+ * entries" rather than take the repair down with it: a repair that throws while counting leaves the
+ * agent stuck with no state written and nothing for a person to press.
+ */
+const UNREADABLE_CODES = new Set(["EISDIR", "ENOTDIR", "EACCES", "EPERM", "ELOOP"]);
 export async function countTranscriptEntries(jsonlPath: string): Promise<number> {
   try { return (await readFile(jsonlPath, "utf8")).split("\n").filter((line) => line.trim().length > 0).length; }
-  catch (error) { if (isMissingFile(error)) return 0; throw error; }
+  catch (error) {
+    if (isMissingFile(error)) return 0;
+    const code = typeof error === "object" && error != null && "code" in error ? String((error as { code?: unknown }).code) : "";
+    if (UNREADABLE_CODES.has(code)) return 0;
+    throw error;
+  }
 }
 
 /** Same stamp shape the store's own quarantine uses, so an operator reads one convention. */
@@ -143,6 +241,22 @@ export async function setAsideStaleJournalFiles(paths: { readonly pendingPath: s
     if (cursor != null) moved.push(cursor);
   }
   return moved;
+}
+
+/**
+ * The same job for the ON-DEMAND repair, which has no recovery in front of it. A pending write-ahead
+ * copy that PARSES is either a live turn's, or one the next recover() will replay or discard against
+ * the real checkpoint hashes -- so it is left exactly where it is, and only a file that cannot be
+ * parsed is set aside. MEASURED in review on this Mac: renaming a valid one dropped the turn it was
+ * holding (3 lines became 2) while the console reported "2 entries kept".
+ */
+export async function setAsideUnusableJournalFiles(paths: { readonly pendingPath: string; readonly cursorPath: string }): Promise<string[]> {
+  let raw: string;
+  try { raw = await readFile(paths.pendingPath, "utf8"); }
+  catch (error) { if (isMissingFile(error)) return []; throw error; }
+  try { parsePendingCheckpoint(raw); return []; }
+  catch { /* not parseable: it can only be in the way */ }
+  return await setAsideStaleJournalFiles(paths);
 }
 
 /**
@@ -190,7 +304,11 @@ function summaryLine(report: TranscriptRepairReport): string {
   const aside = report.quarantined.length === 0
     ? "nothing set aside"
     : `set aside ${report.quarantined.map((path) => basename(path)).join(", ")}`;
-  const verb = report.outcome === "already-healthy" ? "nothing to repair in" : "repaired";
+  const verb = report.outcome === "already-healthy"
+    ? "nothing to repair in"
+    : report.outcome === "cleared"
+      ? "cleared the stuck state on"
+      : "repaired";
   return `[sand][transcript] ${verb} the conversation store for ${report.conversationId}: ${report.before} entries before, ${report.after} after, ${aside}`;
 }
 
@@ -204,9 +322,16 @@ export interface TranscriptFileRepairOptions {
 
 /**
  * The on-demand repair, behind the console's Repair control. It has no live conversation state to
- * rebuild from, so it does what can be done safely from outside a turn: set the stale write-ahead
- * copy and cursor aside, REINDEX the agent's databases, and clear the needs-repair latch so the
- * next message runs the recovery again. The counts are the conversation file's, before and after.
+ * rebuild from, so it does what can be done safely from outside a turn: set a write-ahead copy that
+ * cannot be parsed aside, REINDEX a database that will not open, and turn the needs-repair state off
+ * so the next message runs the recovery again. The counts are the conversation file's, before and
+ * after -- this never rewrites that file, so it cannot lose a line.
+ *
+ * Three different answers, on purpose. Something was moved or reindexed: `recovered`. Nothing was,
+ * and the only act was turning the stuck state off: `cleared`, which the console words as "send it
+ * one message and see", because nothing has been repaired yet. Nothing at all to do:
+ * `already-healthy`. And a state a person has ALREADY cleared once is refused rather than cleared
+ * again -- by then the recovery has refused twice and a second clear is a loop with a green tick.
  */
 export async function repairTranscriptFiles(options: TranscriptFileRepairOptions): Promise<TranscriptRepairReport> {
   const { transcriptsDir, conversationId } = options;
@@ -215,22 +340,34 @@ export async function repairTranscriptFiles(options: TranscriptFileRepairOptions
   const before = await countTranscriptEntries(jsonlPath);
   let report: TranscriptRepairReport;
   try {
-    const quarantined = await setAsideStaleJournalFiles({
+    const quarantined = await setAsideUnusableJournalFiles({
       pendingPath: join(dir, `${conversationId}.journal-pending.json`),
       cursorPath: join(dir, `${conversationId}.journal-cursor.json`),
     });
     const reindexed = await reindexIfUnreadable(options.sqlitePaths ?? []);
     const need = await readTranscriptRepairNeed(transcriptsDir, conversationId);
-    await clearTranscriptRepairNeed(transcriptsDir, conversationId);
-    const after = await countTranscriptEntries(jsonlPath);
-    const changed = quarantined.length > 0 || reindexed.length > 0 || need != null;
-    report = {
-      conversationId, before, after, quarantined,
-      outcome: changed ? "recovered" : "already-healthy",
-      reason: changed
-        ? "the stuck state was cleared; the next message rebuilds what is missing"
-        : "this conversation store had nothing to repair",
-    };
+    const moved = quarantined.length > 0 || reindexed.length > 0;
+    if (need != null && !moved && (need.clears ?? 0) >= 1) {
+      report = {
+        conversationId, before, after: before, quarantined,
+        outcome: "needs-attention",
+        reason: `this was cleared once already and came straight back, so it needs a person: ${need.reason}`,
+      };
+    } else {
+      if (need != null) await clearTranscriptRepairNeed(transcriptsDir, conversationId);
+      const after = await countTranscriptEntries(jsonlPath);
+      report = moved
+        ? {
+          conversationId, before, after, quarantined, outcome: "recovered",
+          reason: "the stuck state was cleared; the next message rebuilds what is missing",
+        }
+        : need != null
+          ? { conversationId, before, after, quarantined, outcome: "cleared", reason: need.reason }
+          : {
+            conversationId, before, after, quarantined, outcome: "already-healthy",
+            reason: "this conversation store had nothing to repair",
+          };
+    }
   } catch (error) {
     report = { conversationId, before, after: before, quarantined: [], outcome: "needs-attention", reason: messageOf(error) };
   }
@@ -265,6 +402,9 @@ export async function repairTranscriptJournal<Store>(options: TranscriptJournalR
   }
 
   const finish = async (quarantined: readonly string[]): Promise<TranscriptRepairReport> => {
+    // The store is back, so the clear count goes with it: the next time this breaks, a person gets
+    // their one clear again rather than meeting a refusal earned by an episode that is over.
+    await forgetTranscriptRepairHistory(transcriptsDir, conversationId).catch(() => {});
     const after = await countTranscriptEntries(target.jsonlPathFor(conversationId));
     const report: TranscriptRepairReport = {
       conversationId, before, after, quarantined,

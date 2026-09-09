@@ -3607,7 +3607,7 @@
     const repair = canRepair && needsRepair(worker)
       ? `<section class="settings-section" data-repair-for="${escapeHtml(worker.id)}"><div class="setting-row"><div><strong>Conversation store</strong><small>${escapeHtml(
         (typeof worker.needsRepairReason === "string" && worker.needsRepairReason.trim())
-          || "This agent's conversation store needs repair, so every turn ends without an answer. Repairing rebuilds it from what the box already holds and keeps every entry it can. Nothing is deleted.",
+          || "This agent's conversation store needs repair, so every turn ends without an answer. Repairing turns the stuck state off and sets aside anything unreadable so the next message can rebuild the conversation. Nothing is deleted.",
       )}</small></div><button class="primary-button" type="button" data-repair-transcript="${escapeHtml(worker.id)}">Repair</button></div><p class="field-hint" data-repair-note hidden></p></section>`
       : "";
     return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role || "No role set on the host.")}</p><div class="tag-list"><span class="tag">endpoint (box-wide) · ${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section>${repair}<section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, the role and the routines shown here belong to this agent. The endpoint and the box's screens belong to the whole box and are shared with every other agent on it.</p>${identity}${role}${avatar}${switches}<div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div>${browser}${hygiene}</section>${memories}${audit}</div>`;
@@ -3662,8 +3662,19 @@
   // publishes the judge, so one cannot be on the page without the other.
   function repairOutcomeWords(answer) {
     const kept = Number.isFinite(answer.after) ? answer.after : null;
-    const worked = (typeof window !== "undefined" ? window.__transcriptRepair : null)?.worked(answer) === true;
+    const judge = typeof window !== "undefined" ? window.__transcriptRepair : null;
+    const worked = judge?.worked(answer) === true;
     const moved = (answer.quarantined ?? []).length;
+    // The host could only turn the stuck state off. Nothing was repaired and no count was kept, so
+    // this says what it did and what to do next instead of claiming a repair. The control and the
+    // pill still go -- the state really is off -- and the next message either works or puts it back.
+    if (judge?.cleared?.(answer) === true) {
+      const why = (answer.reason || "").trim();
+      return {
+        worked: true,
+        text: `Cleared the stuck state. Send this agent one message: if it answers, it is back. If it fails the same way, this store needs a person${why ? `, and the reason it gave was: ${why}` : ""}.`,
+      };
+    }
     if (!worked) {
       const said = (answer.reason || answer.outcome || "").trim();
       // The host's own sentence, with no prefix and no status word in front of it.

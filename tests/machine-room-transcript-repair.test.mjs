@@ -45,7 +45,7 @@ async function loadPredicate() {
   const source = await readFile(adapterPath, "utf8");
   const block = between(source, "  // ---- BOX-6b: a conversation store that needs repair", "  // ---- end BOX-6b", "the adapter's BOX-6b block");
   const global = {};
-  const api = new Function("global", `${block}\nreturn { TRANSCRIPT_REPAIR_SENTENCE, transcriptRepairWordsSeen, repairFlagOf };`)(global);
+  const api = new Function("global", `${block}\nreturn { TRANSCRIPT_REPAIR_SENTENCE, transcriptRepairWordsSeen, repairFlagOf, repairWorked, repairCleared };`)(global);
   return { ...api, global };
 }
 
@@ -373,7 +373,11 @@ test("BOX-6b: the control's own words promise what the repair actually does", as
   const worker = { id: "titan", name: "Titan", role: "", model: "m", files: [], browser: { screen: "" }, status: "attention", statusText: "x", needsRepair: true };
   const panel = await loadPanel({ adapter: { repairTranscript: () => null } });
   const drawn = panel(worker);
-  assert.match(drawn, /keeps every entry it can/);
+  // What it DOES, not what it would be nice if it did. The verb sets the stuck state aside; the
+  // message after it is what rebuilds. A card that promised a rebuild is the false promise the
+  // review round found in the operator doc, and it was on this card too.
+  assert.match(drawn, /the next message can rebuild/);
+  assert.doesNotMatch(drawn, /Repairing rebuilds it/);
   assert.match(drawn, /Nothing is deleted/);
   assert.match(drawn, /data-repair-note/);
   // The host's own reason replaces the generic sentence when it sent one.
@@ -600,4 +604,62 @@ test("BOX-6b: one judge decides both the pill and the button's words", async () 
   assert.equal(judge({ before: 0, after: 0, quarantined: [], outcome: "already-healthy", reason: "this conversation store had nothing to repair" }), true);
   // The host's fourth word, for a checkpoint it had to rebuild from nothing.
   assert.equal(judge({ after: 0, outcome: "reset" }), true);
+});
+
+// ==================================================================================================
+// The review's false success: an on-demand repair whose only act was turning the stuck state off
+// answered "recovered", and the panel said "Repaired, 0 entries kept." on the one case the state
+// exists for. It has its own word now, and its own sentence.
+// ==================================================================================================
+
+test("BOX-6b: clearing the stuck state says so, and never claims a count it did not keep", async () => {
+  const press = await loadRepairPress({
+    worker: { id: "titan", needsRepair: true },
+    adapter: {
+      repairTranscript: async () => ({
+        agentId: "titan", before: 0, after: 0, quarantined: [], outcome: "cleared",
+        reason: "the conversation blobs are not readable",
+      }),
+    },
+  });
+  const btn = button();
+  await press.repairTranscriptFromPanel(btn, "titan");
+  assert.match(press.note.textContent, /^Cleared the stuck state\./);
+  assert.match(press.note.textContent, /Send this agent one message/);
+  assert.match(press.note.textContent, /the conversation blobs are not readable/);
+  assert.doesNotMatch(press.note.textContent, /Repaired/, "nothing was repaired");
+  assert.doesNotMatch(press.note.textContent, /entries kept/);
+  assert.doesNotMatch(press.note.textContent, /did not repair it/, "the state really is off");
+  // The state is off, so the control and the pill go with it; the next message puts them back if
+  // the store is still broken.
+  assert.equal(btn.removed, true);
+  assert.equal(press.rendered.roster >= 1, true);
+});
+
+test("BOX-6b: cleared is not a success word for the judge that clears the pill by itself", async () => {
+  const { repairWorked, repairCleared } = await loadPredicate();
+  assert.equal(repairWorked({ before: 0, after: 0, outcome: "cleared" }), false,
+    "a repair that repaired nothing must not read as one");
+  assert.equal(repairCleared({ before: 0, after: 0, outcome: "cleared" }), true);
+  assert.equal(repairCleared({ outcome: "recovered" }), false);
+  assert.equal(repairCleared(null), false);
+  // The refusal the second press gets, once a person has cleared it once.
+  assert.equal(repairWorked({ outcome: "needs-attention", reason: "this was cleared once already and came straight back, so it needs a person: the conversation blobs are not readable" }), false);
+});
+
+test("BOX-6b: a second press, refused by the host, reads as a refusal with the original reason", async () => {
+  const press = await loadRepairPress({
+    worker: { id: "titan", needsRepair: true },
+    adapter: {
+      repairTranscript: async () => ({
+        agentId: "titan", before: 0, after: 0, quarantined: [], outcome: "needs-attention",
+        reason: "this was cleared once already and came straight back, so it needs a person: the conversation blobs are not readable",
+      }),
+    },
+  });
+  const btn = button();
+  await press.repairTranscriptFromPanel(btn, "titan");
+  assert.match(press.note.textContent, /^That did not repair it: this was cleared once already/);
+  assert.equal(btn.removed, false, "the button stays, because the state is still true");
+  assert.equal(btn.disabled, false);
 });

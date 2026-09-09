@@ -95,15 +95,24 @@ reach the box at all.**
 2. Open **Agent details**. The first card is **Conversation store**, carrying the host's own reason
    for the state and a **Repair** button.
 
-3. Press it. It rebuilds the conversation from what the box already holds, keeps every entry it
-   can, and moves nothing to the bin — a file it cannot use is renamed with a timestamp, never
-   deleted. The panel then says what happened, with the count:
+3. Press it. **The button does not rebuild the conversation. Read what it does, because the
+   wording of its answer follows from it exactly.** From outside a turn there is no live checkpoint
+   to rebuild from, so it does the three things that are safe from there: it sets aside a
+   write-ahead copy that cannot be read (renamed with a timestamp, never deleted — a copy that
+   still reads is left alone, because it is holding a turn), it reindexes a database that will not
+   open, and it turns the stuck state off. Turning that state off is the part that matters: the
+   next message runs the host's own recovery, and *that* is the run which rebuilds the conversation.
 
-   > Repaired, 115 entries kept. Ask this agent something and it should answer now.
+   Four answers, and they mean different things:
 
-   A store that turned out to have nothing wrong with it says so instead — *There was nothing to
-   repair here.* A refusal says what the host said, in the host's own words, and leaves the button
-   where it was.
+   > **Cleared the stuck state.** Send this agent one message: if it answers, it is back. If it
+   > fails the same way, this store needs a person, and the reason it gave was: …
+
+   is the common one — nothing was repairable from outside, the stuck state is off, and the next
+   message decides. A press that did move a file says **Repaired, N entries kept** with what it set
+   aside; a store with nothing wrong says **There was nothing to repair here**; and a second press
+   on a state that was already cleared once is refused with the original reason, because by then
+   the host's own recovery has refused twice and clearing it again is a loop.
 
 4. Ask the agent something. That is the only proof that counts.
 
@@ -124,22 +133,42 @@ curl -s -X POST http://127.0.0.1:1340/api/repairAgentTranscript \
 ```
 
 It answers `{agentId, before, after, quarantined, outcome, reason}` and writes an audit row into
-`agents/<id>/audit.jsonl`. Measured on grok-bot-local-vm 2026-09-09, against a store with nothing
-wrong with it:
+`agents/<id>/audit.jsonl`.
+
+**Measured on the R750, demo box `titanbot-box-atonqjq7zx593jsacaccpfau`, 2026-09-09 20:46:27.956Z**
+— the one time this has been run against a real customer-facing agent, `c63fdce4-…`, and the whole
+of what it answered, out of that agent's own ledger:
 
 ```json
-{"agentId":"6fc65d2b-…","before":0,"after":0,"quarantined":[],
- "outcome":"already-healthy","reason":"this conversation store had nothing to repair"}
+{"type":"transcript_repair","outcome":"already-healthy","before":0,"after":0,"quarantined":[]}
 ```
 
-Two things to read correctly, because both are easy to get backwards:
+That is the honest answer for that agent: by the time the button was pressed the swapped bundle's
+own in-turn recovery had already unwedged it, so there was nothing left for the verb to do. The
+line in that box's host log a moment later — `repaired the conversation store for c63fdce4-…: 0
+entries before, 8 after` — is the **message's** recovery, not the button's. Read the two together
+that way; the counts belong to whichever half did the work.
+
+**Measured on grok-bot-local-vm** against a scratch agent deliberately left in the stuck state, the
+answer the button is really for:
+
+```json
+{"agentId":"…","before":0,"after":0,"quarantined":[],
+ "outcome":"cleared","reason":"<the reason the recovery gave when it refused>"}
+```
+
+Three things to read correctly, because they are easy to get backwards:
+
+- **`cleared` is not `recovered`.** It means the stuck state is off and nothing else happened yet.
+  The next message is what rebuilds, and if that message fails the same way the store needs a
+  person: pressing the button a second time is refused on purpose.
 
 - **An empty `quarantined` is a normal answer, not a failure.** It arrives as `[]`, and in the one
   case this has been run against in production both databases were healthy and there was nothing
   to set aside. Read `after` for what was kept and `outcome` for what happened.
 - **`reason` explains; it does not refuse.** The host sends one on a success as well. The outcome
-  word is the verdict: `already-healthy`, `recovered` and `reset` are repairs that worked,
-  `refused` is not.
+  word is the verdict: `already-healthy` and `recovered` are repairs that worked, `cleared` is a
+  stuck state turned off, and `needs-attention` is a refusal.
 
 ### Before you repair a real customer's agent
 

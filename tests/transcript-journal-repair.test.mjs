@@ -13,7 +13,7 @@
 // the repair has to set aside rather than delete, and the third is a recovery that cannot succeed:
 // it must latch, fail the turn once, and NOT try again on every following turn.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -278,4 +278,126 @@ test("an unknown agent id is refused rather than resolved to a path", async () =
   const result = await verbModule.repairAgentTranscript({ agentId: "../../etc" });
   assert.equal(result.outcome, "needs-attention");
   assert.equal(result.reason, "that is not an agent this box knows");
+});
+
+// ================================================================================================
+// The review's blocker, pinned. Pressing Repair used to rename ANY <id>.journal-pending.json to
+// .corrupt-<stamp> without reading it, so a press during a live turn threw away the turn that WAL
+// was holding and the console reported it as "kept". Measured on this Mac before the fix: a
+// 3-line conversation came back 2 lines and the verb answered before 2, after 2, "recovered".
+// ================================================================================================
+
+test("a write-ahead copy that parses is left where it is, so the turn it holds still lands", async () => {
+  const conversation = claimedConversation("sand-journal-live-wal");
+  const deriver = countingDeriver();
+  const { journal } = routedMirror(conversation.transcriptsDir, deriver);
+  const TWO = { turns: [Uint8Array.of(1), Uint8Array.of(2)] };
+
+  // Two durable lines, then a third turn prepared and NOT yet committed: a real pending WAL.
+  await journal.recover(CTX, conversation.id, TWO, STORE);
+  await journal.prepareCheckpoint(CTX, conversation.id, CHECKPOINT, STORE, false);
+  const jsonl = conversation.dirOf("jsonl");
+  assert.equal(entriesIn(jsonl).length, 2, "the third line is in the write-ahead copy, not the file yet");
+
+  const report = await repairModule.repairTranscriptFiles({
+    transcriptsDir: conversation.transcriptsDir,
+    conversationId: conversation.id,
+    log: () => {},
+  });
+  assert.deepEqual(report.quarantined, [], "a valid write-ahead copy is not damage and is not moved");
+  assert.equal(report.outcome, "already-healthy");
+
+  const dir = path.join(conversation.transcriptsDir, conversation.id);
+  assert.equal(readdirSync(dir).filter((name) => name.includes(".corrupt-")).length, 0);
+
+  // A fresh mirror, the way a restarted host meets it: the pending copy replays and the line lands.
+  const next = routedMirror(conversation.transcriptsDir, countingDeriver());
+  await next.journal.recover(CTX, conversation.id, CHECKPOINT, STORE);
+  assert.equal(entriesIn(jsonl).length, 3, "the turn the write-ahead copy was holding reached the file");
+});
+
+test("a write-ahead copy that cannot be parsed is still set aside", async () => {
+  const conversation = claimedConversation("sand-journal-broken-wal");
+  writeFileSync(conversation.dirOf("jsonl"), `${lineFor(0)}\n`, "utf8");
+  writeFileSync(conversation.dirOf("journal-pending.json"), "{ not json", "utf8");
+
+  const report = await repairModule.repairTranscriptFiles({
+    transcriptsDir: conversation.transcriptsDir,
+    conversationId: conversation.id,
+    log: () => {},
+  });
+  assert.equal(report.quarantined.length, 1);
+  assert.match(report.quarantined[0], /journal-pending\.json\.corrupt-/);
+  assert.equal(report.outcome, "recovered");
+  assert.equal(report.after, 1, "the conversation file is never rewritten by the on-demand repair");
+});
+
+test("clearing the stuck state answers cleared, not repaired, and the second clear is refused", async () => {
+  const conversation = claimedConversation("sand-journal-latch-only");
+  const reason = "the conversation blobs are not readable";
+  await repairModule.writeTranscriptRepairNeed(conversation.transcriptsDir, conversation.id, reason);
+
+  const lines = [];
+  const first = await repairModule.repairTranscriptFiles({
+    transcriptsDir: conversation.transcriptsDir,
+    conversationId: conversation.id,
+    log: (line) => lines.push(line),
+  });
+  assert.equal(first.outcome, "cleared", "nothing was repaired, so it must not say recovered");
+  assert.equal(first.reason, reason, "the console needs the original reason to print it");
+  assert.equal(await repairModule.readTranscriptRepairNeed(conversation.transcriptsDir, conversation.id), null);
+  assert.ok(lines.some((line) => /cleared the stuck state on the conversation store/.test(line)));
+
+  // The next message fails the same way and latches again. The clear count survives the clearing.
+  await repairModule.writeTranscriptRepairNeed(conversation.transcriptsDir, conversation.id, reason);
+  const again = await repairModule.readTranscriptRepairNeed(conversation.transcriptsDir, conversation.id);
+  assert.equal(again.clears, 1, "the marker remembers that a person already cleared it once");
+
+  const second = await repairModule.repairTranscriptFiles({
+    transcriptsDir: conversation.transcriptsDir,
+    conversationId: conversation.id,
+    log: () => {},
+  });
+  assert.equal(second.outcome, "needs-attention", "a second clear would be a loop with a green tick");
+  assert.match(second.reason, /cleared once already/);
+  assert.match(second.reason, /conversation blobs are not readable/);
+  assert.ok(await repairModule.readTranscriptRepairNeed(conversation.transcriptsDir, conversation.id) != null,
+    "the state stays on, because it is true");
+});
+
+test("a recovery that works forgets the clear count, so the next episode gets its clear back", async () => {
+  const conversation = claimedConversation("sand-journal-history-reset");
+  await repairModule.writeTranscriptRepairNeed(conversation.transcriptsDir, conversation.id, "something old");
+  await repairModule.clearTranscriptRepairNeed(conversation.transcriptsDir, conversation.id);
+
+  const { routed } = routedMirror(conversation.transcriptsDir, countingDeriver());
+  const { error } = await captureLog(() => routed.prepareCheckpoint(CTX, conversation.id, CHECKPOINT, STORE, false));
+  assert.equal(error, undefined, `prepare should have recovered: ${error?.message ?? ""}`);
+
+  await repairModule.writeTranscriptRepairNeed(conversation.transcriptsDir, conversation.id, "something new");
+  const need = await repairModule.readTranscriptRepairNeed(conversation.transcriptsDir, conversation.id);
+  assert.equal(need.clears, 0, "the recovery ended the old episode, so the count went with it");
+});
+
+test("the stuck state still lands when the conversation directory cannot be written", async (t) => {
+  const conversation = claimedConversation("sand-journal-unwritable");
+  const dir = path.join(conversation.transcriptsDir, conversation.id);
+  chmodSync(dir, 0o500);
+  t.after(() => { try { chmodSync(dir, 0o700); } catch { /* already gone */ } });
+
+  await repairModule.writeTranscriptRepairNeed(conversation.transcriptsDir, conversation.id, "the directory is read-only");
+  const need = await repairModule.readTranscriptRepairNeed(conversation.transcriptsDir, conversation.id);
+  assert.ok(need != null, "a latch that cannot be written is a turn that fails for ever with no pill");
+  assert.equal(need.reason, "the directory is read-only");
+  // Beside the transcripts directory, not inside the one that refused the write.
+  assert.ok(readdirSync(conversation.transcriptsDir).some((name) => name.endsWith(".journal-needs-repair.json")));
+
+  chmodSync(dir, 0o700);
+  const report = await repairModule.repairTranscriptFiles({
+    transcriptsDir: conversation.transcriptsDir,
+    conversationId: conversation.id,
+    log: () => {},
+  });
+  assert.equal(report.outcome, "cleared");
+  assert.equal(await repairModule.readTranscriptRepairNeed(conversation.transcriptsDir, conversation.id), null);
 });

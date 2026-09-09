@@ -6,11 +6,13 @@
 // What this can and cannot do, stated plainly because the difference decides the counts it reports.
 // The in-turn recovery (transcript-journal-repair.repairTranscriptJournal) has the live checkpoint
 // and the conversation blobs, so it can rebuild the conversation file. This verb runs outside a
-// turn and has neither, so it does the half that is safe from outside: it sets the stale
-// write-ahead copy and cursor aside, REINDEXes the agent's databases, and clears the needs-repair
-// latch. Clearing the latch is what matters -- the next message runs the recovery again, and that
-// is the run which rebuilds. `after` is therefore the conversation file's count as it stands, not a
-// promise about what the next message will write.
+// turn and has neither, so it does the half that is safe from outside: it sets a write-ahead copy
+// that CANNOT BE PARSED aside (a valid one is left alone -- it is holding a turn), REINDEXes a
+// database that will not open, and turns the needs-repair state off. Turning that state off is what
+// matters -- the next message runs the recovery again, and that is the run which rebuilds. `after`
+// is therefore the conversation file's count as it stands, not a promise about what the next
+// message will write, and when clearing the state was the ONLY thing it did the outcome is
+// `cleared`, not `recovered`.
 import { join } from "node:path";
 
 import { evidenceRegistry } from "../evidence/evidence-registry.js";
@@ -25,6 +27,7 @@ import {
   transcriptsDirForAgentDir,
   type TranscriptRepairReport,
 } from "../../transcript-mirror/transcript-journal-repair.js";
+import { runInTranscriptWriteLane } from "../../transcript-mirror/transcript-mirror.js";
 
 export interface RepairAgentTranscriptInput {
   readonly agentId: string;
@@ -60,12 +63,20 @@ export async function repairAgentTranscript(input: RepairAgentTranscriptInput): 
     ? input.agentDir
     : join(getSandAgentsRootDir(), agentId);
 
-  const report = await repairTranscriptFiles({
-    transcriptsDir: transcriptsDirForAgentDir(agentDir),
-    conversationId: agentId,
-    sqlitePaths: [join(agentDir, CONVERSATION_BLOBS_FILENAME), join(agentDir, STORE_FILENAME)],
-    ...(input.log == null ? {} : { log: input.log }),
-  });
+  // In the journal's own per-conversation write lane, never beside it. The gateway serves this verb
+  // while turns are running, and the file work below moves the same files a turn's prepare and
+  // commit read: off the lane, a press of Repair lands between them, commit finds no write-ahead
+  // copy, and the turn fails with the state the button exists to clear. Same queue, one at a time.
+  const transcriptsDir = transcriptsDirForAgentDir(agentDir);
+  const report = await runInTranscriptWriteLane(
+    join(transcriptsDir, agentId, `${agentId}.jsonl`),
+    () => repairTranscriptFiles({
+      transcriptsDir,
+      conversationId: agentId,
+      sqlitePaths: [join(agentDir, CONVERSATION_BLOBS_FILENAME), join(agentDir, STORE_FILENAME)],
+      ...(input.log == null ? {} : { log: input.log }),
+    }),
+  );
 
   const result: RepairAgentTranscriptResult = {
     agentId,

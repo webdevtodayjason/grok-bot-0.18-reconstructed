@@ -608,11 +608,22 @@
     const outcome = String(answer.outcome ?? "");
     return REPAIR_WORKED.test(outcome) || (outcome === "" && Number.isFinite(answer.after));
   }
+  /**
+   * `cleared` is the host's word for "the only thing I could do was turn the stuck state off".
+   * Deliberately NOT in REPAIR_WORKED: nothing was repaired, no count was kept, and telling the
+   * person "Repaired, 0 entries kept" after a press that did none of that is the false success the
+   * review measured. The stuck state IS gone, so the pill and the control go with it -- and the
+   * words the panel prints say to send one message and watch.
+   */
+  function repairCleared(answer) {
+    return answer != null && String(answer.outcome ?? "").toLowerCase() === "cleared";
+  }
   global.__transcriptRepair = {
     SENTENCE: TRANSCRIPT_REPAIR_SENTENCE,
     wordsSeen: transcriptRepairWordsSeen,
     flagOf: repairFlagOf,
     worked: repairWorked,
+    cleared: repairCleared,
     remember: (id) => { if (id != null) repairIds.add(id); },
     forget: (id) => { repairIds.delete(id); },
   };
@@ -3063,7 +3074,7 @@
           };
           // Only a repair the host stood behind forgets the failure this page saw. A refusal leaves
           // the pill and the control exactly where they were, which is the truth.
-          if (repairWorked(shaped)) repairIds.delete(agentId);
+          if (repairWorked(shaped) || repairCleared(shaped)) repairIds.delete(agentId);
           return shaped;
         });
       },

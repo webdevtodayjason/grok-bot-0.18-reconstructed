@@ -332,9 +332,13 @@ salvage stops at the first page it cannot read, which is how a 2,940-row file on
 
 **The console does this now (BOX-6b).** Open the agent, open Agent details, press **Repair** on the
 Conversation store card; or `POST /api/repairAgentTranscript {"id":"<agent id>"}` at the box
-gateway. It rebuilds from what the box already holds, keeps every entry it can, quarantines rather
-than deletes, and answers `{before, after, quarantined, outcome}` — `"quarantined": null` is a
-normal answer, not a failure. Back the agent's directory up with `cp -a` inside the box first.
+gateway. **It does not rebuild the conversation itself:** it turns the stuck state off, sets aside
+a write-ahead copy that cannot be read (renamed, never deleted, and one that still reads is left
+alone because it is holding a turn) and reindexes a database that will not open — the message you
+send afterwards is what runs the host's own recovery and rebuilds. It answers
+`{before, after, quarantined, outcome}`; an empty `quarantined` is a normal answer, `cleared` means
+the state is off and nothing else happened yet, and a second press on a state already cleared once
+is refused on purpose. Back the agent's directory up with `cp -a` inside the box first.
 **docs/BOX-STORE.md** has the whole thing, including how to tell the two damage shapes apart
 read-only and why removing a `.journal-mode` marker is not the fix.
 
