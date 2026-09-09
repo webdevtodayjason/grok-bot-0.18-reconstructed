@@ -77,6 +77,7 @@ import type {
   TurnFileTransferToolFactoryInput,
   TurnMcpManagementToolFactoryInput,
   TurnProblemReportToolFactoryInput,
+  TurnSendEmailToolFactoryInput,
   TurnReadToolFactoryInput,
   TurnSubagentManagementToolFactoryInput,
   TurnWebFetchToolFactoryInput,
@@ -102,6 +103,8 @@ import {
 } from "./sand-activity.js";
 import { connectorCardEmissionToMessage, type BoxHelpOutcome } from "./runner/tools/box-help-tool.js";
 import { appendProblemReport } from "./extensions/feedback/problem-reports.js";
+import { readAgentMailFor } from "./extensions/mail/agent-mail-store.js";
+import { postMailSend, resolveRelaySend } from "./extensions/mail/relay-send-client.js";
 import { createAgentPromptSession } from "./extensions/inference/extension.js";
 import { CONNECTOR_MANIFESTS } from "../shared/channels.js";
 import { parseStoredTrigger } from "./automations/automation-trigger.js";
@@ -2755,6 +2758,23 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             return profile == null ? undefined : String(profile.name ?? "") || undefined;
           },
           savePending: entry => appendProblemReport(getSandRootDir(), entry),
+        },
+      }),
+      /**
+       * MAIL-3. The send tool's dependencies, and what is deliberately not among them: a Resend
+       * key, a From address, and any way to name either. The box says who it is with the bearer it
+       * already presents to the relay for everything else, and the relay decides what the From is
+       * from its own copy of the directory. `resolveRelaySend` reads both the relay's address and
+       * that bearer out of SAND_HOST_BUNDLE_S3_BASE_URL, so a box with no relay in front of it
+       * resolves nothing and buildTurnTools withholds the tool rather than offering one that can
+       * only fail.
+       */
+      createSendEmailToolInputs: (): TurnSendEmailToolFactoryInput => ({
+        dependencies: {
+          getAgentId: () => session.id,
+          readMail: agentId => readAgentMailFor(agentId, getSandRootDir()),
+          resolveRelay: () => resolveRelaySend(),
+          post: (target, body, timeoutMs) => postMailSend(target, body, timeoutMs),
         },
       }),
       createReactionToolInputs: turn => ({

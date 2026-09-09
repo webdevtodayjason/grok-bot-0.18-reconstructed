@@ -217,7 +217,16 @@
   // never sees a tool name at all. The row's own sentence is below, in toolRowText.
   const PROBLEM_REPORT_TOOL_CALL = "reportBugToolCall";
   const PROBLEM_REPORT_ROW_TEXT = "Reported a problem to the developers";
-  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task", [PROBLEM_REPORT_TOOL_CALL]: "Report" };
+  // MAIL-3. The bot's own send rides `sendToUserToolCall`, whose args are a single string. It gets
+  // a TOOL_LABELS entry for the same reason the row above does: a name that is not in this table is
+  // headlined with the raw proto name, and a person must never read a tool name on their own
+  // screen. That one string is the RECIPIENT, and on a refusal the recipient behind
+  // MAIL_SEND_FAILED_PREFIX -- the outline carries no result this page can read (a non-shell row is
+  // {kind, id, name, status, summary}), so without the marker a mail the relay REFUSED would have
+  // drawn "Sent an email to ..." over a send that never happened.
+  const MAIL_SEND_TOOL_CALL = "sendToUserToolCall";
+  const MAIL_SEND_FAILED_PREFIX = "not sent: ";
+  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task", [PROBLEM_REPORT_TOOL_CALL]: "Report", [MAIL_SEND_TOOL_CALL]: "Email" };
   const oneLine = (value, max) => {
     const text = String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" · ");
     return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -257,6 +266,20 @@
     const path = String(summary ?? "").match(/"(?:path|file_path|filePath)"\s*:\s*"([^"]+)"/);
     return path ? `Read ${baseName(path[1])} · ${path[1]}` : null;
   }
+  // The recipient, out of the args JSON, the way readHeadline takes a path out of one. An address
+  // cannot hold a double quote, so the cheap match is the safe one; anything unparseable falls back
+  // to a sentence with no address in it rather than to the proto name.
+  function mailSendRowText(item) {
+    const found = String(item?.summary ?? "").match(/"message"\s*:\s*"([^"]*)"/);
+    const value = found ? found[1].trim() : "";
+    const failed = value.startsWith(MAIL_SEND_FAILED_PREFIX) || item?.status === "failed";
+    const to = value.startsWith(MAIL_SEND_FAILED_PREFIX)
+      ? value.slice(MAIL_SEND_FAILED_PREFIX.length).trim()
+      : value;
+    if (item?.status === "pending") return to ? `Sending an email to ${to}` : "Sending an email";
+    if (failed) return to ? `Tried to email ${to} · it did not send` : "An email did not send";
+    return to ? `Sent an email to ${to}` : "Sent an email";
+  }
   function toolRowText(item) {
     const label = TOOL_LABELS[item.name] ?? String(item.name ?? "Tool").replace(/ToolCall$/, "");
     // FEEDBACK-1. The one row in this table that is not a receipt of work done for the person, and
@@ -265,6 +288,11 @@
     // anywhere. One fixed sentence in plain words, and an EMPTY detail so app.js draws a muted
     // bubble rather than an expandable receipt with the payload inside it.
     if (item.name === PROBLEM_REPORT_TOOL_CALL) return { text: PROBLEM_REPORT_ROW_TEXT, detail: "", kind: label };
+    // MAIL-3. The same shape and for a related reason: one plain sentence, and an EMPTY detail so
+    // app.js draws a muted bubble instead of an expandable receipt. The subject and the body are
+    // the person's own words going out under their business's name; the chip says a mail went and
+    // to whom, and the readable copy lives on the workspace's own Mail card, not in an expander.
+    if (item.name === MAIL_SEND_TOOL_CALL) return { text: mailSendRowText(item), detail: "", kind: label };
     const headline = item.name === "shellToolCall" ? shellHeadline(item.summary, item.output)
       : item.name === "readToolCall" ? readHeadline(item.summary)
       : null;

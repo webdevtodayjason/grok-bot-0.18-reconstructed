@@ -17,6 +17,7 @@
 //   node scripts/verify-toolset.mjs --browser    SAND_BROWSER_USE on: a browserUse subagent reads a page
 //   node scripts/verify-toolset.mjs --mcp-instructions  a stored connector instruction reaches the next prompt
 //   node scripts/verify-toolset.mjs --room       a shared room: members answer text only
+//   node scripts/verify-toolset.mjs --mail-send  MAIL-3: the send tool appears and disappears with canSend
 //
 // TOOLS-17. The room leg exists because the shared-room runner had never run. Of the 4,840 toolsets
 // traced on this box, not one carries isSharedRoomRunner, so the filter that cuts a room member
@@ -39,11 +40,16 @@ const MODE = process.argv.includes("--connector")
   : process.argv.includes("--mcp-instructions") ? "mcp-instructions"
   : process.argv.includes("--browser") ? "browser"
   : process.argv.includes("--room") ? "room"
+  : process.argv.includes("--mail-send") ? "mail-send"
   : process.argv.includes("--subagent") ? "subagent" : "chief";
 const flag = (name, fallback) => (process.argv.includes(name)
   ? process.argv[process.argv.indexOf(name) + 1]
   : fallback);
-const DEFAULT_TIMEOUT_MS = MODE === "chief" ? 180000 : MODE === "room" ? 240000 : 420000;
+const DEFAULT_TIMEOUT_MS = MODE === "chief" ? 180000
+  : MODE === "room" ? 240000
+  // MAIL-3 drives two READY turns, so this is the budget for each of them, not for the pair.
+  : MODE === "mail-send" ? 120000
+  : 420000;
 const requestedTimeoutMs = Number.parseInt(flag("--timeout-ms", String(DEFAULT_TIMEOUT_MS)), 10);
 if (!Number.isFinite(requestedTimeoutMs) || requestedTimeoutMs <= 0) {
   console.warn(`--timeout-ms was not a positive number; using the ${MODE} default of ${DEFAULT_TIMEOUT_MS}ms`);
@@ -67,7 +73,13 @@ const TOKEN = token();
 const call = async (method, args = {}) => {
   const res = await fetch(`${GATEWAY}/api/${method}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    // Every gate names itself on the wire, so a box's access log can tell a gate's traffic from a
+    // customer's without anybody having to remember which run was happening at the time.
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+      "user-agent": "titanbot-gate/verify-toolset",
+    },
     body: JSON.stringify(args),
   });
   const text = await res.text();
@@ -175,8 +187,27 @@ const HOST_MACHINE_TOOLS = ["ExternalShell", "ExternalRead", "AwaitExternalShell
 // browser_open, browser_click, browser_type, browser_screenshot. They are offered on the same
 // predicate as Screenshot and request_box_help -- a chief, a box with a desktop, the box up -- and
 // withheld with the reason `browser_tools_off` when SAND_BROWSER_TOOLS is set to 0.
-const CHIEF_TOOL_COUNT_WITH_COMPUTER = 39;
-const CHIEF_TOOL_COUNT_WITHOUT_COMPUTER = 34;
+//
+// And both went up by one again with FEEDBACK-1, which was not noticed at the time: `report_problem`
+// is offered to EVERY agent, deliberately outside every predicate in buildTurnTools, and these two
+// numbers were left where they were. So this leg had been failing on the branch tip before MAIL-3
+// touched it. MEASURED on grok-bot-local-vm 2026-09-09 18:31Z, on the branch tip plus MAIL-3 with
+// no send wired: 35 tools with no computer connected, and the 35th is report_problem.
+const CHIEF_TOOL_COUNT_WITH_COMPUTER = 40;
+const CHIEF_TOOL_COUNT_WITHOUT_COMPUTER = 35;
+
+// MAIL-3. send_email is the first tool whose presence depends on something outside the toolset:
+// the box's own copy of the address directory. It is offered only when the relay has pushed
+// canSend true AND this agent holds a row in it, and withheld with `mail_send_off` otherwise, so
+// the expected count moves by exactly one rather than becoming a range. A range would have made
+// this gate stop measuring the thing it exists for -- 26 schemas is what the fleet is measured at
+// and local endpoints break above six, so "34 or 35" is not an answer anybody can act on.
+const MAIL_SEND_WITHHELD_REASON = "mail_send_off";
+// The withheld list names tools the way the rest of that list does (CloudAgent, ExternalShell),
+// while the tool the model sees is `send_email`. Normalise rather than pick, so a rename on either
+// side is still recognised here and reported as a wrong reason instead of a missing row.
+const isMailSendWithheld = (entry) =>
+  String(entry?.tool ?? "").toLowerCase().replace(/[^a-z]/g, "") === "sendemail";
 
 const spoken = (entries) => entries.filter((entry) => entry.kind === "send-message");
 
@@ -232,6 +263,10 @@ const previousTrace = await readTrace();
 if (previousTrace !== "1") await writeTrace("1");
 const previousLocalMachine = await readSetting(LOCAL_MACHINE);
 let pinnedLocalMachine = false;
+// MAIL-3. The box's address list exactly as this run found it, and whether this run changed it.
+// setAgentMail writes the file whole, so the only safe restore is the whole of what was read.
+let mailBefore = null;
+let pushedMail = false;
 // Agents that appear during the run and are not the probe are the model's doing (CreateAgent) or a
 // phantom; either way they are reported and removed so the roster ends as it started.
 const rosterBefore = new Set((await call("listAgents")).map((a) => a.id));
@@ -256,6 +291,15 @@ try {
       }
       return { from, chief, boxScoped };
     };
+    // MAIL-3. Read the box's own copy of the address directory once, for this agent, before any
+    // turn is driven. `getAgentMail` is a host command an older bundle does not have; on such a
+    // box there is no send tool either, so an unanswerable probe is "not offered" rather than a
+    // failure. Nothing here is written: the gate that gives an agent a row is the send leg.
+    const mailFile = await call("getAgentMail").catch(() => null);
+    const mailSendExpected = mailFile?.canSend === true
+      && (mailFile?.addresses ?? {})[agent.id] != null;
+    console.log(`address directory: ${mailFile == null ? "not on this bundle" : `canSend=${mailFile.canSend === true}`}`
+      + `, row for this agent: ${mailSendExpected ? "yes" : "no"} -> send_email ${mailSendExpected ? "expected" : "withheld"}`);
     const READY = "Reply with the single word READY.";
     const first = await driveTurn(wantSubagent
       ? "Dispatch one computerUse subagent whose only job is to take a single screenshot of "
@@ -302,9 +346,28 @@ try {
             + "a withheld tool has to be reported with its reason, not just absent");
         }
       }
-      const expectedCount = expected ? CHIEF_TOOL_COUNT_WITH_COMPUTER : CHIEF_TOOL_COUNT_WITHOUT_COMPUTER;
+      // MAIL-3. The one tool whose offer is decided by a file on the box rather than by this
+      // build, read back from the box itself so the expectation is measured and not assumed.
+      const mailOffered = line.tools.includes("send_email");
+      if (mailSendExpected !== mailOffered) {
+        fail(mailSendExpected
+          ? "this box's address directory says canSend and holds a row for this agent, yet send_email was not offered"
+          : "this box's address directory does not offer this agent a send, yet send_email was offered anyway");
+      }
+      if (!mailOffered) {
+        const row = (line.withheld ?? []).find(isMailSendWithheld);
+        if (row == null) {
+          fail("send_email is absent from the toolset and absent from the withheld list: a withheld tool has to be reported with its reason, not just missing");
+        }
+        if (row.reason !== MAIL_SEND_WITHHELD_REASON) {
+          fail(`send_email is withheld for "${row.reason}", expected "${MAIL_SEND_WITHHELD_REASON}"`);
+        }
+      }
+      const expectedCount = (expected ? CHIEF_TOOL_COUNT_WITH_COMPUTER : CHIEF_TOOL_COUNT_WITHOUT_COMPUTER)
+        + (mailSendExpected ? 1 : 0);
       if (line.count !== expectedCount) {
-        fail(`chief offered ${line.count} tools, expected ${expectedCount} with ${expected ? "a computer connected" : "no computer connected"}`);
+        fail(`chief offered ${line.count} tools, expected ${expectedCount} with ${expected ? "a computer connected" : "no computer connected"}`
+          + `${mailSendExpected ? " and a wired send" : ""}`);
       }
     };
     // The prompt half. The base prompt used to spend paragraphs on the two machines and the file
@@ -771,6 +834,102 @@ try {
     }
     console.log("PASS — connector");
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // MAIL-3. The send tool is the first one whose presence is decided by a file the RELAY writes
+  // into the box rather than by anything in this build, so it is the first one whose absence could
+  // be either a correct withhold or a broken wire. This leg makes the box say which, by moving the
+  // one fact and measuring both worlds a minute apart.
+  //
+  // It gives its own scratch agent a row, because a fresh agent has none: the relay sweeps every
+  // five minutes and the control plane mints from that sweep, so an agent made seconds ago can only
+  // ever measure the "no address" branch. setAgentMail rewrites the file WHOLE, which is why the
+  // box's own list is read first, one row added to it, and the original written back on the way
+  // out. A gate that leaves a box's addresses different from how it found them is a gate that
+  // breaks that customer's mail.
+  //
+  // No mail is sent here and none can be: canSend true offers the tool, and this leg never asks a
+  // model to use it.
+  if (MODE === "mail-send") {
+    const directory = await call("getAgentMail").catch(() => null);
+    if (directory == null || String(directory.domain ?? "").length === 0) {
+      console.log(`SKIP — ${BOX} holds no address directory, so there is no send to switch on or off`);
+    } else {
+      mailBefore = {
+        domain: String(directory.domain),
+        canSend: directory.canSend === true,
+        addresses: Object.entries(directory.addresses ?? {})
+          .map(([agentId, row]) => ({ agentId, code: String(row?.code ?? ""), address: String(row?.address ?? "") }))
+          .filter((row) => row.code.length > 0 && row.address.length > 0),
+      };
+      console.log(`address directory: domain=${mailBefore.domain} canSend=${mailBefore.canSend} `
+        + `addresses=${mailBefore.addresses.length}`);
+      agent = await freshAgent(`verify-mailsend-${Math.random().toString(36).slice(2, 8)}`);
+      const taken = new Set(mailBefore.addresses.map((row) => row.code));
+      let code = "";
+      do { code = String(Math.floor(100000 + Math.random() * 900000)); } while (taken.has(code));
+      const own = { agentId: agent.id, code, address: `agent${code}@${mailBefore.domain}` };
+
+      const driveOne = async (label) => {
+        const from = await hostLogLines();
+        await call("sendPrompt", { agentId: agent.id, prompt: "Reply with the single word READY." });
+        const deadline = Date.now() + TIMEOUT_MS;
+        let line;
+        while (Date.now() < deadline) {
+          await sleep(4000);
+          line = (await traceLinesSince(from))
+            .find((one) => one.conversationId === agent.id && !one.isSubagentRunner);
+          if (line != null) break;
+        }
+        if (line == null) fail(`no [sand][toolset] line for the ${label} turn; is SAND_TOOL_TRACE readable in the box?`);
+        console.log(`${label}: ${line.count} tools, send_email ${line.tools.includes("send_email") ? "offered" : "absent"}`);
+        return line;
+      };
+
+      const push = async (canSend) => {
+        const written = await call("setAgentMail", {
+          domain: mailBefore.domain, canSend, addresses: [...mailBefore.addresses, own],
+        });
+        pushedMail = true;
+        console.log(`pushed canSend=${canSend} with ${written?.written ?? "?"} addresses (this agent holds ${own.address})`);
+      };
+
+      await push(true);
+      const on = await driveOne("canSend true");
+      await push(false);
+      const off = await driveOne("canSend false");
+
+      if (!on.tools.includes("send_email")) {
+        fail("this agent has an address and the directory says canSend, yet send_email was not offered");
+      }
+      if (off.tools.includes("send_email")) {
+        fail("the directory says this workspace cannot send, yet send_email was still offered: "
+          + "a bot would hold a tool its own standing facts deny");
+      }
+      const named = (off.withheld ?? []).find(isMailSendWithheld);
+      if (named == null) {
+        fail("send_email is absent from the toolset and absent from the withheld list: "
+          + "a withheld tool has to be reported with its reason, not just missing");
+      }
+      if (named.reason !== MAIL_SEND_WITHHELD_REASON) {
+        fail(`send_email is withheld for "${named.reason}", expected "${MAIL_SEND_WITHHELD_REASON}"`);
+      }
+      // Exact, not a range, and on both sides. A delta of one is what "the count moved by exactly
+      // one tool" means; the absolute figures are what say neither world drifted for some other
+      // reason while this leg was running.
+      if (on.count !== off.count + 1) {
+        fail(`the send tool moved the count by ${on.count - off.count}, expected exactly 1 `
+          + `(${on.count} with a send, ${off.count} without)`);
+      }
+      const base = (line) => (line.localMachineConnected
+        ? CHIEF_TOOL_COUNT_WITH_COMPUTER
+        : CHIEF_TOOL_COUNT_WITHOUT_COMPUTER);
+      if (off.count !== base(off)) fail(`without a send the chief was offered ${off.count} tools, expected ${base(off)}`);
+      if (on.count !== base(on) + 1) fail(`with a send the chief was offered ${on.count} tools, expected ${base(on) + 1}`);
+      console.log(`PASS — mail-send (${off.count} tools without a send, ${on.count} with one, `
+        + `withheld as ${named.reason} when off)`);
+    }
+  }
 } catch (error) {
   if (!(error instanceof VerificationFailed)) throw error;
   console.error(`FAIL — ${error.message}`);
@@ -791,4 +950,16 @@ try {
   // The pin is the operator's box-wide switch, so it goes back exactly as found, deleted if it was
   // never there. A run that dies mid-leg must not leave the five withheld on a live box.
   if (pinnedLocalMachine) await writeSetting(LOCAL_MACHINE, previousLocalMachine ?? null).catch(() => {});
+  // MAIL-3. Before the scratch agent is deleted or after, it does not matter: the list written back
+  // is the one that was read, so the scratch agent's row goes with it either way. A run that dies
+  // mid-leg must not leave a customer's box holding an address for an agent that no longer exists,
+  // or a canSend this gate flipped.
+  if (pushedMail && mailBefore != null) {
+    await call("setAgentMail", {
+      domain: mailBefore.domain, canSend: mailBefore.canSend, addresses: mailBefore.addresses,
+    }).then(
+      (written) => console.log(`restored the box's address list (${written?.written ?? "?"} addresses, canSend=${mailBefore.canSend})`),
+      (error) => console.error(`WARN — the address list could not be restored: ${error?.message ?? error}`),
+    );
+  }
 }
