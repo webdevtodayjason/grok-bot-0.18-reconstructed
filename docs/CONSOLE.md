@@ -274,7 +274,7 @@ The viewer is item D's, and what it may and may not open is in the header of
 | `node --test tests/titan-crew.test.mjs` | `backgrounds.js` still publishes the list the console knows it by, loaded the way the browser loads it |
 | `node --test tests/machine-room-transcript-fold.test.mjs` | DASH-FOLD-1's fold still runs before the badge sees the rows |
 | `scripts/verify-console-polish.mjs` | the browser legs, on `grok-bot-local-vm` and then read-only on Jason's console |
-| `scripts/verify-dashboard.mjs` | unchanged, and must stay green |
+| `scripts/verify-dashboard.mjs` | unchanged. On `grok-bot-local-vm` it carries twelve known-red legs from leftover gate probes and the in-flight marketplace wave (GATE-14), so read it by diffing its failure list against a run of the previous commit, not by its tally: 166 PASS / 12 FAIL before this wave and 169 PASS / 12 FAIL after, with an empty `diff` between the two failure lists |
 
 The ship is **relay-only by construction**: everything in this wave is `ui/`, tests, scripts and
 docs. `git diff <pre-wave>..HEAD -- source/ deploy/` must be empty before shipping. If it is not,
