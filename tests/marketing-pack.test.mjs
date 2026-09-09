@@ -387,6 +387,25 @@ test("Remove team takes back the agents AND the skills, and leaves everything el
   assert.deepEqual(box.shared.map((row) => row.name), before.skills);
 });
 
+test("one agent refusing the library read does not read as an empty library", async () => {
+  // Measured on grok-bot-local-vm 2026-09-09: the library was read through one agent chosen at the
+  // start, that agent stopped answering, and the read came back empty on a box holding 55 rows. An
+  // empty library is precisely the answer that makes a second import re-write every document, so
+  // the read walks the roster until one answers.
+  const box = fakeBox({ agents: ["Sulky", "Titan"] });
+  await team.importMarketingTeam(box, theTeam);
+  const after = { agents: box.roster.length, skills: box.shared.length };
+  const call = box.call.bind(box);
+  box.call = async (method, args) => {
+    if (method === "getAgentWorkflows" && args.id === "a0") throw new Error("that agent does not exist");
+    return call(method, args);
+  };
+  const second = await team.importMarketingTeam(box, theTeam);
+  assert.equal(second.state, "done", second.message);
+  assert.equal(box.shared.length, after.skills, "the sulky agent's refusal re-imported every document");
+  assert.equal(box.roster.length, after.agents);
+});
+
 test("Remove team on a box that never imported the pack does nothing at all", async () => {
   const box = fakeBox({ agents: ["Titan", "Marketing"], library: ["web-research-pass"] });
   const removed = await team.removeMarketingTeam(box, theTeam);

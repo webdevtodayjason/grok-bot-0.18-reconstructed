@@ -244,18 +244,32 @@
     return `${summary}\n\n${instructions}`;
   };
 
-  /** Every workflow the box holds, asked through any agent: the library is shared, not per agent. */
-  async function sharedLibrary(gateway, agentId) {
-    if (!agentId) return [];
-    const rows = await gateway.call("getAgentWorkflows", { id: agentId }).catch(() => []);
-    return listOf(rows).filter((row) => row != null && row.source !== "automation");
+  /**
+   * Every workflow the box holds. The library is shared, so any agent answers with the same list --
+   * but ONE agent failing to answer must not read as an empty library, because an empty library is
+   * exactly the answer that makes the import re-write all ten documents and leave doubles behind.
+   * Measured on grok-bot-local-vm 2026-09-09: a single anchor agent stopped answering mid-run and
+   * the read came back empty on a box holding 55 rows. So it walks the roster until one answers.
+   */
+  async function sharedLibrary(gateway, agentId, roster) {
+    const ids = [];
+    for (const id of [text(agentId), ...listOf(roster).map((agent) => text(agent && agent.id))]) {
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    for (const id of ids) {
+      let rows;
+      try { rows = await gateway.call("getAgentWorkflows", { id }); } catch { continue; }
+      if (!Array.isArray(rows)) continue;
+      return rows.filter((row) => row != null && row.source !== "automation");
+    }
+    return [];
   }
 
   /** Delete named rows out of the shared library. Used by the rollback and by Remove team. */
-  async function deleteSkillsNamed(gateway, agentId, names, failures) {
+  async function deleteSkillsNamed(gateway, agentId, names, failures, roster) {
     if (!agentId || names.size === 0) return 0;
     let removed = 0;
-    for (const row of await sharedLibrary(gateway, agentId)) {
+    for (const row of await sharedLibrary(gateway, agentId, roster)) {
       if (!names.has(text(row.name))) continue;
       try {
         await gateway.call("deleteAgentWorkflow", { id: agentId, workflowId: text(row.id) });
@@ -293,7 +307,7 @@
 
     // The library is read once, through whatever agent already exists. On an empty box there is
     // nothing to ask through and nothing to collide with, so an empty list is the right answer.
-    const held = new Set((await sharedLibrary(gateway, text(roster[0] && roster[0].id)))
+    const held = new Set((await sharedLibrary(gateway, text(roster[0] && roster[0].id), roster))
       .map((row) => text(row.name)).filter(Boolean));
 
     const createdAgents = [];
@@ -333,7 +347,7 @@
       // Roll back exactly what this run made. Skills first, while an agent it can be asked
       // through is still alive.
       const anchor = createdAgents[0] ?? text(roster[0] && roster[0].id);
-      await deleteSkillsNamed(gateway, anchor, createdSkills, null).catch(() => {});
+      await deleteSkillsNamed(gateway, anchor, createdSkills, null, roster).catch(() => {});
       for (const id of createdAgents) await gateway.call("deleteAgent", { id }).catch(() => {});
       return { state: "failed", message: String(error?.message ?? error), members: [] };
     }
@@ -355,9 +369,9 @@
     // their bot, so a sweep runs even when the roster holds none: a previous removal that deleted
     // the bots and failed on the documents left exactly that.
     const anchor = text((mine[0] ?? roster[0] ?? {}).id);
-    const names = new Set((await sharedLibrary(gateway, anchor))
+    const names = new Set((await sharedLibrary(gateway, anchor, roster))
       .map((row) => text(row.name)).filter((name) => name.startsWith(skillPrefix)));
-    const skills = await deleteSkillsNamed(gateway, anchor, names, failures);
+    const skills = await deleteSkillsNamed(gateway, anchor, names, failures, roster);
 
     let agents = 0;
     for (const agent of mine) {
