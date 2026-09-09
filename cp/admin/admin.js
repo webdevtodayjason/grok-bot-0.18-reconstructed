@@ -1,9 +1,16 @@
 // cp/admin/admin.js -- the super admin console's whole behaviour. ADMIN-1.
 //
-// No framework and no build step. It fetches seven routes, renders seven panels, and offers the named
+// No framework and no build step. It fetches eight routes, renders nine panels, and offers the named
 // actions below. The session token lives in sessionStorage and nowhere else: it dies with the tab,
 // it is never in a URL, and it is never written into a cookie, so nothing carries it to a route
 // that did not ask for it.
+//
+// ADMIN-3 MADE IT A DASHBOARD. One panel is on screen at a time, a left rail names them and the URL
+// hash says which, so a link opens a panel. All eight loaders still run together on one Refresh:
+// the rail decides what is SHOWN, never what is fetched, because an operator who opens Box health
+// during an outage must not wait on a fetch that could have happened a second earlier. The ninth
+// panel, the Overview, costs no route at all -- every figure on it was already fetched for one of
+// the eight, and each loader hands its headline number to a registry the Overview draws from.
 //
 // PROVIDERS-1 ADDED THE ONE THING THIS PAGE HAD NEVER DONE: it takes a secret IN. Every panel
 // before it was read-only plus seven actions that carried no value, and the only secret that ever
@@ -95,6 +102,123 @@
     node.hidden = String(message ?? "").length === 0;
   };
 
+  // ---- the rail: which panel is on screen -------------------------------------------------------
+  //
+  // ADMIN-3. Jason, 2026-09-09: "stuff is all jumbled and there is a lot of scrolling." One panel at
+  // a time, named by the URL hash, so a pasted link opens a panel and the browser's own back button
+  // walks them. Nothing about what a panel CONTAINS changed: every section, every id and every
+  // control is where it was.
+  //
+  // The hidden ATTRIBUTE and never a style or a class of this file's own. `[hidden]` is settled once,
+  // at the top of admin.css, with an !important that beats every display rule under it, so there is
+  // exactly one place in this product that decides whether a panel is on the screen. A class here
+  // would be a second place, and the day the two disagree every panel is on screen at once.
+
+  const PANELS = [
+    "panel-overview", "panel-signins", "panel-clients", "panel-boxes", "panel-system",
+    "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace",
+  ];
+
+  const wantedPanel = (raw) => {
+    const id = String(raw ?? "").replace(/^#/, "");
+    return PANELS.includes(id) ? id : PANELS[0];
+  };
+
+  function showPanel(raw) {
+    const wanted = wantedPanel(raw);
+    for (const id of PANELS) {
+      const section = $(id);
+      if (section) section.hidden = id !== wanted;
+      const link = document.querySelector(`.rail a[href="#${id}"]`);
+      if (link == null) continue;
+      if (id === wanted) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    }
+    // Each panel scrolls inside itself, so a panel left half way down must not hand its scroll
+    // position to the next one an operator opens.
+    const open = $(wanted);
+    if (open) open.scrollTop = 0;
+  }
+
+  window.addEventListener("hashchange", () => showPanel(location.hash));
+
+  // ---- the summary strips and the Overview -------------------------------------------------------
+  //
+  // ADMIN-3 asked for a strip of figures at the top of each panel and an Overview that links into
+  // them. Neither fetches anything: every number was already in one of the eight answers, so each
+  // loader writes its own strip and registers its one headline figure, and the Overview is drawn
+  // from that registry once the eight have settled. It is NOT a ninth loader, and Refresh runs the
+  // same eight requests it always ran.
+  //
+  // A panel that threw registers nothing and its Overview chip says "not measured" with the reason
+  // the loader gave. That is the whole reason the Overview reads a registry rather than making its
+  // own request: a chip that fetched separately could show a green figure for a panel that is dark.
+
+  const OVERVIEW = [
+    { key: "clients", label: "Clients running", hash: "#panel-clients" },
+    { key: "boxes", label: "Boxes answering", hash: "#panel-boxes" },
+    { key: "spend", label: "Spend this month", hash: "#panel-spend" },
+    { key: "feedback", label: "Reports waiting", hash: "#panel-feedback" },
+    { key: "verification", label: "Needs re-verification", hash: "#panel-marketplace" },
+    { key: "attacks", label: "Sign-in attacks", hash: "#panel-signins" },
+  ];
+  const headlines = new Map();
+
+  /** One figure: a caption, the number, and a line under it. A null is "not measured" and why. */
+  function statNode(tag, chip) {
+    const node = document.createElement(tag);
+    node.className = `stat${chip.tone ? ` ${chip.tone}` : ""}`;
+    node.appendChild(el("div", "k", chip.label));
+    const value = el("div", "v");
+    if (chip.value === null || chip.value === undefined) {
+      value.className = "v unmeasured";
+      value.appendChild(text("not measured"));
+    } else {
+      if (chip.word) value.className = "v word";
+      value.appendChild(text(String(chip.value)));
+    }
+    node.appendChild(value);
+    if (chip.detail) node.appendChild(el("div", "d", chip.detail));
+    if (chip.why) node.title = String(chip.why);
+    return node;
+  }
+
+  /**
+   * A panel's own strip, and the one figure it lends the Overview.
+   *
+   * Called where each loader has its answer and BEFORE that loader's own early return, not at the
+   * end of it: four of the eight return early on an empty answer, and a strip written after that
+   * return is a strip nobody with no customers, no boxes or no reports would ever see.
+   */
+  function summarise(sectionId, chips, headline) {
+    const host = document.querySelector(`#${sectionId} .strip`);
+    if (host) {
+      clear(host);
+      for (const chip of chips) host.appendChild(statNode("div", chip));
+    }
+    if (headline) headlines.set(headline.key, headline);
+  }
+
+  function renderOverview() {
+    const host = $("overview");
+    if (host == null) return;
+    clear(host);
+    for (const row of OVERVIEW) {
+      const chip = headlines.get(row.key) ?? { label: row.label, value: null, why: "this panel did not load" };
+      const node = statNode("a", { ...chip, label: chip.label ?? row.label });
+      node.href = row.hash;
+      host.appendChild(node);
+    }
+  }
+
+  // A time an operator can compare with a log line, which is what a failure timestamp is for. The
+  // rest of this page says "3 h ago" because the gap is what matters there; here the clock is.
+  const utcMinute = (iso) => {
+    const at = new Date(String(iso ?? ""));
+    if (Number.isNaN(at.getTime())) return String(iso ?? "");
+    return `${at.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  };
+
   // ---- the wire --------------------------------------------------------------------------------
 
   async function api(method, pathname, body) {
@@ -139,6 +263,9 @@
     door.hidden = true;
     panel.hidden = false;
     $("whoami").textContent = email ? `signed in as ${email}` : "signed in with the operator token";
+    // The hash, so a link straight to a panel opens that panel rather than the Overview and then
+    // jumping. An empty or unknown hash lands on the Overview.
+    showPanel(location.hash);
   }
 
   function signOut(message) {
@@ -194,16 +321,88 @@
   });
 
   $("signout").addEventListener("click", () => signOut("Signed out."));
-  $("refresh").addEventListener("click", () => { void loadAll(); });
+  $("refresh").addEventListener("click", () => {
+    // ADMIN-2. Refresh takes the new-client card away with everything else on the screen, because it
+    // is the only sight of a temporary password there will ever be and it must not sit around after
+    // the operator has moved on. It also stops the provisioning poll: a fresh load is about to
+    // answer the same question the poll was asking.
+    stopWatchingProvision();
+    clear($("addClientResult"));
+    void loadAll();
+  });
   $("hours").addEventListener("change", () => { void loadSignIns(); });
   $("outcome").addEventListener("change", () => { void loadSignIns(); });
 
   // ---- panel 1: sign-in attempts ---------------------------------------------------------------
 
+  // SIGNIN-1. Jason, 2026-09-09 11:43, holding two screenshots of this panel: 147.136.44.142 marked
+  // "Attack", 101 tries, 58 locked out, 23 different passwords, one of the accounts named being his
+  // own. Every one of those bursts was our own deploy gate spending the relay's lockout on purpose.
+  //
+  // A gate row is set aside by the ROUTE, not here, and on two facts rather than one: the user agent
+  // says titanbot-gate, AND the same address signed in successfully as an operator inside the hour.
+  // The second half is the part a stranger cannot write into a header. What this file does with the
+  // answer is draw those rows greyed and NAMED, in the same table as everything else, and print how
+  // many were set aside on every summary. A row that is quietly uncounted is a row nobody can audit,
+  // so none of them disappear.
+  const gateRowsIn = (answer) => Number(answer?.gates?.rows ?? 0);
+  const attacksIn = (answer) => (answer.addresses ?? []).filter((row) => row.attack).length;
+
+  function signInChips(answer) {
+    const rows = answer.rows ?? [];
+    const attacks = attacksIn(answer);
+    const chips = [
+      { label: "Attempts", value: rows.length },
+      { label: "Refused", value: rows.filter((row) => row.outcome === "refused").length },
+      { label: "Locked out", value: rows.filter((row) => row.outcome === "locked").length },
+      { label: "Attacks", value: attacks, tone: attacks > 0 ? "bad" : "good" },
+    ];
+    const gates = gateRowsIn(answer);
+    if (gates > 0) {
+      chips.push({
+        label: "Your own gates",
+        value: gates,
+        detail: "set aside, still listed below",
+        why: String(answer.gates?.setAsideNote || (answer.gates?.scripts ?? []).join(", ")),
+      });
+    }
+    return chips;
+  }
+
+  const signInHeadline = (answer) => {
+    const hours = String($("hours").value);
+    const attacks = attacksIn(answer);
+    const gates = gateRowsIn(answer);
+    return {
+      key: "attacks",
+      label: "Sign-in attacks",
+      value: attacks,
+      tone: attacks > 0 ? "bad" : "good",
+      detail: [
+        hours === "1" ? "in the last hour" : hours === "24" ? "in the last day" : `in the last ${hours} hours`,
+        gates > 0 ? `${gates} of our own gate rows set aside` : "",
+      ].filter(Boolean).join(", "),
+    };
+  };
+
+  /** "your own verification gate (verify-deploy)", beside a row the route recognised as one. */
+  function gateNote(row) {
+    const script = String(row.gateScript ?? "").trim();
+    const node = el("span", "quiet", script.length > 0
+      ? `your own verification gate (${script})`
+      : "your own verification gate");
+    node.title = "This attempt came from one of this product's own verification gates, from an address that also signed in as an operator inside the hour. It is left out of the Attack rule and out of the counts above, and it is still listed here.";
+    return node;
+  }
+
+  /** "N of our own gate rows" under a summary figure, so a set-aside row is never an invisible one. */
+  const gateSetAside = (count) => el("div", "quiet", `${count} of our own gate ${count === 1 ? "row" : "rows"} set aside`);
+
   async function loadSignIns() {
     const hours = $("hours").value;
     const outcome = $("outcome").value;
     const answer = await api("GET", `/v1/admin/sign-ins?hours=${encodeURIComponent(hours)}&outcome=${encodeURIComponent(outcome)}&limit=500`);
+    summarise("panel-signins", signInChips(answer), signInHeadline(answer));
 
     const note = [];
     note.push(`${answer.rows.length} attempt${answer.rows.length === 1 ? "" : "s"}`);
@@ -213,6 +412,7 @@
     if (answer.relay && answer.relay.reachable === false) {
       note.push(`the console's own ledger could not be read: ${answer.relay.why}`);
     }
+    if (answer.gates?.setAsideNote) note.push(String(answer.gates.setAsideNote));
     $("signInsNote").textContent = note.join(" - ");
 
     const addresses = $("addresses").querySelector("tbody");
@@ -230,6 +430,14 @@
         chip.title = answer.rule;
         ip.appendChild(chip);
       }
+      // SIGNIN-1. An address that also signed in as an operator or a super admin inside the hour is
+      // one of ours, and saying so is what stops an operator reading their own laptop as an attacker.
+      if (row.yourAddress === true) {
+        const mine = el("div", "quiet", "your address");
+        mine.title = "Somebody signed in successfully from this address as an operator or a super admin inside the hour.";
+        ip.appendChild(mine);
+      }
+      if (Number(row.gateRows ?? 0) > 0) ip.appendChild(gateSetAside(Number(row.gateRows)));
       tr.appendChild(ip);
       tr.appendChild(el("td", "num", row.attempts));
       tr.appendChild(el("td", "num", row.refused));
@@ -259,6 +467,12 @@
         chip.title = answer.sprayRule ?? "";
         who.appendChild(chip);
       }
+      if (row.yourAddress === true) {
+        const mine = el("div", "quiet", "your address");
+        mine.title = "This account signed in successfully as an operator or a super admin inside the hour.";
+        who.appendChild(mine);
+      }
+      if (Number(row.gateRows ?? 0) > 0) who.appendChild(gateSetAside(Number(row.gateRows)));
       tr.appendChild(who);
       tr.appendChild(el("td", "num", row.attempts));
       tr.appendChild(el("td", "num", row.refused));
@@ -279,6 +493,9 @@
     }
     for (const row of answer.rows) {
       const tr = document.createElement("tr");
+      // Greyed and named, never dropped. Left out of the Attack rule and out of the counts, and
+      // still in the list, because the operator has to be able to see what was set aside.
+      if (row.gate === true) tr.className = "gateRow";
       const at = el("td", null, ago(row.at));
       at.title = when(row.at);
       tr.appendChild(at);
@@ -293,7 +510,9 @@
       const outcomeCell = document.createElement("td");
       outcomeCell.appendChild(el("span", `chip ${row.outcome}`, row.outcome === "ok" ? "signed in" : row.outcome === "locked" ? "locked out" : "refused"));
       tr.appendChild(outcomeCell);
-      tr.appendChild(el("td", null, row.source === "relay" ? "the console" : "this service"));
+      const seenBy = el("td", null, row.source === "relay" ? "the console" : "this service");
+      if (row.gate === true) { seenBy.appendChild(document.createElement("br")); seenBy.appendChild(gateNote(row)); }
+      tr.appendChild(seenBy);
       attempts.appendChild(tr);
     }
   }
@@ -307,6 +526,41 @@
   };
 
   // ---- panel 2: clients and users --------------------------------------------------------------
+
+  // How many workspaces are still coming up, recorded where the strip is built so the add-client
+  // poll below knows when to stop without a second pass over the same answer.
+  let clientsBuilding = 0;
+
+  function clientChips(answer) {
+    const clients = answer.clients ?? [];
+    const running = clients.filter((one) => String(one.status) === "running").length;
+    clientsBuilding = clients.filter((one) => /provision|building|pending/i.test(String(one.status))).length;
+    const people = clients.reduce((sum, one) => sum + (one.users ?? []).length, 0);
+    const supers = clients.reduce((sum, one) => sum + (one.users ?? []).filter((user) => user.superAdmin).length, 0);
+    return [
+      { label: "Workspaces", value: clients.length },
+      {
+        label: "Running",
+        value: `${running} of ${clients.length}`,
+        tone: running === clients.length ? "good" : "warn",
+        detail: clientsBuilding > 0 ? `${clientsBuilding} still building` : "",
+      },
+      { label: "People", value: people },
+      { label: "Super admins", value: supers },
+    ];
+  }
+
+  const clientHeadline = (answer) => {
+    const clients = answer.clients ?? [];
+    const running = clients.filter((one) => String(one.status) === "running").length;
+    return {
+      key: "clients",
+      label: "Clients running",
+      value: `${running} of ${clients.length}`,
+      tone: running === clients.length ? "good" : "warn",
+      detail: clientsBuilding > 0 ? `${clientsBuilding} still building` : "",
+    };
+  };
 
   // The two numbers on this screen that are money, formatted once. A null is never a zero: it goes
   // through `measured` below and comes out as the reason it could not be read.
@@ -456,6 +710,7 @@
 
   async function loadClients() {
     const answer = await api("GET", "/v1/admin/clients");
+    summarise("panel-clients", clientChips(answer), clientHeadline(answer));
     const host = $("clients");
     clear(host);
     if (answer.clients.length === 0) {
@@ -568,6 +823,195 @@
     }
   }
 
+  // ---- ADMIN-2: adding a client from the screen --------------------------------------------------
+  //
+  // Jason, 2026-09-09 11:43: "if I was going to onboard a new client, would that be something I would
+  // do from this console or is this console merely reporting?" It is not merely reporting from here
+  // on. This runs the same sequence `node cp/cli.mjs signup add` runs -- the account, the workspace
+  // slug derived from the company name, the box -- and the command line stays as the second door.
+  //
+  // THE SUBMIT IS A FETCH AND NEVER A NATIVE ONE. This page's own CSP says form-action 'none', so a
+  // native submit is blocked by the browser with nothing on the screen to explain it, which reads as
+  // a dead button. preventDefault comes first, always.
+  //
+  // THE WELCOME MAIL IS NOT DRAWN AS A GREEN LIGHT. This control plane sends no mail at all today.
+  // The checkbox is present, unchecked and disabled with the reason beside it, the route is told
+  // sendWelcome false, and the card offers a note to copy instead. A tick that quietly sends nothing
+  // is worse than no tick, and this is the panel where that mistake costs a customer their password.
+
+  const addClientForm = $("addClientForm");
+
+  /**
+   * The plan model picker, filled from what the providers panel already fetched.
+   *
+   * If that answer failed there is nothing to choose from, so the select is swapped for a field the
+   * operator types a routing name into. An empty picker is a control that looks broken and gives the
+   * operator no way past it.
+   */
+  function fillAddClientModels() {
+    const select = $("acPlanModel");
+    const typed = $("acPlanModelText");
+    if (select == null || typed == null) return;
+    const models = (providersAnswer.planModels ?? []).filter((one) => String(one.alias ?? "").length > 0);
+    if (models.length === 0) {
+      select.hidden = true;
+      typed.hidden = false;
+      return;
+    }
+    select.hidden = false;
+    typed.hidden = true;
+    const keep = select.value;
+    const fallback = String(providersAnswer.defaults?.planModel ?? models[0].alias);
+    fill(select, models.map((one) => ({ value: one.alias, label: one.customerName || one.alias })),
+      models.some((one) => one.alias === keep) ? keep : fallback);
+  }
+
+  const chosenPlanModel = () => ($("acPlanModel").hidden ? $("acPlanModelText").value : $("acPlanModel").value).trim();
+
+  // A workspace is still building when the route answers, so its row is polled until it is not. Ten
+  // seconds apart, three minutes at the outside, and it stops the moment the panel is left or Refresh
+  // is pressed. A page that polls for ever is a page that keeps a laptop awake all night.
+  let provisionWatch = null;
+  const stopWatchingProvision = () => {
+    if (provisionWatch != null) { clearTimeout(provisionWatch); provisionWatch = null; }
+  };
+
+  function watchProvisioning() {
+    stopWatchingProvision();
+    const deadline = Date.now() + 180_000;
+    const tick = async () => {
+      provisionWatch = null;
+      if (Date.now() > deadline) return;
+      if ($("panel-clients")?.hidden === true) return;
+      try { await loadClients(); } catch { return; }
+      if (clientsBuilding === 0) return;
+      provisionWatch = setTimeout(() => { void tick(); }, 10_000);
+    };
+    provisionWatch = setTimeout(() => { void tick(); }, 10_000);
+  }
+
+  /**
+   * What came back, shown ONCE.
+   *
+   * The temporary password is minted by the route, stored as a hash and readable from nowhere after
+   * this, so this card is the only sight of it there will ever be. Nothing writes it anywhere else,
+   * no re-render brings it back, and Refresh takes the card away. It is drawn as a card rather than
+   * in the banner because the next banner would replace it, and this one has to live long enough to
+   * be copied.
+   */
+  function showNewClient(result) {
+    const host = $("addClientResult");
+    clear(host);
+    const tenant = result.tenant ?? {};
+    const name = String(tenant.name || tenant.slug || "The workspace");
+    const state = String(result.state ?? "");
+    const card = el("div", "newClient");
+    card.appendChild(el("strong", null, state === "running"
+      ? `${name} is up.`
+      : state === "building"
+        ? `${name} was added and the workspace is still coming up.`
+        : `${name} was added and the build did not finish. Press Provision on its row to pick it up where it stopped.`));
+
+    const password = String(result.temporaryPassword ?? "");
+    if (password.length > 0) card.appendChild(el("p", "once", "This password is shown once. Copy it now."));
+
+    const rows = [
+      ["Workspace", String(tenant.slug ?? "")],
+      ["Sign in at", String(result.signIn ?? "")],
+      ["Email", String(result.account?.email ?? "")],
+    ];
+    if (password.length > 0) rows.push(["Temporary password", password]);
+    const list = document.createElement("dl");
+    for (const [label, value] of rows) {
+      if (value.length === 0) continue;
+      list.appendChild(el("dt", null, label));
+      list.appendChild(el("dd", null, value));
+    }
+    card.appendChild(list);
+
+    // What each of the two answers about themselves, in their own words, because "the plan model was
+    // not applied" and "the plan model is what you asked for" look the same on a card that says
+    // neither.
+    for (const [label, applied] of [["Plan model", result.planModel], ["Agent ceiling", result.ceiling]]) {
+      if (applied == null) continue;
+      const line = el("p", "quiet", `${label}: ${applied.applied ?? "not applied"}${applied.why ? ` -- ${applied.why}` : ""}`);
+      card.appendChild(line);
+    }
+    if (result.welcomeMail && result.welcomeMail.sent !== true) {
+      card.appendChild(el("p", "quiet", `No welcome mail was sent: ${String(result.welcomeMail.why ?? "this service does not send mail yet")}. Copy the note below and send it yourself.`));
+    }
+
+    if (password.length > 0) {
+      const copy = el("button", "ghost small", "Copy the welcome note");
+      copy.type = "button";
+      const note = [
+        `Your Titanium Bot workspace is ready.`,
+        `Sign in at ${result.signIn ?? ""}`,
+        `Email: ${result.account?.email ?? ""}`,
+        `Temporary password: ${password}`,
+        `Change the password after the first sign-in.`,
+      ].join("\n");
+      copy.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(note);
+          banner("The welcome note is on the clipboard. It carries the password, so paste it somewhere the customer and nobody else will read.", true);
+        } catch {
+          banner("This browser would not give the page the clipboard. Select the four lines above and copy them by hand.");
+        }
+      });
+      card.appendChild(copy);
+    }
+    host.appendChild(card);
+  }
+
+  $("addClientShow").addEventListener("click", () => {
+    addClientForm.hidden = !addClientForm.hidden;
+    if (!addClientForm.hidden) { fillAddClientModels(); $("acEmail").focus(); }
+  });
+  $("addClientCancel").addEventListener("click", () => { addClientForm.hidden = true; });
+
+  addClientForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = $("addClientSave");
+    const ceiling = Number($("acCeiling").value);
+    const body = {
+      email: $("acEmail").value.trim(),
+      company: $("acCompany").value.trim(),
+      name: $("acName").value.trim(),
+      planModel: chosenPlanModel(),
+      ceiling: Number.isFinite(ceiling) && ceiling > 0 ? Math.round(ceiling) : null,
+      // Off, and the route answers what it did with it. See the note above this form.
+      sendWelcome: false,
+    };
+    clear($("addClientResult"));
+    banner("");
+    button.disabled = true;
+    try {
+      const result = await api("POST", "/v1/admin/clients", body);
+      showNewClient(result);
+      banner(String(result.message || `${body.company} was added.`), true);
+      addClientForm.reset();
+      $("acCeiling").value = "40";
+      fillAddClientModels();
+      addClientForm.hidden = true;
+      await loadClients().catch(() => {});
+      watchProvisioning();
+    } catch (error) {
+      // THE ROUTE'S OWN SENTENCE, UNCHANGED. Every refusal this form can produce -- an address that
+      // already has an account, a company name with nothing in it to name a workspace after, a slug
+      // that is taken or reserved, new workspaces switched off on this server -- is already written
+      // there in words a person reads. Rewording it here would put two explanations of the same
+      // refusal in the same product, and the operator would meet whichever one they happened to hit.
+      banner(String(error.message));
+      // The account exists and the build did not: the password still has to be shown, once, or the
+      // customer has an account nobody can open.
+      if (error.body?.temporaryPassword) {
+        showNewClient(error.body);
+        await loadClients().catch(() => {});
+      }
+    } finally { button.disabled = false; }
+  });
+
   // ---- panel 3: box health ---------------------------------------------------------------------
 
   // The one function that keeps the screen honest: a value that was not measured renders as the
@@ -581,8 +1025,40 @@
     return text(format ? format(value) : String(value));
   };
 
+  function boxChips(answer) {
+    const boxes = answer.boxes ?? [];
+    const answering = boxes.filter((one) => one.gatewayAnswering === true).length;
+    const unknown = boxes.filter((one) => one.gatewayAnswering === null || one.gatewayAnswering === undefined).length;
+    const up = boxes.filter((one) => String(one.containerState) === "running").length;
+    return [
+      { label: "Workspaces", value: boxes.length },
+      {
+        label: "Answering",
+        value: `${answering} of ${boxes.length}`,
+        tone: answering === boxes.length ? "good" : "bad",
+        detail: unknown > 0 ? `${unknown} not measured` : "",
+      },
+      { label: "Containers up", value: `${up} of ${boxes.length}` },
+    ];
+  }
+
+  const boxHeadline = (answer) => {
+    const boxes = answer.boxes ?? [];
+    const answering = boxes.filter((one) => one.gatewayAnswering === true).length;
+    // A container can be running while the thing inside it is not answering, which is the whole
+    // reason this panel asks twice, so the Overview counts the half that a customer would notice.
+    return {
+      key: "boxes",
+      label: "Boxes answering",
+      value: `${answering} of ${boxes.length}`,
+      tone: answering === boxes.length ? "good" : "bad",
+      detail: "their gateway answered when this page loaded",
+    };
+  };
+
   async function loadBoxes() {
     const answer = await api("GET", "/v1/admin/boxes");
+    summarise("panel-boxes", boxChips(answer), boxHeadline(answer));
     const body = $("boxes").querySelector("tbody");
     clear(body);
     if (answer.boxes.length === 0) {
@@ -648,8 +1124,29 @@
     return node;
   };
 
+  function systemChips(answer) {
+    const stuck = (answer.stuckProvisioning ?? []).length;
+    return [
+      {
+        label: "Coolify", word: true,
+        value: answer.coolify?.reachable ? "reachable" : "not answering",
+        tone: answer.coolify?.reachable ? "good" : "bad",
+        why: String(answer.coolify?.why || answer.coolify?.url || ""),
+      },
+      {
+        label: "Console relay", word: true,
+        value: answer.relay?.reachable ? "reachable" : "not answering",
+        tone: answer.relay?.reachable ? "good" : "bad",
+        why: String(answer.relay?.why || answer.relay?.url || ""),
+      },
+      { label: "Builds stuck", value: stuck, tone: stuck === 0 ? "good" : "bad" },
+      { label: "Sign-ins in the last day", value: answer.counts?.signInsLastDay ?? null },
+    ];
+  }
+
   async function loadSystem() {
     const answer = await api("GET", "/v1/admin/system");
+    summarise("panel-system", systemChips(answer));
     const host = $("system");
     clear(host);
 
@@ -715,8 +1212,38 @@
 
   // ---- panel 5: spend --------------------------------------------------------------------------
 
+  // THE ONE PLACE A TOTAL COULD LIE. Summing dollars across workspaces turns every unmeasured one
+  // into a zero, and a total that quietly left three customers out reads exactly like a quiet month.
+  // So a window where NOTHING was measured says so, and a window where only some were carries the
+  // count of the ones missing from it.
+  function spendChips(answer) {
+    if (answer.configured === false) {
+      return [{ label: "This month", value: null, why: String(answer.why ?? "the proxy could not be asked") }];
+    }
+    const clients = answer.clients ?? [];
+    const total = (pick) => {
+      const seen = clients.map(pick).filter((one) => Number.isFinite(Number(one)));
+      return seen.length === 0 ? null : dollars(seen.reduce((sum, one) => sum + Number(one), 0));
+    };
+    const missing = clients.filter((one) => !Number.isFinite(Number(one.thisMonth?.dollars))).length;
+    return [
+      {
+        label: "This month",
+        value: clients.length === 0 ? dollars(0) : total((one) => one.thisMonth?.dollars),
+        detail: missing > 0 ? `${missing} workspace${missing === 1 ? "" : "s"} not measured` : "",
+        why: missing > 0 ? "This total leaves out the workspaces the proxy could not be asked about." : "",
+        tone: missing > 0 ? "warn" : "",
+      },
+      { label: "Today", value: clients.length === 0 ? dollars(0) : total((one) => one.today?.dollars) },
+      { label: "Workspaces", value: clients.length },
+    ];
+  }
+
+  const spendHeadline = (answer) => ({ ...spendChips(answer)[0], key: "spend", label: "Spend this month" });
+
   async function loadSpend() {
     const answer = await api("GET", "/v1/admin/spend");
+    summarise("panel-spend", spendChips(answer), spendHeadline(answer));
     const body = document.querySelector("#spend tbody");
     clear(body);
     $("spendNote").textContent = answer.configured
@@ -935,8 +1462,8 @@
     if (health.reachable === true) {
       const chip = el("span", "chip ok", "answering");
       // WHERE THE GREEN CAME FROM, on the chip itself. Nothing on this install checks health in the
-      // background, so "answering" means either requests went through and none failed, or somebody
-      // pressed the button beside it. A green light with no source behind it is worse than none.
+      // background, so "answering" means either the last requests went through, or somebody pressed
+      // the button beside it. A green light with no source behind it is worse than none.
       chip.title = String(health.how || health.why || "");
       head.appendChild(chip);
     } else if (health.reachable === false) {
@@ -947,6 +1474,25 @@
       const chip = el("span", "quiet", "not checked");
       chip.title = String(health.why || "nothing has checked this provider, so there is nothing to report");
       head.appendChild(chip);
+    }
+
+    // PROVIDERS-8. THE MONTH'S FAILURES, BESIDE THE CHIP AND NEVER INSTEAD OF IT.
+    //
+    // Measured on the R750 2026-09-09 12:02: plan-qwen answered HTTP 200 in 2,357 ms through the
+    // proxy while this panel said "not answering", because the health rule went red on ANY failure
+    // inside the month window and three of that key's 220 requests had failed the previous evening,
+    // before the key moved endpoints. A colour that cannot go back to green until the calendar turns
+    // is a colour an operator learns to ignore.
+    //
+    // So the chip answers "is it working now" and this line answers "has it ever not", and both are
+    // on the screen at once whatever the colour. Drawn whenever the month holds a failure, including
+    // beside a green chip, because a green chip that hides three failures is the half of this that
+    // nobody can act on.
+    const month = health.month ?? null;
+    if (month != null && Number(month.failures) > 0) {
+      const note = el("span", "monthFail", `${Number(month.failures)} of ${Number(month.requests ?? 0)} failed this month${month.lastFailureAt ? `, last ${utcMinute(month.lastFailureAt)}` : ""}`);
+      note.title = String(month.lastFailureWhy || "The most recent failure inside the month window. The chip beside this reads the most recent requests, which is a different question.");
+      head.appendChild(note);
     }
 
     const actions = el("div", "actions");
@@ -974,6 +1520,43 @@
     check.title = "Sends one real request to this provider on every model it serves, and records what came back. It costs the vendor a request, which is why it is a button and not a timer.";
     check.addEventListener("click", () => act(check, () => api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/health`, {})));
     actions.appendChild(check);
+    // PROVIDERS-8. A check sends one real request on every model this provider serves, and there is
+    // nothing to send it with until a key is in. Said beside the button rather than in a tooltip: a
+    // disabled control cannot be hovered in every browser, and a button that does nothing with no
+    // reason on the screen is read as broken.
+    const keyCount = (provider.keys ?? []).length;
+    if (keyCount === 0) {
+      check.disabled = true;
+      check.title = "Add a key first, then this can check it.";
+      actions.appendChild(el("span", "quiet", "add a key first, then this can check it"));
+    }
+
+    // PROVIDERS-9. REMOVING A PROVIDER.
+    //
+    // Measured on the R750 2026-09-09: the Alibaba token plan was listed TWICE. `qwen`, the preset
+    // with the override, the key and 254 requests behind it, and `qwen-plan`, a leftover of the
+    // 2026-09-08 recovery carrying the same name and the same address with no key and nothing ever
+    // run through it. Two identical cards is two chances to point a plan model at the dead one.
+    //
+    // Off unless the card holds no key AND serves no deployment, because a provider with either
+    // behind it is a provider whose removal takes a customer off the air on the next request. The
+    // reason why it is off is beside it, for the same reason as above.
+    const servedBy = (providersAnswer.planModels ?? []).filter((model) =>
+      String(model.provider ?? "") === provider.id
+      || (model.deployments ?? []).some((one) => String(one.keySlot ?? "").startsWith(`${provider.id}-`)));
+    const removeProvider = el("button", "ghost small removeProvider", "Remove");
+    removeProvider.type = "button";
+    const blocking = keyCount > 0
+      ? `This provider still holds ${keyCount === 1 ? "a key" : `${keyCount} keys`}. Remove the keys first.`
+      : servedBy.length > 0
+        ? `${servedBy.map((one) => one.alias).join(", ")} still ${servedBy.length === 1 ? "runs" : "run"} on it. Point ${servedBy.length === 1 ? "it" : "them"} somewhere else first.`
+        : "";
+    if (blocking.length > 0) {
+      removeProvider.disabled = true;
+      removeProvider.title = blocking;
+    }
+    actions.appendChild(removeProvider);
+    if (blocking.length > 0) actions.appendChild(el("span", "quiet", blocking));
     head.appendChild(actions);
     card.appendChild(head);
 
@@ -1238,6 +1821,47 @@
       await act(addGo, () => api("POST", `/v1/admin/providers/${encodeURIComponent(provider.id)}/keys`, { label, apiKey: value }));
     });
     card.appendChild(addForm);
+
+    // The typed confirmation. The same shape the key removal uses, because it is the same decision
+    // one size up, and the same rule: the word typed is the word the route checks, so a confirmation
+    // this console would accept and the service would refuse cannot exist.
+    const removeForm = el("form", "keyForm danger providerRemoveForm");
+    removeForm.hidden = true;
+    const confirmProvider = document.createElement("input");
+    confirmProvider.type = "text";
+    confirmProvider.autocomplete = "off";
+    confirmProvider.placeholder = provider.id;
+    confirmProvider.className = "confirmProvider";
+    const removeGo = el("button", "ghost small", "Remove this provider");
+    removeGo.type = "submit";
+    removeForm.appendChild(confirmProvider);
+    removeForm.appendChild(removeGo);
+    // A built-in is never really removed: what goes is the override this console put on top of it,
+    // and the built-in underneath comes back. Saying "removed" about that would be a lie the next
+    // page load exposes.
+    removeForm.appendChild(el("span", "why", provider.fromPreset === true
+      ? `Type ${provider.id} to confirm. This is one of the built-in providers; removing it only takes the override off and puts the built-in back.`
+      : `Type ${provider.id} to confirm. It holds no key and nothing runs on it, so nothing stops when it goes.`));
+    removeForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const typed = confirmProvider.value.trim();
+      if (typed !== String(provider.id)) {
+        banner(`Type ${provider.id} in the box to remove this provider. Nothing was removed.`);
+        return;
+      }
+      confirmProvider.value = "";
+      await act(removeGo, () => api("DELETE", `/v1/admin/providers/${encodeURIComponent(provider.id)}`, {
+        confirm: typed,
+        // Only for a built-in, and only because the operator read the sentence above saying that is
+        // what removing one means. The route refuses a preset without it.
+        andOverride: provider.fromPreset === true,
+      }));
+    });
+    removeProvider.addEventListener("click", () => {
+      removeForm.hidden = !removeForm.hidden;
+      if (!removeForm.hidden) confirmProvider.focus();
+    });
+    card.appendChild(removeForm);
     return card;
   }
 
@@ -1616,9 +2240,25 @@
     }
   }
 
+  function providerChips(answer) {
+    if (answer.configured === false) {
+      return [{ label: "Providers", value: null, why: String(answer.why ?? "the proxy could not be asked") }];
+    }
+    const providers = answer.providers ?? [];
+    const keys = providers.reduce((sum, one) => sum + (one.keys ?? []).length, 0);
+    const down = providers.filter((one) => one.health?.reachable === false).length;
+    return [
+      { label: "Providers", value: providers.length },
+      { label: "Plan models", value: (answer.planModels ?? []).length },
+      { label: "Keys", value: keys },
+      { label: "Not answering", value: down, tone: down === 0 ? "good" : "bad" },
+    ];
+  }
+
   async function loadProviders() {
     const answer = await api("GET", "/v1/admin/providers");
     providersAnswer = answer;
+    summarise("panel-providers", providerChips(answer));
 
     const note = [];
     if (answer.configured === false) {
@@ -1652,6 +2292,9 @@
 
     renderDefaults(answer);
     renderLedger(answer.actions ?? []);
+    // ADMIN-2's picker is filled from this answer and from nothing else, so the two panels can never
+    // offer different plan models.
+    fillAddClientModels();
   }
 
   // ---- panel 7: feedback (FEEDBACK-1) ----------------------------------------------------------
@@ -1752,10 +2395,34 @@
     return card;
   }
 
+  function feedbackChips(answer) {
+    const counts = answer.counts ?? {};
+    const unread = Number(counts.criticalNew ?? 0);
+    return [
+      { label: "On record", value: answer.total ?? 0 },
+      { label: "New", value: counts.new ?? 0, tone: Number(counts.new ?? 0) > 0 ? "warn" : "good" },
+      { label: "Critical and unread", value: unread, tone: unread > 0 ? "bad" : "good" },
+      { label: "Filed", value: counts.filed ?? 0 },
+    ];
+  }
+
+  const feedbackHeadline = (answer) => {
+    const counts = answer.counts ?? {};
+    const unread = Number(counts.criticalNew ?? 0);
+    return {
+      key: "feedback",
+      label: "Reports waiting",
+      value: counts.new ?? 0,
+      tone: unread > 0 ? "bad" : Number(counts.new ?? 0) > 0 ? "warn" : "good",
+      detail: unread > 0 ? `${unread} critical and unread` : "nobody is stopped right now",
+    };
+  };
+
   async function loadFeedback() {
     const tier = $("feedbackTier").value;
     const state = $("feedbackState").value;
     const answer = await api("GET", `/v1/admin/feedback?tier=${encodeURIComponent(tier)}&state=${encodeURIComponent(state)}&limit=200`);
+    summarise("panel-feedback", feedbackChips(answer), feedbackHeadline(answer));
     $("feedbackGates").textContent = String(answer.gates ?? "");
     const note = [
       `${answer.total} report${answer.total === 1 ? "" : "s"} on record`,
@@ -1833,8 +2500,36 @@
     return el("span", `chip${tone ? ` ${tone}` : ""}`, word);
   }
 
+  function marketplaceChips(answer) {
+    const stale = (answer.records ?? []).filter((one) => String(one.state) === "needs-re-verification").length;
+    const ledger = answer.ledger ?? {};
+    return [
+      { label: "Catalog rows", value: (answer.catalog ?? []).length },
+      { label: "Needs re-verification", value: stale, tone: stale === 0 ? "good" : "warn" },
+      {
+        label: "Cloud sessions",
+        // Never a zero for a relay that could not be asked: no session opened and nobody counted
+        // look identical on a screen and one of them is the expensive half of a bill.
+        value: ledger.measured === true ? (ledger.tenants ?? []).reduce((sum, one) => sum + Number(one.sessions ?? 0), 0) : null,
+        why: ledger.measured === true ? "" : String(ledger.why ?? "the relay could not be asked"),
+      },
+    ];
+  }
+
+  const marketplaceHeadline = (answer) => {
+    const stale = (answer.records ?? []).filter((one) => String(one.state) === "needs-re-verification").length;
+    return {
+      key: "verification",
+      label: "Needs re-verification",
+      value: stale,
+      tone: stale === 0 ? "good" : "warn",
+      detail: stale === 0 ? "every row still matches its vendor's page" : "a vendor moved something under a marketing row",
+    };
+  };
+
   async function loadMarketplace() {
     const answer = await api("GET", "/v1/admin/marketplace");
+    summarise("panel-marketplace", marketplaceChips(answer), marketplaceHeadline(answer));
     const records = new Map((answer.records ?? []).map((record) => [String(record.rowId), record]));
 
     const rows = $("marketplaceRows").querySelector("tbody");
@@ -1946,18 +2641,38 @@
 
   // ---- everything at once ----------------------------------------------------------------------
 
+  // Which Overview chip each loader owns, in the order they are started below. The Overview is drawn
+  // from what the eight registered, so a loader that threw has to have its chip written back to
+  // "not measured": otherwise the number it registered on the last successful Refresh would sit
+  // there looking current while the panel behind it is dark.
+  const LOADER_HEADLINE = ["attacks", "clients", "boxes", null, "spend", null, "feedback", "verification"];
+
   async function loadAll() {
     banner("");
     const button = $("refresh");
     button.disabled = true;
     // Each panel loads on its own and reports its own failure into its own space, so one route
     // being down does not blank the other seven. `allSettled`, deliberately.
+    //
+    // ALL EIGHT, WHICHEVER PANEL IS ON SCREEN. The rail decides what is shown and never what is
+    // fetched: an operator who opens Box health during an outage must not then wait on a request
+    // that could have been made a second earlier, and the Overview's figures all come from these
+    // eight, so loading them lazily would leave it half drawn.
     const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend(), loadProviders(), loadFeedback(), loadMarketplace()]);
     button.disabled = false;
     const broken = results.filter((result) => result.status === "rejected" && String(result.reason?.message) !== "unauthorized");
     if (broken.length > 0) banner(`${broken.length} panel${broken.length === 1 ? "" : "s"} could not be loaded: ${broken.map((row) => row.reason.message).join("; ")}`);
+    results.forEach((result, index) => {
+      const key = LOADER_HEADLINE[index];
+      if (key == null || result.status !== "rejected") return;
+      const row = OVERVIEW.find((one) => one.key === key);
+      headlines.set(key, { key, label: row?.label ?? key, value: null, why: String(result.reason?.message ?? "this panel did not load") });
+    });
+    renderOverview();
     // The one flag a browser gate waits on, rather than a fixed sleep. It says the render finished,
-    // not that everything in it succeeded, which is exactly what a gate wants to inspect.
+    // not that everything in it succeeded, which is exactly what a gate wants to inspect. It counts
+    // the LOADERS the refresh runs, which is eight; the page carries nine panels, because the ninth
+    // fetches nothing and is drawn from what the eight registered.
     window.__adminLive = { panels: 8, at: new Date().toISOString() };
     document.body.setAttribute("data-admin-loaded", "true");
   }

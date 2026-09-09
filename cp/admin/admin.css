@@ -6,9 +6,14 @@
   on the machine, because this page loads nothing from anywhere -- no CDN, no font service -- and a
   webfont request would be the one thing on the screen that could hang.
 
-  One column, one width, no theme switch. This is an operator's screen and it is read on a laptop at
-  the wrong time of day, so the contrast is high and the numbers are monospaced wherever comparing
-  two of them down a column is the point.
+  One width, no theme switch. This is an operator's screen and it is read on a laptop at the wrong
+  time of day, so the contrast is high and the numbers are monospaced wherever comparing two of
+  them down a column is the point.
+
+  ADMIN-3 turned the one long column into a dashboard: a 224px rail and a content column, the whole
+  thing exactly one viewport tall, with the RAIL and the PANEL each scrolling inside themselves and
+  the body never scrolling at all. The 1180px reading width did not change; at 1440 the rail takes
+  the gutter that used to be empty, so no table and no card got narrower for it.
 */
 
 :root {
@@ -18,7 +23,11 @@
   --ink: #E8EDF3;
   --quiet: #93A1B3;
   --cyan: #00C8F0;
-  --warm: #FF8A3D;
+  /* The one amber on this page, and it has three jobs: a message under the door, a plan window
+     running out, and a provider that answered its last requests but failed some earlier in the
+     month. It was #FF8A3D, which is the parent company's MSP orange and the only token on this
+     board that came from somewhere else. */
+  --warn: #F2A93B;
   --bad: #FF5C68;
   --good: #3ECF8E;
   --radius: 10px;
@@ -27,6 +36,15 @@
 }
 
 * { box-sizing: border-box; }
+
+/* HIDDEN HAS TO WIN, EVERYWHERE. Anything below that sets a display beats the browser's own
+   `[hidden] { display: none }` at equal specificity, and the first build of the providers panel
+   shipped a roll form and a remove form open under every key because of exactly that: the code set
+   hidden, a class set `display: flex`, and Playwright happily typed into a field nobody meant to be
+   on screen. ADMIN-3 made this the rule the whole page depends on rather than one panel's patch:
+   `.console` is a grid, `.panels` is a flex column and eight of its nine sections are hidden at any
+   moment, so a single missed override would put every panel on the screen at once. */
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -102,34 +120,137 @@ button.ghost {
 button.ghost:hover:not(:disabled) { color: var(--ink); border-color: var(--cyan); }
 button.small { margin-top: 0; padding: 4px 9px; font-size: 12px; }
 
-.message { min-height: 20px; margin: 14px 0 0; font-size: 13px; color: var(--warm); }
+.message { min-height: 20px; margin: 14px 0 0; font-size: 13px; color: var(--warn); }
 
 /* ---- the console ---------------------------------------------------------------------------- */
 
-.console { max-width: 1180px; margin: 0 auto; padding: 20px 22px 60px; }
+/* ADMIN-3. Three rows and two columns, exactly one viewport tall. The top bar and the banner span
+   both columns; the rail and the panel column share the last row and each scrolls inside itself, so
+   `document.documentElement.scrollHeight` stays at the viewport height whatever a panel holds. The
+   gate asserts that on every one of the nine panels. */
+.console {
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-areas:
+    "top    top"
+    "banner banner"
+    "rail   panels";
+  height: 100dvh;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
 
 .top {
+  grid-area: top;
   display: flex; align-items: center; gap: 12px;
-  padding-bottom: 16px; margin-bottom: 18px;
+  padding: 14px 22px;
   border-bottom: 1px solid var(--line);
 }
 .who { display: grid; line-height: 1.3; }
 .topActions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 
 .banner {
+  grid-area: banner;
+  margin: 12px 22px 0;
   padding: 10px 13px; border-radius: 8px;
   background: #22161C; border: 1px solid #4A2630; color: #FFC4C9;
   font-size: 13px;
 }
 .banner.good { background: #10231C; border-color: #1E4636; color: #A9EBCE; }
 
+/* ---- the rail ------------------------------------------------------------------------------- */
+/* Plain anchors. Tab reaches them, Enter follows them, the browser's own back button walks the
+   panels, and the current one is marked with aria-current so a screen reader says which it is. */
+
+.rail {
+  grid-area: rail;
+  min-height: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  padding: 14px 10px 24px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.rail a {
+  display: block;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  color: var(--quiet);
+  font-size: 13.5px; font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.rail a:hover { color: var(--ink); background: #0C131C; }
+.rail a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.rail a[aria-current="page"] {
+  color: var(--ink);
+  background: #0C131C;
+  border-color: var(--line);
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+/* ---- the panel column ------------------------------------------------------------------------ */
+/* One flex column holding nine sections, eight of them hidden, and the footer. The visible section
+   takes what is left and scrolls inside itself; the column itself does not scroll, so a panel can
+   never push the page taller than the window. */
+
+.panels {
+  grid-area: panels;
+  min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  padding: 16px 22px 0;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 18px 20px 20px;
-  margin-bottom: 16px;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
+
+/* ---- a panel's own summary strip -------------------------------------------------------------- */
+/* The three or four numbers that say whether this panel needs reading at all, in a row under its
+   heading. Same card, same rules as everything else on the page: a figure that was not measured
+   says so in words instead of drawing a zero. */
+
+.strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 12px; }
+.strip:empty { display: none; }
+.stat {
+  display: grid; gap: 2px;
+  min-width: 108px;
+  padding: 7px 12px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: #0C131C;
+  color: inherit; text-decoration: none;
+}
+.stat .k { font-size: 11px; color: var(--quiet); text-transform: uppercase; letter-spacing: 0.06em; }
+.stat .v { font-family: var(--mono); font-size: 18px; line-height: 1.25; }
+.stat .v.unmeasured { font-family: var(--sans); font-size: 13px; color: var(--quiet); }
+/* A figure that is a word rather than a number: "reachable", "not answering". Monospaced 18px is
+   for comparing digits down a column, which a word is not. */
+.stat .v.word { font-family: var(--sans); font-size: 15px; font-weight: 600; }
+.stat .d { font-size: 12px; color: var(--quiet); white-space: normal; }
+.stat.warn { border-color: #5A4326; }
+.stat.bad { border-color: #4A2630; }
+.stat.good { border-color: #1E4636; }
+a.stat:hover { border-color: var(--cyan); }
+a.stat:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+
+/* The Overview is the same card at reading size, laid out as a grid rather than a strip, because
+   every one of its six is a link into the panel the figure came from. */
+.overview { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.overview .stat { padding: 13px 15px; }
+.overview .stat .v { font-size: 24px; }
 
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 6px; }
 .controls select { padding: 5px 9px; }
@@ -156,6 +277,12 @@ td.num { text-align: right; }
   font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em;
   border: 1px solid var(--line); color: var(--quiet);
 }
+/* SIGNIN-1. One of our own verification gates, in the same table as everything else and quieter
+   than everything else. It is not hidden: an attempt that is left out of a count has to stay
+   readable, or the count cannot be checked. */
+tr.gateRow td { color: var(--quiet); }
+tbody tr.gateRow:hover td { background: #0E151E; }
+
 .chip.attack { background: #2A1116; border-color: var(--bad); color: #FFB0B7; }
 .chip.refused { border-color: #57303A; color: #FFB0B7; }
 .chip.locked { border-color: #5A4326; color: #FFCE9B; }
@@ -182,17 +309,26 @@ td.num { text-align: right; }
 /* AGENTS-CAP-2. Wide enough for four digits and no wider: this is a ceiling, not a paragraph. */
 .capRow input.clientCeiling { width: 84px; }
 
+/* ADMIN-2. What comes back after a client is added: the workspace, the sign-in address, the email
+   and the one and only sight of the temporary password. It is drawn as a card rather than a banner
+   because a banner is replaced by the next message, and this one has to survive long enough to be
+   copied. Nothing rewrites it and no reload brings it back. */
+.newClient {
+  margin: 12px 0 4px;
+  padding: 14px 16px;
+  border: 1px solid #1E4636; border-radius: 8px;
+  background: #0C131C;
+}
+.newClient dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 10px 0; font-size: 13px; }
+.newClient dt { color: var(--quiet); }
+.newClient dd { margin: 0; font-family: var(--mono); font-size: 13px; word-break: break-all; }
+.newClient .once { color: var(--warn); font-size: 13px; margin: 0 0 6px; }
+
 /* ---- providers, keys and plan models ------------------------------------------------------ */
 /* PROVIDERS-1. Two stacks of cards and one form that is reused for adding and for editing.
    Nothing here is a new visual language: the same card, the same ghost button, the same chip. */
 
-/* HIDDEN HAS TO WIN. Everything below sets a display, and a class selector setting `display: flex`
-   beats the browser's own `[hidden] { display: none }` at the same specificity, so a form the code
-   had marked hidden was drawn anyway: the first render of this panel put a roll form and a remove
-   form under every single key. The page LOOKED like it worked, and the gate agreed, because
-   Playwright will happily type into a field that was never meant to be on screen. So this rule
-   comes first and it is the one place hidden is decided for this panel. */
-.providers [hidden], .planModels [hidden], #panel-providers form[hidden], #panel-providers label[hidden] { display: none; }
+/* Hidden is decided once, at the top of this file, for every panel including this one. */
 
 .providers, .planModels { display: grid; gap: 12px; }
 .provider, .planModel {
@@ -201,6 +337,18 @@ td.num { text-align: right; }
 .provider .head, .planModel .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .provider .head strong, .planModel .name { font-size: 15px; font-weight: 600; }
 .provider .actions, .planModel .actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* PROVIDERS-8. The month's failures, beside the chip and never instead of it. A provider whose last
+   five requests all answered is green, and a green chip that hides three failures earlier in the
+   month is a chip nobody can act on, so the count sits next to it in the one amber this page has.
+   Measured on the R750 2026-09-09: plan-qwen answered in 2,357 ms while the panel said "not
+   answering", because three failures on 2026-09-08 outvoted 217 later successes. */
+.monthFail { color: var(--warn); font-size: 12px; }
+
+/* PROVIDERS-9. Removing a provider. Off unless the card holds no key and serves no deployment, and
+   its reason is on the button, because a disabled control with no explanation is read as broken. */
+.removeProvider[disabled] { border-color: var(--line); }
+.providerRemoveForm { margin-top: 10px; }
 
 /* The routing alias. The operator needs it and a customer never sees it, so it is quiet, it is
    monospaced, and it carries its own caption saying what it is. */
@@ -241,11 +389,26 @@ form.stack .controls { margin: 0; }
 .card.bad { border-color: #4A2630; }
 .card.good { border-color: #1E4636; }
 
-.foot { margin-top: 22px; text-align: center; }
+.foot { flex: none; padding: 10px 0 12px; text-align: center; }
 
+/* Narrow enough that a 224px rail is a quarter of the screen: the rail becomes a strip across the
+   top that scrolls sideways, and the panel takes the rest. Everything else is unchanged. */
 @media (max-width: 640px) {
-  .console { padding: 14px 12px 40px; }
+  .console {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-areas: "top" "banner" "rail" "panels";
+  }
+  .rail {
+    flex-direction: row;
+    overflow-x: auto; overflow-y: hidden;
+    border-right: 0; border-bottom: 1px solid var(--line);
+    padding: 8px 12px;
+  }
+  .panels { padding: 12px 12px 0; }
   .panel { padding: 14px 13px 16px; }
+  .top { padding: 12px 12px; flex-wrap: wrap; }
+  .banner { margin: 10px 12px 0; }
   .topActions { width: 100%; margin-left: 0; }
 }
 
@@ -253,7 +416,7 @@ form.stack .controls { margin: 0; }
    spend figure, and it is half typed-in and half measured, which the text beside it says. */
 .quotaBar { width: 88px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .quotaFill { height: 100%; background: var(--good); }
-.quotaFill.warn { background: var(--warm); }
+.quotaFill.warn { background: var(--warn); }
 
 /* FEEDBACK-1. The two blocks this panel prints verbatim: what an agent actually sent, and a
    prepared issue body when no repository token is stored yet. Both can be long and neither may

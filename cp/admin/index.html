@@ -6,12 +6,19 @@
   /v1/admin route that refuses anything but a super admin, so the shell itself carries no customer
   data: no counts, no names, no hostnames, nothing but the words below.
 
-  The panels are in the order Jason asked for them, which is also the order an operator opens them
-  in on a bad morning: who has been knocking, then who the customers are, then whether their boxes
-  are up, then whether the machine is, then the money that is not wired in yet. Providers is sixth
-  because it is the one panel you open to CHANGE something rather than to find out what happened,
-  and Feedback is seventh because it is the one somebody else fills in: what the agents reported
-  and their operators chose to send on (FEEDBACK-1).
+  ADMIN-3 MADE IT A DASHBOARD RATHER THAN A SCROLL. Jason, 2026-09-09: "stuff is all jumbled and
+  there is a lot of scrolling." Every section below is the section it always was, with the same id,
+  the same controls and the same routes. What changed is that a left rail names them, one is on
+  screen at a time, and the URL hash says which, so a pasted link opens a panel. The page itself
+  never scrolls: the rail scrolls, and each panel scrolls inside its own box.
+
+  The rail is in the order Jason asked for the panels, which is also the order an operator opens
+  them in on a bad morning: the Overview first, then who has been knocking, then who the customers
+  are, then whether their boxes are up, then whether the machine is, then the money that is not
+  wired in yet. Providers comes after those because it is the one panel you open to CHANGE
+  something rather than to find out what happened, and Feedback after it because it is the one
+  somebody else fills in: what the agents reported and their operators chose to send on
+  (FEEDBACK-1).
 -->
 <html lang="en">
 <head>
@@ -50,15 +57,50 @@
     <div class="topActions">
       <span id="measuredAt" class="quiet"></span>
       <button id="refresh" type="button" class="ghost">Refresh</button>
-      <button id="signout" type="button" class="ghost">Sign out</button>
+      <button id="signout" type="button" class="ghost">Log out</button>
     </div>
   </header>
 
   <p id="banner" class="banner" role="status" hidden></p>
 
+  <!--
+    THE RAIL. ADMIN-3. Jason, 2026-09-09: "stuff is all jumbled and there is a lot of scrolling."
+    One entry per panel, one panel on screen, and the hash names it so a link opens it. These are
+    plain anchors on purpose: Tab reaches them, Enter follows them, a middle click opens them in a
+    tab and the browser's own back button walks the panels, none of which we have to write.
+  -->
+  <nav class="rail" id="rail" aria-label="Panels">
+    <a href="#panel-overview">Overview</a>
+    <a href="#panel-signins">Sign-in attempts</a>
+    <a href="#panel-clients">Clients and users</a>
+    <a href="#panel-boxes">Box health</a>
+    <a href="#panel-system">System health</a>
+    <a href="#panel-spend">Spend</a>
+    <a href="#panel-providers">Providers</a>
+    <a href="#panel-feedback">Feedback</a>
+    <a href="#panel-marketplace">Marketplace</a>
+  </nav>
+
+  <div class="panels" id="panels">
+
+  <!-- 0. Overview ----------------------------------------------------------------------------- -->
+  <!--
+    ADMIN-3. The first entry, and the only panel that measures nothing of its own: every figure on
+    it was already fetched for one of the eight below, so it costs no route and no request. Each
+    chip is a link into the panel it came from, and a chip whose panel could not be loaded reads
+    "not measured" with the reason on it rather than a zero.
+  -->
+  <section class="panel" id="panel-overview" data-panel="overview">
+    <h2>Overview</h2>
+    <p class="quiet">Where to look first. Every number here comes from one of the panels beside it,
+      measured at the same moment, and each one is a link into the panel it came from.</p>
+    <div id="overview" class="overview"></div>
+  </section>
+
   <!-- 1. Sign-in attempts ------------------------------------------------------------------- -->
-  <section class="panel" id="panel-signins" data-panel="sign-ins">
+  <section class="panel" id="panel-signins" data-panel="sign-ins" hidden>
     <h2>Sign-in attempts</h2>
+    <div class="strip"></div>
     <p class="quiet">Every refusal and every lockout at both doors, from the console and from this
       service. The password that was tried is never kept. What is kept is a keyed hash of it, which
       is enough to say whether it was the same password again or a different one, and nothing else.</p>
@@ -101,15 +143,58 @@
   </section>
 
   <!-- 2. Clients and users ------------------------------------------------------------------ -->
-  <section class="panel" id="panel-clients" data-panel="clients">
+  <section class="panel" id="panel-clients" data-panel="clients" hidden>
     <h2>Clients and users</h2>
+    <div class="strip"></div>
     <p class="quiet">One row per customer, and the people who can sign in to it.</p>
+
+    <!--
+      ADMIN-2. Jason, 2026-09-09 11:43: "if I was going to onboard a new client, would that be
+      something I would do from this console or is this console merely reporting?" It is not merely
+      reporting from here on. This form runs the same sequence the CLI's `signup add` runs: the
+      account, the workspace slug derived from the company name, and the box. The CLI stays as the
+      second door for a machine.
+
+      THE SUBMIT IS A FETCH AND NEVER A NATIVE ONE. This page's own CSP says form-action 'none', so
+      a native submit is blocked with nothing on the screen to explain it, which reads as a dead
+      button. The handler calls preventDefault first, always.
+    -->
+    <h3>Add a client</h3>
+    <div class="controls">
+      <button id="addClientShow" type="button" class="ghost small">Add a client</button>
+    </div>
+    <form id="addClientForm" class="stack" hidden>
+      <div class="fields">
+        <label>Email<input id="acEmail" type="email" autocomplete="off" placeholder="owner@theircompany.com" required></label>
+        <label>Company<input id="acCompany" type="text" autocomplete="off" placeholder="Their Company" required></label>
+        <label>The person's name<input id="acName" type="text" autocomplete="off" placeholder="their name"></label>
+        <label>Plan model
+          <select id="acPlanModel"></select>
+          <input id="acPlanModelText" type="text" autocomplete="off" placeholder="a routing name, e.g. plan-zai" hidden>
+        </label>
+        <label>Agent ceiling<input id="acCeiling" type="number" min="1" step="1" value="40" autocomplete="off"></label>
+      </div>
+      <label class="check"><input id="acWelcome" type="checkbox" disabled> Send the welcome mail
+        <span class="quiet" id="acWelcomeWhy">this service does not send mail yet, so copy the note
+          below instead</span></label>
+      <p class="quiet">The workspace name comes from the company, the same way the command line
+        derives it. A temporary password is minted and shown once in the card below, because it is
+        stored as a hash and no route on this service can read it back.</p>
+      <div class="controls">
+        <button id="addClientSave" type="submit" class="ghost small">Add this client</button>
+        <button id="addClientCancel" type="button" class="ghost small">Cancel</button>
+      </div>
+    </form>
+    <div id="addClientResult"></div>
+
+    <h3>The customers</h3>
     <div id="clients" class="clients"></div>
   </section>
 
   <!-- 3. Box health ------------------------------------------------------------------------- -->
-  <section class="panel" id="panel-boxes" data-panel="boxes">
+  <section class="panel" id="panel-boxes" data-panel="boxes" hidden>
     <h2>Box health</h2>
+    <div class="strip"></div>
     <p class="quiet">A container can be running while the thing inside it is not answering, so both
       are asked separately. Anything this service cannot see from inside its own container says
       "not measured" and why.</p>
@@ -120,15 +205,17 @@
   </section>
 
   <!-- 4. System health ---------------------------------------------------------------------- -->
-  <section class="panel" id="panel-system" data-panel="system">
+  <section class="panel" id="panel-system" data-panel="system" hidden>
     <h2>System health</h2>
+    <div class="strip"></div>
     <p class="quiet">The machine everything runs on, as far as this service can see it.</p>
     <div id="system" class="cards"></div>
   </section>
 
   <!-- 5. Spend ------------------------------------------------------------------------------ -->
-  <section class="panel" id="panel-spend" data-panel="spend">
+  <section class="panel" id="panel-spend" data-panel="spend" hidden>
     <h2>Spend</h2>
+    <div class="strip"></div>
     <p class="quiet" id="spendNote">What each customer has run through the models included in their
       plan, this month and today. Dollars are for you and never for them: their own Settings shows a
       percentage and a sentence. Anything the proxy could not be asked for says "not measured" and
@@ -155,8 +242,9 @@
     on this page holds one, and the banner names the slot and a short hash and never a fragment of
     the value itself.
   -->
-  <section class="panel" id="panel-providers" data-panel="providers">
+  <section class="panel" id="panel-providers" data-panel="providers" hidden>
     <h2>Providers, keys and plan models</h2>
+    <div class="strip"></div>
     <p class="quiet">Who supplies the models, which keys open them, and what each plan runs on.
       Nothing on this page needs a restart. What it does need is a moment: the proxy picks a change
       up on the next request, a workspace on its next turn, and a customer's open page the next time
@@ -264,8 +352,9 @@
     No new CSS. The panel is the controls, the scroll table, the chips and the masked key form this
     page already has.
   -->
-  <section class="panel" id="panel-feedback" data-panel="feedback">
+  <section class="panel" id="panel-feedback" data-panel="feedback" hidden>
     <h2>Feedback</h2>
+    <div class="strip"></div>
     <p class="quiet" id="feedbackGates">Every report here was written by an agent, shown to the
       workspace operator, and sent by that person. This is the second gate.</p>
     <div class="controls">
@@ -311,8 +400,9 @@
     Read-only, on purpose. The re-read runs weekly on a timer and from the CLI; there is no button
     here that reaches out to seven vendors because somebody clicked Refresh.
   -->
-  <section class="panel" id="panel-marketplace" data-panel="marketplace">
+  <section class="panel" id="panel-marketplace" data-panel="marketplace" hidden>
     <h2>Marketplace</h2>
+    <div class="strip"></div>
     <p class="quiet" id="marketplaceNote">The vendor documentation our marketing rows depend on, and
       what it says today. Meta, X and LinkedIn move scope names, review tiers and endpoint versions
       between our releases, so these facts are re-read on a schedule rather than audited once.</p>
@@ -338,6 +428,8 @@
   <footer class="foot">
     <span id="version" class="quiet"></span>
   </footer>
+
+  </div><!-- .panels -->
 </div>
 
 <script src="/admin/admin.js"></script>
