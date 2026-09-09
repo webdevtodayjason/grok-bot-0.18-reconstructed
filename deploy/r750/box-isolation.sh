@@ -142,7 +142,21 @@ HOST_TABLE="${TITANBOT_HOST_TABLE:-titanbot_host}"
 HOST_GUARD_MODE_FILE="${TITANBOT_HOST_GUARD_MODE_FILE:-/etc/titanbot/host-guard.mode}"
 # Where the last-installed policy is remembered, so a re-apply that would change nothing leaves the
 # counters running. Under /run on purpose: nftables rules do not survive a reboot either.
-HOST_GUARD_STATE="${TITANBOT_HOST_GUARD_STATE:-/run/titanbot/host-guard.fingerprint}"
+# WHERE THE FINGERPRINT IS REMEMBERED, and it has to be somewhere the process can actually write.
+# This runs as a systemd --user unit as the operator's own user and asks for root only for nft, so
+# /run/titanbot -- root-owned 0755, as root's own earlier run left it -- was not writable, and both
+# the mkdir and the write were swallowed by `|| true`. The fingerprint was therefore never stored,
+# every tick read an empty PREVIOUS, and the table was rebuilt every 60 seconds. Measured on the
+# R750 2026-09-09: /run/titanbot/host-guard.fingerprint did not exist, and the accept rule's handle
+# walked 2086 -> 2088 -> 2090 over 90 seconds with its counter resetting each time. That is the
+# whole instrument the shadow pass depends on, silently reading "the last minute" while looking like
+# an accumulating window.
+#
+# XDG_RUNTIME_DIR is the user manager's own runtime directory (/run/user/1001 here), user-writable
+# and cleared on reboot, which is the same property /run was chosen for: nftables rules do not
+# survive a reboot either, so the memory and the thing it remembers disappear together. A root run
+# has no XDG_RUNTIME_DIR and falls back to /run, which root can write.
+HOST_GUARD_STATE="${TITANBOT_HOST_GUARD_STATE:-${XDG_RUNTIME_DIR:-/run}/titanbot/host-guard.fingerprint}"
 SHASUM="$(command -v sha256sum || command -v shasum)"
 # shadow by default, and by default on a host that has never been told otherwise. A first apply that
 # silently started dropping traffic on a live machine would be the wrong way round: the counters
@@ -153,19 +167,28 @@ if [ -z "$HOST_GUARD" ] && [ -r "$HOST_GUARD_MODE_FILE" ]; then
 fi
 HOST_GUARD="${HOST_GUARD:-shadow}"
 case "$HOST_GUARD" in off|shadow|drop) ;; *) echo "TITANBOT_HOST_GUARD must be off, shadow or drop (got '$HOST_GUARD')" >&2; exit 64 ;; esac
-# 2049, 445 and 11434 joined the drop set on 2026-09-08 and not before, on the rule this file set
-# for itself: their shadow counters read zero. Measured on the R750 over a 31 minute accumulating
-# window with all three tenant boxes running -- NFS, Samba and ollama each counted 0 packets from
-# any non-exempt docker bridge, while the exempt rule counted 71. Nothing on this host needs a
-# customer's agent to reach its file exports or its local model server.
+# 2049, 445 and 11434 were moved into the drop set on 2026-09-08 on the strength of "their shadow
+# counters read zero over a 31 minute accumulating window". They are moved back out here, and the
+# reason is not a change of mind about NFS, Samba and ollama: there was no accumulating window. The
+# fingerprint that keeps a table across a tick could not be written (see HOST_GUARD_STATE above), so
+# the table was rebuilt every 60 seconds and every counter on this host has only ever shown the last
+# minute. That expansion never reached the R750 -- the live table still reads them watch-only -- so
+# nothing is being taken away here; what is being removed is a default that would have applied a
+# restrictive change to a shared host on evidence that was not what it said it was.
+#
+# The rule this file set for itself stands and is now measurable for the first time: a port joins
+# the drop set after its counter has read zero across a window it was actually accumulating over.
+# Re-decide these three on such a window. The blast radius is worth stating plainly, because it is
+# why this is not a formality: about sixty containers that are nothing to do with this product share
+# this host, and 11434 is the machine's own model server.
 #
 # 80, 443 and 5000 stay watch-only, and that is a decision rather than an oversight. 80 and 443 on
 # the host are Coolify's own proxy, which is how everything published on this machine is served, and
 # taking those away from a container is a bigger blast radius than this row is about. 5000 is a
-# python service nobody has identified yet; its counter is zero too, and it can join the set the day
-# somebody can say what it is.
-DROP_PORTS="${TITANBOT_HOST_GUARD_DROP_PORTS:-22,47291,8000,2049,445,11434}"
-WATCH_PORTS="${TITANBOT_HOST_GUARD_WATCH_PORTS:-5000,80,443}"
+# python service nobody has identified yet, and it can join the set the day somebody can say what it
+# is.
+DROP_PORTS="${TITANBOT_HOST_GUARD_DROP_PORTS:-22,47291,8000}"
+WATCH_PORTS="${TITANBOT_HOST_GUARD_WATCH_PORTS:-2049,445,11434,5000,80,443}"
 
 MODE=apply
 case "${1:-}" in
@@ -638,8 +661,12 @@ else
     say "mode $HOST_GUARD; the installed policy is already this one, so the counters were left running"
   else
     "${NFT[@]}" -f "$HOST_RULES" || die "nft would not load the host guard (root? does this kernel have fib expressions?)"
-    mkdir -p "$(dirname "$HOST_GUARD_STATE")" 2>/dev/null || true
-    printf '%s\n' "$FINGERPRINT" > "$HOST_GUARD_STATE" 2>/dev/null || true
+    # Say so when the fingerprint cannot be kept. Silent failure here does not break the boundary,
+    # which is why it went unnoticed for a day, but it quietly destroys the counters -- and the
+    # counters are the only evidence anybody has for whether a port can join the drop set.
+    if ! { mkdir -p "$(dirname "$HOST_GUARD_STATE")" 2>/dev/null && printf '%s\n' "$FINGERPRINT" > "$HOST_GUARD_STATE" 2>/dev/null; }; then
+      say "WARNING cannot write $HOST_GUARD_STATE, so this table will be rebuilt every tick and its counters will never accumulate"
+    fi
     say "mode $HOST_GUARD; drop set $DROP_PORTS; watch-only $WATCH_PORTS; ${#EXEMPT_ADDRS[@]} exempt address(es)"
   fi
   rm -f "$HOST_RULES"

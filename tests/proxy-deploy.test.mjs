@@ -398,6 +398,33 @@ test("and --verify measures both halves: every box reaches the proxy, nothing re
   assert.match(script, /^PROXY_DB_PORT="\$\{TITANBOT_PROXY_DB_PORT:-5432\}"$/m);
 });
 
+test("the host guard remembers its fingerprint somewhere the user unit can actually write", () => {
+  // Measured on the R750 2026-09-09: /run/titanbot is root-owned 0755, this runs as a systemd --user
+  // unit as the operator, and the mkdir and the write were both swallowed by `|| true`. So the
+  // fingerprint was never stored, PREVIOUS read empty every tick, and the table was rebuilt every
+  // 60 seconds -- the accept rule's handle walked 2086 -> 2088 -> 2090 over 90 seconds with its
+  // counter resetting each time. The boundary still held; the counters did not, and the counters are
+  // the entire evidence base for letting a port into the drop set.
+  const script = readFileSync(ISOLATION, "utf8");
+  assert.match(script, /HOST_GUARD_STATE="\$\{TITANBOT_HOST_GUARD_STATE:-\$\{XDG_RUNTIME_DIR:-\/run\}\/titanbot\/host-guard\.fingerprint\}"/);
+  // And it says so when it cannot, because that is what hid this.
+  assert.match(script, /WARNING cannot write \$HOST_GUARD_STATE/);
+  assert.equal(
+    /printf '%s\\n' "\$FINGERPRINT" > "\$HOST_GUARD_STATE" 2>\/dev\/null \|\| true/.test(script),
+    false,
+    "the silent fallback is what made a dead instrument look like a working one",
+  );
+});
+
+test("and a port only sits in the drop set on evidence the counters could actually have carried", () => {
+  // The drop set holds the three ports TENANT-3 is about and nothing else. NFS, Samba and ollama
+  // were moved back to watch-only because the window that justified them was not accumulating; they
+  // rejoin on a window that is. This asserts the default, not the operator's env override.
+  const script = readFileSync(ISOLATION, "utf8");
+  assert.match(script, /^DROP_PORTS="\$\{TITANBOT_HOST_GUARD_DROP_PORTS:-22,47291,8000\}"$/m);
+  assert.match(script, /^WATCH_PORTS="\$\{TITANBOT_HOST_GUARD_WATCH_PORTS:-2049,445,11434,5000,80,443\}"$/m);
+});
+
 test("the host guard exempts a container on every address family it holds, not just IPv4", () => {
   // The bug this pins, measured on the R750 2026-09-09 with the guard ALREADY in drop mode: the
   // exemption was one `ip saddr` line, and `ip saddr` in an inet table matches IPv4 only. The two
