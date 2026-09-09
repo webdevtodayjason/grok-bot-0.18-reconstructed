@@ -90,7 +90,10 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(codexDirect, /response\.output_text\.delta/);
   assert.match(codexDirect, /type: "function_call_output"/);
   assert.match(providers, /parameters: jsonSchema\(parameters\)/);
-  assert.match(providers, /You are Grok Bot, a warm, concise desktop assistant/);
+  // Renamed with the rest of what the model reads and says (ATTACH-1/B6). The constant behind
+  // SAND_PRODUCT_DISPLAY_NAME is still the old name and is filed as NAME-1; these are the strings a
+  // person or a model actually sees.
+  assert.match(providers, /You are Titanium Bot, a warm, concise desktop assistant/);
   assert.match(providers, /mcpServers: \{ grok_bot_plugins:/);
   assert.match(providers, /recordRoutedUsage\(provider, usage\)/);
   assert.match(providers, /queryClaude/);

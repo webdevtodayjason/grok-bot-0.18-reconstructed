@@ -16,7 +16,7 @@ import { isSandBoxSettingEnabled, SAND_TOOL_TRACE_SETTING } from "../../sand-box
 import { SandSettingsStore } from "../../../shared/node/settings/sand-settings-store.js";
 import { getBoxSecretsStorePath } from "../secrets/secrets-service.js";
 import { streamCodexDirectResponses, type CodexDirectTool } from "./codex-direct-responses.js";
-import { DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW, OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV, fetchOpenAiCompatibleContextWindow, openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
+import { DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW, IMAGE_PART_BYTES_MAX, OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV, endpointRefusesImages, fetchOpenAiCompatibleContextWindow, openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
 import type { LabelMessage, PromptExecutor } from "./sand-labeling.js";
 
 type Loose = Record<string, any>;
@@ -47,17 +47,17 @@ export function getHostRoutedToolExecutor(): RoutedToolExecutor | undefined {
  * coordinator's one-shot text calls -- guarantees a silent turn.
  */
 const GROK_AGENT_SYSTEM_PROMPT = [
-  "You are Grok Bot, a warm, concise desktop assistant.",
+  "You are Titanium Bot, a warm, concise desktop assistant.",
   "The user cannot see your plain replies. Your assistant text is a private scratchpad.",
   "SendMessage is your only voice: a reply counts only once it is inside a SendMessage call.",
   "To answer, call SendMessage with type set to \"text\" and content set to what you want to say.",
-  "The tools supplied with this request are Grok Bot's already-connected plugins and accounts. Use them when relevant instead of claiming a plugin is unavailable.",
+  "The tools supplied with this request are Titanium Bot's already-connected plugins and accounts. Use them when relevant instead of claiming a plugin is unavailable.",
 ].join("\n");
 
 const GROK_ROUTER_SYSTEM_PROMPT = [
-  "You are Grok Bot, a warm, concise desktop assistant.",
-  "You are running inside Grok Bot, not inside Codex CLI or Claude Code.",
-  "The tools supplied with this request are Grok Bot's already-connected plugins and accounts. Use them whenever they are relevant instead of claiming that a plugin is unavailable or asking the user to reconnect it.",
+  "You are Titanium Bot, a warm, concise desktop assistant.",
+  "You are running inside Titanium Bot, not inside Codex CLI or Claude Code.",
+  "The tools supplied with this request are Titanium Bot's already-connected plugins and accounts. Use them whenever they are relevant instead of claiming that a plugin is unavailable or asking the user to reconnect it.",
   "Never ask for an API key for an already-connected plugin. Respond directly to the user in natural language after completing any necessary tool calls.",
 ].join("\n");
 
@@ -91,19 +91,99 @@ function stringifyArgs(value: unknown): string {
   try { return JSON.stringify(value) ?? "{}"; } catch { return "{}"; }
 }
 
-function flattenParts(content: unknown): { text: string; toolCalls: Loose[]; results: Loose[] } {
-  if (typeof content === "string") return { text: content, toolCalls: [], results: [] };
+/**
+ * ATTACH-1. The picture a person attaches is the user message's OWN part, and it looks like
+ * `{type:"image", image:Uint8Array, mimeType}` -- context-processing pushes exactly that shape once
+ * the blob is hydrated. This loop knew text, tool-call and tool-result and nothing else, so the part
+ * fell straight through, conversationInput emitted a plain string, and the picture was gone.
+ * Measured twice on Jason's box on 2026-09-09: the console leg was clean end to end, the bytes
+ * arrived byte-identical in the agent's attachments folder, the containment check passed -- which is
+ * why he saw his own screenshot -- and the model was still sent no image at all.
+ */
+type WireImage = { readonly b64: string; readonly mediaType: string; readonly name: string; readonly oversize?: boolean };
+
+/** The transport's own per-image ceiling, so one attachment cannot blow the whole request. */
+const USER_IMAGE_B64_MAX = IMAGE_PART_BYTES_MAX;
+
+function imageMediaType(part: Loose): string {
+  const declared = typeof part.mimeType === "string" ? part.mimeType : typeof part.mediaType === "string" ? part.mediaType : "";
+  return declared.startsWith("image/") ? declared : "image/png";
+}
+/** Whatever the picture can be called in a sentence. Often empty: the console carries no filename this far. */
+function imageName(part: Loose): string {
+  for (const key of ["filename", "fileName", "path", "name"]) {
+    const value = part[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return "";
+}
+/** Size once encoded, whatever container the bytes arrived in. A base64 string is measured as itself. */
+function imagePayloadLength(payload: unknown): number | null {
+  if (typeof payload === "string") return payload.length === 0 ? null : payload.length;
+  if (payload instanceof Uint8Array) return payload.byteLength === 0 ? null : Math.ceil(payload.byteLength / 3) * 4;
+  if (payload instanceof ArrayBuffer) return payload.byteLength === 0 ? null : Math.ceil(payload.byteLength / 3) * 4;
+  return null;
+}
+function imageBase64(payload: unknown): string | null {
+  if (typeof payload === "string") return payload.length === 0 ? null : payload;
+  // Buffer is a Uint8Array, so this covers both of them.
+  if (payload instanceof Uint8Array) return Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength).toString("base64");
+  if (payload instanceof ArrayBuffer) return Buffer.from(payload).toString("base64");
+  return null;
+}
+/** True without converting anything, so the trace counter can count without paying for base64. */
+function hasUserImagePayload(part: Loose): boolean {
+  return part.type === "image" && imagePayloadLength(part.image ?? part.data) != null;
+}
+/**
+ * An over-cap image comes back MARKED rather than dropped. It still has to be named to the model:
+ * a picture that is silently not there is the whole failure this item exists to end.
+ */
+function userImagePart(raw: unknown): WireImage | null {
+  const part = asRecord(raw);
+  if (part == null || part.type !== "image") return null;
+  const payload = part.image ?? part.data;
+  const length = imagePayloadLength(payload);
+  if (length == null) return null;
+  const mediaType = imageMediaType(part), name = imageName(part);
+  if (length > USER_IMAGE_B64_MAX) return { b64: "", mediaType, name, oversize: true };
+  const b64 = imageBase64(payload);
+  return b64 == null ? null : { b64, mediaType, name };
+}
+
+/** Named so the model can say which picture is missing. The console has no filename, so this counts instead. */
+function namesOf(images: readonly WireImage[], from: number): string {
+  return images.map((image, index) => (image.name.length > 0 ? image.name : `image ${from + index + 1}`)).join(", ");
+}
+/**
+ * A picture that could not travel says so, in words, in the message it belonged to. The two reasons
+ * read differently and neither claims more than was measured: "too large" is our own cap, and the
+ * other case deliberately does not blame the model, because the same line covers a transport that
+ * has no image channel at all.
+ */
+function withheldImageNote(images: readonly WireImage[], from: number, reason: "size" | "unsent"): string {
+  const one = images.length === 1, named = namesOf(images, from);
+  const it = one ? "it" : "them", shows = one ? "it shows" : "they show";
+  return reason === "size"
+    ? `[${named} ${one ? "was" : "were"} too large to send with this message, so ${one ? "it was" : "they were"} left out. Say so rather than guessing what ${shows}.]`
+    : `[The ${one ? "picture" : "pictures"} attached to this message could not be sent, so you cannot see ${it}: ${named}. Any file path listed above is where ${one ? "it is" : "they are"} on this box. Say plainly that you cannot see ${it} rather than guessing what ${shows}.]`;
+}
+
+function flattenParts(content: unknown): { text: string; toolCalls: Loose[]; results: Loose[]; images: WireImage[] } {
+  if (typeof content === "string") return { text: content, toolCalls: [], results: [], images: [] };
   if (!Array.isArray(content)) {
     const single = asRecord(content);
-    return { text: typeof single?.text === "string" ? single.text : "", toolCalls: [], results: [] };
+    return { text: typeof single?.text === "string" ? single.text : "", toolCalls: [], results: [], images: [] };
   }
   const text: string[] = [];
   const toolCalls: Loose[] = [];
   const results: Loose[] = [];
+  const images: WireImage[] = [];
   for (const raw of content) {
     const part = asRecord(raw);
     if (part == null) continue;
     if (typeof part.text === "string" && part.text.length > 0) { text.push(part.text); continue; }
+    if (part.type === "image") { const image = userImagePart(part); if (image != null) images.push(image); continue; }
     if (part.type === "tool-call" && typeof part.toolName === "string") {
       toolCalls.push({
         id: typeof part.toolCallId === "string" ? part.toolCallId : `call_${toolCalls.length}`,
@@ -137,7 +217,7 @@ function flattenParts(content: unknown): { text: string; toolCalls: Loose[]; res
       }
     }
   }
-  return { text: text.join("\n"), toolCalls, results };
+  return { text: text.join("\n"), toolCalls, results, images };
 }
 
 /**
@@ -167,7 +247,10 @@ function countHistoryImageParts(messages: readonly ProviderMessage[]): number {
     if (Array.isArray(value)) { for (const item of value) walk(item); return; }
     const part = asRecord(value);
     if (part == null) return;
-    if (part.type === "image" && typeof part.data === "string" && part.data.length > 0) { found += 1; return; }
+    // ATTACH-1. This counted only `{type:"image", data:"<base64>"}`, the shape a tool result renders,
+    // so a person's own attachment -- `{type:"image", image:Uint8Array}` -- read 0 and AGREED with
+    // the wire count at 0. The trace hid exactly the drop it exists to expose.
+    if (part.type === "image" && hasUserImagePayload(part)) { found += 1; return; }
     // A tool result keeps its text in `result` and its rendered parts in `experimental_content`
     // (tool-stream-executor). An image only ever lives in the latter.
     if (part.type === "tool-result") { walk(part.experimental_content); walk(asRecord(part.result)?.content); }
@@ -185,22 +268,59 @@ function countWireImageParts(input: readonly Loose[]): number {
   return found;
 }
 
-function conversationInput(messages: readonly ProviderMessage[], hasSendMessage = false): { input: Loose[]; instructions: string } {
+/**
+ * `imagesAllowed` is false for a transport with no image channel of its own and for an endpoint that
+ * has already refused one this process. It is not a preference: the same request that carries a
+ * picture to a vision endpoint kills the turn outright on glm-5.3, so the choice between sending the
+ * bytes and sending a sentence has to be made here, where the message is still editable.
+ */
+function conversationInput(messages: readonly ProviderMessage[], hasSendMessage = false, imagesAllowed = true): { input: Loose[]; instructions: string } {
   const mapped = messages.map(message => {
     const role = message.role === "assistant" ? "assistant"
       : message.role === "system" ? "system"
       : message.role === "tool" ? "tool" : "user";
-    const { text, toolCalls, results } = flattenParts(message.content);
-    return { role, content: text, toolCalls, results };
+    const { text, toolCalls, results, images } = flattenParts(message.content);
+    return { role, content: text, toolCalls, results, images };
   });
   const own = mapped.filter(message => message.role === "system" && message.content.trim().length > 0).map(message => message.content);
 
   const input: Loose[] = [];
+  // One budget for the whole turn, spent in order, so a long history of screenshots cannot push the
+  // request past what the endpoint will read while the newest picture is the one that gets dropped.
+  let budget = HISTORY_IMAGE_B64_MAX;
+  let seen = 0;
   for (const message of mapped) {
     if (message.role === "system") continue;
     if (message.role === "tool") { input.push(...message.results); continue; }
     if (message.toolCalls.length > 0) {
       input.push({ role: message.role, content: message.content.length > 0 ? message.content : null, tool_calls: message.toolCalls });
+      continue;
+    }
+    if (message.images.length > 0) {
+      const from = seen;
+      seen += message.images.length;
+      const sendable: WireImage[] = [], withheld: WireImage[] = [];
+      for (const image of message.images) {
+        if (!imagesAllowed || image.oversize === true || image.b64.length > budget) { withheld.push(image); continue; }
+        budget -= image.b64.length;
+        sendable.push(image);
+      }
+      let text = message.content;
+      if (withheld.length > 0) {
+        const note = withheldImageNote(withheld, from, imagesAllowed ? "size" : "unsent");
+        text = text.length > 0 ? `${text}\n\n${note}` : note;
+      }
+      if (sendable.length > 0) {
+        input.push({
+          role: message.role,
+          content: [
+            ...(text.trim().length > 0 ? [{ type: "text", text }] : []),
+            ...sendable.map(image => ({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.b64}` } })),
+          ],
+        });
+        continue;
+      }
+      if (text.trim().length > 0) input.push({ role: message.role, content: text });
       continue;
     }
     if (message.content.trim().length > 0) input.push({ role: message.role, content: message.content });
@@ -242,7 +362,7 @@ function providerPrompt(messages: readonly ProviderMessage[]): string {
     const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
     return `${message.role.toUpperCase()}: ${content}`;
   }).join("\n\n");
-  return `${GROK_ROUTER_SYSTEM_PROMPT}\n\nContinue this Grok Bot conversation.\n\n${rendered}`;
+  return `${GROK_ROUTER_SYSTEM_PROMPT}\n\nContinue this Titanium Bot conversation.\n\n${rendered}`;
 }
 
 function deferred<T>() { return Promise.withResolvers<T>(); }
@@ -263,7 +383,7 @@ function codexCredentials(): CodexCredentials {
   const idToken = parsed?.tokens?.id_token;
   const accountId = parsed?.tokens?.account_id;
   if (parsed?.auth_mode !== "chatgpt" || typeof accessToken !== "string" || accessToken.length === 0 || typeof refreshToken !== "string" || refreshToken.length === 0 || typeof idToken !== "string" || idToken.length === 0 || typeof accountId !== "string" || accountId.length === 0) {
-    throw new Error("Codex is not signed in with ChatGPT. Run `codex login`, then reopen Grok Bot.");
+    throw new Error("Codex is not signed in with ChatGPT. Run `codex login`, then reopen Titanium Bot.");
   }
   return { accessToken, refreshToken, idToken, accountId, path, document: parsed };
 }
@@ -361,6 +481,10 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
   const metadata = deferred<Record<string, unknown>>();
   const model = configuredCodexModel();
   const tools = codexTools(definitions);
+  // This route hands `input` to the Responses API verbatim, which spells a picture `input_image`
+  // and rejects the chat-shaped `image_url` part outright. Until that mapping exists here, an
+  // attached picture travels as the sentence rather than as bytes, which is honest and not silent.
+  const codexConversation = conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage"), false);
   const fullStream = (async function* () {
     let text = "";
     try {
@@ -372,8 +496,8 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
         // Pre-existing: `settings` was not in scope on this branch, so every codex-direct
         // turn threw a ReferenceError before it reached the backend. The note wants the
         // endpoint that is actually answering, and on this route that is fixed and known.
-        instructions: withBackendNote(conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions, { baseUrl: "https://chatgpt.com/backend-api/codex", model, apiKey: null, contextWindow: null, endpointName: "the ChatGPT/Codex subscription backend" }),
-        input: conversationInput(messages).input,
+        instructions: withBackendNote(codexConversation.instructions, { baseUrl: "https://chatgpt.com/backend-api/codex", model, apiKey: null, contextWindow: null, endpointName: "the ChatGPT/Codex subscription backend" }),
+        input: codexConversation.input,
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
         maxSteps: tools == null ? 1 : 8,
@@ -394,7 +518,7 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
 
 function claudeExecutor(messages: readonly ProviderMessage[], invocationId: string, onUsage?: (usage: UsageRecord) => void, mcpServerUrl?: string) {
   const executable = resolveClaudeCodeCliPath();
-  if (executable == null) throw new Error("Claude Code is not installed. Install and sign in to Claude Code, then reopen Grok Bot.");
+  if (executable == null) throw new Error("Claude Code is not installed. Install and sign in to Claude Code, then reopen Titanium Bot.");
   const usage = deferred<{ promptTokens: number; completionTokens: number; totalTokens: number }>();
   const extendedUsage = deferred<{ inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; maxTokens: number }>();
   const resultResponse = deferred<ReturnType<typeof response>>();
@@ -629,6 +753,10 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
 }
 
   const tools = openAiCompatibleTools(withJsonSchemaParameters(definitions));
+  // Once for the turn, not three times: each call re-encodes every attached picture to base64, and
+  // the request, the instructions and the trace line all want the same one anyway.
+  const imagesAllowed = !endpointRefusesImages(settings.baseUrl, settings.model);
+  const conversation = conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage"), imagesAllowed);
   // SAND_TOOL_TRACE: what actually leaves for the provider, beside the [sand][toolset] line for
   // what buildTurnTools offered. openAiCompatibleTools drops any definition without parameters;
   // the browserUse subagent lost all fifteen browser tools that way and nobody could see it.
@@ -640,7 +768,9 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
       transport: settings.transport ?? "chat", model: settings.model,
       offered: (definitions ?? []).length, sent: (tools ?? []).length,
       historyImageParts: countHistoryImageParts(messages),
-      imageParts: countWireImageParts(conversationInput(messages).input),
+      imageParts: countWireImageParts(conversation.input),
+      // False only after this endpoint and model have refused a picture once in this host process.
+      imagesAllowed,
       tools: (tools ?? []).map(tool => tool.name),
     })}`);
   }
@@ -656,8 +786,8 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
         ...(settings.transport == null ? {} : { transport: settings.transport }),
         ...(settings.accountId == null ? {} : { accountId: settings.accountId }),
         ...(settings.originator == null ? {} : { originator: settings.originator }),
-        instructions: withBackendNote(conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage")).instructions, settings),
-        input: conversationInput(messages).input,
+        instructions: withBackendNote(conversation.instructions, settings),
+        input: conversation.input,
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
         maxSteps: tools == null ? 1 : 8,
