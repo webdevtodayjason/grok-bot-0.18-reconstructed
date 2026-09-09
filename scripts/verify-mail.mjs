@@ -207,6 +207,10 @@ function startStub(toAddress, port) {
   // receive legs still read `seen`; the send legs read `calls`, because asserting a forced From
   // means reading the body the relay actually put on the wire.
   const calls = [];
+  // MAIL-3 follow-up. A send the provider REJECTS still cost a call to the operator's account, so
+  // the cap has to count it. Proving that needs a stub that says no, and only for sends: the
+  // receive legs above read messages back through this same server.
+  let rejectSend = null;
   const server = createServer((req, res) => {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });
@@ -217,6 +221,11 @@ function startStub(toAddress, port) {
       // Resend answers a send with the id it gave the message, and that id is what the log row,
       // the workspace's own ledger and the sentence the bot says all have to carry.
       const isSend = String(req.method ?? "") === "POST" && String(req.url ?? "").split("?")[0] === "/emails";
+      if (isSend && rejectSend != null) {
+        calls.push({ method: String(req.method ?? ""), url: String(req.url ?? ""), body, answered: rejectSend.body, isSend, rejected: true });
+        res.writeHead(rejectSend.status, { "content-type": "application/json" });
+        return res.end(JSON.stringify(rejectSend.body));
+      }
       const answered = isSend
         ? { id: `em_stub_${randomBytes(8).toString("hex")}` }
         : (String(req.url ?? "").endsWith("/attachments") ? attachments : message);
@@ -230,6 +239,8 @@ function startStub(toAddress, port) {
     calls,
     /** Only the sends, so a leg can say "nothing reached Resend" and mean it. */
     sends() { return calls.filter((call) => call.isSend); },
+    /** Make every send from here on come back refused, the way a real 422 reads. Null puts it back. */
+    rejectSends(status = 0, body = null) { rejectSend = status > 0 ? { status, body } : null; },
     async start() {
       await new Promise((resolve, reject) => {
         server.once("error", reject);
@@ -731,6 +742,48 @@ try {
             check(accepted === cap && capRefusal.status === 429 && capRefusal.text.includes(String(cap)),
               `the send after ${cap} in an hour is refused, and the refusal names ${cap}`,
               `${accepted} accepted, then HTTP ${capRefusal.status} ${capRefusal.text.slice(0, 160)}`);
+
+            // ---- a send the provider refuses, which still counts ---------------------------------
+            //
+            // The hole this leg exists to close: the counts behind the cap once took `sending` and
+            // `sent` and nothing else, so a bot whose every send was rejected never ran out of
+            // hour and could keep the relay calling the operator's shared account for ever. Sixty
+            // failing sends from one bot made sixty calls and no refusal. The cap is lowered for
+            // the length of this leg so it costs four calls rather than thirty-one.
+            step("a send the mail service refuses still spends the bot's hour");
+            const failBot = ours[2] ?? capBot;
+            const hourAgo = () => new Date(Date.now() - 3_600_000).toISOString();
+            const beforeFail = store.agentMailSendWindow(OWN, failBot.agentId, hourAgo()).count;
+            const capWas = store.getSetting("mail.send.hourlyPerAgent", "");
+            store.setSetting("mail.send.hourlyPerAgent", String(beforeFail + 3));
+            stub.rejectSends(422, {
+              statusCode: 422, name: "validation_error",
+              message: "The example.invalid domain is not verified. Please verify at resend.com/domains",
+            });
+            try {
+              const statuses = [];
+              const words = [];
+              for (let n = 0; n < 4; n += 1) {
+                const response = await sendAs(good(failBot.agentId));
+                statuses.push(response.status);
+                words.push(String((await response.json().catch(() => null))?.message ?? ""));
+              }
+              check(statuses.join(",") === "502,502,502,429",
+                "three refused sends, and the fourth is over the cap rather than a fourth call out",
+                statuses.join(","));
+              // What the bot reads out to the person. The provider's own words belong on the row.
+              const leaked = words.slice(0, 3).filter((word) => /HTTP |[{}]|resend/i.test(word));
+              check(leaked.length === 0 && words[0].includes("nothing was sent"),
+                "and what the bot is handed is one plain sentence with no status code, no JSON and no vendor in it",
+                leaked[0] ?? words[0]);
+              const rowsAfter = sendLog.list(OWN, 200).filter((row) => row.agentId === failBot.agentId);
+              check(rowsAfter.filter((row) => row.outcome === "failed").length >= 3,
+                "the three that failed are on the record as failed",
+                rowsAfter.map((row) => row.outcome).join(","));
+            } finally {
+              stub.rejectSends(0);
+              store.setSetting("mail.send.hourlyPerAgent", capWas);
+            }
 
             // ---- switched off for a workspace --------------------------------------------------
             step("switched off for a workspace, and a control plane that cannot be reached");

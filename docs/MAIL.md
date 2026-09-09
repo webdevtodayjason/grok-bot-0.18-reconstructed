@@ -487,6 +487,17 @@ IGNORED rather than refused, and a test asserts it never appears in the body tha
 10. The row is closed with the outcome and Resend's id, a line goes on that workspace's own sent
     ledger, and the bot is answered in plain words — what went, to whom, and the message id.
 
+**When Resend says no.** The row, that workspace's sent ledger and the relay's log all get the
+provider's own words, because that is what an operator wants to read. The BOT never does. It reads
+its answer out to the person, so a status code, a JSON body and a vendor's domain would land on a
+customer's own screen; the first cut of this handed back `HTTP 422 {"statusCode":422,…
+resend.com/domains}` verbatim. Two cases are worth telling apart and both are read off the status
+rather than echoed: a message the service will not take, which retrying will not fix (*"The mail
+service would not accept that message, so nothing was sent. Check the address it was going to."*),
+and a failure on their side, which retrying will (*"…could not take that message just now… Try again
+in a few minutes."*). A test walks every refusal this route can make and asserts none of the
+sentences carries `HTTP `, a brace, a vendor name or a status code.
+
 **Why the claim comes before the send.** An unsent mail is recoverable and an unlogged send is not,
 and "every send is on the record" is the entire justification for this route existing. A crash
 between the claim and the close leaves a row reading `sending`, which counts toward the cap and
@@ -522,10 +533,25 @@ Both are `admin_settings` rows on the control plane, each with a documented per-
 so the super admin can move them without a deploy. A refusal names the number it hit and when the
 next one can go.
 
-They are counted from `mail_send_log` rows whose outcome is `sending` or `sent`. **Not** from the
-relay's in-process rate limiter, which a relay restart forgives, and **not** in the box, because a
-limit a box counts is a limit a box can reset by restarting. A bot sends tens of mails a day, not
-thousands, so these are the shape of "something has gone wrong" rather than a billing meter.
+They are counted from **every `mail_send_log` row claimed in the window, whatever became of it** —
+`sent`, still `sending`, and `failed`. **Not** from the relay's in-process limiter, which a relay
+restart forgives, and **not** in the box, because a limit a box counts is a limit a box can reset by
+restarting. A bot sends tens of mails a day, not thousands, so these are the shape of "something has
+gone wrong" rather than a billing meter.
+
+The first cut of this counted only `sending` and `sent`, on the reasoning that a `failed` row gave
+its place back because no mail left. That was wrong in the direction that matters. A send Resend
+REFUSES still cost a call to the operator's shared account, and a caller in a loop fails every time,
+so the one caller the cap exists to stop was the one caller it never stopped: measured against the
+real route with a stub answering 422, sixty attempts from one bot made sixty calls and hit no
+refusal. Every claimed row counts now, and thirty failures in an hour stops a bot the same as thirty
+sends.
+
+**And a cheap door in front of the caps.** `/mail/send` carries the same transport limiter
+`/hooks/resend` has — 60 a minute, keyed on a hash of the bearer and never the bearer, or on the
+address when there is no bearer — so a looping caller, or one with no credential at all, costs this
+process a map lookup rather than a control plane round trip per attempt. The caps are the policy;
+this is only the refusal in front of them.
 
 Jason's own workspace gets the same cap as a customer. A cap that exempts the operator hides its own
 bugs from the only person who would notice them.
@@ -575,6 +601,12 @@ Nothing. The relay already has the key it needs, and the address list pushed int
 Resend from its own shell with a `RESEND_API_KEY` an operator put there, and the email skill carried
 that recipe. Both are gone. If you set that shell secret on a box before this wave, it is no longer
 used by anything and can be cleared from the console's Secrets card.
+
+The review round found one place the old recipe survived: `docs/OPERATOR-RUNBOOK.md` step 5 of
+"Email for your agents" still told a brand new operator to put a domain-scoped Resend key into an
+agent's shell, and its step 4 still described the name-based addresses MAIL-2 replaced. Both are
+rewritten. The runbook and this document now say the same thing, which is the only state either of
+them is allowed to be in.
 
 ### Bounces and complaints are not this wave
 
@@ -685,6 +717,12 @@ list, and a control plane that cannot be reached.
 The three refusals for no-address, a foreign workspace and a retired address are asserted to answer
 **the same sentence**, because a caller must learn nothing about a workspace that is not its own.
 
+A nineteenth leg, added by the review round, makes the stub answer 422 for a while: three refused
+sends and the fourth is over the cap rather than a fourth call out (the hourly setting is lowered
+for the length of the leg so it costs four calls rather than thirty-one, and put back after), the
+three rows read `failed`, and the sentence handed to the bot carries no status code, no JSON and no
+vendor name. That leg is the one that would have caught the cap counting only successes.
+
 `--send-box` adds the live half: a bot on the box is asked to send, and its conversation outline is
 read for the row. It is behind its own flag because it is a model turn — the bot has to decide to
 use the tool — so it is slow and not deterministic, and the deterministic half of the same proof
@@ -698,7 +736,8 @@ for the roster's ordering rather than for a fault — measured red one run and g
 `grok-bot-local-vm`, 2026-09-09, with nothing changed between them.
 
 **Measured 2026-09-09 on this Mac, box `grok-bot-local-vm`, on the merged tree,** scratch relay on
-127.0.0.1:7798 against a stub control plane on 7812, 10 bots on the box: **72 PASS, 0 FAIL**, 18:41Z.
+127.0.0.1:7798 against a stub control plane on 7812, 10 bots on the box: **72 PASS, 0 FAIL**, 18:41Z,
+and **73 PASS, 0 FAIL** at 19:41Z on 127.0.0.1:7799 with the review round's leg in it.
 The forced From on the wire was `"Books (titanium)" <agent227050@verify-mail.invalid>` with Reply-To
 the same address, while the caller's `president@example.invalid`, supplied as `from`, `replyTo` and
 `headers.From` at once, appeared nowhere in the body Resend received. The control plane's row read
@@ -799,8 +838,25 @@ mail yet*.
 | **3. A refusal, live** | A bot with no address, asked to send at 19:17:05Z, answered *"I can't send that email. I don't have an email address of my own yet, and without one I have no way to send outbound mail."* and made **no tool call at all** — it did not try and it reached for no key. `node cp/cli.mjs mail sends richard-avery`: *richard-avery has sent no mail yet*, his slug is the only line in `/state/mail-no-send.txt`, his box was not swapped, and nothing was written inside it. |
 | **4. What a person sees** | A real browser on `console.titanium.bot` (headless Chrome, playwright-core). The chip reads exactly `Sent an email to jbrashear@titaniumcomputing.com` as a muted bubble with nothing to expand, and the strings `send_email` and `sendToUser` appear **nowhere on the page**. The Email card's Sent table: `Sep 9, 2:12 PM · Titan · jbrashear@titaniumcomputing.com · Test from Titan · sent`. Screenshots: `leg2-chip-jasons-titan.png`, `leg2-conversation.png`, `leg4-email-card.png`, `leg4-sent-table.png`. |
 
-`canSend` after the relay restart: true on `demo` and on `titanium`, false on `richard-avery`, read
-off each box's own `agent-mail.json`.
+**A third send, which the table above used to step over.** `mail_send_log` holds THREE rows, not the
+two this section walks. Row 3 is `2026-09-09T19:14:40.269Z · titanium · code 633973 ·
+jbrashear@titaniumcomputing.com · sent · ae3d1a54-3865-42ca-bfac-e9d92df94531`, subject
+`Test from Titan (Dfoxlaw room)`, From `"Titan (titanium)" <agent633973@myagents.email>` off the
+relay's own `/state/mail-sent.jsonl`, with the matching relay line. It is the same bot as leg 2,
+prompted from a console conversation this wave did not open, and it landed inside the ship lock, so
+the narrative above stepped 19:12:53 straight to 19:17:05 and never named it. Said here because
+anyone auditing later against "0 rows before" finds three and has to know which one this was.
+
+**`canSend` after the relay restart.** True on `demo` and on `titanium`, read off each box's own
+`agent-mail.json` (both `updatedAt 2026-09-09T19:22Z`, and `demo` again at 19:37:58.518Z on a later
+sweep). `richard-avery` reads false, and NOTHING WROTE IT: his slug is in `/state/mail-no-push.txt`,
+so the relay wrote nothing inside his box at all, and it logs that every sweep —
+`richard-avery holds 1 address(es) and they route; nothing was written inside that box, which this
+relay is set to leave read-only`. His false is left over from `updatedAt 1788974510903`
+(2026-09-09T17:21:50.903Z), an hour and three quarters before the 19:08:06Z restart. The rule that
+actually refuses his bots is the other file: `richard-avery` in `/state/mail-no-send.txt`, written
+at 19:04Z and read by the route on every request, which is the half worth measuring and is measured
+in leg 3 above. An absent push is not a rule; that line is.
 
 **Still to do, and it is Jason's to do, not an ssh job.** His box still holds a `RESEND_API_KEY`
 shell secret from before this wave. Nothing uses it any more — the key the send route uses never

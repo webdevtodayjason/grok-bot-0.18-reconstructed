@@ -2639,6 +2639,30 @@ async function mailSendClose(id, outcome, resendId, detail) {
   if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
 }
 
+// MAIL-3 follow-up. The cheap door in front of the caps. The real policy is the control plane's --
+// thirty an hour per bot, two hundred a day per workspace, counted over rows nobody in a box can
+// reach -- and this is not that. This is the transport refusal that keeps a looping caller, or one
+// with no credential at all, from costing this process a control plane round trip per attempt. The
+// key is a HASH of the bearer and never the bearer, so no token is held in a limiter's Map; a
+// caller that presents none is keyed by address instead. Sixty a minute is far above what a bot
+// sending tens of mails a day ever asks for.
+const mailSendLimiter = createRateLimiter({ limit: 60, windowMs: 60_000 });
+function mailSendLimiterKey(req) {
+  const header = String(req.headers.authorization ?? "");
+  const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
+  return presented.length === 0 ? `client:${clientOf(req)}` : `box:${sha256Hex(presented).slice(0, 32)}`;
+}
+/** Answered in the send route's own shape, because the sentence is what a bot reads back. */
+function mailSendTooMany(req, res, wait) {
+  return drainThenEnd(req, res, 429,
+    { "content-type": "application/json", "cache-control": "no-store", "retry-after": String(wait) },
+    JSON.stringify({
+      message: "That is more mail than this box may ask for right now, so nothing was sent. Try again in a minute.",
+      sent: false,
+      error: "rate_limited",
+    }));
+}
+
 let mailSendRouteBuilt = null;
 function mailSendRoute() {
   if (mailSendRouteBuilt != null) return mailSendRouteBuilt;
@@ -2995,7 +3019,11 @@ const server = createServer(async (req, res) => {
     // is a bot inside a box, which holds no session cookie. Its credential is the box's own gateway
     // token, presented as a bearer and matched against the registry -- the one credential a box
     // already has, so no new secret is minted for this.
-    if (url.pathname === "/mail/send") return await mailSendRoute().handleSend(req, res);
+    if (url.pathname === "/mail/send") {
+      const wait = mailSendLimiter.retryAfterSeconds(mailSendLimiterKey(req));
+      if (wait > 0) return await mailSendTooMany(req, res, wait);
+      return await mailSendRoute().handleSend(req, res);
+    }
     // Before the console's login as well, and behind a credential the console session cannot
     // present: this is the CONTROL PLANE asking the relay for the two things only the relay can
     // see. The failed sign-in ledger, because a refusal happens at this door and never reaches the

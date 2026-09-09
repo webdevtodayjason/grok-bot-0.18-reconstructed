@@ -575,15 +575,19 @@ export function openStore(options = {}) {
   const countMailSendRows = statement("SELECT COUNT(*) AS n FROM mail_send_log WHERE tenant = ? AND at >= ?");
   // MAIL-3. The claim, the settle, the operator's list, and the two counts the caps read.
   //
-  // BOTH COUNTS TAKE `sending` AND `sent` AND NOTHING ELSE. A row still reading `sending` is a
-  // message we do not know the fate of, and not counting it is what would let a bug that crashes
-  // between the claim and Resend send without limit. A `failed` row gave its place back on purpose:
-  // we know that one did not go.
+  // BOTH COUNTS TAKE EVERY CLAIMED ROW IN THE WINDOW, whatever became of it. The first cut of this
+  // counted only `sending` and `sent`, on the reasoning that a `failed` row gave its place back
+  // because we know that one did not go. That reasoning was wrong in the direction that matters:
+  // the cap is not only a courtesy to recipients, it is the only thing standing between a looping
+  // bot and the operator's shared account at the far end, and a send the provider rejects still
+  // cost a call to it. Measured on this Mac against the real route with a stub answering 422: sixty
+  // sends from one bot made sixty provider calls and never hit the cap. A bot that has failed
+  // thirty times in an hour stops, and the refusal already tells it when the next one can go.
   const claimMailSendRow = statement("INSERT INTO mail_send_log (tenant, agent_id, code, to_addr, at, outcome, resend_id, detail) VALUES (?, ?, ?, ?, ?, 'sending', '', '')");
   const settleMailSendRow = statement("UPDATE mail_send_log SET outcome = ?, resend_id = ?, detail = ? WHERE id = ?");
   const selectMailSends = statement("SELECT * FROM mail_send_log WHERE tenant = ? ORDER BY id DESC LIMIT ?");
-  const countAgentSendRows = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM mail_send_log WHERE tenant = ? AND agent_id = ? AND at >= ? AND outcome IN ('sending', 'sent')");
-  const countTenantSendRows = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM mail_send_log WHERE tenant = ? AND at >= ? AND outcome IN ('sending', 'sent')");
+  const countAgentSendRows = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM mail_send_log WHERE tenant = ? AND agent_id = ? AND at >= ?");
+  const countTenantSendRows = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM mail_send_log WHERE tenant = ? AND at >= ?");
   const sendWindow = (row) => ({ count: Number(row?.n ?? 0), oldest: String(row?.oldest ?? "") });
   const mailSendRow = (record) => (record == null ? null : {
     id: Number(record.id),

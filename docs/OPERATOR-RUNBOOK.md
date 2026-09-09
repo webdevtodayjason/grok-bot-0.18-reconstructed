@@ -679,9 +679,15 @@ conversation. The whole thing, including the DNS records and the two values you 
    card. Both are write-only: the card says Saved or Not saved yet, and nothing on this server can
    read either back.
 4. Type your domain, pick who gets mail nobody else is named for, and turn **Receiving** on. Each
-   agent's address is its name in lower case with the spaces taken out, and the card lists them.
-5. For an agent to send, it needs `RESEND_API_KEY` in its shell. Ask the agent to send an email and
-   it will ask you for the key on a card, the same way every other shell secret is handed over.
+   agent gets `agent<six digits>@<your domain>`, minted for it by the control plane and printed on
+   that bot's own card and on the Email card's list. The digits are not its name on purpose: a name
+   changes, and an address that changed with it would stop working.
+5. There is nothing to do for sending. The key you pasted in step 3 stays on the relay and is never
+   copied anywhere, and a bot that asks to send goes through the relay, which puts its own address
+   on the message. It is worth knowing why: a key scoped to your domain can send as **any** address
+   at that domain, so a copy inside one customer's box could send as every other customer and as
+   your own Titan. If you set `RESEND_API_KEY` on a box before this, nothing reads it any more —
+   clear it from that bot's **Secrets** card.
 
 `node scripts/verify-mail.mjs --url <your console> --stub` measures the whole path against a stub
 Resend, but it only runs against a scratch relay on the same machine that has no Resend key or
