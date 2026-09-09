@@ -1,4 +1,8 @@
-// AGENTS-CAP-1. A box holds Titan plus ninety-nine (it was twelve until 2026-09-08).
+// AGENTS-CAP-2. A box holds Titan plus thirty-nine by default (it was twelve until 2026-09-08, then a
+// hundred for a day; Jason settled on forty on 2026-09-09 because flat coordination holds to about
+// fifty and TEAMS-1 does not exist). The super admin raises a workspace from its client row, which
+// writes SAND_MAX_AGENTS into that box, so the tests below separate the DEFAULT from a roster SIZE:
+// the hundred-bot rosters are fake populations that must still refuse, not a claim about the cap.
 //
 // Three things had to be true and only the first was. (1) The ceiling was 50, declared twice in
 // two files that were not wired to each other. (2) Groups were counted, so a box with rooms in it
@@ -90,16 +94,16 @@ test("the store the gateway holds can count this box's bots", async () => {
   assert.equal(await store.countCapAgents(), 8, "the room on this box is not one of the bots");
 });
 
-test("the ceiling is Titan plus ninety-nine", () => {
-  assert.equal(agents.SAND_DEFAULT_MAX_AGENTS, 100);
+test("the default ceiling is Titan plus thirty-nine", () => {
+  assert.equal(agents.SAND_DEFAULT_MAX_AGENTS, 40);
 });
 
 test("the refusal is plain words and names what to do about it", () => {
   assert.equal(
-    agents.sandAgentLimitMessage(100),
-    "This workspace holds Titan and 99 more bots. Remove one to add another.",
+    agents.sandAgentLimitMessage(40),
+    "This workspace holds Titan and 39 more bots. Remove one to add another.",
   );
-  assert.equal(new agents.SandAgentLimitError(100).message, agents.SAND_AGENT_LIMIT_MESSAGE);
+  assert.equal(new agents.SandAgentLimitError(40).message, agents.SAND_AGENT_LIMIT_MESSAGE);
   // No em dash, no jargon, no "cap" or "limit exceeded".
   assert.doesNotMatch(agents.SAND_AGENT_LIMIT_MESSAGE, /[—–]|limit|cap|quota|maximum/i);
 });
@@ -122,18 +126,26 @@ test("a limit error is recognised by the callers that exist to swallow it", () =
 
 test("SAND_MAX_AGENTS moves the ceiling on a live box, without a recreate", () => {
   useSettingsRoot();
-  assert.equal(boxSetting.resolveSandMaxAgents(), 100, "no override, the default");
+  assert.equal(boxSetting.resolveSandMaxAgents(), 40, "no override, the default");
   writeHostSettings({ SAND_MAX_AGENTS: "20" });
   assert.equal(boxSetting.resolveSandMaxAgents(), 20);
   writeHostSettings({ settings: { SAND_MAX_AGENTS: "4" } });
   assert.equal(boxSetting.resolveSandMaxAgents(), 4, "the nested shape is read too");
+  // AGENTS-CAP-2. This is the door the super admin's client row writes through, and the value it
+  // writes is a STRING: the reader takes a value only when typeof is "string", so a JSON number is
+  // ignored in silence and the box falls back to the default. The three live R750 boxes carry
+  // "100" here, which is why the default coming down to 40 cannot move a workspace already set.
+  writeHostSettings({ SAND_MAX_AGENTS: "100" });
+  assert.equal(boxSetting.resolveSandMaxAgents(), 100, "a raised workspace keeps its own number");
+  writeHostSettings({ SAND_MAX_AGENTS: 100 });
+  assert.equal(boxSetting.resolveSandMaxAgents(), 40, "a number rather than a string is not read");
 });
 
 test("a nonsense ceiling is ignored rather than locking the box out", () => {
   useSettingsRoot();
   for (const bad of ["0", "-3", "abc", "13.5", ""]) {
     writeHostSettings({ SAND_MAX_AGENTS: bad, filler: bad });
-    assert.equal(boxSetting.resolveSandMaxAgents(), 100, `"${bad}" is not a ceiling`);
+    assert.equal(boxSetting.resolveSandMaxAgents(), 40, `"${bad}" is not a ceiling`);
   }
 });
 
@@ -148,6 +160,9 @@ test("the environment still wins over the file", () => {
   }
 });
 
+// The hundred here is a roster SIZE, not the ceiling: a fake population well over the default that
+// must refuse the next bot. It stays at a hundred through the AGENTS-CAP-2 change on purpose, so
+// the test still covers a roster larger than the ceiling rather than one that merely equals it.
 test("a fake roster of a hundred bots refuses the next one", async () => {
   useSettingsRoot();
   writeHostSettings({ note: "no override here" });
@@ -158,10 +173,30 @@ test("a fake roster of a hundred bots refuses the next one", async () => {
     () => store.mintAgent(async () => "should never run"),
     (error) => {
       assert.equal(agents.isSandAgentLimitError(error), true);
+      // The refusal names the ceiling IN FORCE, not the roster it counted: forty here, because
+      // this box carries no SAND_MAX_AGENTS of its own.
+      assert.equal(error.message, "This workspace holds Titan and 39 more bots. Remove one to add another.");
+      return true;
+    },
+  );
+});
+
+// AGENTS-CAP-2, the other half of the same door: a workspace the super admin raised keeps its own
+// number, and the refusal it prints is that number rather than the product's default.
+test("a raised workspace refuses at its own ceiling, and says so", async () => {
+  useSettingsRoot();
+  writeHostSettings({ SAND_MAX_AGENTS: "100" });
+  const store = storeFor(rosterRoot(100));
+  assert.equal(await store.isAgentCapReached(), true);
+  await assert.rejects(
+    () => store.mintAgent(async () => "should never run"),
+    (error) => {
       assert.equal(error.message, "This workspace holds Titan and 99 more bots. Remove one to add another.");
       return true;
     },
   );
+  const roomy = storeFor(rosterRoot(50));
+  assert.equal(await roomy.isAgentCapReached(), false, "fifty bots is under a raised ceiling of a hundred");
 });
 
 test("twelve bots still has room for one more", async () => {
@@ -183,7 +218,7 @@ test("groups do not count against it", async () => {
   assert.equal(await store.isAgentCapReached(), false);
 });
 
-test("a group is minted even when the box already holds its hundred bots", async () => {
+test("a group is minted even when the box is over its ceiling", async () => {
   useSettingsRoot();
   writeHostSettings({ note: "default ceiling" });
   const store = storeFor(rosterRoot(100));

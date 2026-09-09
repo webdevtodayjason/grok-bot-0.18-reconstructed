@@ -121,6 +121,7 @@ import "./cursor-free.test.mjs";
 // has already started, so the run stops after the first file or two. Static imports are hoisted
 // and all resolve before this module's body runs, which is why they work and nothing else does.
 import "./agent-cap.test.mjs";
+import "./read-fence.test.mjs";
 import "./box-secrets-preserve.test.mjs";
 import "./box-store-secret-exclusion.test.mjs";
 import "./box-copy-in-agent-db.test.mjs";

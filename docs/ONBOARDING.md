@@ -324,29 +324,49 @@ makes. This is a separate prompt.
 which is the tier kept in mind every turn. That is what makes him still know them tomorrow. The
 state object in section 4 is the record of the interview; his memory is what he actually works from.
 
-## 8. The ceiling: Titan and ninety-nine
+## 8. The ceiling: a default of forty, raised per workspace
 
-**A box holds 100 agents: Titan and 99 more** (Jason, 2026-09-08: "Can you make it 100?"; it was
-13 until then, the size of the mascot crew, which is a drawing decision and not a ceiling: the faces
-wrap). `SAND_MAX_AGENTS` in `sand-host-settings.json` overrides it; the default is 100. Groups do
-not count. The number is a ceiling, not a load: a bot costs nothing until it runs, and a desktop
-seat is opened only for a bot that asks for one.
+**A box holds 40 bots by default: Titan and 39 more.** Jason decided the number on 2026-09-09,
+against the 100 set the day before and the 13 before that. The reasoning is worth keeping because it
+is not arbitrary: flat coordination holds to about fifty, one lead talking to every bot with nothing
+structured underneath, and the hierarchy tooling that would carry more (TEAMS-1) does not exist yet.
+Forty is the number a workspace can actually run, not the number it can hold.
+
+**Forty is a default, not a ceiling.** The super admin raises a workspace from its row in the admin
+console, which writes `SAND_MAX_AGENTS` into that box's `sand-host-settings.json`; the container
+environment still wins over the file. The three live boxes on the R750 carry `"100"` there today, so
+the default coming down cannot move a workspace somebody already set. Groups do not count. The
+number is a ceiling, not a load: a bot costs nothing until it runs, and a desktop seat is opened
+only for a bot that asks for one.
+
+Two things about that setting are easy to get wrong, and both fail silently. The value must be a
+**string**: the settings reader takes a value only when `typeof value === "string"`, so a JSON
+number is ignored and the box drops to the default. And the range is **1..1000**, checked by
+`resolveSandMaxAgents`, which fails **open** — anything outside it, or unparseable, is discarded and
+the workspace runs at 40 with nothing saying why. So whatever offers the control validates the range
+before it writes.
 
 It is enforced at one place, `mintAgent` (`session-materialization.ts:81`), which both `createAgent`
 and `duplicateAgent` funnel through. The refusal a person sees is one sentence:
 
-> This workspace holds Titan and 99 more bots. Remove one to add another.
+> This workspace holds Titan and 39 more bots. Remove one to add another.
 
 Templated from the ceiling in force, so a box with `SAND_MAX_AGENTS` set reads its own number. No
 status code, no class name, nothing about limits or maximums. It reaches the console as HTTP 409
 (`statusForCommandError`, `gateway-server.ts:15`) and the console shows the sentence as a toast. The
-Add button carries the count: **n of 99**, where n is the agents besides Titan.
+Add button carries the count: **n of 39**, where n is the agents besides Titan, and it follows a
+raised workspace the same way the refusal does.
 
-The roster header carries the same ceiling, `n / 13 bots`, counted off the roster the console can
+The roster header carries the same ceiling, `n / 40 bots`, counted off the roster the console can
 see rather than off `countAgents`: a room is an agent to `countAgents` and is not a bot, so
 counting rooms against a cap that excludes them would put two numbers that disagree side by side.
 The host's own count is on the tooltip. Both numbers follow the ceiling the host reports on
-`getOnboardingState`, and fall back to 13.
+`getOnboardingState` and `getAgentCapacity`, and fall back to the default only when no host answers.
+
+The gates read that number off the box rather than carrying a literal (GATE-15). `verify-deploy` and
+`verify-dashboard` both ask `getAgentCapacity` and require the console to **agree** with what the
+box reports. A gate that pins a literal goes red the next time somebody deliberately changes the
+ceiling, which is exactly what GATE-15 was filed as.
 
 **One trap left, and one that is closed.**
 
@@ -354,12 +374,12 @@ The closed one, written down because it is what the shape of this code is explai
 to live in two files that were not wired to each other: `session-materialization.ts` held
 `MAX_AGENTS_PER_USER = 50` and its own `SandAgentLimitError`, `shared/agents/agents.ts` held a second
 constant, a second class of the same name, and `SAND_AGENT_LIMIT_MESSAGE = "50 is the maximum"`.
-There is one of each now. The ceiling is `SAND_DEFAULT_MAX_AGENTS = 13` (`agents.ts:64`), the class is
-declared once beside it (`agents.ts:74`) and re-exported from `session-materialization.ts:28` so the
+There is one of each now. The default is `SAND_DEFAULT_MAX_AGENTS = 40` (`agents.ts:73`), the class is
+declared once beside it (`agents.ts:83`) and re-exported from `session-materialization.ts:28` so the
 old import path still works, and no `MAX_AGENTS_PER_USER` is left anywhere under `source/` (the only
 mention now is the word list the gate uses to keep jargon out of the refusal a person reads).
 
-The trap that is still live: `isSandAgentLimitError` (`agents.ts:89`) is what two callers use to
+The trap that is still live: `isSandAgentLimitError` (`agents.ts:98`) is what two callers use to
 catch a limit, `tryEnsureSession` (`session-runtime.ts:417`) and the post-delete fallback
 (`agent-lifecycle.ts:476`), and `statusForCommandError` (`gateway-server.ts:15`) is what turns it
 into the 409 the console reads. All three test the error's **name**, not its message, so the refusal

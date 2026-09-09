@@ -53,17 +53,24 @@ export function isSandDefaultAgentName(name: string): boolean {
 export const GROUP_MAX_MEMBERS = 6;
 
 /**
- * AGENTS-CAP-1. A box holds a hundred bots, Titan and ninety-nine more (Jason, 2026-09-08 17:59:
- * "I need to open up the number of agents that we can have. Can you make it 100?"; it was
- * thirteen, the size of the mascot crew, which is a drawing decision and not a ceiling). An operator can move
- * the ceiling with SAND_MAX_AGENTS (sand-host-settings.json, or the container env); the host
- * reads it through `resolveSandMaxAgents` and hands the resolved number to the error below, so
- * the refusal always names the number actually in force.
+ * AGENTS-CAP-2. A box holds forty bots, Titan and thirty-nine more. Jason decided the number on
+ * 2026-09-09 06:34, against the hundred AGENTS-CAP-1 had set the day before: flat coordination
+ * holds to about fifty, one lead talking to every bot with no structure under it, and the
+ * hierarchy tooling that would carry more than that (TEAMS-1) does not exist yet. Forty is the
+ * number a workspace can actually run, not the number it can hold.
+ *
+ * Forty is a DEFAULT, not a ceiling. The super admin raises a workspace from its row in the admin
+ * console, which writes SAND_MAX_AGENTS into that box's sand-host-settings.json; the container env
+ * still wins over the file, and the three live boxes on the R750 carry "100" as a string in that
+ * file today, so the default cannot move a workspace somebody already set.
+ *
+ * The host reads the number in force through `resolveSandMaxAgents` and hands it to the error
+ * below, so the refusal always names the ceiling actually in force rather than this constant.
  *
  * Groups are not bots and do not count: `SandSessionMaterialization.countCapAgents` skips any
  * agent directory carrying a group config, and a group is minted exempt from the check.
  */
-export const SAND_DEFAULT_MAX_AGENTS = 100;
+export const SAND_DEFAULT_MAX_AGENTS = 40;
 export const SAND_MAX_AGENTS_SETTING = "SAND_MAX_AGENTS";
 
 /** A person reads this, so it is plain words and it names the thing they can do about it. */
