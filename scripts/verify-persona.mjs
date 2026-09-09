@@ -195,6 +195,15 @@ const ask = async (agentId, prompt, label) => {
 };
 
 let probe = null;
+// The address list as this box held it before the gate touched it, so the box goes back to it.
+const mailBefore = mail == null ? null : {
+  domain: String(mail.domain ?? ""),
+  canSend: mail.canSend === true,
+  addresses: Object.entries(mail.addresses ?? {})
+    .map(([agentId, row]) => ({ agentId, code: String(row?.code ?? ""), address: String(row?.address ?? "") }))
+    .filter((row) => row.code.length > 0 && row.address.length > 0),
+};
+let pushedMail = false;
 try {
   const created = await call("createAgent", {
     name: `probe-persona-${Math.random().toString(36).slice(2, 8)}`,
@@ -204,11 +213,35 @@ try {
   if (probe?.id == null) throw new VerificationFailed("createAgent returned no agent");
   console.log(`\nscratch agent ${probe.id}`);
 
+  // THE SENTENCE THE ITEM IS FOR. A scratch agent minted seconds ago holds no row in the directory
+  // -- the relay sweeps every five minutes and the control plane mints from that sweep -- so left
+  // alone this gate can only ever measure the "I have none yet" branch, which is not the sentence
+  // Jason's or Richard's Titan will say. Measured 2026-09-09: that was the only answer either
+  // machine had ever produced for this question.
+  //
+  // So the gate gives itself a row. setAgentMail writes the file whole, which is why the box's own
+  // list is read first, this one row added to it, and the original written back in cleanup: a gate
+  // that leaves a box's addresses different from how it found them is a gate that breaks mail.
+  let own = null;
+  if (mailBefore != null && mailBefore.domain.length > 0) {
+    const taken = new Set(mailBefore.addresses.map((row) => row.code));
+    let code = "";
+    do { code = String(Math.floor(100000 + Math.random() * 900000)); } while (taken.has(code));
+    own = { agentId: probe.id, code, address: `agent${code}@${mailBefore.domain}` };
+    const push = await call("setAgentMail", {
+      domain: mailBefore.domain, canSend: mailBefore.canSend,
+      addresses: [...mailBefore.addresses, own],
+    });
+    pushedMail = true;
+    console.log(`  gave the scratch agent ${own.address} (${push?.written ?? "?"} addresses on the box)`);
+  } else {
+    console.log("  this box holds no address directory, so the no-address answer is the one measured");
+  }
+
   // 1. Do you have email?
   const email = await ask(probe.id,
     "Do you have an email address of your own? Answer in one or two sentences. If you have one, say it exactly.",
     "email");
-  const own = mail?.addresses?.[probe.id] ?? null;
   if (own == null) {
     check(/\b(no|not|don'?t|do not)\b/i.test(email) && !/@/.test(email),
       "with no address in the directory it says it has none",
@@ -219,10 +252,9 @@ try {
   } else {
     check(email.includes(own.address), `it states its own address ${own.address}`,
       `got ${JSON.stringify(email.slice(0, 160))}`);
-    const others = Object.entries(mail.addresses)
-      .filter(([id]) => id !== probe.id).map(([, row]) => row.address);
+    const others = mailBefore.addresses.filter((row) => row.agentId !== probe.id).map((row) => row.address);
     check(!others.some((address) => email.includes(address)),
-      "and no other bot's address");
+      `and no other bot's address (${others.length} other(s) on this box)`);
   }
 
   // 2. How many agents can we have? Against the live ceiling, never a remembered number.
@@ -285,6 +317,13 @@ try {
   failures += 1;
   console.log(`\n  FAIL  ${error instanceof VerificationFailed ? error.message : String(error?.message ?? error)}`);
 } finally {
+  // The addresses first: a box left holding a gate's synthetic row would route a code that belongs
+  // to a bot that no longer exists.
+  if (pushedMail && mailBefore != null) {
+    await call("setAgentMail", { domain: mailBefore.domain, canSend: mailBefore.canSend, addresses: mailBefore.addresses })
+      .then(() => console.log(`\nthe box's address list is back to the ${mailBefore.addresses.length} it held`))
+      .catch((error) => console.log(`\ncould not put the address list back: ${error.message}`));
+  }
   if (probe?.id != null) {
     // Pass or fail, the roster goes back to what it was. A gate that leaves bots behind is the
     // roster-growth bug it is supposed to catch.

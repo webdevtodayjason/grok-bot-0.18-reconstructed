@@ -136,6 +136,36 @@ mail sweep` asks for a pass right now.
 A bot that already has an address gets the same one back for ever. Renaming a bot moves the display
 name and never the address.
 
+A bot that has **left** the roster loses its address on the same pass: the sweep hands over the
+whole roster, so the control plane retires every active row whose bot is not on it, and a retired
+code is refused for good rather than reused. That happens only on a roster that says something —
+an empty answer is what a box that would not reply looks like from here, and it retires nothing.
+Before this, a throwaway probe agent deleted an hour earlier still held a live routable address.
+
+### Whose door a message arrives at
+
+**One workspace holds `myagents.email`, and only that workspace's edge may resolve a code.**
+
+Both halves of the webhook credential are a customer's to set: the domain and the Svix signing
+secret are fields on their own Mail card. So for the first afternoon of MAIL-2 a customer could
+type `myagents.email` into their own card, sign a body with their own secret naming
+`agent<code>@myagents.email` for a bot in a workspace they have no account on, and the relay
+delivered their words into that customer's box — reproduced end to end on 2026-09-09, HTTP 200 and
+a delivery. The credential was per workspace and the directory it unlocked was global.
+
+Two rules, and mail at this domain has to pass both:
+
+- The relay's door sends any recipient at the directory's domain to the workspace that **holds**
+  that domain and to no other, whatever anybody else's `mail.json` says. That workspace is the
+  operator's; on a console where it is not, `CP_MAIL_OWNER_SLUG` or one slug in the relay's
+  `mail-owner.txt` names it, and the file is read per message so nothing restarts.
+- That workspace's signing secret is then the only one that can verify the body, and every other
+  workspace's edge answers `elsewhere` for a code without reading the directory at all.
+
+So the recipient in the body is Resend's word rather than a poster's, which is what makes it safe
+to route on. `tests/relay-mail-tenant-claim.test.mjs` posts a validly signed webhook from one
+workspace naming another workspace's code and asserts nothing is delivered.
+
 ### Who a message goes to, in this order
 
 The order is the security, so it is written as an order:
@@ -334,17 +364,43 @@ the card save the rest of the form without ever holding a secret.
 | File | What it holds |
 |---|---|
 | `ui/mail.json` | The settings, including both secrets. Mode 0600, owned like its directory, gitignored. |
-| `ui/mail-inbox.jsonl` | One line per event: `{at, email_id, message_id, from, to, subject, agentId, agentName, outcome}`. Mode 0600, gitignored. |
+| `ui/mail-inbox.jsonl` | One line per event: `{at, email_id, message_id, from, to, subject, agentId, agentName, outcome}`, plus `slug` on the rows described below. Mode 0600, gitignored. |
+| `ui/mail-owner.txt` | Optional. One workspace slug: the workspace whose Resend account holds the per-bot address domain, and the only one whose edge may resolve a code. Absent means the operator's. `CP_MAIL_OWNER_SLUG` is the same value as an environment variable and wins. Read per message. |
+| `ui/mail-no-push.txt` | Optional, and empty in the product. One workspace slug per line (`#` starts a comment): workspaces this relay must not write inside. Their codes are still minted and their mail still routes; only the `setAgentMail` push is skipped. `SAND_UI_MAIL_NO_PUSH_SLUGS` is the same list as a comma-separated environment variable. Read once per sweep, so a change takes effect within five minutes with nothing restarted. |
 
 The ledger is the "what arrived and where it went" record the console shows, and the duplicate
 check reads it. **It never holds a body or a secret.** It is not an archive of your mail; Resend has
 that.
 
-`outcome` is one of `delivered`, `no_route`, `fetch_failed`, `send_failed`. An event that was not
-received mail, a message that arrived while receiving was switched off, a duplicate that already has
-a row, and a message the roster could not be read for, do not write one. The last of those is the
-503 above: Resend still has that message and will send it again, so recording it as one that came
-and went would be wrong.
+`outcome` is one of six:
+
+| `outcome` | What happened |
+|---|---|
+| `delivered` | It reached the bot it was for. |
+| `legacy_name` | The same, at an address made out of a name, with the retiring notice above it. |
+| `no_route` | At this relay's domain and belonging to nobody: no bot holds that code, the code is retired, or the name matches nobody on the roster. |
+| `sender_not_approved` | The workspace only takes mail from senders it has allowed, and this one is not. |
+| `fetch_failed` | Resend would not hand the message back for that id. |
+| `send_failed` | The bot was found and its box would not take the message. |
+
+An event that was not received mail, a message that arrived while receiving was switched off, a
+duplicate that already has a row, and a message the roster could not be read for, do not write one.
+The last of those is the 503 above: Resend still has that message and will send it again, so
+recording it as one that came and went would be wrong.
+
+**WHAT THE DOOR KEEPS ABOUT SOMEBODY ELSE'S MAIL.** One workspace's edge is the door every per-bot
+address comes through (§3), so it writes a row for mail that was never for its own bots. That row
+holds `at`, `email_id`, `outcome` and `slug`, the workspace it went to, **and nothing else**: no
+sender, no recipient, no subject, no bot name. The workspace the mail was actually for gets the
+whole row, mirrored into its own ledger as the message is delivered, and that is the only ledger
+those details are on. Before 2026-09-09 the door kept the full row, so the operator's own Mail card
+listed every customer's senders and subject lines.
+
+**THE LEDGER IS APPENDED TO AND NEVER ROTATED.** The duplicate check reads its last 256 KB and this
+process also remembers the last 2000 email ids it finished with, so the cost of one message does
+not grow with how much mail the workspace has ever taken. If a rotation is ever added, the ids it
+drops have to be carried into that in-memory set on the way out, or a message old enough to have
+been rotated away could be delivered a second time.
 
 ---
 

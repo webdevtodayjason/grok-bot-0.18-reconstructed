@@ -32,10 +32,11 @@
 //
 // Exit 0 the wire is proved, 1 a leg failed, 2 nothing could be measured.
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { deflateSync } from "node:zlib";
 
 const flag = (name, fallback = null) => {
@@ -84,11 +85,22 @@ const docker = (args) => new Promise((resolve, reject) =>
   execFile("docker", args, { maxBuffer: 32 << 20 }, (error, out) =>
     (error ? reject(new Error(`docker ${args.join(" ")}: ${error.message}`)) : resolve(String(out)))));
 
-// A 64x64 solid blue PNG, written by hand so the gate carries no fixture and no encoder. One colour
-// and one word: an answer that names it cannot have been guessed from the filename alone, because
-// the file is named for the colour too and a model that only read the name would still have to be
-// told the name -- which is exactly what the GUARDED outcome asserts instead.
-function solidBluePng() {
+// A 64x64 solid-colour PNG, written by hand so the gate carries no fixture and no encoder.
+//
+// THE COLOUR AND THE NAME ARE BOTH SECRETS. The first version of this gate wrote solid-blue.png and
+// asked for the colour, so a model that read nothing but the path in the attached-files note could
+// answer "blue" -- and the scorer took that as a pass, which made the exact regression this item
+// exists to catch (an image stripped on the way to the provider) score green. One of four colours
+// is picked at random each run and the file is named for a random token, so nothing in the prompt,
+// the path or the roster carries the answer: the only place the answer exists is the pixels.
+const COLOURS = [
+  { word: "blue", rgb: [0x1e, 0x5a, 0xd6] },
+  { word: "red", rgb: [0xd6, 0x1e, 0x2a] },
+  { word: "green", rgb: [0x1e, 0xa5, 0x4a] },
+  { word: "yellow", rgb: [0xf2, 0xd0, 0x1e] },
+];
+const COLOUR = COLOURS[Math.floor(Math.random() * COLOURS.length)];
+function solidColourPng([red, green, blue]) {
   const crcTable = Array.from({ length: 256 }, (_, n) => {
     let c = n;
     for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
@@ -115,7 +127,7 @@ function solidBluePng() {
     raw[row] = 0; // no filter
     for (let x = 0; x < side; x += 1) {
       const at = row + 1 + x * 3;
-      raw[at] = 0x1e; raw[at + 1] = 0x5a; raw[at + 2] = 0xd6; // an unmistakable blue
+      raw[at] = red; raw[at + 1] = green; raw[at + 2] = blue;
     }
   }
   return Buffer.concat([
@@ -181,9 +193,12 @@ const cleanup = async () => {
 };
 
 const scratch = mkdtempSync(join(tmpdir(), "verify-attach-"));
-const picture = join(scratch, "solid-blue.png");
-writeFileSync(picture, solidBluePng());
+// Named for nothing: a token, so the path in the attached-files note says only that a file is
+// there. The word this gate is waiting for exists in the pixels and nowhere else.
+const picture = join(scratch, `img-${randomBytes(4).toString("hex")}.png`);
+writeFileSync(picture, solidColourPng(COLOUR.rgb));
 const PROMPT = "Reply with the one colour word that describes the attached image.";
+console.log(`  the picture is ${basename(picture)} and it is ${COLOUR.word}; neither the name nor the prompt says so`);
 
 step("a person attaches the picture in a real browser and sends");
 const { chromium } = createRequire(`${PW_DIR}/package.json`)("playwright-core");
@@ -206,7 +221,7 @@ try {
     null, { timeout: 60_000 },
   );
   const chip = (await page.locator("#attachment-tray").textContent()) ?? "";
-  if (chip.includes("solid-blue.png")) pass("the attachment tray shows the file, staged and uploaded");
+  if (chip.includes(basename(picture))) pass("the attachment tray shows the file, staged and uploaded");
   else fail("the attachment tray never showed the file", chip.slice(0, 120));
 
   await page.locator("#message-input").fill(PROMPT);
@@ -260,7 +275,8 @@ if (wire == null) {
 
 step("the answer");
 console.log(`  reply: ${reply.slice(0, 600) || "(nothing)"}`);
-const namedTheColour = /\bblue\b/i.test(reply);
+const namedTheColour = new RegExp(`\\b${COLOUR.word}\\b`, "i").test(reply);
+const namedAnotherColour = COLOURS.some((one) => one.word !== COLOUR.word && new RegExp(`\\b${one.word}\\b`, "i").test(reply));
 const saidItCannotSee = /cannot see|could not see|can't see|cannot view|can't view|unable to see|not able to see|no image|don't see an image|do not see an image/i.test(reply);
 
 if (wire != null && wire.imageParts >= 1) {
@@ -271,10 +287,16 @@ if (wire != null && wire.imageParts >= 1) {
 if (reply.length === 0) {
   // The failure this whole item exists to end: "On it", and then nothing, forever.
   fail("the turn said nothing at all", "which is the exact silence this item exists to end");
+} else if (namedTheColour && wire != null && wire.imageParts >= 1) {
+  pass(`VISION -- the picture left as a picture and the agent named it ${COLOUR.word}`);
 } else if (namedTheColour) {
-  pass(wire != null && wire.imageParts >= 1
-    ? "VISION -- the picture left as a picture and the agent named its colour"
-    : "the agent named the colour without an image part, so it read the file itself");
+  // The picture never left as a picture and the answer is still right. With a random colour behind
+  // a random filename there is nothing to read it off, so this is the gate measuring something it
+  // does not understand, and a gate that does not understand its own pass is not a pass.
+  fail(`the agent said ${COLOUR.word} with no image on the wire`,
+    `imageParts=${wire?.imageParts ?? "unknown"}; nothing but the pixels carries that word, so this turn is not measured`);
+} else if (namedAnotherColour && !saidItCannotSee) {
+  fail("the agent named a colour the picture is not", reply.slice(0, 300));
 } else if (saidItCannotSee) {
   // Three ways to get here, and all three are an honest close rather than a dead turn:
   //  - the guard fired, so no image part left and the model was handed the sentence instead;
@@ -285,7 +307,7 @@ if (reply.length === 0) {
     ? "  the picture left as a picture and this model still says it cannot look at one"
     : "  no image part left for this endpoint, so the measured close is the guard and not the colour");
   pass("HONEST -- the agent says plainly that it cannot see the picture instead of guessing or going quiet");
-  if (/solid-blue\.png|attachments\//.test(reply)) pass("and it knows which file it was given, and where it is");
+  if (new RegExp(`${basename(picture)}|attachments/`).test(reply)) pass("and it knows which file it was given, and where it is");
   else console.log("  note: the reply does not name the file, so only the note in the prompt carries the path");
 } else {
   fail("the agent neither named the colour nor said it could not see the picture", reply.slice(0, 300));

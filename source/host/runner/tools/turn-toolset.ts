@@ -191,7 +191,7 @@ export const SAND_FORCED_STATIC_TOOL_NAMES = new Set([
 ]);
 
 export const SAND_DYNAMIC_TOOL_HINTS: Readonly<Record<string, string>> = {
-  CLOUD_AGENT: "Launch and manage Cursor cloud coding agents for repository work.",
+  CLOUD_AGENT: "Launch and manage cloud coding agents for repository work.",
   SEARCH_PLUGINS: "Search installable plugins/connectors when a task needs a service.",
   AUTHENTICATE_MCP_SERVER: "Start authentication for a connector that needs auth.",
   COPY_TO_BOX: "Copy a file from the user's computer onto your box.",

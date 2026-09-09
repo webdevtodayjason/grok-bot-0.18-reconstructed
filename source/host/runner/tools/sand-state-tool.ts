@@ -20,7 +20,7 @@ export const OPERATIONS = {
   },
   workflow: {
     write: 'save or rewrite a reusable skill (name, description, body; id to rewrite). The description is REQUIRED and is what a reader uses to decide whether the skill applies, so write it as "use this when …". A workflow has no trigger — a saved task that runs on a schedule is a routine.',
-    delete: "(id). Cursor-managed skills can't be edited or deleted.",
+    delete: "(id). Managed skills can't be edited or deleted.",
   },
   profile: { set: "your name and/or description. For your picture use target avatar." },
   settings: { set: "hidden_from_sidebar, notify_on_updates. Only the fields you pass change." },

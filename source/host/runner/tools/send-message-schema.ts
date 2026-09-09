@@ -5,9 +5,10 @@ import {
   shellEnvSecretFieldRefusal,
   SHELL_SECRET_CONNECTOR,
 } from "../../extensions/shell-tools/shell-secret-field.js";
+import { SAND_PRODUCT_NAME } from "../../../shared/product-name.js";
 import { sandWidgetSchema } from "../../../shared/sand-widgets.js";
 export const SEND_MESSAGE_TYPES = ["text", "attachment", "widget", "cursor-agent", "secret-request"] as const;
-export const SEND_MESSAGE_TYPE_DESCRIPTION = "text for chat messages, attachment for actual files or standalone media, widget for an interactive question with selectable options, cursor-agent to reference a Cursor cloud agent by its bcId (renders as a card that opens the agent in Cursor on click), secret-request to ask the user for a credential through a secure masked input (never a chat paste) -- with connector \"shell\" the value lands as an environment variable of your own box shell.";
+export const SEND_MESSAGE_TYPE_DESCRIPTION = "text for chat messages, attachment for actual files or standalone media, widget for an interactive question with selectable options, secret-request to ask the user for a credential through a secure masked input (never a chat paste) -- with connector \"shell\" the value lands as an environment variable of your own box shell.";
 export type SendMessageType = typeof SEND_MESSAGE_TYPES[number];
 export interface SendMessageInput {
   readonly type: SendMessageType; readonly content?: string | undefined; readonly url?: string | undefined;
@@ -52,9 +53,13 @@ const objectSchema = z.object({
   })).optional().describe("Optional, only for type:text. Image(s) that belong with this message; they render inside the same chat bubble, below your text \u2014 one image full width, several as a compact gallery. Use whenever you're showing something you're talking about; use type:attachment only for an image that IS the whole message."),
   alt: z.string().trim().optional().describe("Optional. A short description (alt text) of the image for type:attachment \u2014 what the image shows. Shown to the user on hover and in the fullscreen viewer."),
   reply_to: z.string().trim().optional().describe("Optional. Short address of the prior message this reply threads to (e.g. t3u for the user message in turn 3, t3s1 for your second SendMessage in turn 3). Omit when not threading."),
-  channel: z.string().trim().optional().describe("Optional. A connected messaging channel address to deliver this to instead of the in-app Grok Bot chat, shaped platform:chat, the address shown to you in an [inbound] wake. Omit to send to the in-app chat (the default). Only valid with type:text or type:attachment."),
+  channel: z.string().trim().optional().describe(`Optional. A connected messaging channel address to deliver this to instead of the in-app ${SAND_PRODUCT_NAME} chat, shaped platform:chat, the address shown to you in an [inbound] wake. Omit to send to the in-app chat (the default). Only valid with type:text or type:attachment.`),
   widget: sandWidgetSchema.optional().describe("Required when type is widget. A question with selectable options: { prompt, helpText?, options: [{ label, value?, description?, style? }], allowCustom?, dismissOnMoveOn? }. The user picks one option; its value comes back as their reply, and the chat shows the resolved card with their selection checked under your prompt \u2014 so phrase the prompt as a natural question, not a menu instruction. The user can also dismiss the question without answering; you'll be told on your next turn, so treat that as a decline and don't re-ask. Set allowCustom: true to also let the user type their own free-text answer instead of picking an option. Set dismissOnMoveOn: true only for low-stakes questions that become moot if the user moves on (it auto-dismisses once they send a newer message without answering); leave it off for real decisions you still need answered."),
-  bcId: z.string().trim().optional().describe("Required when type is cursor-agent. The bcId of the Cursor cloud agent to reference (e.g. bc-xxxxxxxx-...)."),
+  // CURSOR-1. The type stays in the encoder so a transcript written before this still renders, and
+  // it is not advertised anywhere the model reads: there is no cloud agent on this box to
+  // reference, and a tool description that offers one is the model being told a thing that is not
+  // true on every turn.
+  bcId: z.string().trim().optional().describe("Not for use."),
   secret: z.object({
     label: z.string().trim().min(1).describe('What credential to ask for, shown as the card title and echoed in the field placeholder ("Paste your \u2026"), e.g. "Slack bot token".'),
     description: z.string().trim().optional().describe("Optional short help shown under the label."),

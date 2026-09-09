@@ -311,3 +311,29 @@ test("no mail verb in the CLI opens the database directly", async () => {
     assert.ok(section.includes(`function ${verb}`), `${verb} is missing from the mail section`);
   }
 });
+
+test("a bot that has left the roster loses its address, and a roster that says nothing changes none", () => {
+  // Minting alone left a deleted bot's code active and routable for ever: measured on the R750 on
+  // 2026-09-09, two throwaway gate probes deleted hours earlier still held live addresses.
+  const store = openStore({ file: ":memory:" });
+  try {
+    const directory = createMailDirectory({ store, domain: "myagents.email" });
+    const first = directory.mint("demo", [{ id: "a1", name: "Titan" }, { id: "a2", name: "cf-probe-833658" }]);
+    assert.equal(first.minted, 2);
+    assert.equal(first.retired, 0);
+    const probe = first.addresses.find((row) => row.agentId === "a2");
+
+    // The probe agent is deleted, so the next sweep hands over a roster without it.
+    const second = directory.mint("demo", [{ id: "a1", name: "Titan" }]);
+    assert.equal(second.retired, 1, "the address of a bot that is gone is retired");
+    assert.equal(second.addresses.find((row) => row.agentId === "a2").state, "retired");
+    assert.equal(second.addresses.find((row) => row.agentId === "a1").state, "active");
+    assert.equal(directory.lookup(probe.address.split("@")[0]).state, "retired",
+      "and the relay refuses it, because that is what it does with a retired row");
+
+    // A roster read that answered nothing is not the same as a workspace with no bots.
+    const empty = directory.mint("demo", []);
+    assert.equal(empty.retired, 0, "an empty roster retires nothing");
+    assert.equal(empty.addresses.find((row) => row.agentId === "a1").state, "active");
+  } finally { store.close(); }
+});

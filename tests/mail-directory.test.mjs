@@ -42,7 +42,7 @@ test("a recipient at another domain is refused before the directory is read at a
   let asked = 0;
   const answer = await routeDirectoryFirst({
     addresses: ["someone@anvilmail.io", "hello@acme.test"],
-    agents: ROSTER, settings: SETTINGS,
+    agents: ROSTER, settings: SETTINGS, ownsDirectory: true,
     directoryDomain: DOMAIN,
     directoryRoute: async () => { asked += 1; return null; },
   });
@@ -50,8 +50,24 @@ test("a recipient at another domain is refused before the directory is read at a
   assert.equal(asked, 0, "nothing at our domain means nothing about our directory is read");
 });
 
+test("an edge that does not hold the directory can never resolve a code, however the body is signed", async () => {
+  // The blocker of 2026-09-09: the credential that unlocks this route is a signing secret each
+  // customer sets on their OWN card, and the thing it unlocked was the directory that spans every
+  // customer. So the question has to be asked before the lookup, and it is asked of the caller and
+  // not of the message.
+  let asked = 0;
+  const answer = await routeDirectoryFirst({
+    addresses: [`agent123456@${DOMAIN}`], agents: ROSTER, settings: SETTINGS,
+    directoryDomain: DOMAIN,
+    directoryRoute: async () => { asked += 1; return { slug: "demo", agentId: "a_titan", agentName: "Titan", address: `agent123456@${DOMAIN}`, state: "active" }; },
+  });
+  assert.equal(answer.kind, "elsewhere", "a foreign edge is told this is not its mail");
+  assert.equal(asked, 0, "and the directory is not even read on its behalf");
+  assert.match(answer.why, /does not hold the address directory/);
+});
+
 test("with no directory configured every message routes the way it always did", async () => {
-  const answer = await routeDirectoryFirst({ addresses: [`titan@${DOMAIN}`], agents: ROSTER, settings: SETTINGS });
+  const answer = await routeDirectoryFirst({ addresses: [`titan@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, ownsDirectory: true });
   assert.equal(answer.kind, "elsewhere");
 });
 
@@ -60,15 +76,15 @@ test("a code resolves to the workspace that holds it, and a retired one is refus
                  agent222222: { slug: "demo", agentId: "a_old", agentName: "Gone", address: `agent222222@${DOMAIN}`, state: "retired" } };
   const directoryRoute = async (localpart) => rows[localpart] ?? null;
 
-  const found = await routeDirectoryFirst({ addresses: [`agent123456@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, directoryDomain: DOMAIN, directoryRoute });
+  const found = await routeDirectoryFirst({ addresses: [`agent123456@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, ownsDirectory: true, directoryDomain: DOMAIN, directoryRoute });
   assert.equal(found.kind, "code");
   assert.equal(found.route.slug, "demo");
   assert.equal(found.route.agentId, "a_titan");
 
-  const retired = await routeDirectoryFirst({ addresses: [`agent222222@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, directoryDomain: DOMAIN, directoryRoute });
+  const retired = await routeDirectoryFirst({ addresses: [`agent222222@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, ownsDirectory: true, directoryDomain: DOMAIN, directoryRoute });
   assert.equal(retired.kind, "no_route");
 
-  const nobody = await routeDirectoryFirst({ addresses: [`agent999999@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, directoryDomain: DOMAIN, directoryRoute });
+  const nobody = await routeDirectoryFirst({ addresses: [`agent999999@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, ownsDirectory: true, directoryDomain: DOMAIN, directoryRoute });
   assert.equal(nobody.kind, "no_route", "an address nobody holds is nobody's, and not the catch-all's");
 });
 
@@ -78,7 +94,7 @@ test("a name address still arrives, with the line that says it is going away, un
   const at = Date.parse("2026-09-09T00:00:00Z");
 
   const legacy = await routeDirectoryFirst({
-    addresses: [`books@${DOMAIN}`], agents: ROSTER, settings: SETTINGS,
+    addresses: [`books@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, ownsDirectory: true,
     directoryDomain: DOMAIN, directoryRoute, directoryAddress, now: () => at,
   });
   assert.equal(legacy.kind, "legacy");
@@ -88,14 +104,14 @@ test("a name address still arrives, with the line that says it is going away, un
 
   // A name nobody on the roster answers to is not the catch-all's either.
   const guess = await routeDirectoryFirst({
-    addresses: [`accounts@${DOMAIN}`], agents: ROSTER, settings: SETTINGS,
+    addresses: [`accounts@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, ownsDirectory: true,
     directoryDomain: DOMAIN, directoryRoute, now: () => at,
   });
   assert.equal(guess.kind, "no_route");
 
   // And after the stop date the notice is not a warning any more, it is the refusal.
   const after = await routeDirectoryFirst({
-    addresses: [`books@${DOMAIN}`], agents: ROSTER, settings: SETTINGS,
+    addresses: [`books@${DOMAIN}`], agents: ROSTER, settings: SETTINGS, ownsDirectory: true,
     directoryDomain: DOMAIN, directoryRoute, directoryAddress,
     now: () => Date.parse("2026-10-02T00:00:00Z"),
   });
@@ -244,7 +260,7 @@ const ledgerOf = (dir) => {
  * webhook, a second one whose bots the mail is actually for, and Richard's, which is a real
  * customer and read-only this wave.
  */
-async function console3() {
+async function console3({ noPush = "richard-avery" } = {}) {
   const store = openStore({ file: ":memory:" });
   const cp = stubControlPlane(store);
   const cpUrl = await cp.start();
@@ -275,6 +291,13 @@ async function console3() {
     SAND_UI_TENANTS_FILE: tenantsFile([alpha.row, beta.row, richard.row]),
     CP_URL: cpUrl, CP_RELAY_TOKEN: RELAY_TOKEN,
     GROK_BOT_MAIL_API_BASE: resendUrl,
+    // Alpha is the workspace whose Resend account holds myagents.email on this console, which is
+    // what makes its edge the one a per-bot code may be resolved on. On the R750 that workspace is
+    // the operator's and this variable is not set at all.
+    CP_MAIL_OWNER_SLUG: "alpha",
+    // And which workspaces this relay must not write inside. Empty in the product; an operator
+    // sets it, which is the whole point of the setting.
+    SAND_UI_MAIL_NO_PUSH_SLUGS: noPush,
   }, { prefix: "relay-mail-directory-", pathValue: "/nonexistent" });
 
   // The sweep runs at start. Wait for it rather than racing it.
@@ -295,7 +318,7 @@ async function console3() {
   };
 }
 
-test("the relay sweeps every workspace, mints what is missing, and leaves Richard's box alone", async () => {
+test("the relay sweeps every workspace, mints what is missing, and leaves a read-only box alone", async () => {
   const world = await console3();
   try {
     assert.deepEqual([...world.cp.seen.mint].sort(), ["alpha", "beta", "richard-avery"]);
@@ -310,7 +333,7 @@ test("the relay sweeps every workspace, mints what is missing, and leaves Richar
     assert.ok(world.alphaBox.seen.some((one) => one.command === "setAgentMail"), "alpha's box was told its addresses");
     assert.ok(world.betaBox.seen.some((one) => one.command === "setAgentMail"), "beta's box was told its addresses");
     assert.equal(world.richardBox.seen.some((one) => one.command === "setAgentMail"), false,
-      "nothing was written inside Richard's box: it is a real customer and read-only this wave");
+      "nothing was written inside the box the operator named read-only");
 
     // Beta's box is on the current bundle, alpha's too; the push carries the addresses and no key.
     const pushed = world.alphaBox.seen.find((one) => one.command === "setAgentMail");
@@ -318,6 +341,17 @@ test("the relay sweeps every workspace, mints what is missing, and leaves Richar
     assert.equal(pushed.args.canSend, false, "sending is unchanged this wave, and the box is told so");
     assert.equal(pushed.args.addresses.length, 2);
     assert.equal(JSON.stringify(pushed.args).includes("re_test"), false, "no key is ever in that push");
+  } finally { world.stop(); }
+});
+
+test("the read-only list is an operator's setting and the product ships with it empty", async () => {
+  // The slug that was in this list on 2026-09-09 was a live customer's, written into the relay's
+  // source with nothing that would ever take it out. With no setting every workspace is pushed to,
+  // which is the behaviour every deployment of this product gets.
+  const world = await console3({ noPush: "" });
+  try {
+    await waitFor(() => world.richardBox.seen.some((one) => one.command === "setAgentMail"),
+      "the push into a workspace nobody asked to be left alone");
   } finally { world.stop(); }
 });
 

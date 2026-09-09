@@ -13,7 +13,7 @@
 // check the rendered words against the fact rather than against a golden string. A number that
 // appears in the prompt and not in the settings file is the bug this suite exists to catch.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test, { after } from "node:test";
@@ -40,6 +40,7 @@ const bundle = async (entry, name) => {
 const persona = await bundle("source/host/runner/standing-persona.ts", "standing-persona.cjs");
 const promptMod = await bundle("source/host/runner/system-prompt.ts", "system-prompt.cjs");
 const docs = await bundle("source/host/runner/box-reference-docs.ts", "box-reference-docs.cjs");
+const sendMessage = await bundle("source/host/runner/tools/send-message-tool.ts", "send-message-tool.cjs");
 
 // ------------------------------------------------------------------ a fake box on disk
 
@@ -263,6 +264,77 @@ test("no assembled prompt names the dead upstream or the wrong product", () => {
     assert.ok(!assembled.includes(word), `the prompt does not say ${word}`);
   }
   assert.ok(assembled.includes("Titanium Bot"), "it does say the product's real name");
+});
+
+// The prompt was only ever half of what the model reads. On 2026-09-09, measured inside the
+// running bundle on the R750, the persona section said "This product is called Titanium Bot" once
+// and the SendMessage tool description -- sent on every single turn -- opened with the old name and
+// offered a cloud agent on the dead upstream, four times over. The test above passed the whole
+// time, because it only ever read the prompt strings.
+
+/**
+ * Every word this tool puts in front of the model: its own description, and every `description`
+ * in the JSON schema its parameters are sent as -- which is the literal thing on the wire.
+ */
+function toolDescriptions(tool) {
+  const out = [String(tool.descriptionGenerator?.() ?? tool.description ?? "")];
+  const walk = (node) => {
+    if (Array.isArray(node)) { for (const one of node) walk(one); return; }
+    if (node == null || typeof node !== "object") return;
+    if (typeof node.description === "string") out.push(node.description);
+    for (const value of Object.values(node)) walk(value);
+  };
+  walk(tool.parameters?.jsonSchema ?? tool.parameters);
+  return out;
+}
+
+test("the tool descriptions the model is handed name no dead upstream and no old product name", () => {
+  const tool = sendMessage.createSendMessageTool({
+    getIngestAttachment: () => undefined,
+    onSendMessage: () => undefined,
+  });
+  const texts = toolDescriptions(tool);
+  assert.ok(texts.length > 1, `the descriptions were read, not an empty object: ${texts.length}`);
+  for (const text of texts) {
+    for (const word of ["Cursor", "cloud agent", "Grok Bot", "Titanbot"]) {
+      assert.ok(!text.includes(word), `no tool description says ${word}: ${text.slice(0, 160)}`);
+    }
+  }
+  assert.ok(texts[0].includes("Titanium Bot"), "and the one that names the product names this one");
+});
+
+// And the same rule over every OTHER description in the tree, because the one that shipped the bug
+// was in a file nobody thought of as prompt text. This reads the source rather than a built
+// toolset: a toolset needs a box, a gateway and a model behind it, and the string is written here.
+test("no tool description anywhere in the tree names the dead upstream or the old product", () => {
+  const roots = ["source/host/runner/tools", "source/shared"];
+  const files = [];
+  for (const root of roots) {
+    for (const entry of readdirSync(path.join(repoRoot, root), { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".ts")) files.push(path.join(root, entry.name));
+    }
+  }
+  assert.ok(files.length > 10, `the tree was walked: ${files.length} files`);
+  const offenders = [];
+  for (const file of files) {
+    const source = readFileSync(path.join(repoRoot, file), "utf8");
+    // What the model reads: a zod .describe(), and any constant whose name says it is a
+    // description or a hint. Not comments, not tool results, not the encoder's old transcript
+    // rendering -- those are read below or not by a model at all.
+    // Block comments first: this file's own prose names both, on purpose, and so does the note in
+    // sand-mcp-management-tools that records which sentence was taken out.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+    const strings = [
+      ...code.matchAll(/\.describe\(\s*([`"'])([\s\S]*?)\1\s*\)/g),
+      ...code.matchAll(/^\s*(?:export\s+)?const\s+[A-Z0-9_]*(?:DESCRIPTION|HINTS|DOC)[A-Z0-9_]*[^=\n]*=\s*([`"'])([\s\S]*?)\1/gm),
+    ].map((match) => match[2]);
+    for (const text of strings) {
+      for (const word of ["Cursor cloud", "cursor.com", "Grok Bot", "Titanbot"]) {
+        if (text.includes(word)) offenders.push(`${file}: ${word}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], "every description the model reads says what is true on this box");
 });
 
 test("the generated box reference docs name the product and describe the console", () => {

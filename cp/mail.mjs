@@ -113,12 +113,32 @@ export function createMailDirectory({ store, domain = mailDomain(), now = () => 
       // retired gets a fresh one on the next sweep, and counting its gravestone as "already held"
       // reported "0 minted" on the pass that minted it.
       const before = new Set(store.listMailAddresses(tenant).filter((row) => row.state === "active").map((row) => row.agentId));
+      const roster = normalizeAgents(agents);
       let minted = 0;
-      for (const agent of normalizeAgents(agents)) {
+      for (const agent of roster) {
         const record = store.mintMailCode({ tenant, agentId: agent.id, agentName: agent.name, domain: at });
         if (record != null && !before.has(record.agentId)) minted += 1;
       }
-      return { domain: at, slug: tenant, minted, ...tenantAnswer(tenant), measuredAt: new Date(now()).toISOString() };
+      // AND THE OTHER HALF. Minting alone leaves a deleted bot's address active and routable for
+      // ever: measured on the R750 on 2026-09-09, two throwaway gate probes deleted hours earlier
+      // still held live addresses, and mail to one of them was accepted, resolved and pushed at a
+      // box that has no such bot, ending as send_failed instead of the no_route the design
+      // promises for an address belonging to nobody. The roster is already in hand, so the diff
+      // costs nothing.
+      //
+      // ONLY ON A ROSTER THAT SAYS SOMETHING. An empty list is what a box that would not answer
+      // looks like from here, and retiring a whole workspace because one gateway call hiccuped is
+      // far worse than an address living a few minutes too long.
+      let retired = 0;
+      if (roster.length > 0) {
+        const live = new Set(roster.map((agent) => agent.id));
+        for (const record of store.listMailAddresses(tenant)) {
+          if (record.state !== "active" || live.has(record.agentId)) continue;
+          store.retireMailAddress(record.code);
+          retired += 1;
+        }
+      }
+      return { domain: at, slug: tenant, minted, retired, ...tenantAnswer(tenant), measuredAt: new Date(now()).toISOString() };
     },
 
     /**

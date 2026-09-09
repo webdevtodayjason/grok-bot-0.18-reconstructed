@@ -2124,6 +2124,13 @@ function mailEdgeFor(t) {
     directoryRoute: (localpart) => mailDirectoryRoute(localpart),
     directoryAddress: ({ agentId }) => Promise.resolve(mailAddressOf(t.slug, agentId)),
     deliverTo: (args) => mailDeliverTo(args, t.slug),
+    // The directory is global and a signing secret is not: every workspace sets its own on its own
+    // Mail card, so an edge that could resolve a code would be a workspace that could sign a body
+    // naming any other customer's bot. Only the workspace whose Resend account actually holds the
+    // directory domain resolves codes; for everyone else routeDirectoryFirst answers "elsewhere"
+    // and their own domain routes exactly as it always did.
+    ownsDirectory: () => t.slug === mailDirectoryOwnerSlug(),
+    ownSlug: t.slug,
     log: (line) => console.log(line),
   });
   mailEdges.set(t.slug, { settingsFile: t.mailSettingsFile, edge });
@@ -2151,12 +2158,48 @@ const MAIL_SWEEP_MS = 5 * 60_000;
 // the refresh a miss triggers is rate limited hard. Thirty seconds is one control plane read per
 // half minute in the worst case, and it is short enough that a bot minted a moment ago answers.
 const MAIL_MISS_COOLDOWN_MS = 30_000;
-// RICHARD'S BOX IS A REAL CUSTOMER AND READ-ONLY THIS WAVE. His codes are minted and they route,
-// because routing is decided here and not inside a box; what is skipped is the setAgentMail push,
-// which writes a file inside the box and is the only part of this that touches one. His Titan
-// therefore does not know its own address until his box is next swapped, and it can still be
-// written to. Named here rather than passed in so the reason travels with the name.
-const MAIL_NO_PUSH_SLUGS = new Set(["richard-avery"]);
+// WHICH WORKSPACE HOLDS THE DIRECTORY DOMAIN. myagents.email is one Resend account and it is the
+// operator's; every other workspace on this console has its own domain or none. This is the one
+// workspace whose edge may resolve a per-bot code, and it is a setting rather than a constant only
+// so an operator who runs the directory out of a workspace that is not slug "operator" can say so.
+const MAIL_OWNER_FILE = process.env.SAND_UI_MAIL_OWNER_FILE?.trim() || stateFile("mail-owner.txt", HERE);
+function mailDirectoryOwnerSlug() {
+  const named = process.env.CP_MAIL_OWNER_SLUG?.trim();
+  if (named != null && named.length > 0) return named;
+  // The same escape hatch the read-only list has, and for the same reason: a console's containers
+  // are made once and this is a fact an operator may have to correct on a running one.
+  try {
+    for (const line of readFileSync(MAIL_OWNER_FILE, "utf8").split("\n")) {
+      const slug = line.split("#")[0].trim();
+      if (slug.length > 0) return slug;
+    }
+  } catch { /* no file, which is every install where the operator holds the domain */ }
+  return OPERATOR_SLUG;
+}
+
+// WORKSPACES THIS RELAY MUST NOT WRITE INSIDE. Codes are still minted for them and mail still
+// routes to them -- routing is decided here, not in a box -- but the setAgentMail push, the only
+// part of this that writes a file inside somebody's box, is skipped. That is an operator's
+// decision about one afternoon and one customer, so it is set on the relay and the product ships
+// with it EMPTY: a customer's slug written into source is a fact about a Wednesday that every
+// future deployment of this product would carry.
+//
+// Two ways to set it, because the relay's container environment is fixed when the container is
+// created and a live console is not recreated to hold a customer read-only for an afternoon:
+// SAND_UI_MAIL_NO_PUSH_SLUGS (comma separated) and a file of one slug per line beside the rest of
+// the relay's state. Both are read each sweep, so a slug added or removed takes effect within five
+// minutes with nothing restarted.
+const MAIL_NO_PUSH_FILE = process.env.SAND_UI_MAIL_NO_PUSH_FILE?.trim() || stateFile("mail-no-push.txt", HERE);
+function mailNoPushSlugs() {
+  const slugs = String(process.env.SAND_UI_MAIL_NO_PUSH_SLUGS ?? "").split(",").map((one) => one.trim()).filter(Boolean);
+  try {
+    for (const line of readFileSync(MAIL_NO_PUSH_FILE, "utf8").split("\n")) {
+      const slug = line.split("#")[0].trim();
+      if (slug.length > 0) slugs.push(slug);
+    }
+  } catch { /* no file, which is every install that never held a workspace read-only */ }
+  return new Set(slugs);
+}
 
 let mailDirectoryState = { domain: "", tenants: {}, measuredAt: "", readAt: 0, source: "never read" };
 let mailDirectoryLoadedFromDisk = false;
@@ -2311,6 +2354,9 @@ async function mailMintSweep(reason = "the timer") {
   if (mailSweepRunning) return { ok: false, why: "a sweep is already running" };
   mailSweepRunning = true;
   const swept = [];
+  // Read once per sweep rather than at import, so an operator adds or removes a workspace with a
+  // file and a five minute wait instead of a restart.
+  const noPush = mailNoPushSlugs();
   try {
     // The control plane FIRST, and nothing else happens if it does not answer.
     //
@@ -2354,10 +2400,10 @@ async function mailMintSweep(reason = "the timer") {
         continue;
       }
       const addresses = Array.isArray(minted?.addresses) ? minted.addresses : [];
-      swept.push({ slug: entry.slug, addresses: addresses.length, minted: Number(minted?.minted ?? 0) });
+      swept.push({ slug: entry.slug, addresses: addresses.length, minted: Number(minted?.minted ?? 0), retired: Number(minted?.retired ?? 0) });
 
-      if (MAIL_NO_PUSH_SLUGS.has(entry.slug)) {
-        console.log(`mail  ${entry.slug} holds ${addresses.length} address(es) and they route; nothing was written inside that box, which is read-only this wave`);
+      if (noPush.has(entry.slug)) {
+        console.log(`mail  ${entry.slug} holds ${addresses.length} address(es) and they route; nothing was written inside that box, which this relay is set to leave read-only`);
         continue;
       }
       // The box's own copy, so the prompt can say what this bot's address is without a network
@@ -2377,8 +2423,9 @@ async function mailMintSweep(reason = "the timer") {
     // Re-read only when something was actually minted: the warm read at the top of this function
     // is already this pass's directory otherwise.
     const minted = swept.reduce((total, row) => total + row.minted, 0);
-    const refreshed = minted > 0 ? await mailDirectoryRefresh() : warmed;
-    console.log(`mail  swept ${swept.length} workspace(s) for addresses (${reason}); ${minted} minted, `
+    const retired = swept.reduce((total, row) => total + row.retired, 0);
+    const refreshed = minted + retired > 0 ? await mailDirectoryRefresh() : warmed;
+    console.log(`mail  swept ${swept.length} workspace(s) for addresses (${reason}); ${minted} minted, ${retired} retired, `
       + (refreshed.ok ? `${refreshed.addresses} in the directory` : `the directory could not be re-read: ${refreshed.why}`));
     return { ok: true, swept, directory: refreshed };
   } finally { mailSweepRunning = false; }
@@ -2472,6 +2519,21 @@ async function handleMailWebhook(req, res) {
   }
 
   const domains = recipientDomains(raw);
+  // The directory's domain is decided here and never by a claim on a tenant's own Mail card. Any
+  // workspace can write "myagents.email" into its own settings and set its own signing secret; if
+  // that made it a claimant, its secret would be the one that verified its own body and the edge it
+  // reached could resolve any customer's code. So: a recipient at the directory's domain is the
+  // directory owner's mail, whatever anybody else's mail.json says, and their secret is the only
+  // one that can prove it.
+  const directoryDomain = mailDirectoryDomain();
+  if (directoryDomain.length > 0 && domains.includes(directoryDomain)) {
+    const ownerSlug = mailDirectoryOwnerSlug();
+    const owner = contextOf(ownerSlug);
+    if (owner != null) return await mailEdgeFor(owner).handleWebhook(req, res, { raw });
+    console.log(`mail  a webhook named ${directoryDomain} and ${ownerSlug}, which holds it, is not a workspace on this console`);
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ ignored: "no_directory_owner" }));
+  }
   const claimants = [];
   for (const entry of serving) {
     const t = contextOf(entry.slug);

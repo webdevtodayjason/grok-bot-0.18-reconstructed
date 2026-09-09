@@ -27,7 +27,7 @@
 // duplicate check reads.
 //
 // Nothing here imports anything outside node builtins: the relay has no node_modules at all.
-import { appendFile, chmod, chown, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, chown, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { stateFile } from "./state-dir.mjs";
@@ -58,6 +58,11 @@ export const RESEND_API_BASE = "https://api.resend.com";
 // A webhook body is an event envelope, not a message: Resend hands over ids and headers and the
 // relay fetches the mail itself. 256 KB is far past anything that shape reaches.
 export const MAIL_BODY_LIMIT = 256 * 1024;
+// How much of the ledger the duplicate check and the console's recent list read. 256 KB is a few
+// thousand rows, which is far more than either needs and a fixed cost whatever the file grew to.
+export const MAIL_LEDGER_TAIL_BYTES = 256 * 1024;
+// And how many finished email ids this process keeps in memory in front of that read.
+export const MAIL_SETTLED_IDS = 2000;
 // The prompt carries the mail, so it carries whatever somebody sent us. 20000 characters is a long
 // email and a short context window; past that the agent is handed the start and told nothing else.
 export const MAIL_BODY_CHARS = 20_000;
@@ -330,9 +335,18 @@ export function legacyNotice({ address, codeAddress = "", stopDate = MAIL_LEGACY
  */
 export async function routeDirectoryFirst({
   addresses = [], agents = [], settings = MAIL_DEFAULTS,
-  directoryDomain = "", directoryRoute = null, directoryAddress = null,
+  directoryDomain = "", directoryRoute = null, directoryAddress = null, ownsDirectory = false,
   legacyNoticeUntil = MAIL_LEGACY_STOP, now = () => Date.now(),
 } = {}) {
+  // MAIL-2 SECURITY. The directory is one global thing and an edge is one workspace's, so the
+  // question "may this edge resolve a code at all" has to be asked before the lookup and not after
+  // it. Without this line any workspace that set its OWN signing secret could sign a body naming
+  // another workspace's agent<code>@ address and have this edge deliver a stranger's words into
+  // that customer's box: the credential is per workspace, the directory it unlocked was not.
+  // Only the workspace whose Resend account actually holds the directory domain gets past here.
+  if (ownsDirectory !== true) {
+    return { kind: "elsewhere", why: "this workspace does not hold the address directory" };
+  }
   const at = (typeof directoryDomain === "function" ? directoryDomain() : directoryDomain);
   const domain = String(at ?? "").trim().toLowerCase();
   if (domain.length === 0 || typeof directoryRoute !== "function") {
@@ -491,7 +505,8 @@ export function mailPrompt({
 // One line per event: what arrived, and where it went. No body, no headers, no secret -- this file
 // is the console's "recent mail" list and the duplicate check, and it is not an archive of the mail.
 
-export function mailLedgerRow({ at, emailId, messageId, from, to, subject, agentId, agentName, outcome }) {
+export function mailLedgerRow({ at, emailId, messageId, from, to, subject, agentId, agentName, outcome, slug }) {
+  const workspace = asString(slug);
   return {
     at: at ?? new Date().toISOString(),
     email_id: asString(emailId),
@@ -502,6 +517,9 @@ export function mailLedgerRow({ at, emailId, messageId, from, to, subject, agent
     agentId: asString(agentId),
     agentName: asString(agentName),
     outcome: asString(outcome) || "unknown",
+    // Only on the rows that need it -- the door's row for another workspace's mail -- so every row
+    // this file already holds keeps the shape the console reads.
+    ...(workspace.length > 0 ? { slug: workspace } : {}),
   };
 }
 
@@ -512,9 +530,32 @@ export async function appendMailLedger(row, { file = MAIL_LEDGER_FILE, ownLikePa
   else { try { const parent = await stat(path.dirname(file)); await chown(file, parent.uid, parent.gid); } catch {} }
 }
 
-export async function readMailLedger(file = MAIL_LEDGER_FILE) {
+/**
+ * The ledger, or the end of it.
+ *
+ * `maxBytes` is why this is not just readFile: the duplicate check runs on every webhook and this
+ * file only ever grows, so a workspace that has taken mail for a year would parse a year of it to
+ * decide one message. With a byte budget only the tail is read and the first line is dropped
+ * unless the whole file fitted, because a tail almost always starts mid-line. The console's
+ * "recent mail" list wants the tail too; nothing needs the whole file.
+ */
+export async function readMailLedger(file = MAIL_LEDGER_FILE, { maxBytes = 0 } = {}) {
   let raw;
-  try { raw = await readFile(file, "utf8"); } catch { return []; }
+  if (maxBytes > 0) {
+    let handle = null;
+    try {
+      handle = await open(file, "r");
+      const size = (await handle.stat()).size;
+      const start = Math.max(0, size - maxBytes);
+      const buffer = Buffer.alloc(Math.min(size, maxBytes));
+      if (buffer.length > 0) await handle.read(buffer, 0, buffer.length, start);
+      raw = buffer.toString("utf8");
+      if (start > 0) raw = raw.slice(raw.indexOf("\n") + 1);
+    } catch { return []; }
+    finally { await handle?.close().catch(() => {}); }
+  } else {
+    try { raw = await readFile(file, "utf8"); } catch { return []; }
+  }
   const rows = [];
   for (const line of raw.split("\n")) {
     if (line.trim().length === 0) continue;
@@ -599,6 +640,16 @@ export function createMailEdge({
   directoryRoute = null,
   directoryAddress = null,
   deliverTo = null,
+  // Whether THIS workspace is the one whose Resend account holds the directory domain. False --
+  // the default, and every workspace but one -- means a code at that domain is never resolved
+  // here, whatever the body says. routeDirectoryFirst carries the reason. A function is read on
+  // every message, the same way directoryDomain is, so an operator who names a different workspace
+  // does not have to restart a relay to be believed.
+  ownsDirectory = false,
+  // This edge's own workspace, used for one thing: a row about somebody else's mail is written
+  // without the sender, the recipient or the subject on it. The receiving workspace already has
+  // the whole row from the mirror in server.mjs.
+  ownSlug = "",
   legacyNoticeUntil = MAIL_LEGACY_STOP,
   now = () => Date.now(),
   log = (line) => console.log(line),
@@ -609,6 +660,17 @@ export function createMailEdge({
   // together would both read a ledger without it and both deliver. This set is that row until it
   // is written, and it is checked in the same step as the ledger with nothing awaited between them.
   const inFlight = new Set();
+  // And the email ids this process has already finished with, bounded. The row on disk is the
+  // durable duplicate check, but the file grows for ever and re-parsing all of it to decide one
+  // message is a cost that rises with the workspace's lifetime volume; this answers first, and the
+  // disk is only consulted -- by its tail -- when this set has never seen the id. If a rotation is
+  // ever added to this module, the ids it drops have to be carried into this set on the way out,
+  // or the window this covers shrinks to whatever the rotation left behind.
+  const settledIds = new Set();
+  const remember = (emailId) => {
+    settledIds.add(emailId);
+    while (settledIds.size > MAIL_SETTLED_IDS) settledIds.delete(settledIds.values().next().value);
+  };
   const ledgerFiles = { file: ledgerFile, ownLikeParent };
   const sendJson = (res, status, value) => {
     res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
@@ -631,7 +693,7 @@ export function createMailEdge({
     return mailSettingsShape(settings, {
       webhookUrl,
       addresses: mailAddresses(agents, settings.domain),
-      recent: recentMail(await readMailLedger(ledgerFile)),
+      recent: recentMail(await readMailLedger(ledgerFile, { maxBytes: MAIL_LEDGER_TAIL_BYTES })),
     });
   }
 
@@ -697,21 +759,41 @@ export function createMailEdge({
     const emailId = asString(data.email_id ?? data.id);
     if (emailId.length === 0) return sendJson(res, 200, { ignored: "type" });
 
-    const ledger = await readMailLedger(ledgerFile);
-    if (inFlight.has(emailId) || ledger.some((row) => row.email_id === emailId)) {
+    // The claim is taken BEFORE the ledger is read and not after it. Ten copies of one signed
+    // webhook arrive together; if each one reached the disk before any of them said "mine", all ten
+    // would read a ledger without the row and all ten would deliver. Measured, with ten at once.
+    if (inFlight.has(emailId) || settledIds.has(emailId)) {
       return sendJson(res, 200, { ignored: "duplicate" });
     }
     inFlight.add(emailId);
-    try { return await deliver(res, settings, data, emailId); }
-    finally { inFlight.delete(emailId); }
+    try {
+      const ledger = await readMailLedger(ledgerFile, { maxBytes: MAIL_LEDGER_TAIL_BYTES });
+      if (ledger.some((row) => row.email_id === emailId)) {
+        remember(emailId);
+        return sendJson(res, 200, { ignored: "duplicate" });
+      }
+      return await deliver(res, settings, data, emailId);
+    } finally { inFlight.delete(emailId); }
   }
 
   // Everything past the duplicate check, so the check and the work it guards are one thing: this
   // runs with this email id held in inFlight and nothing else can be working on the same message.
   async function deliver(res, settings, data, emailId) {
     const record = async (row) => {
+      remember(asString(row?.emailId));
       await appendMailLedger(mailLedgerRow(row), ledgerFiles)
         .catch((error) => log(`mail  could not write the inbox ledger: ${error?.message ?? error}`));
+    };
+    // A row about mail addressed to a bot in ANOTHER workspace. This edge is the door every
+    // workspace's mail comes through, so without this the operator's own ledger -- and the Mail
+    // card that renders it -- would hold every customer's senders and subject lines. It keeps what
+    // says the door worked (when, which message, which workspace, how it ended) and drops the
+    // sender, the recipient, the subject and the bot's name. The receiving workspace still gets
+    // the whole row: server.mjs mirrors it into their ledger as the message is delivered.
+    const recordCode = async (target, row) => {
+      const slug = asString(target?.slug);
+      const foreign = slug.length > 0 && slug !== asString(ownSlug);
+      await record(foreign ? { emailId: row.emailId, outcome: row.outcome, slug } : row);
     };
 
     let message;
@@ -732,7 +814,16 @@ export function createMailEdge({
     const messageId = asString(message.message_id ?? message.messageId ?? data.message_id);
     const createdAt = asString(message.created_at ?? message.createdAt ?? data.created_at);
     // received_for is the address the mail was actually delivered for (a BCC, a forwarding rule),
-    // so it is read before the To header, which a stranger writes.
+    // so it is read before the To header.
+    //
+    // WHO WROTE THESE. `data` is the webhook body and `message` is what Resend answered when this
+    // workspace's own key asked for that email id, so both are Resend's words -- but only because
+    // of the two rules above this line. A body reaches this function having verified against THIS
+    // edge's signing secret, and a recipient at the directory's domain only ever reaches the edge
+    // of the workspace that holds that domain. Before those rules any customer could sign a body
+    // with their own secret, name another customer's agent<code>@ address in data.to, and have it
+    // delivered; the recipient was theirs to write. It is not any more, and that is what makes
+    // this list safe to route on rather than the field it is read from.
     const addresses = [...toAddressList(message.received_for), ...toAddressList(data.to), ...toAddressList(message.to)];
 
     // "The roster could not be read" is not "nobody was named for it", and the two must not answer
@@ -752,6 +843,7 @@ export function createMailEdge({
     const decision = await routeDirectoryFirst({
       addresses, agents, settings,
       directoryDomain, directoryRoute, directoryAddress, legacyNoticeUntil, now,
+      ownsDirectory: (typeof ownsDirectory === "function" ? ownsDirectory() : ownsDirectory) === true,
     });
 
     if (decision.kind === "no_route") {
@@ -767,7 +859,7 @@ export function createMailEdge({
       // switch: docs/MAIL.md says which way it is set and why.
       if (decision.approvedSendersOnly && !decision.senders.includes(String(from).toLowerCase())) {
         log(`mail  ${target.address} only takes mail from addresses that have been allowed; ${from} is not one`);
-        await record({ emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "sender_not_approved" });
+        await recordCode(target, { emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "sender_not_approved" });
         return sendJson(res, 200, { ignored: "sender_not_approved" });
       }
       const prompt = mailPrompt({
@@ -785,10 +877,10 @@ export function createMailEdge({
       ).catch((error) => ({ status: 0, text: String(error?.message ?? error), type: "" }));
       if (answer.status !== 200) {
         log(`mail  ${emailId} did not reach ${target.agentName} in ${target.slug}: HTTP ${answer.status} ${String(answer.text).slice(0, 200)}`);
-        await record({ emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "send_failed" });
+        await recordCode(target, { emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "send_failed" });
         return sendJson(res, 200, { ignored: "send_failed" });
       }
-      await record({ emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "delivered" });
+      await recordCode(target, { emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "delivered" });
       log(`mail  ${target.address} -> ${target.agentName} in ${target.slug}`);
       return sendJson(res, 200, { delivered: { agentId: target.agentId, agentName: target.agentName, slug: target.slug } });
     }

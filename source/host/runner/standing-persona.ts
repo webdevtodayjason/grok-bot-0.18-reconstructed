@@ -41,11 +41,12 @@ import {
   boxOnboardingService,
 } from "../extensions/onboarding/onboarding-box-store.js";
 import type { SandOnboardingRecord } from "../extensions/onboarding/onboarding-state.js";
+import { SAND_PRODUCT_NAME } from "../../shared/product-name.js";
 import { getSandRootDir, toModelVisiblePath } from "../host-paths.js";
 import { resolveSandMaxAgents } from "../sand-box-setting.js";
 
 /** The one name the product answers to in anything a person or a model reads. */
-export const SAND_PERSONA_PRODUCT_NAME = "Titanium Bot";
+export const SAND_PERSONA_PRODUCT_NAME = SAND_PRODUCT_NAME;
 
 /** The exact words that re-run the first-run interview in chat. Said once, meant literally. */
 export const SAND_ONBOARDING_RETRIGGER_PHRASE = "run first-time setup";

@@ -149,7 +149,22 @@ says about itself in the same run — `getAgentCapacity`, `getAgentMail`, `getOn
 says the retrigger phrase once and checks the interview actually starts. The agent is deleted pass
 or fail.
 
-**grok-bot-local-vm** (this Mac), 13:36Z, 86 s: 13 of 13 PASS.
+**And it gives that agent an address first.** A bot minted seconds ago holds no row in the
+directory — the relay sweeps every five minutes — so left alone this gate could only ever measure
+the "I have none yet" branch, which is not the sentence Jason's or Richard's Titan says. It reads
+the box's own address list, pushes it back with one synthetic row for its scratch agent, asks the
+question, and writes the original list back in cleanup. The first run of the answer that matters is
+below.
+
+**grok-bot-local-vm** (this Mac), 15:31Z, 91 s: 13 of 13 PASS, bundle `df1300366eb2`, model
+glm-5.3. The box's facts that run were `maxAgents=40`, `doneReason=completed`,
+`domain=verify-mail.invalid` with 8 addresses. Asked whether it has an email address of its own,
+with a row of its own in the directory for the first time:
+
+> "Yes, I do: agent346507@verify-mail.invalid. Mail sent there lands right here in our chat, and I
+> can act on it."
+
+— its exact address and no other bot's, out of the eight on that box.
 
 **The R750 demo tenant** (`titanbot-box-atonqjq7zx593jsacaccpfau`, bundle `3de23332477d`, model
 Qwen 3.8 Max), 14:25Z, 80 s: 13 of 13 PASS. The box's own facts that run were `maxAgents=100`,
