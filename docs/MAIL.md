@@ -864,6 +864,32 @@ leaves the relay — and it can be cleared from the console's Secrets card whene
 
 ---
 
+## 9c. The MAIL-3 review round on the R750, 2026-09-09
+
+Three findings, shipped from `f01d864` in the usual order: `sync.sh --no-install` at 20:53Z, the
+control plane rebuilt and restarted through the Coolify API, the relay LAST at 20:55Z. **No box was
+swapped and none needed to be**: nothing under `source/` changed between the bundle the boxes run
+(`39f588dbc57d`) and this commit, so the send tool and the seed skill are untouched. Richard Avery's
+box was not written to at all.
+
+After the restart `/app/cp/store.mjs` on `titanbot-cp-hnhzi0ongkw0gsg9k4flcv7d` is
+`4fce080c1517f551…`, and `/app/ui/mail-edge.mjs` and `/app/ui/server.mjs` on the relay are
+`6ebbe3c3d8e0d923…` and `e1817a5db3bc4eda…`, each byte-equal to the tree at that commit.
+
+| what | measured on the R750 (jason-PowerEdge-R750), 2026-09-09 |
+| --- | --- |
+| **A send the mail service refuses spends the bot's hour** | The shipped `/app/cp/store.mjs` and `/app/cp/mail.mjs`, run inside the control plane container over an in-memory store so the live table is untouched: 60 attempts from one bot, every one of them settled `failed`. **30 would have gone out to the provider, the 31st was refused, 30 rows written, all 30 reading `failed`.** Before the fix the same shape made 60 calls and refused nothing. |
+| **The public door costs something now** | 63 unauthenticated `POST https://console.titanium.bot/mail/send` from this Mac at 20:55:51Z: the first 60 answered `401 {"error":"unauthorized"}`, **the 61st, 62nd and 63rd answered 429** with *"That is more mail than this box may ask for right now, so nothing was sent. Try again in a minute."* and a `retry-after`. |
+| **What a bot is handed when the service says no** | The shipped `/app/ui/mail-edge.mjs`, run inside the relay container against two stubbed answers. A 422 carrying `{"statusCode":422,…"Please verify at resend.com/domains"}`: the bot is handed *"The mail service would not accept that message, so nothing was sent. Check the address it was going to."* and the ROW carries the whole `HTTP 422 {…}` string. A 503: *"The mail service could not take that message just now, so nothing was sent. Try again in a few minutes."*, row detail `HTTP 503 upstream unavailable`. Neither sentence contains a status code, a brace or a vendor's name. |
+| **The happy path still goes** | One real send through the shipped route with the demo box's own bearer, demo to demo so no customer sees it: **sent 2026-09-09T20:56:20.343Z, Resend id `8165a340-a3d2-4cdd-b6f5-2ae9adc2792a`**, `mail_send_log` row 4, From `"Titan (demo)" <agent247758@myagents.email>` to `agent078793@myagents.email`, subject `MAIL-3 review leg`. It came back through the product's own INBOUND ledger **3.9 s later at 20:56:24.197Z**, `delivered` to Marketing · Analytics reporter on `demo`. |
+
+**Measured on this Mac** (Darwin 25.6.0, node v22.23.1) before the ship:
+`scripts/verify-mail.mjs --url http://127.0.0.1:7799 --stub --send --directory` **73 PASS 0 FAIL** at
+19:41Z on `grok-bot-local-vm`, with the review round's failing-send leg in it; `npm test`
+**2052/2052**; and the finding's own harness, driving the real route over the real store with a stub
+answering 422, **30 provider calls for 60 attempts, first refusal on attempt 31** where it had been
+60 calls and no refusal.
+
 ## 9a. Measured again on the R750 after the review round, 2026-09-09
 
 The blocker and the three smaller findings of the review round, on the same machine, same way.
