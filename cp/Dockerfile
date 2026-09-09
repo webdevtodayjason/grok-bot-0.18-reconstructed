@@ -94,6 +94,17 @@ COPY deploy/coolify/docker-compose.yml /app/deploy/coolify/docker-compose.yml
 # exist before it can manage them.
 COPY deploy/coolify/proxy-config/bootstrap.json /app/deploy/coolify/proxy-config/bootstrap.json
 
+# MARKET-26. The marketplace rows the verification job re-reads the vendors' documentation for.
+#
+# cp/verification.mjs reads the catalog off disk and evaluates its DECLARED_PLUGINS literal in a
+# node:vm context whose only global is Object -- the control plane has no build step and no npm
+# dependency by design, so it cannot import a .ts module. Without this line the job answers
+# "marketplace verification (boot) did not finish: ENOENT ... catalog.ts" on a running control
+# plane, which is a deploy that looks fine everywhere except the one panel this wave added.
+#
+# One file, and it is pure data: the type declarations and the frozen rows, no imports executed.
+COPY source/shared/marketplace/catalog.ts /app/source/shared/marketplace/catalog.ts
+
 # ---- the defaults ------------------------------------------------------------------------------
 # Set here as well as in control-plane.compose.yml so the image is honest on its own: a plain
 # `docker run titanbot-cp:local` with only the two secrets given still starts, writes its store

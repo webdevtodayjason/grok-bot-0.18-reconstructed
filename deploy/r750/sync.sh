@@ -212,7 +212,12 @@ rsync -a "$REPO/deploy/coolify/docker-compose.yml" "$REPO/deploy/coolify/box.com
 # missing config.yaml, which is the right failure and still a failure.
 ssh "$HOST" "mkdir -p '$ROOT/deploy/coolify/proxy-config'"
 rsync -a --delete "$REPO/deploy/coolify/proxy-config/" "$HOST:$ROOT/deploy/coolify/proxy-config/"
-say "cp/{$(cd "$REPO/cp" && ls *.mjs *.md | tr '\n' ',')Dockerfile}, cp/admin/ and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml,proxy.compose.yml,proxy-config/}"
+# MARKET-26. The catalog the verification job reads, into the build context so cp/Dockerfile can
+# copy it. One file by name, never the directory: source/ is the host's whole tree and none of the
+# rest of it belongs in the control plane's image.
+ssh "$HOST" "mkdir -p '$ROOT/source/shared/marketplace'"
+rsync -a "$REPO/source/shared/marketplace/catalog.ts" "$HOST:$ROOT/source/shared/marketplace/catalog.ts"
+say "cp/{$(cd "$REPO/cp" && ls *.mjs *.md | tr '\n' ',')Dockerfile}, cp/admin/, source/shared/marketplace/catalog.ts and deploy/coolify/{docker-compose.yml,box.compose.yml,control-plane.compose.yml,proxy.compose.yml,proxy-config/}"
 # The control plane's own store is never shipped. It lives on the server under /data/titanbot and
 # holds every customer's password hash.
 say "cp/.data is not shipped"
