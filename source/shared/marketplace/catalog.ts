@@ -379,7 +379,11 @@ export const MARKETPLACE_PLUGIN_CATEGORIES: readonly string[] = Object.freeze([
   "Documents & Files",
   "Web & Search",
   "Code review",
-  "Shell tools",
+  // "Shell tools" was here and no row has ever been filed under it. The console draws only the
+  // chips that have members, so it was a chip nobody could ever see and the deploy gate went red
+  // comparing the screen to this list. The one shell tool the catalog ships is a code review tool
+  // and belongs where it is; "Shell tools" is how the TOOLS panel groups a connector, which is a
+  // different list and is untouched.
   // Wave B. Richard's first hour is the reason: the rows a marketing person looks for are not
   // "Business" and not "Web & Search", and putting them anywhere else means the person who came
   // here to connect a Page has to read every chip to find out we have nothing for them.

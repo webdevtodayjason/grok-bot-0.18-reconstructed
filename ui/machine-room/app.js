@@ -2638,9 +2638,17 @@
 
   function marketplaceCardMarkup(item) {
     const install = marketplaceInstallById(item.id);
-    const action = install?.installed === true
-      ? `<span class="status-pill success marketplace-card-action" data-marketplace-added="${escapeHtml(item.id)}">✓ Added</span>`
-      : `<button class="primary-button marketplace-card-action" type="button" data-marketplace-add="${escapeHtml(item.id)}">Add</button>`;
+    // A ROW THAT INSTALLS NOTHING GETS NO ADD, ON THE CARD EITHER. Its plugin page already draws
+    // none, and the card was still drawing one -- measured on screen 2026-09-09, where Add on the
+    // Meta card opened the custom-MCP editor, which is a door that would write an entry nothing
+    // connects to. Meta, X and LinkedIn install nothing because there is nothing honest to install:
+    // no official server publishes an organic post anywhere, so the row is a page that tells a
+    // person what to go and do. Clicking the card opens that page, which is the whole action.
+    const action = item?.installsNothing === true
+      ? ""
+      : install?.installed === true
+        ? `<span class="status-pill success marketplace-card-action" data-marketplace-added="${escapeHtml(item.id)}">✓ Added</span>`
+        : `<button class="primary-button marketplace-card-action" type="button" data-marketplace-add="${escapeHtml(item.id)}">Add</button>`;
     // QOL-LOGOS: one tile at one size (the catalog's logo when it names one, its letter when not),
     // and the action carries its own class so the "✓ Added" pill cannot be squeezed to a clip.
     return `<div class="plugin-card marketplace-card" data-marketplace-card="${escapeHtml(item.id)}"><button class="marketplace-card-open" type="button" data-marketplace-plugin="${escapeHtml(item.id)}">${marketplaceTileMarkup(item?.icon, item?.name, false, item?.id)}<span class="marketplace-card-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.tagline ?? "")}</small></span></button>${action}</div>`;

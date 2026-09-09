@@ -2088,7 +2088,12 @@ try {
     // (shell-tool-catalog.ts: "Run inside the box as user box. Never run by the gate." -- it is a
     // curl|sh on a shared box), so installShellTool is recorded and stubbed on the adapter the
     // page already exposes for the Bots tab, and what is asserted is the route the click took.
-    const shellRow = catalogPlugins.find((plugin) => String(plugin.kind) === "shell-tool") ?? null;
+    // A row that INSTALLS NOTHING also reports kind "shell-tool", because the kind is derived from
+    // "has no connector entry" and Meta, X, LinkedIn and Browserbase have none: there is nothing
+    // honest to install for them. They are not what this leg is about, and picking one made it
+    // click an Add that should not exist. So the row has to actually have a shell-tool install.
+    const shellRow = catalogPlugins.find((plugin) => String(plugin.kind) === "shell-tool"
+      && plugin.installsNothing !== true && plugin.install != null) ?? null;
     if (shellRow) await openMarketplace();
     // A featured row is drawn twice on purpose (once under Featured, once under its own category),
     // so this counts buttons rather than expecting one, and clicks the first of them.
