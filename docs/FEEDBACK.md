@@ -182,6 +182,18 @@ Two things make that survivable, and both are why they exist:
   are lost.
 - The **always-present Report a problem control** means the door is never closed.
 
+**And the sharp edge of that, said here rather than discovered.** "Re-read on every load" is exactly
+and only what it says: `drainPendingProblemReports()` runs once, at first paint, and nothing polls
+afterwards. So when an agent calls the tool while the person is already sitting in front of the
+console, the transcript draws its quiet "Reported a problem to the developers" row within the turn
+and **the card does not arrive until the page is loaded again.** Measured on
+https://console.titanium.bot as the demo customer, 2026-09-09: the chip was there inside the turn and
+no card had appeared 275 seconds later; one reload and the card was there, editable, and it sent.
+Nothing is lost — the report is in the box's own file until somebody answers it — but the person is
+shown a chip with no card behind it, which reads as the product swallowing the report. That is the
+one shape of this feature that still looks like the complaint it was built to answer, so it is filed
+as its own owned row, **FEEDBACK-1b**, with the call site named.
+
 ### The console's own build number
 
 Did not exist before this. It is the first 8 hex of a sha256 over the page's own `app.js`, computed
@@ -259,3 +271,42 @@ change, not a tool change. TOOLS-READ-1 is the same condition (`agent-data` is a
 | tests | `tests/problem-report-tool.test.mjs`, `tests/machine-room-feedback.test.mjs` |
 | the gate | `scripts/verify-feedback.mjs` |
 | the panel | `docs/ADMIN.md` §Feedback |
+
+---
+
+## 11. Measured
+
+Every number names the machine it was measured on. Nothing here is planned.
+
+**On the R750, through the customer's own door** (https://console.titanium.bot signed in as the demo
+account in real headless Chrome, bundle `7af8ac2316fd`, 2026-09-09):
+
+- The demo bot called the tool. The transcript drew **exactly one muted row, "Reported a problem to
+  the developers"**, and the tool's own name appears nowhere in the rendered page text.
+- On the next load the card carried the agent's own title, its tier chip, the custody line and an
+  **editable** body. The person added a line, pressed Send, and **one** POST left the page.
+- Within one reload the report was listed at https://api.titanium.bot/admin: tier `critical`,
+  workspace `demo` (stamped by the relay, never read from the body), state `new`. The panel is the
+  seventh section and the page draws seven panels and no more.
+- **Approve** wrote `approved` with who decided and when. **Create GitHub issue** answered, in these
+  words, *"the issue body is ready; paste a repo token in the Feedback panel and press this again"*,
+  with the whole issue body rendered and **zero requests sent anywhere**. The door is proven and
+  unfired because no repository token has been pasted, and none is ever pushed into a box.
+- The **automatic offer** was measured the same day on the same console on a genuinely failed turn
+  (BOX-6 transcript corruption on the demo Titan): the card appeared with the plain-words sentence
+  "Titan could not finish that one", the raw provider wording was nowhere in the conversation, and it
+  sent. It is report #1 in the panel.
+
+**On grok-bot-local-vm** (bundle `df1300366eb2`, 2026-09-09):
+
+- `verify-feedback` (the console arc in real Chrome, POST body captured): **27 passed, 0 failed**.
+- `verify-feedback --box` (the pending file and the two gateway commands): **5 passed, 0 failed, 1
+  skipped** (the toolset-trace leg, which needs `SAND_TOOL_TRACE`).
+- `verify-feedback --agent` (a real scratch agent calls the tool, then is deleted): **4 passed, 0
+  failed** — the pending file carried ProblemReport v1 with the agent's own title.
+
+**On this Mac:** `verify-admin` **300 PASS, 0 FAIL** over the control plane, the panel, the two
+gates on every report, the credential refusal and the leak sweep.
+
+**Still wave A's to land:** the persona sentence in §8. It is not in the standing role yet, checked
+in the merged tree 2026-09-09. Filed as **FEEDBACK-1c**.

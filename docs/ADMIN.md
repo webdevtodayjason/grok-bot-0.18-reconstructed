@@ -206,6 +206,18 @@ to the product default with nothing on any screen saying why.
 a pin rather than a success. That is the same rule the model row keeps, for the same reason: a door
 that reports a write it knows cannot take effect lies quietly, which is worse than one that refuses.
 
+**Measured on the R750, 2026-09-09.** Before the bundle landed, all three boxes were read read-only
+and each held `"SAND_MAX_AGENTS": "100"` as a string with `printenv SAND_MAX_AGENTS` empty, which is
+what made the product default coming down to forty safe: it cannot reach a box that pins its own
+number. After both host swaps all three still answered `maxAgents 100`. The clients panel then read
+100, 100, 100 off the three boxes; the demo row was set to 40 and answered **`maxAgents 40, pinned
+false`, which is the number the box read back and not the number that was sent**; the demo box's
+settings file afterwards is `{"SAND_TOOL_TRACE":"1","SAND_SELF_TALK_CAP":"2","SAND_MAX_AGENTS":"40"}`
+at mode 0600, so the merge kept its neighbours and wrote a string. Signed in at
+https://console.titanium.bot as the demo customer in a real browser, the header reads **`2 / 40
+bots`** with **`1 of 39`** on the Add tile. Jason's row and Richard Avery's row were read and never
+written and still read 100.
+
 **Neither button closes a session that is already open**, and reset password is the one where that
 matters, because it is the button you reach for when an account is compromised. The old password
 stops working the moment you press it. A session token that person is already holding keeps working
