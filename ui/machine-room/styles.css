@@ -1749,6 +1749,43 @@ dialog[open] {
    is what the card's own <small> and every other status pill already do on this tinted ground.
    Checked in both dusk and mist rather than assumed. */
 
+/* FEEDBACK-1. The report card, and the two always-present controls above the composer.
+
+   The custody line takes the same treatment the credential card's does, and for the same reason:
+   it is a promise about where something goes, not a caption. At --text-tertiary and 9px it reads
+   as small print, which is exactly what nobody checks before pressing Send.
+
+   The controls float above the composer rather than sitting in the shelf's grid: the shelf is
+   three columns, and a fourth child wraps the utilities onto a second row nobody can see. That is
+   the bug .composer-status already carries a comment about; this is the same fix. */
+.problem-report-card .field-hint {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.problem-report-card textarea {
+  min-height: 132px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.composer-aside {
+  position: absolute;
+  right: 16px;
+  bottom: calc(100% + 6px);
+  display: flex;
+  gap: 6px;
+}
+
+.composer-aside .ghost-button {
+  min-height: 0;
+  padding: 3px 11px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
 .routine-list,
 .plugin-list,
 .settings-list,

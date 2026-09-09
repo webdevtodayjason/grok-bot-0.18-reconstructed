@@ -79,6 +79,12 @@ import {
   type BoxHelpDependencies,
 } from "./box-help-tool.js";
 import {
+  PROBLEM_REPORT_TOOL_HINT,
+  PROBLEM_REPORT_TOOL_ID,
+  createProblemReportTool,
+  type ProblemReportDependencies,
+} from "./problem-report-tool.js";
+import {
   createGenerateImageTool,
   type GenerateImageToolDependencies,
 } from "../../../packages/agent/tools/core/generate-image.js";
@@ -191,6 +197,7 @@ export const SAND_DYNAMIC_TOOL_HINTS: Readonly<Record<string, string>> = {
   COPY_TO_BOX: "Copy a file from the user's computer onto your box.",
   COPY_FROM_BOX: "Copy a file from your box onto the user's computer.",
   REQUEST_BOX_HELP: "Hand your box's desktop to the user for a sign-in or manual step.",
+  [PROBLEM_REPORT_TOOL_ID]: PROBLEM_REPORT_TOOL_HINT,
   CHECK_SUBAGENT: "Inspect a running background subagent's status and recent actions.",
   MESSAGE_SUBAGENT: "Send a new instruction into a running background subagent.",
   STOP_SUBAGENT: "Abort a running background subagent.",
@@ -589,6 +596,8 @@ export interface TurnToolFactories {
   browserDirect?(): readonly TurnTool[];
   screenshot?(): TurnTool;
   requestBoxHelp?(): TurnTool;
+  /** FEEDBACK-1. Unguarded: every agent has it, subagents and desktop-less boxes included. */
+  problemReport?(): TurnTool;
   mcpMeta?(dynamicToolRegistry?: DynamicToolRegistry): readonly TurnTool[];
   mcpManagement?(): readonly TurnTool[];
   subagentManagement?(): readonly TurnTool[];
@@ -644,6 +653,10 @@ export interface TurnFileTransferToolFactoryInput {
 
 export interface TurnBoxHelpToolFactoryInput {
   readonly dependencies: BoxHelpDependencies<unknown>;
+}
+
+export interface TurnProblemReportToolFactoryInput {
+  readonly dependencies: ProblemReportDependencies;
 }
 
 export interface TurnGenerateImageToolFactoryInput {
@@ -722,6 +735,7 @@ export interface TurnToolsetFactoryInputs {
   readonly screenshot?: TurnComputerToolFactoryInput;
   readonly fileTransfer?: TurnFileTransferToolFactoryInput;
   readonly requestBoxHelp?: TurnBoxHelpToolFactoryInput;
+  readonly problemReport?: TurnProblemReportToolFactoryInput;
   readonly generateImage?: TurnGenerateImageToolFactoryInput;
   readonly webSearch?: TurnWebSearchToolFactoryInput;
   readonly webFetch?: TurnWebFetchToolFactoryInput;
@@ -775,6 +789,10 @@ export interface TurnToolsetHostFactoryProvider {
     turn: TurnToolsetTurnInput,
     props: TurnToolsetBuildProps,
   ) => TurnBoxHelpToolFactoryInput;
+  readonly createProblemReportToolInputs?: (
+    turn: TurnToolsetTurnInput,
+    props: TurnToolsetBuildProps,
+  ) => TurnProblemReportToolFactoryInput;
   readonly createGenerateImageToolInputs?: (
     turn: TurnToolsetTurnInput,
     props: TurnToolsetBuildProps,
@@ -1128,6 +1146,12 @@ export function createTurnBoxHelpToolFactory(
   return () => asTurnTool(createRequestBoxHelpTool(input.dependencies));
 }
 
+export function createTurnProblemReportToolFactory(
+  input: TurnProblemReportToolFactoryInput,
+): () => TurnTool {
+  return () => asTurnTool(createProblemReportTool(input.dependencies));
+}
+
 export function createTurnGenerateImageToolFactory(
   input: TurnGenerateImageToolFactoryInput,
 ): () => TurnTool {
@@ -1249,7 +1273,7 @@ export function createTurnToolsetFactories(
 ): Pick<
   TurnToolFactories,
   "task" | "mcpMeta" | "computer" | "browser" | "browserDirect" | "screenshot"
-  | "fileTransfer" | "requestBoxHelp" | "generateImage" | "webSearch" | "webFetch" | "externalAwait"
+  | "fileTransfer" | "requestBoxHelp" | "problemReport" | "generateImage" | "webSearch" | "webFetch" | "externalAwait"
   | "boxAwait" | "externalShell" | "externalRead" | "boxShell" | "boxRead"
   | "sendMessage" | "sendToAgent" | "reaction" | "createAgent" | "updateAgent" | "updateState"
   | "subagentManagement"
@@ -1286,6 +1310,9 @@ export function createTurnToolsetFactories(
     ...(input.requestBoxHelp === undefined
       ? {}
       : { requestBoxHelp: createTurnBoxHelpToolFactory(input.requestBoxHelp) }),
+    ...(input.problemReport === undefined
+      ? {}
+      : { problemReport: createTurnProblemReportToolFactory(input.problemReport) }),
     ...(input.generateImage === undefined
       ? {}
       : { generateImage: createTurnGenerateImageToolFactory(input.generateImage) }),
@@ -1383,6 +1410,9 @@ export function createTurnToolsetFactoriesForTurn(
     ...(provider.createRequestBoxHelpToolInputs === undefined
       ? {}
       : { requestBoxHelp: provider.createRequestBoxHelpToolInputs(turn, props) }),
+    ...(provider.createProblemReportToolInputs === undefined
+      ? {}
+      : { problemReport: provider.createProblemReportToolInputs(turn, props) }),
     ...(provider.createGenerateImageToolInputs === undefined
       ? {}
       : { generateImage: provider.createGenerateImageToolInputs(turn, props) }),
@@ -1756,6 +1786,17 @@ export function buildTurnTools(
     if (screenshot !== undefined) tools.push(screenshot);
     const requestBoxHelp = factories.requestBoxHelp?.();
     if (requestBoxHelp !== undefined) tools.push(requestBoxHelp);
+  }
+
+  // FEEDBACK-1. Deliberately outside every predicate above. A fault in the product is not something
+  // only an agent with a desktop can hit: a subagent whose shell refuses, a box-scoped runner whose
+  // read is denied, a room member whose connector times out are all agents that have something
+  // worth reporting, and each of them is exactly where "Titan tried to cover up failure" came from.
+  // The tool writes into the box's own pending file and posts nothing, so there is no reach it
+  // could have here that it does not have anywhere else.
+  {
+    const problemReport = factories.problemReport?.();
+    if (problemReport !== undefined) tools.push(problemReport);
   }
 
   // The immutable builder only offers the MCP discovery/call pair when the

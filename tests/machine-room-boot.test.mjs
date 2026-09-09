@@ -433,6 +433,8 @@ async function adapterHelpers() {
   };
   const TOOL_LABELS = source.slice(source.indexOf("  const TOOL_LABELS = "), source.indexOf("\n", source.indexOf("  const TOOL_LABELS = ")));
   return new Function(`
+    ${grab("PROBLEM_REPORT_TOOL_CALL", "const")}
+    ${grab("PROBLEM_REPORT_ROW_TEXT", "const")}
     ${TOOL_LABELS}
     ${grab("oneLine", "arrow-block")}
     ${grab("baseName", "const")}
