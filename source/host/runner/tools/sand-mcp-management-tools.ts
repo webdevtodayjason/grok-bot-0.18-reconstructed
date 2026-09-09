@@ -218,7 +218,12 @@ export function credentialLiteralRefusal(
   }
   for (const field of env ?? []) {
     if (field.includes("=")) {
-      return `Send only the NAME of the environment variable, not "${field}". Pass env: ["${field.split("=")[0]}"] and tell the user to type the value into the masked box on the ${name} page \u2014 a key you type here is stored in this conversation.`;
+      // The name, never the pair. Quoting `field` back would put the value the model just typed
+      // into the refusal, and a refusal is read by the model and kept in the transcript, so it
+      // would land the key in the two places refusing it exists to keep it out of. The header
+      // branch above has always been careful about this; this one was not.
+      const named = field.split("=")[0];
+      return `Send only the NAME of the environment variable. You sent "${named}" with its value attached; pass env: ["${named}"] and tell the user to type the value into the masked box on the ${name} page \u2014 a key you type here is stored in this conversation.`;
     }
   }
   return null;

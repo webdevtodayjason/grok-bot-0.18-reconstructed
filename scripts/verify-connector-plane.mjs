@@ -1050,10 +1050,12 @@ try {
 
   // ------------------------------------------- (f) CONNECT-1 the AddMcpServer tool runs its body
   // AddMcpServer used to die on "parse7 is not a function": the manager asked its caller for a
-  // config validator and no caller ever supplied one, so the tool never reached the account at
-  // all. The tool takes a REMOTE url and nothing else -- stdio connectors are the operator's
-  // connectors.json, not this tool -- so the probe is a remote endpoint and the claim is that the
-  // tool executes its own body and gets as far as the account write.
+  // config validator and no caller ever supplied one, so the tool never reached its own body. It
+  // then spent a wave reaching an upstream account that exists on no box of ours, which is a
+  // different way of reaching nothing. MARKET-6 repointed it at the one writer the console uses,
+  // so the claim is now the whole round trip on THIS box: the agent adds a server, the host
+  // connects it and lists its tools, the agent takes it back off -- and a key typed into a header
+  // instead of a field name is refused with the field named and the file untouched.
   if (!MODEL_TOOL) console.log("\n(f) CONNECT-1 — the AddMcpServer turn is skipped (pass --model-tool)");
   else {
     console.log("\n(f) CONNECT-1 — the model's AddMcpServer tool runs its body");
@@ -1103,16 +1105,39 @@ try {
         fail(`${probeName} survived UninstallMcpServer`);
       }
       ok(`${probeName} is gone from listInstalledMcpServers`);
-    } else if (/inference credential|signed-in Cursor account|Managing MCP servers requires/.test(said)) {
-      // The write lands on the Cursor account, not on this machine. On a box with no account the
-      // tool can only get this far, and getting this far IS the thing CONNECT-1 broke.
-      ok("AddMcpServer reached the account write and stopped there: this box has no signed-in account");
     } else {
-      fail(`AddMcpServer failed for an unrecognised reason: ${head.slice(0, 300)}`);
+      // There used to be a branch here that PASSED on "this box has no signed-in account". It was
+      // true and it was the wrong thing to be green about: the tool wrote to an upstream account
+      // that does not exist on any box of ours, so the arm reported success for a path that reached
+      // nothing, and then asserted connectors.json was byte-identical, which it was for the same
+      // reason. Both halves agreed, and together they said the agent's own way in did not work
+      // while the gate stayed green. The tool now writes through the same one writer the console
+      // uses, so there is no refusal left that counts as a pass.
+      fail(`AddMcpServer did not add the server: ${head.slice(0, 300)}`);
     }
 
-    if (await readConnectorsBase64() !== connectorsSnapshot) fail("the AddMcpServer turn changed connectors.json");
-    ok("connectors.json is byte-identical: the account tool did not touch the local connector plane");
+    // MARKET-6. What the model does with a key it is holding, measured rather than assumed.
+    //
+    // The first version of this leg asked the model to call the tool WITH a literal in the
+    // Authorization header and asserted the tool refused it. It failed on grok-bot-local-vm on
+    // 2026-09-08, and it failed because the system is right: the model read the tool's own
+    // instruction, minted `DEEPWIKI_TOKEN` itself, and called with a placeholder, so the refusal
+    // never fired and the add succeeded. A gate that demands the model produce the bad input in
+    // order to prove the guard is a gate that goes red on correct behaviour, which is the same
+    // class of mistake as the branch removed above, pointing the other way.
+    //
+    // So the tool-level refusal is pinned where it is deterministic, in
+    // tests/connector-literal-refusal.test.mjs, and what this arm asserts is the thing only a live
+    // box can show: whatever route the model took to get here, the file it left behind names a
+    // field and carries no key.
+    const writtenAfterAdd = await docker(["exec", BOX, "cat", CONNECTORS]);
+    if (/(sk|glpat|xoxp|ghp)-[A-Za-z0-9]{8,}/.test(writtenAfterAdd)) {
+      fail("the model's add put something shaped like a key into connectors.json");
+    }
+    ok("the model's add left no key-shaped literal in connectors.json");
+
+    if (await readConnectorsBase64() !== connectorsSnapshot) fail("the AddMcpServer turns did not put connectors.json back");
+    ok("connectors.json is byte-identical to what this arm found: the probe added and removed itself");
   }
 
   // ------------------------------------------ (g) CONNECT-2 a connector that cannot ever connect

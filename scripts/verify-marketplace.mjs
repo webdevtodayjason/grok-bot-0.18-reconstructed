@@ -18,6 +18,14 @@
 //   byte as it was found. This is the leg that would catch the console and the host disagreeing
 //   about the shape of an add, which is exactly what they did the first time they met.
 //
+//   THE OLDER TRANSPORT (--sse). The picker's second option is drawn on every run above; only this
+//   arm opens it. A connector added through that door has to come back `transport=sse` with the far
+//   end's tools listed -- not silently `http`, and not connected-looking with nothing behind it. It
+//   runs against this repo's own stub in SSE mode rather than a vendor, because no shipping preset
+//   recommends SSE and the one obvious public candidate answers 410 on its /sse, so a gate pointed
+//   at a vendor would be measuring that vendor's retirement schedule. Off by default: it starts a
+//   process inside the box, so it is asked for rather than assumed, one arm at a time.
+//
 // Custody -- that a stored value reaches no process argument list -- is asserted by
 // scripts/verify-connector-host.mjs, which can drive an in-box bearer stub without a vendor key.
 // This gate does the console's half and deliberately does not duplicate it.
@@ -27,9 +35,11 @@
 //
 //   node scripts/verify-marketplace.mjs
 //   node scripts/verify-marketplace.mjs --no-write   skip the add/remove leg on a shared box
+//   node scripts/verify-marketplace.mjs --sse        add the older-transport arm
 //
 //   0  every leg passed        1  a leg failed
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { chromium } from "../.cache/playwright/node_modules/playwright-core/index.mjs";
 
 const GATEWAY = process.env.SAND_HOST_GATEWAY_URL ?? process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:7777";
@@ -37,10 +47,20 @@ const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/C
 const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const DATA = "/home/box/sand-data";
 const NO_WRITE = process.argv.includes("--no-write");
+const SSE_ARM = process.argv.includes("--sse");
 // Keyless on purpose: a public docs server needs no credential and no sign-in, so the add leg can
 // run on a shared box without anyone's key being involved.
 const PROBE_URL = "https://mcp.deepwiki.com/mcp";
 const PROBE_NAME = `mktprobe-${Math.random().toString(36).slice(2, 8)}`;
+
+// The older-transport arm. Its far end is scripts/lib/mcp-bearer-stub.mjs in SSE mode, run inside
+// the box, and its key is invented here and lives for the length of the run: a gate that needed a
+// vendor's credential to open a door could not be run by anyone who did not already hold one.
+const SSE_NAME = `mktsse-${Math.random().toString(36).slice(2, 8)}`;
+const SSE_FIELD = "MKTSSE_STUB_KEY";
+const SSE_VALUE = `mktsse-${Math.random().toString(36).slice(2, 14)}`;
+const SSE_PORT = 8794;
+const SSE_STUB_PATH = "/tmp/mktsse-stub.mjs";
 
 const inBox = (command) => new Promise((resolve, reject) => {
   execFile("docker", ["exec", BOX, "sh", "-lc", command], { maxBuffer: 32 * 1024 * 1024 }, (error, out) => {
@@ -48,6 +68,65 @@ const inBox = (command) => new Promise((resolve, reject) => {
   });
 });
 const connectorsSha = () => inBox(`sha256sum ${DATA}/connectors.json | cut -c1-64`).then((line) => line.trim());
+
+/** A gateway command through the page, which already holds the session the console signed in with. */
+const gateway = (command, body) => page.evaluate(async ([name, payload]) => {
+  const res = await fetch(`/api/${name}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+  const text = await res.text();
+  try { return { status: res.status, body: JSON.parse(text) }; } catch { return { status: res.status, body: text }; }
+}, [command, body ?? {}]);
+
+/**
+ * The box's own address on the docker bridge. Not 127.0.0.1: inside a box that is the exec daemon on
+ * 1337 and 1338 and the host's gateway on 1340, and the connector writer refuses it outright. A
+ * private address on plain http is the shape the rules do allow, which is what this arm needs.
+ */
+async function boxAddress() {
+  const out = await new Promise((resolve, reject) => execFile("docker",
+    ["inspect", BOX, "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"],
+    (error, stdout) => (error ? reject(error) : resolve(String(stdout)))));
+  const address = out.trim().split(/\s+/).find((entry) => /^\d+\.\d+\.\d+\.\d+$/.test(entry));
+  if (address === undefined) throw new Error("the box has no non-loopback IPv4 address to reach its own stub on");
+  return address;
+}
+
+/** Copies the stub in and starts it in SSE mode. The key crosses in the ENVIRONMENT, never argv. */
+async function startSseStub(address) {
+  const source = readFileSync(new URL("./lib/mcp-bearer-stub.mjs", import.meta.url), "utf8");
+  const encoded = Buffer.from(source, "utf8").toString("base64");
+  await inBox(`echo ${encoded} | base64 -d > ${SSE_STUB_PATH}`);
+  void new Promise((resolve) => execFile("docker",
+    ["exec", "-d", "-e", `MCP_STUB_KEY=${SSE_VALUE}`, "-e", "MCP_STUB_SSE=1", BOX,
+      "node", SSE_STUB_PATH, "--port", String(SSE_PORT), "--host", address],
+    () => resolve())).catch(() => {});
+  // Up means "refuses a wrong bearer on the stream", which is a stronger readiness signal than a
+  // socket that accepts: a half-started server would answer the connect and nothing else.
+  for (let n = 0; n < 40; n += 1) {
+    await new Promise((r) => setTimeout(r, 500));
+    const probe = await inBox(`curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' ${`http://${address}:${SSE_PORT}/sse`} || true`).catch(() => "");
+    if (probe.trim() === "401") return true;
+  }
+  return false;
+}
+
+const stopSseStub = async () => {
+  await inBox(`pkill -f ${SSE_STUB_PATH} || true`).catch(() => {});
+  await inBox(`rm -f ${SSE_STUB_PATH}`).catch(() => {});
+};
+
+/** Every word the box uses for "not finished yet"; `initializing` is a native remote's handshake. */
+const UNSETTLED = new Set(["loading", "connecting", "initializing", "starting", "pending"]);
+async function settle(server, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const rows = (await gateway("listInstalledMcpServers", {})).body;
+    last = (Array.isArray(rows) ? rows : []).find((row) => row.serverIdentifier === server || row.name === server) ?? null;
+    if (last != null && !UNSETTLED.has(String(last.status))) return last;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return last;
+}
 
 let failed = 0;
 const check = (ok, what, detail = "") => {
@@ -222,6 +301,69 @@ try {
     check(removed.status < 400, "Uninstall with the clear offer came back without an error", removed.body.slice(0, 140));
     const shaAfter = await connectorsSha();
     check(shaAfter === shaBefore, "connectors.json is byte-identical to what this run found", `${shaBefore.slice(0, 12)} -> ${shaAfter.slice(0, 12)}`);
+  }
+
+  // ---- the older transport, opened rather than assumed ------------------------------------------
+  // The picker has offered SSE since the card shipped and nothing had ever gone through it. The
+  // claim is narrow and it is the whole point: an entry added through that door comes back
+  // `transport=sse` with the far end's tools listed. A door that quietly fell back to the modern
+  // transport would look identical on the page and be a different protocol on the wire.
+  if (!SSE_ARM) {
+    console.log("  --  the older-transport arm is skipped (pass --sse)");
+  } else {
+    const shaBeforeSse = await connectorsSha();
+    let address = null;
+    try {
+      address = await boxAddress();
+      const up = await startSseStub(address);
+      check(up, `the in-box stub is serving the older transport on ${address}:${SSE_PORT} and refuses a wrong bearer`);
+      if (up) {
+        // Through the form, because the form is what shipped: the transport is chosen in the picker
+        // and the header is marked secret, so what reaches the host is a stored NAME and no value.
+        await page.click('[data-byo-door="link"]');
+        await page.waitForTimeout(400);
+        await page.fill("#byo-url", `http://${address}:${SSE_PORT}/sse`);
+        await page.waitForTimeout(500);
+        await page.selectOption("#byo-transport", "sse");
+        await page.fill("#byo-name", SSE_NAME);
+        await page.fill('[data-byo-header-name="0"]', "Authorization");
+        await page.fill('[data-byo-header-env="0"]', SSE_FIELD);
+        await page.waitForTimeout(300);
+        await page.click("[data-byo-link] button[type=submit]");
+        await page.waitForTimeout(2500);
+
+        const written = await inBox(`cat ${DATA}/connectors.json`);
+        check(written.includes(`"${SSE_NAME}"`), `the entry was written under the name the form was given (${SSE_NAME})`);
+        check(!written.includes(SSE_VALUE), "and connectors.json carries no value, only the field's name");
+
+        // With nothing stored the far end refuses, which is the honest state to be in before a key.
+        const beforeKey = await settle(SSE_NAME, 60_000);
+        check(beforeKey != null, "the connector is listed before its key is stored", `status=${beforeKey?.status} ${String(beforeKey?.statusSentence ?? "").slice(0, 90)}`);
+
+        const stored = await gateway("setConnectorSecret", { server: SSE_NAME, field: SSE_FIELD, value: SSE_VALUE });
+        check(stored.status < 400, "the key stores through the masked card's own command", String(stored.body).slice(0, 120));
+
+        const connected = await settle(SSE_NAME, 120_000);
+        check(connected?.status === "connected", "the box connected over the older transport",
+          `status=${connected?.status} ${String(connected?.statusSentence ?? connected?.statusDetail ?? "").slice(0, 160)}`);
+        check(connected?.transport === "sse", `and it opened it AS sse rather than falling back (transport=${connected?.transport})`);
+
+        const probed = await gateway("probeConnector", { server: SSE_NAME });
+        const names = (probed.body?.tools ?? []).map((tool) => tool.name);
+        check(names.includes("search") && names.includes("fetch_content"),
+          `the far end's tools came back over the stream (${names.join(", ") || "none"})`);
+
+        // Same custody line as the modern transport, because the older one is no excuse for a
+        // weaker rule: the value the card stored is in no process argument list in the box.
+        const psOut = await inBox("ps -eo args");
+        check(!psOut.includes(SSE_VALUE), "the stored value is in no process argument list inside the box");
+      }
+    } finally {
+      await gateway("removeLocalConnector", { server: SSE_NAME, name: SSE_NAME, clearSecrets: true }).catch(() => {});
+      await stopSseStub();
+    }
+    const shaAfterSse = await connectorsSha();
+    check(shaAfterSse === shaBeforeSse, "connectors.json is byte-identical after the older-transport arm", `${shaBeforeSse.slice(0, 12)} -> ${shaAfterSse.slice(0, 12)}`);
   }
 } finally {
   await browser.close();
