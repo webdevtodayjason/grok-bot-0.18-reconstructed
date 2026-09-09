@@ -370,6 +370,119 @@ memories, skills or routines -- a row an import could do nothing with is still a
 
 ---
 
+## Titan and the catalog (TITAN-CATALOG-1)
+
+Jason, 2026-09-09: *"Titan should be able to see all connectors and all the agents as a catalog.
+When creating a new agent, it should be able to pull from those templates."* Titan had filed the
+same thing himself two minutes earlier: he could create a blank agent and read a profile, but "a
+template system where you pick a pre-built role and it comes with a starter persona, memory seeds,
+and maybe connector configs, that's not here yet."
+
+He was right, and the reason was structural. The whole of the Add sequence lived in the browser, in
+`ui/machine-room/bot-setup.js`. Nothing in the box could run it. **Measured on grok-bot-local-vm
+2026-09-09, before this wave:** a fresh agent asked "create me an Instagram marketer" made exactly
+one tool call, `CreateAgent`, and shipped an agent with a model-invented persona, 0 memories, 0
+jobs and 0 playbooks. He never looked at the catalog and never offered a template.
+
+### One import, two doors
+
+The sequence moved into the box, unchanged, as the gateway verb `importMarketplaceBot`
+(`source/host/extensions/marketplace/marketplace-bot-import.ts`). The console's Add calls it and
+the agent's tool calls it, so there is one implementation and no way for the two to disagree.
+
+```
+importMarketplaceBot { id, name?, duplicate? }
+  -> { state, alreadyExisted, agent{id,name}, agentId, name,
+       memories{added,duplicates,rejected[]},
+       skills{imported[],reused[],skipped[]},
+       routines{created[],notCreated[]},
+       apps{connected[],addable[],informational[],byo[]},
+       integrations{connected[],offered[],informational[],unavailable[]},
+       message, rolledBack? }
+```
+
+**It takes an id, not a row.** The row is resolved inside the box with `findMarketplaceBot`. A
+caller holding a list CARD — which carries no instructions, memories, skills, routines or apps —
+cannot hand one back and quietly create a description-only agent holding nothing. That is the first
+entry under "What bites", made impossible rather than documented.
+
+**`apps` is the console's four buckets and `integrations` is the same thing as plain names.** The
+panel card draws the first; a person, and an agent reporting to one, reads the second.
+
+The order, the idempotency, the " copy" behaviour, the rollback, the persona composition, the fact
+splitting, the frontmatter naming, the cron rule and the plain-words receipt all moved across
+intact. They are pinned by `tests/host-marketplace-bot-import.test.mjs` against a fake box, which is the
+only honest place to pin an order, and by `scripts/verify-titan-catalog.mjs` against a real one.
+
+### What the console kept
+
+`bot-setup.js` is 125 lines now: the roster read the page does before it offers Add, one call, and
+two sentences a browser has to be able to say for itself — a box older than the console (the relay
+serves one console to every workspace, and a box that has not been updated does not carry the verb),
+and a box that answers with nothing. `tests/bot-setup.test.mjs` asserts the file names none of the
+ten writing commands, because a thin caller that quietly regrows the eight steps would pass every
+other case in that suite.
+
+`marketplace-bots.js` was not touched: it still calls `setUpBot(gateway, bot, {duplicate,
+onProgress})` and still renders the same receipt fields.
+
+### The app-shape defect, found twice on one evening
+
+`planApps` read `row.pluginId` and `row.description`. A catalog app row carries `plugin` and `line`
+(`MarketplaceBotApp`, catalog.ts). Every app on every generated row therefore fell past the
+connected and addable branches into the add-your-own bucket.
+
+**Measured against the live host's own `getMarketplaceItem` answer for `account-book` on
+grok-bot-local-vm 2026-09-09:** the host served 11 app rows, 7 of them carrying a `plugin` id and 0
+carrying a `pluginId`, and the shipped code put all 11 in `byo` — Slack, Notion, Linear, Hex,
+Databricks SQL, Gmail, Google Calendar, Granola, Google Drive, Google Sheets and Salesforce. So the
+receipt told a customer that Slack "is not something we carry yet, so you would add your own" for
+apps this box carries and may already have installed. Roughly 177 of the 244 app entries across the
+65 community rows carry a plugin id and every one of them was misreported.
+
+BOTS-4's own review wave found the same thing on the same evening, from the other end — one press
+of Add on `mr-toms` on the R750 demo tenant — and fixed the console's reader by normalising both
+spellings in `appsOf`. The two fixes are not a duplicate: theirs keeps the page honest for as long
+as the page reads a row itself, and this one moves the reading into the box, where both doors get it.
+
+The second half of the same defect is this wave's alone: `installedPluginIds` was an option **no
+caller in the product ever passed** (the page computes the installed set for its own chips and never
+handed it over), so `connected` was empty even on the six first-party integrations-only rows, whose
+path otherwise worked.
+
+Both are fixed in the move rather than ported. The verb reads `plugin` and `line` first, keeps
+`pluginId`/`description` as fallbacks so an older row still resolves, and **derives installed state
+itself** — `connectors.json` for a connector, a binary probe for a shell tool, through the same
+reader the plugin tools use. There is no argument left for a caller to forget. The regression case
+is fed `findMarketplaceBot("account-book")` straight out of the bundled catalog rather than a
+fixture, because a hand-written fixture in the report's own vocabulary is exactly what kept the old
+suite green over this.
+
+### A team pack does not come through this door
+
+A pack is several agents with a coordinator and a reporting line, and that sequence lives on the
+Bots tab (`marketplace-bots.js`, the Import team button). Through the verb it would make ONE agent
+carrying the pack's name and none of its members, which looks like it worked, so the verb refuses a
+row carrying `members` in plain words and points at the page. The Bots tab already routes packs
+away from `setUpBot`, so nothing in the console reaches that refusal.
+
+### What the gates assert, and where
+
+`scripts/verify-titan-catalog.mjs` on grok-bot-local-vm: the verb sets a real catalog row up; the
+box is read back and every fact is compared character for character (the store slices over its cap
+and says nothing); every job is on the box and switched off; **no app naming a plugin is ever
+reported as one we do not carry**; the same bot goes in again through `bot-setup.js` loaded into
+the gate process and the two agents are compared field for field; a third press writes nothing; and
+the bot's own introduction is waited for. Everything it creates is taken back and the roster ends at
+the count it started.
+
+On the R750 demo tenant the introduction leg is NOT asserted. `BOX-7` is measured: that box starts
+no introduction for any new agent, including a plain one created with `isKickstartRequested: true`.
+There the claim is the roster row, the memories, the playbooks, the jobs switched off, and the
+receipt's wording about apps.
+
+---
+
 ## The plugin roadmap (MARKET-40)
 
 The apps these 65 bots ask for, in demand order, counted over the scrape's 246 entries. This wave
@@ -505,6 +618,12 @@ names both.
 - **A team pack seeds no memory store.** Its import creates one bot per member with that member's
   own written brief as its identity and never calls `addAgentMemories`. The Memories block on a pack
   says so; the single-bot footnote would be a promise the press does not keep.
+- **There is a third reader of `bot.apps` now, and it is in the box.**
+  `source/host/extensions/marketplace/marketplace-bot-import.ts` reads an app row for the gateway
+  verb both doors go through, and it reads `plugin` and `line` first with the two console spellings
+  as fallbacks. Its regression case is fed `findMarketplaceBot("account-book")` straight out of the
+  bundled catalog rather than a fixture, because a fixture written in the reader's own vocabulary is
+  exactly what kept this green.
 
 ## What is not proven yet
 

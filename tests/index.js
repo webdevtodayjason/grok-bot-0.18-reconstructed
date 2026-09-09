@@ -92,6 +92,7 @@ import "./send-cap-per-turn.test.mjs";
 import "./tinyfish-key-stub.test.mjs";
 import "./shell-tools.test.mjs";
 import "./marketplace-bot-import.test.mjs";
+import "./host-marketplace-bot-import.test.mjs";
 import "./marketplace-catalog.test.mjs";
 import "./marketplace-marketing-rows.test.mjs";
 import "./marketplace-verification.test.mjs";

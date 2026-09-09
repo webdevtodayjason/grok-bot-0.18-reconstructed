@@ -29,6 +29,11 @@ import {
   marketplaceCatalogWireView,
   marketplacePluginWireView,
 } from "../shared/marketplace/catalog.js";
+// TITAN-CATALOG-1. The catalog import, in the host, so the console and the agent run one sequence.
+import {
+  importMarketplaceBot as runMarketplaceBotImport,
+  type MarketplaceImportBox,
+} from "./extensions/marketplace/marketplace-bot-import.js";
 import {
   SHELL_TOOLS,
   SHELL_TOOL_FIELDS,
@@ -449,6 +454,47 @@ export function createHostGatewayApi(
     return result;
   };
 
+  /**
+   * One job, created. Lifted out of the command because TITAN-CATALOG-1's catalog import creates
+   * jobs too and a second copy of this body would be a second place for the analytics rule to rot.
+   * `source` is the door it came through, which is the only thing that differs between the two.
+   */
+  const createAutomationFor = async (agentId: string, spec: any, source: string) => {
+    markActive("user_action");
+    const countBefore = (await method(manager, "getAgentAutomations")(agentId)).length;
+    const created = await method(manager, "createAgentAutomation")(agentId, spec);
+    if (created.length > countBefore) {
+      method(telemetry.analytics, "trackEvent")("sand.automation.created", {
+        agent_id: agentId,
+        trigger_type: spec.trigger.type,
+        source
+      });
+    }
+    return created;
+  };
+
+  /**
+   * TITAN-CATALOG-1. The eleven doors the catalog import goes through, each one the same call the
+   * matching gateway command makes. The import module holds the ORDER; this holds nothing but the
+   * wiring, so the console's press and the agent's request cannot reach a different box.
+   */
+  const marketplaceImportBox: MarketplaceImportBox = {
+    listAgents: () => method(manager, "listAgents")(),
+    // No `origin` and no `templateId`: the console's Add never sent either, and the point of this
+    // record is that both doors mint the agent exactly as that press did.
+    createAgent: (args) => mintAgent(args),
+    deleteAgent: (id) => removeAgentCompletely(id),
+    addAgentMemories: (id, memories) => method(manager, "addAgentMemories")(id, memories),
+    getAgentMemories: (id) => method(manager, "getAgentMemories")(id),
+    getAgentWorkflows: (id) => method(manager, "getAgentWorkflows")(id),
+    importAgentWorkflowText: (id, markdown, name) =>
+      method(manager, "importAgentWorkflowMarkdown")(id, markdown, name),
+    deleteAgentWorkflow: (id, workflowId) => method(manager, "deleteAgentWorkflow")(id, workflowId),
+    createAgentAutomation: (id, spec) => createAutomationFor(id, spec, "marketplace_import"),
+    getAgentAutomations: (id) => method(manager, "getAgentAutomations")(id),
+    kickstartAgent: async (id) => ({ isIntroductionInFlight: await deps.kickstartIfPending(id) })
+  };
+
   const openAgent = async (
     args: any,
     operation: "switchAgent" | "openAgentWindowed" | "openAgentTail"
@@ -756,24 +802,8 @@ export function createHostGatewayApi(
         args.automationId,
         args.isEnabled
       ),
-    createAgentAutomation: async (args: any) => {
-      markActive("user_action");
-      const countBefore = (await method(manager, "getAgentAutomations")(
-        args.id
-      )).length;
-      const created = await method(manager, "createAgentAutomation")(
-        args.id,
-        args.spec
-      );
-      if (created.length > countBefore) {
-        method(telemetry.analytics, "trackEvent")("sand.automation.created", {
-          agent_id: args.id,
-          trigger_type: args.spec.trigger.type,
-          source: "automations_ui"
-        });
-      }
-      return created;
-    },
+    createAgentAutomation: (args: any) =>
+      createAutomationFor(args.id, args.spec, "automations_ui"),
     updateAgentAutomation: (args: any) =>
       method(manager, "updateAgentAutomation")(
         args.id,
@@ -1288,6 +1318,16 @@ export function createHostGatewayApi(
       }
       throw new TypeError(`getMarketplaceItem needs kind "plugin" or "bot", not "${kind}"`);
     },
+    // TITAN-CATALOG-1. Set one catalog bot up: the agent, its remembered facts, its playbooks, its
+    // jobs switched off, and its own introduction last. The console's Add and the agent's request
+    // both land here, so there is one sequence on the box rather than one per door. Which plugins
+    // this box already carries is asked of the box itself and is NOT an argument: the console had
+    // silently stopped passing it and every receipt said nothing was connected.
+    importMarketplaceBot: (args: any) => runMarketplaceBotImport(marketplaceImportBox, {
+      id: args?.id,
+      ...(args?.name === undefined ? {} : { name: args.name }),
+      ...(args?.duplicate === undefined ? {} : { duplicate: args.duplicate })
+    }),
 
     // --------------------------------------------------------------- JOBBUS, the Titan Job Bus
     // The whole of the relay's /v1 surface (docs/JOB-BUS.md section 3). Every refusal is a

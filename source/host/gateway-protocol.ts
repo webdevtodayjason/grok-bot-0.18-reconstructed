@@ -181,6 +181,12 @@ export const SAND_GATEWAY_COMMANDS = {
   // SearchPlugins cannot be looking at two different catalogs.
   listMarketplace: (api: GatewayApi) => api.listMarketplace(),
   getMarketplaceItem: (api: GatewayApi, body: string) => api.getMarketplaceItem(parseCommandArgs(body)),
+  // TITAN-CATALOG-1. Setting a catalog bot up, in the host, so the console and the agent run the
+  // SAME eight steps in the same order. The sequence used to live in ui/machine-room/bot-setup.js
+  // and the agent had no way to reach it at all; the console now calls this and adds nothing of its
+  // own. Takes the catalog id and resolves the row here -- never a row handed in, because a list
+  // card carries no instructions, memories, skills, routines or apps and would import an empty bot.
+  importMarketplaceBot: (api: GatewayApi, body: string) => api.importMarketplaceBot(parseCommandArgs(body)),
   // JOBBUS. The Titan Job Bus (docs/JOB-BUS.md). The relay's /v1 surface is the first five commands
   // and nothing else: an allowlisted job API that returns attested results and never exposes a
   // shell. `jobBusList` and the settings pair are the console's, and `jobBusAudit` is the relay's
