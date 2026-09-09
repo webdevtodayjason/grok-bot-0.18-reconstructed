@@ -8,7 +8,7 @@
 // The fake key below is 44 characters like the real one and is not a credential to anything.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -106,4 +106,38 @@ test("a browser row's URL is redacted too, because a token travels in a query st
 test("no secret store at all writes the line unchanged rather than failing", () => {
   const redact = redaction.createBoxSecretRedactor({ sandRoot: path.join(sandRoot, "absent"), cacheMs: 0 });
   assert.equal(redact(`echo ${FAKE_KEY}`), `echo ${FAKE_KEY}`);
+});
+
+// The fourth writer into the same file, and the one the row's own fix left open. The action auditor
+// redacts the shell COMMAND it appends to agents/<id>/audit.jsonl. The evidence registry appends a
+// tool_result record to that SAME ledger carrying the head of the tool's OUTPUT, and that was going
+// down unredacted -- so the command was clean and whatever the command printed was not. A turn that
+// echoes a stored secret wrote it to disk in full.
+test("and the evidence ledger's tool_result head, which is the shell command's own output", async () => {
+  const evidence = await load("source/host/extensions/evidence/evidence-registry.ts", "evidence-registry");
+  evidence.setEvidenceLedgerRedactor(redaction.createBoxSecretRedactor({ sandRoot, cacheMs: 0 }));
+  const agentId = "f97bfb2e-fcbb-4955-b4a1-5ea0408497dd";
+  const ledgerDir = mkdtempSync(path.join(os.tmpdir(), "sand-evidence-"));
+  after(() => rmSync(ledgerDir, { recursive: true, force: true }));
+  const ledger = path.join(ledgerDir, "audit.jsonl");
+  const registry = evidence.evidenceRegistry ?? evidence.default;
+  registry.configure({ ledgerPath: () => ledger });
+
+  const attestation = registry.attest(agentId, {
+    toolCallId: "call-1", tool: "shell", ok: true, exitCode: 0,
+    result: `the key is ${FAKE_KEY}\n`,
+  });
+
+  // Written down: redacted.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const written = readFileSync(ledger, "utf8");
+  assert.equal(written.includes(FAKE_KEY), false, "the evidence ledger still carries the key");
+  assert.match(written, new RegExp(`<redacted:${prefix}>`), "and it should say what it took out");
+
+  // Held in memory: NOT redacted, on purpose. evidence-verdict decides a claim by looking for its
+  // tokens in attestation.head, and the job bus reads the same heads. Redacting those would change
+  // what the host concludes about a turn rather than what it writes down.
+  assert.equal(attestation.head.includes(FAKE_KEY), true, "the verdict path must still see the real result");
+  // And the attestation is of the REAL result, not the redacted copy.
+  assert.equal(attestation.sha256, createHash("sha256").update(`the key is ${FAKE_KEY}\n`, "utf8").digest("hex"));
 });

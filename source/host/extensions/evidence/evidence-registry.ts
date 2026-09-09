@@ -13,6 +13,23 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { getSandAgentsRootDir } from "../../storage/agent-paths.js";
 import { EVIDENCE_CHECKER, decideVerdict, type EvidenceVerdict } from "./evidence-verdict.js";
+import { createBoxSecretRedactor } from "../../secret-redaction.js";
+
+// PROXY-9. The ledger this module writes is agents/<id>/audit.jsonl -- the same file the action
+// auditor appends to, and the same file the row is about. The auditor redacts the shell COMMAND it
+// records there. This module records, into that file, the head of every work tool's RESULT: up to
+// MAX_ATTESTATION_HEAD_CHARS of a shell command's own output. So the file was half redacted, with
+// the command clean and the output that command produced carrying whatever it printed. A turn that
+// echoes a stored secret wrote that secret to disk in full.
+//
+// Only the persisted copy is redacted, deliberately. The in-memory attestation keeps the real text,
+// because evidence-verdict decides a claim by looking for its tokens in attestation.head and the
+// job bus reads the same heads; redacting those would change what the host concludes about a turn
+// rather than what it writes down. bytes and sha256 stay over the ORIGINAL result too -- they
+// attest what the tool really returned, and an attestation of the redacted copy would attest
+// nothing.
+let redactLedgerSecrets: (text: string) => string = createBoxSecretRedactor();
+export function setEvidenceLedgerRedactor(redact: (text: string) => string): void { redactLedgerSecrets = redact; }
 
 export const MAX_ATTESTATION_HEAD_CHARS = 8_000;
 
@@ -120,7 +137,7 @@ class EvidenceRegistry {
     };
     attempt?.attestations.push(attestation);
     const { head, ...rest } = attestation;
-    this.append(agentId, `${JSON.stringify({ ts: new Date().toISOString(), agentId, ...this.receiptFields(agentId), type: "tool_result", ...rest, head })}\n`);
+    this.append(agentId, `${JSON.stringify({ ts: new Date().toISOString(), agentId, ...this.receiptFields(agentId), type: "tool_result", ...rest, head: redactLedgerSecrets(head) })}\n`);
     return attestation;
   }
 
