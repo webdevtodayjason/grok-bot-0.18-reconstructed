@@ -107,6 +107,27 @@ for mpath in glob.glob("/var/lib/sand-box-store/*/manifest.json"):
 print("cleaned")
 `;
 
+// Sweep anything an earlier run left behind BEFORE seeding. A run that dies between the seed and
+// the cleanup leaves a directory and two manifest keys in the box, and the next run then measures a
+// box with a stranger's fixture in it. Found on grok-bot-local-vm after a run that failed on its
+// own log wait. Named by prefix, so it only ever removes this gate's own leavings.
+step("sweep anything an earlier run left behind");
+say(inBox(`
+import glob, json, shutil
+removed = []
+for d in glob.glob("/home/box/sand-data/verify-copy-in-*"):
+    shutil.rmtree(d, ignore_errors=True); removed.append(d.rsplit("/", 1)[-1])
+keys = 0
+for m in glob.glob("/var/lib/sand-box-store/*/manifest.json"):
+    try: j = json.load(open(m))
+    except Exception: continue
+    before = len(j.get("entries", {}))
+    j["entries"] = {k: v for k, v in j.get("entries", {}).items() if "/verify-copy-in-" not in k}
+    if len(j["entries"]) != before:
+        json.dump(j, open(m, "w")); keys += before - len(j["entries"])
+print(f"{len(removed)} stale fixture directory(ies), {keys} stale manifest key(s)")
+`).trim());
+
 step(`seed the store with a copy that differs from the live file (${BOX})`);
 const seeded = JSON.parse(inBox(seed).trim().split("\n").pop());
 say(`manifest ${seeded.manifest}`);
