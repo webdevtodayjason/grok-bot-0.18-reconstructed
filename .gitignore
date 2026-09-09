@@ -51,3 +51,10 @@ undefined/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# The control plane's own store, when a verb is run without CP_DATA_DIR and it lands in the repo
+# root. It holds accounts, the change record and, since FEEDBACK-1, the repository token: a file
+# that must never reach anybody's clone, and it appears whenever somebody runs cp/cli.mjs here.
+/control-plane.sqlite
+/control-plane.sqlite-shm
+/control-plane.sqlite-wal

@@ -36,6 +36,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const appPath = path.join(repoRoot, "ui/machine-room/app.js");
 const adapterPath = path.join(repoRoot, "ui/machine-room/gateway-adapter.js");
 
+const escapeForCard = (value) => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 const between = (source, startMark, endMark, what) => {
   const start = source.indexOf(startMark);
   const end = source.indexOf(endMark, start + 1);
@@ -249,6 +251,47 @@ test("FEEDBACK-1: a token-shaped run is masked before the card is drawn", async 
     assert.ok(!surface.includes(secret), "the raw token must not reach the card or the payload");
   }
   assert.match(drawn, /redacted, \d+ chars/);
+});
+
+// The blocker this pins. Masking used to happen at DRAW time, on the evidence the page built for
+// itself: an agent-written description quoting an env dump went to the card raw, and a tool's error
+// was starred on screen and sent whole. So a customer's key could leave the workspace, land in the
+// control plane's feedback table and be POSTed into a GitHub issue body without the person who
+// pressed Send ever having seen it. Masking is at MINT time now: the card, the body the person
+// edits and the payload are the same already-masked bytes.
+test("FEEDBACK-1: a token an agent wrote is masked on the card AND on the wire", async () => {
+  const secret = `sk-${"A1b2C3d4E5".repeat(4)}`;
+  const hex = "f".repeat(64);
+  const posted = [];
+  const feedback = await loadFeedback({
+    adapter: { sendProblemReport: (payload) => { posted.push(payload); return Promise.resolve({ id: "fb-1" }); } },
+  });
+  const offer = feedback.offerProblemReport({
+    tier: "critical",
+    category: "shell",
+    title: `Shell refused with ${secret}`,
+    description: `The environment printed OPENAI_API_KEY=${secret} and a session id ${hex}, and every command after that failed.`,
+    steps: [`export OPENAI_API_KEY=${secret}`, "run anything"],
+    tools: [{ name: "Shell", status: "failed", error: `auth failed for ${secret}` }],
+  });
+  const drawn = feedback.reportCardsMarkup();
+  for (const [what, surface] of [["the card", drawn], ["the offer body", offer.body]]) {
+    assert.ok(!surface.includes(secret), `${what} carries the raw key`);
+    assert.ok(!surface.includes(hex), `${what} carries the raw session id`);
+  }
+
+  // Unedited, which is the case that used to leak: the structured copies ride along, so they have
+  // to be the masked ones.
+  await feedback.sendProblemOffer(offer.id, offer.body);
+  const wire = JSON.stringify(posted[0]);
+  assert.ok(!wire.includes(secret), "the raw key was sent");
+  assert.ok(!wire.includes(hex), "the raw session id was sent");
+  assert.match(posted[0].description, /redacted, \d+ chars/);
+  assert.match(posted[0].tools[0].error, /redacted, \d+ chars/);
+  assert.match(posted[0].steps[0], /redacted, \d+ chars/);
+  // What is on screen and what is sent are the same bytes, which is what the custody line says.
+  assert.equal(posted[0].tools[0].error, offer.tools[0].error);
+  assert.ok(drawn.includes(escapeForCard(posted[0].tools[0].error.split(" ").pop())), "the card shows the masked run the wire carries");
 });
 
 test("FEEDBACK-1: the custody line promises exactly what the send does", async () => {

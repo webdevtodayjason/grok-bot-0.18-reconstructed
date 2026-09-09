@@ -76,9 +76,45 @@ Minted identically by the agent's tool, by the automatic offer, and by the self-
 `workspace` is **absent on purpose** and is filled by the relay and by nothing else.
 
 `evidence` is built **only from the conversation outline and the transcript** — never from a file,
-never from an environment, never from the two secret stores. Token-shaped runs are masked by the
-page's own masker (`maskSecrets`) before the card is drawn, so what is on screen and what is sent are
-the same bytes.
+never from an environment, never from the two secret stores.
+
+**Token-shaped runs are masked once, at mint time, and nowhere else.** `offerProblemReport` puts the
+title, the description, every step, every tool's answer and the whole of `evidence` through the
+page's own masker (`maskSecrets`) *before* they go on the offer, so the card, the body the person
+edits and the payload the relay is handed are the same already-masked bytes. That is a correction:
+masking used to happen at draw time, on the evidence the page built for itself, so a key an **agent**
+quoted in its description or in a tool's answer was starred on screen and **sent whole** — into the
+control plane's feedback table and from there into a GitHub issue body, without the person who
+pressed Send ever having seen it. Measured on this Mac 2026-09-09 and pinned by
+`tests/machine-room-feedback.test.mjs` ("a token an agent wrote is masked on the card AND on the
+wire"), which fails against the code as it was.
+
+**No image is carried.** The design named an optional screenshot on the card; it is not built and
+nothing in the payload can hold one. A screenshot is the one piece of evidence nobody can read before
+it is sent — the masker cannot see into a PNG, so the custody line above ("what you see is what is
+sent, and no secret goes") would stop being true the moment one rode along. Filed as **FEEDBACK-1d**
+with what it would take to do it honestly. Today: paste the words instead.
+
+### What is carried, and what happens when it does not fit
+
+| field | at most | over it |
+|---|---|---|
+| `title`, `category`, `evidence` names | 200 / 60 / 200 characters | **clamped** — they name a report rather than carry its evidence, and the person cannot edit a title on the card |
+| `description` | 32,000 characters | **refused** |
+| `steps` | 12, each 400 | **refused** |
+| `tools` | 10, each answer 300 | **refused** |
+| `evidence.calls` | 12, summary 400, output 1,200 | **refused** |
+| `evidence.messages` | 6, each 800 | **refused** |
+
+Every number is the console's own maximum or larger, and the whole point of the list is that a
+console minting inside it always lands. **A field over its limit is refused with a sentence naming
+it, never cut down to fit.** That is also a correction: the intake used to keep 8,000 characters of
+an ordinary 15,296-character shell-failure report, drop two of the twelve calls the console mints,
+cut each call's output from 1,200 to 800 — and answer 201, with nothing on any screen saying so. A
+report cut in half reads as a whole one and sends whoever reads it looking for a step that was never
+written down. `cp/feedback.mjs` `INTAKE_BYTES` (96 KB) is what the control plane and the relay both
+read up to; a report at every limit at once is 65,671 bytes measured on this Mac, and
+`tests/cp-feedback.test.mjs` fails if that stops fitting.
 
 ### What "you can edit it" actually means
 

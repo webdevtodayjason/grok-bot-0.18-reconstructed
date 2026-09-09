@@ -46,7 +46,7 @@ import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifyS
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
 import { createMailDirectory, mailDomain } from "./mail.mjs";
-import { normalizeReport } from "./feedback.mjs";
+import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
   VERIFY_INTERVAL_MS,
@@ -106,13 +106,13 @@ const noContent = (response) => { response.writeHead(204, { "cache-control": "no
 // request stream leaves the connection half spoken, the client waits for a response it can never
 // finish reading, and the symptom is a request that hangs instead of a request that is refused.
 // Past the hard ceiling the socket is closed instead, because at that size draining is the attack.
-async function readJsonBody(request) {
+async function readJsonBody(request, cap = MAX_BODY_BYTES) {
   const chunks = [];
   let total = 0;
   let tooLarge = false;
   for await (const chunk of request) {
     total += chunk.length;
-    if (total > MAX_BODY_BYTES) {
+    if (total > cap) {
       tooLarge = true;
       chunks.length = 0;
       if (total > HARD_BODY_CEILING) { request.destroy(); break; }
@@ -950,7 +950,14 @@ export function createApp(options = {}) {
 
     let body = {};
     if (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE") {
-      try { body = await readJsonBody(request); }
+      // One route reads more than the rest, and it is the report intake. A report carries its
+      // evidence twice -- the block of text the person read and edited, and the structured copy --
+      // so the ordinary maximum is larger than any form on this service. cp/feedback.mjs owns the
+      // number and its limits are sized to fit inside it.
+      const cap = segments[0] === "v1" && segments[1] === "feedback" && segments.length === 2
+        ? FEEDBACK_BODY_BYTES
+        : MAX_BODY_BYTES;
+      try { body = await readJsonBody(request, cap); }
       catch (error) { return json(response, 400, { error: error.code === "too_large" ? "too_large" : "bad_json", message: String(error.message) }); }
     }
 

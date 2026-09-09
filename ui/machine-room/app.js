@@ -835,7 +835,7 @@
   let problemOfferSeq = 0;
   const problemOffersFor = (context = activeContext()) => problemOffers.filter((offer) => offer.agentId === context.id);
 
-  // Everything drawn on the card goes through this on the way in. The regex is the page's own
+  // Everything an offer is minted from goes through this on the way in. The regex is the page's own
   // (maskSecrets, further down), so a token pasted into a shell command and echoed back by the box
   // is masked here for the same reason it is masked on an evidence receipt.
   const reportRedact = (value) => maskSecrets(String(value ?? ""));
@@ -869,7 +869,7 @@
     if ((seed.steps ?? []).length) lines.push("", "Steps:", ...seed.steps.map((step, i) => `${i + 1}. ${step}`));
     if ((seed.tools ?? []).length) {
       lines.push("", "Tools:");
-      for (const tool of seed.tools) lines.push(`- ${tool.name} · ${tool.status}${tool.error ? ` · ${reportRedact(tool.error)}` : ""}`);
+      for (const tool of seed.tools) lines.push(`- ${tool.name} · ${tool.status}${tool.error ? ` · ${tool.error}` : ""}`);
     }
     if ((seed.calls ?? []).length) {
       lines.push("", "What ran just before:");
@@ -889,8 +889,26 @@
    */
   function offerProblemReport(seed) {
     const context = seed.agentId ? { kind: "worker", id: seed.agentId } : activeContext();
-    const evidence = seed.calls || seed.messages ? { calls: seed.calls ?? [], messages: seed.messages ?? [] } : reportEvidence(context);
-    const full = { ...seed, ...evidence };
+    const evidence = seed.calls || seed.messages
+      ? {
+        calls: (seed.calls ?? []).map((call) => ({ ...call, summary: reportRedact(call.summary), output: reportRedact(call.output) })),
+        messages: (seed.messages ?? []).map((message) => ({ ...message, text: reportRedact(message.text) })),
+      }
+      : reportEvidence(context);
+    // MASKED ONCE, HERE, AND NOWHERE ELSE. The fields an agent wrote -- the title, the description,
+    // the steps and each tool's answer -- go through the page's masker before they are put on the
+    // offer, so the card, the body the person edits and the payload the relay is handed are the
+    // same already-masked bytes. Masking at draw time instead meant a token quoted by an agent was
+    // starred on screen and sent whole, which is the one thing the custody line promises cannot
+    // happen.
+    const title = reportRedact(seed.title ?? "Something went wrong");
+    const description = reportRedact(seed.description ?? "");
+    const steps = (seed.steps ?? []).map((step) => reportRedact(step));
+    const tools = (seed.tools ?? []).map((tool) => ({
+      ...tool,
+      ...(tool?.error == null ? {} : { error: reportRedact(tool.error) }),
+    }));
+    const full = { ...seed, title, description, steps, tools, ...evidence };
     const offer = {
       id: `offer-${problemOfferSeq += 1}`,
       agentId: seed.agentId ?? context.id,
@@ -898,9 +916,9 @@
       pendingId: seed.pendingId ?? null,
       tier: seed.tier ?? "quality",
       category: seed.category ?? "console",
-      title: seed.title ?? "Something went wrong",
-      steps: seed.steps ?? [],
-      tools: seed.tools ?? [],
+      title,
+      steps,
+      tools,
       calls: evidence.calls,
       messages: evidence.messages,
       body: reportBodyText(full),
@@ -988,7 +1006,10 @@
       .then((answer) => { settleProblemOffer(offer, "sent"); return answer; })
       .catch((error) => {
         offer.status = "pending";
-        offer.note = `That did not send: ${error.message}. It is still here, so you can try again.`;
+        // The relay's sentences end in a full stop of their own, so one is taken off before this
+        // one is added rather than showing the person two in a row.
+        const said = String(error?.message ?? "").trim().replace(/\s*\.$/, "");
+        offer.note = `That did not send: ${said}. It is still here, so you can try again.`;
         renderTranscript();
         return null;
       });

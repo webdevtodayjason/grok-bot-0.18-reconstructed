@@ -1342,7 +1342,10 @@ async function forwardFeedback(req, res, t) {
     return say(503, { sent: false, message: "This console is not connected to the developers, so the report was not sent. Keep it and pass it on to whoever runs this instance." });
   }
   let body;
-  try { body = JSON.parse(await readBody(req, 64 * 1024) || "{}"); } catch { return fail(res, 400, "that was not JSON"); }
+  // 96 KB, which is cp/feedback.mjs INTAKE_BYTES and not this file's own opinion: a report carries
+  // its evidence twice, as the text the person edited and as the structured copy, so a reader
+  // smaller than the control plane's would refuse reports the control plane would have taken.
+  try { body = JSON.parse(await readBody(req, 96 * 1024) || "{}"); } catch { return fail(res, 400, "that was not JSON"); }
 
   let upstream;
   try {

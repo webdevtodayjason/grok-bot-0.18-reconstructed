@@ -13,13 +13,23 @@
 // can be reached by a box, and nothing in it takes a workspace name from a body.
 //
 // SO EVERY VALUE HERE ARRIVES FROM A CUSTOMER'S BROWSER AND IS TREATED AS SUCH. normalizeReport
-// keeps the fields it knows, clamps every one of them, and drops the rest. An unknown key is not
-// an error and is not stored: a report is evidence, not a document somebody gets to design.
+// keeps the fields it knows, checks every one of them against its limit, and drops the rest. An
+// unknown key is not an error and is not stored: a report is evidence, not a document somebody gets
+// to design. A field over its limit is REFUSED with a sentence naming it, never cut down to fit.
 //
-// The clamps are also a contract with the console. cp/server.mjs reads a request body up to 64 KB
-// and refuses anything larger before this file ever sees it, so a console that mints inside the
-// limits below always lands and one that does not is refused by the intake rather than truncated
-// into a report that reads as complete and is not. docs/FEEDBACK.md carries the numbers.
+// The limits are also a contract with the console. cp/server.mjs reads a feedback body up to
+// INTAKE_BYTES below and refuses anything larger before this file ever sees it, so a console that
+// mints inside the limits below always lands and one that does not is refused by the intake rather
+// than truncated into a report that reads as complete and is not. docs/FEEDBACK.md carries the
+// numbers.
+
+/**
+ * How large a feedback body may be on the wire. Larger than every other route on this service, and
+ * deliberately: a report carries the same evidence twice -- once as the block of text the person
+ * read and edited, and once in structured form -- so the ordinary maximum is around 68 KB where
+ * every other body here is a form. The relay's own reader in ui/server.mjs carries the same number.
+ */
+export const INTAKE_BYTES = 96 * 1024;
 
 /**
  * The three tiers, from Titan's own design (2026-09-09). They change how loudly a report is shown,
@@ -39,37 +49,58 @@ export const TIER_ROUTING = {
  * Every clamp, in one place, because these numbers are a contract with three separate minters (the
  * agent's tool, the console's automatic offer, and the self-test) and with the 64 KB intake.
  *
- * A report at every limit at once is 43,617 bytes of JSON, measured on this Mac by the test in
- * tests/cp-feedback.test.mjs, which is what leaves room under the 65,536 byte intake for the
- * envelope. Raising any of these means running that test again.
+ * EVERY NUMBER HERE IS THE CONSOLE'S OWN MAXIMUM OR LARGER, and that is the whole point of the
+ * list. They used to be smaller than what the console mints: an ordinary shell-failure report was
+ * 15,296 characters of description, the intake kept 8,000 of them, dropped two of the twelve calls
+ * and cut each call's output from 1,200 characters to 800 -- and answered 201, so nothing on any
+ * screen said a word about it. The card promises that what you read is what is sent, and a report
+ * quietly cut in half sends whoever reads it looking for a step that was never written down.
+ *
+ * ui/machine-room/app.js mints at most: a body of the description plus twelve calls (400-character
+ * summary, 1,200-character output) and six messages of 800; the description below leaves room for
+ * all of that plus the agent's own words, which on its own comes to 24,211 characters measured on
+ * this Mac. A report at every limit at once is measured by the test in tests/cp-feedback.test.mjs
+ * and has to fit INTAKE_BYTES with room for the envelope. Raising any of these means running that
+ * test again.
  */
 export const LIMITS = {
   title: 200,
   category: 60,
-  description: 8000,
+  description: 32000,
   steps: 12,
   step: 400,
   tools: 10,
   toolName: 120,
   toolError: 300,
-  calls: 10,
-  callSummary: 600,
-  callOutput: 800,
-  messages: 8,
-  messageText: 1500,
+  calls: 12,
+  callSummary: 400,
+  callOutput: 1200,
+  messages: 6,
+  messageText: 800,
   field: 200,
 };
 
 const oneLine = (value, limit) => String(value ?? "").replace(/[\r\n\t]+/g, " ").trim().slice(0, limit);
-const block = (value, limit) => String(value ?? "").replace(/\r\n/g, "\n").trim().slice(0, limit);
+const flatten = (value) => String(value ?? "").replace(/[\r\n\t]+/g, " ").trim();
+const block = (value) => String(value ?? "").replace(/\r\n/g, "\n").trim();
 const listOf = (value) => (Array.isArray(value) ? value : []);
 
 /**
- * A report from a console, kept, clamped, and stripped of everything this file does not know.
+ * A report from a console, kept, checked, and stripped of everything this file does not know.
  *
- * Answers {ok, report} or {ok: false, why} with a sentence a person reads. The one hard refusal is
- * a tier that is not one of the three: a report filed under a tier nobody filters on is a report
- * nobody sees, and guessing one for the caller would hide that.
+ * Answers {ok, report} or {ok: false, why} with a sentence a person reads. Two hard refusals, and
+ * neither of them cuts anything down to size:
+ *
+ *  - A TIER THAT IS NOT ONE OF THE THREE. A report filed under a tier nobody filters on is a report
+ *    nobody sees, and guessing one for the caller would hide that.
+ *  - ANYTHING OVER ITS LIMIT. The evidence -- the description, the steps, each tool's answer, the
+ *    calls and the last things said -- is refused with the number, never truncated, because a
+ *    report cut in half reads as a whole one. The card shows the sentence and the person can trim
+ *    it; editing the text drops the structured copies and on its own usually does it.
+ *
+ * The cosmetic one-liners are the exception and are still clamped: a title, a category, a tool's
+ * name, an agent id. Those name a report rather than carry its evidence, and the person cannot edit
+ * a title on the card -- refusing one would leave them with a report they had no way to send.
  */
 export function normalizeReport(raw, { at = Date.now() } = {}) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -81,22 +112,65 @@ export function normalizeReport(raw, { at = Date.now() } = {}) {
   }
   const title = oneLine(raw.title, LIMITS.title);
   if (title.length === 0) return { ok: false, why: "a report needs a title, which is the one line the panel lists it by." };
-  const description = block(raw.description, LIMITS.description);
+
+  // What is over, named one by one, so the sentence says which part to trim rather than "too big".
+  const over = [];
+  const fits = (value, limit, what) => {
+    if (String(value ?? "").length > limit) over.push(`${what} is ${String(value).length} characters and at most ${limit} are carried`);
+    return value;
+  };
+  const holds = (list, limit, what) => {
+    if (list.length > limit) over.push(`there are ${list.length} ${what} and at most ${limit} are carried`);
+    return list;
+  };
+
+  const description = fits(block(raw.description), LIMITS.description, "the description");
   if (description.length === 0) return { ok: false, why: "a report needs a description saying what happened." };
 
+  const steps = holds(listOf(raw.steps).map((one) => flatten(one)).filter((one) => one.length > 0), LIMITS.steps, "steps");
+  steps.forEach((step, index) => fits(step, LIMITS.step, `step ${index + 1}`));
+
+  const tools = holds(listOf(raw.tools).map((one) => ({
+    name: oneLine(one?.name, LIMITS.toolName),
+    status: oneLine(one?.status, 40),
+    error: flatten(one?.error),
+  })).filter((one) => one.name.length > 0), LIMITS.tools, "tools");
+  tools.forEach((tool) => fits(tool.error, LIMITS.toolError, `what ${tool.name} answered`));
+
   const evidenceIn = raw.evidence !== null && typeof raw.evidence === "object" && !Array.isArray(raw.evidence) ? raw.evidence : {};
+  const calls = holds(listOf(evidenceIn.calls).map((one) => ({
+    name: oneLine(one?.name, LIMITS.toolName),
+    status: oneLine(one?.status, 40),
+    summary: block(one?.summary),
+    output: block(one?.output),
+  })).filter((one) => one.name.length > 0), LIMITS.calls, "recorded calls");
+  calls.forEach((call) => {
+    fits(call.summary, LIMITS.callSummary, `the line recorded for ${call.name}`);
+    fits(call.output, LIMITS.callOutput, `what ${call.name} printed`);
+  });
+
+  const messages = holds(listOf(evidenceIn.messages).map((one) => ({
+    role: oneLine(one?.role, 40),
+    text: block(one?.text),
+  })).filter((one) => one.text.length > 0), LIMITS.messages, "recorded messages");
+  messages.forEach((message, index) => fits(message.text, LIMITS.messageText, `message ${index + 1}`));
+
+  if (over.length > 0) {
+    return {
+      ok: false,
+      why: `this report is larger than a report is carried at: ${over.slice(0, 3).join("; ")}${over.length > 3 ? `, and ${over.length - 3} more` : ""}.`
+        + " Nothing was stored, because a report cut down to fit reads as a whole one. Shorten it and send it again.",
+    };
+  }
+
   const report = {
     version: 1,
     tier,
     category: oneLine(raw.category, LIMITS.category),
     title,
     description,
-    steps: listOf(raw.steps).slice(0, LIMITS.steps).map((one) => oneLine(one, LIMITS.step)).filter((one) => one.length > 0),
-    tools: listOf(raw.tools).slice(0, LIMITS.tools).map((one) => ({
-      name: oneLine(one?.name, LIMITS.toolName),
-      status: oneLine(one?.status, 40),
-      error: oneLine(one?.error, LIMITS.toolError),
-    })).filter((one) => one.name.length > 0),
+    steps,
+    tools,
     evidence: {
       // NOT taken from the body. The relay stamps the workspace from its own registry and the
       // intake writes it over whatever arrived, so a box cannot file as its neighbour. It is left
@@ -107,16 +181,8 @@ export function normalizeReport(raw, { at = Date.now() } = {}) {
       conversation: oneLine(evidenceIn.conversation, LIMITS.field),
       hostVersion: oneLine(evidenceIn.hostVersion, LIMITS.field),
       consoleVersion: oneLine(evidenceIn.consoleVersion, LIMITS.field),
-      calls: listOf(evidenceIn.calls).slice(0, LIMITS.calls).map((one) => ({
-        name: oneLine(one?.name, LIMITS.toolName),
-        status: oneLine(one?.status, 40),
-        summary: block(one?.summary, LIMITS.callSummary),
-        output: block(one?.output, LIMITS.callOutput),
-      })).filter((one) => one.name.length > 0),
-      messages: listOf(evidenceIn.messages).slice(0, LIMITS.messages).map((one) => ({
-        role: oneLine(one?.role, 40),
-        text: block(one?.text, LIMITS.messageText),
-      })).filter((one) => one.text.length > 0),
+      calls,
+      messages,
     },
     at: Number.isFinite(Number(raw.at)) && Number(raw.at) > 0 ? Number(raw.at) : at,
   };

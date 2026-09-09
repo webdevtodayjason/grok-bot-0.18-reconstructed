@@ -36,13 +36,17 @@
 //               written against. When it does not, that is SKIP with the reason, not a fail
 //   feedback    FEEDBACK-1: a report posted with the relay token lands and the admin token does
 //               not open that door; a slug in the body is ignored in favour of the relay's
-//               forwarded one; edit, approve and suppress each write a change record row;
+//               forwarded one; a report at the console's own maximum lands with nothing shorter
+//               than it was sent and one over a limit is refused with the field named rather than
+//               truncated; edit, approve and suppress each write a change record row;
 //               Create GitHub issue with no token answers the prepared-body sentence and sends
-//               nothing; a token the fake GitHub refuses is not stored; one it accepts files it
+//               nothing; a token the fake GitHub refuses is not stored; one it accepts files it;
+//               a suppressed report is refused rather than filed over its own decision, and
+//               filing a report nobody approved is recorded as the approval it is
 //   ceiling     AGENTS-CAP-2: the clients panel reads the number off the box, 0, 5000, "forty",
 //               2.5 and null are each refused in a sentence and never reach the box, a write
 //               answers with what the box read back, and a pin reports a pin and not a success
-//   page        headless Chrome signs in at /admin and all seven panels render from the fixture
+//   page        headless Chrome signs in at /admin and all eight panels render from the fixture
 //   providers   the sixth panel, driven through a real browser: a key typed into the masked field
 //               reaches no response body and no node of the DOM, a roll takes the pool from two to
 //               three to two with no key on screen, a plan model with no screenshot route is
@@ -1337,6 +1341,31 @@ let plantedReportId = 0;
   check(liar?.tenant === TENANT_SLUG, "under the relay's workspace and not the body's", String(liar?.tenant));
   check(!JSON.stringify(liar ?? {}).includes("victim"), "and the body's own name is nowhere in the record");
 
+  // THE CONSOLE'S OWN MAXIMUM SHAPE, through the real intake. It used to answer 201 and store 8,000
+  // characters of a 15,296-character description, drop two of the twelve calls and cut each call's
+  // output from 1,200 to 800, with nothing on any screen saying so.
+  const bigCalls = Array.from({ length: 12 }, (_, i) => ({
+    name: "Shell", status: "failed", summary: `run ${i} `.padEnd(400, "."), output: `output ${i} `.padEnd(1200, "."),
+  }));
+  const bigDescription = ["The shell has failed every time for the last hour.", "", "What ran just before:",
+    ...bigCalls.map((call) => `- ${call.summary}\n  ${call.output}`)].join("\n");
+  const big = await postReport({
+    ...report, title: "the console's own maximum", description: bigDescription,
+    evidence: { ...report.evidence, calls: bigCalls },
+  }, { token: RELAY_TOKEN, tenant: TENANT_SLUG });
+  check(big.status === 201, "a report at the console's own maximum lands whole", `status ${big.status}, ${bigDescription.length} characters sent`);
+  const bigRow = ((await call("GET", "/v1/admin/feedback?limit=50", { token: bossToken })).json?.rows ?? [])
+    .find((row) => row.title === "the console's own maximum");
+  check(bigRow?.payload?.description?.length === bigDescription.length, "with nothing shorter than it was sent",
+    `${bigRow?.payload?.description?.length ?? 0} of ${bigDescription.length}`);
+  check((bigRow?.payload?.evidence?.calls ?? []).length === 12, "and no call dropped", String((bigRow?.payload?.evidence?.calls ?? []).length));
+  check((bigRow?.payload?.evidence?.calls ?? []).every((call) => call.output.length === 1200), "and no output cut");
+  // Over a limit is a refusal with the field named, never a 201 that stored half of it.
+  const tooBig = await postReport({ ...report, description: "d".repeat(40_000) }, { token: RELAY_TOKEN, tenant: TENANT_SLUG });
+  check(tooBig.status === 400, "a report over a limit is refused rather than truncated", `status ${tooBig.status}`);
+  check(/the description is \d+ characters/.test(String(tooBig.json?.message ?? "")), "in a sentence naming the field",
+    String(tooBig.json?.message ?? "").slice(0, 80));
+
   // The panel.
   const listed = await call("GET", "/v1/admin/feedback?limit=50", { token: bossToken });
   check(listed.status === 200, "the Feedback panel answers the super admin", `status ${listed.status}`);
@@ -1394,6 +1423,33 @@ let plantedReportId = 0;
   check(githubIssues.length === 1 && String(githubIssues[0].title ?? "").startsWith("[critical]"), "one issue, titled with its tier", String(githubIssues[0]?.title ?? "").slice(0, 40));
   const afterFiling = await call("GET", "/v1/admin/feedback?state=filed", { token: bossToken });
   check((afterFiling.json?.rows ?? []).length === 1, "and the row reads as filed");
+
+  // THE SECOND GATE IS A CHECK. A suppressed report used to file anyway, and filing overwrote the
+  // state, the name and the time on the row -- so the decision survived only in the change record
+  // and was gone from the panel, while docs/ADMIN.md promised it was kept.
+  const refusedFiling = await call("POST", `/v1/admin/feedback/${liar?.id}/issue`, { token: bossToken, body: {} });
+  check(refusedFiling.status === 409 && refusedFiling.json?.filed === false,
+    "a suppressed report is refused rather than filed", `status ${refusedFiling.status}`);
+  check(/was suppressed on/.test(String(refusedFiling.json?.message ?? "")),
+    "in a sentence naming the decision it would have overwritten", String(refusedFiling.json?.message ?? "").slice(0, 70));
+  check(githubIssues.length === 1, "and nothing reached GitHub", String(githubIssues.length));
+  const stillSuppressed = (await call("GET", "/v1/admin/feedback?state=suppressed", { token: bossToken })).json?.rows ?? [];
+  check(stillSuppressed.some((row) => row.id === liar?.id), "the suppression is still on the row the panel draws");
+
+  // A report nobody pressed Approve on. Filing IS the approval -- pressing Create GitHub issue is a
+  // deliberate act by the same person the Approve button belongs to -- but it is written down as
+  // one rather than left implied.
+  const fresh = await postReport({ ...report, title: "never approved, filed anyway" }, { token: RELAY_TOKEN, tenant: TENANT_SLUG });
+  const freshId = Number(fresh.json?.id ?? 0);
+  check(freshId > 0 && fresh.json?.state === "new", "a third report arrives in state new", String(fresh.json?.state));
+  const filedNew = await call("POST", `/v1/admin/feedback/${freshId}/issue`, { token: bossToken, body: {} });
+  check(filedNew.status === 200 && filedNew.json?.filed === true, "filing a report that was never approved is allowed", `status ${filedNew.status}`);
+  check(/filing it counted as the approval/.test(String(filedNew.json?.message ?? "")),
+    "and says so, rather than quietly calling it approved", String(filedNew.json?.message ?? "").slice(-70));
+  const implied = ((await call("GET", "/v1/admin/actions", { token: bossToken })).json?.rows ?? [])
+    .filter((row) => String(row.action) === "feedback.issue");
+  check(implied.some((row) => /filing is the approval/.test(String(row.detail))),
+    "and the change record carries the implied approval with it");
 }
 
 // ---- the ceiling on a client row (AGENTS-CAP-2) -----------------------------------------------
@@ -1554,12 +1610,14 @@ if (!WANT_BROWSER) {
   const live = await page.evaluate(() => window.__adminLive ?? null);
   check(live != null, "the super admin gets in and the page finishes loading", live ? `${live.panels} panels at ${live.at}` : "no readiness flag");
 
-  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-spend", "panel-providers", "panel-feedback"];
+  // Eight since the marketplace panel landed (MARKET-26). The count is pinned rather than left
+  // open because a panel that stops rendering is invisible on a page that draws seven others.
+  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace"];
   for (const id of panels) {
     check(await page.locator(`#${id}`).isVisible(), `the ${id.replace("panel-", "")} panel renders`);
   }
-  check((await page.locator(".panel").count()) === 7, "seven panels and no more", String(await page.locator(".panel").count()));
-  check(live?.panels === 7, "and the readiness flag says seven", String(live?.panels));
+  check((await page.locator(".panel").count()) === panels.length, `${panels.length} panels and no more`, String(await page.locator(".panel").count()));
+  check(live?.panels === panels.length, `and the readiness flag says ${panels.length}`, String(live?.panels));
 
   const attackChips = await page.locator("#addresses .chip.attack").count();
   check(attackChips === 1, "one Attack chip, on the address that earned it", String(attackChips));
@@ -1966,7 +2024,7 @@ step("nothing leaked");
 // ---- out ------------------------------------------------------------------------------------------
 console.log("");
 if (failures === 0) {
-  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, the seven panels, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
+  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, the eight panels, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
 } else {
   console.log(`FAIL  ${failures} check${failures === 1 ? "" : "s"} did not hold.`);
   if (childLog.length > 0) {

@@ -57,6 +57,10 @@ const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css
 function stubRelay(root, seed) {
   const posted = [];
   const resolved = [];
+  // What the relay answers on the NEXT report only. ui/server.mjs answers a failure with a plain
+  // sentence under `message` and nothing under `error`, and the console used to read `error`, so
+  // three carefully written sentences were thrown away and the person read an HTTP status code.
+  let failNext = null;
   let pending = seed.pending ?? [];
   let trays = seed.trays ?? [];
   const agents = [{ id: "titan", name: "Titan", isGroup: false, createdAt: 1, unreadCount: 0, lastMessagePreview: "", status: "idle" }];
@@ -89,6 +93,13 @@ function stubRelay(root, seed) {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       let body = {}; try { body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); } catch { /* empty */ }
       if (url.pathname === "/feedback") {
+        if (failNext != null) {
+          const { status, answer } = failNext;
+          failNext = null;
+          response.writeHead(status, { "content-type": "application/json" });
+          response.end(JSON.stringify(answer));
+          return;
+        }
         posted.push(body);
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ id: "fb-1", workspace: "demo", state: "new" }));
@@ -119,7 +130,11 @@ function stubRelay(root, seed) {
       response.end(body);
     } catch { response.writeHead(404); response.end("no"); }
   });
-  return { server, posted, resolved, get pending() { return pending; } };
+  return {
+    server, posted, resolved,
+    failNextFeedback(status, answer) { failNext = { status, answer }; },
+    get pending() { return pending; },
+  };
 }
 
 const listen = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -227,6 +242,36 @@ async function consoleLeg() {
       "and the box was told to stop offering it", JSON.stringify(relay.resolved));
     const settled = await page.evaluate(() => document.querySelector(".transcript")?.innerText ?? "");
     check(/The developers have it/.test(settled), "the card says what happened, once it has happened");
+
+    // ---- a send the relay refused, in the relay's own words ------------------------------------
+    // The sentence is ui/server.mjs forwardFeedback's, verbatim. A status code in front of a
+    // customer is the presentation host-notes-read-as-errors.md bans, and it is what the person
+    // used to read here because the console looked for the wrong key on the answer.
+    const RELAY_SAID = "The developers' service did not answer in time, so the report was not sent. Try again in a minute.";
+    relay.failNextFeedback(502, { sent: false, message: RELAY_SAID });
+    await page.click("[data-report-open]", { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    const refusedTarget = await page.evaluate(() => {
+      const node = [...document.querySelectorAll(".problem-report-card")]
+        .find((el) => el.textContent.includes("A problem with this product"));
+      const button = node?.querySelector("[data-report-send]");
+      if (!button) return null;
+      const box = button.getBoundingClientRect();
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    });
+    check(refusedTarget != null, "Report a problem opens a card with a Send on it");
+    if (refusedTarget) {
+      await page.mouse.click(refusedTarget.x, refusedTarget.y);
+      await page.waitForTimeout(1200);
+    }
+    const refusedNote = await page.evaluate(() => {
+      const node = [...document.querySelectorAll(".problem-report-card")]
+        .find((el) => el.textContent.includes("A problem with this product"));
+      const hints = [...(node?.querySelectorAll(".field-hint") ?? [])];
+      return hints.length > 1 ? hints[hints.length - 1].textContent : "";
+    });
+    check(refusedNote.includes(RELAY_SAID), "the card says what the relay said, word for word", refusedNote || "no note");
+    check(!/\d/.test(refusedNote), "and no status code reaches the person", refusedNote || "no note");
 
     // ---- the always-present controls -----------------------------------------------------------
     const controls = await page.evaluate(() => {

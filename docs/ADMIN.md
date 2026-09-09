@@ -130,7 +130,7 @@ counted per source because the two services keep different salts.
 
 ---
 
-## The seven panels, and where every number comes from
+## The eight panels, and where every number comes from
 
 Every number carries the moment it was measured. Anything that could not be measured says **"not
 measured"** and why, and never a zero, a dash, or a green tick.
@@ -217,6 +217,20 @@ at mode 0600, so the merge kept its neighbours and wrote a string. Signed in at
 https://console.titanium.bot as the demo customer in a real browser, the header reads **`2 / 40
 bots`** with **`1 of 39`** on the Add tile. Jason's row and Richard Avery's row were read and never
 written and still read 100.
+
+**Making `gh` work inside a workspace is one paste, on this same row's box (GH-1).** The GitHub CLI
+is installed in every box and reads a token out of the environment or out of `~/.config/gh`. It reads
+neither by default, so `gh auth status` answers *"You are not logged into any GitHub hosts"* and the
+agent reports it as a fault. The remedy is the box's own shell store, not this console and not an
+environment variable: `setShellSecret GITHUB_TOKEN <value>` through that box's gateway, after which
+every agent shell — the window daemons' shells included — carries `GITHUB_TOKEN`, which is the name
+`gh` itself says it reads ("Failed to log in to github.com using token (GITHUB_TOKEN)", measured in
+the box), and `gh` is signed in. **It survives a host swap** (the shell store lives in the box's data directory, and
+`persist-cli-auth` carries `.config/gh` across one) and **is lost on a container recreate**, which is
+the same rule every other in-box credential follows. Measured read-only inside the demo tenant's box
+on the R750, 2026-09-09: `gh` 2.46.0 present, `GH_TOKEN` and `GITHUB_TOKEN` both empty, all three
+possible `~/.config/gh` directories absent. The paste is an operator action nobody has taken yet and
+is tracked as **GH-1b**.
 
 **Neither button closes a session that is already open**, and reset password is the one where that
 matters, because it is the button you reach for when an account is compromised. The old password
@@ -422,6 +436,16 @@ suppressed report is **kept** with your name and the time on the decision, never
 at this and it was not a bug" is itself a record. The rows are **never pruned**, the same as
 `admin_actions` and for the same reason. Every state change writes an `admin_actions` row.
 
+**A decided report is not filed, and filing an undecided one IS the decision.** Create GitHub issue
+refuses a report that was **suppressed** or **closed**, in a sentence naming who decided and when —
+because filing wrote `state`, `decidedBy` and `decidedAt` over the row, so the suppression the
+paragraph above promises is kept would have survived only in `admin_actions` and been gone from the
+panel. Reopen it by approving it again if that decision has changed. A report still in `new` files
+without a second press: pressing Create GitHub issue is a deliberate act by the same person the
+Approve button belongs to. It is written down as the approval it is — the answer says so and the
+change record row carries "filing is the approval" — rather than left implied. Both legs are measured
+by `scripts/verify-admin.mjs`.
+
 **Edit changes the wording, never the evidence.** The title and the body move; the payload the agent
 sent stays exactly as it arrived underneath them, and the issue body is built from that payload. So
 what lands on GitHub is what the agent reported, with the operator's context beside it.
@@ -467,10 +491,15 @@ command today and a timer later, deliberately: a digest nobody has read once is 
 a schedule.
 
 **The size of a report is a contract with three minters** (the agent's tool, the console's automatic
-offer, and the self-test) and with the 64 KB intake. `cp/feedback.mjs`'s `LIMITS` are the numbers; a
-report at every one of them at once is **43,617 bytes of JSON, measured on this Mac**, which leaves
-room under the intake for the envelope. A console that mints inside them always lands. One that does
-not is refused by the intake rather than truncated into a report that reads as complete and is not.
+offer, and the self-test) and with the intake, which for this one route reads up to
+`cp/feedback.mjs`'s `INTAKE_BYTES` (96 KB) because a report carries its evidence twice: as the block
+of text the person read and edited, and as the structured copy. `cp/feedback.mjs`'s `LIMITS` are the
+numbers, every one of them the console's own maximum or larger, and **a field over its limit is
+refused with a sentence naming it, never truncated** — a report cut down to fit reads as a whole one
+and sends whoever reads it looking for a step that was never written down. A report at every one of
+them at once is **65,671 bytes of JSON, measured on this Mac**, which leaves room under the intake
+for the envelope. A console that mints inside them always lands. One that does not is refused by the
+intake rather than truncated into a report that reads as complete and is not.
 
 **A report carrying this service's own session secret, admin token or relay token is refused with
 "that report carried a credential, so nothing was stored".** That is not a claim that a report can
@@ -649,6 +678,6 @@ Super admins will be required to enrol, which is the right order: this console i
 protecting most, and today it is one password.
 
 Stripe fills in the **Spend** panel's billing half. The old line here said "Payments panel" and there
-is no such panel: the seven are Sign-in attempts, Clients and users, Box health, System health,
-Spend, Providers and Feedback, and payments are a placeholder paragraph inside Spend saying billing
-is not wired in yet.
+is no such panel: the eight are Sign-in attempts, Clients and users, Box health, System health,
+Spend, Providers, Feedback and Marketplace, and payments are a placeholder paragraph inside Spend
+saying billing is not wired in yet.

@@ -2892,7 +2892,10 @@
         }).then(async (response) => {
           const text = await response.text();
           let body; try { body = JSON.parse(text); } catch { body = null; }
-          if (!response.ok) throw new Error(body?.error ?? `the report was not accepted (${response.status})`);
+          // `message` FIRST. The relay answers every failure with a plain sentence under that key
+          // and nothing under `error`, so reading `error` first threw all three of them away and
+          // put an HTTP status code in front of a customer instead.
+          if (!response.ok) throw new Error(body?.message ?? body?.error ?? `the report was not sent (${response.status})`);
           return body ?? {};
         });
       },

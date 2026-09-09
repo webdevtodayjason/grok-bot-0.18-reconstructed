@@ -13,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import { openStore, FEEDBACK_STATES, SECRET_SETTINGS } from "../cp/store.mjs";
 import {
   FEEDBACK_TIERS,
+  INTAKE_BYTES,
   LIMITS,
   buildDigest,
   buildIssueBody,
@@ -56,8 +57,8 @@ test("a report keeps what it knows, clamps it, and drops everything else", () =>
   const normalized = normalizeReport({
     ...REPORT,
     title: `${"x".repeat(LIMITS.title + 50)}`,
-    description: "y".repeat(LIMITS.description + 100),
-    steps: Array.from({ length: LIMITS.steps + 5 }, (_, i) => `step ${i}`),
+    description: "y".repeat(LIMITS.description),
+    steps: Array.from({ length: LIMITS.steps }, (_, i) => `step ${i}`),
     // Nothing takes a workspace from a body, so an attempt to name one is simply not kept.
     workspace: "somebody-else",
     slug: "somebody-else",
@@ -95,24 +96,94 @@ test("a report with no title and one with no description are both refused", () =
   assert.equal(normalizeReport("not an object").ok, false);
 });
 
-test("a report at every limit at once still fits under the 64 KB intake", () => {
-  const big = normalizeReport({
-    tier: "quality",
-    category: "x".repeat(LIMITS.category * 2),
-    title: "t".repeat(LIMITS.title * 2),
-    description: "d".repeat(LIMITS.description * 2),
-    steps: Array.from({ length: LIMITS.steps * 2 }, () => "s".repeat(LIMITS.step * 2)),
-    tools: Array.from({ length: LIMITS.tools * 2 }, (_, i) => ({ name: `tool${i}`, status: "failed", error: "e".repeat(LIMITS.toolError * 2) })),
-    evidence: {
-      calls: Array.from({ length: LIMITS.calls * 2 }, (_, i) => ({ name: `call${i}`, status: "500", summary: "s".repeat(LIMITS.callSummary * 2), output: "o".repeat(LIMITS.callOutput * 2) })),
-      messages: Array.from({ length: LIMITS.messages * 2 }, () => ({ role: "assistant", text: "m".repeat(LIMITS.messageText * 2) })),
-    },
-  });
+const atEveryLimit = () => ({
+  tier: "quality",
+  category: "x".repeat(LIMITS.category),
+  title: "t".repeat(LIMITS.title),
+  description: "d".repeat(LIMITS.description),
+  steps: Array.from({ length: LIMITS.steps }, () => "s".repeat(LIMITS.step)),
+  tools: Array.from({ length: LIMITS.tools }, (_, i) => ({ name: `tool${i}`, status: "failed", error: "e".repeat(LIMITS.toolError) })),
+  evidence: {
+    calls: Array.from({ length: LIMITS.calls }, (_, i) => ({ name: `call${i}`, status: "500", summary: "s".repeat(LIMITS.callSummary), output: "o".repeat(LIMITS.callOutput) })),
+    messages: Array.from({ length: LIMITS.messages }, () => ({ role: "assistant", text: "m".repeat(LIMITS.messageText) })),
+  },
+});
+
+test("a report at every limit at once still fits the intake", () => {
+  const big = normalizeReport(atEveryLimit());
   assert.equal(big.ok, true);
   const bytes = Buffer.byteLength(JSON.stringify(big.report), "utf8");
-  // The whole point of the clamps: a console that mints inside them always lands, so nobody ever
-  // sees a report truncated into one that reads as complete and is not.
-  assert.ok(bytes < 64 * 1024, `a maximal report is ${bytes} bytes, which does not fit the intake`);
+  // The whole point of the limits: a console that mints inside them always lands, so nobody ever
+  // sees a report truncated into one that reads as complete and is not. The envelope needs room,
+  // so a maximal report has to leave a few KB of the intake unused.
+  assert.ok(bytes < INTAKE_BYTES - 4096, `a maximal report is ${bytes} bytes, which does not fit the ${INTAKE_BYTES} byte intake`);
+});
+
+// The fault this pins: the intake used to keep 8,000 characters of a 15,296-character description,
+// drop two of the twelve calls the console mints and cut each call's output from 1,200 to 800 --
+// and answer 201, with nothing on any screen saying so. A report is refused now, never shortened.
+test("a report over a limit is refused with the field named, and nothing is shortened", () => {
+  const over = (patch) => normalizeReport({ ...atEveryLimit(), ...patch });
+
+  const longDescription = over({ description: "d".repeat(LIMITS.description + 1) });
+  assert.equal(longDescription.ok, false, "a description over the limit was accepted and cut");
+  assert.match(longDescription.why, /the description is \d+ characters/);
+  assert.match(longDescription.why, /Nothing was stored/);
+
+  const shape = atEveryLimit();
+  const tooManyCalls = over({
+    evidence: { ...shape.evidence, calls: [...shape.evidence.calls, { name: "one-more", status: "500", summary: "s", output: "o" }] },
+  });
+  assert.equal(tooManyCalls.ok, false, "a thirteenth call was dropped instead of refused");
+  assert.match(tooManyCalls.why, /13 recorded calls/);
+
+  const longOutput = over({
+    evidence: { ...shape.evidence, calls: [{ name: "Shell", status: "failed", summary: "s", output: "o".repeat(LIMITS.callOutput + 1) }] },
+  });
+  assert.equal(longOutput.ok, false, "an output over the limit was accepted and cut");
+  assert.match(longOutput.why, /what Shell printed/);
+
+  // The cosmetic one-liners are the exception and stay clamped: the person cannot edit a title on
+  // the card, so refusing one would leave them holding a report they had no way to send.
+  const longTitle = over({ title: "t".repeat(LIMITS.title + 40) });
+  assert.equal(longTitle.ok, true);
+  assert.equal(longTitle.report.title.length, LIMITS.title);
+});
+
+// The console's own maximum shape, minted the way ui/machine-room/app.js mints it: twelve calls
+// with a 400-character summary and a 1,200-character output, six messages of 800, and a body that
+// carries all of it plus the agent's own words. Nothing may be shorter after the intake.
+test("the console's maximum report lands with nothing shorter than it was sent", () => {
+  const calls = Array.from({ length: 12 }, (_, i) => ({
+    name: `Shell`, status: "failed", summary: `run ${i} `.padEnd(400, "."), output: `output ${i} `.padEnd(1200, "."),
+  }));
+  const messages = Array.from({ length: 6 }, (_, i) => ({ role: i % 2 === 0 ? "you" : "agent", text: `said ${i} `.padEnd(800, ".") }));
+  const bodyLines = [
+    "The shell has failed every time for the last hour.",
+    "", "What ran just before:",
+    ...calls.map((call) => `- ${call.summary}\n  ${call.output}`),
+    "", "Last said:",
+    ...messages.map((message) => `- ${message.role}: ${message.text}`),
+  ];
+  const description = bodyLines.join("\n");
+  const sent = {
+    tier: "critical", category: "shell", title: "The shell refuses every command",
+    description,
+    tools: [{ name: "Shell", status: "failed", error: "exit 1" }],
+    evidence: { agent: "titan", agentName: "Titan", conversation: "titan", hostVersion: "1", consoleVersion: "2", calls, messages },
+  };
+  const normalized = normalizeReport(sent);
+  assert.equal(normalized.ok, true, `the console's own maximum was refused: ${normalized.why}`);
+  const report = normalized.report;
+  assert.equal(report.description.length, description.length, "the description came back shorter than it was sent");
+  assert.equal(report.evidence.calls.length, calls.length, "calls were dropped");
+  report.evidence.calls.forEach((call, i) => {
+    assert.equal(call.output.length, calls[i].output.length, `call ${i} output was cut`);
+    assert.equal(call.summary.length, calls[i].summary.length, `call ${i} summary was cut`);
+  });
+  assert.equal(report.evidence.messages.length, messages.length, "messages were dropped");
+  report.evidence.messages.forEach((message, i) => assert.equal(message.text.length, messages[i].text.length, `message ${i} was cut`));
+  assert.ok(Buffer.byteLength(JSON.stringify(report), "utf8") < INTAKE_BYTES);
 });
 
 test("the issue body carries the evidence and no fence escapes the page", () => {

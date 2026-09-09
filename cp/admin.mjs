@@ -3445,8 +3445,28 @@ export function createAdminApi({
         // door is broken. The body is built from the payload the agent sent, not from the edited
         // title, so what lands on GitHub is the evidence.
         if (verb === "issue") {
+          // THE SECOND GATE IS A CHECK AND NOT A LABEL. A report that was suppressed or closed is a
+          // decision somebody made with their name on it, and filing it would overwrite that
+          // decision in the row the panel draws -- the suppression would survive only in the
+          // ledger. So a decided report is refused here, in the same words the panel shows, and
+          // reopening it is a deliberate second act.
+          if (row.state === "suppressed" || row.state === "closed") {
+            const when = Number(row.decidedAt) > 0 ? new Date(Number(row.decidedAt)).toISOString().slice(0, 10) : "an earlier day";
+            json(response, 409, {
+              error: "decided",
+              filed: false,
+              message: `Report ${id} was ${row.state} on ${when} by ${row.decidedBy || "somebody"}, so nothing was filed. Approve it again first if that decision has changed.`,
+            });
+            return true;
+          }
           const door = githubDoor();
-          const payload = row.payload ?? normalizeReport({ tier: row.tier, title: row.title, description: row.body }).report;
+          // The fallback is for a row that somehow has no payload. normalizeReport can refuse it --
+          // it refuses anything over a limit rather than cutting it -- so the row's own columns are
+          // the last resort, whole. An issue body with the description missing would be worse than
+          // a long one.
+          const payload = row.payload
+            ?? normalizeReport({ tier: row.tier, title: row.title, description: row.body }).report
+            ?? { version: 1, tier: row.tier, category: row.category, title: row.title, description: row.body, steps: [], tools: [], evidence: {}, at: row.at };
           const issueBody = buildIssueBody(payload ?? {}, { workspace: row.tenant, id: row.id });
           const issueTitle = `[${row.tier}] ${row.title}`;
           if (!door.stored) {
@@ -3459,7 +3479,16 @@ export function createAdminApi({
             });
             return true;
           }
-          const ledger = beginAction(guard, request, { action: "feedback.issue", target: String(id), detail: `report ${id} to ${door.repo}` });
+          // Filing a report nobody pressed Approve on IS the approval, and it is written down as
+          // one rather than left implied: pressing Create GitHub issue is a deliberate act by the
+          // same person the Approve button belongs to, so refusing it would only teach them to
+          // press two buttons in a row.
+          const impliedApproval = row.state === "new";
+          const ledger = beginAction(guard, request, {
+            action: "feedback.issue",
+            target: String(id),
+            detail: `report ${id} to ${door.repo}${impliedApproval ? " (filing is the approval; it had none)" : ""}`,
+          });
           const filed = await fileIssue({
             token: store.getSetting(SETTING_GITHUB_TOKEN, ""),
             repo: door.repo,
@@ -3480,7 +3509,7 @@ export function createAdminApi({
             filed: true,
             issueUrl: filed.url,
             report: { ...updated, at: new Date(updated.at).toISOString() },
-            message: `Report ${id} is ${filed.url}.`,
+            message: `Report ${id} is ${filed.url}.${impliedApproval ? " It had not been approved, so filing it counted as the approval and is on the record as one." : ""}`,
           });
           return true;
         }
