@@ -181,3 +181,9 @@ import "./machine-room-files.test.mjs";
 // stops a stranger's guess landing in the operator's own Titan.
 import "./cp-mail.test.mjs";
 import "./mail-directory.test.mjs";
+
+// MAIL-3: a bot sends from its own address. The relay holds the key and forces the From; the
+// control plane holds the record and the caps. The refusal order is the security, so both files
+// walk it a case at a time.
+import "./mail-send-route.test.mjs";
+import "./cp-mail-send.test.mjs";

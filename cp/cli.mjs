@@ -25,6 +25,7 @@
 //   node cp/cli.mjs mail list [<slug>]
 //   node cp/cli.mjs mail retire <code>
 //   node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off
+//   node cp/cli.mjs mail sends <slug>
 //   node cp/cli.mjs mail sweep
 //   node cp/cli.mjs feedback list|show|approve|suppress|close|issue|digest|github-token
 //   node cp/cli.mjs marketplace list
@@ -1343,6 +1344,7 @@ const USAGE = [
   "node cp/cli.mjs mail list [<slug>]",
   "node cp/cli.mjs mail retire <code>",
   "node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off",
+  "node cp/cli.mjs mail sends <slug>",
   "node cp/cli.mjs mail sweep",
   "node cp/cli.mjs feedback list [--tier critical|quality|observation] [--state new|approved|filed|suppressed|closed] [--tenant <slug>] [--since 7d]",
   "node cp/cli.mjs feedback show <id>",
@@ -1452,6 +1454,34 @@ async function mailOnly(args) {
   out("the relay picks this up on its next sweep, which is within five minutes");
 }
 
+// MAIL-3. What a workspace's bots have sent through the relay's send route. Over the API like every
+// other verb in this section, for the reason written above it: on the R750 the rows are inside the
+// control plane container and this is typed on a Mac, so a verb that opened the store would answer
+// "nothing sent yet" over a live log and nothing would error.
+//
+// No subject on this list, because there is none in that table. The subject is the customer's and
+// it is on their own console, beside the mail that arrived for them.
+async function mailSends(args) {
+  const slug = positional(args)[0] ?? "";
+  if (slug.length === 0) die("node cp/cli.mjs mail sends <slug>");
+  const answer = await api("GET", `/v1/mail/sends?slug=${encodeURIComponent(slug)}`);
+  const rows = Array.isArray(answer?.rows) ? answer.rows : [];
+  const caps = answer?.caps ?? {};
+  if (rows.length === 0) {
+    out(`${slug} has sent no mail yet`);
+    out("bots send from their own address through the relay; every one of them lands here");
+    return;
+  }
+  // The bot's name is last for the reason mail list gives: it is the one column with no length
+  // limit, so everything to the left of it stays lined up however a customer names their bots.
+  out(`${pad("when", 26)}${pad("code", 9)}${pad("to", 32)}${pad("outcome", 10)}${pad("resend id", 38)}bot`);
+  for (const row of rows) {
+    out(`${pad(row.at, 26)}${pad(row.code, 9)}${pad(row.to, 32)}${pad(row.outcome, 10)}${pad(row.resendId || "-", 38)}${row.agentName || row.agentId || "(unknown)"}`);
+  }
+  out(`${rows.length} send(s); the caps are ${caps.hourlyPerAgent ?? "?"} an hour for one bot and ${caps.dailyPerWorkspace ?? "?"} a day for the workspace`);
+  out("a row reading `sending` is one nothing came back about, which counts against the cap until it does");
+}
+
 async function mailSweep() {
   const answer = await askRelay("POST", "/mail/sweep");
   for (const row of Array.isArray(answer?.swept) ? answer.swept : []) {
@@ -1492,6 +1522,7 @@ const commands = {
   "mail senders": mailSenders,
   "mail allow": mailAllow,
   "mail only": mailOnly,
+  "mail sends": mailSends,
   "mail sweep": mailSweep,
   "feedback list": feedbackList,
   "feedback show": feedbackShow,

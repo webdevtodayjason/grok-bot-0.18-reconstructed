@@ -45,7 +45,7 @@ import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, 
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
-import { createMailDirectory, mailDomain } from "./mail.mjs";
+import { createMailDirectory, createMailSends, mailDomain } from "./mail.mjs";
 import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
@@ -584,6 +584,10 @@ export function createApp(options = {}) {
   // reaches this service and no webhook lands on it: the relay keeps both, and this answers the
   // two routes below. cp/mail.mjs carries the reasoning.
   const mail = createMailDirectory({ store, domain: mailDomain(), now });
+  // MAIL-3. The send log and its two caps, beside the directory and over the same store. It still
+  // holds no Resend key: the relay does the sending and this says whether it may and writes down
+  // that it did.
+  const mailSends = createMailSends({ store, now });
 
   // Its own file, handed the pieces this one already owns, so there is one store, one Coolify
   // client and one session verifier in this process rather than two. It mounts below, before the
@@ -1016,6 +1020,48 @@ export function createApp(options = {}) {
       if (!requireRelay(request, response)) return undefined;
       const answer = mail.mint(body.slug, body.agents);
       return json(response, answer.error ? 400 : 200, answer);
+    }
+
+    // ---- the send log (MAIL-3, docs/MAIL.md) ----------------------------------------------------
+    // Beside the directory and the mint above, behind the same one credential and for the same
+    // reason: what the one relay needs from this service to serve a customer. No Resend key crosses
+    // this line in either direction.
+    //
+    // TWO ROUTES AND NOT ONE, because the claim happens BEFORE the mail goes and the outcome is
+    // only known after. An unsent mail is recoverable and an unlogged send is not, so a crash
+    // between them leaves a row reading "sending", which counts toward the cap and reads as "we do
+    // not know". A single route taking a finished send would have no way to say that.
+    if (segments[1] === "relay" && segments[2] === "mail" && segments[3] === "send" && segments.length === 5) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      if (segments[4] === "open") {
+        const answer = mailSends.openSend({
+          slug: body.slug, agentId: body.agentId, code: body.code, to: body.to, idem: body.idem,
+        });
+        // 429 on a cap and 400 on a malformed claim, so the relay can pass the sentence on word for
+        // word rather than inventing one of its own.
+        return json(response, answer.ok ? 200 : (answer.error === "rate_limited" ? 429 : 400), answer);
+      }
+      if (segments[4] === "close") {
+        const answer = mailSends.closeSend(body.id, body.outcome, body.resendId, body.detail);
+        return json(response, answer.ok ? 200 : 400, answer);
+      }
+    }
+
+    // The operator's own read of that log. It is HERE, at /v1/mail/sends, and NOT under /v1/admin,
+    // for one structural reason: cp/admin.mjs claims every /v1/admin/* path and answers 404 to
+    // anything it does not match itself, so a mail route added under that prefix has to be added
+    // inside that file -- and that file belongs to another wave this week. Folding this read into
+    // the super admin panel is filed as MAIL-3b. It is still a super admin route: requireAdmin, the
+    // same as everything under that prefix, and the relay's own credential does not open it.
+    if (segments[1] === "mail" && segments[2] === "sends" && segments.length === 3) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireAdmin(request, response)) return undefined;
+      const slug = String(url.searchParams.get("slug") ?? "").trim();
+      if (slug.length === 0) return json(response, 400, { error: "bad_request", message: "Name the workspace." });
+      const asked = Number.parseInt(String(url.searchParams.get("limit") ?? ""), 10);
+      const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, 500) : 50;
+      return json(response, 200, { slug, caps: mailSends.sendCaps(slug), rows: mailSends.listSends(slug, limit) });
     }
 
     // ---- a problem report, forwarded by a console (FEEDBACK-1) ---------------------------------
