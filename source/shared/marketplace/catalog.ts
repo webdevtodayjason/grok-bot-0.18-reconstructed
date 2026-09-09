@@ -52,6 +52,12 @@ export type {
   RemoteConnectorMode,
 } from "./connector-spec.js";
 
+// The Marketing team pack is its own module: seven personas and ten SKILL.md bodies are more text
+// than the six rows below put together, and a member list is a shape they do not have. It spreads
+// into BOTS as ordinary bot rows (MarketingTeamBot extends MarketplaceBot), so the validator, the
+// wire view and every existing reader are unchanged.
+import { MARKETING_TEAM_BOTS } from "./marketing-team.js";
+
 /** Kept as the wire's word for what a row is, derived from `install` rather than declared. */
 export type MarketplacePluginKind = "connector" | "shell-tool";
 
@@ -240,6 +246,7 @@ export const MARKETPLACE_BOT_CATEGORIES: readonly string[] = Object.freeze([
   "Engineering",
   "Operations",
   "Sales",
+  "Marketing",
   "Personal",
 ]);
 
@@ -1088,6 +1095,7 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([
     ]),
     integrations: Object.freeze(["localfiles"]),
   }),
+  ...MARKETING_TEAM_BOTS,
 ]);
 
 /**

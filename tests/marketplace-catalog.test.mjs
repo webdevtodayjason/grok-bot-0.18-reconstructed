@@ -94,7 +94,14 @@ test("every plugin carries a category from the declared list", () => {
 
 test("every bot names real plugins, a declared category and at least one skill", () => {
   const ids = new Set(catalog.MARKETPLACE_PLUGINS.map((plugin) => plugin.id));
-  assert.equal(catalog.MARKETPLACE_BOTS.length, 6);
+  // A FLOOR, not a count. The six original templates have to still be there; a seventh row (the
+  // Marketing team pack) is a feature, and a test that fails on one is a test that makes adding a
+  // template feel like breaking something.
+  const botIds = new Set(catalog.MARKETPLACE_BOTS.map((bot) => bot.id));
+  for (const id of ["research-desk", "pr-review-desk", "ops-watcher", "issue-triage", "inbox-triage", "course-note-taker"]) {
+    assert.ok(botIds.has(id), `the ${id} template is gone from the catalog`);
+  }
+  assert.equal(botIds.size, catalog.MARKETPLACE_BOTS.length, "two bot rows share an id");
   for (const bot of catalog.MARKETPLACE_BOTS) {
     assert.ok(catalog.MARKETPLACE_BOT_CATEGORIES.includes(bot.category), `bot ${bot.id} category "${bot.category}"`);
     assert.equal(bot.creator, "Titanbot team");

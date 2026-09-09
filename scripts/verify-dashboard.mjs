@@ -2164,8 +2164,13 @@ try {
     // assertion threw first.
     const marketCatalog = await gw("listMarketplace", {}).catch((error) => ({ error: error.message }));
     const marketBots = Array.isArray(marketCatalog?.bots) ? marketCatalog.bots : [];
-    check(marketBots.length === 6, "listMarketplace serves the six bot templates",
-      marketCatalog?.error ?? `${marketBots.length}: ${marketBots.map((b) => b.name).join(", ")}`);
+    // A floor by name rather than a count: the six originals have to be served, and a seventh row
+    // is a template somebody added, not a regression.
+    const servedBotIds = new Set(marketBots.map((b) => String(b?.id ?? "")));
+    const missingBots = ["research-desk", "pr-review-desk", "ops-watcher", "issue-triage", "inbox-triage", "course-note-taker"]
+      .filter((id) => !servedBotIds.has(id));
+    check(missingBots.length === 0, "listMarketplace serves every bot template this tree ships",
+      marketCatalog?.error ?? (missingBots.length ? `missing ${missingBots.join(", ")}` : `${marketBots.length}: ${marketBots.map((b) => b.name).join(", ")}`));
     const researchDesk = marketBots.find((b) => String(b?.name ?? "") === "Research desk") ?? null;
     if (marketBots.length === 0) {
       console.log("  INFO  this host serves no bot catalog; the Bots-tab checks below are skipped");
