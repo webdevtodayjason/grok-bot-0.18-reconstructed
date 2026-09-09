@@ -306,6 +306,22 @@ hand-off object 144 B and no image, `handBackForeverBox` **16 ms** with the entr
 21 ms later, `skipBoxHandoff` **6 ms** stamped `dismissed`, and an ordinary prompt after both
 decisions answered in 27.6 s.
 
+**After the HANDBACK-2 fixes, bundle `37050858e4ec` on all three R750 boxes, 2026-09-08**, one real
+turn inside `titanbot-box-atonqjq7zx593jsacaccpfau`: prompt to a pending hand-off **10.2 s**; the
+whole status **296 B** carrying `state "absent"`, `vncUrl: null` **and `boxSeat: 4`**, which is the
+case that used to make the console draw display `:1`; `skipBoxHandoff` answered **`{"ok":true}` in
+10 ms**, the entry read `dismissed`, the host stopped reporting the hand-off, and the agent's next
+message was "No problem, I skipped the handoff." The assignment file in that box holds the same
+seats the status reports.
+
+**The browser half of that pass was NOT re-run.** Signing in at `console.titanium.bot` needs
+`DEMO_PASSWORD` out of `/home/sem/titanbot/cp.env`, which this wave is not allowed to read, so the
+post-fix browser measurement in this file is the one on grok-bot-local-vm. What is established on
+the R750 is the wire above and the bytes: `sha256` of `ui/machine-room/app.js` and `styles.css` on
+the server equals the shipped worktree's, and all three boxes report `hostVersion 37050858e4ec`. To
+close it, run `scripts/verify-handoff.mjs --console` against the console with the demo account's
+password in the environment.
+
 ---
 
 ## 6. The gates
