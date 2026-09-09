@@ -61,9 +61,10 @@
 // Exit 0 nothing failed, 1 something failed, 2 nothing could be measured.
 import { execFile } from "node:child_process";
 import http from "node:http";
-import { readFileSync, appendFileSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync } from "node:fs";
 
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:7777";
+const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const SETTINGS = "/home/box/sand-data/sand-host-settings.json";
 const AGENTS_DIR = "/home/box/sand-data/agents";
@@ -107,6 +108,15 @@ const CLOUD_LIVE = process.argv.includes("--cloud-live");
  */
 const VENDORS_ONLY = process.argv.includes("--vendors-only");
 const CLOUD_CDP_SETTING = "SAND_CLOUD_BROWSER_LOOPBACK_CDP";
+// How long a held browser may sit unused before the host gives it back. Shortened here on purpose:
+// the product's own default is four minutes, which is longer than this gate is allowed to take.
+// Not shortened FURTHER on purpose either -- at eight seconds the gaps between one turn's own tool
+// calls exceeded it, the browser was given back between the type and the click, and the gate
+// recreated the very defect it exists to catch ("nothing on the page matched Save note", measured
+// here 2026-09-09). Forty-five is comfortably longer than a turn's own gaps and short enough to
+// wait out.
+const CLOUD_IDLE_SETTING = "SAND_CLOUD_BROWSER_IDLE_SECONDS";
+const CLOUD_IDLE_SECONDS = 45;
 const CLOUD_ENGINES_FILE = "/home/box/sand-data/browser-engines.json";
 const CLOUD_LEDGER_FILE = "/home/box/sand-data/cloud-browser-ledger.jsonl";
 const FIXTURE_PORT = Number.parseInt(flag("--port", "18791"), 10);
@@ -647,6 +657,7 @@ let settingsTouched = false;
 // CLOUD-BROWSER-1. Restored in the finally like everything else this gate touches: a run that dies
 // must not leave a box pinned to a cloud engine.
 let previousCloudCdp;
+let previousCloudIdle;
 let previousEngines = "";
 let cloudTouched = false;
 let cloudLedgerBefore = 0;
@@ -936,9 +947,16 @@ try {
       await writeBoxFileB64(CLOUD_ENGINES_FILE, JSON.stringify({
         engine: "browser-use", cloudSites: [], autoEscalate: true, sessionCeilingPerTurn: 20, preferred: "browser-use",
       }));
+      // A browser is held for the life of the PAGE now, not of the tool call, so the run's last
+      // page is still holding one when the plan ends -- which is correct and is also the one thing
+      // that would make "every session closed" fail for the right reason. The idle timer is what
+      // gives it back, and four minutes is longer than this gate may take, so the box is asked to
+      // use a short one while the arm runs. It is restored with everything else in the finally.
+      previousCloudIdle = await readSetting(CLOUD_IDLE_SETTING);
+      await writeSetting(CLOUD_IDLE_SETTING, String(CLOUD_IDLE_SECONDS));
       cloudLedgerBefore = parseCloudLedger(await sh(`cat ${CLOUD_LEDGER_FILE} 2>/dev/null || true`)).length;
       check(await readSetting(CLOUD_CDP_SETTING) === endpoint, "the box is pointed at its own browser through the cloud path");
-      info(`cloud ledger rows before this run: ${cloudLedgerBefore}`);
+      info(`cloud ledger rows before this run: ${cloudLedgerBefore}, idle release at ${CLOUD_IDLE_SECONDS}s`);
     }
   }
 
@@ -1235,21 +1253,85 @@ try {
 
   // CLOUD-BROWSER-1. The leg above passes trivially if nothing browsed at all, so on a cloud run it
   // has to learn which engine actually ran. The ledger is the evidence, because it is the thing the
-  // product writes anyway: one row per cloud session, tenant and vendor and minutes on it. No rows
+  // product writes anyway: one row per cloud session, box and vendor and minutes on it. No rows
   // means the cloud path never ran and "the browser did not double" proved nothing.
   const ledgerRows = parseCloudLedger(await sh(`cat ${CLOUD_LEDGER_FILE} 2>/dev/null || true`));
   if (CLOUD_SHAPE) {
     const gained = ledgerRows.length - cloudLedgerBefore;
     check(gained > 0, "and the cloud path is what ran, on the ledger's own word",
       `${gained} new session row(s); without one, the invariant above proved nothing`);
-    const closedRows = ledgerRows.filter((row) => row.endedAt != null);
-    check(closedRows.length === ledgerRows.length, "every cloud session in the ledger was closed",
-      `${ledgerRows.length - closedRows.length} still open`);
-    const named = ledgerRows.filter((row) => String(row.tenant ?? "").length > 0 && String(row.vendor ?? "").length > 0);
-    check(named.length === ledgerRows.length, "and every row names a tenant and an engine");
+    // A browser is held for the page now, so the run's last page is still holding one at this
+    // point. That is the fix, not a leak -- and the thing that has to be proved is that the idle
+    // timer gives it back. The box was told to use a short one at the top of this arm, so this
+    // waits that long plus a margin and then asks the ledger again. A session that is still open
+    // after that IS a leak, and the same number would have looked fine under the old assertion.
+    const openNow = ledgerRows.filter((row) => row.endedAt == null).length;
+    info(`cloud sessions still held when the plan ended: ${openNow}`);
+    check(openNow <= 1, "at most one browser is held when the run ends, which is the page it left open",
+      `${openNow} open`);
+    const releaseBy = Date.now() + (CLOUD_IDLE_SECONDS + 25) * 1000;
+    let openAfter = openNow;
+    while (Date.now() < releaseBy && openAfter > 0) {
+      await sleep(3000);
+      openAfter = parseCloudLedger(await sh(`cat ${CLOUD_LEDGER_FILE} 2>/dev/null || true`))
+        .filter((row) => row.endedAt == null).length;
+    }
+    check(openAfter === 0, `and the idle timer gives it back within ${CLOUD_IDLE_SECONDS}s of nothing using it`,
+      `${openAfter} still open`);
+    ledgerRows.length = 0;
+    ledgerRows.push(...parseCloudLedger(await sh(`cat ${CLOUD_LEDGER_FILE} 2>/dev/null || true`)));
+    // `boxName`, not `tenant`: a box holds no control-plane slug, and the field is named after what
+    // it actually holds. The relay is what stamps the tenant onto what the admin panel reads.
+    const named = ledgerRows.filter((row) => String(row.boxName ?? row.tenant ?? "").length > 0 && String(row.vendor ?? "").length > 0);
+    check(named.length === ledgerRows.length, "and every row names the box it ran on and an engine");
     info(`cloud sessions on the ledger: ${ledgerRows.length} (${gained} from this run)`);
   } else {
     info(`cloud sessions on the ledger: ${ledgerRows.length} (this run used the box's own browser)`);
+  }
+
+  // ------------------------------------------- the console's own side of the cloud browser, in a
+  // REAL browser.
+  //
+  // ui/machine-room/cloud-browser.js shipped complete, self-mounting, and with no <script> tag
+  // loading it: 290 lines that never ran, on a box, for a release. A person could therefore never
+  // take over a cloud session, while two documents said they could. A file with no gate behind it
+  // is exactly how that happens, so this opens the console the way a person does and asks whether
+  // the strip is on the screen -- not whether the file exists, which was already true.
+  step("the console draws where the browser is running");
+  if (!existsSync(CHROME)) {
+    skip("the Computer card says where the browser runs", `no Chrome at ${CHROME}; set GROK_BOT_CHROME`);
+  } else {
+    const { chromium } = await import("../.cache/playwright/node_modules/playwright-core/index.mjs");
+    const consoleBrowser = await chromium.launch({ executablePath: CHROME, headless: true, args: ["--no-sandbox"] });
+    try {
+      const consolePage = await consoleBrowser.newPage();
+      await consolePage.goto(`${GATEWAY}/`, { waitUntil: "load" });
+      // The tag itself, first, because that is the regression: a module the page never loads.
+      const tagged = await consolePage.evaluate(() =>
+        [...document.querySelectorAll("script[src]")].some((tag) => /cloud-browser\.js/.test(tag.getAttribute("src") || "")));
+      check(tagged, "the console loads the cloud browser module", tagged ? "" : "no <script src=cloud-browser.js> in index.html");
+      const mounted = await consolePage.evaluate(() => typeof window.__cloudBrowser === "object" && window.__cloudBrowser != null);
+      check(mounted, "and the module mounted in the page");
+      // Then the thing a person actually sees. The strip polls, so it is waited for rather than
+      // read once; a strip that needs a click to appear is not a strip on the screen.
+      let strip = "";
+      for (let n = 0; n < 40 && strip.length === 0; n += 1) {
+        strip = await consolePage.evaluate(() => {
+          const node = document.getElementById("cloud-browser-strip");
+          if (node == null) return "";
+          const box = node.getBoundingClientRect();
+          return box.width > 0 && box.height > 0 ? node.textContent.replace(/\s+/g, " ").trim() : "";
+        });
+        if (strip.length === 0) await consolePage.waitForTimeout(500);
+      }
+      check(strip.length > 0, "and the Computer card says where the browser is running", strip || "the strip never appeared on screen");
+      check(/this computer|cloud browser/i.test(strip), "in plain words a person reads", strip);
+      // The rule this console holds everywhere: no vendor's name in anything a person reads.
+      const vendorNamed = /browserbase|browser use/i.test(strip);
+      check(!vendorNamed, "and it names no vendor", vendorNamed ? strip : "");
+    } finally {
+      await consoleBrowser.close().catch(() => {});
+    }
   }
 
   // -------------------------------------------------- MARKET-17: nothing of a vendor's in any argv
@@ -1368,6 +1450,9 @@ try {
     await writeSetting(CLOUD_CDP_SETTING, previousCloudCdp ?? null)
       .then(() => info(`${CLOUD_CDP_SETTING} restored`))
       .catch((error) => info(`${CLOUD_CDP_SETTING} NOT restored: ${error.message}`));
+    await writeSetting(CLOUD_IDLE_SETTING, previousCloudIdle ?? null)
+      .then(() => info(`${CLOUD_IDLE_SETTING} restored`))
+      .catch((error) => info(`${CLOUD_IDLE_SETTING} NOT restored: ${error.message}`));
     await (previousEngines.length > 0
       ? writeBoxFileB64(CLOUD_ENGINES_FILE, previousEngines)
       : sh(`rm -f ${CLOUD_ENGINES_FILE}`))

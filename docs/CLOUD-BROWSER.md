@@ -10,12 +10,15 @@ them are all exactly what they were. What changes is which browser is on the oth
 Marketing is the reason. Three things the box's own Chrome cannot do:
 
 - **A residential exit.** A sign-up from a datacentre address is refused before the form is read.
-- **A saved login that survives a box swap.** The box's Chrome profile is inside the box, and a
-  recreate takes it with it.
 - **A page a person can take over.** When a page asks for a phone code, an identity check or a
   captcha, the work has to reach a person *inside the same session* or it is lost.
 
-A cloud browser is those three things. Everything else about it is worse than the box's own Chrome —
+A third one, **a saved login that survives a box swap**, is what a cloud browser could be and is not
+yet in this product. Both vendors document browser profiles; `CloudBrowserService.open` accepts a
+`profileId` and nothing supplies one, so every session starts signed out. That is CLOUD-BROWSER-6,
+and §"What is not here" at the end says so rather than this section implying otherwise.
+
+Everything else about a cloud browser is worse than the box's own Chrome —
 it costs money, it is slower to start, and its screen is not on the desktop the person is watching —
 so the box stays the default and the cloud is where the box cannot go.
 
@@ -62,7 +65,7 @@ So every session is a row in `/home/box/sand-data/cloud-browser-ledger.jsonl`, m
 object per line, no secrets in any field:
 
 ```
-{ tenant, agentId, vendor, sessionId, startedAt, endedAt, minutes, proxyBytes|null,
+{ boxName, agentId, vendor, sessionId, startedAt, endedAt, minutes, proxyBytes|null,
   engine, reason, url }
 ```
 
@@ -70,9 +73,13 @@ object per line, no secrets in any field:
 object carries it; Browser Use documents no per-browser traffic number at all. A zero there would
 read as "this session used no proxy", and the admin view says *not reported by this vendor* instead.
 
-The row's own `tenant` field is whatever the box calls itself — a box does not know its
-control-plane slug, because nothing pushes one in. The relay stamps the authoritative slug on what
-it serves, because the relay is the thing that knows which box belongs to whom.
+`boxName` is **not the tenant**, and the field is named after what it holds because it used to
+claim otherwise. A box does not know its control-plane slug, because nothing pushes one in, so this
+is a hostname — inside a container, a short docker id. Measured on the demo box on 2026-09-09 every
+row read `"tenant":"0e6e57702ef1"`, and the panel only said *demo* because the relay stamped the
+slug it had resolved the container by. The relay stays the only thing that names a tenant. Rows
+written before the rename are read back under the new name and never rewritten: a ledger is a
+receipt.
 
 ## The stop rule
 
@@ -81,15 +88,30 @@ stop action ends it. A session nobody stopped is a browser billing by the hour w
 it. So:
 
 - the ledger row goes down **before** the connect, so a session orphaned by a crash can be found;
-- the stop runs in a `finally` on **every** exit path, including a thrown tool error;
+- a browser is held for the life of the **page**, not of the tool call, and given back on three
+  things: the tab being closed, a call that threw, and an idle timer (`CLOUD_VIEW_IDLE_SECONDS`,
+  240 s) that is deliberately shorter than the vendor's own session ceiling. It is **not** given
+  back at a turn boundary: the hand-off card ends the bot's turn on purpose, and closing there would
+  throw the session away in the exact moment a person is about to take it over;
 - a sweep at host start reads each unfinished session's state **from the vendor** and stops what is
   still running. It reads first, every time — no cloud call in this wave is retried or stopped
   without first asking the vendor what state the thing is in;
-- one session per tool call, and a per-turn ceiling, in code.
+- one browser per page and a per-turn ceiling on how many pages may reach the cloud, in code.
+
+Holding the browser for the page is the whole of what makes a sign-up possible. It used to be
+minted and stopped inside one tool call, which meant the click after the open landed in a different
+browser on a different page: measured on the demo box on 2026-09-09, two sessions for one Instagram
+profile five seconds apart, neither continued. A click carries no address, so the router had nothing
+to decide from; now an op with no address never routes at all and goes to whichever browser holds
+the page.
 
 ## What a person sees
 
-Two things, and neither is a new panel.
+Two things, and neither is a new panel. Both live in `ui/machine-room/cloud-browser.js`, which
+index.html loads beside `marketplace-bots.js`. It shipped once with no `<script>` tag at all — 290
+lines that never ran on any box, so nobody could take over anything while this section said they
+could — and `scripts/verify-browser-tools.mjs` now opens the console in a real browser and fails if
+the strip is not on the screen.
 
 **In the Computer card**, a strip that says where the browser runs — this computer or a cloud one —
 and what the month has cost in sessions, minutes and gigabytes.

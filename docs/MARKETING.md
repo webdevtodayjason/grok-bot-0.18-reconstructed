@@ -74,9 +74,8 @@ A heading left blank is not a gap, it is a licence for a specialist to invent so
 
 ## 4. Approvals
 
-Nothing reaches the public until you answer a decision card. The card is
-`SendMessage {"type":"widget"}`, which **ends the bot's turn** — that is the mechanism, not the
-etiquette. A model that would otherwise keep going cannot skip it, because there is no turn left
+Nothing reaches the public until you answer a decision card. The card **ends the bot's turn** —
+that is the mechanism, not the etiquette. A bot that would otherwise keep going has no turn left
 to keep going in.
 
 The granularity matters more than the rule:
@@ -109,8 +108,8 @@ So organic posting is one of two things, and the team is built for both:
 
 **The browser.** A bot drives a real Chrome signed in as the client. This is the honest path for
 any network whose API needs an app review a small business will not pass. When a page needs a
-person (a code, a captcha, an identity check) the bot hands it to you with a live view and picks up
-after you hand it back.
+person — a code, a captcha, an identity check — the bot stops and hands the step to you rather than
+guessing at it.
 
 There are two of those browsers now, behind the same four tools and the same driver, so a bot never
 knows which one it got and a result never changes shape:
@@ -118,7 +117,17 @@ knows which one it got and a result never changes shape:
 - **The one in the box.** Free, always there, and it comes from this server's address. That address
   is what a sign-up page refuses.
 - **A cloud browser** at Browser Use or Browserbase, on a residential exit. This is what gets past
-  the refusal, and it is what carries a saved login that survives the box being rebuilt.
+  the refusal.
+
+A page stays in whichever browser opened it, for as long as the bot is working on it, so a sign-up
+that takes an open, three fields and a button is one browser and not four. When the page is in a
+cloud browser and a person has to finish a step, the console draws a **take over** row beside the
+bot's hand-off card, pointed at that same browser, so you do the step in the page the bot was on.
+
+Two things this does **not** do yet, said plainly because the roadmap at the end of §7 is where they
+live and not here: a saved login does not survive across sessions (the vendor's browser profiles
+exist and nothing hands one to a session yet), and a browser given back to a customer's own screen
+is still the box's Chrome, not the cloud one.
 
 Which one runs is decided in that order: the engine you pinned for the workspace, then the site
 list (instagram.com, facebook.com and linkedin.com are on it out of the box), then — at most once
@@ -168,9 +177,10 @@ named partner. Somebody re-authorises every two months, forever. Put it in a cal
 **LinkedIn publishes no rate limits, by policy.** Not "we could not find them" — they say they do
 not publish them. Plan for the limit you cannot see.
 
-**Browser Use profiles are minted by hand.** Saved logins per workspace are created in the vendor's
-own dashboard; there is no documented endpoint to create one. The docs here say so rather than
-promising an API that does not exist.
+**There is no saved login yet.** The vendor documents browser profiles and this product does not use
+one: every cloud session starts signed out. A client's login therefore has to be done again in the
+session that needs it, which is what the take-over row is for. CLOUD-BROWSER-6 is where that
+changes; until it lands, do not plan a week of posting around a login you did once.
 
 **Skills are shared and they outlive their bot.** Everything imported goes into the box's shared
 library, which every bot on the box can see, and deleting a bot leaves its documents behind. The
@@ -197,4 +207,7 @@ the roster.
 | The weekly re-read of the vendors' own documentation | `cp/verification.mjs` |
 
 Roadmap, deliberately not built in this release: roster grouping and sub-coordinators (TEAMS-1),
-a per-tenant OAuth callback for Meta, X and LinkedIn, and a Canva row.
+a per-tenant OAuth callback for Meta, X and LinkedIn, a Canva row, and the two cloud-browser halves
+§5 names — a saved login per client carried by a vendor browser profile (CLOUD-BROWSER-6), and a
+cloud page handed back onto the customer's own screen rather than into the vendor's live view
+(CLOUD-BROWSER-7).

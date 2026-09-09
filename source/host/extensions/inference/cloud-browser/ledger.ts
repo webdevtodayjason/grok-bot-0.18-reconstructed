@@ -9,8 +9,16 @@
  *
  * So the row is:
  *
- *   { tenant, agentId, vendor, sessionId, startedAt, endedAt, minutes, proxyBytes|null,
+ *   { boxName, agentId, vendor, sessionId, startedAt, endedAt, minutes, proxyBytes|null,
  *     engine, reason, url }
+ *
+ * `boxName` IS NOT THE TENANT, and the field is named that way because it once claimed to be. A box
+ * does not know its control-plane slug -- nothing pushes one in -- so the best name it has for
+ * itself is its own hostname, which inside a container is the short docker id. Measured on the
+ * R750's demo box on 2026-09-09: every row read `"tenant":"0e6e57702ef1"`, and the panel only read
+ * "demo" because the relay stamped the slug it had resolved the container by onto what it served.
+ * The file on disk is the artefact an operator opens for a billing dispute, so it says what it
+ * knows -- which box -- and the relay's stamp stays the only thing that says whose box it is.
  *
  * `proxyBytes` is null on purpose where the vendor does not publish it. Browserbase's session
  * object carries it; Browser Use documents no per-browser traffic figure at all. Writing a zero
@@ -41,7 +49,8 @@ import type { CloudBrowserVendor } from "./secrets.js";
 export const CLOUD_BROWSER_LEDGER_FILENAME = "cloud-browser-ledger.jsonl";
 
 export interface CloudBrowserLedgerRow {
-  readonly tenant: string;
+  /** What the box calls itself. NOT the tenant: see the header. The relay names the tenant. */
+  readonly boxName: string;
   readonly agentId: string;
   readonly vendor: CloudBrowserVendor;
   readonly sessionId: string;
@@ -77,7 +86,7 @@ function append(rootDir: string, row: Record<string, unknown>): void {
 
 /** The row that goes down BEFORE the connect. Everything about the money is still unknown here. */
 export function recordCloudSessionOpened(rootDir: string, row: {
-  readonly tenant: string;
+  readonly boxName: string;
   readonly agentId: string;
   readonly vendor: CloudBrowserVendor;
   readonly sessionId: string;
@@ -85,7 +94,7 @@ export function recordCloudSessionOpened(rootDir: string, row: {
   readonly url: string;
 }): CloudBrowserLedgerRow {
   const open: CloudBrowserLedgerRow = {
-    tenant: row.tenant,
+    boxName: row.boxName,
     agentId: row.agentId,
     vendor: row.vendor,
     sessionId: row.sessionId,
@@ -142,7 +151,12 @@ export function readCloudBrowserLedger(rootDir: string): CloudBrowserLedgerRow[]
     try { parsed = JSON.parse(trimmed) as Record<string, unknown>; } catch { continue; }
     const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : "";
     if (sessionId.length === 0) continue;
-    const { event: _event, ...row } = parsed;
+    const { event: _event, tenant: writtenAsTenant, ...rest } = parsed;
+    // Rows written before this field was named honestly carry the box's own name under `tenant`.
+    // They are read, not rewritten: a ledger is a receipt, and rewriting one is the opposite of it.
+    const row = rest.boxName === undefined && typeof writtenAsTenant === "string"
+      ? { ...rest, boxName: writtenAsTenant }
+      : rest;
     bySession.set(sessionId, row as unknown as CloudBrowserLedgerRow);
   }
   return [...bySession.values()];
@@ -155,7 +169,7 @@ export function openCloudSessions(rootDir: string): CloudBrowserLedgerRow[] {
     .sort((left, right) => String(left.startedAt).localeCompare(String(right.startedAt)));
 }
 
-/** What the console's Computer card and the admin panel both count. One month, one tenant. */
+/** What the console's Computer card and the admin panel both count. One month, one box. */
 export function summariseCloudBrowserLedger(rows: readonly CloudBrowserLedgerRow[], since?: Date): {
   readonly sessions: number;
   readonly minutes: number;

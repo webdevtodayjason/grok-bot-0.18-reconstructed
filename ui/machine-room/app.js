@@ -2804,10 +2804,27 @@
     };
   }
 
+  /**
+   * Has the recurring check already found that this row moved?
+   *
+   * A doc fact the job could not confirm comes back as `state: "changed"`, and the catalog carries
+   * that per fact. The page used to decide "under review" from AGE alone, so a row the job had
+   * flagged this morning still read "Checked today" in the hero while the operator's own panel said
+   * NEEDS RE-VERIFICATION -- measured on the R750 on 2026-09-09 against the Browserbase row, whose
+   * recheck interval is thirty days, so the customer's page would have kept saying it for a month
+   * on an installable row with two credential boxes on it. The flip is delivered; it was only ever
+   * drawn one disclosure down, in the collapsed section nobody opens before installing.
+   */
+  function marketplaceRowFlagged(item) {
+    const docs = Array.isArray(item?.docs) ? item.docs : [];
+    return docs.some((doc) => String(doc?.state ?? "verified") === "changed");
+  }
+
   function marketplaceVerificationMarkup(item) {
     if (!item) return "";
     const verification = item.verification ?? null;
     const age = marketplaceRowAge(item);
+    const flagged = marketplaceRowFlagged(item);
     const lines = [];
     if (verification?.checkedOn) {
       // A DATE AND NOTHING ELSE. `verification.how` is a sentence written for us -- it names an
@@ -2818,10 +2835,17 @@
       const ran = marketplaceDay(verification.checkedOn);
       lines.push(`<p class="field-hint" data-marketplace-verified>Verified ${escapeHtml(ran || String(verification.checkedOn))}</p>`);
     }
-    if (age.oldest) {
-      lines.push(age.stale
-        ? `<p class="field-hint" data-marketplace-under-review><strong>Under review</strong> — we are re-reading this vendor's own documentation. What is below was true on ${escapeHtml(marketplaceDay(age.oldest))} and these vendors change their requirements often, so hold off installing until this page says checked again.</p>`
-        : `<p class="field-hint" data-marketplace-checked>Checked ${escapeHtml(marketplaceDay(age.oldest))} against ${escapeHtml(String(item.source?.label ?? "the vendor's own documentation"))}.</p>`);
+    if (age.oldest || flagged) {
+      // Flagged first. An out-of-date row is a row nobody has looked at; a flagged row is one
+      // somebody looked at and found had moved, which is the worse of the two and the one a person
+      // must not read a reassuring date on.
+      if (flagged) {
+        lines.push(`<p class="field-hint" data-marketplace-under-review data-marketplace-flagged><strong>Under review</strong> — this vendor has changed something since we last wrote these steps down, and we are working out what. Hold off setting it up until this page says checked again; what is below may send you round a loop that no longer exists.</p>`);
+      } else if (age.stale) {
+        lines.push(`<p class="field-hint" data-marketplace-under-review><strong>Under review</strong> — we are re-reading this vendor's own documentation. What is below was true on ${escapeHtml(marketplaceDay(age.oldest))} and these vendors change their requirements often, so hold off installing until this page says checked again.</p>`);
+      } else {
+        lines.push(`<p class="field-hint" data-marketplace-checked>Checked ${escapeHtml(marketplaceDay(age.oldest))} against ${escapeHtml(String(item.source?.label ?? "the vendor's own documentation"))}.</p>`);
+      }
     }
     return lines.join("");
   }

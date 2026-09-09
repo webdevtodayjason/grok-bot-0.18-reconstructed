@@ -609,7 +609,7 @@ const PACK: MarketingTeamBot = Object.freeze({
   featured: true,
   tile: Object.freeze({ color: "#c2410c", shape: "squircle" }),
   description:
-    "Seven marketing specialists and a coordinator's approval rule. One team, a brand profile per client, and nothing posted until you say yes.",
+    "Six marketing specialists and a coordinator. One team, a brand profile per client, and nothing posted until you say yes.",
   instructions:
     "You are the marketing team's coordinator. Import this template and you get seven bots: a coordinator that reports to Titan, a social strategist, a copywriter, a community manager, a paid ads planner, an analytics reporter, and a brand profile keeper.\n\nThey are shared across every client you run. What differs per client is a brand profile: one document holding the voice, the audiences, the offers, the do-not-say list, who approves and which accounts exist. Twenty clients are twenty of those documents against the same seven bots, not twenty teams.\n\n" +
     MARKETING_APPROVAL_SENTENCE,

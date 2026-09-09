@@ -88,6 +88,26 @@ test("seven specialists, one of them the coordinator that reports to Titan", () 
   }
 });
 
+// The card shipped saying "Seven marketing specialists and a coordinator's approval rule", which a
+// person reads as eight bots against a roster of seven. Any number word in the copy a customer
+// reads now has to be a number the roster actually has.
+test("the numbers in the pack's own copy match the roster it creates", () => {
+  const WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  const specialists = members.filter((member) => member.reportsTo != null).length;
+  const allowed = new Set([members.length, specialists]);
+  // Only a number that is COUNTING BOTS. "One team, a brand profile per client" is a sentence about
+  // the shape of the thing, not a headcount, and a check that cannot tell those apart is a check
+  // somebody deletes.
+  const counted = /\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:marketing\s+)?(specialists?|bots?|agents?)\b/gi;
+  for (const found of theTeam.description.matchAll(counted)) {
+    const value = WORDS[found[1].toLowerCase()];
+    assert.ok(
+      allowed.has(value),
+      `the pack description counts "${found[0]}" and the roster has ${members.length} bots, ${specialists} of them specialists: ${theTeam.description}`,
+    );
+  }
+});
+
 test("every member names real plugin ids, and the pack's list is exactly their union", () => {
   const union = new Set();
   for (const member of members) {

@@ -126,6 +126,7 @@ import { hostname } from "node:os";
 // CLOUD-BROWSER-1. The cloud leg of the four browser tools. Everything it needs -- the policy, the
 // stored keys, the ledger, the register of open sessions -- lives under the sand root next door.
 import {
+  CLOUD_VIEW_IDLE_SECONDS,
   CloudBrowserService,
   type CloudBrowserPorts,
   type CloudBrowserVendor,
@@ -1143,16 +1144,31 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
      * throw away: the register of open cloud sessions the console draws from, and the per-turn
      * session ceiling. Neither is a setting, and neither survives being reconstructed.
      *
-     * `tenant` is the best name the box has for itself. A box does not know its control-plane slug
-     * -- nothing pushes it in -- so the relay stamps the authoritative slug onto what it serves,
-     * because the relay is the thing that knows which box belongs to whom.
+     * `getBoxName` is the best name the box has for itself, and the ledger field is named after
+     * what it holds rather than after what somebody hoped it held. A box does not know its
+     * control-plane slug -- nothing pushes it in -- so this is a hostname, which inside a container
+     * is a short docker id. The relay stamps the authoritative slug onto what it serves, because
+     * the relay is the thing that knows which box belongs to whom.
      */
     const cloudBrowserService = new CloudBrowserService({
       rootDir: getSandRootDir(),
       fetch: ((input: string, init?: Record<string, unknown>) =>
         fetch(input, init as RequestInit)) as CloudBrowserPorts["fetch"],
-      getTenant: () => readSandBoxSetting("SAND_TENANT") ?? hostname(),
+      getBoxName: () => readSandBoxSetting("SAND_TENANT") ?? hostname(),
       getAgentId: () => session.id,
+      /**
+       * How long a held browser may sit unused before it is given back. It is a setting because it
+       * is the one bound on what a forgotten cloud browser can cost, so an operator has to be able
+       * to shorten it on a running box -- and because a gate that cannot shorten it cannot prove
+       * the release path in less than four minutes. Read per call; anything outside 5..900 seconds
+       * is ignored and the default stands.
+       */
+      get viewIdleMs(): number {
+        const seconds = Number(readSandBoxSetting("SAND_CLOUD_BROWSER_IDLE_SECONDS"));
+        return Number.isFinite(seconds) && seconds >= 5 && seconds <= 900
+          ? Math.floor(seconds) * 1000
+          : CLOUD_VIEW_IDLE_SECONDS * 1000;
+      },
       // The gate's loopback endpoint (scripts/verify-browser-tools.mjs --cloud-shape). Read per
       // call so a gate can set it and clear it without a restart; the module refuses anything that
       // is not ws:// on 127.0.0.1, so this cannot become a way to point the browser somewhere else.
@@ -1174,14 +1190,16 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       cloudBrowser: {
         route: input => cloudBrowserService.route(input),
         shouldEscalate: verdicts => cloudBrowserService.shouldEscalate(verdicts),
-        open: async input => {
-          const lease = await cloudBrowserService.open({
-            vendor: input.engine as CloudBrowserVendor,
-            route: { engine: input.engine as CloudBrowserVendor, reason: input.reason },
-            url: input.url,
-          });
-          return { cdpUrl: lease.handle.cdpUrl, sessionId: lease.handle.sessionId, close: lease.close };
-        },
+        // The browser is held for the life of a PAGE, not of a tool call, which is what makes a
+        // sign-up possible at all: the click after the open reaches the browser the open used.
+        viewEngine: viewId => cloudBrowserService.viewEngine(viewId),
+        hold: async input => await cloudBrowserService.hold({
+          viewId: input.viewId,
+          engine: input.engine as "box" | CloudBrowserVendor,
+          reason: input.reason,
+          url: input.url,
+        }),
+        releaseView: async viewId => { await cloudBrowserService.releaseView(viewId); },
       },
     });
     const sharedRoomBoxToolsEnabled = (): boolean =>

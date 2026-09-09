@@ -109,14 +109,37 @@ export {
  */
 export const CLOUD_SESSION_TIMEOUT_SECONDS = 300;
 
+/**
+ * CLOUD-BROWSER-2's real cause, and the constant that answers it.
+ *
+ * A cloud session used to be minted and stopped inside ONE tool call. Measured on the R750's demo
+ * box on 2026-09-09: two sessions for the same Instagram profile, 5.4 s and 8.1 s apart, two
+ * separate browsers, neither continued. Nothing a marketing team actually needs -- a sign-up, a
+ * login, a code typed into a second page -- can happen that way, because the click after the open
+ * lands in a different browser on a different page.
+ *
+ * So a browser is now held for the life of the PAGE, not the call, and this is how long it may sit
+ * with nothing pointed at it before it is given back. Deliberately under the vendor's own ceiling
+ * above: the vendor stops the session at five minutes whatever we do, so an idle timer longer than
+ * that would only ever hand a dead endpoint to the next click.
+ */
+export const CLOUD_VIEW_IDLE_SECONDS = 240;
+
 export interface CloudBrowserPorts {
   /** The sand root. The secret store, the policy and the ledger all live under it. */
   readonly rootDir: string;
   readonly fetch: FetchLike;
-  /** The tenant this box belongs to, for the ledger row the super admin reads. */
-  getTenant(): string;
+  /**
+   * What this box calls itself, for the ledger row. NOT the tenant, and it is named that way
+   * because the field used to claim to be one: a box holds no control-plane slug, so this is a
+   * hostname, which inside a container is a short docker id. The relay stamps the real tenant onto
+   * what it serves, because the relay is the thing that knows whose box it is.
+   */
+  getBoxName(): string;
   /** Whose turn this is. The live-view register and the per-turn ceiling are both keyed on it. */
   getAgentId(): string;
+  /** How long a held browser may sit unused. Defaults to CLOUD_VIEW_IDLE_SECONDS; the tests shorten it. */
+  readonly viewIdleMs?: number;
   /**
    * THE GATE'S OWN ENDPOINT, and the reason it is production code rather than a test double.
    *
@@ -166,10 +189,23 @@ export interface CloudSessionLease {
  * The whole cloud leg as one object, so the seam in sand-browser-tools.ts is a handful of lines
  * rather than a second copy of this file's judgement.
  */
+/** One page, and the browser that is holding it. `lease` is null when that browser is the box's own. */
+interface HeldCloudView {
+  engine: "box" | CloudBrowserVendor;
+  lease: CloudSessionLease | null;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 export class CloudBrowserService {
   #ports: CloudBrowserPorts;
   #live: CloudBrowserLiveRegister;
   #sessionsThisTurn = new Map<string, number>();
+  /**
+   * Which browser holds which page. This map is the whole of the fix for a cloud session that could
+   * not survive its own tool call: a click carries no address, so without a note of what opened the
+   * page the router would decide from nothing and send the click to the box.
+   */
+  #views = new Map<string, HeldCloudView>();
 
   constructor(ports: CloudBrowserPorts, live: CloudBrowserLiveRegister = cloudBrowserLiveSessions) {
     this.#ports = ports;
@@ -198,9 +234,87 @@ export class CloudBrowserService {
     return storedCloudBrowserVendors(this.#ports.rootDir);
   }
 
-  /** A new turn resets the per-turn ceiling. Called where the runner already notices a turn start. */
+  /**
+   * A new turn resets the per-turn ceiling. Called where the runner already notices a turn start.
+   *
+   * It deliberately does NOT give the held browsers back. A hand-off card ends the bot's turn on
+   * purpose -- that is the mechanism -- and the person then does the thing only they can do (a
+   * code, a captcha, an identity check) in that browser's live view. Closing on the next turn start
+   * would throw away the session in the exact moment the wave exists for. The idle timer is what
+   * bounds the money instead, and it is shorter than the vendor's own ceiling.
+   */
   beginTurn(agentId: string): void {
     this.#sessionsThisTurn.delete(agentId);
+  }
+
+  /** Which browser is holding this page, or undefined when nothing has opened it yet. */
+  viewEngine(viewId: string): "box" | CloudBrowserVendor | undefined {
+    return this.#views.get(viewId)?.engine;
+  }
+
+  /**
+   * Take, or keep, the browser that holds this page.
+   *
+   * Called on EVERY browser action, box included, so the box is recorded as the holder too: a page
+   * opened in the box must keep being clicked in the box, and a map that only knew about cloud
+   * pages could not say that. A cloud engine answers with the endpoint the driver attaches to; the
+   * box answers with nothing, which is how the caller knows to use the display and the local port.
+   */
+  async hold(input: {
+    readonly viewId: string;
+    readonly engine: "box" | CloudBrowserVendor;
+    readonly reason: string;
+    readonly url: string;
+    readonly contextId?: string | undefined;
+    readonly profileId?: string | undefined;
+  }): Promise<{ readonly cdpUrl: string; readonly sessionId: string } | null> {
+    const existing = this.#views.get(input.viewId);
+    if (existing !== undefined && existing.engine === input.engine) {
+      this.#armIdle(input.viewId);
+      return existing.lease === null
+        ? null
+        : { cdpUrl: existing.lease.handle.cdpUrl, sessionId: existing.lease.handle.sessionId };
+    }
+    // The page is moving to the other engine -- an address given to a page already open elsewhere,
+    // or the one escalation a box answer is allowed. Give the old browser back before taking a new
+    // one, so a switch never leaves two browsers billing for one page.
+    if (existing !== undefined) await this.releaseView(input.viewId);
+    if (input.engine === "box") {
+      this.#views.set(input.viewId, { engine: "box", lease: null, timer: null });
+      this.#armIdle(input.viewId);
+      return null;
+    }
+    const lease = await this.open({
+      vendor: input.engine,
+      route: { engine: input.engine, reason: input.reason },
+      url: input.url,
+      ...(input.contextId === undefined ? {} : { contextId: input.contextId }),
+      ...(input.profileId === undefined ? {} : { profileId: input.profileId }),
+    });
+    this.#views.set(input.viewId, { engine: input.engine, lease, timer: null });
+    this.#armIdle(input.viewId);
+    return { cdpUrl: lease.handle.cdpUrl, sessionId: lease.handle.sessionId };
+  }
+
+  /** Give this page's browser back. Stops a cloud session; a box page is simply forgotten. */
+  async releaseView(viewId: string): Promise<void> {
+    const held = this.#views.get(viewId);
+    if (held === undefined) return;
+    this.#views.delete(viewId);
+    if (held.timer !== null) clearTimeout(held.timer);
+    if (held.lease !== null) await held.lease.close();
+  }
+
+  #armIdle(viewId: string): void {
+    const held = this.#views.get(viewId);
+    if (held === undefined) return;
+    if (held.timer !== null) clearTimeout(held.timer);
+    const timer = setTimeout(() => {
+      void this.releaseView(viewId).catch(() => undefined);
+    }, this.#ports.viewIdleMs ?? CLOUD_VIEW_IDLE_SECONDS * 1000);
+    // A pending idle timer is not a reason for this process to stay alive.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    held.timer = timer;
   }
 
   /**
@@ -244,7 +358,7 @@ export class CloudBrowserService {
     const agentId = this.#ports.getAgentId();
     const handle = await this.#openVendor(input.vendor, input.contextId, input.profileId);
     const row = recordCloudSessionOpened(this.#ports.rootDir, {
-      tenant: this.#ports.getTenant(),
+      boxName: this.#ports.getBoxName(),
       agentId,
       vendor: input.vendor,
       sessionId: handle.sessionId,

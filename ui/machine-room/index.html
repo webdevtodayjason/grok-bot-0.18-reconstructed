@@ -373,6 +373,14 @@
     <!-- The Marketplace's Bots tab. It only attaches window.__marketplaceBots at load and reads
          the adapter lazily, so it can come before app.js builds one. -->
     <script src="marketplace-bots.js"></script>
+    <!-- The cloud browser's own side of the console: the strip in the Computer card that says where
+         the browser is running and what the month cost, and the take-over row beside a hand-off
+         card. Same contract as marketplace-bots.js above -- it publishes window.__cloudBrowser at
+         load, reads the gateway lazily, and finds the cards itself, so nothing in app.js has to
+         call it. It shipped once with no tag here at all, which is how a person could never take
+         over a cloud session; scripts/verify-browser-tools.mjs now opens the console in a real
+         browser and fails if the strip is not on screen. -->
+    <script src="cloud-browser.js"></script>
     <!-- CONSOLE-4: the three sibling modules items B, C and D fill. They sit here, beside
          marketplace-bots.js and ahead of app.js, for one reason: app.js consults all three seams
          inside its FIRST renderAll, and a module that arrives after that first paint would show

@@ -363,6 +363,76 @@ try {
       await page.click("[data-marketplace-back]").catch(() => {});
       await page.waitForTimeout(600);
     }
+
+    // A ROW THE RECURRING CHECK HAS FLAGGED DRAWS "Under review" TOO, ON TODAY'S DATE.
+    //
+    // The leg above ages a row out. This one is the case that actually bit: the job read the
+    // vendor's page, could not find the fact the row depends on, stamped the doc `changed` and the
+    // read date FORWARD to today -- so the row was fresh by age and broken in fact, and the hero
+    // said "Checked today" on it. Measured on the R750 on 2026-09-09: the operator's own panel said
+    // NEEDS RE-VERIFICATION for browserbase while its page would have said checked, for thirty days,
+    // with two credential boxes and an Add on it. Age cannot see that; the doc's own state can.
+    const flaggedPatched = await page.evaluate(async () => {
+      const adapter = window.__machineRoomAdapter;
+      if (adapter == null || typeof adapter.listMarketplace !== "function") return { unavailable: "the console exposes no adapter" };
+      window.__marketplaceGateOriginal = adapter.listMarketplace.bind(adapter);
+      const original = window.__marketplaceGateOriginal;
+      adapter.listMarketplace = async () => {
+        const catalog = await original(true);
+        const today = new Date().toISOString().slice(0, 10);
+        return {
+          ...catalog,
+          plugins: (catalog?.plugins ?? []).map((plugin) => (plugin.id === "meta"
+            // Read TODAY, and one of the facts has moved. Exactly what a --write leaves behind.
+            ? { ...plugin, docs: (plugin.docs ?? []).map((doc, index) => ({ ...doc, checkedOn: today, state: index === 0 ? "changed" : doc.state })) }
+            : plugin)),
+        };
+      };
+      return { patched: true };
+    });
+    if (flaggedPatched.unavailable) {
+      check(false, "the flagged-row leg could not run", String(flaggedPatched.unavailable));
+    } else {
+      await page.click("[data-close-dialog]").catch(() => {});
+      await page.waitForTimeout(400);
+      await page.click('[data-capability="marketplace"]');
+      await page.waitForTimeout(2500);
+      await page.click('[data-marketplace-card="meta"]');
+      await page.waitForTimeout(900);
+      const flaggedDrew = await page.evaluate(() => {
+        const node = document.querySelector("[data-marketplace-under-review]");
+        if (node == null) {
+          const fresh = document.querySelector("[data-marketplace-checked]");
+          return { review: false, text: (fresh?.textContent ?? "nothing at all").trim().slice(0, 120) };
+        }
+        const r = node.getBoundingClientRect();
+        return {
+          review: true,
+          flagged: node.hasAttribute("data-marketplace-flagged"),
+          text: node.textContent.trim().slice(0, 200),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+        };
+      });
+      check(flaggedDrew.review === true && flaggedDrew.flagged === true && flaggedDrew.w > 200 && flaggedDrew.h > 0,
+        `a row the check has flagged says so, even though its dates are today's (${flaggedDrew.text})`,
+        JSON.stringify(flaggedDrew));
+      check(flaggedDrew.review === true && /hold off/i.test(flaggedDrew.text),
+        "and it tells the person to hold off before they spend an afternoon on it", flaggedDrew.text);
+      // The date must not still be on the page beside it. Two lines, one saying checked today and
+      // one saying under review, is worse than either on its own.
+      const stillDated = await page.$$('[data-marketplace-checked]');
+      check(stillDated.length === 0, "and the reassuring date is gone, not sitting beside it", `${stillDated.length} drawn`);
+
+      await page.evaluate(() => {
+        if (typeof window.__marketplaceGateOriginal === "function") {
+          window.__machineRoomAdapter.listMarketplace = window.__marketplaceGateOriginal;
+          delete window.__marketplaceGateOriginal;
+        }
+      });
+      await page.click("[data-marketplace-back]").catch(() => {});
+      await page.waitForTimeout(600);
+    }
   }
 
   // ---- Add your own -----------------------------------------------------------------------------
