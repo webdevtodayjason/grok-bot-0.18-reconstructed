@@ -553,8 +553,13 @@ test("gap-badge.js and gap-badge.css are loaded by the page once app.js calls th
   const index = await readFile(path.join(repoRoot, "ui/machine-room/index.html"), "utf8");
   assert.match(index, /<script src="gap-badge\.js"><\/script>/, "the module must load before app.js");
   assert.match(index, /<link rel="stylesheet" href="gap-badge\.css" \/>/);
+  // app.js is not a static tag on this page: the boot script waits for the gateway and then
+  // appends it, so the thing to be ahead of is whichever of those two shapes the page uses.
+  const appAt = [index.indexOf('src="app.js"'), index.indexOf('script.src = "app.js"')]
+    .filter((at) => at >= 0);
+  assert.ok(appAt.length, "index.html no longer loads app.js in any shape this test knows");
   assert.ok(
-    index.indexOf('src="gap-badge.js"') < index.indexOf('src="app.js"'),
+    index.indexOf('src="gap-badge.js"') < Math.min(...appAt),
     "app.js reads window.__gapBadge at render time, so the module has to be there first",
   );
 });
