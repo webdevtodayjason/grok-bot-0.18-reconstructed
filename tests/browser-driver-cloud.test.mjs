@@ -20,8 +20,9 @@ import tls from "node:tls";
 import crypto from "node:crypto";
 
 import { connectWebSocket, acceptKey, encodeFrame, OPCODE } from "../runtime/browser-driver/ws.mjs";
+import { CdpConnection } from "../runtime/browser-driver/cdp.mjs";
 import { checkPublicWebUrl, NOT_PUBLIC_WEB } from "../runtime/browser-driver/driver.mjs";
-import { analyzePage, detectEmptyShell, EMPTY_SHELL_MIN_HTML_BYTES } from "../runtime/browser-driver/page-text.mjs";
+import { analyzePage, detectEmptyShell, EMPTY_SHELL_MAX_CHARS, EMPTY_SHELL_MIN_HTML_BYTES } from "../runtime/browser-driver/page-text.mjs";
 
 /* ------------------------------------------------------------------ a TLS websocket server */
 
@@ -120,6 +121,45 @@ test("ws.mjs takes the wss leg and reaches for TLS rather than a plain socket", 
   }
 });
 
+test("attachTo takes an http endpoint and resolves it, the way the vendor's own docs use it", async () => {
+  // MEASURED against Browser Use 2026-09-09: POST /api/v4/browsers answered with a `cdpUrl` that is
+  // NOT a ws:// URL, and their docs hand that same string to Playwright's connect_over_cdp, which
+  // accepts an http endpoint and resolves /json/version itself. A driver that only spoke websocket
+  // would have refused the vendor's own documented answer at the door. This is that case.
+  const { server, port } = await startEchoServer({ secure: false });
+  const asked = [];
+  try {
+    // A tiny http server standing in for the vendor's /json/version, pointing at the socket above.
+    const http = await import("node:http");
+    const resolver = http.createServer((request, response) => {
+      asked.push(request.url);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/abc` }));
+    });
+    await new Promise((resolve) => resolver.listen(0, "127.0.0.1", resolve));
+    try {
+      const connection = await CdpConnection.attachTo(`http://127.0.0.1:${resolver.address().port}/cdp/session-token`, { timeoutMs: 5000 });
+      assert.deepEqual(asked, ["/cdp/session-token/json/version"], "the endpoint's own path is kept; the credential is in it");
+      connection.close();
+    } finally {
+      resolver.close();
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test("attachTo refuses an endpoint that is neither a websocket nor a web address", async () => {
+  for (const url of ["file:///etc/passwd", "ftp://example.com/x"]) {
+    await assert.rejects(
+      async () => await CdpConnection.attachTo(url, { timeoutMs: 300 }),
+      (error) => /cannot reach a browser over/.test(error.message),
+      `expected ${url} to be refused`,
+    );
+  }
+  await assert.rejects(async () => await CdpConnection.attachTo("", {}), (error) => /no browser endpoint/.test(error.message));
+});
+
 /* ------------------------------------------------------------------ the second address guard */
 
 test("checkPublicWebUrl still refuses a public name that resolves to a private address", async () => {
@@ -149,18 +189,35 @@ test("checkPublicWebUrl still refuses a scheme that is not the web", async () =>
 
 /* ------------------------------------------------------------------ the no-content verdict */
 
-// The measured page, rebuilt from what grok-bot-local-vm read on 2026-09-09: a 620 kB document that
-// answered 200 with needsLogin false, blocked false, and Meta's footer chrome as its entire text.
-// The markup is padding because the markup is not what the verdict reads -- the extracted text is,
-// and this reproduces the extracted text exactly: short link-shaped lines and nothing else.
-const INSTAGRAM_FOOTER_WORDS = [
-  "Meta", "About", "Blog", "Jobs", "Help", "API", "Privacy", "Terms", "Locations",
-  "Instagram Lite", "Threads", "Contact Uploading & Non-Users", "Meta Verified",
-  "English", "Afrikaans", "Deutsch", "Espanol", "Francais",
+// THE CAPTURED PAGE, and it is captured rather than imagined.
+//
+// Read off grok-bot-local-vm 2026-09-09 by driving the box's own Chrome at
+// https://www.instagram.com/titaniumcomputing/ and printing the extracted text: 630 characters,
+// HTTP 200, needsLogin false, blocked false. Every one of those characters is footer chrome. The
+// two lines that matter are kept verbatim from that capture:
+//
+//   - the 411-character language picker, whose options are run together with no separators. A
+//     length test alone reads that as prose, which is exactly why the first version of this verdict
+//     did NOT fire on the page it was written for;
+//   - the copyright line, which is short enough to be a label.
+//
+// The markup around them is padding, because the markup is not what the verdict reads.
+const INSTAGRAM_FOOTER_LINES = [
+  "Meta", "About", "Blog", "Jobs", "Help", "API", "Privacy", "Consumer Health Privacy",
+  "Terms", "Locations", "Popular", "Instagram Lite", "Meta AI", "Muse", "Threads",
+  "Contact Uploading & Non-Users", "Meta Verified", "English",
 ];
+// Verbatim from the capture. 411 characters, about one space every forty.
+const INSTAGRAM_LANGUAGE_PICKER =
+  "AfrikaansالعربيةČeštinaDanskDeutschΕλληνικάEnglishEnglish (UK)Español (España)Español"
+  + "فارسیSuomiFrançaisעבריתBahasa IndonesiaItaliano日本語한국어Bahasa MelayuNorskNederlandsPolski"
+  + "Português (Brasil)Português (Portugal)РусскийSvenskaภาษาไทยFilipinoTürkçe中文(简体)中文(台灣)"
+  + "বাংলাગુજરાતીहिन्दीHrvatskiMagyarಕನ್ನಡമലയാളംमराठीनेपालीਪੰਜਾਬੀසිංහලSlovenčinaதமிழ்తెలుగుاردو"
+  + "Tiếng Việt中文(香港)БългарскиFrançais (Canada)RomânăСрпскиУкраїнська";
 const INSTAGRAM_SHELL_HTML = `<html><head><title>Titanium Computing (@titaniumcomputing) &#8226; Instagram photos and videos</title></head>`
   + `<body><div id="mount_0_0_aB">${"<div class=\"x1n2onr6\"><span></span></div>".repeat(9000)}</div>`
-  + `<footer><ul>${INSTAGRAM_FOOTER_WORDS.map((word) => `<li><a href="#">${word}</a></li>`).join("")}</ul>`
+  + `<footer><ul>${INSTAGRAM_FOOTER_LINES.map((word) => `<li><a href="#">${word}</a></li>`).join("")}</ul>`
+  + `<div>${INSTAGRAM_LANGUAGE_PICKER}</div>`
   + `<span>&#169; 2026 Instagram from Meta</span></footer></body></html>`;
 
 // example.com as it really is: 559 bytes, 131 characters of readable text, and a whole page.
@@ -182,6 +239,46 @@ test("emptyShell fires on the captured Instagram body", () => {
   assert.equal(analysis.blocked, false, "and it was not blocked either");
   assert.equal(analysis.emptyShell, true, "so the third verdict is the only thing that can catch it");
   assert.ok(analysis.emptyShellReason.length > 0);
+});
+
+test("the language picker on that page is not mistaken for prose", () => {
+  // The regression this exists for, in one assertion. The captured page's text is 630 characters
+  // and 411 of them are one line of run-together language names. Measured on grok-bot-local-vm
+  // 2026-09-09, that line alone kept the verdict from firing on the real page.
+  assert.ok(INSTAGRAM_LANGUAGE_PICKER.length > EMPTY_SHELL_MAX_CHARS, "the line is longer than the short-page threshold");
+  const analysis = analyzePage({ html: INSTAGRAM_SHELL_HTML, innerText: "", title: "Titanium Computing", url: "https://www.instagram.com/titaniumcomputing/", status: 200 });
+  assert.ok(analysis.text.includes("Українська"), "the picker really is in the extracted text");
+  assert.ok(analysis.text.length > EMPTY_SHELL_MAX_CHARS, "so the page is not caught by the short-page clause");
+  assert.equal(analysis.emptyShell, true, "and is still caught, on the clause that reads it as a list rather than a sentence");
+});
+
+test("a long line that IS running text keeps a page out of the verdict", () => {
+  // The other side of the same rule, aimed squarely at the list-versus-sentence clause: this page
+  // clears the short-page threshold, so the only clause left that could call it empty is the one
+  // that reads its lines. An ordinary paragraph is one long line too, and the thing that tells it
+  // apart from a run-together list is spaces at a plausible rate -- about one word every five
+  // characters here, against one every forty in Instagram's language picker.
+  const prose = "The measured latency on this box was three seconds and change, which is slower than the same page "
+    + "read from the Mac, and slower again on a cold browser. The first open pays for Chrome starting up and "
+    + "every open after it does not. That is the whole shape of the number, and it is why a gate that times a "
+    + "cold browser is timing the wrong thing entirely. Warm it first, then time what you came to time, "
+    + "and say which of the two the number belongs to whenever you write it down anywhere at all.";
+  const page = `<html><head><title>A note</title></head><body><div>${"<span></span>".repeat(9000)}</div>`
+    + `<footer><ul><li>About</li><li>Terms</li></ul></footer><article><p>${prose}</p></article></body></html>`;
+  const analysis = analyzePage({ html: page, innerText: "", title: "A note", url: "https://example.com/a", status: 200 });
+  assert.ok(analysis.text.length > EMPTY_SHELL_MAX_CHARS, `the page must clear the short-page clause; it is ${analysis.text.length}`);
+  assert.ok(analysis.text.includes("three seconds and change"));
+  assert.equal(analysis.emptyShell, false, "one long line of real sentences is content, not furniture");
+});
+
+test("a heavy page with almost nothing on it is a shell, which is the ported rule doing its job", () => {
+  // TOOLS-FETCH-2's clause, unchanged: a big document that reduced to almost nothing. A rendered DOM
+  // of a hundred kilobytes carrying one sentence is a page that did not finish drawing itself.
+  const page = `<html><head><title>Loading</title></head><body><div>${"<span></span>".repeat(9000)}</div>`
+    + `<article><p>The measured latency on this box was three seconds and change.</p></article></body></html>`;
+  const analysis = analyzePage({ html: page, innerText: "", title: "Loading", url: "https://example.com/a", status: 200 });
+  assert.ok(analysis.text.length < EMPTY_SHELL_MAX_CHARS);
+  assert.equal(analysis.emptyShell, true);
 });
 
 test("emptyShell does NOT fire on the captured example.com body", () => {

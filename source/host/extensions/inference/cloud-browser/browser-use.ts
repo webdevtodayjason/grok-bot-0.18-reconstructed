@@ -20,6 +20,17 @@
  * nothing is asked twice. The verification job (item B) carries this contradiction as a named fact
  * so the day the vendor settles it, the row says so instead of this code quietly working by luck.
  *
+ * THE ENDPOINT IS NOT A WEBSOCKET URL, and that cost a real session to learn. Measured against the
+ * live API 2026-09-09: `POST /api/v4/browsers` answered 201 and its `cdpUrl` is not `ws://`. The
+ * vendor's own docs hand that string to Playwright's `connect_over_cdp`, which takes an http
+ * endpoint and resolves `/json/version` itself. So the driver accepts both shapes; nothing here
+ * inspects or rewrites the endpoint, it just carries it.
+ *
+ * PROFILES ARE AN API, not a dashboard-only affair: `POST /api/v4/profiles` with a name returns an
+ * id, and that id goes on browser creation as a top-level `profileId` -- log in once, stop the
+ * browser, and the next one starts signed in. That is the saved login that survives a box swap.
+ * This adapter passes a `profileId` through; minting and naming one per client is the next slice.
+ *
  * No key is ever read here from an environment variable or from argv. It arrives as an argument
  * from secrets.ts, which reads the 0600 store in this same process.
  */

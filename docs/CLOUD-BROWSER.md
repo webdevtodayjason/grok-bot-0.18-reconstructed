@@ -179,8 +179,18 @@ host, key or session id, and checks that no request file was left behind.
   ask is not a retry of anything and cannot double-spend. Every other status is reported as it came
   back. The verification job carries this contradiction as a named fact, so the day the vendor
   settles it the row says so instead of this code working by luck.
-- **Browser Use profiles** are minted by hand in the vendor dashboard. There is no documented API to
-  create one, so the docs say that rather than promising something that does not exist.
+- **Browser Use's `cdpUrl` is not a websocket URL.** Measured against the live API on 2026-09-09:
+  `POST /api/v4/browsers` answered 201 with a `cdpUrl` whose scheme is not `ws`. Their own docs hand
+  that string straight to Playwright's `connect_over_cdp`, which accepts an **http** endpoint and
+  resolves `/json/version` itself. A driver that only spoke websocket would have refused the
+  vendor's own documented answer at the door, so `CdpConnection.attachTo` accepts both shapes and
+  resolves an http endpoint the same way it resolves a loopback port. This is the single most
+  useful thing the one metered run bought.
+- **Browser Use profiles** are a documented API, not a dashboard-only affair:
+  `POST /api/v4/profiles` with `{"name": "…"}` returns an id, and that id goes on browser creation
+  as a top-level `profileId`. Log in once in that browser, stop it, and the next browser starts
+  already signed in — which is exactly the "saved login that survives a box swap" this wave is for.
+  The adapter passes `profileId` through; minting and naming profiles per client is the next slice.
 - **Browserbase** authenticates with `X-BB-API-Key`. `POST /v1/sessions` answers with `id`,
   `status`, `connectUrl` and `proxyBytes`; `GET /v1/sessions/{id}/debug` gives
   `debuggerFullscreenUrl`; `POST /v1/sessions/{id}` with `status: "REQUEST_RELEASE"` is the stop.
@@ -230,3 +240,37 @@ way to point the browser somewhere else. The gate restores the setting and the p
 
 Warm the browser before timing anything: measured on this Mac 2026-09-09, a cold open is 45,561 ms
 (Chrome launch) against 1,317 ms warm, and one screenshot is a 14,764-byte JPEG 1280 wide.
+
+## What was measured, and on what
+
+**grok-bot-local-vm, 2026-09-09.** The driver driven directly on the box, once with a display and a
+loopback port (the box path) and once with a `cdpUrl` (the cloud path), against the same page:
+
+| page | engine | time | text | verdict |
+|---|---|---|---|---|
+| example.com | box | 1,456 ms | 129 chars | — |
+| example.com | cloud | 1,007 ms | 129 chars | — |
+| instagram.com/titaniumcomputing/ | box | 2,317 ms | 0 chars | `emptyShell` |
+| instagram.com/titaniumcomputing/ | cloud | 1,641 ms | 630 chars | `emptyShell` |
+
+On example.com the field set is byte-identical across the two paths:
+`engine, ok, summary, text, title, url, viewId`. On the Instagram profile the two runs saw the page
+render differently — one load gave up 630 characters and the other none at all — so the optional
+`text` field is present on one and absent on the other. That is the page varying, not the engine:
+the driver only carries `text` when there is text, and both runs reached the same verdict.
+
+The Instagram result is the whole reason the third verdict exists. Both engines answered 200 with
+`needsLogin: false` and `blocked: false`, and the 630 characters are Meta's footer: About, Blog,
+Jobs, Help, Privacy, Terms, and a 411-character run-together list of language names. Zero characters
+of running text. Before this wave, that was handed to the model with no verdict at all.
+
+The custody check on the same run: no vendor host, key or session id in any process's argument list
+on the box, and zero request files left behind — the driver unlinks each one as it reads it.
+
+**Browser Use, one metered session, 2026-09-09.** `POST /api/v4/browsers` answered 201; the session
+reported `active` before the stop; `PATCH .../{id}` with `{"action":"stop"}` answered 200; and
+reading the session back afterwards reported `stopped`. Total 0.02 minutes, proxy traffic not
+reported by this vendor. That one run is also what caught the `cdpUrl` scheme above.
+
+**Browserbase** was skipped: `BROWSERBASE_PROJECT_ID` is not stored, and a key with no project id
+opens nothing. The gate says so rather than passing quietly.

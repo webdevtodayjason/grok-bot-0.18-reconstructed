@@ -143,7 +143,11 @@ export function isLoopbackDebuggerEndpoint(value: unknown): boolean {
   if (raw.length === 0) return false;
   try {
     const parsed = new URL(raw);
-    if (parsed.protocol !== "ws:") return false;
+    // ws:// or http:// -- the driver resolves an http endpoint through /json/version the same way
+    // it resolves a loopback port, and a box's own Chrome answers on both. wss:// and https:// are
+    // refused here on purpose: this setting exists to point at THIS box, and anything encrypted is
+    // by definition somewhere else.
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "http:") return false;
     const host = parsed.hostname.replace(/^\[|\]$/g, "");
     return host === "127.0.0.1" || host === "::1";
   } catch {

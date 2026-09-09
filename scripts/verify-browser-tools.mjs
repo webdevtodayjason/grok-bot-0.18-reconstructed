@@ -52,6 +52,8 @@
 //                    browser, so the shape claim is measured without a vendor and without a bill
 //   --cloud-live     CLOUD-BROWSER-1, METERED: one short session per vendor, minutes and proxy
 //                    bytes recorded, each one read back from the vendor to prove it stopped
+//   --vendors-only   run ONLY the metered arm: no box, no stub, no endpoint pin. Pair with
+//                    --cloud-live to check the vendors without a six-minute box run
 //
 // Run it on its own. It repins the box's model endpoint for the length of the run, so a second
 // gate running beside it would be answered by this stub.
@@ -95,6 +97,15 @@ const DRY_RUN = process.argv.includes("--dry-run");
  */
 const CLOUD_SHAPE = process.argv.includes("--cloud-shape");
 const CLOUD_LIVE = process.argv.includes("--cloud-live");
+/**
+ * --vendors-only runs the metered arm and nothing else.
+ *
+ * That arm measures the VENDOR -- what a session costs, what it reports, whether the stop works --
+ * not the product, so it needs no box, no stub and no endpoint pin. Making it wait behind a
+ * six-minute box run that also repins the box's model would mean nobody checks the vendors between
+ * releases, which is the whole point of having the arm.
+ */
+const VENDORS_ONLY = process.argv.includes("--vendors-only");
 const CLOUD_CDP_SETTING = "SAND_CLOUD_BROWSER_LOOPBACK_CDP";
 const CLOUD_ENGINES_FILE = "/home/box/sand-data/browser-engines.json";
 const CLOUD_LEDGER_FILE = "/home/box/sand-data/cloud-browser-ledger.jsonl";
@@ -123,6 +134,9 @@ let nothingToMeasure = "";
 // puts the operator's endpoint pin and two settings back -- so an early exit for "the box is not
 // answering" would leave the box pointed at a stub that is no longer listening.
 class NothingToMeasure extends Error {}
+// --vendors-only. Not a failure and not "nothing could be measured": the box run was deliberately
+// skipped, and the metered arm after the finally is the run.
+class SkipTheBoxRun extends Error {}
 const bail = (why) => { throw new NothingToMeasure(why); };
 const check = (ok, label, detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`);
@@ -836,6 +850,12 @@ if (DRY_RUN) {
 }
 
 try {
+  if (VENDORS_ONLY) {
+    // Nothing on the box is touched, so nothing has to be put back. The metered arm below is the
+    // whole run, and the finally's restores are all no-ops because no flag above was ever set.
+    info("--vendors-only: the box run is skipped; only the metered vendor arm below runs");
+    throw new SkipTheBoxRun();
+  }
   step("the box, and this Mac's fixtures");
   const up = (await sh("echo up")).trim();
   if (up !== "up") bail(`the box ${BOX} does not answer docker exec`);
@@ -1314,10 +1334,11 @@ try {
     }
   }
 } catch (error) {
-  if (error instanceof NothingToMeasure) nothingToMeasure = error.message;
+  if (error instanceof SkipTheBoxRun) { /* --vendors-only; the metered arm below is the run */ }
+  else if (error instanceof NothingToMeasure) nothingToMeasure = error.message;
   else check(false, "the browser-tools gate", error.message);
 } finally {
-  step("putting it back");
+  if (!VENDORS_ONLY) step("putting it back");
   if (agentId != null && !KEEP) {
     // An agent will not delete while its turn is still running, and a probe that survived a
     // passing run is exactly how a roster fills up with gate leftovers. Wait for it to settle.
@@ -1400,8 +1421,14 @@ if (CLOUD_LIVE) {
     if (sessionId.length === 0) {
       check(false, "and said which session it was", JSON.stringify(created.body).slice(0, 160));
     } else {
-      check(typeof created.body?.cdpUrl === "string" && created.body.cdpUrl.startsWith("wss://"),
-        "and handed back a wss endpoint the box driver can attach to");
+      // MEASURED 2026-09-09: this vendor's cdpUrl is not a ws:// URL. Their own docs hand it to
+      // Playwright's connect_over_cdp, which takes an http endpoint and resolves /json/version
+      // itself -- so the driver has to accept BOTH shapes, and this leg asserts the shape rather
+      // than assuming one. The scheme is printed because that is the fact worth having on the row.
+      const cdpUrl = String(created.body?.cdpUrl ?? "");
+      const scheme = /^([a-z]+):/i.exec(cdpUrl)?.[1]?.toLowerCase() ?? "";
+      check(["ws", "wss", "http", "https"].includes(scheme),
+        "and handed back an endpoint the box driver can attach to", `scheme: ${scheme || "(none)"}`);
       // THE STOP, in a finally of its own: whatever happened above, the browser ends here.
       let stopped = null;
       try {

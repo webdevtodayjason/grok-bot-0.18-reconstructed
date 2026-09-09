@@ -424,20 +424,52 @@ export function detectBlocked(input) {
  */
 export const EMPTY_SHELL_MIN_HTML_BYTES = 50_000;
 export const EMPTY_SHELL_MAX_CHARS = 400;
-// How much of a page can be furniture before there is nothing else left. A page carrying one real
-// paragraph clears this on that paragraph alone.
-export const EMPTY_SHELL_MAX_PROSE_CHARS = 200;
+/**
+ * How little running text a heavy page can have before it counts as having said nothing.
+ *
+ * Set from the measurement rather than from taste, and set to leave room on BOTH sides. On
+ * grok-bot-local-vm 2026-09-09, instagram.com/titaniumcomputing/ came back with 630 characters of
+ * text and, once the language picker is read as the run-together list it is, ZERO characters of
+ * running text. So the bar does not need to be high to catch it, and a high bar is what makes this
+ * verdict dangerous: telling someone "this page said nothing" about a page that said something
+ * short is worse than missing a shell, because they will believe it.
+ *
+ * A single ordinary sentence is about 120 characters. A page with one of those said something.
+ */
+export const EMPTY_SHELL_MAX_PROSE_CHARS = 120;
 // A line that is short and ends in no sentence punctuation is a link, a menu item or a button
 // label. Long lines and lines that end a sentence are prose, and prose means the page said something.
 const CHROME_LINE_MAX_CHARS = 30;
+
+/**
+ * A LONG LINE IS NOT AUTOMATICALLY PROSE, and this is the clause the real page taught us.
+ *
+ * Measured on grok-bot-local-vm 2026-09-09, reading instagram.com/titaniumcomputing/ through the
+ * box's own Chrome: 630 characters, every one of them footer chrome -- and 411 of those characters
+ * were a SINGLE line, the language picker, with its options run together and no separators:
+ * "AfrikaansالعربيةČeštinaDanskDeutsch..." A length test alone called that prose, so the verdict
+ * did not fire on the exact page it was written for.
+ *
+ * The rule that tells them apart is the one thing language always has and a concatenated list never
+ * does: spaces, at a plausible rate. Running text averages a word every five or six characters. That
+ * language picker averages one per forty. So a line whose average "word" is longer than twenty
+ * characters is a list that lost its separators, not a sentence, whatever its length.
+ */
+const PROSE_MAX_AVERAGE_WORD_CHARS = 20;
+
+function looksLikeRunningText(line) {
+  const words = line.split(/\s+/).filter((word) => word.length > 0).length;
+  return words > 0 && line.length / words <= PROSE_MAX_AVERAGE_WORD_CHARS;
+}
 
 function proseCharacters(text) {
   let total = 0;
   for (const raw of String(text ?? "").split("\n")) {
     const line = raw.replace(/^-\s+/, "").trim();
     if (line.length === 0) continue;
-    const looksLikeChrome = line.length <= CHROME_LINE_MAX_CHARS && !/[.!?:;]$/.test(line);
-    if (!looksLikeChrome) total += line.length;
+    const shortLabel = line.length <= CHROME_LINE_MAX_CHARS && !/[.!?:;]$/.test(line);
+    if (shortLabel || !looksLikeRunningText(line)) continue;
+    total += line.length;
   }
   return total;
 }
