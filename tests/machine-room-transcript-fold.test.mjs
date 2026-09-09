@@ -49,6 +49,11 @@ test("rows with receipts, exchanges, or different words stay separate", async ()
 
 test("the transcript renders the count in plain words", async () => {
   const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
-  assert.match(source, /foldRepeatedRows\(contextMessages\(\)\)\.map\(messageMarkup\)/);
+  // CONSOLE-4 put a badge between the fold and the renderer: the folded rows are handed to
+  // gap-badge.js when it is loaded, and mapped straight through messageMarkup when it is not. The
+  // fold still runs first either way, so a folded row is what the badge counts and what the
+  // expanded view shows.
+  assert.match(source, /const rows = foldRepeatedRows\(contextMessages\(\)\);/);
+  assert.match(source, /rows\.map\(messageMarkup\)\.join\(""\)/);
   assert.match(source, /`\$\{message\.text\} · \$\{message\.count\} steps`/);
 });

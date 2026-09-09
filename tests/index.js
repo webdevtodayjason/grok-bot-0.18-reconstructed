@@ -52,7 +52,13 @@ import "./sand-host-setting.test.mjs";
 import "./browser-tool-parameters.test.mjs";
 import "./machine-room-gateway.test.mjs";
 import "./machine-room-identity.test.mjs";
-import "./connector-custody.test.mjs";
+// `./connector-custody.test.mjs` used to be imported here. The file has never existed on this
+// branch -- 3df0722 added the import without it, and the only commit that ever carried the file is
+// 3e643c9 on market-fix-wip, a dead agent's partial work that was never merged. A stale import is
+// not a skipped suite: it throws at module resolution, so `node --test tests/` died before running
+// anything and took all 128 suites with it. The suite's own guard below
+// ("imports nothing that is not there") is what named it. Whichever wave lands that file adds its
+// import back in the same commit, which is what that guard is for.
 import "./connector-health.test.mjs";
 import "./connector-plane.test.mjs";
 import "./machine-room-connectors.test.mjs";
@@ -152,3 +158,7 @@ import "./test-index-covers-the-suite.test.mjs";
 
 // HANDBACK-1: the computer hand-off card, the rail and the takeover banner.
 import "./machine-room-handoff.test.mjs";
+
+// CONSOLE-4: the plate before the first pixel, the boot cover, the transcript that settles, the
+// adapter's data shapes and the four seams items B, C and D plug into.
+import "./machine-room-boot.test.mjs";

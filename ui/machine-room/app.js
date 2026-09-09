@@ -909,6 +909,16 @@
     return `<div class="inline-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span>${dismiss}</div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
   }
 
+  // Whose attachments these are. The host's read commands take the agent, and a room's files
+  // belong to whichever member the conversation leads with -- one expression, used by the markup
+  // that offers the controls and by every read behind them, so a file cannot be listed under one
+  // agent and fetched under another.
+  function attachmentAgentId() {
+    const context = activeContext();
+    if (context.kind === "worker") return context.id;
+    return (contextRecord()?.memberIds ?? [])[0] ?? "";
+  }
+
   // GW-09: a file in the transcript. The markup is a slot; fillAttachments asks the host for the
   // bytes after the render (readAttachmentImage for an image, readAttachmentText for anything
   // else) so nothing here is drawn from the path alone.
@@ -917,7 +927,14 @@
     const body = a.kind === "image"
       ? `<div class="attachment-slot" data-attachment-slot>Reading ${escapeHtml(a.name)} from the host…</div>`
       : `<pre class="attachment-preview" data-attachment-slot>Reading ${escapeHtml(a.name)} from the host…</pre>`;
-    return `<figure class="message-attachment" data-attachment="${escapeHtml(a.path)}" data-attachment-kind="${escapeHtml(a.kind)}" data-attachment-name="${escapeHtml(a.name)}"><figcaption><span class="tag">▱ ${escapeHtml(a.name)}</span></figcaption>${body}</figure>`;
+    // CONSOLE-4 seam: Open and Download, beside the caption. Jason, 2026-09-08: "I can't click,
+    // open, or view it." Both route to the file viewer (files-viewer.js, item D) through the same
+    // delegated funnel as the desktop's file tiles, so one place decides what opening a file means.
+    const controls = `<span class="attachment-controls">`
+      + `<button class="ghost-button attachment-open" type="button" data-attachment-open="${escapeHtml(a.path)}" data-attachment-agent="${escapeHtml(attachmentAgentId())}" data-attachment-name="${escapeHtml(a.name)}">Open</button>`
+      + `<button class="ghost-button attachment-download" type="button" data-attachment-download="${escapeHtml(a.path)}" data-attachment-agent="${escapeHtml(attachmentAgentId())}" data-attachment-name="${escapeHtml(a.name)}">Download</button>`
+      + `</span>`;
+    return `<figure class="message-attachment" data-attachment="${escapeHtml(a.path)}" data-attachment-kind="${escapeHtml(a.kind)}" data-attachment-name="${escapeHtml(a.name)}"><figcaption><span class="tag">▱ ${escapeHtml(a.name)}</span>${controls}</figcaption>${body}</figure>`;
   }
 
   // ---- HANDBACK-1: the computer hand-off ------------------------------------------------------
@@ -1108,7 +1125,12 @@
     const author = workerById(message.authorId);
     const isWorking = message.type === "working";
     const body = isWorking ? `<div class="typing-dots" aria-label="${escapeHtml(message.authorName)} is working"><i></i><i></i><i></i></div>`
-      : message.type === "attachment" && message.attachment ? `${paragraphMarkup(message.text)}${attachmentMarkup(message)}`
+      // CONSOLE-4: a message can carry more than one file. Ten of Titan's eleven transcript files
+      // ride the {type:"text", images:[…]} carrier that SendMessage's own tool description tells
+      // the model to use, and that carrier is a LIST. Each figure gets its own [data-attachment]
+      // path, which is what fillAttachments and the file viewer key off, so nothing else changes.
+      : message.type === "attachment" && message.attachment
+        ? `${paragraphMarkup(message.text)}${(message.attachments ?? [message.attachment]).map((a) => attachmentMarkup({ ...message, attachment: a })).join("")}`
       : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
     return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? roomSpeakerMarkup(author, message) : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${evidenceChipMarkup(message)}</div></article>`;
   }
@@ -1120,18 +1142,58 @@
     const older = record?.hasOlder && typeof adapter.loadOlderMessages === "function"
       ? `<div class="transcript-older"><button class="ghost-button" type="button" data-load-older>Show earlier messages</button></div>`
       : "";
-    return older + foldRepeatedRows(contextMessages()).map(messageMarkup).join("");
+    // CONSOLE-4 seam: everything between two chat messages folds into one badge per gap
+    // (gap-badge.js, item B). DASH-FOLD-1's step-count folding runs first and stays inside the
+    // expanded view. With the module absent this is today's transcript, row for row.
+    const rows = foldRepeatedRows(contextMessages());
+    const gaps = window.__gapBadge;
+    return older + (gaps && typeof gaps.render === "function"
+      ? gaps.render(rows, messageMarkup, { agentId: contextLead()?.id ?? null, working: (record?.status ?? "") === "working" })
+      : rows.map(messageMarkup).join(""));
   }
 
   // A row just revealed (a search hit) holds the reader on it: a refresh that lands in the next
   // moments must not scroll the transcript back to the bottom under the flash.
   let holdScrollUntil = 0;
+  // CONSOLE-4. One deliberate jump to the bottom, consumed by the next render. Set on first paint,
+  // on a conversation change, and on the reader's own send -- the three moments a person expects
+  // to be taken to the newest line. Nothing else may move them.
+  let pinToBottomOnce = true;
+  const pinTranscriptToBottom = () => { pinToBottomOnce = true; };
+  /**
+   * CONSOLE-4: the transcript follows a reader who is already at the bottom, and never moves one
+   * who is not.
+   *
+   * This used to read `if (!keepScroll || wasNearBottom)`, which computed wasNearBottom and then
+   * threw it away: every message:created arrives with keepScroll false, so every SSE tick dragged
+   * the reader to the bottom whatever they were reading. With .transcript carrying
+   * scroll-behavior:smooth each of those was an ANIMATION across the full height. Measured on
+   * grok-bot-local-vm in real Chrome, on Atera Triage (190 rows, 15,908 px in a 668 px viewport):
+   * a reader parked at 5,334 was dragged 9,830 px to 15,164 inside five seconds, with the
+   * transcript in motion on 27.9 % of 301 animation frames and never settling. After this change,
+   * the same reader on the same conversation: 0 px of drift, 0.0 % of 301 frames. Jason,
+   * 2026-09-08: "the chat for Titan just scrolls forever."
+   *
+   * Ruled out by measurement, so none of them is fixed here: scroll-to-top paging (already on
+   * wheel, fired zero times), image height shift (scrollHeight constant), the foldRepeatedRows
+   * rebuild.
+   *
+   * `keepScroll` is still in the signature and is deliberately no longer consulted. Five call
+   * sites pass it and it distinguished nothing worth keeping -- the pin above is what those sites
+   * actually meant, set explicitly at the three moments that deserve it, rather than inferred from
+   * a flag that was false on every stream event.
+   */
   function renderTranscript(keepScroll, pinToRevealed) {
-    const wasNearBottom = elements.transcript.scrollHeight - elements.transcript.scrollTop - elements.transcript.clientHeight < 90;
-    elements.transcript.innerHTML = transcriptMarkup();
+    const box = elements.transcript;
+    const wasNearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 90;
+    box.innerHTML = transcriptMarkup();
     fillAttachments();
-    if (pinToRevealed || Date.now() < holdScrollUntil) return;
-    if (!keepScroll || wasNearBottom) requestAnimationFrame(() => { elements.transcript.scrollTop = elements.transcript.scrollHeight; });
+    // A revealed row, or a flash still holding: the reader is being held on a line on purpose, so
+    // the pin is spent rather than fired under them.
+    if (pinToRevealed || Date.now() < holdScrollUntil) { pinToBottomOnce = false; return; }
+    const pin = pinToBottomOnce;
+    pinToBottomOnce = false;
+    if (pin || wasNearBottom) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
   }
 
   // After an older page lands: the same rebuild, but the reader stays on the line they were on
@@ -1151,7 +1213,12 @@
     const row = elements.transcript.querySelector(`[data-message-id="${CSS.escape(entryId)}"]`);
     if (!row) return false;
     holdScrollUntil = Date.now() + 3000;
-    row.scrollIntoView({ block: "center" });
+    // CONSOLE-4: the one scroll a person actually asked for, so it is the one that animates. The
+    // stylesheet no longer smooths the container -- that made every SSE tick an animation across
+    // the whole conversation -- so smoothness is opted into here, and only where a reduced-motion
+    // reader has not asked for the opposite.
+    const gently = !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    row.scrollIntoView({ block: "center", ...(gently ? { behavior: "smooth" } : {}) });
     row.classList.add("is-flash");
     window.setTimeout(() => row.classList.remove("is-flash"), 2500);
     return true;
@@ -1291,6 +1358,9 @@
 
   function selectContext(kind, id) {
     rosterMode = kind === "worker" ? "workers" : "rooms";
+    // CONSOLE-4: a different conversation opens at its newest line. This is one of the three
+    // moments that earn a jump to the bottom; a stream tick is not one of them.
+    pinTranscriptToBottom();
     adapter.selectContext({ kind, id });
     closeOpenDialogs();
   }
@@ -3749,13 +3819,21 @@
         const plate = img.parentElement?.querySelector("[data-handoff-thumb-plate]");
         if (plate) plate.hidden = true;
       });
+    // CONSOLE-4, rail tile only (the card's own thumbs above are untouched): the tile no longer
+    // ships an <img> it has nothing to put in, because a hidden one painted Chrome's broken-image
+    // glyph. So the first frame for an agent arrives with no element to write into, and the tile
+    // is redrawn instead -- rememberBoxHandoffFrame has already run one line up the call site, so
+    // that redraw finds the frame. Redrawing #rail-screen is cheap and does not touch the
+    // transcript, which is the thing the note above is protecting.
     const tile = document.querySelector("img[data-rail-screen]");
     if (tile && tile.dataset.agentId === agentId) {
       tile.src = dataUrl;
       tile.hidden = false;
       const plate = document.querySelector("#rail-screen [data-rail-screen-plate]");
       if (plate) plate.hidden = true;
+      return;
     }
+    if (!tile && document.querySelector("#rail-screen [data-rail-screen-plate]")) renderScreenTile();
   }
 
   // The amber card at the top of the rail, drawn only while the host reports a pending hand-off
@@ -3793,7 +3871,11 @@
     const lead = contextRecord();
     if (!lead) { tile.innerHTML = ""; return; }
     const live = lead.handoff ?? null;
-    const frame = boxHandoffFrame(lead.id, live?.requestId ?? boxHandoffLastRequestId(lead) ?? "");
+    // CONSOLE-4 seam: a hand-off's own frozen frame first (HANDBACK-1 owns that), then the idle
+    // reader's (screen-tile.js, item C). With the module absent this is exactly today's source.
+    const frame = boxHandoffFrame(lead.id, live?.requestId ?? boxHandoffLastRequestId(lead) ?? "")
+      || (typeof window.__screenTile?.frameFor === "function" ? window.__screenTile.frameFor(lead.id) : "")
+      || "";
     const seat = boxHandoffSeatOf(lead);
     // "Connecting" only while a reader for THIS agent is actually running. It used to be said
     // whenever the box had handed out a seat, so an idle agent with a screen sat on "Connecting"
@@ -3805,9 +3887,22 @@
       ? "This computer did not say which screen this agent is on"
       : reading ? "Connecting" : "Click to open this computer's screen";
     const caption = boxHandoffScreenCaption(lead, seat);
+    // CONSOLE-4. Jason, 2026-09-08: "The Titan screen at the top right says 'Click to open,' but
+    // there's a broken image there." The <img> used to be emitted always and marked hidden -- and
+    // `.rail-screen-button img { display: block }` outranks the UA sheet's [hidden] on
+    // specificity, so Chrome painted its own broken-image glyph and the alt text instead.
+    // Reproduced on grok-bot-local-vm in real Chrome across the first eight agents on the box:
+    // 8 of 8 tiles carried an <img> with src null, naturalWidth 0 and computed display block, and
+    // the tile painted the glyph over the alt text. After: 0 broken, 8 plates. (The same defect
+    // was read on Jason's console at 231x75 during the design pass.) It is the same trap the
+    // .handoff-island[hidden] rule exists for, one screen up in styles.css.
+    //
+    // So: no <img> unless there is something to put in it. With no frame the tile is the plate
+    // alone, which is a real placeholder that says what clicking does.
     tile.innerHTML = `<button class="rail-screen-button" type="button" data-handoff-action="open" data-agent-id="${escapeHtml(lead.id)}" data-request-id="${escapeHtml(live?.requestId ?? "")}">`
-      + `<span class="rail-screen-plate" data-rail-screen-plate${frame ? " hidden" : ""}>${escapeHtml(plate)}</span>`
-      + `<img data-rail-screen data-agent-id="${escapeHtml(lead.id)}" alt="${escapeHtml(caption)}"${frame ? ` src="${escapeHtml(frame)}"` : ""}${frame ? "" : " hidden"} />`
+      + (frame
+        ? `<img data-rail-screen data-agent-id="${escapeHtml(lead.id)}" alt="${escapeHtml(caption)}" src="${escapeHtml(frame)}" />`
+        : `<span class="rail-screen-plate" data-rail-screen-plate>${escapeHtml(plate)}</span>`)
       + `</button>`
       + `<small class="rail-screen-caption" id="rail-screen-caption">${escapeHtml(caption)}</small>`;
   }
@@ -3835,6 +3930,16 @@
     // frame on a box that hands one over in about 1.4 s. Only the hand-off ending, or the
     // conversation moving to another agent, stops the reader.
     else if (!live || (boxHandoffThumb && boxHandoffThumb.agentId !== openId)) boxHandoffTeardown();
+    // CONSOLE-4 seam: the idle agent's own reader (screen-tile.js, item C). It owns starting,
+    // stopping and pausing itself from this one call; nothing here reaches into it. `visible` is
+    // false while the desktop dialog is open, because that dialog already has the live screen and
+    // a second client on the same seat is a second handshake for the same pixels.
+    window.__screenTile?.sync?.({
+      agentId: openId,
+      seat,
+      status: lead?.status ?? null,
+      visible: !document.hidden && !elements.desktopDialog.open,
+    });
     renderHandoffRail();
     renderScreenTile();
   }
@@ -4056,10 +4161,19 @@
     elements.desktopLive.innerHTML = `<span class="status-dot ${lead && lead.status === "working" ? "working" : "ready"}"></span> ${escapeHtml(lead ? lead.name : record.name)} ${state.desktop.paused ? "is paused" : "is working"}`;
     document.querySelectorAll("[data-desktop-app]").forEach((button) => button.classList.toggle("active", button.dataset.desktopApp === activeDesktopApp));
     if (activeDesktopApp === "files") {
+      // CONSOLE-4. Jason, 2026-09-08: "it shows me files we've created, but I can't click, open,
+      // or view it." It was a <div>, with no handler anywhere. Every row is a button now, and all
+      // of them go through the same funnel as the transcript's Open, so the two lists open the one
+      // viewer.
+      const fileAgent = attachmentAgentId();
       const files = record.files.length
-        ? record.files.map((file) => `<div class="file-tile">▱<strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(file.meta)}</small></div>`).join("")
+        ? record.files.map((file) => `<button class="file-tile" type="button" data-file-open="${escapeHtml(file.path)}" data-file-agent="${escapeHtml(fileAgent)}" data-file-name="${escapeHtml(file.name)}">▱<strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(file.meta)}</small></button>`).join("")
         : `<div class="empty-state">Nothing has been attached to this conversation yet.</div>`;
-      elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} files</h3><p>Files that passed through the part of this conversation loaded on screen${record.hasOlder ? " — show earlier messages to include older ones" : ""}. This host keeps no per-worker directory — anything a worker writes with Shell goes to one /workspace shared by every agent on the box.</p></div><span class="status-pill">${record.files.length}</span></div><div class="file-grid">${files}</div></div>`;
+      // The old sentence here described /workspace, which is not where any of these files are:
+      // every row in this list came out of this agent's own transcript and lives under its
+      // attachments. Saying the host keeps no per-worker directory, directly above a list of that
+      // agent's files, argued with the list.
+      elements.desktopWindow.innerHTML = `<div class="files-view"><div class="browser-page-head"><div><h3>${escapeHtml(record.name)} files</h3><p>Files that passed through the part of this conversation loaded on screen${record.hasOlder ? " — show earlier messages to include older ones" : ""}. Open one to read it here, or download it. Files a worker writes with Shell go to a /workspace shared by every agent on the box and are not listed.</p></div><span class="status-pill">${record.files.length}</span></div><div class="file-grid">${files}</div></div>`;
     } else if (activeDesktopApp === "terminal") {
       mountBoxSurface("terminal", "Terminal");
     } else {
@@ -5238,6 +5352,9 @@
 
   adapter.subscribe((event) => {
     state = event.snapshot;
+    // CONSOLE-4: every route into another conversation, not only the roster click -- the palette's
+    // jump, and landOn after a create, both reach the page through this event and nothing else.
+    if (event.type === "context:selected") pinTranscriptToBottom();
     // An older page is the one transcript change that must not move the reader.
     if (event.type === "transcript:older") { renderTranscriptKeepingOffset(); renderContextCard(); renderBoxHandoffSurfaces(); return; }
     // A revealed entry: the window may have grown backwards; redraw, then scroll to and flash it.
@@ -5285,6 +5402,9 @@
     if (!text && ready.length === 0) return;
     if (pendingAttachments.some((a) => a.pending)) { showToast("Still uploading — one moment."); return; }
     const context = { ...activeContext() };
+    // CONSOLE-4: your own send takes you to the bottom, wherever you were reading. The third and
+    // last of the moments that earn the jump.
+    pinTranscriptToBottom();
     adapter.sendMessage(context, text, ready);
     pendingAttachments = [];
     renderAttachmentTray();
@@ -5694,7 +5814,7 @@
   // a container of its own. Called with nothing it walks the stage's transcript, as it always did.
   function fillAttachments(root = elements.transcript) {
     if (typeof adapter.readAttachmentImage !== "function") return;
-    const agentId = activeContext().kind === "worker" ? activeContext().id : (contextRecord()?.memberIds ?? [])[0] ?? null;
+    const agentId = attachmentAgentId() || null;
     root.querySelectorAll("[data-attachment]").forEach((figure) => {
       const path = figure.dataset.attachment;
       const slot = figure.querySelector("[data-attachment-slot]");
@@ -5726,7 +5846,7 @@
     if (!view.truncated && view.bytesRead >= view.totalSize) return;
     const more = figure.querySelector("[data-attachment-more]");
     if (more) { more.disabled = true; more.textContent = "Reading more from the host…"; }
-    const agentId = activeContext().kind === "worker" ? activeContext().id : (contextRecord()?.memberIds ?? [])[0] ?? null;
+    const agentId = attachmentAgentId() || null;
     adapter.readAttachmentChunk(agentId, path, view.bytesRead, CHUNK_BYTES).then((chunk) => {
       if (!chunk) { view.truncated = false; view.totalSize = view.bytesRead; paintTextPreview(figure, view); return; }
       view.text += chunk.text;
@@ -6210,6 +6330,44 @@
   // it the adapter here keeps that module out of this file's internals entirely.
   window.__machineRoomAdapter = adapter;
   // ===== end Marketplace hook =====
+
+  // ===== CONSOLE-4: the seam the three sibling modules build against =====
+  // gap-badge.js, screen-tile.js and files-viewer.js are separate files so that four builders can
+  // share this console without four of them sharing this file. They need five things out of it and
+  // nothing else: the modal every other viewer already opens, the markdown renderer the transcript
+  // already uses, the redaction already applied to attachment text, the escaper, and a way to ask
+  // for a repaint. Publishing them here keeps those modules out of this file's internals entirely,
+  // exactly as window.__marketplaceBots and window.__titanMascots already do.
+  window.__mrUi = { openPanel, paragraphMarkup, maskSecrets, escapeHtml, renderAll };
+
+  // The badge's own control. Delegated at the document because the transcript is rebuilt wholesale
+  // on every render, so a listener bound to a row would be thrown away with it.
+  document.addEventListener("click", (event) => {
+    const toggle = event.target.closest?.("[data-gap-toggle]");
+    if (!toggle) return;
+    window.__gapBadge?.toggle?.(toggle);
+  });
+
+  // Every route to a file: the desktop's Files list, and Open and Download on a transcript
+  // attachment. One funnel, so a file cannot open one way from one list and another way from the
+  // other -- which is the whole of what Jason reported on 2026-09-08.
+  document.addEventListener("click", (event) => {
+    const tile = event.target.closest?.("[data-file-open]");
+    if (tile) {
+      window.__filesViewer?.open?.({ path: tile.dataset.fileOpen, agentId: tile.dataset.fileAgent || null, name: tile.dataset.fileName || "" });
+      return;
+    }
+    const open = event.target.closest?.("[data-attachment-open]");
+    if (open) {
+      window.__filesViewer?.open?.({ path: open.dataset.attachmentOpen, agentId: open.dataset.attachmentAgent || null, name: open.dataset.attachmentName || "" });
+      return;
+    }
+    const download = event.target.closest?.("[data-attachment-download]");
+    if (download) {
+      window.__filesViewer?.open?.({ path: download.dataset.attachmentDownload, agentId: download.dataset.attachmentAgent || null, name: download.dataset.attachmentName || "", download: true });
+    }
+  });
+  // ===== end CONSOLE-4 seam =====
 
   // HANDBACK-1: the two things about a hand-off a gate cannot see from the DOM. Reads only, no
   // writes, and nothing in the app calls them. `skipSupported` is here because the blocker it

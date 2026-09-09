@@ -8,6 +8,15 @@
     <!-- The Titanium Bot mark. This used to be `data:,` -- an empty icon, only there because the
          relay served none and every load logged a 404. -->
     <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+    <!-- CONSOLE-4: the chosen plate, stamped on <html> before a single stylesheet paints.
+         BEFORE the links below, and not after them: a classic script placed after a <link> waits
+         for that stylesheet to load before it executes, which is the whole cost this removes.
+         Measured on grok-bot-local-vm (this Mac), warm box, over loopback, sampling the shell's
+         computed background every 25 ms: 1,247 ms of the warmwind mountains with no saved choice
+         and 861 ms with habitat-3 saved, because nothing set data-bg until backgrounds.js ran at
+         the end of fourteen serial gateway round trips. After this file: 0 ms on both, across 220
+         samples each. -->
+    <script src="bg-boot.js"></script>
     <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="motion.css" />
     <link rel="stylesheet" href="styles.css" />
@@ -16,8 +25,28 @@
     <!-- ONBOARD-1: the first-run dialog. Its own file so the wave editing styles.css and this
          one never land on the same lines. -->
     <link rel="stylesheet" href="onboarding.css" />
+    <!-- CONSOLE-4. Four stylesheets whose waves each own one file: the boot cover, and the three
+         sibling modules item A installs seams for. Each ships as a stub until its item lands. -->
+    <link rel="stylesheet" href="boot.css" />
+    <link rel="stylesheet" href="gap-badge.css" />
+    <link rel="stylesheet" href="screen-tile.css" />
+    <link rel="stylesheet" href="files-viewer.css" />
   </head>
   <body>
+    <!-- CONSOLE-4: the boot cover. Static markup, so it is on screen with the FIRST paint rather
+         than after a script has decided to draw it. Opaque over the whole shell on purpose: the
+         markup below ships seed copy -- "MSP Team", "3 members · ready", "2h 14m", "Atera Triage's
+         desktop" -- which is fiction on a real box and was all on screen at 500 ms today on a box
+         that has none of it. The lift logic is the IIFE at the end of this file. -->
+    <div id="boot-cover" data-boot-state="showing" role="status" aria-live="polite">
+      <div class="boot-cover-inner">
+        <img class="boot-sprite" data-boot-sprite src="assets/characters/titan-curious.png" alt="" width="96" height="96" />
+        <strong class="boot-line">Setting up your console</strong>
+        <small class="boot-step" data-boot-step>Reaching this box</small>
+        <div class="boot-track" aria-hidden="true"><span></span></div>
+      </div>
+    </div>
+
     <div class="app-shell" id="app-shell">
       <div class="ambient-backdrop" aria-hidden="true"></div>
       <div class="ambient-vignette" aria-hidden="true"></div>
@@ -335,6 +364,16 @@
     <!-- The Marketplace's Bots tab. It only attaches window.__marketplaceBots at load and reads
          the adapter lazily, so it can come before app.js builds one. -->
     <script src="marketplace-bots.js"></script>
+    <!-- CONSOLE-4: the three sibling modules items B, C and D fill. They sit here, beside
+         marketplace-bots.js and ahead of app.js, for one reason: app.js consults all three seams
+         inside its FIRST renderAll, and a module that arrives after that first paint would show
+         the person an unbadged transcript and a plateless tile for one tick before swapping them.
+         Each publishes its object at load and reads the adapter lazily, which is exactly the
+         contract marketplace-bots.js above already keeps. Every seam no-ops with the module absent,
+         so each of these can stay a stub until its item lands. -->
+    <script src="gap-badge.js"></script>
+    <script src="screen-tile.js"></script>
+    <script src="files-viewer.js"></script>
     <script>
       // app.js builds its adapter synchronously, so the gateway is read first and app.js is
       // loaded after. If the gateway is unreachable the demo adapter runs and the page still
@@ -350,6 +389,132 @@
         };
         document.body.appendChild(script);
       });
+    </script>
+
+    <!-- CONSOLE-4: when the cover lifts.
+         =================================
+         Deliberately here and not in gateway-adapter.js, and deliberately not chained to hydrate's
+         promise. That file has no AbortController and no per-call timeout anywhere, and it awaits
+         every installed connector before it asks for the first conversation -- BOOT-1 measured
+         46,318 ms to live with one cold stdio connector. A cover that waits for that promise is a
+         cover that never lifts. So the ceiling is a setTimeout armed at parse time, and the two
+         signals are things a PERSON can see on the page rather than promises the page made.
+
+         Both observers watch for markup app.js draws. The roster and the transcript are painted in
+         the same synchronous renderAll, so a worker card on screen means the first transcript page
+         has been drawn too -- which is how an empty conversation resolves without waiting out the
+         ceiling. -->
+    <script>
+      (function bootCover() {
+        "use strict";
+        var cover = document.getElementById("boot-cover");
+        if (!cover) return;
+        var CEILING_MS = 8000;
+        var startedAt = Date.now();
+        var seen = { roster: false, rows: false, demo: false };
+
+        // The whole lift decision, as one pure function of what has been seen and how long it has
+        // been. Everything below only feeds it and acts on its answer.
+        function shouldLiftCover(state) {
+          if (state.demo) return true;
+          if (state.elapsed >= CEILING_MS) return true;
+          return Boolean(state.roster && state.rows);
+        }
+
+        var quiet = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        var stepEl = cover.querySelector("[data-boot-step]");
+        var step = function (words) { if (stepEl) stepEl.textContent = words; };
+        var lifted = false;
+
+        function removeCover() {
+          if (cover && cover.parentNode) cover.parentNode.removeChild(cover);
+          cover = null;
+        }
+
+        function lift() {
+          if (lifted) return;
+          lifted = true;
+          if (observers) observers.forEach(function (o) { try { o.disconnect(); } catch (e) {} });
+          // The ceiling fired with nothing drawn: say the conversation is still opening rather than
+          // uncovering an empty column that reads as a finished, empty page. app.js overwrites this
+          // the moment the first real row lands.
+          var transcript = document.getElementById("transcript");
+          if (!seen.rows && transcript && !transcript.querySelector(".message-row")) {
+            transcript.innerHTML = '<div class="empty-state">Still opening this conversation…</div>';
+          }
+          if (quiet) { removeCover(); return; }
+          cover.dataset.bootState = "lifting";
+          cover.addEventListener("transitionend", removeCover, { once: true });
+          // A transition that never fires (the node was display:none'd, the sheet did not load)
+          // must not leave an opaque cover over the console for ever.
+          window.setTimeout(removeCover, 900);
+        }
+
+        function settle() {
+          if (shouldLiftCover({ roster: seen.roster, rows: seen.rows, demo: seen.demo, elapsed: Date.now() - startedAt })) lift();
+        }
+
+        var observers = [];
+        function watch(target, fn) {
+          if (!target) return;
+          var o = new MutationObserver(fn);
+          o.observe(target, { childList: true, subtree: true });
+          observers.push(o);
+          fn();
+        }
+
+        watch(document.getElementById("worker-stack"), function () {
+          if (seen.roster) return;
+          var card = document.querySelector("#worker-stack .worker-card");
+          if (!card) return;
+          seen.roster = true;
+          var name = (card.querySelector("strong") || {}).textContent;
+          step(name ? "Opening " + name : "Opening your conversation");
+          // The roster and the transcript are drawn in one pass, so an empty transcript at this
+          // moment is a conversation with nothing in it, not one that has not loaded yet.
+          var transcript = document.getElementById("transcript");
+          if (transcript && !transcript.querySelector(".message-row") && !transcript.querySelector("[data-load-older]")) seen.rows = true;
+          settle();
+        });
+
+        watch(document.getElementById("transcript"), function () {
+          if (seen.rows) return;
+          if (!document.querySelector("#transcript .message-row")) return;
+          seen.rows = true;
+          settle();
+        });
+
+        // The gateway was unreachable and the demo factory is what is behind this cover. Say so
+        // here, then get out of the way: a friendly "Setting up your console" sitting on top of the
+        // red DEMO DATA bar is the cover lying about the page it is covering.
+        var demoWatch = new MutationObserver(function () {
+          if (!document.documentElement.dataset.demo || seen.demo) return;
+          seen.demo = true;
+          step("This console could not reach this box");
+          cover.dataset.bootFault = "1";
+          settle();
+        });
+        demoWatch.observe(document.documentElement, { attributes: true, attributeFilter: ["data-demo"] });
+        observers.push(demoWatch);
+
+        window.setTimeout(settle, CEILING_MS);
+
+        // The live crew face, once the kit has upgraded. The still above is what paints first --
+        // it needs no script at all -- and this only swaps in the animated one when there is one to
+        // swap in and the person has not asked for less motion.
+        if (!quiet && window.customElements) {
+          window.customElements.whenDefined("titan-mascot").then(function () {
+            var still = cover && cover.querySelector("[data-boot-sprite]");
+            if (!still) return;
+            var live = document.createElement("titan-mascot");
+            live.setAttribute("variant", "0");
+            live.setAttribute("mood", "curious");
+            live.setAttribute("tracking", "off");
+            live.className = "boot-sprite-live";
+            still.replaceWith(live);
+          }).catch(function () {});
+        }
+      })();
     </script>
   </body>
 </html>

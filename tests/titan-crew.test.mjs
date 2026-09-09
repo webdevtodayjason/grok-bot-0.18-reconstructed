@@ -181,7 +181,14 @@ test("every crew member has the three stills the kit ships", async () => {
 
 test("Titan Nebula is the background a fresh browser opens on", () => {
   // No document on the stub: every DOM path is a no-op and the two constants are what is left.
-  const globals = loadBrowserScript("ui/machine-room/backgrounds.js", { document: undefined, localStorage: { getItem: () => null, setItem: () => {} } });
+  //
+  // CONSOLE-4 moved those constants into bg-boot.js, which the page loads in <head> before the
+  // first stylesheet so the chosen plate is stamped on <html> before anything paints. Loading both
+  // into one stub is what the browser does; backgrounds.js deliberately keeps no copy of its own,
+  // because two copies means a plate added to one of them flashes twice.
+  const globals = { document: undefined, localStorage: { getItem: () => null, setItem: () => {} } };
+  loadBrowserScript("ui/machine-room/bg-boot.js", globals);
+  loadBrowserScript("ui/machine-room/backgrounds.js", globals);
   assert.equal(globals.__machineRoomBackgrounds.DEFAULT_CHOICE, "titan-nebula");
   const ids = globals.__machineRoomBackgrounds.BUILT_IN.map((b) => b.id);
   assert.ok(ids.includes("titan-nebula"), "the nebula is in the picker");

@@ -1,0 +1,3 @@
+/* The rail's screen tile reader. Owner: CONSOLE-4 item C. Stub installed by item A.
+   Its own file so item C never opens styles.css. The tile's own box, its plate and its caption are
+   already in styles.css under .rail-screen-*, and item A owns those lines. */

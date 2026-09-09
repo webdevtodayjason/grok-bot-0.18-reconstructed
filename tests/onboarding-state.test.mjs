@@ -19,10 +19,21 @@ import { build } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stage = mkdtempSync(path.join(repoRoot, "node_modules", ".onboarding-state-test-"));
-// Pinned here, not once at import: the box store reads SAND_DATA_ROOT on every call, and under a
-// runner that loads every suite into one process another file's root would otherwise win.
+// The box store reads SAND_DATA_ROOT on every call, and under a runner that loads every suite into
+// one process another file's root would otherwise win.
+//
+// That is what used to happen. The assignment below sat at module top level, which under
+// tests/index.js runs while the imports are still being resolved -- so every suite imported after
+// this one overwrote it, and by the time these tests actually executed the box store was reading
+// somebody else's directory. `isOnboardingActive` then answered from a settings file this suite
+// had never written. It was invisible for as long as it existed, because tests/index.js was also
+// importing a file that does not exist on this branch, so `node --test tests/` died at resolution
+// and never ran any of it (found while landing CONSOLE-4, which fixed that import).
+//
+// So the root is pinned before each read instead, which is what the paragraph above always meant.
 const boxRoot = mkdtempSync(path.join(tmpdir(), "onboarding-box-"));
-process.env.SAND_DATA_ROOT = boxRoot;
+const pinBoxRoot = () => { process.env.SAND_DATA_ROOT = boxRoot; };
+pinBoxRoot();
 after(() => {
   rmSync(stage, { recursive: true, force: true });
   rmSync(boxRoot, { recursive: true, force: true });
@@ -240,11 +251,13 @@ test("an answer cannot become a paste the box has to carry forever", () => {
 // file's stamp. The default has to be "no": an unreadable settings file must not hand a finished
 // box a tool for a conversation that already happened.
 const writeBoxSettings = (onboarding) => {
+  pinBoxRoot();
   const document = { version: 1, ...(onboarding === undefined ? {} : { onboarding }) };
   writeFileSync(path.join(boxRoot, "settings.json"), JSON.stringify(document, null, 2));
 };
 
 test("the tool gate is off on a box with no settings file at all", () => {
+  pinBoxRoot();
   rmSync(path.join(boxRoot, "settings.json"), { force: true });
   assert.equal(boxStore.isOnboardingActive(), false);
 });
@@ -263,6 +276,7 @@ test("a settings file with no onboarding record leaves the gate off", () => {
 });
 
 test("an unreadable settings file leaves the gate off, and does not throw a turn", () => {
+  pinBoxRoot();
   writeFileSync(path.join(boxRoot, "settings.json"), "{ half written");
   assert.equal(boxStore.isOnboardingActive(), false);
 });

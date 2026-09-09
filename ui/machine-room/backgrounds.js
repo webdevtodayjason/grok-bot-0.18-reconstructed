@@ -13,49 +13,15 @@
   "use strict";
 
   const doc = global.document;
-  const CHOICE_KEY = "machineRoom.background";
-  // What a browser with nothing stored opens on. Jason's nebula is the product brand's plate
-  // (2026-09-06); "original" is still in the picker one click away, so this is a default, not a
-  // removal.
-  const DEFAULT_CHOICE = "titan-nebula";
-  const CUSTOM_KEY = "machineRoom.backgrounds.custom";
+  // CONSOLE-4: the default, the built-in list, the id-to-file rule and apply() all live in
+  // bg-boot.js, which runs in <head> before the first stylesheet so the chosen plate is on <html>
+  // before anything paints. This file owns the PICKER and the uploads and reads the rest from
+  // there. Deliberately no fallback copy of those constants: a second copy means a plate added to
+  // one of them flashes twice, which is worse than the flash this arrangement removes.
+  const boot = global.__mrBg;
+  const { CHOICE_KEY, CUSTOM_KEY, DEFAULT_CHOICE, BUILT_IN, apply } = boot;
   const MAX_EDGE = 1920;
   const BUDGET_BYTES = 4_000_000; // localStorage is ~5MB; leave the app its share.
-
-  // Names follow the operator's own filenames. Renaming someone's pictures for them is how you
-  // end up with a label that argues with the thumbnail.
-  const BUILT_IN = [
-    { id: "original", name: "Original", full: "assets/warmwind-landscape.svg", thumb: "assets/warmwind-landscape.svg" },
-    { id: "bg1-misty", name: "Misty" },
-    { id: "bg1-misty2", name: "Misty II" },
-    { id: "bg1-misty3", name: "Misty III" },
-    { id: "bg2-misty-dessert", name: "Desert Mist" },
-    { id: "bg2-nebulous", name: "Nebulous" },
-    { id: "bg2-Pine-mist", name: "Pine Mist" },
-    // Jason's nebula for the product brand (2026-09-06): teal and violet on near-black, the console's own
-    // teal reads as part of the picture.
-    { id: "titan-nebula", name: "Titan Nebula" },
-    // The Habitat series (Jason, 2026-09-07): alien terrain under the console's own blues and violets.
-    // A `series` groups tiles under one heading in the picker; seasonal sets come the same way, one
-    // line each, with the season in the series name.
-    { id: "habitat-1", name: "Habitat I", series: "Habitat" },
-    { id: "habitat-2", name: "Habitat II", series: "Habitat" },
-    { id: "habitat-3", name: "Habitat III", series: "Habitat" },
-    { id: "habitat-4", name: "Habitat IV", series: "Habitat" },
-    { id: "habitat-5", name: "Habitat V", series: "Habitat" },
-    // The Lab series (Jason, 2026-09-07 08:56).
-    { id: "lab-1", name: "The Lab I", series: "The Lab" },
-    { id: "lab-2", name: "The Lab II", series: "The Lab" },
-    { id: "lab-3", name: "The Lab III", series: "The Lab" },
-    // Two painted plates for the regular set (Jason, 2026-09-07, from bg2.png and bg3.png): named
-    // here for what they show, since the files carried no name of their own.
-    { id: "crystal-dunes", name: "Crystal Dunes" },
-    { id: "deep-current", name: "Deep Current" },
-  ].map((b) => ({
-    ...b,
-    full: b.full ?? `assets/backgrounds/${b.id}.webp`,
-    thumb: b.thumb ?? `assets/backgrounds/${b.id}.thumb.webp`,
-  }));
 
   const read = (key, fallback) => {
     try { return JSON.parse(global.localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
@@ -66,20 +32,6 @@
 
   const customs = () => read(CUSTOM_KEY, []);
   const all = () => [...BUILT_IN, ...customs()];
-
-  function apply(id) {
-    const choice = all().find((b) => b.id === id);
-    const root = doc.documentElement;
-    // "original" means the handoff's own stack, so the override is removed rather than pointed at
-    // the same plate -- one code path owns the default.
-    if (!choice || choice.id === "original") {
-      root.removeAttribute("data-bg");
-      root.style.removeProperty("--machine-room-bg");
-      return;
-    }
-    root.style.setProperty("--machine-room-bg", `url("${choice.full}")`);
-    root.dataset.bg = choice.id;
-  }
 
   function choose(id) {
     write(CHOICE_KEY, id);
@@ -140,8 +92,13 @@
     const plain = all().filter((b) => !b.series);
     const bySeries = new Map();
     for (const b of all()) if (b.series) bySeries.set(b.series, [...(bySeries.get(b.series) ?? []), b]);
+    // CONSOLE-4: a real heading row, spanning the whole grid. It used to carry
+    // `style="flex-basis:100%"` while .bg-grid is display:grid, where flex-basis does nothing at
+    // all -- so "Habitat" and "The Lab" each took one 185x104 cell between two tiles and read on
+    // screen as a blank tile with a label on it. Jason, 2026-09-08: "they're just blank spots."
+    // The span now lives in backgrounds.css, where the grid is.
     const swatches = plain.map(swatch).join("")
-      + [...bySeries].map(([name, tiles]) => `<p class="field-hint bg-series" style="flex-basis:100%;margin:10px 0 2px">${esc(name)}</p>${tiles.map(swatch).join("")}`).join("");
+      + [...bySeries].map(([name, tiles]) => `<p class="field-hint bg-series">${esc(name)}</p>${tiles.map(swatch).join("")}`).join("");
     return `
       <section class="settings-section" id="bg-section">
         <h3>Background</h3>
@@ -186,11 +143,14 @@
 
   // The two constants above are the whole of what tests/titan-crew.test.mjs reads, and it loads
   // this file with no document at all -- so they are published before the first line that needs a
-  // page, and the DOM half returns rather than throwing on a stub.
+  // page, and the DOM half returns rather than throwing on a stub. They come from bg-boot.js now
+  // and are re-published here unchanged, because this is the name the rest of the console knows.
   global.__machineRoomBackgrounds = { DEFAULT_CHOICE, BUILT_IN };
   if (!doc) return;
 
-  // Restore before first paint so the chosen plate is never seen swapping in.
+  // bg-boot.js already did this in <head>, before the first stylesheet. Repeated here because it
+  // is idempotent and because this file also has to cover the operator's own uploads, whose data
+  // URLs bg-boot only reads when the stored id is one of them.
   apply(read(CHOICE_KEY, DEFAULT_CHOICE));
 
   // This file is appended after boot, so DOMContentLoaded has already fired and waiting for it
