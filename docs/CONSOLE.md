@@ -439,7 +439,7 @@ Add `--url https://console.titanium.bot` with `CONSOLE_BEARER` in the environmen
 pass against a live console. In that mode nothing is created, nothing is prompted, and every leg that
 would write is refused with its reason. The bearer is never printed and never written to disk.
 
-Four rules the script is written under, each paid for by an earlier gate that lied:
+Five rules the script is written under, each paid for by an earlier gate that lied:
 
 - **A click that resolved is not evidence.** `page.click()` calls `scrollIntoViewIfNeeded` first and
   has passed on menu items no mouse could reach. Everything that claims a person can use a control
@@ -449,6 +449,13 @@ Four rules the script is written under, each paid for by an earlier gate that li
 - **The rail tile's click is a write**, so that leg is local-box only.
 - **`getForeverBoxStatus` takes `{ id }`**, and the tile leg asserts the difference between the two
   argument shapes rather than assuming it.
+- **A leg opens a conversation that HAS the thing it measures.** The badge, files and scroll legs
+  used to open `roster[0]` and skip when it came up empty, which on `grok-bot-local-vm` reported
+  "the module has not merged" about a module that was loaded and working: the first agent there has
+  a five-row transcript with no run of system rows and no file in it, and a five-row transcript
+  cannot drift because it does not overflow. They now walk the roster until the page shows the
+  shape, print how many they opened, and the scroll leg prints the transcript's height and row
+  count beside the drift so a reader can see what the number was measured on.
 
 Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 
@@ -461,7 +468,10 @@ Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 | `node --test tests/titan-crew.test.mjs` | `backgrounds.js` still publishes the list the console knows it by, loaded the way the browser loads it |
 | `node --test tests/machine-room-transcript-fold.test.mjs` | DASH-FOLD-1's fold still runs before the badge sees the rows |
 | `scripts/verify-console-polish.mjs` | the browser legs, on `grok-bot-local-vm` and then read-only on Jason's console |
-| `scripts/verify-dashboard.mjs` | unchanged. On `grok-bot-local-vm` it carries twelve known-red legs from leftover gate probes and the in-flight marketplace wave (GATE-14), so read it by diffing its failure list against a run of the previous commit, not by its tally: 166 PASS / 12 FAIL before this wave and 169 PASS / 12 FAIL after, with an empty `diff` between the two failure lists |
+| `node --test tests/machine-room-gap-badge.test.mjs` | the gap predicate, the headline and its span ceiling, the preference store, the receipt that survives a rebuild, and that the module is loaded ahead of app.js |
+| `node --test tests/machine-room-screen-tile.test.mjs` | the blank-frame refusal, the reader's life, the seat argument shape, and the stylesheet's `[hidden]` belt |
+| `node --test tests/machine-room-files.test.mjs` | the viewer's five branches, the masking, and the `/files` route's fences against a real relay and a real gateway |
+| `scripts/verify-dashboard.mjs` | unchanged by this wave, and NOT green on `grok-bot-local-vm`. It leaves its own probe agents behind and they then fail its avatar and bot-cap legs (GATE-14), so the honest way to read it on this box is to diff its failure list against a run of the previous commit rather than to read its tally |
 
 The ship is **relay-only by construction**: everything in this wave is `ui/`, tests, scripts and
 docs. `git diff <pre-wave>..HEAD -- source/ deploy/` must be empty before shipping. If it is not,
