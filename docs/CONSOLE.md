@@ -502,6 +502,8 @@ Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 | `node --test tests/titan-crew.test.mjs` | `backgrounds.js` still publishes the list the console knows it by, loaded the way the browser loads it |
 | `node --test tests/machine-room-transcript-fold.test.mjs` | DASH-FOLD-1's fold still runs before the badge sees the rows |
 | `scripts/verify-console-polish.mjs` | the browser legs, on `grok-bot-local-vm` and then read-only on Jason's console |
+| `scripts/verify-mobile.mjs` | the same console at 390x844 and 430x932 with touch, and a 1440x900 leg that fails on a changed pixel (§7) |
+| `node --test tests/machine-room-mobile.test.mjs` | that the phone pass stayed inside `@media (max-width: 690px)` (§7) |
 | `node --test tests/machine-room-gap-badge.test.mjs` | the gap predicate (**including that an adapter notice ends a gap and is never folded away**), the headline, its kinds line in plain words and its span ceiling, the preference store, the receipt that survives a rebuild, and that the module is loaded ahead of app.js |
 | `node --test tests/machine-room-screen-tile.test.mjs` | the blank-frame refusal, the reader's life, the seat argument shape, and the stylesheet's `[hidden]` belt |
 | `node --test tests/machine-room-files.test.mjs` | the viewer's five branches, the masking, and the `/files` route's fences against a real relay and a real gateway |
@@ -587,3 +589,199 @@ thirteen is in a surface this pass touched: three avatar legs and three bot-cap 
 leftover probe agents, three attachment legs are a probe turn that did not come back inside the 60 s
 budget, three are the marketplace legs belonging to the wave editing that code, and the last is the
 gate's own summary line.
+
+---
+
+## 7. On a phone
+
+Titan filed it as report #4 in the control plane on 2026-09-09, in the person's own words:
+
+> The mobile version of the console does not work: cannot scroll or move around, content is too
+> large for the mobile viewport. User was trying to read chat on a phone and could not navigate at
+> all.
+
+### One cause, and it was not the scrolling
+
+`.app-shell` is a grid. It had rows and **no column track**, so its single implicit column was
+`auto` and sized to the widest child's min-content. That child is `.window-bar`, whose three tracks
+resolved to **88 + 273 + 134.406 px plus 20 px of padding = 515.406 px**, and the 273 px in the
+middle is the automatic minimum of `.capability-dock` — six capability buttons with no `min-width: 0`
+anywhere under them.
+
+So at a 390 px viewport the whole console laid itself out at 515.406 px and `.app-shell`'s
+`overflow: hidden` clipped the other **125 px** with no scrollbar and no pan. Measured on
+`grok-bot-local-vm` in real Chrome at 390x844, device scale 3, touch, an iPhone user agent:
+
+| | before | after |
+|---|---|---|
+| `getComputedStyle('.app-shell').gridTemplateColumns` | `515.406px` | `390px` |
+| elements a person cannot reach past the right edge | 402 at 390, 392 at 430 | **0** at both |
+| `document.scrollingElement.scrollWidth` | 390 (nothing gave the 125 px back) | 390 |
+| `.send-button` | x 425..500, `elementFromPoint` → `null` | x 293..368, 75x44, hit-tests clean |
+| `#settings-button` | x 476..505, off screen | x 336..380, 44x44 |
+| `#theme-toggle` | x 436..465, off screen | x 288..332, 44x44 |
+| the roster and the agent rail | `display: none` | drawers, behind a handle each |
+| `#message-input` font | 15px — iOS zooms the layout viewport on focus | 16px, line 22, eight-line cap 176 |
+| `env(safe-area-inset-*)` in the whole console | none, anywhere | on the bar and the shelf |
+| controls under 44 px in the visible band | 15, including Send at 75x42 and the room menu at 29x29 | 0, and the report card's own Send went 58x34 → 44 with them |
+| a report card opened by hand | 442 px wide at x 0, an 11px box to type into | 333 px, 0 descendants past the edge, 16px |
+| settings panel, descendants past the edge | 31, worst right edge 692 px | 43 rects, **0** of them outside a sideways scroller |
+| sideways, at 844x390 | shell 650 px tall, composer bottom 394 in a 390 px viewport | shell 390, composer on screen |
+
+**The transcript was never the thing that could not scroll.** It is the only scroller in the chain
+and it worked: 14,527 px of content in a 625 px band, and a real CDP thumb drag moved it 447 px. What
+could not be scrolled or panned was the 125 px of console hanging off the right, which is the "cannot
+move around" half of the report. The fold, the paging and the scroll pin CONSOLE-4 landed are
+untouched; the phone adds `overscroll-behavior: contain` so a drag at either end does not chain into
+a document that cannot move.
+
+### The rule: desktop widths do not change
+
+Everything the phone pass adds lives inside `@media (max-width: 690px)`, or in a
+`@media (max-height: 500px)` block for a phone turned sideways. **Two rules are outside it**, and
+they are the only two:
+
+```css
+.app-shell { grid-template-columns: minmax(0, 1fr); }          /* the cause */
+.icon-button.drawer-toggle, .drawer-scrim { display: none; }   /* nodes that only exist on a phone */
+```
+
+`tests/machine-room-mobile.test.mjs` parses the sheet and fails if a third one appears.
+
+`verify-mobile --desktop` proves the first of them is a no-op at 1440x900 by an **A/B in one
+browser** rather than against a committed baseline, so the comparison isolates *this* ship instead of
+carrying every other wave's changes: load the console, fingerprint it, revert the rule, fingerprint
+it again.
+
+**What a pixel claim can be on this console, and what it cannot.** The first cut of that leg
+screenshotted the full page twice a few seconds apart and failed by 11 KB on a page nobody had
+touched. With every animation and transition forced off, measured on this Mac in headless Chrome:
+`.window-bar` and `#transcript` come back byte-identical shot after shot, and **every panel carrying
+`backdrop-filter: blur() saturate()`** — the roster, the room capsule, the agent rail, the shelf —
+differs by about a hundred bytes in a hundred kilobytes each time. That is the compositor
+re-rasterising a blur, not the layout moving, and no amount of waiting settles it. A leg that
+insisted on full-page byte equality would fail on an unchanged console, which is a gate that lies in
+the other direction.
+
+So the leg makes two claims instead of one bad one:
+
+- **The geometry, exactly.** Every element in the document, by tag, id, class and rounded rect. One
+  element moving one pixel changes it. That is what "the shell's column rule changes nothing"
+  actually means, and it is deterministic — with one honest subtraction, measured in the same run:
+  the fingerprint is taken **twice in the same state first**, and anything that moved on its own
+  with nothing changed is named, counted and left out. On a busy box that is the agent rail
+  redrawing its screen tile and its browser strip on the adapter's beat, which is not evidence
+  about a stylesheet rule in either direction. Everything else has to match exactly.
+- **The pixels, where pixels are stable.** `.window-bar` and `#transcript` are shot in both states
+  and compared byte for byte, and each region's own noise floor is measured first, in the same run.
+  A region that will not hold still is named and skipped rather than quietly dropped.
+
+Reverting **both** base rules first is part of the leg: the drawer handles coming back must change
+the fingerprint, which is what shows the comparison can see a change at all. Measured on
+`grok-bot-local-vm`, 1440x900: reverting both changed **13** rects; reverting the column rule alone
+changed **none** — 931 of 933 elements with identical rects, the two left out being the agent rail's
+screen plate and its image, which redraw on the adapter's beat. `.window-bar` and `#transcript` came
+back byte-identical in both states (their byte counts move with the conversation on screen, so the
+claim is the equality, not the number). The leg also re-reads the three numbers the same box
+gave before the ship: shell column `1440px`, `.composer` bottom **856**, `.send-button` x
+**959..1053**. Both full-page screenshots are saved anyway, for a person to look at.
+
+### The bar is two rows, and the rails are drawers
+
+The bar was the widest thing in the shell, so the phone pass had to take things off it rather than
+add to it. The traffic lights and the product mark go (the mark is on the boot cover, in the tab
+title and on the sign-in page), the ⌘K hint goes on a device with no keyboard, and the six capability
+buttons move to their own full-width second row. Squeezed into one row beside five 44 px targets the
+dock's track measured **94 px against a 280 px strip** — two and a half of six capabilities behind a
+sideways scroll nobody would find.
+
+`justify-self: center` is why `min-width: 0` alone did not help: a centred grid item sizes to its
+content, and the first candidate measured the dock still 273 px wide inside a 112 px track with its
+buttons drawn on top of the theme and settings buttons. It stretches now, and still scrolls with a
+fade at either end if a longer set of capabilities ever does not fit.
+
+The two rails were `display: none` at this width, so a person on a phone could not change agent,
+change room, or open an agent's screen at all — `#rail-screen` laid out at 0x0 because its parent was
+hidden, and a script could open the desktop dialog while a thumb had nothing to press. They are
+off-canvas drawers now, one behind a handle top-left and one top-right, and the agent's screen tile
+is reachable by hand for the first time (measured 274x172 at 390x844).
+
+The scrim lives **inside** `.stage`. `.stage` is `position: relative; z-index: 2`, which makes it a
+stacking context, so a drawer inside it cannot be raised above a sibling of the stage however high
+its `z-index` goes: the first cut put the scrim next to the stage and the drawer opened *under* its
+own scrim, dimmed by it, in real Chrome.
+
+`app.js` gains 27 lines of code and nothing else: which drawer is open, Escape and a scrim tap closing it,
+closing behind a chosen conversation, and handing the keyboard back to the handle that opened it. The
+sliding, the scrim and the visibility are CSS. The unit test caps that block's line count, so "the
+smallest addition" is a measured claim and not an intention.
+
+### The keyboard, and what is not measured
+
+`index.html`'s viewport meta gains `viewport-fit=cover` — without it every `env(safe-area-inset-*)`
+resolves to 0 and the composer sits under the home indicator — and `interactive-widget=resizes-content`.
+Chrome honours that second one; **iOS Safari does not**, so `app.js` also sets a `--kb` custom
+property from a `visualViewport` resize listener and the shelf pads by it. Measured with a
+keyboard-sized visual viewport simulated in Chrome: the shelf's bottom padding went 10 → 310 px and
+the composer came off the bottom.
+
+**The iPhone's own keyboard is unmeasured.** Chrome cannot raise one. This is built to the platform
+rule and asserted against a simulated resize, and that is the whole of the claim.
+
+### Boy-scout, inside these files
+
+The settings panel had 31 descendants past the right edge at 390 px — the Job Bus table is 631 px
+wide and reached x 692, and the provider tiles under "Your own keys" were sliced mid-word. Two rules:
+`min-width: 0` on the settings list and its sections, and one column for the provider grid. The
+tables were already wrapped in `overflow-x: auto`; what was missing was letting the wrapper shrink.
+After it, 43 rects still report a right edge past 390 — every one of them inside a sideways scroller
+a thumb can drag — and **0** that nobody can reach.
+
+Two dead rules went with it. `.window-actions .icon-button:first-child { display: none }` matched
+nothing (the first child of `.window-actions` is `#palette-hint`, a `.quiet-button`), so the theme
+toggle it meant to drop had been on the bar the whole time, off the right edge of it. And
+`.capability-dock`/`.capability-button` were set twice in the same breakpoint, decided by which was
+further down the file; the phone's copy is the measured one, so the older pair went.
+
+### The gate
+
+```
+node scripts/verify-mobile.mjs --width     the shell's column is the viewport; nothing hangs off the edge
+                               --reach     every control on screen, 44x44, and nothing on top of it
+                               --scroll    a real touch drag moves the transcript; the document never moves
+                               --send      a tapped Send lands a message
+                               --drawers   both drawers open, work, and close
+                               --panels    the marketplace, a bot page and settings fit
+                               --attach    a staged picture's chip is on screen and unclipped
+                               --card      a report card opened by hand fits, and its Send is a real target
+                               --fonts     every text input ≥ 16px; the meta covers the notch
+                               --land      a phone turned sideways keeps its composer
+                               --desktop   1440x900 does not move by one pixel
+                               --all       every leg, one browser, one relay
+```
+
+Every phone leg runs at **both** 390x844 and 430x932, device scale 3, `isMobile`, `hasTouch` and an
+iPhone user agent carrying `titanbot-gate/verify-mobile.mjs`. The default target is a relay spawned
+from the worktree under test against `grok-bot-local-vm`, so the gate measures the tree it lives in
+rather than whatever tree the 7777 server was started from; it holds the shared box lock while it
+does, and the run budget starts when the lock is in hand. `--url https://console.titanium.bot` with
+`CONSOLE_BEARER` runs read-only and refuses the two legs that write. Screenshots land in
+`$GROK_BOT_SHOT_DIR` and every one is named in the output.
+
+Two things the gate does deliberately, and says so in its own header:
+
+- **The overflow count only counts what nobody can reach.** An element inside a container that
+  scrolls sideways can be dragged into view, and a drawer parked off canvas at `visibility: hidden`
+  is not on the page. Both are excluded, and the raw count is printed beside the real one so the two
+  are never confused.
+- **Nothing is scrolled before a control is hit-tested.** A control a person needs at all times has
+  to be where they can press it, and "it works once you scroll to it" is the failure this gate
+  exists to catch.
+
+Measured on `grok-bot-local-vm`, this Mac, 2026-09-09: `verify-mobile --all` **135 passed, 0
+failed**, eleven legs at both device sizes.
+
+| Gate | What it covers |
+|---|---|
+| `node --test tests/machine-room-mobile.test.mjs` | that the phone pass stayed inside its breakpoint: exactly two base rules, the dock really shrinkable, the composer's font and its eight-line cap moving together, the viewport meta, the scrim inside the stage, and a line-count ceiling on `app.js`'s share |
+| `node scripts/verify-mobile.mjs --all` | the browser legs at both device sizes on `grok-bot-local-vm`, then read-only on `console.titanium.bot` |

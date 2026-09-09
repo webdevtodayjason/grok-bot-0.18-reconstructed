@@ -61,11 +61,13 @@ async function loadFeedback({ messages = [], adapter = {}, contextId = "titan", 
     sendProblemOffer, settleProblemOffer, problemOfferById, drainFailedTurnOffers,
     noteRepeatedToolFailures, openProblemReportCard, runSelfTest, drainPendingProblemReports,
     consoleBuild, loadConsoleBuild, loadHostBuild,
+    problemOfferQueue, foldProblemOffer, watchPendingProblemReports, REPORT_FOLD_MS, PENDING_POLL_MS,
   };`;
+  const pins = { count: 0 };
   const activeContext = () => ({ kind: "worker", id: contextId });
   const built = new Function(
     "escapeHtmlSource", "maskSource", "activeContext", "contextMessages", "contextName", "adapter",
-    "renderTranscript", "showToast", "fetch", "crypto", "TextEncoder",
+    "renderTranscript", "showToast", "fetch", "crypto", "TextEncoder", "pinTranscriptToBottom",
     `${escaper}\n${masker}\n${body}\n${exports}`,
   );
   const api = built(
@@ -78,8 +80,9 @@ async function loadFeedback({ messages = [], adapter = {}, contextId = "titan", 
     globalThis.fetch,
     globalThis.crypto,
     globalThis.TextEncoder,
+    () => { pins.count += 1; },
   );
-  return { ...api, renders };
+  return { ...api, renders, get pins() { return pins.count; } };
 }
 
 // The extracted body declares escapeHtml and maskSecrets itself (they are prepended above), so the
@@ -346,6 +349,137 @@ test("FEEDBACK-1: Not now sends nothing and says so", async () => {
   assert.match(feedback.reportCardsMarkup(), /Nothing left this workspace/);
 });
 
+// ---- FEEDBACK-2: the card has a life ------------------------------------------------------------
+// Jason, 2026-09-09, on a card he had already answered: "that green box is not going away. It just
+// stays there." A settled card had no timer, no dismiss control and no way off the page short of a
+// reload, and it sat pinned above the composer for the life of the tab.
+
+test("FEEDBACK-2: a settled card folds into one quiet transcript row and stops being a card", async () => {
+  const feedback = await loadFeedback({ adapter: { sendProblemReport: () => Promise.resolve({ id: "fb-1" }) } });
+  const offer = feedback.offerProblemReport({ title: "The shell refuses every command", description: "x" });
+  await feedback.sendProblemOffer(offer.id, "x");
+  assert.equal(feedback.problemOfferById(offer.id).status, "sent");
+  assert.match(feedback.reportCardsMarkup(), /Sent\. The developers have it\./);
+  // The claim the old copy made -- "you can see what you sent in your own copy above" -- was only
+  // true while the card was on screen, and the card is about to leave.
+  assert.doesNotMatch(feedback.reportCardsMarkup(), /your own copy above/);
+  assert.match(feedback.reportCardsMarkup(), /data-report-dismiss/, "and it can be dismissed by hand");
+
+  feedback.foldProblemOffer(feedback.problemOfferById(offer.id));
+  const folded = feedback.reportCardsMarkup();
+  assert.equal(feedback.problemOfferById(offer.id).status, "folded");
+  assert.match(folded, /Sent to the developers: The shell refuses every command/);
+  assert.doesNotMatch(folded, /inline-card/, "it is a quiet row now, not a card");
+  assert.doesNotMatch(folded, /data-report-send|data-report-dismiss/, "with nothing left to press");
+});
+
+test("FEEDBACK-2: Not now folds to its own row, and the timer is a few seconds and not a minute", async () => {
+  const feedback = await loadFeedback();
+  const offer = feedback.offerProblemReport({ title: "Something", description: "x" });
+  feedback.settleProblemOffer(offer, "dropped");
+  feedback.foldProblemOffer(offer);
+  assert.match(feedback.reportCardsMarkup(), /Kept to yourself: Something/);
+  assert.ok(feedback.REPORT_FOLD_MS >= 2000 && feedback.REPORT_FOLD_MS <= 15000, `a card that folds after ${feedback.REPORT_FOLD_MS} ms is either unreadable or pinned`);
+});
+
+test("FEEDBACK-2: the box is told before the card folds, so the console never shows a decision the box has no record of", async () => {
+  let tell = null;
+  const feedback = await loadFeedback({
+    adapter: {
+      resolveProblemReport: () => new Promise((resolve) => { tell = resolve; }),
+      sendProblemReport: () => Promise.resolve({}),
+    },
+  });
+  const offer = feedback.offerProblemReport({ title: "Something", description: "x", pendingId: "pr-7" });
+  const settled = feedback.settleProblemOffer(offer, "dropped");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(offer.foldTimer, undefined, "nothing is scheduled while the box has not answered");
+  tell({ resolved: true });
+  await settled;
+  await new Promise((r) => setImmediate(r));
+  assert.notEqual(offer.foldTimer, undefined, "and the fold is scheduled once it has");
+  clearTimeout(offer.foldTimer);
+});
+
+test("FEEDBACK-2: one card at a time, in the order the agent wrote them", async () => {
+  const feedback = await loadFeedback({ adapter: { sendProblemReport: () => Promise.resolve({}) } });
+  const first = feedback.offerProblemReport({ title: "Mobile console unusable", description: "a" });
+  const second = feedback.offerProblemReport({ title: "No bot template system", description: "b" });
+  const drawn = feedback.reportCardsMarkup();
+  assert.match(drawn, /Mobile console unusable/);
+  assert.doesNotMatch(drawn, /No bot template system/, "the second waits its turn rather than stacking");
+  assert.equal(feedback.problemOfferQueue().length, 1);
+
+  await feedback.sendProblemOffer(first.id, "a");
+  feedback.foldProblemOffer(feedback.problemOfferById(first.id));
+  const after = feedback.reportCardsMarkup();
+  assert.match(after, /Sent to the developers: Mobile console unusable/, "the first is a quiet row where it happened");
+  assert.match(after, /No bot template system/, "and the second is the card now");
+  assert.ok(after.indexOf("Mobile console unusable") < after.indexOf("No bot template system"), "in order");
+  assert.equal(second.status, "pending");
+});
+
+// ---- FEEDBACK-1b: the pending file is watched -----------------------------------------------------
+// It used to be read exactly once, after first paint. An agent that filed while the person was
+// sitting in front of the console drew its quiet row and no card, until a reload. Measured on
+// grok-bot-local-vm 2026-09-09: two reports in the box's file at t+12 s, zero cards on the open
+// page at 6, 12, 18, 24 and 30 s, and BOTH cards stacked after one reload.
+
+test("FEEDBACK-1b: a report written while the page is open is drawn without a reload", async () => {
+  const rows = [];
+  const feedback = await loadFeedback({
+    adapter: { listProblemReports: () => Promise.resolve([...rows]), resolveProblemReport: () => Promise.resolve({}) },
+  });
+  assert.equal((await feedback.watchPendingProblemReports(0)).length, 0, "nothing pending, nothing drawn");
+  rows.push({ id: "pr-1", agentId: "titan", agentName: "Titan", report: { tier: "quality", category: "console", title: "Mobile console unusable", description: "a" } });
+  const made = await feedback.watchPendingProblemReports(1_000_000);
+  assert.equal(made.length, 1);
+  assert.match(feedback.reportCardsMarkup(), /Mobile console unusable/);
+  assert.ok(feedback.renders.count > 0, "and the transcript was redrawn for it");
+});
+
+test("FEEDBACK-1b: the watch has a floor under it, so a busy conversation does not ask the box every tick", async () => {
+  let asked = 0;
+  const feedback = await loadFeedback({
+    adapter: { listProblemReports: () => { asked += 1; return Promise.resolve([]); } },
+  });
+  await feedback.watchPendingProblemReports(1_000_000);
+  await feedback.watchPendingProblemReports(1_000_000 + 900);
+  await feedback.watchPendingProblemReports(1_000_000 + 1800);
+  assert.equal(asked, 1, "three SSE ticks inside the floor, one read of the box");
+  await feedback.watchPendingProblemReports(1_000_000 + feedback.PENDING_POLL_MS + 1);
+  assert.equal(asked, 2, "and one more once the floor has passed");
+  assert.ok(feedback.PENDING_POLL_MS >= 1000 && feedback.PENDING_POLL_MS <= 20000, `a ${feedback.PENDING_POLL_MS} ms floor is either a hammer or a reload in disguise`);
+});
+
+test("FEEDBACK-1b: a second report arriving on the watch queues behind the first, and answering the first shows it", async () => {
+  const rows = [
+    { id: "pr-1", agentId: "titan", agentName: "Titan", report: { title: "Mobile console unusable", description: "a" } },
+  ];
+  const resolved = [];
+  const feedback = await loadFeedback({
+    adapter: {
+      listProblemReports: () => Promise.resolve([...rows]),
+      resolveProblemReport: (id, outcome) => { resolved.push([id, outcome]); return Promise.resolve({}); },
+      sendProblemReport: () => Promise.resolve({ id: "fb-2" }),
+    },
+  });
+  const first = (await feedback.watchPendingProblemReports(1_000_000))[0];
+  rows.push({ id: "pr-2", agentId: "titan", agentName: "Titan", report: { title: "No bot template system", description: "b" } });
+  const second = (await feedback.watchPendingProblemReports(2_000_000))[0];
+  assert.equal(second.pendingId, "pr-2");
+  assert.doesNotMatch(feedback.reportCardsMarkup(), /No bot template system/, "the second is written down but not drawn yet");
+
+  await feedback.sendProblemOffer(first.id, first.body);
+  feedback.foldProblemOffer(feedback.problemOfferById(first.id));
+  assert.deepEqual(resolved, [["pr-1", "sent"]]);
+  assert.match(feedback.reportCardsMarkup(), /No bot template system/, "answering the first brings the second forward");
+
+  // The set that stops a report being offered twice must survive the fold, or the watch re-offers
+  // what the person just answered on its next tick.
+  assert.equal((await feedback.watchPendingProblemReports(3_000_000)).length, 0);
+});
+
 test("FEEDBACK-1: a send that fails leaves the card pending and says why", async () => {
   const feedback = await loadFeedback({
     adapter: { sendProblemReport: () => Promise.reject(new Error("the relay is not answering")) },
@@ -380,13 +514,18 @@ test("FEEDBACK-1: a report the agent wrote while nobody was watching is offered 
   assert.deepEqual(resolved, [["pr-1", "sent"]], "the box stops offering what the person answered");
 });
 
-test("FEEDBACK-1: the always-present control opens a card with nothing failed", async () => {
+test("FEEDBACK-1: the always-present control opens a card with nothing failed, and takes the reader to it", async () => {
   const feedback = await loadFeedback();
   feedback.openProblemReportCard();
   const drawn = feedback.reportCardsMarkup();
   assert.match(drawn, /A problem with this product/);
   assert.match(drawn, /Say what happened, what you expected/);
   assert.equal(feedback.renders.count, 1, "the card is drawn as soon as it is asked for");
+  // FEEDBACK-2. The card is appended at the END of the transcript and renderTranscript only follows
+  // a reader already at the bottom, so pressing this while scrolled back drew a correct card below
+  // the fold. Measured on grok-bot-local-vm at 390x844: the card was on the page, 333 px wide, and
+  // its Send was off screen with nothing saying where it had gone.
+  assert.equal(feedback.pins, 1, "pressing the control pins the transcript to the bottom once");
 });
 
 test("FEEDBACK-1: the self-test asks for the six sections and stops teaching the boundary as a bug", async () => {

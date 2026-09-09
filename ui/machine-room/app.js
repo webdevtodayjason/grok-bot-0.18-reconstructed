@@ -854,6 +854,34 @@
   let problemOfferSeq = 0;
   const problemOffersFor = (context = activeContext()) => problemOffers.filter((offer) => offer.agentId === context.id);
 
+  // FEEDBACK-2. How long a settled card says what happened before it folds itself into the
+  // transcript. Jason, 2026-09-09, on a card he had already answered: "that green box is not going
+  // away. It just stays there." Long enough to read one sentence, short enough that the next
+  // report is not queued behind a card nobody is looking at any more.
+  const REPORT_FOLD_MS = 6000;
+
+  /**
+   * FEEDBACK-2. What the transcript draws for this conversation: every report that has already
+   * folded, as a quiet row where it happened, and then AT MOST ONE live card.
+   *
+   * One at a time is the whole point. Two reports drawn as a stack of editable cards is what a
+   * reload used to show -- measured on grok-bot-local-vm, a page reloaded with two pending rows
+   * drew both at once, each with its own Send -- and a person answering the second has already
+   * lost track of which body belongs to which title. The rest wait their turn and arrive as soon
+   * as the one in front of them is answered.
+   */
+  function problemOfferQueue(context = activeContext()) {
+    const rows = [];
+    let live = false;
+    for (const offer of problemOffersFor(context)) {
+      if (offer.status === "folded") { rows.push(offer); continue; }
+      if (live) continue;
+      live = true;
+      rows.push(offer);
+    }
+    return rows;
+  }
+
   // Everything an offer is minted from goes through this on the way in. The regex is the page's own
   // (maskSecrets, further down), so a token pasted into a shell command and echoed back by the box
   // is masked here for the same reason it is masked on an evidence receipt.
@@ -986,25 +1014,61 @@
     if (offer.status === "sending") {
       return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">Sending this to the developers…</small></span></div></div></article>`;
     }
+    // FEEDBACK-2: the end of the card's life. One quiet row where the report happened, drawn the
+    // same way every other detail-less system row is drawn, so scrolling back tomorrow shows what
+    // was decided and nothing is pinned above the composer.
+    if (offer.status === "folded") {
+      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="message-bubble">${escapeHtml(offer.foldText)}</div></article>`;
+    }
     if (offer.status === "sent" || offer.status === "dropped") {
+      // Not "you can see what you sent in your own copy above": that sentence was only true while
+      // this card was on screen, and this card is about to fold itself away.
       const settled = offer.status === "sent"
-        ? "Sent. The developers have it, and you can see what you sent in your own copy above."
+        ? "Sent. The developers have it."
         : "Kept to yourself. Nothing left this workspace.";
       const accent = offer.status === "sent" ? "var(--green-500)" : "var(--amber-500)";
-      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${offer.status === "sent" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">${escapeHtml(settled)}</small></span></div></div></article>`;
+      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${offer.status === "sent" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">${escapeHtml(settled)}</small></span></div><div class="inline-card-actions"><button class="card-action" type="button" data-report-dismiss="${escapeHtml(offer.id)}">Dismiss</button></div></div></article>`;
     }
     const note = offer.note ? `<small class="field-hint">${escapeHtml(offer.note)}</small>` : "";
     return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card problem-report-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small>Would you like to send this to the developers?</small></span></div><div class="tag-list">${chip}</div><div class="field"><label class="sr-only" for="report-body-${escapeHtml(offer.id)}">What is sent to the developers</label><textarea id="report-body-${escapeHtml(offer.id)}" data-report-body="${escapeHtml(offer.id)}" rows="8" aria-describedby="report-custody-${escapeHtml(offer.id)}">${escapeHtml(offer.body)}</textarea><small class="field-hint" id="report-custody-${escapeHtml(offer.id)}">${escapeHtml(REPORT_CUSTODY)}</small>${note}</div><div class="inline-card-actions"><button class="card-action primary" type="button" data-report-send="${escapeHtml(offer.id)}">Send</button><button class="card-action" type="button" data-report-drop="${escapeHtml(offer.id)}">Not now</button></div></div></article>`;
   }
 
-  const reportCardsMarkup = () => problemOffersFor().map(reportCardMarkup).join("");
+  const reportCardsMarkup = () => problemOfferQueue().map(reportCardMarkup).join("");
 
+  /**
+   * FEEDBACK-2. Settling is not the end of the card, it is the start of the last few seconds of it.
+   *
+   * The box is told first and the fold waits for that answer. `resolveProblemReport` used to be
+   * fire-and-forget, which was harmless while a settled card sat there for ever; with a fold it is
+   * not. Taking the row off the screen while the box still held it would show a decision the box
+   * has no record of, and the next load would offer the same report again with nothing said.
+   */
   function settleProblemOffer(offer, status, note) {
     offer.status = status;
     offer.note = note ?? "";
-    if (offer.pendingId && (status === "sent" || status === "dropped") && typeof adapter.resolveProblemReport === "function") {
-      Promise.resolve(adapter.resolveProblemReport(offer.pendingId, status)).catch(() => {});
-    }
+    const told = offer.pendingId && (status === "sent" || status === "dropped") && typeof adapter.resolveProblemReport === "function"
+      ? Promise.resolve(adapter.resolveProblemReport(offer.pendingId, status)).catch(() => null)
+      : Promise.resolve(null);
+    renderTranscript();
+    told.then(() => scheduleProblemOfferFold(offer));
+    return told;
+  }
+
+  function scheduleProblemOfferFold(offer) {
+    if (offer.foldTimer != null || offer.status === "folded") return;
+    offer.foldTimer = setTimeout(() => foldProblemOffer(offer), REPORT_FOLD_MS);
+  }
+
+  // Also the Dismiss button's own path: a person who has read the sentence does not have to wait
+  // out the timer to get the space back.
+  function foldProblemOffer(offer) {
+    if (!offer) return;
+    if (offer.foldTimer != null) { clearTimeout(offer.foldTimer); offer.foldTimer = null; }
+    if (offer.status !== "sent" && offer.status !== "dropped") return;
+    offer.foldText = offer.status === "sent"
+      ? `Sent to the developers: ${offer.title}`
+      : `Kept to yourself: ${offer.title}`;
+    offer.status = "folded";
     renderTranscript();
   }
 
@@ -1136,6 +1200,14 @@
       description: "Say what happened, what you expected, and what you were doing at the time.",
       source: "manual",
     });
+    // FEEDBACK-2: and take the person to it. The card is appended at the end of the transcript, and
+    // renderTranscript only follows a reader who is already at the bottom (CONSOLE-4), so pressing
+    // this while scrolled back drew the card below the fold with nothing saying where it went.
+    // Measured on grok-bot-local-vm at 390x844: the card was on the page, 333 px wide and correct,
+    // and its Send was off screen. Pressing a button that opens a card is one of the moments a
+    // person expects to be taken to the newest line, so it uses the same one-shot pin the roster
+    // click and a send use, and nothing else moves the reader.
+    pinTranscriptToBottom();
     renderTranscript();
   }
 
@@ -1172,6 +1244,36 @@
         });
       }))
       .catch(() => []);
+  }
+
+  /**
+   * FEEDBACK-1b. The pending file is WATCHED, not read once.
+   *
+   * `drainPendingProblemReports` used to be called from exactly one place: after first paint. So an
+   * agent that used its reporting tool while the person was sitting in front of the console drew
+   * its quiet "Reported a problem to the developers" row inside the turn and no card behind it,
+   * until the page was loaded again. Jason, 2026-09-09, on the second of two reports Titan filed
+   * in one turn: the row was there, the card never came, and the control plane has one report
+   * where the console said two. Measured on grok-bot-local-vm the same day: both rows were in the
+   * box's file at t+12 s and the open page drew nothing for thirty seconds.
+   *
+   * This rides the beat the console already runs -- the adapter's own subscribe, which fires on
+   * the 900 ms debounced re-read and on the 15 s heartbeat -- with a floor under it, because a
+   * drain is a gateway round trip and a busy conversation would otherwise ask the box for its
+   * pending file several times a second. The floor is what makes this cheap; the cards are still
+   * drawn one at a time, in the order the agent wrote them.
+   */
+  const PENDING_POLL_MS = 4000;
+  let pendingPolledAt = 0;
+  let pendingPolling = false;
+  function watchPendingProblemReports(now = Date.now()) {
+    if (typeof adapter.listProblemReports !== "function") return Promise.resolve([]);
+    if (pendingPolling || now - pendingPolledAt < PENDING_POLL_MS) return Promise.resolve([]);
+    pendingPolling = true;
+    pendingPolledAt = now;
+    return drainPendingProblemReports()
+      .then((made) => { if (made.length) renderTranscript(); return made; })
+      .finally(() => { pendingPolling = false; });
   }
   // ---- end FEEDBACK-1 --------------------------------------------------------------------------
 
@@ -6134,6 +6236,8 @@
     // behind them. Both are cheap array reads over what is already on the page.
     drainFailedTurnOffers();
     noteRepeatedToolFailures();
+    // FEEDBACK-1b: and the box's own pending file, on the same beat, behind its own floor.
+    watchPendingProblemReports();
     // CONSOLE-4: every route into another conversation, not only the roster click -- the palette's
     // jump, and landOn after a create, both reach the page through this event and nothing else.
     if (event.type === "context:selected") pinTranscriptToBottom();
@@ -6311,6 +6415,12 @@
     if (reportDrop) {
       const offer = problemOfferById(reportDrop.dataset.reportDrop);
       if (offer) settleProblemOffer(offer, "dropped");
+      return;
+    }
+    // FEEDBACK-2: fold the settled card now rather than waiting out its own few seconds.
+    const reportDismiss = event.target.closest("[data-report-dismiss]");
+    if (reportDismiss) {
+      foldProblemOffer(problemOfferById(reportDismiss.dataset.reportDismiss));
       return;
     }
     const secret = event.target.closest("[data-submit-secret]");
@@ -6540,6 +6650,47 @@
   // After the submit handler above has cleared the value, not before it.
   elements.composer.addEventListener("submit", () => { requestAnimationFrame(autosizeComposer); });
   autosizeComposer();
+
+  // ---- MOBILE-1: the two drawers, and the keyboard ---------------------------------------------
+  // The rails are off-canvas panels at phone widths and ordinary columns above the breakpoint, and
+  // the stylesheet does the sliding, the scrim and the visibility. What is here is only what CSS
+  // cannot do: which drawer is open, Escape and a scrim tap closing it, and handing the keyboard
+  // back to the button that opened it.
+  let drawerOpener = null;
+  const drawerButtons = () => document.querySelectorAll("[data-drawer-toggle]");
+  function setDrawer(name) {
+    const open = name && document.body.dataset.drawer !== name ? name : "";
+    if (open) document.body.dataset.drawer = open; else delete document.body.dataset.drawer;
+    for (const button of drawerButtons()) button.setAttribute("aria-expanded", String(button.dataset.drawerToggle === open));
+    if (open) drawerOpener = document.querySelector(`[data-drawer-toggle="${open}"]`);
+    else if (drawerOpener) { drawerOpener.focus(); drawerOpener = null; }
+  }
+  for (const button of drawerButtons()) button.addEventListener("click", () => setDrawer(button.dataset.drawerToggle));
+  document.getElementById("drawer-scrim")?.addEventListener("click", () => setDrawer(""));
+  // Choosing a conversation is the reason the roster drawer was opened, so it closes behind you.
+  document.getElementById("worker-roster")?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-context-id]")) setDrawer("");
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.dataset.drawer) setDrawer("");
+  });
+
+  // The composer above the keyboard. Chrome honours interactive-widget=resizes-content in the
+  // viewport meta and shrinks the layout viewport for it; iOS Safari does not, so the shelf reads
+  // the visual viewport itself and pads by the difference. THE IPHONE'S OWN KEYBOARD IS UNMEASURED
+  // -- Chrome cannot raise one -- so this is built to the platform rule and asserted against a
+  // simulated visualViewport resize, and docs/CONSOLE.md section 7 says exactly that.
+  if (typeof window !== "undefined" && window.visualViewport) {
+    const trackKeyboard = () => {
+      const view = window.visualViewport;
+      const kb = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));
+      document.documentElement.style.setProperty("--kb", `${kb}px`);
+    };
+    window.visualViewport.addEventListener("resize", trackKeyboard);
+    window.visualViewport.addEventListener("scroll", trackKeyboard);
+    trackKeyboard();
+  }
+  // ---- end MOBILE-1 ----------------------------------------------------------------------------
 
   elements.messageInput.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
@@ -7202,5 +7353,7 @@
   // command simply has nothing to offer.
   loadConsoleBuild();
   loadHostBuild();
-  drainPendingProblemReports().then((made) => { if (made.length) renderTranscript(); });
+  // FEEDBACK-1b: the same drain the subscribe beat runs, so the first read and the watch share one
+  // floor and the page does not ask the box twice in the first second.
+  watchPendingProblemReports();
 })();

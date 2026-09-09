@@ -1220,12 +1220,16 @@ try {
         const r = (sel) => { const el = document.querySelector(sel); if (!el) return null; const b = el.getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) }; };
         const bar = r(".control-shelf"), util = r(".shelf-utilities"), status = r("#composer-status"), composer = r(".composer");
         const inside = !!(bar && util && util.w > 0 && util.y >= bar.y && util.y + util.h <= bar.y + bar.h + 1 && util.x + util.w <= bar.x + bar.w + 1);
-        const above = !!(status && bar && status.h > 0 && status.y + status.h <= bar.y + 2);
+        // FEEDBACK-2: the status used to FLOAT above the shelf, which is what put it on top of a
+        // report card at the transcript's bottom (measured 27 px of overlap at 1440x900 with a file
+        // staged). It is a full-width row inside the shelf now, so what has to be true is that it
+        // is in the shelf's box AND still not taking the composer's column.
+        const withinShelf = !!(status && bar && status.h > 0 && status.y >= bar.y - 1 && status.y + status.h <= bar.y + bar.h + 1);
         const composerLeftOfUtilities = !!(composer && util && composer.x + composer.w <= util.x + 1);
-        return { inside, above, composerLeftOfUtilities, buttons: document.querySelectorAll(".shelf-utilities .icon-button").length };
+        return { inside, withinShelf, composerLeftOfUtilities, buttons: document.querySelectorAll(".shelf-utilities .icon-button").length };
       });
       check(shelf.inside && shelf.composerLeftOfUtilities && shelf.buttons === 3, "the shelf keeps its three utilities beside the composer while the status shows", JSON.stringify(shelf));
-      check(shelf.above, "and the status floats above the shelf instead of taking a column", JSON.stringify(shelf));
+      check(shelf.withinShelf, "and the status takes a row of the shelf rather than the composer's column, or the conversation above it", JSON.stringify(shelf));
       // MR-27. A long box-wide endpoint name widened the Agent panel past the window edge on the
       // R750. Put the long value in and measure the panel, not the column.
       const panel = await page.evaluate(() => {
@@ -1359,13 +1363,15 @@ try {
       check(chips != null, "and both dropped files stage as chips through uploadAttachment", chips ? JSON.stringify(chips) : await page.evaluate(() => document.getElementById("attachment-tray")?.textContent ?? "the tray is empty"));
       // The MR-26 geometry with files staged. The tray was an unstyled fourth item in a
       // three-column shelf, so the first chip pushed the composer into the utilities' column and
-      // clipped its text under the shelf's edge; it floats above the composer now.
+      // clipped its text under the shelf's edge; it is a full-width row of the shelf now (FEEDBACK-2).
       const trayShelf = await page.evaluate(() => {
         const r = (sel) => { const el = document.querySelector(sel); if (!el) return null; const b = el.getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) }; };
         return { bar: r(".control-shelf"), util: r(".shelf-utilities"), composer: r(".composer"), tray: r("#attachment-tray") };
       });
       check(!!trayShelf.composer && !!trayShelf.util && trayShelf.composer.x + trayShelf.composer.w <= trayShelf.util.x + 1 && trayShelf.util.y + trayShelf.util.h <= trayShelf.bar.y + trayShelf.bar.h + 1, "a staged tray does not take the composer's column", JSON.stringify(trayShelf));
-      check(!!trayShelf.tray && !!trayShelf.bar && trayShelf.tray.y + trayShelf.tray.h <= trayShelf.bar.y + 2, "it floats above the shelf instead", JSON.stringify(trayShelf.tray));
+      // FEEDBACK-2: a row of the shelf now, not a float above it. Floating is what let the tray push
+      // the status chip 38 px further up and onto a report card's own Send button.
+      check(!!trayShelf.tray && !!trayShelf.bar && trayShelf.tray.y >= trayShelf.bar.y - 1 && trayShelf.tray.y + trayShelf.tray.h <= trayShelf.bar.y + trayShelf.bar.h + 1, "it takes a row of the shelf instead", JSON.stringify(trayShelf.tray));
       const attachmentNames = async () => ((await gw("getAgentTranscriptTail", { id: probeAgentId, limit: 40 }))?.entries ?? [])
         .filter((e) => e.kind === "user-attachment")
         .map((e) => e.file_name || String(e.file_path ?? "").split("/").pop());

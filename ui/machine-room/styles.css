@@ -56,6 +56,18 @@ select:focus-visible {
   position: relative;
   isolation: isolate;
   display: grid;
+  /* MOBILE-1, THE CAUSE. This grid had rows and no columns, so its one implicit column was `auto`
+     and sized to the widest child's min-content -- the window bar, whose three tracks resolved to
+     88 + 273 + 134.406 px plus 20 px of padding = 515.406 px, driven by six capability buttons
+     with no `min-width: 0` under them. Measured on grok-bot-local-vm at a 390 px viewport: the
+     whole console laid out at 515.406 px and `overflow: hidden` below clipped the other 125 px
+     with no scroll and no pan, so Send, Settings and the theme toggle were off screen and
+     `elementFromPoint` at their centres answered null. Titan's report #4, in the person's words:
+     "cannot scroll or move around, content is too large for the mobile viewport."
+     At 1440x900 the implicit column already computed to "1440px", so this line is a no-op above
+     the breakpoint -- and the gate's --desktop leg proves that rather than asserting it, by
+     fingerprinting every element's rect in the document with the rule and again without it. */
+  grid-template-columns: minmax(0, 1fr);
   /* The shelf's row is content-sized, not a fixed bar: the composer grows to eight lines
      (QOL-COMPOSER) and a fixed track would leave it hanging out of the shelf with its last
      line clipped under the edge. The stage's 1fr gives back what the shelf takes. */
@@ -101,6 +113,16 @@ select:focus-visible {
   background:
     linear-gradient(180deg, rgba(240, 236, 220, 0.08), rgba(20, 42, 48, 0.25)),
     #f5f7fa;
+}
+
+/* MOBILE-1. The two drawer buttons and the drawer scrim exist only at phone widths: above the
+   breakpoint both rails are on the page and there is nothing to open. With the shell's column
+   track above, this is the second and last rule the phone pass puts outside
+   `@media (max-width: 690px)`, and it is what makes "desktop does not move" checkable -- at 1440
+   these three nodes are not laid out at all. */
+.icon-button.drawer-toggle,
+.drawer-scrim {
+  display: none;
 }
 
 .window-bar {
@@ -1318,13 +1340,27 @@ select:focus-visible {
 
 
 
+/* FEEDBACK-2. The shelf carries its own furniture instead of floating it over the conversation.
+   Three things used to be absolutely positioned at `bottom: calc(100% + 6px)` -- the send status,
+   the attachment tray and the two always-present controls -- so all three painted over the
+   transcript's bottom band, and the report card is the transcript's last child. Measured on
+   grok-bot-local-vm in real Chrome at 1440x900 with one file staged: the status chip ran 706-733
+   against a card at 384-738, twenty-seven pixels of overlap, and elementFromPoint at the chip's
+   centre answered the card's own Send / Not now row. That is Jason's screenshot of 2026-09-09,
+   attachment chip included.
+
+   Each of the three now takes a full-width row above the composer's row. They are `[hidden]` or
+   `:empty` when they have nothing to say, so an empty band collapses to nothing and the shelf is
+   the height it always was. The reason they were floated in the first place -- an unstyled fourth
+   item wrapping the utilities onto a second row and sliding the composer into their column -- is
+   answered by spanning every column rather than by leaving the flow. */
 .control-shelf {
   position: relative;
   z-index: 30;
   display: grid;
   grid-template-columns: minmax(300px, auto) minmax(320px, 600px) auto;
   align-items: center;
-  gap: 24px;
+  gap: 8px 24px;
   margin: 0 24px 18px;
   padding: 14px 16px;
   border: 1px solid var(--glass-edge);
@@ -1772,9 +1808,8 @@ dialog[open] {
 }
 
 .composer-aside {
-  position: absolute;
-  right: 16px;
-  bottom: calc(100% + 6px);
+  grid-column: 1 / -1;
+  justify-self: end;
   display: flex;
   gap: 6px;
 }
@@ -2926,17 +2961,14 @@ dialog[open] {
     display: none;
   }
 
-  .capability-dock {
-    justify-self: center;
-  }
-
-  .capability-button {
-    min-width: 39px;
-  }
-
-  .window-actions .icon-button:first-child {
-    display: none;
-  }
+  /* The dock and its buttons were set here twice over -- `justify-self: center` and
+     `min-width: 39px` -- and the MOBILE-1 block at the end of this sheet sets both the other way.
+     Two rules for one selector in one breakpoint, decided by which is further down the file, is a
+     trap for whoever edits next; the phone's copy is the one that is measured, so this one goes.
+     The rule that stood below them, `.window-actions .icon-button:first-child { display: none }`,
+     matched nothing at all: the first child of .window-actions is #palette-hint, a .quiet-button,
+     so the theme toggle it meant to drop was on the bar the whole time (and off the right edge of
+     it). What replaces all three is in the MOBILE-1 block. */
 
   .stage {
     display: block;
@@ -3031,6 +3063,19 @@ dialog[open] {
   .file-grid {
     grid-template-columns: 1fr 1fr;
   }
+
+}
+
+/* MOBILE-1, the phone turned sideways. At 844x390 the width breakpoint is missed entirely, so the
+   desktop rules apply and `.app-shell`'s `min-height: 650px` beats `height: 100dvh` -- measured on
+   grok-bot-local-vm, the shell laid out 650 px tall and the composer's bottom landed at 394 px in
+   a 390 px viewport with `body { overflow: hidden }`, so nothing scrolled to it. Its own block,
+   keyed on height, because the width block never sees this case and the base rule is a desktop
+   rule. */
+@media (max-height: 500px) {
+  .app-shell {
+    min-height: 0;
+  }
 }
 
 
@@ -3107,14 +3152,14 @@ button.evidence-chip[data-verdict]:hover { border-color: var(--glass-edge); colo
 
 /* Wave C1: send acceptance, transcript paging, skills, hand-back. */
 .composer-status {
-  /* Not a grid cell. The shelf is three columns (chips, composer, utilities); as a fourth item
-     this wrapped the utilities onto a second row nobody can see and slid the composer into the
-     utilities' column the moment the status had any text. It floats above the composer instead. */
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 6px);
-  transform: translateX(-50%);
-  max-width: 60ch;
+  /* Its own row in the shelf, spanning every column. As an auto-placed fourth item this wrapped
+     the utilities onto a second row nobody can see and slid the composer into the utilities'
+     column the moment the status had any text; it used to float above the composer to dodge that,
+     and floating is what put it on top of the report card (FEEDBACK-2, the note on .control-shelf).
+     Spanning the row answers both. */
+  grid-column: 1 / -1;
+  justify-self: center;
+  max-width: min(60ch, 100%);
   padding: 4px 14px;
   border-radius: 999px;
   background: rgba(15, 23, 27, 0.72);
@@ -3766,10 +3811,8 @@ body[data-composer-drop="1"] .composer {
    way the status does, and stays clickable, because the × on a chip is how a file is taken off
    again. Scoped to :not([hidden]) so an author `display` cannot beat the `hidden` attribute. */
 .attachment-tray:not([hidden]) {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 6px);
-  transform: translateX(-50%);
+  grid-column: 1 / -1;
+  justify-self: center;
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
@@ -3777,10 +3820,8 @@ body[data-composer-drop="1"] .composer {
   max-width: min(72ch, 100%);
 }
 
-/* Both float above the shelf, so the status steps up over a tray that is showing beneath it. */
-.attachment-tray:not([hidden]) ~ .composer-status {
-  bottom: calc(100% + 44px);
-}
+/* The rule that used to lift the status another 38 px over a showing tray is gone with the
+   floating: both are rows now, and the shelf stacks them. */
 
 /* qol/vnc-paste: the desktop pane's clipboard note. One line in the desktop footer, between the
    live status and the run controls, sized like the status line beside it so it reads as a caption
@@ -4354,4 +4395,261 @@ body[data-composer-drop="1"] .composer {
   border-color: rgba(16, 74, 78, 0.6);
   color: #f1fbfa;
   background: rgba(16, 94, 98, 0.94);
+}
+
+/* ================================================================================================
+   MOBILE-1. The console on a phone. Titan's report #4, in the person's own words: "the mobile
+   version of the console does not work: cannot scroll or move around, content is too large for the
+   mobile viewport."
+
+   THIS BLOCK IS AT THE END OF THE SHEET ON PURPOSE. A media query adds no specificity, so a rule
+   here has to come after the base rule it beats; the first cut of this block sat 600 lines above
+   `.composer textarea { font: inherit }` and lost, and the composer stayed at the 15px that makes
+   iOS zoom the layout viewport on focus. Everything the phone pass changes is inside this block
+   and the landscape block below it, except two base rules: `.app-shell`'s column track (the cause)
+   and the hide on the two drawer buttons and the scrim (nodes that only exist down here).
+   ================================================================================================ */
+@media (max-width: 690px) {
+  /* THE BAR IS TWO ROWS ON A PHONE. Squeezed into one, the dock's track measured 94 px against a
+     280 px strip -- two and a half of six capabilities, behind a sideways scroll nobody would find.
+     The handles and the window actions take the first row, the dock takes the whole of the second,
+     and all six buttons are on screen with nothing to scroll. The shell's first track goes to
+     `auto` to let the bar be as tall as it needs. */
+  .app-shell {
+    grid-template-rows: auto minmax(0, 1fr) minmax(82px, auto);
+  }
+
+  .window-bar {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    gap: 6px 8px;
+    padding: calc(8px + env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 0 max(10px, env(safe-area-inset-left));
+  }
+
+  /* Five 44 px targets and a scrolling dock do not fit beside a mark as well. Measured at 390 px
+     with the lockup still on the bar, the dock's track came out 22 px wide -- six buttons in a
+     22 px scroller is not a control. The bar at this width is a toolbar; the mark is on the boot
+     cover, in the tab title, and on the sign-in page. The traffic lights go for the same reason:
+     they are decoration on a window that has no chrome to imitate on a phone. */
+  .window-lockup,
+  .traffic-lights {
+    display: none;
+  }
+
+  .window-identity,
+  .window-actions {
+    gap: 4px;
+    height: auto;
+  }
+
+  /* `min-width: 0` alone does NOT shrink this: `justify-self: center` sized it to its content, and
+     the candidate that only added min-width measured the dock still 273 px wide inside a 112 px
+     track, with its buttons drawn on top of the theme and settings buttons. It stretches, scrolls
+     sideways, and fades at whichever end still holds a button -- the same "there is more this way"
+     the room strip uses. */
+  .capability-dock {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: stretch;
+    min-width: 0;
+    min-height: 0;
+    padding: 5px 10px 6px;
+    border-radius: 0 0 22px 22px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+    mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+  }
+
+  .capability-dock::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Sized by their own labels, not stretched to a share of the bar: `flex: 1 1 0` squeezed every
+     button to 44 px and clipped "Marketplace", "Routines" and "Browser" down to their icons. Six
+     of them at their own width fit inside 370 px; if a longer set ever does not, the dock scrolls
+     and fades rather than losing a word. */
+  .capability-button {
+    flex: 0 0 auto;
+    min-width: 0;
+    min-height: 44px;
+    padding: 4px 9px;
+    font-size: 10px;
+  }
+
+  /* Below 940 px the dock is already icons only (`.capability-button span:last-child`), and Add
+     kept its word by accident: its last child is the count, so the label span never matched. One
+     labelled button among five icons reads like a fault on a phone. The count stays -- it is the
+     bots-on-this-box badge, and it is the only number on the bar. */
+  .capability-button > span:not(.capability-icon) {
+    display: none;
+  }
+
+  /* A keyboard shortcut on a device with no keyboard, and it was taking a fifth of the bar. */
+  #palette-hint {
+    display: none;
+  }
+
+  /* An absolutely positioned caption inside a dock with a fifth of its old padding. */
+  .capability-scope {
+    display: none;
+  }
+
+  .room-capsule {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  /* THE RAILS BECOME DRAWERS. Both were `display: none` here, so on a phone there was no control
+     that changed agent, changed room, or opened an agent's screen -- the screen tile laid out at
+     0x0 because its parent was hidden, which is the page.click() trap in one measurement: a script
+     could open the desktop dialog, a thumb had nothing to press. */
+  .icon-button.drawer-toggle {
+    display: grid;
+    place-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The stage's own stacking context has to clear the bar (20) and the shelf (30) for a drawer
+     inside it to cover them. Above the breakpoint it stays at 2 and nothing moves. */
+  .stage {
+    z-index: 60;
+  }
+
+  .worker-roster,
+  .context-space {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    z-index: 70;
+    display: grid;
+    align-content: start;
+    gap: 12px;
+    width: min(86vw, 340px);
+    max-width: none;
+    padding: calc(14px + env(safe-area-inset-top)) 14px calc(16px + env(safe-area-inset-bottom));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: rgba(9, 13, 20, 0.97);
+    box-shadow: var(--shadow-large);
+    visibility: hidden;
+    transition:
+      transform var(--duration-standard),
+      visibility var(--duration-standard);
+  }
+
+  .worker-roster {
+    left: 0;
+    border-right: 1px solid var(--glass-edge);
+    transform: translateX(-100%);
+  }
+
+  .context-space {
+    right: 0;
+    border-left: 1px solid var(--glass-edge);
+    transform: translateX(100%);
+  }
+
+  body[data-drawer="roster"] .worker-roster,
+  body[data-drawer="context"] .context-space {
+    transform: none;
+    visibility: visible;
+  }
+
+  /* The scrim keeps its `hidden` attribute and is drawn only while a drawer is open, so nothing
+     paints over the console when no drawer has ever been opened. */
+  body[data-drawer] .drawer-scrim[hidden] {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: rgba(4, 8, 11, 0.58);
+  }
+
+  /* Inside a drawer, "Hide" hides the stack the drawer exists to show. */
+  #hide-roster {
+    display: none;
+  }
+
+  /* A drag at either end of the transcript must not chain into a document that cannot move. The
+     scroller, the fold and the paging are left exactly where CONSOLE-4 put them. */
+  .transcript {
+    overscroll-behavior: contain;
+  }
+
+  /* THE COMPOSER SITS ABOVE THE KEYBOARD, and clear of the home indicator. There was not one
+     env(safe-area-inset-*) in this console before this rule. --kb is the visual viewport's own
+     answer, set in app.js, for the browser that ignores interactive-widget. */
+  .control-shelf {
+    padding:
+      10px
+      max(16px, env(safe-area-inset-right))
+      calc(max(10px, env(safe-area-inset-bottom)) + var(--kb, 0px))
+      max(16px, env(safe-area-inset-left));
+  }
+
+  /* READABLE. Anything under 16px makes iOS Safari zoom the layout viewport on focus, which is the
+     second half of "content too large for the viewport" the moment a person taps the composer. */
+  .composer textarea,
+  .problem-report-card textarea,
+  .panel-dialog input,
+  .panel-dialog textarea,
+  .panel-dialog select,
+  #palette-input,
+  #teach-note {
+    font-size: 16px;
+  }
+
+  /* The eight-line cap moves with the line box or the last line clips: autosizeComposer reads the
+     computed line-height, so the only number that has to be kept in step is this one. */
+  .composer textarea {
+    min-height: 44px;
+    line-height: 22px;
+    max-height: 176px;
+  }
+
+  /* TAPPABLE. Fifteen visible controls measured under 44 px on a phone. */
+  /* Every button on an in-transcript card, not only the shelf's own: the report card's Send
+     measured 58x34 on a phone, which is a thumb target that misses. */
+  .inline-card-actions .card-action,
+  .send-button,
+  .composer-plus,
+  #room-menu,
+  #theme-toggle,
+  #settings-button,
+  #logout-button,
+  #report-problem,
+  #run-self-test {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  #report-problem,
+  #run-self-test {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* Boy-scout, bounded: the settings panel's own overflow. The Job Bus table is 631 px wide and
+     the provider tiles were sliced mid-word. Two rules, and no redesign of a panel this wave does
+     not own. */
+  .panel-dialog .settings-list,
+  .panel-dialog .settings-section {
+    min-width: 0;
+  }
+
+  .job-bus-table-wrap,
+  .mail-table-wrap,
+  .job-bus-curl {
+    -webkit-overflow-scrolling: touch;
+    overflow-x: auto;
+  }
+
+  .plugin-list,
+  .provider-switch {
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+  }
 }

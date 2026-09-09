@@ -61,6 +61,8 @@ function stubRelay(root, seed) {
   // sentence under `message` and nothing under `error`, and the console used to read `error`, so
   // three carefully written sentences were thrown away and the person read an HTTP status code.
   let failNext = null;
+  const streams = [];
+  const nudge = () => { for (const stream of streams) { try { stream.write(`data: ${JSON.stringify({ channel: "agents" })}\n\n`); } catch { /* gone */ } } };
   let pending = seed.pending ?? [];
   let trays = seed.trays ?? [];
   const agents = [{ id: "titan", name: "Titan", isGroup: false, createdAt: 1, unreadCount: 0, lastMessagePreview: "", status: "idle" }];
@@ -113,9 +115,12 @@ function stubRelay(root, seed) {
     }
     if (url.pathname === "/events") {
       // The host pushes; the adapter debounces 900 ms and re-reads. One nudge is what makes the
-      // tray arrive inside this gate's lifetime rather than on the 15 s heartbeat.
+      // tray arrive inside this gate's lifetime rather than on the 15 s heartbeat, and addPending
+      // nudges again so a report written mid-run reaches the page the same way.
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-      setTimeout(() => { try { response.write(`data: ${JSON.stringify({ channel: "agents" })}\n\n`); } catch { /* gone */ } }, 1200);
+      streams.push(response);
+      request.on("close", () => { const at = streams.indexOf(response); if (at >= 0) streams.splice(at, 1); });
+      setTimeout(nudge, 1200);
       return;
     }
     if (["/subscriptions", "/endpoints", "/model", "/connectors"].includes(url.pathname)) {
@@ -133,6 +138,9 @@ function stubRelay(root, seed) {
   return {
     server, posted, resolved,
     failNextFeedback(status, answer) { failNext = { status, answer }; },
+    // FEEDBACK-1b: an agent writing a report into the box's file while the page is open. The gate
+    // pushes it here and never reloads: the console has to find it on the beat it already runs.
+    addPending(row) { pending = [...pending, row]; nudge(); },
     get pending() { return pending; },
   };
 }
@@ -168,6 +176,8 @@ async function consoleLeg() {
       "the page came up against the gateway rather than falling back to the demo adapter");
 
     // ---- the card an agent's own report produced -----------------------------------------------
+    // FEEDBACK-2: ONE card at a time. The failed-turn offer is minted in the same seconds and waits
+    // its turn; a reload used to draw every pending report at once, stacked, each with its own Send.
     const card = await page.evaluate(() => {
       const node = [...document.querySelectorAll(".problem-report-card")]
         .find((el) => el.textContent.includes("The shell refuses every command"));
@@ -177,31 +187,12 @@ async function consoleLeg() {
     });
     check(card != null, "the report the agent wrote is on the page as a card");
     if (card) {
+      check(card.rows === 1, "and it is the only card on the page", `${card.rows} cards drawn`);
       check(/Would you like to send this to the developers\?/.test(card.text), "the card asks the question Jason asked for");
       check(/exec daemon not reachable/.test(card.body), "what the tool answered is in the editable body");
       check(/What you see below is what is sent/.test(card.text), "the custody line says what goes");
       check(/Your keys, your files and your other conversations are not sent/.test(card.text), "and what does not");
     }
-
-    // ---- the offer after a failed turn ---------------------------------------------------------
-    const offer = await page.evaluate(() => {
-      const node = [...document.querySelectorAll(".problem-report-card")]
-        .find((el) => el.textContent.includes("could not finish that one"));
-      return node ? { text: node.textContent, body: node.querySelector("textarea")?.value ?? "" } : null;
-    });
-    check(offer != null, "a failed turn produced its own offer, with no turn-failed row anywhere");
-    if (offer) {
-      // The card is the part that stays. The adapter's note into the conversation is replaced by
-      // the next transcript read, exactly as the raw line it replaced was, so the plain-words
-      // sentence has to be on the card too.
-      check(/could not finish that one/.test(offer.text), "and the card carries the plain-words sentence");
-      check(/Agent failed to respond/.test(offer.body), "the tray's own words are on the card, where they can be edited");
-      check(!/That turn failed:/.test(offer.text), "and never the raw 'That turn failed:' framing");
-    }
-
-    // No raw provider wording narrated anywhere on the page.
-    const pageText = await page.evaluate(() => document.querySelector(".transcript")?.innerText ?? "");
-    check(!/That turn failed:/.test(pageText), "the raw 'That turn failed:' line is gone from the conversation");
 
     // ---- a human can actually click Send -------------------------------------------------------
     const target = await page.evaluate(() => {
@@ -240,8 +231,119 @@ async function consoleLeg() {
     }
     check(relay.resolved.some(([id, outcome]) => id === "pr-gate-1" && outcome === "sent"),
       "and the box was told to stop offering it", JSON.stringify(relay.resolved));
-    const settled = await page.evaluate(() => document.querySelector(".transcript")?.innerText ?? "");
-    check(/The developers have it/.test(settled), "the card says what happened, once it has happened");
+
+    // ---- FEEDBACK-2: the sent card says what happened, and then goes ---------------------------
+    // Jason, 2026-09-09: "that green box is not going away. It just stays there." It used to have
+    // no timer, no dismiss control, and nothing but a reload took it off the page.
+    const settledText = await page.evaluate(() => document.querySelector(".transcript")?.innerText ?? "");
+    check(/The developers have it/.test(settledText), "the card says what happened, once it has happened");
+    check(!/your own copy above/.test(settledText),
+      "and it no longer promises a copy above that is about to leave with it");
+    check(await page.evaluate(() => document.querySelector("[data-report-dismiss]") != null),
+      "the settled card can be dismissed by hand rather than waited out");
+
+    const folded = await page.waitForFunction(
+      () => (document.querySelector(".transcript")?.innerText ?? "").includes("Sent to the developers:"),
+      { timeout: 12_000 },
+    ).then(() => true).catch(() => false);
+    check(folded, "the sent card folds itself into one quiet transcript row within a few seconds");
+    const afterFold = await page.evaluate(() => ({
+      text: document.querySelector(".transcript")?.innerText ?? "",
+      cards: document.querySelectorAll(".problem-report-card").length,
+      settled: document.querySelectorAll("[data-report-dismiss]").length,
+    }));
+    check(/Sent to the developers: The shell refuses every command/.test(afterFold.text),
+      "the quiet row names what was sent, where the report happened");
+    check(afterFold.settled === 0, "and the pinned card is gone", `${afterFold.settled} settled cards left`);
+
+    // ---- and the next report comes forward on its own ------------------------------------------
+    const offer = await page.evaluate(() => {
+      const node = [...document.querySelectorAll(".problem-report-card")]
+        .find((el) => el.textContent.includes("could not finish that one"));
+      return node ? { text: node.textContent, body: node.querySelector("textarea")?.value ?? "", cards: document.querySelectorAll(".problem-report-card").length } : null;
+    });
+    check(offer != null, "a failed turn produced its own offer, with no turn-failed row anywhere");
+    if (offer) {
+      check(offer.cards === 1, "and it is the only card now, in its turn", `${offer.cards} cards drawn`);
+      // The card is the part that stays. The adapter's note into the conversation is replaced by
+      // the next transcript read, exactly as the raw line it replaced was, so the plain-words
+      // sentence has to be on the card too.
+      check(/could not finish that one/.test(offer.text), "and the card carries the plain-words sentence");
+      check(/Agent failed to respond/.test(offer.body), "the tray's own words are on the card, where they can be edited");
+      check(!/That turn failed:/.test(offer.text), "and never the raw 'That turn failed:' framing");
+    }
+
+    // No raw provider wording narrated anywhere on the page.
+    const pageText = await page.evaluate(() => document.querySelector(".transcript")?.innerText ?? "");
+    check(!/That turn failed:/.test(pageText), "the raw 'That turn failed:' line is gone from the conversation");
+
+    // ---- FEEDBACK-1b: a report written while the page is open, with no reload ------------------
+    // drainPendingProblemReports used to run once, after first paint. Measured on grok-bot-local-vm
+    // 2026-09-09: a scratch agent wrote two reports in one turn, both were in the box's file at
+    // t+12 s, and the open page drew nothing for thirty seconds. One reload drew both at once,
+    // stacked. This writes a report into the box's file NOW, with the failed-turn card still on
+    // screen, and nothing reloads for the rest of the run.
+    relay.addPending({
+      id: "pr-gate-2", at: new Date().toISOString(), agentId: "titan", agentName: "Titan",
+      report: {
+        version: 1, tier: "quality", category: "console",
+        title: "No bot template system visible",
+        description: "The second report of the same turn, written while the person was looking at the console.",
+        at: new Date().toISOString(),
+      },
+    });
+    await page.waitForTimeout(6000);
+    const queued = await page.evaluate(() => ({
+      cards: document.querySelectorAll(".problem-report-card").length,
+      titles: [...document.querySelectorAll(".problem-report-card strong")].map((el) => el.textContent),
+    }));
+    check(queued.cards === 1 && !/No bot template/.test(queued.titles.join(" ")),
+      "it waits its turn instead of stacking on the card already there", `${queued.cards}: ${queued.titles.join(" | ")}`);
+
+    // Not now on the failed-turn card, which is the same settle branch a Send takes.
+    const dropped = await page.evaluate(() => {
+      const node = [...document.querySelectorAll(".problem-report-card")].find((el) => el.textContent.includes("could not finish that one"));
+      const button = node?.querySelector("[data-report-drop]");
+      if (!button) return null;
+      const box = button.getBoundingClientRect();
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    });
+    if (dropped) { await page.mouse.click(dropped.x, dropped.y); await page.waitForTimeout(800); }
+    check(await page.evaluate(() => (document.querySelector(".transcript")?.innerText ?? "").includes("Nothing left this workspace")),
+      "Not now says nothing left the workspace");
+    const live = await page.waitForFunction(
+      () => (document.querySelector(".transcript")?.innerText ?? "").includes("No bot template system visible"),
+      { timeout: 20_000 },
+    ).then(() => true).catch(() => false);
+    check(live, "and the report written while the page was open comes forward on its own, with no reload");
+    check(await page.evaluate(() => (document.querySelector(".transcript")?.innerText ?? "").includes("Kept to yourself:")),
+      "with the dropped one folded to its own quiet row");
+    check(await page.evaluate(() => document.querySelectorAll(".problem-report-card").length) === 1,
+      "still one card at a time");
+
+    // Answer it, so the always-present control below opens the only card on the page.
+    const secondSend = await page.evaluate(() => {
+      const node = [...document.querySelectorAll(".problem-report-card")].find((el) => el.textContent.includes("No bot template system visible"));
+      const button = node?.querySelector("[data-report-drop]");
+      if (!button) return null;
+      const box = button.getBoundingClientRect();
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    });
+    if (secondSend) { await page.mouse.click(secondSend.x, secondSend.y); }
+    await page.waitForFunction(() => document.querySelectorAll(".problem-report-card").length === 0, { timeout: 14_000 }).catch(() => {});
+    check(relay.resolved.some(([id, outcome]) => id === "pr-gate-2" && outcome === "dropped"),
+      "and answering it clears the box's row for it too", JSON.stringify(relay.resolved));
+
+    // ---- what a reload shows: exactly what is still pending, and no settled card ---------------
+    await page.reload({ waitUntil: "load" });
+    await page.waitForTimeout(4000);
+    const afterReload = await page.evaluate(() => ({
+      cards: document.querySelectorAll(".problem-report-card").length,
+      text: document.querySelector(".transcript")?.innerText ?? "",
+    }));
+    check(afterReload.cards === 0, "a reload with nothing pending draws no card at all", `${afterReload.cards} cards`);
+    check(!/Sent to the developers:|Kept to yourself:/.test(afterReload.text),
+      "and no settled card and no fold row survive the reload: they were page-local by construction");
 
     // ---- a send the relay refused, in the relay's own words ------------------------------------
     // The sentence is ui/server.mjs forwardFeedback's, verbatim. A status code in front of a

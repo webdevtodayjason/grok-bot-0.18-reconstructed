@@ -205,7 +205,92 @@ changed there and nothing else:
 **The second trigger** is the same tool failing three times in one conversation, counted off the
 woven tool rows. It fires **once per tool per conversation,** not once per failure.
 
-### An unanswered offer dies with the page
+### The card has a life: pending, sending, settled, folded
+
+Jason, 2026-09-09 17:39, with a screenshot of his own console open on two reports Titan had just
+filed: *"Titan was able to submit two issues to you and that green box is not going away. It just
+stays there."* Both halves of that were code.
+
+**A settled card used to be permanent.** `settleProblemOffer` flipped a status and re-drew; the offer
+stayed in the page's own list for the life of the tab and `reportCardsMarkup` put it back at the end
+of the transcript on every render. There was no timer, no dismiss control, and nothing but a reload
+took it off the screen. Measured on `grok-bot-local-vm` in real Chrome, on the same build his
+screenshot was taken against (`consoleVersion` **cf783fc0**): the settled card was still pinned above
+the composer at +2 s, +20 s and +60 s.
+
+Now the card has four states and an end:
+
+| state | what the person sees | what it does next |
+|---|---|---|
+| **pending** | the title, the tier chips, the editable body, the custody line, Send and Not now | waits |
+| **sending** | *"Sending this to the developers…"* | the POST |
+| **settled** | *"Sent. The developers have it."* or *"Kept to yourself. Nothing left this workspace."*, with a **Dismiss** | folds itself after `REPORT_FOLD_MS` (6 s), or when Dismiss is pressed |
+| **folded** | one quiet transcript row: *"Sent to the developers: &lt;title&gt;"* or *"Kept to yourself: &lt;title&gt;"* | nothing. It is a row like any other |
+
+The settled copy changed with the fold, deliberately: it used to end *"…and you can see what you sent
+in your own copy above"*, which was only true while the card was on screen and stopped being true the
+moment the card left.
+
+**The fold waits for the box.** `resolveProblemReport` used to be fire-and-forget, which was harmless
+while a settled card sat there for ever. With a fold it is not: taking the row off the screen while
+the box still held the report would show a decision the box has no record of. The fold is scheduled
+when that call settles, and not before.
+
+**And the fold is drawn by the card path, not spliced into the transcript.** `contextMessages` is the
+box's own transcript and the adapter replaces it wholesale on every re-read, so a page-local row
+written into that array is wiped on the next tick. The offer cards survive precisely because they are
+appended outside it. There is also no per-report row to fold back into: `foldRepeatedRows` collapses
+two consecutive tool rows with the same text into one — Jason's two reports drew a single
+*"Reported a problem to the developers · 2 steps"* — so the quiet row is minted by the card path, in
+the offers' own order.
+
+**And the control takes you to the card.** The card is appended at the *end* of the transcript, and
+`renderTranscript` only follows a reader who is already at the bottom (CONSOLE-4). So pressing
+**Report a problem** while scrolled back drew a perfectly correct card below the fold with nothing
+saying where it had gone — found by the phone gate at 390x844, where the card was 333 px wide and
+right in every respect and its Send was off screen. Pressing a button that opens a card is one of the
+moments a person expects to be taken to the newest line, so it uses the same one-shot pin a roster
+click and a send use. Nothing else moves the reader: a card that arrives on the watch does **not**
+yank someone who is reading history.
+
+### One card at a time
+
+Two reports used to be drawn as a stack of editable cards, each with its own Send. A person answering
+the second has already lost track of which body belongs to which title. The transcript now draws
+every folded row plus **at most one live card**; the rest wait, and the next one arrives as soon as
+the one in front of it is answered.
+
+### The pending file is watched, not read once
+
+`drainPendingProblemReports()` used to be called from exactly one place: after first paint. So when
+an agent used the tool while the person was already looking at the console, the transcript drew its
+quiet *"Reported a problem to the developers"* row inside the turn and **no card came until the page
+was loaded again.**
+
+That is what happened to Jason. Titan filed two reports; the control plane has **one**. Report #4,
+"Mobile console unusable, no scroll, layout too large for viewport", was drawn and sent. The second,
+"No bot template system visible to Titan, BOTS-1 not yet landed", went into the box's pending file
+and nothing on his screen ever drew a card for it — while the first report's sent card sat pinned
+above the composer, telling him something had worked.
+
+Measured on `grok-bot-local-vm` 2026-09-09: a scratch agent wrote two reports in one turn, both were
+in the box's file at **t+12 s**, and the open page showed **0 cards at 6, 12, 18, 24 and 30 s**. One
+reload drew **both at once**, stacked.
+
+The drain now rides the beat the console already runs — the adapter's `subscribe`, which fires on the
+900 ms debounced re-read and on the 15 s heartbeat — behind a **4 s floor** (`PENDING_POLL_MS`),
+because a drain is a gateway round trip and a busy conversation would otherwise ask the box for its
+pending file several times a second. `seenPendingReports` is what stops the same report being offered
+twice, and it deliberately survives the fold: anything that cleared it would re-offer the card the
+person just answered on the next tick.
+
+Two things fall out of the watch for free. A drained report's evidence is built at drain time, so
+watching makes it closer to the report's own moment (before, the second report of a turn carried the
+first report's tool rows as "what ran just before"). And **a reload now shows exactly what is still
+pending and no settled card**, because the offers were always page-local and the box's row is cleared
+on either outcome.
+
+### An unanswered offer still dies with the page
 
 Said plainly because it is a real limit and not a bug to be discovered later. The offer cards are
 **page-local by construction**: they are not transcript entries, and the box's transcript has no
@@ -213,22 +298,25 @@ record of them. Close the tab on an unanswered offer and it is gone.
 
 Two things make that survivable, and both are why they exist:
 
-- The **box's own pending file** is re-read on every load, so anything an agent wrote through the
-  tool is offered again. Only the two console-side triggers (a failed turn, a repeated tool failure)
-  are lost.
+- The **box's own pending file** is watched, so anything an agent wrote through the tool is offered
+  again. Only the two console-side triggers (a failed turn, a repeated tool failure) are lost.
 - The **always-present Report a problem control** means the door is never closed.
 
-**And the sharp edge of that, said here rather than discovered.** "Re-read on every load" is exactly
-and only what it says: `drainPendingProblemReports()` runs once, at first paint, and nothing polls
-afterwards. So when an agent calls the tool while the person is already sitting in front of the
-console, the transcript draws its quiet "Reported a problem to the developers" row within the turn
-and **the card does not arrive until the page is loaded again.** Measured on
-https://console.titanium.bot as the demo customer, 2026-09-09: the chip was there inside the turn and
-no card had appeared 275 seconds later; one reload and the card was there, editable, and it sent.
-Nothing is lost — the report is in the box's own file until somebody answers it — but the person is
-shown a chip with no card behind it, which reads as the product swallowing the report. That is the
-one shape of this feature that still looks like the complaint it was built to answer, so it is filed
-as its own owned row, **FEEDBACK-1b**, with the call site named.
+### Where a chip may not be drawn
+
+The card is the transcript's last child, and three pieces of shelf furniture used to float over the
+transcript's bottom band at `bottom: calc(100% + 6px)`: the send-acceptance chip, the attachment tray
+and the two always-present controls. Measured at 1440x900 with one file staged — Jason's screenshot
+exactly, attachment chip included — the *"Accepted by the host"* chip ran **706–733** against a card
+at **384–738**, twenty-seven pixels of overlap, and `elementFromPoint` at the chip's centre answered
+the card's own Send / Not now row. `pointer-events: none` meant it did not block the click, only the
+reading.
+
+All three are rows in the shelf's own grid now, spanning its columns, collapsing to nothing when they
+are hidden or empty. The reason they were floated in the first place — an unstyled fourth item
+wrapping the utilities onto a second row and sliding the composer into their column — is answered by
+spanning the row rather than by leaving the flow. `.composer` bottom at 1440x900 is unchanged at
+**856**.
 
 ### The console's own build number
 
@@ -343,6 +431,29 @@ account in real headless Chrome, bundle `7af8ac2316fd`, 2026-09-09):
 
 **On this Mac:** `verify-admin` **300 PASS, 0 FAIL** over the control plane, the panel, the two
 gates on every report, the credential refusal and the leak sweep.
+
+**The card's life and the watch (FEEDBACK-2, FEEDBACK-1b), on grok-bot-local-vm, real Chrome, this
+Mac, 2026-09-09:**
+
+- `verify-feedback` (the console arc, a stub relay, real mouse coordinates): **45 passed, 0 failed,
+  0 skipped** — up from 27. The new checks are the ones that would have caught Jason's screenshot:
+  only one card is drawn at each step; the sent card carries a Dismiss and no longer promises a copy
+  above; it folds inside twelve seconds into "Sent to the developers: &lt;title&gt;" with the pinned
+  card gone; the next report comes forward on its own; a report written into the box's file **with
+  the page open and never reloaded** draws its own card, waits its turn behind the one already
+  there, and clears the box's row when answered; and a reload draws exactly what is still pending,
+  with no settled card and no fold row.
+- `node --test tests/machine-room-feedback.test.mjs`: **23 passed, 0 failed** (16 before). Seven new
+  cases, including that the fold is not scheduled until `resolveProblemReport` has answered, that
+  three SSE ticks inside the 4 s floor read the box once, and that the id set which stops a report
+  being offered twice survives the fold.
+- `verify-mobile --card` on a phone (390x844 and 430x932): the card a person opens by hand is **333
+  px** wide with **0** descendants past the edge and a 16px box to type into (442 px wide at x 0 and
+  an 11px box before this ship), its Send is a 44x44 target with nothing on top of it, and **Not now
+  folds it into a quiet row** instead of pinning it above the composer.
+- The two assertions in `verify-dashboard.mjs` that pinned the old floating furniture — "the status
+  floats above the shelf", "it floats above the shelf instead" — were rewritten to the new
+  invariant: a row of the shelf, still not taking the composer's column.
 
 **Still wave A's to land:** the persona sentence in §8. It is not in the standing role yet, checked
 in the merged tree 2026-09-09. Filed as **FEEDBACK-1c**.

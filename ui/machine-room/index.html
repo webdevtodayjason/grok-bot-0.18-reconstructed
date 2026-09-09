@@ -2,7 +2,12 @@
 <html lang="en" data-theme="dusk">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- MOBILE-1. viewport-fit=cover is what makes env(safe-area-inset-*) resolve to anything but
+         zero, and there was not one of them in this console before this ship, so the composer sat
+         under the home indicator. interactive-widget=resizes-content is honoured by Chrome and
+         ignored by iOS Safari; the visualViewport listener in app.js is the half that works on the
+         phone, and the iPhone keyboard itself is unmeasured (docs/CONSOLE.md, section 7). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="description" content="Machine Room, the Titanium Bot console for this box." />
     <title>Machine Room · Titanium Bot</title>
     <!-- The Titanium Bot mark. This used to be `data:,` -- an empty icon, only there because the
@@ -54,6 +59,11 @@
 
       <header class="window-bar">
         <div class="window-identity" aria-label="Titanium Bot, Machine Room">
+          <!-- MOBILE-1: the roster's drawer handle. Drawn only at phone widths, where the roster
+               is off canvas; above the breakpoint the roster is a column and this is display:none.
+               It replaces the traffic lights on the bar rather than adding to it, because the bar
+               being too wide is the whole bug. -->
+          <button class="icon-button drawer-toggle" id="roster-drawer" type="button" data-drawer-toggle="roster" aria-controls="worker-roster" aria-expanded="false" aria-label="Conversations">☰</button>
           <div class="traffic-lights" aria-hidden="true">
             <span></span><span></span><span></span>
           </div>
@@ -90,6 +100,9 @@
         </nav>
 
         <div class="window-actions">
+          <!-- MOBILE-1: the agent panel's drawer handle, and with it the first way a thumb has ever
+               had of reaching this agent's screen tile. -->
+          <button class="icon-button drawer-toggle" id="context-drawer" type="button" data-drawer-toggle="context" aria-controls="context-space" aria-expanded="false" aria-label="This conversation">◧</button>
           <!-- GW-14: shown only when isGlobalSearchEnabled answered true at boot. -->
           <button class="quiet-button palette-hint" id="palette-hint" type="button" aria-label="Search messages, bots and files" hidden>Search <kbd>⌘K</kbd></button>
           <button class="icon-button" id="theme-toggle" type="button" aria-label="Toggle atmosphere">◐</button>
@@ -142,7 +155,7 @@
 
         </section>
 
-        <aside class="context-space" aria-label="Current conversation context">
+        <aside class="context-space" id="context-space" aria-label="Current conversation context">
           <!-- HANDBACK-1. Two sections above the context card, in this order and no other: the
                amber "Needs your attention" card while the open agent has a hand-off pending, then
                that agent's screen. Both are filled by renderHandoffRail/renderScreenTile; the
@@ -174,14 +187,27 @@
             </div>
           </section>
         </aside>
+
+        <!-- MOBILE-1: the drawer scrim, INSIDE the stage. `.stage` is `position: relative;
+             z-index: 2`, so it is a stacking context and the two drawers inside it cannot be
+             raised above a sibling of the stage however high their z-index goes: the first cut put
+             the scrim next to the stage and the drawer opened UNDER it, dimmed by its own scrim.
+             It is fixed and inset: 0, so from in here it still covers the bar and the shelf. It
+             keeps its `hidden` attribute for the life of the page and is drawn only by the rule
+             that reads body[data-drawer]. -->
+        <div class="drawer-scrim" id="drawer-scrim" hidden></div>
       </main>
 
       <footer class="control-shelf">
-        <div class="workspace-list" id="workspace-list" aria-label="Open rooms"></div>
-        <div class="attachment-tray" id="attachment-tray" hidden></div>
+        <!-- FEEDBACK-2: the shelf's furniture band, in the order it stacks. These three used to be
+             absolutely positioned above the shelf and painted over the transcript's last row,
+             which is how the "Accepted by the host" chip ended up sitting on a report card's own
+             Send button. They span the shelf's columns instead, and collapse to nothing when they
+             are hidden or empty. -->
         <!-- The host's acceptance ledger for the last send, never the click: promptAcceptanceStatus
              fills this after every sendPrompt, which itself answers "accepted" unconditionally. -->
         <div class="composer-status" id="composer-status" data-composer-status data-composer-state="idle" hidden></div>
+        <div class="attachment-tray" id="attachment-tray" hidden></div>
         <!-- FEEDBACK-1: always here, whether or not anything has gone wrong. The automatic offer
              only appears when the console can see a failure, and an offer nobody answers dies with
              the tab, so this is the door that is always open. -->
@@ -189,6 +215,7 @@
           <button class="ghost-button" type="button" id="report-problem" data-report-open>Report a problem</button>
           <button class="ghost-button" type="button" id="run-self-test" data-run-self-test>Run a self-test</button>
         </div>
+        <div class="workspace-list" id="workspace-list" aria-label="Open rooms"></div>
         <form class="composer" id="composer">
           <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachment">＋</button>
           <input id="composer-file" type="file" multiple hidden />
