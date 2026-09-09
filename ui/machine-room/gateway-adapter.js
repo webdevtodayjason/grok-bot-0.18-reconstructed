@@ -1482,8 +1482,21 @@
   // A host that has not landed the commands answers "unknown gateway method", tryCall turns that
   // into null, and the panel says the catalog is not on this host rather than drawing an empty one.
   let marketplaceCatalogCache = null;
+  // The read IN FLIGHT, not only the settled answer. Measured on grok-bot-local-vm 2026-09-09:
+  // opening the Marketplace fetched the whole catalog TWICE -- 221,128 B on a box serving seven
+  // bots -- because the Plugins half and the Bots half both ask before either answer lands, and a
+  // cache that only holds settled answers is empty for both of them. With 72 bots in the catalog
+  // that is the difference between one body and two on a relay that buffers each one whole.
+  let marketplaceCatalogRead = null;
   async function marketplaceCatalog(force) {
     if (marketplaceCatalogCache && force !== true) return marketplaceCatalogCache;
+    if (marketplaceCatalogRead != null && force !== true) return marketplaceCatalogRead;
+    const read = marketplaceCatalogFetch();
+    marketplaceCatalogRead = read;
+    try { return await read; } finally { if (marketplaceCatalogRead === read) marketplaceCatalogRead = null; }
+  }
+
+  async function marketplaceCatalogFetch() {
     const answer = await tryCall("listMarketplace", {});
     if (answer == null) return null;
     marketplaceCatalogCache = {

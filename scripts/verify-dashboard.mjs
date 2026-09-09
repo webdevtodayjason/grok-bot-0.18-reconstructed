@@ -2218,8 +2218,10 @@ try {
       else if (listed.includes(String(researchDesk.id))) {
         await page.click(`[data-bot-id="${researchDesk.id}"]`); await page.waitForTimeout(1000);
         const tabs = await page.$$eval("[data-bot-tab]", (els) => els.map((e) => e.dataset.botTab));
-        check(["instructions", "skills", "integrations"].every((t) => tabs.includes(t)), "the bot page carries its three left tabs", tabs.join(", "));
-        check((await page.$$(`[data-import-bot="${researchDesk.id}"]`)).length === 1, "and one Import Bot button");
+        // BOTS-1: four blocks now, and Instructions is not one of them -- a bot's operating rules
+        // are its memories, and the first of them is what its identity is composed from.
+        check(["memories", "skills", "routines", "integrations"].every((t) => tabs.includes(t)), "the bot page carries its four left blocks", tabs.join(", "));
+        check((await page.$$(`[data-import-bot="${researchDesk.id}"]`)).length === 1, "and one Add button");
         // Tools it can use: one row per integration the template names, each either already
         // installed or carrying the Add that goes through the Plugins tab's own install path.
         await page.click(`[data-bot-tab="integrations"]`).catch(() => {}); await page.waitForTimeout(800);
