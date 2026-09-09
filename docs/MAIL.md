@@ -775,13 +775,36 @@ that was wrong for two days.** Every number below names the machine it was measu
   probe agents and the skills panel this box has failed on since GATE-14. Sending moves that gate by
   zero.
 
-### Not measured here, and it is the ship that measures it
+### Measured on the R750, 2026-09-09, the way a customer hits it
 
-The R750: the demo tenant's Titan sending one mail read back through the inbound ledger, Jason's own
-Titan sending "Test from Titan" to `jbrashear@titaniumcomputing.com`, `node cp/cli.mjs mail sends
-<slug>` against the live control plane, the chip in a browser on `console.titanium.bot`, and
-`richard-avery` refused at the route by `mail-no-send.txt`. None of that has run. When it does, the
-times in UTC and CDT, the Resend ids and the machine go here, under a heading of their own.
+Shipped from the merged commit `4e71d94` in this order: `sync.sh --no-install` at 19:00Z, the
+control plane rebuilt and restarted through the Coolify API FIRST, `richard-avery` written into the
+relay's `/state/mail-no-send.txt` at 19:04Z, the host bundle `4e71d946bfa1` into the two boxes that
+may send, and the relay LAST at 19:08:06Z. Richard Avery's box was not swapped and nothing was
+written inside it.
+
+**The migration, before anything could claim a row.** The live `mail_send_log` read
+`id, tenant, agent_id, code, to_addr, at, outcome` with 0 rows at 18:59Z, and
+`id, tenant, agent_id, code, to_addr, at, outcome, resend_id, detail` with 0 rows after the restart.
+Read straight off `/data/titanbot/_control-plane/control-plane.sqlite`, not off a fresh in-memory
+store.
+
+**The zero the log started from.** `node cp/cli.mjs mail sends demo` at 19:08:25Z: *demo has sent no
+mail yet*.
+
+| leg | measured, R750, 2026-09-09 |
+| --- | --- |
+| **1. The demo tenant's Titan sends, and the mail comes back through the product** | Prompted 19:11:18Z. The control plane's row: `2026-09-09T19:11:24.775Z · 247758 · agent633973@myagents.email · sent · 2ebb8816-e20a-4263-a5b6-f182f2ede320 · Titan`. The From the recipient saw, off that workspace's own sent ledger: `"Titan (demo)" <agent247758@myagents.email>`. It arrived back in the receiving workspace's INBOUND ledger 7.2 s later — `2026-09-09T19:11:31.974Z`, from `agent247758@myagents.email` to `agent633973@myagents.email`, subject `MAIL-3 ship leg 1`, `delivered` to Titan on `titanium`. Its outline row is one `sendToUserToolCall` whose whole summary is `{"message":"agent633973@myagents.email"}` — the recipient and nothing else. |
+| **2. Jason's own Titan sends the mail he asked for** | Prompted through `console.titanium.bot` at 19:12:47Z UTC (14:12:47 CDT). **Sent 2026-09-09T19:12:53.319Z UTC, 14:12:53 CDT. Resend id `fd9dff09-945e-4275-8d1b-011861a9a40a`.** To `jbrashear@titaniumcomputing.com`, subject exactly `Test from Titan`, From `"Titan (titanium)" <agent633973@myagents.email>`. `node cp/cli.mjs mail sends titanium` reads it back as `633973 · jbrashear@titaniumcomputing.com · sent · fd9dff09-…`, and read once while it was still in flight it read `sending` with no id — the claim is written before Resend is called, exactly as designed. Titan's own words: *"Sent. The mail service accepted it for delivery with id `fd9dff09-945e-4275-8d1b-011861a9a40a`. It went from agent633973@myagents.email to jbrashear@titaniumcomputing.com, subject "Test from Titan" … Accepted means the mail service took it; that's not the same as delivered or read."* |
+| **3. A refusal, live** | A bot with no address, asked to send at 19:17:05Z, answered *"I can't send that email. I don't have an email address of my own yet, and without one I have no way to send outbound mail."* and made **no tool call at all** — it did not try and it reached for no key. `node cp/cli.mjs mail sends richard-avery`: *richard-avery has sent no mail yet*, his slug is the only line in `/state/mail-no-send.txt`, his box was not swapped, and nothing was written inside it. |
+| **4. What a person sees** | A real browser on `console.titanium.bot` (headless Chrome, playwright-core). The chip reads exactly `Sent an email to jbrashear@titaniumcomputing.com` as a muted bubble with nothing to expand, and the strings `send_email` and `sendToUser` appear **nowhere on the page**. The Email card's Sent table: `Sep 9, 2:12 PM · Titan · jbrashear@titaniumcomputing.com · Test from Titan · sent`. Screenshots: `leg2-chip-jasons-titan.png`, `leg2-conversation.png`, `leg4-email-card.png`, `leg4-sent-table.png`. |
+
+`canSend` after the relay restart: true on `demo` and on `titanium`, false on `richard-avery`, read
+off each box's own `agent-mail.json`.
+
+**Still to do, and it is Jason's to do, not an ssh job.** His box still holds a `RESEND_API_KEY`
+shell secret from before this wave. Nothing uses it any more — the key the send route uses never
+leaves the relay — and it can be cleared from the console's Secrets card whenever he likes.
 
 ---
 
