@@ -112,7 +112,7 @@ test("every bot names real plugins, a declared category and at least one skill",
   assert.equal(botIds.size, catalog.MARKETPLACE_BOTS.length, "two bot rows share an id");
   for (const bot of catalog.MARKETPLACE_BOTS) {
     assert.ok(catalog.MARKETPLACE_BOT_CATEGORIES.includes(bot.category), `bot ${bot.id} category "${bot.category}"`);
-    // BOTS-1 scoped the next three to the rows WE WROTE rather than deleting them. A community row
+    // BOTS-4 scoped the next three to the rows WE WROTE rather than deleting them. A community row
     // is credited to the person who wrote it, may name no plugin we carry, and may arrive with no
     // skill at all -- and each of those is still a defect on a first-party template. What holds for
     // every row is in validateMarketplaceCatalog, and tests/community-bots.test.mjs is where the
@@ -161,7 +161,7 @@ test("no string in the catalog is shaped like a credential", () => {
   // after it -- so a hint that says "a user token (xoxp-)" is fine and a real token is not. The
   // last two are the generic shapes: a long unbroken base64-ish run, and an obvious assignment.
   //
-  // BOTS-1 REPLACED THE GENERIC RUN, because it read English as a secret. `[A-Za-z0-9+_-]{40,}`
+  // BOTS-4 REPLACED THE GENERIC RUN, because it read English as a secret. `[A-Za-z0-9+_-]{40,}`
   // fires on "account-book-account-brief-before-a-call" (a namespaced skill document name) and on
   // the path half of "github.com/modelcontextprotocol/servers/tree/main/src/filesystem", and a
   // test that cries wolf on sixty of those is a test somebody eventually deletes. What a secret

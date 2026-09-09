@@ -58,7 +58,7 @@ export type {
 // wire view and every existing reader are unchanged.
 import { MARKETING_TEAM_BOTS } from "./marketing-team.js";
 
-// BOTS-1. The 65 community rows, GENERATED from the scrape checked in under bots/ by
+// BOTS-4. The 65 community rows, GENERATED from the scrape checked in under bots/ by
 // scripts/build-bot-catalog.mjs. It is its own module for the same reason the Marketing pack is:
 // 444 paragraphs of operating rules and 263 skill bodies are more text than everything else in this
 // file put together, and a generated file nobody hand-edits should not sit inside one people do.
@@ -318,7 +318,7 @@ export interface MarketplaceBotSkill {
 }
 
 /**
- * BOTS-1. One paragraph of operating rules the bot already knows, as the page shows it and as the
+ * BOTS-4. One paragraph of operating rules the bot already knows, as the page shows it and as the
  * import seeds it.
  *
  * TWO FORMS, AND THE SPLIT HAPPENS AT BUILD TIME. `text` is the paragraph -- what a person reads on
@@ -338,7 +338,7 @@ export interface MarketplaceBotMemory {
 }
 
 /**
- * BOTS-1. A job that runs on its own, and the cron it will actually run under.
+ * BOTS-4. A job that runs on its own, and the cron it will actually run under.
  *
  * `schedule` is a five-field cron or null, resolved when the catalog is BUILT rather than left as
  * the prose. `automation-store.upsert` writes nothing when a trigger will not normalise and the
@@ -357,7 +357,7 @@ export interface MarketplaceBotRoutine {
 }
 
 /**
- * BOTS-1. An app this bot uses, as the bot page shows it.
+ * BOTS-4. An app this bot uses, as the bot page shows it.
  *
  * `integrations` stays exactly what it has always been -- plugin ids, validated against
  * MARKETPLACE_PLUGINS -- and this is the row beside it that carries what the screenshots show: the
@@ -387,13 +387,13 @@ export interface MarketplaceBot {
   readonly name: string;
   readonly creator: string;
   /**
-   * BOTS-1. What follows the creator's name on the row, so a community bot is credited rather than
+   * BOTS-4. What follows the creator's name on the row, so a community bot is credited rather than
    * quietly presented as ours: "by <name>, from the community". Absent on a first-party row.
    */
   readonly creatorNote?: string;
   readonly category: string;
   /**
-   * BOTS-1. The categories this bot ALSO belongs to. A bot may sit under two chips upstream; one
+   * BOTS-4. The categories this bot ALSO belongs to. A bot may sit under two chips upstream; one
    * becomes `category` and the rest land here so nothing is lost and the chip filter reads both.
    */
   readonly tags?: readonly string[];
@@ -406,19 +406,19 @@ export interface MarketplaceBot {
   /** Plugin ids from MARKETPLACE_PLUGINS. The bot page offers Add for the missing ones. */
   readonly integrations: readonly string[];
   /**
-   * BOTS-1. Facts it already knows, seeded into the agent's own memory store on import. Every row
+   * BOTS-4. Facts it already knows, seeded into the agent's own memory store on import. Every row
    * in the catalog has these: a first-party row that declares none has them DERIVED from its
    * `instructions`, below, so the four blocks on a bot page are the same four blocks on every bot.
    */
   readonly memories?: readonly MarketplaceBotMemory[];
-  /** BOTS-1. Jobs that run on their own, created disabled with the schedule their words imply. */
+  /** BOTS-4. Jobs that run on their own, created disabled with the schedule their words imply. */
   readonly routines?: readonly MarketplaceBotRoutine[];
-  /** BOTS-1. Apps it can use, with this bot's own sentence per app and what the page may offer. */
+  /** BOTS-4. Apps it can use, with this bot's own sentence per app and what the page may offer. */
   readonly apps?: readonly MarketplaceBotApp[];
-  /** BOTS-1. Where the row came from. Absent means first-party, and two validator rules are stricter. */
+  /** BOTS-4. Where the row came from. Absent means first-party, and two validator rules are stricter. */
   readonly origin?: "first-party" | "community";
   /**
-   * BOTS-1. The namespace this bot's skills are imported under, so 65 bots that each ship a
+   * BOTS-4. The namespace this bot's skills are imported under, so 65 bots that each ship a
    * "Getting started" do not fight over one document in the box's shared library. It is what the
    * front matter in every `skills[].body` already names.
    */
@@ -459,7 +459,7 @@ export interface MarketplaceBotMember {
 }
 
 /**
- * BOTS-1. A bot as the LIST serves it: the row and its chips, and a count per block.
+ * BOTS-4. A bot as the LIST serves it: the row and its chips, and a count per block.
  *
  * The five heavy fields are absent, and `getMarketplaceItem` is where the whole row comes from.
  * The type says so rather than leaving a reader to find out from a payload: `counts` is present on
@@ -517,7 +517,7 @@ export const MARKETPLACE_PLUGIN_CATEGORIES: readonly string[] = Object.freeze([
 ]);
 
 /**
- * BOTS-1 added the last three, and DEDUPED "Marketing", which this list shipped twice.
+ * BOTS-4 added the last three, and DEDUPED "Marketing", which this list shipped twice.
  *
  * The duplicate is not cosmetic: the categories go out on the wire and the console draws one chip
  * per entry, so the Bots half of the panel has been drawing two identical Marketing chips, the
@@ -539,7 +539,7 @@ export const MARKETPLACE_BOT_CATEGORIES: readonly string[] = Object.freeze([
   // TEAMS-1's pack lands under this chip rather than under Sales, which is a different job.
   "Marketing",
   "Personal",
-  // BOTS-1. The community pack brings three topics the first-party rows never had.
+  // BOTS-4. The community pack brings three topics the first-party rows never had.
   "Design",
   "Product",
   "Recruiting & People",
@@ -1780,7 +1780,7 @@ const DECLARED_BOTS: readonly MarketplaceBot[] = Object.freeze([
 ]);
 
 /**
- * BOTS-1. The Memories block, for the rows that predate it.
+ * BOTS-4. The Memories block, for the rows that predate it.
  *
  * The six first-party templates and the Marketing pack each carry ONE paragraph of operating rules,
  * and it has always lived in `instructions`. Rather than edit seven rows across two files that
@@ -2093,7 +2093,7 @@ export function marketplaceCatalogWireView(
 }
 
 /**
- * BOTS-1. What a bot looks like in the LIST, which is not what it looks like on its page.
+ * BOTS-4. What a bot looks like in the LIST, which is not what it looks like on its page.
  *
  * MEASURED on grok-bot-local-vm 2026-09-09, before this wave: the `listMarketplace` answer was
  * 110,564 bytes with 7 bots in it, and the console fetched it TWICE on one Marketplace open. With
@@ -2349,7 +2349,7 @@ export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETP
     const botLogoProblem = marketplaceLogoProblem(where, bot.tile.file);
     if (botLogoProblem != null) problems.push(botLogoProblem);
 
-    // BOTS-1. These two rules are about a row WE WROTE. A first-party template with no skill or no
+    // BOTS-4. These two rules are about a row WE WROTE. A first-party template with no skill or no
     // integration is a row somebody forgot to finish. A community row is a scrape: 15 of the 65 name
     // no skill and 16 name no plugin we carry, and they are still worth adding because their
     // memories are the whole substance of the bot. What a community row may NOT be is a row an
@@ -2364,7 +2364,7 @@ export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETP
       if (!pluginIds.has(integration)) problems.push(`${where} names integration "${integration}", which is not a plugin id`);
     }
 
-    // BOTS-1. Every fact has to fit the store, or the host would write a version cut mid sentence.
+    // BOTS-4. Every fact has to fit the store, or the host would write a version cut mid sentence.
     for (const [index, memory] of (bot.memories ?? []).entries()) {
       if (memory.text.trim().length === 0) problems.push(`${where} memory ${index} is empty`);
       if (memory.facts.length === 0) problems.push(`${where} memory ${index} carries no facts, so nothing would be seeded`);
@@ -2376,7 +2376,7 @@ export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETP
       }
     }
 
-    // BOTS-1. A routine either carries a cron the host can actually resolve, or it carries null and
+    // BOTS-4. A routine either carries a cron the host can actually resolve, or it carries null and
     // says why. The bare word "weekly" normalises, stores, and never runs.
     for (const routine of bot.routines ?? []) {
       if (routine.name.trim().length === 0) problems.push(`${where} has a routine with no name`);
@@ -2386,7 +2386,7 @@ export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETP
       }
     }
 
-    // BOTS-1. An app may name a plugin only if we really carry it, and its offer has to match what
+    // BOTS-4. An app may name a plugin only if we really carry it, and its offer has to match what
     // that plugin does: a row that installs nothing gets an information line, never an Add.
     for (const app of bot.apps ?? []) {
       const at = `${where} app "${app.name}"`;

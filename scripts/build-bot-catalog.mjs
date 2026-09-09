@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// BOTS-1 item A. Turn the scraped community pack into source/shared/marketplace/community-bots.ts.
+// BOTS-4 item A. Turn the scraped community pack into source/shared/marketplace/community-bots.ts.
 //
 // THE POINT OF A GENERATOR. 65 rows carrying 444 paragraphs of operating rules, 277 skills and 104
 // routines is not a file a person edits. bots.json goes into the repo exactly as it came off the

@@ -1,4 +1,4 @@
-// BOTS-1. The 65 community bot rows, and the eight things that can actually go wrong with them.
+// BOTS-4. The 65 community bot rows, and the eight things that can actually go wrong with them.
 //
 // The rows are GENERATED (scripts/build-bot-catalog.mjs) from a scrape checked in verbatim
 // (source/shared/marketplace/bots/bots.json) plus a file of human decisions each carrying the exact

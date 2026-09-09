@@ -63,7 +63,7 @@ test("the pack is a bot row the catalog serves, in a category the catalog declar
   // its own copy of the module. What matters is that the row the catalog serves IS the row the
   // module declares, field for field.
   //
-  // BOTS-1 added exactly one exception, and it is a DERIVED field rather than an edit to this
+  // BOTS-4 added exactly one exception, and it is a DERIVED field rather than an edit to this
   // module. Every bot page now opens on a Memories block ("Facts it already knows"), and this pack
   // predates it: the catalog composes one from the row's `instructions` for any row that declares
   // none, so the pack gains the block without marketing-team.ts being touched by another wave. The
