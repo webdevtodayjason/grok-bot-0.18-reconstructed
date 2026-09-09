@@ -284,7 +284,7 @@ test("a SHOT-4 row that reads 'Wrote ...' is counted as shell, from the kind fie
     chat("c2"),
   ];
   const words = api.kindWords(api.group(rows, {}).find((item) => item.rows));
-  assert.equal(words, "browser 1, read 1, shell 1", "the kinds come from `kind`; nothing here says 'wrote'");
+  assert.equal(words, "1 browser step, 1 file read, 1 command", "the kinds come from `kind`; nothing here says 'wrote'");
   assert.ok(!words.includes("wrote"), "a text parse would have mislabelled exactly the row that carries a receipt");
 });
 
@@ -296,10 +296,10 @@ test("the kinds line reads biggest first and is dropped when it would only resta
   for (let i = 0; i < 5; i += 1) many.push(sys(`r${i}`, "Read", { kind: "read" }));
   many.push(chat("c2"));
   const gap = api.group(many, {}).find((item) => item.rows);
-  assert.equal(api.kindWords(gap), "shell 6, read 5, browser 3", "Jason's own example, in his own order");
+  assert.equal(api.kindWords(gap), "6 commands, 5 files read, 3 browser steps", "Jason's own example, in his own order and in plain words");
 
   const lone = api.group([chat("c1"), sys("t1", "Shell · ls", { kind: "shell" }), chat("c2")], {}).find((item) => item.rows);
-  assert.equal(api.kindWords(lone), "", "'shell 1' under '1 step' is the same fact twice");
+  assert.equal(api.kindWords(lone), "", "'1 command' under '1 step' is the same fact twice");
 
   // The seventeen folded "Computer · running" rows DASH-FOLD-1 was built for: one kind, and it
   // accounts for every step, so the line under the headline would say nothing new.
@@ -312,12 +312,73 @@ test("a row the adapter did not classify is counted and never guessed at", async
   const { api } = await loadBadge();
   const gap = api.group([chat("c1"), sys("t1", "Accepted by the host"), sys("t2", "Shell", { kind: "shell" }), chat("c2")], {}).find((i) => i.rows);
   assert.equal(gap.steps, 2, "both steps counted");
-  assert.equal(api.kindWords(gap), "shell 1", "one of the two is named; the other is counted and named nowhere");
+  assert.equal(api.kindWords(gap), "1 command", "one of the two is named; the other is counted and named nowhere");
   const none = api.group([chat("c1"), sys("t1", "Accepted by the host"), sys("t2", "Delivered"), chat("c2")], {}).find((i) => i.rows);
   assert.equal(none.steps, 2);
   assert.equal(api.kindWords(none), "", "nothing classified means nothing claimed");
   const three = api.group([chat("c1"), sys("t1", "?"), sys("t2", "S", { kind: "shell" }), sys("t3", "R", { kind: "read" }), chat("c2")], {}).find((i) => i.rows);
-  assert.equal(api.kindWords(three), "read 1, shell 1", "the unclassified row is in the count and in no kind");
+  assert.equal(api.kindWords(three), "1 file read, 1 command", "the unclassified row is in the count and in no kind");
+});
+
+// Measured on Jason's console 2026-09-08: the badge on Titan's transcript read "Worked for 7 sec ·
+// 8 steps · shell 4, websearch 3, webfetch 1". Those are tool names with "ToolCall" cut off them,
+// lowercased -- machine identifiers on the one row this badge adds to the conversation a paying
+// customer reads.
+test("the kinds line is in plain words, never a tool's own identifier", async () => {
+  const { api } = await loadBadge();
+  const rows = [chat("c1")];
+  for (let i = 0; i < 4; i += 1) rows.push(sys(`s${i}`, "Shell", { kind: "shell" }));
+  for (let i = 0; i < 3; i += 1) rows.push(sys(`w${i}`, "Searched", { kind: "websearch" }));
+  rows.push(sys("f0", "Fetched", { kind: "webfetch" }));
+  rows.push(chat("c2"));
+  const words = api.kindWords(api.group(rows, {}).find((item) => item.rows));
+  assert.equal(words, "4 commands, 3 web searches, 1 page read", "Jason's own badge, in words");
+  for (const slug of ["websearch", "webfetch", "shell"]) {
+    assert.ok(!words.includes(slug), `${slug} is a tool's name, not a word for the person`);
+  }
+  // A kind nobody has a plural for prints unchanged rather than being guessed at.
+  const odd = api.group([chat("c1"), sys("o1", "?", { kind: "fzf" }), sys("o2", "?", { kind: "read" }), chat("c2")], {}).find((i) => i.rows);
+  assert.equal(api.kindWords(odd), "1 fzf, 1 file read");
+  // Singular and plural are both right; "1 pages read" is the bug this pins.
+  const one = api.group([chat("c1"), sys("a1", "?", { kind: "webfetch" }), sys("a2", "?", { kind: "shell" }), chat("c2")], {}).find((i) => i.rows);
+  assert.equal(api.kindWords(one), "1 command, 1 page read", "ties still sort on the kind slug, so the order is unchanged");
+});
+
+// The adapter writes its own notices to the person as system rows -- notWired, failed, the
+// send-failure push and the connect-approval push, all of them authorId "system" / authorName
+// "Machine Room". Run against the shipped file before this fix: [shell][read][Sending failed: boom]
+// [… is not wired …] folded into one badge headlined "4 steps · read 1, shell 1" with both notices
+// inside a hidden body and neither counted in the headline.
+test("a notice the console wrote to the person ends the gap and is never inside a badge", async () => {
+  const { api } = await loadBadge();
+  const notice = (id, text) => ({ id, authorId: "system", authorName: "Machine Room", type: "system", text, time: "09:41" });
+  const cases = [
+    notice("send-failed-1", "Sending failed: boom"),
+    notice("unwired-1", "Routines is not wired to the gateway yet."),
+    notice("failed-1", "Slack returned no connect URL"),
+    notice("connect-1", "Approve Slack in the tab that just opened. The connection completes on the host, not here."),
+  ];
+  for (const row of cases) {
+    const html = api.render(
+      [chat("c1"), sys("t1", "Shell · ls", { kind: "shell" }), sys("t2", "Read app.js", { kind: "read" }), row, sys("t3", "Shell · pwd", { kind: "shell" }), sys("t4", "Read x", { kind: "read" }), chat("c2")],
+      stubMarkup,
+      { agentId: "titan", working: false },
+    );
+    const found = badges(html);
+    assert.equal(found.length, 2, `the notice splits the run in two (${row.id})`);
+    for (const badge of found) {
+      assert.ok(!bodyOf(badge).includes(`data-id="${row.id}"`), `${row.id} is never inside a body`);
+    }
+    assert.ok(html.includes(`data-id="${row.id}"`), `${row.id} is still drawn where the person can read it`);
+  }
+  // And a lone notice beside two steps is not folded away either: it closes the gap the steps made.
+  const lone = api.render(
+    [chat("c1"), sys("t1", "Shell", { kind: "shell" }), sys("t2", "Shell", { kind: "shell" }), notice("send-failed-2", "Sending failed: boom")],
+    stubMarkup,
+    { agentId: "titan", working: false },
+  );
+  assert.equal(badges(lone).length, 1);
+  assert.ok(!bodyOf(badges(lone)[0]).includes('data-id="send-failed-2"'));
 });
 
 test("a peer exchange is named from the exchange it carries, never from the sentence it prints", async () => {
@@ -326,7 +387,7 @@ test("a peer exchange is named from the exchange it carries, never from the sent
     [chat("c1"), sys("x1", "2 messages with Scribe", { exchange: {} }), sys("t1", "Shell", { kind: "shell" }), chat("c2")],
     {},
   ).find((i) => i.rows);
-  assert.equal(api.kindWords(gap), "messages 1, shell 1");
+  assert.equal(api.kindWords(gap), "1 message, 1 command");
 });
 
 test("the span is the interval between the two bounding chat entries", async () => {

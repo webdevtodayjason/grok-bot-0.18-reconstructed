@@ -35,9 +35,10 @@
   <body>
     <!-- CONSOLE-4: the boot cover. Static markup, so it is on screen with the FIRST paint rather
          than after a script has decided to draw it. Opaque over the whole shell on purpose: the
-         markup below ships seed copy -- "MSP Team", "3 members · ready", "2h 14m", "Atera Triage's
-         desktop" -- which is fiction on a real box and was all on screen at 500 ms today on a box
-         that has none of it. The lift logic is the IIFE at the end of this file. -->
+         shell under it is not the person's box until app.js has filled it, and every field in it
+         ships blank for that reason (see the note on .room-capsule). The lift logic is the IIFE at
+         the end of this file, and it writes one line saying the box has not been reached when the
+         ceiling fires before anything was drawn. -->
     <div id="boot-cover" data-boot-state="showing" role="status" aria-live="polite">
       <div class="boot-cover-inner">
         <img class="boot-sprite" data-boot-sprite src="assets/characters/titan-curious.png" alt="" width="96" height="96" />
@@ -64,7 +65,7 @@
         </div>
 
         <nav class="capability-dock" aria-label="Capabilities">
-          <span class="capability-scope" id="capability-scope">MSP Team tools</span>
+          <span class="capability-scope" id="capability-scope"></span>
           <button class="capability-button is-contextual" type="button" data-capability="files" data-capability-scope="context" aria-label="Open files for the current context">
             <span class="capability-icon">▱</span><span>Files</span>
           </button>
@@ -118,10 +119,17 @@
         </section>
 
         <section class="conversation-space" aria-labelledby="room-title">
+          <!-- CONSOLE-4-SEED-1: every field a person reads ships EMPTY and is filled by app.js.
+               These carried design copy -- "MSP Team", "3 members · ready", "2h 14m", "Ask MSP
+               Team…", "MSP Team tools", "MSP Team · shared", "Atera Triage's desktop", "Atera
+               Triage is working" -- and when the gateway stalls, app.js never loads at all and the
+               boot cover comes off that fiction at its 8 s ceiling with nothing marking it as
+               fiction. Blank is honest; the cover's lift() writes one line saying the box has not
+               been reached. Do not put words back in these nodes. -->
           <header class="room-capsule">
             <div>
-              <strong id="room-title">MSP Team</strong>
-              <span id="room-subtitle">3 members · ready</span>
+              <strong id="room-title"></strong>
+              <span id="room-subtitle"></span>
             </div>
             <!-- QOL-NEEDS-YOU: the same amber pill the sidebar card carries, on the conversation
                  you are actually looking at. -->
@@ -168,7 +176,7 @@
 
           <button class="desktop-capsule" id="open-desktop" type="button">
             <span class="desktop-symbol">▣</span>
-            <span><strong id="desktop-capsule-title">Desktop</strong><small id="desktop-capsule-scope">MSP Team · shared</small></span>
+            <span><strong id="desktop-capsule-title">Desktop</strong><small id="desktop-capsule-scope"></small></span>
             <span class="capsule-chevron">⌄</span>
           </button>
         </aside>
@@ -186,7 +194,7 @@
           <label class="sr-only" for="message-input">Message the selected room</label>
           <!-- QOL-COMPOSER: a textarea, not an input. Enter sends, Shift+Enter opens a line, and
                the box grows with what is in it up to eight lines (autosizeComposer in app.js). -->
-          <textarea id="message-input" name="message" rows="1" autocomplete="off" placeholder="Ask MSP Team…"></textarea>
+          <textarea id="message-input" name="message" rows="1" autocomplete="off" placeholder=""></textarea>
           <button class="send-button" type="submit"><span>➤</span> Send</button>
         </form>
         <div class="shelf-utilities">
@@ -194,7 +202,7 @@
           <button class="icon-button" id="people-button" type="button" aria-label="People">♙</button>
           <button class="icon-button" id="shelf-settings" type="button" aria-label="Settings">⚙</button>
           <button class="schedule-ring" id="schedule-button" type="button" aria-label="Next scheduled routine">
-            <span><strong id="next-routine-countdown">2h 14m</strong><small id="next-routine-label">next routine</small></span>
+            <span><strong id="next-routine-countdown"></strong><small id="next-routine-label"></small></span>
           </button>
         </div>
       </footer>
@@ -234,7 +242,7 @@
         <header class="desktop-header">
           <div>
             <span class="dialog-eyebrow">Shared computer</span>
-            <h2 id="desktop-title">Atera Triage’s desktop</h2>
+            <h2 id="desktop-title">Desktop</h2>
           </div>
           <div class="desktop-header-actions">
             <!-- Both of these belong in this row and not in the footer. They were 719px below the
@@ -278,7 +286,7 @@
           </aside>
         </div>
         <footer class="desktop-footer">
-          <span class="desktop-live"><span class="status-dot working"></span> Atera Triage is working</span>
+          <span class="desktop-live"></span>
           <!-- qol/vnc-paste: the pane's clipboard, said once where the pane is. "while this pane has
                the keyboard" is the honest scope: once the box's screen is clicked the browser stops
                delivering paste here at all, and only the frame's own Cmd+V chord (Mac) gets back.
@@ -435,12 +443,30 @@
           if (lifted) return;
           lifted = true;
           if (observers) observers.forEach(function (o) { try { o.disconnect(); } catch (e) {} });
-          // The ceiling fired with nothing drawn: say the conversation is still opening rather than
-          // uncovering an empty column that reads as a finished, empty page. app.js overwrites this
-          // the moment the first real row lands.
+          // What the cover uncovers. Three cases, and the difference is the whole point of this
+          // block:
+          //
+          //   - roster and rows both drawn: the real console. Nothing to write.
+          //   - roster drawn, rows not: the page is real and one conversation is still opening.
+          //   - neither: the ceiling fired before app.js reached its first render, so every field
+          //     in the shell is still the empty markup index.html ships. It used to ship copy --
+          //     "MSP Team", "3 members · ready", "2h 14m", "Atera Triage's desktop" -- and with
+          //     /api stalled the cover came off that at 8.7 s and a person read a team, an agent
+          //     and a routine that do not exist on their box, with nothing saying anything was
+          //     wrong. Measured on console.titanium.bot 2026-09-08 with the calls stalled in the
+          //     browser only. Now the shell is blank until app.js fills it, and this says why.
           var transcript = document.getElementById("transcript");
+          var stalled = !seen.roster && !seen.rows && !seen.demo;
           if (!seen.rows && transcript && !transcript.querySelector(".message-row")) {
-            transcript.innerHTML = '<div class="empty-state">Still opening this conversation…</div>';
+            transcript.innerHTML = stalled
+              ? '<div class="empty-state">Still reaching this box. Nothing on this page has loaded yet.</div>'
+              : '<div class="empty-state">Still opening this conversation…</div>';
+          }
+          if (stalled) {
+            var stalledTitle = document.getElementById("room-title");
+            var stalledSub = document.getElementById("room-subtitle");
+            if (stalledTitle && !stalledTitle.textContent) stalledTitle.textContent = "Still connecting";
+            if (stalledSub && !stalledSub.textContent) stalledSub.textContent = "this console has not reached your box yet";
           }
           if (quiet) { removeCover(); return; }
           cover.dataset.bootState = "lifting";

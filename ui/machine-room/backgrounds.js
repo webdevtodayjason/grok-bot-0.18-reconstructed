@@ -19,6 +19,33 @@
   // there. Deliberately no fallback copy of those constants: a second copy means a plate added to
   // one of them flashes twice, which is worse than the flash this arrangement removes.
   const boot = global.__mrBg;
+  // bg-boot.js is a blocking <head> script, so its absence is a deploy fault rather than a state
+  // this file should ever see -- but without this guard the destructure below threw at module top
+  // level and took the WHOLE picker with it. Measured on console.titanium.bot 2026-09-08 with only
+  // bg-boot.js blocked in the browser: pageerror "Cannot destructure property 'CHOICE_KEY' of
+  // 'boot' as it is undefined", no .bg-grid in Operator settings at all, no way to choose a plate,
+  // and nothing on screen saying why -- the module's own __machineRoomBackgrounds publication is
+  // three hundred lines below the throw and never ran either.
+  //
+  // The fallback is deliberately NOT a second copy of the default and the list: two copies is the
+  // bug bg-boot.js exists to remove, and a test pins the literal id to one file. So an empty set,
+  // published under the name the rest of the console reads, plus one line in settings where the
+  // tiles would have been.
+  if (!boot) {
+    global.__machineRoomBackgrounds = { DEFAULT_CHOICE: "", BUILT_IN: [] };
+    if (doc) {
+      const saySo = () => global.setTimeout(() => {
+        const panel = doc.getElementById("panel-content");
+        if (!panel || doc.getElementById("bg-section")) return;
+        if (!/Global router|Operator settings/i.test(doc.getElementById("panel-title")?.textContent ?? "")) return;
+        panel.insertAdjacentHTML("beforeend", '<section class="settings-section" id="bg-section"><h3>Background</h3><p>The plate list did not load with this page, so there is nothing to pick from here. A reload usually fixes it.</p></section>');
+      }, 0);
+      const bindNote = () => ["settings-button", "shelf-settings"].forEach((id) => doc.getElementById(id)?.addEventListener("click", saySo));
+      if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", bindNote);
+      else bindNote();
+    }
+    return;
+  }
   const { CHOICE_KEY, CUSTOM_KEY, DEFAULT_CHOICE, BUILT_IN, apply } = boot;
   const MAX_EDGE = 1920;
   const BUDGET_BYTES = 4_000_000; // localStorage is ~5MB; leave the app its share.

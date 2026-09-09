@@ -19,9 +19,11 @@
 //   control hit-tests it: a box with area, and the element under its own centre is that element or
 //   something inside it.
 //
-//   NOTHING IS READ BEFORE THE ADAPTER EXISTS. index.html ships a static shell with seed copy in it
-//   ("MSP Team", "3 members ready"), so a selector satisfied at 200 ms may be reading fiction. Every
-//   leg waits for window.__machineRoomAdapter first.
+//   NOTHING IS READ BEFORE THE ADAPTER EXISTS. index.html ships a static shell, and a selector
+//   satisfied at 200 ms is reading markup app.js has not filled yet. (It used to ship seed COPY in
+//   those fields -- "MSP Team", "3 members ready" -- which the review pass emptied, because an 8 s
+//   ceiling over a stalled boot uncovered it as if it were the person's own box.) Every leg waits
+//   for window.__machineRoomAdapter first.
 //
 //   THE RAIL TILE'S CLICK IS A WRITE. data-handoff-action="open" reaches mountBoxSurface, which
 //   POSTs /box/launch and opens an app on the agent's seat. So the leg that proves the tile opens

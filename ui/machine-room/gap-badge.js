@@ -10,13 +10,15 @@
  * gateway-adapter.js, index.html or styles.css, and render() is a pure function of its arguments
  * plus this module's own state, so it runs in a test with no DOM at all.
  *
- * The grouping rule is one line, and that line is the whole "never hides a card" requirement:
- * a gap is a maximal run of rows whose type is "system". Everything the person must not lose
- * behind a click already carries another type -- a decision card is "decision", a hand-off card is
- * "handoff", a secret card and an attachment are "attachment", a failed turn is "turn-failed", the
- * working bubble is "working", a reply is "text" -- so each of those ends a gap for free and none
- * of them can ever land inside a body. Evidence chips draw inside a reply's own row and notices
- * are toasts outside the transcript, so neither is between-chats content in the first place.
+ * The grouping rule carries the whole "never hides a card" requirement: a gap is a maximal run of
+ * rows that are STEPS. Everything the person must not lose behind a click already carries another
+ * type -- a decision card is "decision", a hand-off card is "handoff", a secret card and an
+ * attachment are "attachment", a failed turn is "turn-failed", the working bubble is "working", a
+ * reply is "text" -- so each of those ends a gap for free and none of them can ever land inside a
+ * body. Evidence chips draw inside a reply's own row. The one thing "type === system" got wrong is
+ * that the adapter also SPEAKS to the person in system rows -- "Sending failed: …", "… is not
+ * wired to the gateway yet." -- and those carry an author where a step never does, so isChat below
+ * reads the author rather than taking the type's word for it.
  *
  * Three things this file will not do, each because the measurement said so:
  *
@@ -146,7 +148,23 @@
   }
 
   // ---- grouping ---------------------------------------------------------------------------------
-  var isChat = function (row) { return !row || row.type !== "system"; };
+  // A gap is a run of rows that are STEPS. "type === system" alone was not that predicate: the
+  // adapter writes its own notices to the person as system rows too -- "Sending failed: …",
+  // "… is not wired to the gateway yet.", "Approve … in the tab that just opened" -- and those are
+  // things said to the reader, not work done for them. Run in node against the shipped file on
+  // 2026-09-08: [shell][read][Sending failed: boom][… not wired …] folded into one badge headlined
+  // "4 steps" with kinds "read 1, shell 1", both notices inside a hidden body and neither counted
+  // in the headline. A notice now ends the gap and is drawn where the person can read it, the same
+  // way a decision, a hand-off, an attachment and a failed turn already were.
+  var isChat = function (row) {
+    if (!row || row.type !== "system") return true;
+    // A step is nobody's message. Every tool row and every peer-exchange row the adapter maps out
+    // of a transcript carries no author at all; the four places the adapter SPEAKS to the person in
+    // a system row -- notWired, failed, the send-failure push and the connect-approval push -- all
+    // stamp authorId "system" and authorName "Machine Room", because that is what those rows are.
+    // So the author field is the mark, and it is read here rather than the type.
+    return Boolean(row.authorId) && !row.kind && !row.exchange;
+  };
 
   function group(rows, ctx) {
     var out = [];
@@ -241,12 +259,38 @@
     return span ? span + " · " + steps : steps;
   }
 
-  // "shell 6, browser 3, read 5". Dropped when it would only restate the headline: a gap whose every
-  // step is the one named kind says nothing under "14 steps" that "shell 14" adds.
+  // The plural the badge prints for each kind. The `kind` itself is a machine identifier -- it is
+  // TOOL_LABELS' label lowercased, or the tool's own name with "ToolCall" cut off it -- so printing
+  // it raw put "websearch 3, webfetch 1" on the one row this badge adds to the conversation a
+  // customer reads. Measured on Jason's console 2026-09-08: "Worked for 7 sec · 8 steps · shell 4,
+  // websearch 3, webfetch 1". The table is here rather than in the adapter because the adapter's
+  // label is also what the ROW is headlined with, where "Shell" is the right word and "commands" is
+  // not. Anything unmapped prints its kind unchanged: a wrong guess at a plural is worse than a
+  // word the reader can look at and understand is a tool's name.
+  var KIND_WORDS = {
+    shell: ["command", "commands"],
+    read: ["file read", "files read"],
+    write: ["file written", "files written"],
+    browser: ["browser step", "browser steps"],
+    computer: ["computer step", "computer steps"],
+    websearch: ["web search", "web searches"],
+    webfetch: ["page read", "pages read"],
+    messages: ["message", "messages"],
+    update: ["update", "updates"],
+    task: ["subagent run", "subagent runs"],
+  };
+  function kindPhrase(entry) {
+    var words = KIND_WORDS[entry.kind];
+    if (!words) return entry.count + " " + entry.kind;
+    return entry.count + " " + (entry.count === 1 ? words[0] : words[1]);
+  }
+
+  // "6 commands, 5 files read, 3 browser steps". Dropped when it would only restate the headline: a
+  // gap whose every step is the one named kind says nothing under "14 steps" that "14 commands" adds.
   function kindWords(gap) {
     if (!gap.kinds.length) return "";
     if (gap.kinds.length === 1 && gap.kinds[0].count === gap.steps) return "";
-    var shown = gap.kinds.slice(0, 4).map(function (entry) { return entry.kind + " " + entry.count; });
+    var shown = gap.kinds.slice(0, 4).map(kindPhrase);
     if (gap.kinds.length > 4) shown.push("and " + (gap.kinds.length - 4) + " more");
     return shown.join(", ");
   }

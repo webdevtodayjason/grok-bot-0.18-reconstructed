@@ -45,6 +45,15 @@ Three rules that are load-bearing and easy to undo by accident:
 - **`machineRoom.backgrounds.custom` is read only when the chosen id starts with `custom-`.** That
   array holds data URLs up to 4,000,000 bytes; `JSON.parse`ing it unconditionally in `<head>` would
   block the first paint by the cost this whole arrangement saves.
+- **`backgrounds.js` guards `window.__mrBg` before it destructures it.** Reading the constants from
+  one file coupled the picker to that file loading, and the destructure was at module top level:
+  measured on `console.titanium.bot` on 2026-09-08 with only `bg-boot.js` blocked in the browser,
+  the page threw *Cannot destructure property 'CHOICE_KEY' of 'boot' as it is undefined* and
+  **Operator settings opened with no `.bg-grid` at all** — no way to pick a plate and nothing saying
+  why, because the module's own `window.__machineRoomBackgrounds` publication is three hundred lines
+  below the throw. The guard publishes an empty set under that name and puts one line where the tiles
+  would be (*"The plate list did not load with this page …"*). Deliberately **not** a fallback copy of
+  the default and the list: that is the second copy the rule above exists to prevent.
 
 `apply()` sets `data-bg` for **every** id, `original` included. It used to remove the attribute for
 `original` and let the stylesheet's own mountains stand in as the default — which is why a browser
@@ -85,9 +94,17 @@ defined and the person has not asked for less motion), the line *Setting up your
 line, and a progress hint that is a hint and not a percentage — nothing here knows how far along the
 boot is.
 
-It is opaque over the whole shell on purpose. `index.html` ships seed copy — "MSP Team",
-"3 members · ready", "2h 14m", "Atera Triage's desktop" — which is fiction on a real box and was all
-on screen at 500 ms on a box that has none of it.
+It is opaque over the whole shell on purpose, and **the shell under it now ships blank**. It used to
+carry design copy in every field a person reads — "MSP Team", "3 members · ready", "2h 14m", "Ask MSP
+Team…", "Atera Triage's desktop" — which is fiction on a real box, and another company's product name
+in a paying customer's markup. An opaque cover hides that for as long as it is up, and no longer:
+measured on `console.titanium.bot` on 2026-09-08 with `/api/**` stalled in the browser only,
+`__bootMachineRoom()` never resolved, so **app.js never loaded at all**, the cover came off at its
+ceiling at **8,675 ms**, and at 14 s the page still named that team, that agent and that routine with
+nothing saying anything was wrong. `#room-title`, `#room-subtitle`, `#capability-scope`,
+`#desktop-capsule-scope`, `#next-routine-countdown`, `#next-routine-label`, `#desktop-title`, the
+`.desktop-live` line and the composer's placeholder are all empty in the markup and filled by
+`app.js`; a test pins that none of them ships words. Do not put copy back in them.
 
 **When it lifts** is a pure function of four things, in `index.html`'s own IIFE:
 
@@ -111,8 +128,12 @@ shouldLiftCover({ roster, rows, demo, elapsed })
 `gateway-adapter.js` has no `AbortController` and no per-call timeout anywhere, and it awaits every
 installed connector before it asks for the first conversation — BOOT-1 measured **46,318 ms** to
 live with one cold stdio connector. A cover that waits on that promise is a cover that never lifts.
-If the ceiling fires with no rows, the transcript column says it is still opening the conversation
-rather than uncovering an empty page pretending to be finished.
+What the lift uncovers depends on what was drawn. Roster and rows both there: the real console,
+nothing written. Roster there, rows not: the transcript column says *Still opening this
+conversation…*. **Neither**, which is the stalled boot above: the transcript says *Still reaching this
+box. Nothing on this page has loaded yet.* and the room capsule reads *Still connecting · this
+console has not reached your box yet*. In the `demo` case the red DEMO DATA bar already says the box
+was not reached, so the cover does not say it a second time.
 
 Under `prefers-reduced-motion: reduce` the node is removed outright — no fade, no sprite pulse, no
 transition to wait for. There is also a 900 ms belt on the `transitionend` listener, so a transition
@@ -215,17 +236,28 @@ contended.
 
 Everything between two chat messages folds into **one badge per gap**, collapsed by default.
 
-**The gap predicate is one line**, because the vocabulary is smaller than it looks. Every
+**The gap predicate is nearly one line**, because the vocabulary is smaller than it looks. Every
 between-chats row is type `system` in three shapes: a plain tool row, a `SHOT-4` receipt row, and a
 Messaged row. Every card that must stay outside the badge — decision, secret, connector, hand-off,
 turn-failed, attachment, the working bubble — is **already another type**, so "never hide a card"
-needs no special casing at all. Evidence chips render inside the reply's own row and notices are
-toasts outside the transcript, so neither is between-chats content either.
+needs no special casing at all. Evidence chips render inside the reply's own row.
 
-**The head** reads like `Worked for 2 min · 14 steps` with the kinds summarised (`shell 6, browser 3,
-read 5`). Where both bounding chat entries exist the badge says the span; where one is missing it
-says the step count alone. It cannot do better: **no tool row carries a timestamp of any kind**, and
-`messagesOf` keeps only a minute-resolution string.
+The one thing `type === "system"` alone got wrong is that **the adapter also speaks to the person in
+system rows**: `notWired` ("… is not wired to the gateway yet."), `failed`, the send-failure push
+("Sending failed: …") and the connect-approval push. Those are messages, not work, and the first
+build folded them into the body with nothing in the headline counting them. A step is nobody's
+message — no tool row and no exchange row carries an author — and all four notice sites stamp
+`authorId: "system"` / `authorName: "Machine Room"`, so `isChat` reads the author: a system row that
+names one ends the gap and is drawn where the person can read it.
+
+**The head** reads like `Worked for 2 min · 14 steps` with the kinds summarised (`6 commands, 5
+files read, 3 browser steps`). The words are a table in `gap-badge.js`, not the `kind` field: that
+field is `TOOL_LABELS`' label lowercased, or the tool's own name with `ToolCall` cut off it, so
+printing it raw put `shell 4, websearch 3, webfetch 1` on Jason's own console. Anything the table
+does not know prints its kind unchanged rather than being guessed a plural. Where both bounding chat
+entries exist the badge says the span; where one is missing it says the step count alone. It cannot
+do better: **no tool row carries a timestamp of any kind**, and `messagesOf` keeps only a
+minute-resolution string.
 
 **Open by click, and the preference sticks.** `button.gap-badge-head[data-gap-toggle]` carries
 `aria-expanded`; the rows appear in a sibling `div.gap-badge-body[aria-live="off"]` exactly as they
@@ -445,7 +477,9 @@ Five rules the script is written under, each paid for by an earlier gate that li
   has passed on menu items no mouse could reach. Everything that claims a person can use a control
   hit-tests it: a box with area, and the element under its own centre is that element or something
   inside it.
-- **Nothing is read before the adapter exists.** The static shell satisfies selectors with seed copy.
+- **Nothing is read before the adapter exists.** The static shell satisfies selectors with markup
+  `app.js` has not filled yet. (It used to satisfy them with seed COPY, which the review pass
+  emptied — see §1.)
 - **The rail tile's click is a write**, so that leg is local-box only.
 - **`getForeverBoxStatus` takes `{ id }`**, and the tile leg asserts the difference between the two
   argument shapes rather than assuming it.
@@ -464,11 +498,11 @@ Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 
 | Gate | What it covers |
 |---|---|
-| `node --test tests/machine-room-boot.test.mjs` | the plate, the floor, the series headings, the cover's lift decision, the scroll table, the four seams with their modules absent, the adapter's data shapes |
+| `node --test tests/machine-room-boot.test.mjs` | the plate, the floor, the series headings, the cover's lift decision **and what it uncovers**, that no field in the shell ships copy, the picker surviving a missing `bg-boot.js`, the scroll table, the four seams with their modules absent, the adapter's data shapes |
 | `node --test tests/titan-crew.test.mjs` | `backgrounds.js` still publishes the list the console knows it by, loaded the way the browser loads it |
 | `node --test tests/machine-room-transcript-fold.test.mjs` | DASH-FOLD-1's fold still runs before the badge sees the rows |
 | `scripts/verify-console-polish.mjs` | the browser legs, on `grok-bot-local-vm` and then read-only on Jason's console |
-| `node --test tests/machine-room-gap-badge.test.mjs` | the gap predicate, the headline and its span ceiling, the preference store, the receipt that survives a rebuild, and that the module is loaded ahead of app.js |
+| `node --test tests/machine-room-gap-badge.test.mjs` | the gap predicate (**including that an adapter notice ends a gap and is never folded away**), the headline, its kinds line in plain words and its span ceiling, the preference store, the receipt that survives a rebuild, and that the module is loaded ahead of app.js |
 | `node --test tests/machine-room-screen-tile.test.mjs` | the blank-frame refusal, the reader's life, the seat argument shape, and the stylesheet's `[hidden]` belt |
 | `node --test tests/machine-room-files.test.mjs` | the viewer's five branches, the masking, and the `/files` route's fences against a real relay and a real gateway |
 | `scripts/verify-dashboard.mjs` | unchanged by this wave, and NOT green on `grok-bot-local-vm`. It leaves its own probe agents behind and they then fail its avatar and bot-cap legs (GATE-14), so the honest way to read it on this box is to diff its failure list against a run of the previous commit rather than to read its tally |
@@ -501,8 +535,8 @@ leave the new version and do the documented `updateHostNow` in each box.
 | the plate at 50 ms | `data-bg` null, no cover | `data-bg="titan-nebula"`, cover showing "Reaching this box" |
 | the picker's series headings | Habitat and The Lab drawn 182x102, one tile's cell each | 20 cells, every heading spans the grid |
 | Titan's transcript, parked 5 s | — | 183 rows, 34,217 px in a 668 px viewport, parked at 11,406, **drift 0 px** over eleven samples |
-| the rail tile | one laid-out `<img>`, no src, `naturalWidth` 0, `display: block`, 231x75, alt "Titan's screen" | **0 broken images**, no src-less `<img>` in the markup at all, the plate, then a real 7,611-character webp off seat :3 in 1.2 s drawn 390 px wide |
-| a run of work between two chats | every row full height | one collapsed row: "Worked for 7 sec · 8 steps · shell 4, websearch 3, webfetch 1", 0 px of body, opening to 106 px on a click |
+| the rail tile | one laid-out `<img>`, no src, `naturalWidth` 0, `display: block`, 231x75, alt "Titan's screen" | **0 broken images**, the plate, then a real 7,611-character webp off seat :3 in 1.2 s drawn 390 px wide. The rail tile emits no `<img>` until it has a frame; the one remaining src-less `<img>` on the page is `HANDBACK-1`'s hand-off thumb (`app.js`, alt "What is on this agent's screen right now"), emitted `hidden` and laid out 0x0 by `styles.css` `.handoff-thumb[hidden] { display: none }` |
+| a run of work between two chats | every row full height | one collapsed row: "Worked for 7 sec · 8 steps · 4 commands, 3 web searches, 1 page read", 0 px of body, opening to 106 px on a click. (Measured as `shell 4, websearch 3, webfetch 1`; the plain-words table landed in the review pass that followed) |
 | the Agent panel's file count | **Files 1** | **Files 10** |
 | `rsi-vs-agi-notes.md` | nothing happened on a click | rendered Markdown, 2,529 characters, 20 list items, 9 paragraphs, a secret still masked; Download carries its own filename; the route answers 200, 2,614 B, `text/markdown` |
 

@@ -130,6 +130,29 @@ test("backgrounds.js still publishes the list the console knows it by", () => {
   assert.ok(ids.includes("original"), "the handoff's own plate is still offered");
 });
 
+// bg-boot.js is a blocking <head> script, so it not loading is a deploy fault -- but before the
+// guard, the destructure at the top of backgrounds.js threw and took the WHOLE picker with it.
+// Measured on console.titanium.bot 2026-09-08 with only bg-boot.js blocked in the browser: pageerror
+// "Cannot destructure property 'CHOICE_KEY' of 'boot' as it is undefined", and Operator settings
+// opened with no .bg-grid at all and nothing saying why.
+test("backgrounds.js survives bg-boot.js not loading, and says so where the tiles would be", () => {
+  const stub = { document: undefined, localStorage: fakeStorage({}) };
+  assert.doesNotThrow(() => loadBrowserScript("ui/machine-room/backgrounds.js", stub), "a missing bg-boot.js must cost the pre-paint plate and nothing else");
+  assert.deepEqual(stub.__machineRoomBackgrounds, { DEFAULT_CHOICE: "", BUILT_IN: [] }, "published under the name the console reads, and deliberately not a second copy of the list");
+
+  const clicks = [];
+  const button = () => ({ addEventListener: (type, fn) => clicks.push(fn) });
+  const buttons = { "settings-button": button(), "shelf-settings": button() };
+  const withPage = {
+    localStorage: fakeStorage({}),
+    setTimeout: (fn) => fn(),
+    document: { readyState: "complete", getElementById: (id) => buttons[id] ?? null, addEventListener() {} },
+  };
+  loadBrowserScript("ui/machine-room/backgrounds.js", withPage);
+  assert.equal(clicks.length, 2, "both settings buttons still open something that explains itself");
+  assert.doesNotThrow(() => clicks[0](), "and a click with no panel on screen is not an error either");
+});
+
 test("bg-boot.js loads before the first stylesheet, and the modules load with the page", async () => {
   const html = await read("ui/machine-room/index.html");
   const bootAt = html.indexOf('src="bg-boot.js"');
@@ -205,6 +228,66 @@ test("the ceiling is armed at parse time and never chained to hydrate's promise"
   assert.match(html, /id="boot-cover" data-boot-state="showing"/, "the cover is static markup so it paints with the first paint");
   assert.match(html, /Setting up your console/);
   assert.match(html, /data-boot-step/);
+});
+
+/** lift(), sliced out of index.html and run against a fake page. quiet:true takes the no-animation
+ *  path, which is the same decision tree without a transitionend to wait on. */
+async function runLift(seen) {
+  const html = await read("ui/machine-room/index.html");
+  const start = html.indexOf("        function lift() {");
+  assert.notEqual(start, -1, "index.html no longer defines lift");
+  const end = html.indexOf("\n        }\n", start);
+  const body = html.slice(start, end + 10);
+  const nodes = {
+    transcript: { innerHTML: "", querySelector: () => null },
+    "room-title": { textContent: "" },
+    "room-subtitle": { textContent: "" },
+  };
+  const doc = { getElementById: (id) => nodes[id] ?? null };
+  const cover = { dataset: {}, parentNode: null, addEventListener() {}, querySelector: () => null };
+  new Function("document", "window", "seen", "cover", "quiet", `var lifted = false; var observers = []; var removeCover = function () {};\n${body}\nlift();`)(
+    doc, { setTimeout() {} }, seen, cover, true,
+  );
+  return nodes;
+}
+
+test("the ceiling with nothing on screen says the box has not been reached, and does not uncover a shell that names one", async () => {
+  const stalled = await runLift({ roster: false, rows: false, demo: false });
+  assert.match(stalled.transcript.innerHTML, /Still reaching this box/);
+  assert.equal(stalled["room-title"].textContent, "Still connecting");
+  assert.match(stalled["room-subtitle"].textContent, /has not reached your box/);
+
+  // The roster drew but the conversation has not: the page is real, one column is still opening.
+  const opening = await runLift({ roster: true, rows: false, demo: false });
+  assert.match(opening.transcript.innerHTML, /Still opening this conversation/);
+  assert.equal(opening["room-title"].textContent, "", "app.js owns this field on a page that reached the box");
+
+  // The demo factory is behind the cover: the red DEMO DATA bar already says the box was not
+  // reached, so the cover's own copy does not say it a second time.
+  const demo = await runLift({ roster: false, rows: false, demo: true });
+  assert.match(demo.transcript.innerHTML, /Still opening this conversation/);
+  assert.equal(demo["room-title"].textContent, "");
+});
+
+// The cover is opaque because index.html used to ship design copy in every field a person reads --
+// "MSP Team", "3 members · ready", "2h 14m", "Atera Triage's desktop". Measured on
+// console.titanium.bot 2026-09-08 with /api stalled in the browser only: the cover came off at
+// 8,675 ms and at 14 s the page still named that team, that agent and that routine, with nothing
+// saying anything was wrong. The fields ship empty now, so the ceiling uncovers a blank shell and
+// the line above rather than a fiction.
+test("no field in the shell ships copy that would read as this box", async () => {
+  const html = await read("ui/machine-room/index.html");
+  for (const id of ["room-title", "room-subtitle", "capability-scope", "desktop-capsule-scope", "next-routine-countdown", "next-routine-label"]) {
+    const match = new RegExp(`id="${id}"[^>]*>([^<]*)<`).exec(html);
+    assert.ok(match, `index.html no longer has #${id}`);
+    assert.equal(match[1].trim(), "", `#${id} ships copy; app.js fills it, and when app.js never loads that copy is what a person reads`);
+  }
+  assert.match(html, /<textarea id="message-input"[^>]*placeholder=""/, "the composer no longer offers to message a room that does not exist");
+  // The comments in this file quote the old copy on purpose, so the check is on the markup only.
+  const markup = html.replaceAll(/<!--[\s\S]*?-->/g, "").replaceAll(/\/\/[^\n]*/g, "");
+  assert.ok(!markup.includes("MSP Team"), "the seed room name is fiction on a real box");
+  assert.ok(!markup.includes("Atera Triage"), "and it is another company's product name in a paying customer's markup");
+  assert.ok(!markup.includes("2h 14m"), "the seed countdown is a routine nobody scheduled");
 });
 
 // ---- A5: the scroll ---------------------------------------------------------------------------
