@@ -1,3 +1,5 @@
+import { basename, dirname } from "node:path";
+
 import {
   agentProfileIdentitiesEqual,
   normalizeAgentProfileIdentity,
@@ -21,10 +23,10 @@ import {
   type ProvenancedMemory,
 } from "./sand-memory.js";
 import {
-  SAND_CLOUD_AGENTS_DISABLED_PROMPT_SECTION,
   SAND_MCP_MULTI_ACCOUNT_PROMPT_SECTION,
   sandBaseSystemPrompt,
 } from "./system-prompt.js";
+import { renderStandingPersonaSection } from "./standing-persona.js";
 import { renderAutomationsSystemPrompt, type AutomationRecord } from "../automations/automation.js";
 import { renderTimeZoneSystemPrompt } from "../../shared/timezone.js";
 import { renderUserIdentitySystemPrompt } from "../sand-user-identity.js";
@@ -90,7 +92,18 @@ export interface SystemPromptAssemblyDependencies {
   readonly multitaskSection?: string;
   readonly mcpManagement: () => unknown;
   readonly isMcpMultiAccountEnabled?: () => boolean;
+  /**
+   * CURSOR-1 part f. Nothing reads this any more: the base prompt no longer has a branch that
+   * swings on cloud agents, because the tool it coached was withheld from the same turn's
+   * toolset. Kept only so the composition that already passes it still type-checks.
+   */
   readonly isCloudAgentsDisabledByTeam?: () => boolean;
+  /**
+   * PERSONA-1. Who this prompt is for, so the standing facts can name this agent's own address
+   * and say whether it is the workspace's lead. Absent on a runner with no agent identity, which
+   * renders no persona section at all.
+   */
+  readonly agentIdForPersona?: () => string | null | undefined;
   /**
    * TOOLS-15. Whether a computer is connected over the local-exec bridge. The base prompt spends
    * several paragraphs teaching ExternalShell, ExternalRead and the two file transfers; the turn
@@ -253,14 +266,39 @@ export function createSystemPromptAssembly(deps: SystemPromptAssemblyDependencie
     return rendered.length > 0 ? rendered : null;
   }
 
+  /**
+   * PERSONA-1. Who this prompt speaks for. The production wiring hands the assembly the agent's
+   * profile file, which is <agents root>/<agent id>/profile.json, so the id is already here and
+   * no new dependency has to be threaded down through the composition. `agentIdForPersona` is the
+   * explicit override a test or a caller with a different shape can supply.
+   */
+  function personaAgentId(): string | null {
+    const explicit = deps.agentIdForPersona?.();
+    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit.trim();
+    const filePath = deps.agentProfileProvider()?.filePath;
+    if (typeof filePath !== "string" || filePath.trim().length === 0) return null;
+    const id = basename(dirname(filePath)).trim();
+    return id.length > 0 && id !== "." && id !== "/" ? id : null;
+  }
+
+  /**
+   * PERSONA-1. Its own section, rendered on every turn, because every fact in it is live. It
+   * cannot be in the base prompt (frozen at import) and it cannot be in the profile section
+   * (snapshot-cached per compaction epoch); see standing-persona.ts for why each one matters.
+   */
+  function getStandingPersonaSection(): string | null {
+    if (deps.isSubagentRunner || deps.isBoxScopedSubagent()) return null;
+    return renderStandingPersonaSection({
+      agentId: personaAgentId(),
+      agents: deps.agentDirectory?.() ?? [],
+    });
+  }
+
   function getSystemPrompt(snapshot?: AgentProfilePromptSnapshot): string {
-    const cloudDisabled = deps.isCloudAgentsDisabledByTeam?.() === true;
     const localMachineConnected = deps.isLocalMachineConnected?.() !== false;
-    const base = deps.isSystemPromptOverridden
+    const base = deps.isSystemPromptOverridden || localMachineConnected
       ? deps.basePrompt
-      : cloudDisabled || !localMachineConnected
-        ? sandBaseSystemPrompt({ cloudAgentsEnabled: !cloudDisabled, localMachineConnected })
-        : deps.basePrompt;
+      : sandBaseSystemPrompt({ localMachineConnected });
     const sections = [base];
     if (deps.isSpotlightEnabled?.() !== false) sections.push(spotlightPromptSection({ canSendMessage: !deps.isSubagentRunner }));
     const profile = deps.isSharedRoomRunner ? profileSection(resolveProfileForPrompt(), true) : snapshot?.profileSection ?? profileSection(resolveProfileForPrompt(), false);
@@ -269,8 +307,8 @@ export function createSystemPromptAssembly(deps: SystemPromptAssemblyDependencie
     const add = (value: string | null | undefined): void => { if (value != null && value.length > 0) sections.push(value); };
     add(getUserIdentitySection());
     if (!deps.isSubagentRunner && !deps.isSystemPromptOverridden && deps.isMultitaskEnabled?.() === true) add(deps.multitaskSection);
-    if (deps.isSystemPromptOverridden && !deps.isSubagentRunner && cloudDisabled) add(SAND_CLOUD_AGENTS_DISABLED_PROMPT_SECTION);
     if (!deps.isSubagentRunner && deps.mcpManagement() != null && deps.isMcpMultiAccountEnabled?.() === true) add(SAND_MCP_MULTI_ACCOUNT_PROMPT_SECTION);
+    add(getStandingPersonaSection());
     add(getTimeZoneSection());
     add(getMemorySection()); add(getAutomationsSection()); add(getWorkflowsSection()); add(getChannelsSection()); add(getAgentDirectorySection());
     add(deps.mcpCustomInstructionsSection()); add(deps.mcpDiscoveryStatusSection()); add(deps.remoteBoxSection()); add(deps.computerSection());

@@ -104,8 +104,11 @@ export function readSandBoxSettingNumber(
 }
 
 /**
- * AGENTS-CAP-1. How many bots one box holds: Titan plus twelve unless an operator says otherwise.
- * Read per call like every other switch, so a live box can be moved without a recreate.
+ * AGENTS-CAP-1. How many bots one box holds. The default is SAND_DEFAULT_MAX_AGENTS, and an
+ * operator moves it with the SAND_MAX_AGENTS setting; this comment used to name a number, and
+ * the number went stale the day the default changed. Read per call like every other switch, so
+ * a live box can be moved without a recreate, and named nowhere else -- the standing persona
+ * section reads it here rather than repeating it.
  */
 export function resolveSandMaxAgents(): number {
   return readSandBoxSettingNumber(SAND_MAX_AGENTS_SETTING, { min: 1, max: 1_000 })
