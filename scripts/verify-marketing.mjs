@@ -295,9 +295,15 @@ try {
   const anchorAgent = [...startRoster.keys()][0] ?? null;
   const startLibrary = await libraryOf(anchorAgent);
   info(`this box holds ${startRoster.size} bots and ${startLibrary.size} documents before anything is imported`);
-  const leftovers = [...startRoster.values()].filter((name) => name.startsWith("Marketing · "));
-  if (leftovers.length > 0) {
-    bail(`an earlier run left ${leftovers.length} of this pack's bots on the box (${leftovers.join(", ")}); remove them and run again`);
+  // Both halves. Documents outlive their bot -- that is the whole reason Remove team exists -- so
+  // a run that checked only the roster started against a library that already held the pack, read
+  // "the library gained 0 documents" as a failure, and then reported its own leftovers as
+  // somebody else's documents being deleted. Measured exactly that way on 2026-09-09.
+  const leftoverBots = [...startRoster.values()].filter((name) => name.startsWith(pack.packaging.agentPrefix));
+  const leftoverDocs = [...startLibrary.values()].filter((name) => name.startsWith(pack.packaging.skillPrefix));
+  if (leftoverBots.length > 0 || leftoverDocs.length > 0) {
+    bail(`an earlier run left this pack on the box (${leftoverBots.length} bots, ${leftoverDocs.length} documents: ${[...leftoverBots, ...leftoverDocs].join(", ")});`
+      + " take the team off and run again");
   }
 
   step("the console, in a real browser");
@@ -518,10 +524,18 @@ try {
           "the approval rule is in the coordinator's own prompt");
         check(state.offered.includes("SendMessage"), "and SendMessage is offered, which is what raises the card");
 
-        // The mechanism the rule rests on: a widget ENDS the turn.
+        // The mechanism the rule rests on: a widget ENDS the turn, and the bot waits.
+        //
+        // Measured, not counted. Counting further completions was the first attempt and it is not
+        // attributable: the box asks the same endpoint for a conversation title with the same
+        // toolset offered, so one extra request after the widget says nothing about whether the
+        // TURN ended. What does say it is the bot's own running state, and the console's own words
+        // on the card.
         await sleep(8000);
-        check(state.turnsAfterWidget === 0, "the widget ended the turn: the host asked for nothing more",
-          state.turnsAfterWidget > 0 ? `${state.turnsAfterWidget} further completion(s)` : "");
+        const stillRunning = (await gw("listAgents", {}).catch(() => []))
+          .find((agent) => String(agent.id) === coordinatorId)?.isRunning === true;
+        check(!stillRunning, "the bot stopped and is waiting on the answer rather than carrying on");
+        info(`the stub answered ${state.turns} request(s) for this bot, ${state.turnsAfterWidget} of them after the card`);
 
         await page.click("[data-panel-close], [data-close-panel]").catch(() => {});
         await page.evaluate((id) => {
@@ -542,8 +556,10 @@ try {
         }
         check(card.buttons.length >= 2, "the decision card is on screen with its options", card.buttons.join(" | "));
         check(/Northgate/.test(card.text), "and it names the client and the batch", oneLine(card.text));
-        check(!/posted|published/i.test(card.text) || /Nothing goes out/.test(card.text),
-          "and nothing says anything was posted", oneLine(card.text));
+        check(/blocked until you answer/i.test(card.text),
+          "and the console says the bot is blocked until it is answered", oneLine(card.text));
+        check(!/\bposted\b|\bpublished\b/i.test(card.text),
+          "and nothing on it says anything went out", oneLine(card.text));
       }
     }
   }
@@ -618,8 +634,19 @@ try {
     console.log(`  restored ${MAX_AGENTS_SETTING} to ${capBefore ?? "the box's default"}`);
   }
   if (!KEEP && importedIds.length > 0) {
+    // Documents FIRST, while a bot that can be asked through is still alive, and both halves --
+    // deleting the bots alone is precisely the defect Remove team exists for, and doing it here
+    // left the next run of this gate starting against a dirty library.
+    let docs = 0;
+    for (const agentId of importedIds) {
+      const rows = await gw("getAgentWorkflows", { id: agentId }).catch(() => []);
+      for (const row of Array.isArray(rows) ? rows : []) {
+        if (!String(row?.name ?? "").startsWith("mkt-")) continue;
+        if (await gw("deleteAgentWorkflow", { id: agentId, workflowId: String(row.id) }).then(() => true).catch(() => false)) docs += 1;
+      }
+    }
     for (const id of importedIds) await gw("deleteAgent", { id }).catch(() => {});
-    console.log(`  removed ${importedIds.length} bot(s) this run created`);
+    console.log(`  removed ${importedIds.length} bot(s) and ${docs} document(s) this run created`);
   }
   if (stub != null) stub.close();
   if (browser != null) await browser.close().catch(() => {});

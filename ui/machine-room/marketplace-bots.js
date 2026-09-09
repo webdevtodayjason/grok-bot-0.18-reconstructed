@@ -1039,6 +1039,16 @@
     renderRefusal,
     packMembersOf,
     memberAgentName,
+    // The pack page's own markup, so the states the gate cannot reach in one run -- a failed
+    // import, a removal -- are still rendered by something before they are rendered at a person.
+    renderTeamState(bot, outcome) {
+      const previous = imports.get(text(bot && bot.id));
+      if (outcome == null) imports.delete(text(bot && bot.id)); else imports.set(text(bot && bot.id), outcome);
+      try { return teamControlsMarkup(bot); }
+      finally { if (previous == null) imports.delete(text(bot && bot.id)); else imports.set(text(bot && bot.id), previous); }
+    },
+    renderTeamMembers: (bot) => membersMarkup(bot),
+    renderFirstRun: (bot) => firstRunMarkup(bot),
     reload() { catalog = null; catalogError = null; return load(); },
   };
 })(typeof window !== "undefined" ? window : globalThis);

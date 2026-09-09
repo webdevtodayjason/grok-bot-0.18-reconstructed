@@ -406,6 +406,56 @@ test("one agent refusing the library read does not read as an empty library", as
   assert.equal(box.roster.length, after.agents);
 });
 
+// ------------------------------------------------------------------ 8. the page's own markup
+//
+// The gate drives one run, so it reaches the confirm, imported, refused and removed states and not
+// the failed one. These render every state once, offline, because a typo in a branch nobody drew
+// is a branch that first renders at a person.
+
+test("every state of the pack page renders, with nothing undefined in it", () => {
+  const states = [
+    null,
+    { state: "running", step: "Copywriter (3 of 7)" },
+    { state: "confirm", members: 7, skills: 10, missing: ["Notion", "Resend"], keys: ["NOTION_TOKEN"] },
+    { state: "confirm", members: 7, skills: 10, missing: [], keys: [] },
+    { state: "refused", message: marketingTeamCapacityRefusal(2, 7) },
+    { state: "failed", message: "the host refused" },
+    { state: "removed", message: "7 bots and 10 documents taken back." },
+    { state: "done", members: members.map((member, index) => ({ id: member.id, role: member.role, agentId: `a${index}`, name: marketingTeamAgentName(member), reused: index === 0, skills: member.skills.map((skill) => ({ name: skill.name, reused: false })) })) },
+  ];
+  for (const state of states) {
+    const html = team.renderTeamState(theTeam, state);
+    const label = state == null ? "(no import yet)" : state.state;
+    assert.equal(typeof html, "string", label);
+    assert.ok(!/undefined|\[object Object\]|NaN/.test(html), `${label} rendered: ${html.slice(0, 200)}`);
+    if (state != null) assert.ok(html.length > 0, `${label} rendered nothing`);
+  }
+  // The refusal reaches the page verbatim, with no command name and no status code in it.
+  const refused = team.renderTeamState(theTeam, { state: "refused", message: marketingTeamCapacityRefusal(2, 7) });
+  assert.ok(refused.includes("room for 2 more bots"), refused);
+  assert.doesNotMatch(refused, /getAgentCapacity|createAgent|maxAgents/);
+});
+
+test("the members section names every member, its playbooks and its tools", () => {
+  const html = team.renderTeamMembers(theTeam);
+  for (const member of members) {
+    assert.ok(html.includes(member.role), `${member.id} is not on the members section`);
+    for (const skill of member.skills) assert.ok(html.includes(skill.name), `${skill.name} is not shown`);
+  }
+  // The coordinator reports to Titan; everyone else reports to the coordinator.
+  assert.ok(html.includes("Reports to Titan"), "nobody is shown reporting to Titan");
+  assert.ok(html.includes("Reports to the coordinator"), "nobody is shown reporting to the coordinator");
+  assert.ok(!/undefined|\[object Object\]/.test(html));
+});
+
+test("the first-run section draws both lists and the prose", () => {
+  const html = team.renderFirstRun(theTeam);
+  for (const line of theTeam.firstRun.needs) assert.ok(html.includes(line.slice(0, 40)), line.slice(0, 40));
+  for (const line of theTeam.firstRun.prerequisites) assert.ok(html.includes(line.slice(0, 40)), line.slice(0, 40));
+  assert.ok(html.includes("No official connector publishes an ordinary post"));
+  assert.ok(!/undefined|\[object Object\]/.test(html));
+});
+
 test("Remove team on a box that never imported the pack does nothing at all", async () => {
   const box = fakeBox({ agents: ["Titan", "Marketing"], library: ["web-research-pass"] });
   const removed = await team.removeMarketingTeam(box, theTeam);
