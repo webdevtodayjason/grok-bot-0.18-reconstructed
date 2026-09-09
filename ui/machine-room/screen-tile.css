@@ -1,0 +1,74 @@
+/*
+ * CONSOLE-4 item C: the rail's screen tile. The belt that keeps the broken glyph off the page, and
+ * the plate the tile shows when there is genuinely no picture yet.
+ *
+ * Loaded after styles.css. Every rule here is either a guard the cascade needs or the plate's own
+ * art; nothing here restyles anything styles.css owns.
+ */
+
+/* THE BELT. This is the bug Jason saw, in one selector.
+ *
+ * styles.css says `.rail-screen-button img { display: block }` -- one class and one type, which
+ * outranks the UA sheet's `[hidden] { display: none }`. So an <img> the console marked hidden went
+ * on being laid out, and an <img> being laid out with no src is exactly where Chrome paints its own
+ * broken-image glyph and the alt text beside it. Measured on console.titanium.bot 2026-09-08 on
+ * the rail tile for Titan: hidden true, computed display block, no src attribute, naturalWidth 0,
+ * a 231x75 box on screen.
+ *
+ * app.js now emits no <img> at all until it has a frame, so on a current console this rule has
+ * nothing to hide. It stays because the trap is one careless line from re-opening and because the
+ * same stylesheet already carries exactly this belt one screen up for .handoff-thumb[hidden] and
+ * .handoff-island[hidden]. The other two selectors cover the ways in that [hidden] would miss: an
+ * element created with the attribute never set, and one whose src was cleared to "". */
+.rail-screen-button img[hidden],
+.rail-screen-button img:not([src]),
+.rail-screen-button img[src=""] {
+  display: none;
+}
+
+/* THE PLATE'S GROUND. A faint halo in the product's cyan rather than a flat dark box. It needs no
+   condition: a tile that HAS a picture covers this entirely, because .rail-screen-button img is
+   100% of the button with object-fit: cover. */
+.rail-screen-button {
+  background-image: radial-gradient(120% 90% at 50% 30%, rgba(0, 200, 240, 0.1), rgba(0, 200, 240, 0) 64%);
+}
+
+/* THE MARK. The Ti tile, quiet, above the words. Three wordings live in app.js and none of them
+   change here -- "This computer did not say which screen this agent is on", "Connecting", "Click to
+   open this computer's screen". What changes is what they sit on: a plate that looks like a place a
+   picture will arrive rather than a thing that failed to load.
+
+   Drawn on the plate element itself rather than on the button, so it comes and goes with the words
+   and needs no :has(). The alpha is baked into the SVG's own fill: a background layer cannot be
+   faded from CSS, and silver at full strength on Midnight competes with the text in front of it. */
+.rail-screen-plate {
+  padding: 42px 12px 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'%3E%3Cg fill='%23E6EBF2' fill-opacity='0.34'%3E%3Cpath fill-rule='evenodd' d='M300 60H724Q964 60 964 300V724Q964 964 724 964H300Q60 964 60 724V300Q60 60 300 60Z M300 155Q155 155 155 300V724Q155 869 300 869H724Q869 869 869 724V300Q869 155 724 155Z'/%3E%3Cpath d='M250 280H596V412H494V793H448Q354 793 354 699V412H328Q250 412 250 334Z'/%3E%3Cpath d='M648 467H794V682Q794 793 683 793H648Z'/%3E%3C/g%3E%3Crect x='648' y='280' width='146' height='146' rx='42' fill='%2300C8F0' fill-opacity='0.62'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center top;
+  background-size: 34px 34px;
+}
+
+/* On mist the tile's ground is white glass: a silver mark on it is invisible and the cyan wash is a
+   smear. Ink at a low alpha, and the halo comes off. */
+[data-theme="mist"] .rail-screen-button {
+  background-image: none;
+}
+
+[data-theme="mist"] .rail-screen-plate {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'%3E%3Cg fill='%230D1117' fill-opacity='0.3'%3E%3Cpath fill-rule='evenodd' d='M300 60H724Q964 60 964 300V724Q964 964 724 964H300Q60 964 60 724V300Q60 60 300 60Z M300 155Q155 155 155 300V724Q155 869 300 869H724Q869 869 869 724V300Q869 155 724 155Z'/%3E%3Cpath d='M250 280H596V412H494V793H448Q354 793 354 699V412H328Q250 412 250 334Z'/%3E%3Cpath d='M648 467H794V682Q794 793 683 793H648Z'/%3E%3C/g%3E%3Crect x='648' y='280' width='146' height='146' rx='42' fill='%2300A8CC' fill-opacity='0.7'/%3E%3C/svg%3E");
+}
+
+/* The reader's own client is off-screen and must never be laid out, hit-tested or focused, whatever
+   else lands on the page later. The module sets these inline too; this is the belt for the same
+   reason the one at the top of this file exists. */
+iframe[data-screen-tile-source] {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 1280px;
+  height: 800px;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
