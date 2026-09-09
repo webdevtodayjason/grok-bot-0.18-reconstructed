@@ -38,6 +38,14 @@
 // bucket. Back to back from one Mac and the next one measures its own lockout. A leg that hits it
 // says so by name rather than failing as though the product were broken.
 import { createRequire } from "node:module";
+
+import { gateUserAgent } from "./gate-agent.mjs";
+
+// SIGNIN-1. This gate has no fetch of its own: every request it makes is made by Chrome, so the
+// name goes on the browser context rather than on a headers object, and it therefore rides on the
+// page loads and the form posts alike. See scripts/gate-agent.mjs for what the header is worth.
+const GATE_AGENT = gateUserAgent(import.meta.url);
+
 const flag = (name) => {
   const at = process.argv.indexOf(`--${name}`);
   return at === -1 ? null : process.argv[at + 1] ?? null;
@@ -92,7 +100,7 @@ async function clickAndLandOn(page, predicate, label) {
 // One customer's whole visit: sign in at the one console, wait for the roster to render, and come
 // back with the agent ids the page actually drew.
 async function visit(browser, who, label) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, userAgent: GATE_AGENT });
   const page = await context.newPage();
   await page.goto(`${CONSOLE_URL}/login`, { waitUntil: "domcontentloaded", timeout: 60000 });
   check(await page.locator('input[name="email"]').count() === 1, `${label}: the one login page has an email field`);
@@ -147,7 +155,7 @@ try {
   }
 
   step("a wrong password");
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, userAgent: GATE_AGENT });
   const page = await context.newPage();
   await page.goto(`${CONSOLE_URL}/login`, { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.fill('input[name="email"]', A.email);

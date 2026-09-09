@@ -53,6 +53,12 @@ import { createRequire } from "node:module";
 import https from "node:https";
 import tls from "node:tls";
 
+import { gateUserAgent } from "./gate-agent.mjs";
+
+// SIGNIN-1. This gate spends the relay's lockout on purpose, so every burst it leaves in the
+// sign-in ledger used to read as an attack from Jason's own address. It says its own name now.
+const GATE_AGENT = gateUserAgent(import.meta.url);
+
 // --url <base> or --url=<base>. Everything else about the run is unchanged, including reading the
 // server's bearer over ssh: the gate still needs the token, and the token still lives on the
 // server rather than on this Mac.
@@ -422,7 +428,7 @@ step(`gateway through ${URL_BASE}`);
 const call = async (method, args = {}, headers = {}) => {
   const res = await fetch(`${URL_BASE}/api/${method}`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "user-agent": GATE_AGENT, "content-type": "application/json", ...headers },
     body: JSON.stringify(args),
     signal: AbortSignal.timeout(30_000),
   });
@@ -447,7 +453,7 @@ check(unauth.status === 401, "the same call with no credential is refused", `HTT
 // it cannot tell the relay's refusal from the gateway's, and a stale gateway bearer would bounce
 // an operator who typed the right password back to the login forever.
 const marker = await fetch(`${URL_BASE}/api/getHostStatus`, {
-  method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(20_000),
+  method: "POST", headers: { "user-agent": GATE_AGENT, "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(20_000),
 });
 check(marker.status === 401 && marker.headers.get("x-relay-auth") === "required",
   "that refusal is marked as the relay's own, which is the only 401 the console treats as signed out",
@@ -462,7 +468,16 @@ const baseline = roster.map((a) => a.id).sort();
 step("the login in front of the relay");
 // redirect:"manual" throughout: a followed 302 hides the very thing under test, which is where the
 // relay sends a caller it does not recognise.
-const hit = (path, init = {}) => fetch(`${URL_BASE}${path}`, { redirect: "manual", signal: AbortSignal.timeout(20_000), ...init });
+// `headers` is built INSIDE this helper and placed AFTER the spread, and both halves of that
+// sentence are load bearing. `...init` comes last on purpose so a caller can override the redirect
+// or the timeout, which means a `headers` default written before it would be REPLACED wholesale by
+// every call that passes headers of its own -- the oversize leg, the lockout leg and both forged
+// X-Forwarded-For legs all do. So the default goes on here and the caller's own headers are spread
+// OVER it, which merges instead of losing either side.
+const hit = (path, init = {}) => fetch(`${URL_BASE}${path}`, {
+  redirect: "manual", signal: AbortSignal.timeout(20_000), ...init,
+  headers: { "user-agent": GATE_AGENT, ...(init.headers ?? {}) },
+});
 const postForm = (path, fields, headers = {}) => hit(path, {
   method: "POST",
   headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", ...headers },
@@ -917,6 +932,11 @@ if (EXTERNAL) {
       rejectUnauthorized: true,
       headers: {
         host: hostname,
+        // By hand, because this leg is node's raw https and not fetch: node adds no user agent of
+        // its own, so these three requests per run are where the ledger's blank-agent rows come
+        // from. A blank agent is exactly the shape the panel must never read as a gate, so the
+        // name has to be here rather than inferred from its absence.
+        "user-agent": GATE_AGENT,
         "content-type": "application/x-www-form-urlencoded",
         accept: "text/html",
         "content-length": Buffer.byteLength(body),

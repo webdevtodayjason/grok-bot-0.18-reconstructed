@@ -65,7 +65,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { gateUserAgent } from "./gate-agent.mjs";
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// SIGNIN-1. Every request this gate makes names the gate, so the sign-in panel can tell its
+// refusals from a stranger's. See scripts/gate-agent.mjs for what the header is and is not worth.
+const GATE_AGENT = gateUserAgent(import.meta.url);
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log([
@@ -456,14 +462,16 @@ async function startRelay({ label, env = {}, pathValue }) {
 // ---- HTTP ---------------------------------------------------------------------------------------
 // Redirects are never followed: which status and which Location is half of what is being measured.
 async function get(base, pathname, { cookie, accept = "text/html", bearer } = {}) {
-  const headers = { accept };
+  // The gate's own name first, then everything a caller asked for, so a caller can override it and
+  // nothing here can silently drop what a caller sent.
+  const headers = { "user-agent": GATE_AGENT, accept };
   if (cookie) headers.cookie = cookie;
   if (bearer) headers.authorization = `Bearer ${bearer}`;
   const res = await fetch(`${base}${pathname}`, { redirect: "manual", headers });
   return { status: res.status, headers: res.headers, text: await res.text() };
 }
 async function postForm(base, pathname, fields, { cookie } = {}) {
-  const headers = { "content-type": "application/x-www-form-urlencoded", accept: "text/html" };
+  const headers = { "user-agent": GATE_AGENT, "content-type": "application/x-www-form-urlencoded", accept: "text/html" };
   if (cookie) headers.cookie = cookie;
   const res = await fetch(`${base}${pathname}`, {
     method: "POST", redirect: "manual", headers, body: new URLSearchParams(fields).toString(),
@@ -473,7 +481,7 @@ async function postForm(base, pathname, fields, { cookie } = {}) {
 async function apiCall(base, method, cookie) {
   const res = await fetch(`${base}/api/${method}`, {
     method: "POST", redirect: "manual",
-    headers: { "content-type": "application/json", cookie }, body: "{}",
+    headers: { "user-agent": GATE_AGENT, "content-type": "application/json", cookie }, body: "{}",
   });
   const text = await res.text();
   let json = null;
@@ -590,7 +598,7 @@ if (RUN("registry")) {
     skip("the relay credential is let in", "no --cp was given");
     skip("the control plane's master signing secret is not in the answer", "no --cp was given");
   } else {
-    const SELF = { "x-gate-self": "1" };
+    const SELF = { "x-gate-self": "1", "user-agent": GATE_AGENT };
     const noBearer = await fetch(`${cpBase}/v1/relay/tenants`, { redirect: "manual", headers: SELF });
     check(noBearer.status === 401, "no bearer is refused", `status ${noBearer.status}`);
 
@@ -684,7 +692,7 @@ if (RUN("rosters")) {
     check(rosterA.status === 200, "the customer's console answers listAgents", `status ${rosterA.status}`);
     const asOperator = await fetch(`${CONSOLE}/api/listAgents`, {
       method: "POST", redirect: "manual",
-      headers: { "content-type": "application/json", authorization: `Bearer ${CRED.gatewayToken}` },
+      headers: { "user-agent": GATE_AGENT, "content-type": "application/json", authorization: `Bearer ${CRED.gatewayToken}` },
       body: "{}",
     });
     const operatorText = await asOperator.text();

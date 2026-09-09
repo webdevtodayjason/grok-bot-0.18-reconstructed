@@ -198,3 +198,69 @@ test("the filter takes a window, an outcome and a cap, newest first", () => {
   assert.equal(filterAttempts(rows, { limit: 1 }).length, 1);
   assert.equal(LEDGER_MAX_BYTES, 5 * 1024 * 1024);
 });
+
+// SIGNIN-1. The user agent, which is the field that lets the panel tell this repository's own
+// verification gates from a stranger working a password list.
+//
+// The relay half of that was already built, and these three cases are here to hold it rather than
+// to add to it: ui/server.mjs fills userAgent from the request on every attempt, the row shape
+// clips it, and GET /admin/login-attempts hands whole rows back. What the gates now send is
+// titanbot-gate/<script name> (scripts/gate-agent.mjs), and what the panel does with it is
+// deliberately narrower than the string, because a user agent is a string a stranger writes:
+// docs/ADMIN.md, "Telling a gate from an attacker", carries the whole rule.
+
+test("a gate's own name survives the write and the read back", async () => {
+  await withDir(async (dir) => {
+    const ledger = createLoginLedger({ dir });
+    await ledger.record({ door: "instance", ip: "198.51.100.4", userAgent: "titanbot-gate/verify-deploy", outcome: "refused", password: "wrong-1" });
+    await ledger.record({ door: "instance", ip: "198.51.100.4", userAgent: "titanbot-gate/verify-deploy", outcome: "locked" });
+
+    const rows = await ledger.rows();
+    assert.equal(rows[0].userAgent, "titanbot-gate/verify-deploy", "the refusal carries the name");
+    assert.equal(rows[1].userAgent, "titanbot-gate/verify-deploy",
+      "and so does the lockout, which is the row the gate leaves seven of and the one that raised the Attack pill");
+    // Byte for byte on the disk as well, because the panel matches on the prefix and a normaliser
+    // that lowercased or trimmed it would make that match a guess.
+    const raw = await readFile(ledger.file, "utf8");
+    assert.equal(raw.includes('"userAgent":"titanbot-gate/verify-deploy"'), true, raw.slice(0, 200));
+  });
+});
+
+test("an agent too long to be a name is clipped rather than dropped", async () => {
+  await withDir(async (dir) => {
+    const ledger = createLoginLedger({ dir });
+    // A user agent is written by whoever is knocking, so the long case is not hypothetical: it is
+    // the one somebody sends on purpose. Clipped and kept, because a row with no agent at all is
+    // indistinguishable from the control plane's own rows, which have none by construction.
+    const long = `titanbot-gate/${"x".repeat(400)}`;
+    await ledger.record({ door: "instance", ip: "198.51.100.5", userAgent: long, outcome: "refused", password: "wrong-2" });
+
+    const [row] = await ledger.rows();
+    assert.equal(row.userAgent.length, USER_AGENT_LIMIT);
+    assert.equal(row.userAgent, long.slice(0, USER_AGENT_LIMIT));
+    assert.equal(row.userAgent.startsWith("titanbot-gate/"), true,
+      "the front of the string is what is kept, so a clipped agent still says which kind of caller it was");
+  });
+});
+
+test("an attempt with no agent stores an empty string, never a null", async () => {
+  await withDir(async (dir) => {
+    const ledger = createLoginLedger({ dir });
+    await ledger.record({ door: "instance", ip: "198.51.100.6", outcome: "refused", password: "wrong-3" });
+    await ledger.record({ door: "account", email: "someone@example.com", ip: "198.51.100.7", userAgent: null, outcome: "refused", password: "wrong-4" });
+
+    const rows = await ledger.rows();
+    for (const row of rows) {
+      assert.equal(row.userAgent, "", "absent reads as empty");
+      assert.equal(typeof row.userAgent, "string",
+        "and never as null: a reader that has to ask whether the key is missing or the value is will eventually decide one of them means something");
+      assert.equal(Object.hasOwn(row, "userAgent"), true, "the key is always there");
+    }
+    // The shape on disk too. A JSON null here would reach the panel as a falsy value beside the
+    // real empty strings the control plane's own door writes, and the two would be told apart by
+    // whichever check happened to run first.
+    const raw = await readFile(ledger.file, "utf8");
+    assert.equal(raw.includes('"userAgent":null'), false, raw.slice(0, 200));
+    assert.equal(raw.includes('"userAgent":""'), true, raw.slice(0, 200));
+  });
+});

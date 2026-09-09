@@ -153,6 +153,7 @@ import "./cp-feedback.test.mjs";
 import "./cp-relay-pair.test.mjs";
 import "./cp-relay-registry.test.mjs";
 import "./deploy-sync-ships-browser-driver.test.mjs";
+import "./gate-agent.test.mjs";
 import "./login-ledger.test.mjs";
 import "./machine-room-onboarding.test.mjs";
 import "./mail-edge-routing.test.mjs";

@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import path from "node:path";
 
 import { LEDGER_NAME, readLedgerFile } from "../ui/login-ledger.mjs";
@@ -66,6 +67,32 @@ const waitForRows = (fetchBody, done) => settleWait(
   },
   (body) => done(body.rows ?? []),
 );
+
+/**
+ * One wrong password sent with NO user agent header of any kind.
+ *
+ * It has to be node's raw http rather than fetch, and that is the whole reason it exists: measured
+ * on this Mac, `fetch` with no headers still sends `user-agent: node`, and only `http.request`
+ * sends none. Those are the two shapes the live ledger actually holds, and the case above needs
+ * both to be able to say the panel's rule can never be an absence test.
+ */
+const knockWithNoAgentHeader = (base, password) => new Promise((resolve, reject) => {
+  const url = new URL("/login", base);
+  const body = new URLSearchParams({ password }).toString();
+  const request = http.request({
+    host: url.hostname,
+    port: url.port,
+    path: url.pathname,
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "text/html",
+      "content-length": Buffer.byteLength(body),
+    },
+  }, (response) => { response.resume(); response.on("end", () => resolve(response.statusCode)); });
+  request.on("error", reject);
+  request.end(body);
+});
 
 // Everything the relay wrote into its own directory, as one string. This is the "grep the data
 // directory for the password" check, done in process.
@@ -652,5 +679,69 @@ test("a box whose settings are nested keeps them nested", async () => {
     assert.equal(after.settings.SAND_TOOL_TRACE, "1");
     assert.equal(after.version, 2, "the document around the settings was dropped");
     assert.equal(after.SAND_MAX_AGENTS, undefined, "the value was also written flat, where the host would not look for it");
+  } finally { relay.stop(); }
+});
+
+// SIGNIN-1. The user agent, all the way from the request to the control plane's read.
+//
+// This is the half that was already built, and the case exists to hold it rather than to add to it.
+// ui/server.mjs fills the field from the request on every attempt, ui/login-ledger.mjs clips it to
+// 120 characters and forces it to a string, and this route projects nothing: it hands back whole
+// rows. So a gate that names itself at the door (scripts/gate-agent.mjs) is legible on the other
+// side without one line of relay code changing, and the case below is what says so out loud.
+//
+// What the panel then DOES with the string is deliberately narrower than the string, because a user
+// agent is written by whoever is knocking. docs/ADMIN.md, "Telling a gate from an attacker", is the
+// rule; nothing in this file is a claim that the prefix proves anything.
+test("the ledger route hands back the user agent it was sent, gate or browser or neither", async () => {
+  const relay = await startRelay(withControlPlane, { prefix: "relay-admin-agent-" });
+  try {
+    const knock = (userAgent) => fetch(`${relay.base}/login`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "text/html",
+        ...(userAgent === undefined ? {} : { "user-agent": userAgent }),
+      },
+      body: new URLSearchParams({ password: `${TRIED}-agent` }).toString(),
+    });
+
+    // Five callers at one door, and the last two are the point of the case.
+    //
+    // Measured on this Mac while writing it: node's own `fetch` sends `user-agent: node` when
+    // nobody sets one, and node's raw `http.request` sends NO user agent header at all. That is
+    // where both shapes in the live ledger come from -- "node" from every gate leg written with
+    // fetch, empty from verify-deploy's raw https origin-bypass leg -- and it is why the panel's
+    // rule can never be an absence test: a blank agent is also what every row from the control
+    // plane's own door carries (cp/store.mjs hands the panel a hardcoded empty string), so reading
+    // absence as "one of ours" would silence a stranger who simply sent no header.
+    await knock("titanbot-gate/verify-deploy");
+    await knock("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36");
+    await knock(undefined);
+    await knockWithNoAgentHeader(relay.base, `${TRIED}-agent`);
+    await knock(`titanbot-gate/${"y".repeat(400)}`);
+
+    const body = await waitForRows(
+      () => fetch(`${relay.base}/admin/login-attempts`, { headers: { authorization: `Bearer ${RELAY_TOKEN}` } }),
+      (rows) => rows.filter((row) => row.outcome === "refused" && row.door === "instance").length >= 5,
+    );
+    const refused = body.rows.filter((row) => row.outcome === "refused" && row.door === "instance");
+    const agents = refused.map((row) => row.userAgent);
+
+    assert.equal(agents.includes("titanbot-gate/verify-deploy"), true,
+      `the gate's own name reaches the reader unchanged: ${JSON.stringify(agents)}`);
+    assert.equal(agents.some((agent) => agent.startsWith("Mozilla/5.0 ")), true,
+      `and so does a browser's: ${JSON.stringify(agents)}`);
+    assert.equal(agents.includes("node"), true,
+      `an unnamed fetch arrives as the word node, which is what every gate leg wrote before this wave: ${JSON.stringify(agents)}`);
+    assert.equal(agents.includes(""), true,
+      `and a caller that sent no header at all is an empty string, not a missing key: ${JSON.stringify(agents)}`);
+    for (const row of refused) {
+      assert.equal(typeof row.userAgent, "string", `${JSON.stringify(row)} carries no agent field at all`);
+      assert.equal(row.userAgent.length <= 120, true, `${row.userAgent.length} characters got past the clip`);
+    }
+    assert.equal(agents.some((agent) => agent.length === 120 && agent.startsWith("titanbot-gate/yyy")), true,
+      `an oversize agent is clipped and kept rather than dropped: ${JSON.stringify(agents.map((a) => a.length))}`);
   } finally { relay.stop(); }
 });
