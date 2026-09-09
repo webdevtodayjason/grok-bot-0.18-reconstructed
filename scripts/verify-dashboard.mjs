@@ -39,6 +39,7 @@
 //   never been set up (docs/ONBOARDING.md).
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -766,16 +767,24 @@ try {
         "Skip for now closes the dialog into the normal console", `open ${after.open}, ${after.cards} roster card(s)`);
     }
 
-    // -- AGENTS-CAP-1, offline: the cap is drawn from the roster on the page, not from a host.
+    // -- AGENTS-CAP-2, offline: the cap is drawn from the roster on the page, not from a host.
+    // GATE-15: no literal. There is no box in this mode, so the number the page falls back to is
+    // AGENT_CAP_DEFAULT in app.js, and the gate reads it out of the source it is testing rather
+    // than carrying a second copy that goes stale the next time the default moves. The live legs
+    // further down ask the box instead, which is the number that actually refuses.
+    const appSource = await readFile(path.join(repoRoot, "ui", "machine-room", "app.js"), "utf8");
+    const declared = Number(/AGENT_CAP_DEFAULT\s*=\s*(\d+)/.exec(appSource)?.[1]);
     const capCounts = await page.evaluate(() => ({
       header: document.querySelector("[data-agent-count]")?.textContent?.trim() ?? "",
       add: document.querySelector('[data-capability="add"] [data-add-count]')?.textContent?.trim() ?? "",
       bots: document.querySelectorAll(".worker-card:not(.room-card)").length,
     }));
-    check(capCounts.header === `${capCounts.bots} / 100 bots`,
-      "the roster header counts this box's bots against the cap of 100", `${capCounts.header || "empty"} beside ${capCounts.bots} bot card(s)`);
-    check(capCounts.add === `${Math.max(0, capCounts.bots - 1)} of 99`,
-      "and the Add button says how many of the ninety-nine beside Titan are taken", capCounts.add || "empty");
+    check(Number.isInteger(declared) && declared > 0,
+      "app.js declares the ceiling the offline console falls back to", `AGENT_CAP_DEFAULT ${declared || "not found"}`);
+    check(capCounts.header === `${capCounts.bots} / ${declared} bots`,
+      "the roster header counts this box's bots against that ceiling", `${capCounts.header || "empty"} beside ${capCounts.bots} bot card(s)`);
+    check(capCounts.add === `${Math.max(0, capCounts.bots - 1)} of ${declared - 1}`,
+      "and the Add button says how many of the seats beside Titan are taken", capCounts.add || "empty");
   } else if (LEAKS) {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     const { storedSecrets } = await import(path.join(repoRoot, "ui", "subscriptions.mjs"));
@@ -1641,19 +1650,33 @@ try {
         check(gone === true && callsTo("deleteAgents") === 1, "and the second click deletes it on the host through deleteAgents");
         if (gone) copyAgentId = null;
       }
-      // (e) The roster header, against AGENTS-CAP-1's cap of 100 (it was 13 until 2026-09-08). The number drawn is the bots on
-      // the box, NOT countAgents: countAgents counts a room as an agent and the cap does not, so
-      // pinning the two together would pin a number that disagrees with the cap beside it. The
-      // host's own count is read anyway and reported in the detail, because when the two differ by
-      // anything other than the rooms on screen that is worth seeing in the log.
+      // (e) The roster header. AGENTS-CAP-2 and GATE-15: this used to assert the literal `/ 100
+      // bots` (and the Add button `of 12`, which had already gone stale and was a second copy of
+      // the same bug). The ceiling is per workspace now -- the super admin raises one from its
+      // client row by writing SAND_MAX_AGENTS into that box -- so no literal is right for every box
+      // this gate is pointed at, and editing the literal would only move the bug to the next
+      // decision. The gate asks the BOX what its ceiling is and requires the console to agree.
+      //
+      // The number drawn is the bots on the box, NOT countAgents: countAgents counts a room as an
+      // agent and the cap does not, so pinning the two together would pin a number that disagrees
+      // with the ceiling beside it. The host's own count is read anyway and reported in the detail,
+      // because when the two differ by anything other than the rooms on screen that is worth
+      // seeing in the log.
       const hostCount = await gw("countAgents").catch(() => null);
-      const shownCount = await until(() => page.evaluate(() => { const el = document.querySelector("[data-agent-count]"); return el && !el.hidden && /^\d+ \/ 100 bots$/.test(el.textContent.trim()) ? el.textContent.trim() : null; }), 25_000, 1500);
+      const capacity = await gw("getAgentCapacity").catch(() => null);
+      const ceiling = Number(capacity?.maxAgents);
+      check(Number.isInteger(ceiling) && ceiling > 0, "(e) the box reports the ceiling it will refuse at",
+        capacity == null ? "getAgentCapacity did not answer" : `maxAgents ${capacity.maxAgents}, ${capacity.bots} bots, ${capacity.remaining} left`);
+      const shownCount = Number.isInteger(ceiling) && ceiling > 0
+        ? await until(() => page.evaluate((max) => { const el = document.querySelector("[data-agent-count]"); return el && !el.hidden && new RegExp(`^\\d+ / ${max} bots$`).test(el.textContent.trim()) ? el.textContent.trim() : null; }, ceiling), 25_000, 1500)
+        : null;
       const botCards = await page.$$eval(".worker-card:not(.room-card)", (els) => els.length).catch(() => -1);
-      check(shownCount != null, "(e) the roster header shows this box's bots against the cap of 100", `${shownCount ?? await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent)} vs host countAgents ${hostCount}`);
+      check(shownCount != null, "(e) the roster header shows this box's bots against the ceiling the box reports", `${shownCount ?? await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent)} against maxAgents ${ceiling}, vs host countAgents ${hostCount}`);
       check(shownCount != null && Number(shownCount.split(" ")[0]) === botCards, "(e) and that number is the bot cards on screen, with the rooms left out", `header ${shownCount}, ${botCards} bot card(s)`);
-      // The Add button carries what is left of the twelve beside Titan, before anyone clicks it.
+      // The Add button carries what is left beside Titan, before anyone clicks it: the same ceiling
+      // less the one seat Titan holds.
       const addCount = await page.evaluate(() => document.querySelector('[data-capability="add"] [data-add-count]')?.textContent?.trim() ?? "");
-      check(/^\d+ of 12$/.test(addCount) && Number(addCount.split(" ")[0]) === Math.max(0, botCards - 1), "(e) the Add button says how many of the twelve bots beside Titan are taken", addCount || "empty");
+      check(Number.isInteger(ceiling) && new RegExp(`^\\d+ of ${ceiling - 1}$`).test(addCount) && Number(addCount.split(" ")[0]) === Math.max(0, botCards - 1), "(e) the Add button says how many of the seats beside Titan are taken", `${addCount || "empty"} against a ceiling of ${ceiling}`);
       await page.waitForTimeout(300);
     }
     await page.keyboard.press("Escape"); await page.waitForTimeout(500);

@@ -684,11 +684,28 @@ try {
   // activeAgentId`) and is filtered out of the count. Same store, different argument -- so the
   // discrepancy is real and unexplained-by-design, not a synthesized card. Measured on the R750:
   // countAgents 0 twice in a row while listAgents returned agent 96a720b6 with a store.db path.
-  // AGENTS-CAP-1: the cap is 100 now (13 until 2026-09-08), Titan and ninety-nine more, and the number beside it is the bots
-  // the console can see rather than countAgents. That also settles the discrepancy described above:
-  // the header no longer reads 0 while a card is on screen, because it counts the cards.
+  // AGENTS-CAP-2 and GATE-15, closed rather than moved. This leg asserted the literal `/ 100 bots`
+  // and went red the moment somebody deliberately changed the ceiling, which is the bug GATE-15
+  // was filed as. Editing the literal to 40 would have relocated it to the next decision, and the
+  // ceiling is per workspace now -- the super admin raises one from its client row -- so no literal
+  // can be right for every box this gate is ever pointed at.
+  //
+  // So the gate asks the BOX what its ceiling is and requires the console to AGREE with it. That
+  // is the property worth holding: the header a person reads is the number the host will actually
+  // refuse at. The number beside it is the bots the console can see rather than countAgents, which
+  // also settles the discrepancy described above -- the header no longer reads 0 while a card is on
+  // screen, because it counts the cards.
+  const capacity = await call("getAgentCapacity", {}, { authorization: `Bearer ${TOKEN}` });
+  const maxAgents = Number(capacity.body?.maxAgents);
   const count = await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent?.trim() ?? "");
-  check(/\d+\s*\/\s*100\s*bots/.test(count), "the roster header shows this box's bots against the cap of 100", count || "empty");
+  if (!Number.isInteger(maxAgents) || maxAgents < 1) {
+    check(false, "the box reports the ceiling its console is drawn against",
+      `getAgentCapacity answered HTTP ${capacity.status} ${JSON.stringify(capacity.body ?? capacity.text).slice(0, 160)}`);
+  } else {
+    check(new RegExp(String.raw`\d+\s*/\s*${maxAgents}\s*bots`).test(count),
+      "the roster header shows this box's bots against the ceiling the box reports",
+      `header "${count || "empty"}", box says ${maxAgents} (${capacity.body?.bots} bots, ${capacity.body?.remaining} left)`);
+  }
 
   // A gateway the page cannot reach shows up here long before it shows up as a blank panel.
   const gatewayErrors = pageErrors.filter((t) => /gateway|api\/|fetch|502|401/i.test(t));

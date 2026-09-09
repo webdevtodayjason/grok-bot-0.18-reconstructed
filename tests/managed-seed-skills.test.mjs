@@ -102,8 +102,16 @@ test("the bundle carries the four real managed skills, frontmatter and all", () 
     assert.match(onboarding.body, new RegExp(`\`${field}\``),
       `the recipe has to name the ${field} field it saves`);
   }
-  assert.match(onboarding.body, /ninety-nine more bots/,
-    "the crew size the person is told about is the box's own ceiling");
+  // AGENTS-CAP-2. This used to pin the exact phrase "ninety-nine more bots". The default came down
+  // to forty on 2026-09-09 and the ceiling is now per workspace, so a hard-coded crew size in a
+  // seed skill is wrong for every workspace the super admin has raised. The sentence lives in
+  // source/host/extensions/managed-setup/seed-skills/onboarding/SKILL.md and is generated into
+  // seed-skills.gen.ts, both of which belong to wave A, so this pass relaxes the assertion to the
+  // shape rather than editing a neighbour's file. The replacement sentence is handed to wave A in
+  // the gap row: "You can create more bots up to this workspace's ceiling, and the console header
+  // says how many are left." Once that lands, this can go back to pinning a phrase with no number.
+  assert.match(onboarding.body, /more bots/,
+    "the person is still told they can add bots; the number is the workspace's own and is not pinned here");
   assert.ok(!onboarding.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
 });
 

@@ -104,8 +104,14 @@ export function readSandBoxSettingNumber(
 }
 
 /**
- * AGENTS-CAP-1. How many bots one box holds: Titan plus twelve unless an operator says otherwise.
- * Read per call like every other switch, so a live box can be moved without a recreate.
+ * AGENTS-CAP-2. How many bots one box holds: Titan plus thirty-nine unless somebody says
+ * otherwise. Read per call like every other switch, so a live box can be moved without a recreate,
+ * which is what lets the super admin raise a workspace from its row in the admin console.
+ *
+ * It fails OPEN on purpose and that has a consequence worth naming where the reader is: anything
+ * outside 1..1000, and anything that is not a string in the settings file, is ignored in silence
+ * and the box drops to the default. So the range is checked BEFORE the write, by whatever offers
+ * the control, or a workspace set to 5000 quietly runs at 40 with nothing saying why.
  */
 export function resolveSandMaxAgents(): number {
   return readSandBoxSettingNumber(SAND_MAX_AGENTS_SETTING, { min: 1, max: 1_000 })
