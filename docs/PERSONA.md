@@ -139,3 +139,34 @@ prompt and in no file is the bug this whole section exists to prevent.
 
 A fact that cannot be read synchronously off this box does not belong here. Push it into a file
 the box holds — the way the mail directory is pushed in with `setAgentMail` — and read the file.
+
+
+## Measured, 2026-09-09
+
+`scripts/verify-persona.mjs` does not read the prompt. It mints a scratch agent, asks it the five
+questions one at a time, reads each whole turn, and scores every answer against what the same box
+says about itself in the same run — `getAgentCapacity`, `getAgentMail`, `getOnboardingState` — then
+says the retrigger phrase once and checks the interview actually starts. The agent is deleted pass
+or fail.
+
+**grok-bot-local-vm** (this Mac), 13:36Z, 86 s: 13 of 13 PASS.
+
+**The R750 demo tenant** (`titanbot-box-atonqjq7zx593jsacaccpfau`, bundle `3de23332477d`, model
+Qwen 3.8 Max), 14:25Z, 80 s: 13 of 13 PASS. The box's own facts that run were `maxAgents=100`,
+`doneReason=existing-box`, `domain=myagents.email canSend=false`, and the answers, verbatim:
+
+| question | answer | checked against |
+| --- | --- | --- |
+| do you have email | "I don't have an email address of my own yet. When one is set up for me, it'll appear in my profile automatically." | that scratch agent holds no row in the directory, and it does not claim it cannot do email at all |
+| how many bots | "100" | `getAgentCapacity.maxAgents = 100`, and not the stale twelve |
+| where does coding go | "The work happens right here on this box: I clone the repo into my workspace, read and edit it, run tests, and push from here." | names no outside vendor; this is CURSOR-1 part (f) closed in the answer rather than in the source |
+| what is this called | "Titanium Bot" | the literal, and neither old name |
+| did onboarding run | "The first-run interview never ran here because this workspace was set up before it existed. Just say \"run first-time setup\" and I'll run it right here in the chat." | `doneReason=existing-box`, and the phrase is exact |
+| the retrigger | "On it! What should I call you?" | the phrase starts the interview in the SAME message, which is the whole point of the fix below |
+
+The lead paragraph was measured separately, on the real demo Titan rather than a scratch agent: its
+card in `console.titanium.bot` reads Role, "Main agent and lead of the crew".
+
+**Richard Avery's box was not swapped**, so his Titan still runs the older bundle: it keeps the
+twelve-bots sentence, and it cannot name its own address even though that address is minted and
+routes. Routing is decided at the relay; only the sentence needs the swap.

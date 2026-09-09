@@ -212,6 +212,12 @@ writes to when it lands.
 - **A box on an older bundle does not know its own address.** `setAgentMail` is a host command; a
   box that has not been swapped answers "unknown gateway method" and the sweep carries on. Delivery
   never depends on that file — only on what the bot can say about itself.
+- **Every mail verb goes over HTTP, and it has to.** They used to open the sqlite store directly,
+  which reads the right database only on the machine that holds it. On the R750 the store is inside
+  the control plane container and the operator types the command on his Mac, so `cp mail list`
+  opened an empty file of its own and answered "no addresses yet" over a live directory of nine
+  (measured 2026-09-09 14:07Z). Nothing errored, which is what made it dangerous. Filed and fixed as
+  MAIL-CLI-1; a test now fails if any verb in that section opens the store.
 
 ---
 
@@ -458,3 +464,41 @@ looked up, and nothing is written inside Richard's box.
   swapped, so his Titan cannot yet name its own address.
 - **Attachments are links, not files.** The relay never downloads one, and the links Resend hands
   over expire.
+
+
+---
+
+## 9. Measured on the R750, 2026-09-09
+
+Everything below was measured on the production machine the way a customer reaches it: real messages
+sent through Resend from `noreply@titanium.bot`, read back in `console.titanium.bot`. Nothing here is
+planned. Times are UTC.
+
+**The rollout.** Control plane rebuilt and restarted first (it must be able to answer a lookup before
+anything asks one), then the host bundle `3de23332477d` swapped into the demo box and Jason's box —
+supervisor line `post-swap watch disarmed: host up 60s on 3de23332477d (healthy)` on each — then the
+relay restarted last, which is what turns the new routing on. Richard Avery's box was not swapped and
+nothing was written inside it; it still runs `e6a2c5d38993`. The Resend webhook was never touched.
+
+**The sweep.** On the relay's start: `swept 3 workspace(s) for addresses (this relay started); 9
+minted, 9 in the directory`, and beside it `richard-avery holds 1 address(es) and they route; nothing
+was written inside that box, which is read-only this wave`.
+
+**The directory.** `cp mail list` at 14:20Z: nine addresses, and the three Titans hold three
+different codes — demo `agent247758@`, richard-avery `agent674470@`, titanium `agent633973@`. No
+address carries a name. That is the whole reason a name-based address had to go.
+
+**Three messages, three outcomes.**
+
+| sent to | ledger | what happened |
+| --- | --- | --- |
+| `agent247758@myagents.email` (demo's Titan) | `delivered` 14:14:13Z | relay log `agent247758@myagents.email -> Titan in demo`; the bot read it in the console: "Got an email at agent247758@myagents.email with proof word HALIBUT-141058." A message arriving at the operator's own relay was routed into a different customer's box. |
+| `agent999999@myagents.email` (nobody's code) | `no_route` 14:16:37Z | empty agentId, and the proof word from that message appears in no transcript anywhere. It never reached the catch-all, which before this wave would have put it in Jason's Titan. |
+| `titan@myagents.email` (the retired name) | `legacy_name` 14:15:58Z | still delivered, to Jason's Titan, carrying: "this arrived at titan@myagents.email, which is an address made out of a name. Addresses like that stop working on 2026-10-01. Your own address is agent633973@myagents.email." |
+
+**What is not measured, and why.** Sending. A2 ships only if a relay-side send route exists, and it
+does not yet: a Resend key scoped to `myagents.email` can send as any address at that domain, so the
+only sound shape is a relay route that holds the stored key and forces the From to the calling
+agent's own code address. Until then every box is pushed `canSend:false` and its bots say so in
+plain words — measured on the demo tenant, where Titan told its operator "sending from my address
+isn't wired up on this workspace yet, so I can receive mail but not send it."

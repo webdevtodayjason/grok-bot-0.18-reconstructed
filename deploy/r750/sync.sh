@@ -123,12 +123,21 @@ step "ship the relay"
 rsync -a "$REPO"/ui/*.mjs "$REPO/ui/index.html" "$HOST:$ROOT/ui/"
 rsync -a --delete "$REPO/ui/machine-room/" "$HOST:$ROOT/ui/machine-room/"
 say "ui/{$(cd "$REPO/ui" && ls *.mjs | tr '\n' ',')index.html,machine-room/}"
-# And prove the relay's own imports resolve on the server before anything restarts it: a missing
-# module is an outage, and this is the moment it is still cheap to know.
-for mod in $(grep -oE 'from "\./[A-Za-z0-9_-]+\.mjs"' "$REPO/ui/server.mjs" | grep -oE '[A-Za-z0-9_-]+\.mjs'); do
-  ssh "$HOST" "test -f '$ROOT/ui/$mod'" || die "ui/server.mjs imports ./$mod but $ROOT/ui/$mod is not on the server after the sync"
+# And prove the relay's imports resolve on the server before anything restarts it: a missing module
+# is an outage, and this is the moment it is still cheap to know.
+#
+# EVERY ui/*.mjs is read, not server.mjs alone. Reading only the entry point misses a module a
+# module imports -- mail-edge.mjs imports ./mail-svix.mjs, and that one is invisible from
+# server.mjs. The rsync above ships ui/*.mjs wholesale so no transitive import has actually gone
+# missing, but the check read narrower than it looked, and a check that cannot fail is worse than
+# no check because it is trusted.
+for src in "$REPO"/ui/*.mjs; do
+  for mod in $(grep -oE 'from "\./[A-Za-z0-9_-]+\.mjs"' "$src" | grep -oE '[A-Za-z0-9_-]+\.mjs'); do
+    ssh "$HOST" "test -f '$ROOT/ui/$mod'" \
+      || die "ui/$(basename "$src") imports ./$mod but $ROOT/ui/$mod is not on the server after the sync"
+  done
 done
-say "every module ui/server.mjs imports is on the server"
+say "every module any ui/*.mjs imports is on the server"
 # auth.json is the server's own password, set on the server by set-password.mjs and never held on
 # this Mac. It is on the same do-not-ship footing as the two files above, for the same reason.
 say "endpoints.json, subscriptions.json, auth.json and mail.json are not shipped"
