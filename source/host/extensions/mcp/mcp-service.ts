@@ -208,7 +208,7 @@ interface McpManagerRuntime {
  * A failure here must never take the host down: the connectors it did not touch keep working
  * exactly as they did, and the log line is the only thing that changes.
  */
-export function runBridgedConnectorMigration(rootDir: string, log: (message: string) => void): void {
+export function runBridgedConnectorMigration(rootDir: string, log: (message: string) => void): string[] {
   try {
     const migration = migrateBridgedRemoteEntries(rootDir, {
       storeSecret: (connector, field, value) => writeConnectorEnvSecret(rootDir, connector, field, value),
@@ -219,8 +219,10 @@ export function runBridgedConnectorMigration(rootDir: string, log: (message: str
     for (const { name, reason } of migration.skipped) {
       log(`connector "${name}" is still bridged: ${reason}`);
     }
+    return migration.migrated;
   } catch (error) {
     log(`bridged connector migration failed (${error instanceof Error ? error.name : typeof error})`);
+    return [];
   }
 }
 
@@ -258,8 +260,9 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
   // source/shared/marketplace/catalog.ts), which is on the box and cannot be unreachable.
   const localConnectorRoot = () => getSandRootDir();
   const marketplaceReader = { rootDir: localConnectorRoot };
-  // MARKET-17. Bridged entries, rewritten at start; the server-list read below does it again.
-  runBridgedConnectorMigration(localConnectorRoot(), log);
+  // MARKET-17. Bridged entries, rewritten at start; the server-list read below does it again. The
+  // names come back because rewriting the file is only half of it -- see `cycleMigrated` below.
+  const migratedAtStart = runBridgedConnectorMigration(localConnectorRoot(), log);
   /**
    * MARKET-6. Which url entries in connectors.json this box connects to ITSELF. Handed to the
    * definition source as a function rather than a list because connectors.json changes under a
@@ -399,6 +402,43 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
       // Class only. The argument to the failing call is the merged config, credentials and all.
     } catch (error) { log(`connector stop failed for ${name}: ${error instanceof Error ? error.name : typeof error}`); return false; }
   };
+  /**
+   * MARKET-17, the half the first fix missed.
+   *
+   * Rewriting connectors.json does not stop the bridge it used to name. Measured on the R750 demo
+   * box on 2026-09-08, minutes after the swap that landed the migration: the entry was the link
+   * shape and `ps` still showed the same three `npx mcp-remote` processes, 29 hours old and
+   * carrying the live bearer, because the box's daemon stops a server only when it LEAVES the list
+   * it is pushed, not when that server's config changes underneath it.
+   *
+   * So each migrated connector is cycled: pushed absent, which stops it, then pushed back, which
+   * starts it in the shape with no argument list. Not on the first tick -- the box may not be
+   * answering yet at host start -- so it is tried a few times, spaced, and gives up quietly. The
+   * timer is unref'd: a host with nothing else to do must still be able to exit.
+   */
+  const cycleMigrated = (names: readonly string[]): void => {
+    if (names.length === 0) return;
+    const attempts = [15_000, 45_000, 120_000];
+    const pending = new Set(names);
+    const tryOnce = (index: number): void => {
+      const timer = setTimeout(() => {
+        void (async () => {
+          for (const name of [...pending]) {
+            if (await restartLocalConnector(name)) {
+              pending.delete(name);
+              log(`connector "${name}" was restarted after its migration, so the bridge that held its key in argv is gone`);
+            }
+          }
+          if (pending.size > 0 && index + 1 < attempts.length) tryOnce(index + 1);
+          else if (pending.size > 0) log(`connector(s) ${[...pending].join(", ")} were migrated but could not be restarted; their old bridge process may still be running until this box restarts`);
+        })();
+      }, attempts[index]);
+      timer.unref?.();
+    };
+    tryOnce(0);
+  };
+  cycleMigrated(migratedAtStart);
+
   const management = {
     // SECRET-2: a connectors.json entry this host refuses to run appears here with the reason,
     // rather than vanishing from the listing and leaving the operator to guess why their connector

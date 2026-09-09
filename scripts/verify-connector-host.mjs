@@ -324,6 +324,17 @@ async function main() {
     fail(`after the migration the stored value is still in ${psAfterMigration.split("\n").filter((line) => line.includes(PROBE_VALUE)).length} process argument list(s)`);
   }
   ok(`the migrated connector connected and its key is in no argument list (${psAfterMigration.split("\n").length} processes read)`);
+  // And no bridge is left running for it. Rewriting the file does not stop the process the old
+  // entry named -- measured on the R750 demo box minutes after the swap, where the entry was the
+  // link shape and the same three `npx mcp-remote` processes were still there, 29 hours old, because
+  // the box's daemon stops a server only when it leaves the list it is pushed. The host now cycles
+  // each migrated connector. On THIS box the seeded entry never got to start as a bridge (the
+  // migration runs before the list is read), so this line is an invariant rather than the
+  // reproduction; the reproduction is on the R750 and is recorded in the MARKET-17 row.
+  if (new RegExp(`mcp-remote[^\\n]*${STUB_PORT}`).test(psAfterMigration)) {
+    fail("a bridge process for the migrated connector is still running");
+  }
+  ok("and no mcp-remote bridge is left running for it");
   await removeProbe(bridgedName, true);
 
   // ---------------------------------------------------------------- (c) a program the box runs
