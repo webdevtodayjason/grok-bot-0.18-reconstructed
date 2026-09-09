@@ -576,11 +576,15 @@ async function legPicker(page) {
   console.log("\n== --picker: no tile-shaped blanks, and the default is the product's own plate");
   const booted = await bootConsole(page);
   if (booted !== true) { skip("the background picker has no blank tiles", "the adapter never appeared"); return; }
-  const opened = await page.evaluate(() => {
+  // Waited for, not read once. backgrounds.js is appended by app.js's own onload, so there is a real
+  // window in which the adapter exists and the picker's object does not yet -- measured here, where
+  // this leg skipped with "not published" on a boot it had passed on a minute earlier. A skip that
+  // is not true is worse than a slow leg.
+  const opened = await until(() => page.evaluate(() => {
     const list = window.__machineRoomBackgrounds;
     return list ? { defaultChoice: list.DEFAULT_CHOICE ?? null, count: (list.BUILT_IN ?? []).length } : null;
-  });
-  if (!opened) { skip("the background picker has no blank tiles", "window.__machineRoomBackgrounds is not published on this page"); return; }
+  }), within(20_000), 400);
+  if (!opened) { skip("the background picker has no blank tiles", "window.__machineRoomBackgrounds never appeared in 20s"); return; }
   check(opened.defaultChoice === "titan-nebula",
     "a person who never chose a background gets Titan Nebula, not the mountains",
     `DEFAULT_CHOICE=${JSON.stringify(opened.defaultChoice)} across ${opened.count} plates`);
