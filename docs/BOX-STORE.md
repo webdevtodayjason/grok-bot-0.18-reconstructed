@@ -146,9 +146,14 @@ Two things to read correctly, because both are easy to get backwards:
 Back the whole agent directory up first, inside the box, on the same volume:
 
 ```sh
-docker exec <box> cp -a /home/box/sand-data/agents/<id> \
-  /home/box/sand-data/agents/<id>-backup-$(date -u +%Y%m%dT%H%M%SZ)
+docker exec <box> sh -c 'mkdir -p /home/box/sand-data/agent-backups && \
+  cp -a /home/box/sand-data/agents/<id> \
+        /home/box/sand-data/agent-backups/<id>-$(date -u +%Y-%m-%dT%H-%M-%SZ)'
 ```
+
+Not under `agents/`. A directory there is scanned as an agent, and a copy with a store in it would
+draw a second row on the roster wearing the same conversation. `agent-backups/` is on the same
+volume and nothing walks it.
 
 The demo Titan's directory is 221 MB against 1.9 T free on that filesystem, so space is not the
 constraint, but the copy is not instant and it must finish before anything else runs. Name the path
@@ -223,6 +228,43 @@ on its own; it deletes the agent afterwards, because a roster that grows during 
 
 The R750 leg is run by hand, once, against the real agent: back it up, repair it through the
 product, send it a message, read the answer.
+
+---
+
+## What that leg measured, 2026-09-09
+
+On the R750, demo box `titanbot-box-atonqjq7zx593jsacaccpfau`, agent
+`c63fdce4-4fc0-4ea7-8a1b-93657df2c6c5`, on bundle `39f588dbc57d`.
+
+Backup first, and it is where it says:
+`/home/box/sand-data/agent-backups/c63fdce4-4fc0-4ea7-8a1b-93657df2c6c5-2026-09-09T20-41-53Z`,
+221 MB, carrying 118 transcript entries and 5,023 conversation blobs.
+
+Before the repair the transcript directory held one file, the 2-byte `.journal-mode` marker written
+2026-09-07 23:00:44Z. No conversation file at all. The store held 118 entries, both databases passed
+`integrity_check`, and the host log carried 19 `TranscriptJournalCorruptionError` lines, every one of
+them this agent.
+
+`repairAgentTranscript` answered
+`{"before":0,"after":0,"quarantined":[],"outcome":"already-healthy","reason":"this conversation store had nothing to repair"}`
+and wrote one `transcript_repair` row into that agent's ledger at 20:46:27.956Z. That is the honest
+answer for this shape: there was no stale write-ahead copy to set aside and no unreadable database to
+reindex. The verb clears the way; the rebuild happens on the next message.
+
+The message went in at 20:46:27Z. The host log gained one line and no new failure:
+
+```
+[sand][transcript] repaired the conversation store for c63fdce4-…: 0 entries before, 8 after, nothing set aside
+```
+
+After it: the conversation file exists, 4,217 bytes, 11 entries; the store 118 → 120 entries;
+conversation blobs 5,023 → 5,042; `TranscriptJournalCorruptionError` still 19, so not one more since
+the bundle landed. Asked "Titan, are you back? Answer in one short sentence", it answered **"Yes, I'm
+here."** six seconds later, and then worked through the backlog the failed turns had left it.
+
+The same verb answers at the console's own address. `POST https://console.titanium.bot/api/repairAgentTranscript`
+for the operator's own Titan returned `{"before":750,"after":750,"quarantined":[],"outcome":"already-healthy"}` —
+the identical call the Repair button makes, over the production edge.
 
 Richard's box `titanbot-box-wepegxhh3fpvr83bubvz5xm5` carries no marker and no such failure. It
 needs nothing from any of this and no wave touches it.

@@ -78,6 +78,14 @@ let skips = 0;
 const check = (ok, label, detail = "") => { console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`); if (ok) passes += 1; else failures += 1; };
 const skip = (label, why) => { console.log(`  SKIP  ${label} — ${why}`); skips += 1; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Pictures, for the operator who reads a report rather than a gate log. Off unless a directory is
+// named, so the gate's own cost does not move: BOX6B_SHOT_DIR=<dir> node scripts/verify-transcript-repair.mjs
+const SHOT_DIR = process.env.BOX6B_SHOT_DIR?.trim() ?? "";
+async function shot(page, name) {
+  if (SHOT_DIR === "") return;
+  try { await page.screenshot({ path: path.join(SHOT_DIR, `${name}.png`) }); console.log(`  SHOT  ${name}.png`); }
+  catch (error) { console.log(`  SHOT  ${name}.png failed: ${error.message}`); }
+}
 
 // ================================================================================================
 // The console leg. A stub relay, the real page, real Chrome, real mouse coordinates.
@@ -247,6 +255,7 @@ async function consoleLeg() {
     check(roster.scribe.found && roster.scribe.pill === null,
       "an ordinary failed turn gets no repair pill", roster.scribe.pill ?? "none, correctly");
     check(roster.needsYou === "", "and the 'N need you' count is not inflated by a stopped machine", roster.needsYou || "hidden, correctly");
+    await shot(page, "01-roster-needs-repair-pill");
 
     // ---- the person walks over to the agent that stopped -----------------------------------------
     await page.click('.worker-card[data-context-id="titan"]', { timeout: 8000 });
@@ -322,6 +331,7 @@ async function consoleLeg() {
     });
     check(/keeps every entry it can/.test(promise) && /Nothing is deleted/.test(promise),
       "the control promises what the repair actually does");
+    await shot(page, "02-repair-control-on-details-panel");
 
     // ---- a person presses it ----------------------------------------------------------------------
     if (control) {
@@ -333,6 +343,7 @@ async function consoleLeg() {
     const note = await page.evaluate(() => document.querySelector("[data-repair-note]")?.textContent ?? "");
     check(/^Repaired, 115 entries kept\./.test(note), "and the panel says what happened, with the count", note || "no note");
     check(!/^\[|^[A-Z]+:/.test(note), "in plain words, with no prefixed verdict line", note || "no note");
+    await shot(page, "03-repaired-entries-kept");
     const gone = await page.evaluate(() => document.querySelector('[data-repair-transcript="titan"]') != null);
     check(gone === false, "the control goes, because there is nothing left to repair");
 
