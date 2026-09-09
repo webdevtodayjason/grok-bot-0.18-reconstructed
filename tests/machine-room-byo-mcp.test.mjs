@@ -359,6 +359,56 @@ test("Add goes to the host's own writer where the box has one", async () => {
   assert.equal(calls.filter((c) => c.method === "addLocalConnector").length, 1);
 });
 
+test("a secret Authorization header is written with the scheme the far end expects", async () => {
+  const written = [];
+  const { createGatewayAdapter } = await loadAdapter({
+    addLocalConnector: (args) => { written.push(args); return { added: true, message: "added", entry: {} }; },
+  });
+  const adapter = createGatewayAdapter(seed());
+
+  // The common case, and the one that was broken: a person pastes an address, leaves the header
+  // row as Authorization, ticks it secret, and types their key into the masked box afterwards.
+  // Written bare, the far end receives `Authorization: <key>` with no scheme and answers 401, and
+  // the health line then tells the operator their key was refused. Every catalog row that uses
+  // Authorization writes `Bearer ${FIELD}`; the form now agrees with them.
+  await adapter.addLocalConnector(adapter.byoRemoteSpec({
+    name: "acme", url: "https://mcp.acme.com/mcp", transport: "http",
+    headers: [{ name: "Authorization", secret: true }],
+  }));
+  assert.equal(written[0].headers.Authorization, "Bearer ${ACME_TOKEN}");
+  assert.deepEqual(written[0].env, ["ACME_TOKEN"]);
+
+  // A vendor's own header takes the key on its own, which is what those servers ask for, so the
+  // placeholder stays bare there. Getting this wrong the other way would break Exa and Browser Use.
+  written.length = 0;
+  await adapter.addLocalConnector(adapter.byoRemoteSpec({
+    name: "exa", url: "https://mcp.exa.ai/mcp", transport: "http",
+    headers: [{ name: "x-api-key", secret: true }],
+  }));
+  assert.equal(written[0].headers["x-api-key"], "${EXA_API_KEY}");
+
+  // And a header that is not a secret is still written as the literal it is.
+  written.length = 0;
+  await adapter.addLocalConnector(adapter.byoRemoteSpec({
+    name: "gh", url: "https://api.githubcopilot.com/mcp/", transport: "http",
+    headers: [{ name: "X-MCP-Readonly", secret: false, value: "true" }],
+  }));
+  assert.equal(written[0].headers["X-MCP-Readonly"], "true");
+});
+
+test("the preview shows the scheme it is going to write", async () => {
+  const { createGatewayAdapter } = await loadAdapter();
+  const adapter = createGatewayAdapter(seed());
+  const shown = await adapter.byoPreview(adapter.byoRemoteSpec({
+    name: "acme", url: "https://mcp.acme.com/mcp", transport: "http",
+    headers: [{ name: "Authorization", secret: true }],
+  }));
+  // The preview is the operator's only sight of the entry before Add, so it has to agree with what
+  // gets written -- scheme included -- and still carry no key.
+  assert.equal(shown.entry.headers.Authorization, "Bearer (stored under ACME_TOKEN)");
+  assert.deepEqual(shown.entry.env, { ACME_TOKEN: "" });
+});
+
 test("a box whose bundle predates the host writer still takes a program, and says so about an address", async () => {
   const { createGatewayAdapter, posts } = await loadAdapter();
   const adapter = createGatewayAdapter(seed());

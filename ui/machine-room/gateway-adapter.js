@@ -968,6 +968,16 @@
   // The spec, from what the LINK door holds. `headers` arrives as rows the form drew:
   // { name, secret, env?, value? }. A secret row keeps its NAME and its env name and drops any
   // value it was given; a plain row keeps a literal, which is what an "X-MCP-Readonly: true" is.
+  // How a secret header's value is written into the entry. Every catalog row that authenticates
+  // with `Authorization` writes `Bearer ${FIELD}`, and every row that uses a vendor's own header
+  // (x-api-key, X-Browser-Use-API-Key) writes the placeholder bare -- because that is what those
+  // servers ask for. The Add-your-own door wrote it bare in BOTH cases, so a person adding any
+  // ordinary bearer server through the form got `Authorization: <key>` with no scheme, a 401 from
+  // the far end, and a health line telling them the server refused their key. There was no way to
+  // reach a working bearer header through the form at all.
+  const byoHeaderPlaceholder = (header, env) =>
+    (/^authorization$/i.test(String(header ?? "").trim()) ? `Bearer \${${env}}` : `\${${env}}`);
+
   function byoRemoteSpec(input) {
     const name = String(input?.name ?? "").trim();
     const url = String(input?.url ?? "").trim();
@@ -1094,7 +1104,12 @@
     }
     if (spec?.shape === "remote") {
       const headers = {};
-      for (const header of spec.headers ?? []) headers[header.name] = header.secret === true ? `(stored under ${header.env})` : String(header.value ?? "");
+      for (const header of spec.headers ?? []) {
+        headers[header.name] = header.secret === true
+          // Shown the way it will be written, scheme included, so the preview and the entry agree.
+          ? (/^authorization$/i.test(String(header.name ?? "").trim()) ? `Bearer (stored under ${header.env})` : `(stored under ${header.env})`)
+          : String(header.value ?? "");
+      }
       return {
         entry: { type: spec.transport === "sse" ? "sse" : "http", url: spec.url, headers, env: Object.fromEntries((spec.envNames ?? []).map((n) => [n, ""])) },
         fromHost: false,
@@ -3590,7 +3605,7 @@
           for (const row of Array.isArray(spec.headers) ? spec.headers : []) {
             const name = String(row?.name ?? "").trim();
             if (!name) continue;
-            headers[name] = row?.secret === true ? `\${${String(row?.env ?? "").trim()}}` : String(row?.value ?? "");
+            headers[name] = row?.secret === true ? byoHeaderPlaceholder(name, String(row?.env ?? "").trim()) : String(row?.value ?? "");
           }
           return {
             name: spec.name,
