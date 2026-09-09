@@ -15,12 +15,47 @@ html[data-theme="mist"][data-bg] .app-shell {
     var(--machine-room-bg) center / cover no-repeat;
 }
 
+/* CONSOLE-4. "Original" is a plate like any other now. bg-boot.js sets data-bg for every id
+   including this one, because leaving the attribute off meant the stylesheet's own mountains were
+   the floor -- and a browser with nothing stored, or with storage blocked, opened on a photograph
+   Jason asked not to see. styles.css paints a flat brand ground instead, and these two rules are
+   what put the mountains back for the person who actually picks them. The rules above already
+   cover it through --machine-room-bg; these stand in when the variable is missing, which is what
+   a stylesheet cached ahead of a bg-boot.js that failed to load looks like. */
+html[data-bg="original"] .app-shell {
+  background:
+    linear-gradient(180deg, rgba(8, 17, 22, 0.15), rgba(8, 17, 22, 0.42)),
+    var(--machine-room-bg, url("assets/warmwind-landscape.svg")) center / cover no-repeat;
+}
+html[data-theme="mist"][data-bg="original"] .app-shell {
+  background:
+    linear-gradient(180deg, rgba(240, 236, 220, 0.08), rgba(20, 42, 48, 0.25)),
+    var(--machine-room-bg, url("assets/warmwind-landscape.svg")) center / cover no-repeat;
+}
+
 .bg-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
   gap: 12px;
   margin-top: 14px;
 }
+
+/* CONSOLE-4: a series heading is a heading, not a tile. It used to be a <p> carrying an inline
+   `flex-basis:100%` inside a display:grid container, where flex-basis does nothing -- so it took a
+   single 185x104 cell in the run of tiles and read as a blank swatch labelled "Habitat" or "The
+   Lab" (Jason, 2026-09-08: "they're just blank spots"). Spanning every column is what makes it a
+   row; the hairline and the small caps are what stop it reading as a tile that failed to load. */
+.bg-series {
+  grid-column: 1 / -1;
+  margin: 14px 0 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--glass-edge-soft, rgba(255, 255, 255, 0.14));
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.bg-series:first-child { margin-top: 0; }
 
 .bg-swatch {
   position: relative;

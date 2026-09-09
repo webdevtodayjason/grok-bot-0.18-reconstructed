@@ -153,3 +153,7 @@ import "./test-index-covers-the-suite.test.mjs";
 
 // HANDBACK-1: the computer hand-off card, the rail and the takeover banner.
 import "./machine-room-handoff.test.mjs";
+
+// CONSOLE-4: the plate before the first pixel, the boot cover, the transcript that settles, the
+// adapter's data shapes and the four seams items B, C and D plug into.
+import "./machine-room-boot.test.mjs";

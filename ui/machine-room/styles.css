@@ -64,9 +64,15 @@ select:focus-visible {
   height: 100dvh;
   min-height: 650px;
   overflow: hidden;
+  /* CONSOLE-4. This used to be the warmwind mountains, and it was the FLOOR every load stood on
+     until backgrounds.js ran fourteen gateway round trips later -- 1,247 ms of a photograph Jason
+     did not choose, measured on grok-bot-local-vm. bg-boot.js now stamps the plate on <html> in
+     <head>, before this sheet paints, so what is left here is what shows when there is no plate at
+     all: a browser with site data blocked, or one whose bg-boot.js did not load. Brand Midnight,
+     flat, so that case is a dark ground rather than a picture. */
   background:
     linear-gradient(180deg, rgba(8, 17, 22, 0.15), rgba(8, 17, 22, 0.42)),
-    url("assets/warmwind-landscape.svg") center / cover no-repeat;
+    #090d14;
 }
 
 .ambient-backdrop {
@@ -89,10 +95,12 @@ select:focus-visible {
   pointer-events: none;
 }
 
+/* The same floor for the mist atmosphere, in mist's own key: its text is near-black, so a Midnight
+   ground here would be dark type on a dark plate for the moment it is visible. Brand Cloud. */
 [data-theme="mist"] .app-shell {
   background:
     linear-gradient(180deg, rgba(240, 236, 220, 0.08), rgba(20, 42, 48, 0.25)),
-    url("assets/warmwind-landscape.svg") center / cover no-repeat;
+    #f5f7fa;
 }
 
 .window-bar {
@@ -649,7 +657,16 @@ select:focus-visible {
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
-  scroll-behavior: smooth;
+  /* CONSOLE-4: no scroll-behavior here. `smooth` turned every scrollTop write in renderTranscript
+     into an animation across the whole height of the conversation, and rows land on a 900 ms SSE
+     cadence. Measured on grok-bot-local-vm on Atera Triage (190 rows, 15,908 px in a 668 px
+     viewport): a reader parked at 5,334 was dragged 9,830 px to 15,164 inside five seconds, with
+     the transcript in motion on 27.9 % of 301 animation frames and never settling. Jason,
+     2026-09-08: "the chat for Titan just scrolls forever." After: the same reader, the same
+     conversation, 0 px of drift and 0.0 % of 301 frames. Under reduced motion, where motion.css
+     already forces `auto`, the old code behaved -- which is why the bug survived, the people who
+     would have reported it were the ones the browser had already fixed it for. flashEntry opts
+     back into smooth at its own call site, for the one scroll a person actually asked for. */
   /* Messages arrive and leave through soft edges instead of being guillotined by the dock above
      and the composer below. The mask rides the scroll container, so the fade sits at the frame
      rather than travelling with the content. */
@@ -2334,12 +2351,36 @@ dialog[open] {
   margin-top: 23px;
 }
 
+/* CONSOLE-4: a file row is a button now, so it needs a button's reset and a button's feedback --
+   left-aligned text, a pointer, and something that moves when it is hovered. It was a <div> with
+   no handler at all, which is what "I can't click, open, or view it" was. */
 .file-tile {
   min-height: 112px;
   padding: 15px;
   border: 1px solid #d4dbd8;
   border-radius: 14px;
   background: #fff;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms, box-shadow 160ms, transform 160ms;
+}
+
+.file-tile:hover {
+  border-color: var(--teal-300, #57d9c0);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+  transform: translateY(-1px);
+}
+
+.file-tile:focus-visible {
+  outline: 2px solid var(--teal-300, #57d9c0);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-tile { transition: none; }
+  .file-tile:hover { transform: none; }
 }
 
 .file-tile strong,
@@ -3200,6 +3241,43 @@ button.evidence-chip[data-verdict]:hover { border-color: var(--glass-edge); colo
 
 .message-attachment figcaption {
   display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* The file's own name, on your own message. `.tag` takes --text-secondary, which is near-white and
+   sized for the dark bubbles -- on the user bubble's cream it was invisible, so an attachment you
+   had sent showed a blank pill where its filename should be. Seen in a real browser while adding
+   the two controls beside it; it reads the bubble's own ink instead. */
+.is-user .message-attachment figcaption .tag {
+  border-color: rgba(60, 50, 36, 0.24);
+  color: var(--text-dark);
+  background: rgba(60, 50, 36, 0.07);
+}
+
+/* CONSOLE-4: Open and Download on a file in the transcript. Quiet until the row is looked at --
+   they are beside the file's own name, and two buttons at full weight on every attachment would
+   read louder than the reply they belong to. */
+.attachment-controls {
+  display: inline-flex;
+  gap: 6px;
+  opacity: 0.55;
+  transition: opacity 160ms;
+}
+
+.message-attachment:hover .attachment-controls,
+.attachment-controls:focus-within {
+  opacity: 1;
+}
+
+.attachment-controls .ghost-button {
+  padding: 2px 9px;
+  font-size: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attachment-controls { transition: none; }
 }
 
 .attachment-slot {
@@ -4007,6 +4085,18 @@ body[data-composer-drop="1"] .composer {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* CONSOLE-4. Jason, 2026-09-08: "The Titan screen at the top right says 'Click to open,' but
+   there's a broken image there." The tile always emitted the <img> and marked it hidden, and the
+   rule above outranks the UA sheet's [hidden] on specificity -- so Chrome painted its own
+   broken-image glyph plus the alt text. Reproduced on grok-bot-local-vm across the first eight
+   agents on the box: 8 of 8 tiles carried an <img> with src null, naturalWidth 0 and computed
+   display block; after, 0 broken and 8 plates. renderScreenTile now emits no <img> without a src
+   at all; this rule is the same guard the .handoff-island[hidden] one above exists for, kept so
+   the trap cannot be re-set by a later edit. */
+.rail-screen-button img[hidden] {
+  display: none;
 }
 
 .rail-screen-plate {
