@@ -425,6 +425,41 @@ test("and a port only sits in the drop set on evidence the counters could actual
   assert.match(script, /^WATCH_PORTS="\$\{TITANBOT_HOST_GUARD_WATCH_PORTS:-2049,445,11434,5000,80,443\}"$/m);
 });
 
+test("verify-deploy's box-to-host leg matches the lines box-isolation.sh actually writes", () => {
+  // This leg was green-by-inconclusive on every run, for two independent reasons, and an
+  // INCONCLUSIVE gate tells an operator exactly as much as a gate that cannot fail. (1) Its
+  // watch-only pattern demanded a space before `watch-only`, while the script writes the marker in
+  // parentheses. (2) It only accepted `closed ... -> host` as evidence, and the script prints that
+  // line ONLY when nothing answered on any guarded port at all; if any watch-only port answers it
+  // prints `note` instead. On the R750, 80 and 443 are Coolify's own proxy and always answer, so
+  // no correct run could ever produce the line the leg was looking for.
+  //
+  // Rather than restate the patterns here, this reads them out of the gate and runs them against
+  // the real shapes, so the two files cannot drift apart again.
+  const gate = readFileSync(path.join(repo, "scripts/verify-deploy.mjs"), "utf8");
+  const patternFor = (name) => {
+    const line = gate.split("\n").find((l) => l.includes(`const ${name} = out.split`));
+    assert.ok(line, `verify-deploy.mjs no longer defines ${name}`);
+    const source = /\/\^(.+?)\/\.test\(l\)/.exec(line);
+    assert.ok(source, `could not read the ${name} pattern out of the gate`);
+    return new RegExp(`^${source[1]}`);
+  };
+
+  // Copied from a real --verify run on the R750, 2026-09-09.
+  const noteLine = "note   titanbot-box-atonqjq7zx593jsacaccpfau -> host 192.168.32.1 also answers on 2049 445 11434 5000 80 443 (watch-only; add to the drop set once its shadow counter reads zero)";
+  const openLine = "OPEN   titanbot-box-atonqjq7zx593jsacaccpfau -> host 192.168.32.1 on 22; a customer's agent reaches the machine that runs every other customer";
+  const closedLine = "closed titanbot-box-atonqjq7zx593jsacaccpfau -> host 192.168.32.1: nothing answered on 22 47291 8000";
+
+  assert.equal(patternFor("watched").test(noteLine), true, "a watch-only note is a probed address and has to count as one");
+  assert.equal(patternFor("openHost").test(openLine), true, "an open drop-set port has to fail the leg");
+  assert.equal(patternFor("closedHost").test(closedLine), true);
+  // And the shapes must not be confused for one another.
+  assert.equal(patternFor("openHost").test(noteLine), false, "a watch-only note is not an open drop-set port");
+
+  // The pass condition counts notes, not just closed lines.
+  assert.match(gate, /closedHost\.length \+ watched\.length === 0/);
+});
+
 test("the host guard exempts a container on every address family it holds, not just IPv4", () => {
   // The bug this pins, measured on the R750 2026-09-09 with the guard ALREADY in drop mode: the
   // exemption was one `ip saddr` line, and `ip saddr` in an inet table matches IPv4 only. The two

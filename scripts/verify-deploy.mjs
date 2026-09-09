@@ -272,18 +272,31 @@ let isolationOutput = "";
   const out = isolationOutput;
   const openHost = out.split("\n").map((l) => l.trim()).filter((l) => /^OPEN\s+\S+ -> host /.test(l));
   const closedHost = out.split("\n").map((l) => l.trim()).filter((l) => /^closed\s+\S+ -> host /.test(l));
-  const watched = out.split("\n").map((l) => l.trim()).filter((l) => /^note\s+\S+ -> host .* watch-only/.test(l));
+  // The space before `watch-only` was the second defect in this leg: box-isolation.sh writes the
+  // marker in parentheses -- `... 5000 80 443 (watch-only; add to the drop set ...)` -- so a pattern
+  // demanding a space in front of it matched nothing, on every host, always.
+  const watched = out.split("\n").map((l) => l.trim()).filter((l) => /^note\s+\S+ -> host .*watch-only/.test(l));
   if (out.length === 0 || /No such file|not found/.test(out)) {
     unresolved(LABEL, `${ROOT}/deploy/box-isolation.sh is not on the server; run deploy/r750/sync.sh, which ships it`);
   } else if (/no box on this network, so there is nothing to probe the host from/.test(out)) {
     check(true, LABEL, "no box on this network, so there was nothing to probe the host from");
   } else if (openHost.length > 0) {
     check(false, LABEL, openHost.join("; ").slice(0, 400));
-  } else if (closedHost.length === 0) {
+  } else if (closedHost.length + watched.length === 0) {
     unresolved(LABEL, "the isolation script ran but produced no box-to-host result, so this was not measured");
   } else {
-    const note = watched.length > 0 ? ` (still answering on watch-only ports: ${watched.length} address(es))` : "";
-    check(true, LABEL, `${closedHost.length} box-to-host probe(s) refused on the drop set${note}`);
+    // A `note` line is a probed address too, and on this fleet it is the ONLY shape a healthy probe
+    // takes. box-isolation.sh prints `closed ... -> host` only when NOTHING answered on any guarded
+    // port, drop set and watch-only alike; if anything watch-only answers it prints `note` instead.
+    // On the R750 80 and 443 are Coolify's own proxy and always answer, so this leg could never see
+    // a `closed` line and read INCONCLUSIVE on every correct run -- a gate that cannot pass tells an
+    // operator nothing, which is the same failure as a gate that cannot fail. Measured 2026-09-09:
+    // six probed addresses across three boxes, every one a `note`, zero `closed`, zero OPEN.
+    // What this leg asserts is the drop set, and the evidence for it is the absence of an OPEN line
+    // on an address that was really probed.
+    const probed = closedHost.length + watched.length;
+    const note = watched.length > 0 ? ` (${watched.length} still answering on watch-only ports, which is what watch-only means)` : "";
+    check(true, LABEL, `${probed} box-to-host probe(s), none open on the drop set${note}`);
   }
 }
 
