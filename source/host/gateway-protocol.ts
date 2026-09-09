@@ -110,6 +110,7 @@ export const SAND_GATEWAY_COMMANDS = {
   prepareBoxForRecreate: (api: GatewayApi) => api.prepareBoxForRecreate(),
   resumeBoxAfterRecreate: (api: GatewayApi, body: string) => api.resumeBoxAfterRecreate(parseCommandArgs(body)),
   handBackForeverBox: (api: GatewayApi, body: string) => api.handBackForeverBox(parseCommandArgs(body)),
+  skipBoxHandoff: (api: GatewayApi, body: string) => api.skipBoxHandoff(parseCommandArgs(body)),
   startTeachRecording: (api: GatewayApi, body: string) => api.startTeachRecording(parseCommandArgs(body)),
   stopTeachRecording: (api: GatewayApi, body: string) => api.stopTeachRecording(parseCommandArgs(body)),
   getTeachRecordingStatus: (api: GatewayApi) => api.getTeachRecordingStatus(),

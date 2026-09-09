@@ -76,7 +76,7 @@ export function createRequestBoxHelpTool(deps: BoxHelpDependencies) {
   return defineCommunicateTool(deps, {
     id: "REQUEST_BOX_HELP",
     name: "request_box_help",
-    description: `Hand your box's desktop to the user for a step only they can do: a login, SSO, passkey, 2FA, captcha, or payment confirmation. Pass one short instruction (no paragraph); the box is surfaced with a "hand back to agent" button and that instruction is shown in chat, then your turn ends. The user does the step on the box and hands it back, and you are resumed automatically, so start by using the read-only Screenshot tool to see what they changed. Use this instead of asking for credentials: the user signs in themselves on the box and you never see their password or 2FA. For classification: domain is the destination app being accessed; when the browser has redirected to an SSO/IdP page (Okta, Google accounts, \u2026), still put the destination app in domain and put the IdP host in idp_domain.`,
+    description: `Hand your box's desktop to the user for a step only they can do: a login, SSO, passkey, 2FA, captcha, or payment confirmation. Pass one short instruction (no paragraph); that instruction is shown in chat over a live picture of the desktop, and your turn ends. The user can take the desktop, do the step and hand it back, or skip the step. Either way you are resumed automatically and told which of the two happened: on a hand-back start with the read-only Screenshot tool to see what they changed; on a skip do not assume the step happened. Use this instead of asking for credentials: the user signs in themselves on the box and you never see their password or 2FA. For classification: domain is the destination app being accessed; when the browser has redirected to an SSO/IdP page (Okta, Google accounts, \u2026), still put the destination app in domain and put the IdP host in idp_domain.`,
     parameters: requestBoxHelpParameters,
     async execute(
       _context: Context,
@@ -100,7 +100,7 @@ export function createRequestBoxHelpTool(deps: BoxHelpDependencies) {
         },
       });
       if (outcome.kind === "already-pending") {
-        return `The user still has the box: you handed it to them for "${outcome.instruction}" and they haven't handed it back, so this request was NOT sent \u2014 asking twice would put a second copy of the same request in their chat. Do not ask again. If you have something to tell them (what you're waiting on, or that you need a different step), say it with SendMessage; otherwise just wait, and you'll be resumed automatically when they hand the box back.`;
+        return `The user still has the box: you handed it to them for "${outcome.instruction}" and they have neither handed it back nor skipped it, so this request was NOT sent \u2014 asking twice would put a second copy of the same request in their chat. Do not ask again. If you have something to tell them (what you're waiting on, or that you need a different step), say it with SendMessage; otherwise just wait, and you'll be resumed automatically once they decide.`;
       }
       resolved.onSendMessage(
         { type: "text", content: args.instruction },
@@ -110,7 +110,7 @@ export function createRequestBoxHelpTool(deps: BoxHelpDependencies) {
           instruction: args.instruction,
         },
       );
-      return "Handed the box to the user. They have control now; wait for them to hand it back, and you'll be resumed automatically.";
+      return "Handed the box to the user. They have control now. They can do the step and hand it back, or skip it \u2014 wait for either, and you'll be resumed automatically with a note saying which one happened.";
     },
   });
 }

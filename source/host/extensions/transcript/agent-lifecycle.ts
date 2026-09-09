@@ -398,7 +398,6 @@ export class AgentLifecycle {
       rmSync(join(getSandRootDir(), `sand-system-prompt-${id}.json`), { force: true });
       this.tm.onAgentForgotten?.(id);
       this.tm.pendingWakeStore?.clearAgent(id);
-      this.tm.boxHandoff.boxHandoffs.delete(id);
       this.tm.boxHandoff.awaitingSink.clear(id);
       this.tm.roster.emitAsyncTasksForAgent(id);
     }
@@ -419,7 +418,6 @@ export class AgentLifecycle {
     rmSync(join(getSandRootDir(), `sand-system-prompt-${active.id}.json`), { force: true });
     this.tm.onAgentForgotten?.(active.id);
     this.tm.pendingWakeStore?.clearAgent(active.id);
-    this.tm.boxHandoff.boxHandoffs.delete(active.id);
     this.tm.boxHandoff.awaitingSink.clear(active.id);
     this.tm.roster.emitAsyncTasksForAgent(active.id);
     const nextAgent = (await this.tm.sessionStore.listAgents(active.id)).find(

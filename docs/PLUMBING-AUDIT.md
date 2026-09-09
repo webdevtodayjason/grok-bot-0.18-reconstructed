@@ -1960,6 +1960,17 @@ wave's output; `npm test` still green; zero UI/feature diffs outside `docs/`.
   for a fork display), authenticated like every other route; the adapter builds the frame on the
   page's own origin. A gateway bearer on a page request mints the session cookie, which is how
   `verify-deploy.mjs` logs in without a password.
+- **The computer hand-off (HANDBACK-1):** `docs/HANDOFF.md` is the contract. What the person meets
+  in all three places (the transcript card, the rail's amber card, the takeover banner), the four
+  pill labels, the three resume prompts verbatim, the four-state machine and why `closed` exists,
+  what survives a reload and a restart (the transcript entry is the record; the live pending record
+  is a 0600 sidecar; no snapshot survives and none rides the wire), the thumbnail's rules with its
+  measured cost, and a WHAT BITES list. The wire is `getForeverBoxStatus.handoff` =
+  `{requestId, instruction, startedAt, snapshotAt?}`, `handBackForeverBox {id, trigger}` and the new
+  `skipBoxHandoff {id}`; resolutions written are `handed_back` and `dismissed`, with `completed` and
+  `cancelled` read-side aliases for rows already on customers' boxes. Gate:
+  `scripts/verify-handoff.mjs --host | --console | --restart`, one at a time. This supersedes the
+  footer hand-back control GW-10 shipped.
 - **More host switches (2026-09-04, Wave U1):** `SAND_MEMORY_DREAMING` (start-time: read once when
   the memory extension starts, so a restart applies it), `SAND_AUTO_REVIEW` (enforce override,
   live per call) and `SAND_AUTO_REVIEW_MODE` (off, shadow, enforce; live). The gates table marks

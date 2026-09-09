@@ -7,6 +7,7 @@ import {
   writeShellEnvSecret
 } from "./extensions/shell-tools/shell-secrets.js";
 import { createBoxConnectorToolCaller } from "./extensions/inference/box-connector-tools.js";
+import { shapeHandoffForStatus } from "./extensions/session/box-handoff-service.js";
 import { getSandRootDir } from "./host-paths.js";
 import {
   commandErrorReportToTelemetry,
@@ -481,10 +482,16 @@ export class SandHost {
         event.resolution
       );
       await this.emitForeverBox(event.agentId);
-      await optionalMethod(this.transcript, "resumeAfterBoxHandoff")?.(
-        event.agentId,
-        event.trigger
-      );
+      // HANDBACK-1. The entry is stamped and the status is out; the agent's next turn must not hold
+      // the person's click open. Awaiting the resume here made handBackForeverBox answer a whole
+      // turn later (measured at 58,917 ms to the socket close on a slow one), and the console had
+      // already moved on. resumeWithHiddenPrompt reports its own failures to the tray.
+      void Promise.resolve(
+        optionalMethod(this.transcript, "resumeAfterBoxHandoff")?.(
+          event.agentId,
+          { resolution: event.resolution, trigger: event.trigger }
+        )
+      ).catch(() => undefined);
     });
 
     this.hostEvents.on("session.box-handoff-status-changed", payload => {
@@ -903,10 +910,13 @@ export class SandHost {
       extensions.api("host-upgrade"),
       "getVersionState"
     )?.() ?? {};
-    const handoff = optionalMethod(
-      extensions.api("session"),
-      "pendingHandoff"
-    )?.(status?.agentId);
+    // HANDBACK-1. Shaped, not spread: the pending record holds a full screenshot and this payload
+    // rides every heartbeat and every status tick. The console reads the live picture off the box.
+    const handoff = shapeHandoffForStatus(
+      optionalMethod(extensions.api("session"), "pendingHandoff")?.(
+        status?.agentId
+      )
+    );
     const diskPressureLevel = extensions.api("forever-box").diskPressureLevel;
 
     return {

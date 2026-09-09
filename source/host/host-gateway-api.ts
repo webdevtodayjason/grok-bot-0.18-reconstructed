@@ -991,6 +991,14 @@ export function createHostGatewayApi(
         args.id,
         args.trigger ?? "button"
       ),
+    // HANDBACK-1. Skip is its own command, not handBackForeverBox with a special trigger: the trigger
+    // form stamps the entry as a hand-back, so the card would read Done on a step nobody did. An
+    // older console never calls this, and a console talking to an older host hides its Skip controls.
+    skipBoxHandoff: (args: any) =>
+      method(deps.extensions.api("session"), "endHandoff")(args.id, {
+        resolution: "dismissed",
+        trigger: "dismissed"
+      }),
 
     startTeachRecording: (args: any) =>
       method(deps.extensions.api("teach-recording"), "start")(args),

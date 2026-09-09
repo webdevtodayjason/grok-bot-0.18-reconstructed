@@ -2445,10 +2445,45 @@ try {
     }
     // -- GW-10(a): the hand-back control exists and is hidden while the host reports no pending
     // hand-off for this agent (getForeverBoxStatus.handoff is where pendingHandoff surfaces).
+    //
+    // HANDBACK-1 moved this control. It used to be a button in the desktop view's footer with its
+    // note beside it; it is the "I'm done, continue" half of the takeover banner now, and the whole
+    // hand-off has a card of its own in the conversation. The IDS DID NOT MOVE (#hand-back,
+    // #hand-back-note), which is exactly what keeps this leg pointed at the real control instead of
+    // going red for the wrong reason. Two things did have to change here, and neither weakens what
+    // the leg measures:
+    //   - visibility is read the way a person meets it -- the element and every ancestor, including
+    //     a closed <dialog> -- rather than by reading `el.hidden` on the button alone. The banner
+    //     carries the hidden state now, so reading the button's own attribute would have reported
+    //     "not hidden" for a control nobody can see. That is stricter than what it replaced.
+    //   - the leg asserts the desktop view is actually OPEN when it measures, so "hidden while
+    //     nothing is pending" cannot pass vacuously on a closed dialog.
+    const handBackView = () => page.evaluate(() => {
+      const el = document.getElementById("hand-back");
+      const dialog = document.getElementById("desktop-dialog");
+      const dialogOpen = dialog?.open === true;
+      if (!el) return { present: false, dialogOpen };
+      let hidden = false;
+      for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+        const cs = getComputedStyle(node);
+        if (node.hidden === true || cs.display === "none" || cs.visibility === "hidden") { hidden = true; break; }
+      }
+      const rect = el.getBoundingClientRect();
+      return {
+        present: true, hidden, dialogOpen, disabled: el.disabled === true,
+        // The banner's own button, and -- when the console stops carrying the owner on the button
+        // itself -- the hand-off card's frozen data-agent-id, which names the same agent.
+        owner: el.dataset.handBack ?? "",
+        cardOwner: document.querySelector("[data-handoff-card] [data-handoff-action]")?.dataset.agentId ?? "",
+        note: document.getElementById("hand-back-note")?.textContent ?? "",
+        w: Math.round(rect.width), h: Math.round(rect.height),
+      };
+    });
     const ateraId = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.name === "Atera Triage")?.id ?? null;
     const boxNow = ateraId ? await gw("getForeverBoxStatus", { id: ateraId }).catch(() => null) : null;
-    const handBack = await page.evaluate(() => { const el = document.getElementById("hand-back"); return el ? { hidden: el.hidden, text: el.textContent } : null; });
-    check(handBack != null && handBack.hidden === (boxNow?.handoff == null), "the hand-back control is in the desktop view and hidden exactly while no hand-off is pending", `hidden ${handBack?.hidden}, host handoff ${JSON.stringify(boxNow?.handoff ?? null)}`);
+    const handBack = await handBackView();
+    check(handBack.dialogOpen === true, "the desktop view is open where the hand-back control is measured", `#desktop-dialog open ${handBack.dialogOpen}`);
+    check(handBack.present && handBack.hidden === (boxNow?.handoff == null), "the hand-back control is in the desktop view and hidden exactly while no hand-off is pending", `present ${handBack.present}, hidden ${handBack.hidden}, host handoff ${JSON.stringify(boxNow?.handoff ?? null)}`);
     // -- GW-10, the hand-back loop end to end, driven the way a user meets it. It used to force the DOM --
     // set el.hidden = false, write the agent id into the dataset by hand, call el.click() -- on an
     // agent with nothing pending, so handBackForeverBox answered null and the check proved only
@@ -2463,33 +2498,43 @@ try {
     // same rule the unread probe follows -- a cold provider is not a dashboard defect. Handing the
     // box back revives the agent, so the probe may spend one more turn of its own after this.
     if (probeAgentId) {
-      const instruction = "Sign in to the gate demo account";
+      // HANDBACK-1 again: the ask is by INTENT, not by tool name. Asked for request_box_help by
+      // name, the model has answered that it does not have the tool while the host's own toolset
+      // line listed it, which failed this leg for the model's manners rather than for the console.
+      // The instruction is the agent's own words now, so the note check reads the host's copy of it
+      // instead of a string this file made up.
       await gw("sendPrompt", {
         agentId: probeAgentId,
-        prompt: `Call the request_box_help tool exactly once, with instruction "${instruction}". `
-          + "Call no other tool and do nothing else.",
+        prompt: "I need to sign in to something on your computer myself. Hand the computer over to "
+          + "me with a one-line instruction and wait for me. Do not try to sign in yourself.",
       }).catch(() => null);
       const pending = await until(async () => {
         const status = await gw("getForeverBoxStatus", { id: probeAgentId }).catch(() => null);
         return status?.handoff ?? null;
       }, TURN_TIMEOUT_MS, 3000);
       if (pending == null) {
-        check(true, `hand-back probe skipped — the probe never called request_box_help inside the ${Math.round(TURN_TIMEOUT_MS / 1000)}s turn budget (the box's endpoint, not the dashboard)`);
+        check(true, `hand-back probe skipped — the probe never handed the computer over inside the ${Math.round(TURN_TIMEOUT_MS / 1000)}s turn budget (the box's endpoint, not the dashboard)`);
       } else {
-        check(true, "request_box_help put a real pending hand-off on the host", JSON.stringify(pending).slice(0, 140));
+        const instruction = String(pending.instruction ?? "");
+        check(true, "an ordinary ask put a real pending hand-off on the host", JSON.stringify(pending).slice(0, 140));
         const errorsBefore = errors.length;
         // The probe's name is not probeName by now: the GW-01 identity checks renamed it. Ask the
         // roster what it is called, or openRoom waits out its whole budget on a title that moved.
         const roomWas = await page.evaluate(() => document.querySelector(".worker-card.is-active")?.dataset.contextId ?? null);
         const probeNow = ((await gw("listAgents").catch(() => [])) ?? []).find((a) => a.id === probeAgentId)?.name ?? probeName;
         const arrived = await openRoom(probeAgentId, probeNow);
-        const shown = await until(() => page.evaluate(() => {
-          const el = document.getElementById("hand-back");
-          if (!el || el.hidden) return null;
-          return { owner: el.dataset.handBack ?? "", note: document.getElementById("hand-back-note")?.textContent ?? "" };
-        }), 20_000, 700);
-        check(shown != null && shown.owner === probeAgentId, "the hand-back control appears on its own once a hand-off is pending, aimed at the agent that asked", shown ? `owner ${shown.owner}, room reached ${arrived}` : "still hidden after 20s");
-        check(shown != null && shown.note.includes(instruction), "and the note beside it repeats the instruction the agent asked for", (shown?.note ?? "").slice(0, 140));
+        // openRoom already opens the ordinary desktop view. Since HANDBACK-1 the banner belongs to
+        // the takeover the card's own "Take over" opens, so if the control is not on screen after
+        // the ordinary open, take over the way a person does and look again. A run where neither
+        // path shows it still fails on its own number below.
+        let shown = await until(async () => { const v = await handBackView(); return v.present && !v.hidden ? v : null; }, 8000, 700);
+        if (shown == null && (await page.$('[data-handoff-action="take-over"]')) != null) {
+          await page.click('[data-handoff-action="take-over"]', { timeout: 8000 }).catch(() => {});
+          shown = await until(async () => { const v = await handBackView(); return v.present && !v.hidden ? v : null; }, 15_000, 700);
+        }
+        const owner = shown ? (shown.owner || shown.cardOwner) : "";
+        check(shown != null && owner === probeAgentId, "the hand-back control appears on its own once a hand-off is pending, aimed at the agent that asked", shown ? `owner ${owner || "(unnamed)"}, ${shown.w}x${shown.h}, room reached ${arrived}` : "still hidden after 23s");
+        check(shown != null && shown.note.includes(instruction), "and the note beside it repeats the instruction the agent asked for", `${(shown?.note ?? "").slice(0, 120)} · host: ${instruction.slice(0, 60)}`);
         if (shown != null) {
           await page.click("#hand-back", { timeout: 10_000 });
           const cleared = await until(async () => {
@@ -2498,16 +2543,22 @@ try {
           }, 20_000, 1000);
           check(cleared === true && callsTo("handBackForeverBox") >= 1, "clicking it clears the pending hand-off on the host", `${cleared === true ? "cleared" : "the host still reports it pending after 20s"}; ${callsTo("handBackForeverBox")} handBackForeverBox call(s)`);
           // Re-hiding follows the host's status event, so it lands as soon as the hand-off clears.
-          const rehid = await until(() => page.evaluate(() => document.getElementById("hand-back")?.hidden === true ? true : null), 15_000, 500);
+          // Since HANDBACK-1 the click also closes the takeover view, which hides the control the
+          // same way; the ancestor walk counts a closed <dialog> as hidden, which is what a person
+          // sees either way.
+          const rehid = await until(async () => ((await handBackView()).hidden === true ? true : null), 15_000, 500);
           check(rehid === true && errors.length === errorsBefore, "and the control hides itself again once nothing is pending, with no page error", `${rehid === true ? "hidden" : "still visible after 15s"}; ${errors.length - errorsBefore} new page error(s)`);
-          // Re-enabling waits on the RPC, and handBackForeverBox does not answer until the agent it
-          // revived has finished a turn (sand-host.ts awaits resumeAfterBoxHandoff), so this is a
-          // turn budget, not a UI one. The bug it guards is real: the handler's .finally used to
-          // read event.currentTarget, null by then, which threw out of the promise chain and left
-          // the button disabled for good. A revived turn that does not come back is a SKIP.
-          const reenabled = await until(() => page.evaluate(() => document.getElementById("hand-back")?.disabled === false ? true : null), TURN_TIMEOUT_MS, 1000);
-          if (reenabled === true) check(true, "and the button re-enables once handBackForeverBox answers");
-          else check(true, `button re-enable skipped — the revived turn did not finish inside the ${Math.round(TURN_TIMEOUT_MS / 1000)}s budget, so handBackForeverBox has not answered yet`);
+          // The bug this guards is real: the handler's .finally used to read event.currentTarget,
+          // null by then, which threw out of the promise chain and left the button disabled for
+          // good. It used to be a TURN budget, because handBackForeverBox did not answer until the
+          // agent it revived had finished a turn. HANDBACK-1 made that resume fire-and-forget, so
+          // the answer is a command answer now and this should land in a second or two; the turn
+          // budget stays as the ceiling and the elapsed time is printed, so a regression back to
+          // the blocking shape shows up as a number rather than as a silent wait.
+          const reenableAt = Date.now();
+          const reenabled = await until(async () => ((await handBackView()).disabled === false ? true : null), TURN_TIMEOUT_MS, 1000);
+          if (reenabled === true) check(true, "and the button re-enables once handBackForeverBox answers", `${((Date.now() - reenableAt) / 1000).toFixed(1)}s`);
+          else check(true, `button re-enable skipped — handBackForeverBox has not answered inside the ${Math.round(TURN_TIMEOUT_MS / 1000)}s budget`);
         }
         // The checks below this block read Atera's conversation. Put the page back where it was,
         // or they measure the probe and report Atera's evidence chips as missing.
@@ -2516,6 +2567,13 @@ try {
           check(await openRoom(roomWas, backName), "the gate is back on the agent the hand-back probe walked away from", backName);
         }
       }
+    }
+    // Handing the computer back closes the desktop view now, and the Files check below is inside
+    // that view. Re-open it if this block's click closed it, or a leg about the file list would
+    // fail on a dialog HANDBACK-1 shut.
+    if ((await page.evaluate(() => document.getElementById("desktop-dialog")?.open !== true)) === true) {
+      await page.click("#open-desktop", { timeout: 10_000 }).catch(() => {});
+      await page.waitForTimeout(1000);
     }
     await page.click("[data-desktop-app='files']"); await page.waitForTimeout(1200);
     await noDemoStrings("files view");

@@ -330,8 +330,6 @@ export class TranscriptManager {
   async dispose(): Promise<void> {
     this.disposed = true;
     await Promise.allSettled([this.sessions.windowedActivationTail]);
-    (this.boxHandoff as any).foreverBoxListeners?.clear?.();
-    (this.boxHandoff as any).boxHandoffs?.clear?.();
     this.acceptanceLedger.dispose();
     this.runLifecycle.runScheduler?.dispose();
     for (const armed of this.ackObligations.ackRedriveTimers.values())
@@ -585,11 +583,7 @@ const delegations: ReadonlyArray<[string, keyof TranscriptManager]> = [
   ["hasCarryablePendingWake", "upgradeResume"],
   ["hasMidDrainRevival", "upgradeResume"],
   ["resumeAfterRecreate", "upgradeResume"],
-  ["subscribeForeverBox", "boxHandoff"],
-  ["withBoxHandoff", "boxHandoff"],
   ["createAwaitingStateSink", "boxHandoff"],
-  ["handBackForeverBox", "boxHandoff"],
-  ["emitForeverBoxStatus", "boxHandoff"],
   ["resumeAfterBoxHandoff", "boxHandoff"],
   ["resumeAfterMcpAuth", "boxHandoff"],
   ["resumeAfterListenerConnect", "boxHandoff"],

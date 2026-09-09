@@ -149,6 +149,7 @@ export const COORDINATOR_METHOD_TABLE = {
   getForeverBoxStatus: { args: "object", reply: "box-status" },
   ensureForeverBox: { args: "object", reply: "box-status" },
   handBackForeverBox: { args: "object", reply: "void" },
+  skipBoxHandoff: { args: "object", reply: "void" },
   startTeachRecording: { args: "object", reply: "record" },
   stopTeachRecording: { args: "object", reply: "record" },
   getTeachRecordingStatus: { args: "none", reply: "record" },
