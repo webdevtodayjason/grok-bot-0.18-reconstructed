@@ -57,11 +57,15 @@ const theBot = Object.freeze({
     { name: "Daily digest", summary: "Each weekday morning, write the digest.", schedule: "0 9 * * 1-5", scheduleNote: "Each weekday at 9am on this box's clock." },
   ],
   integrations: ["notion", "slack"],
+  // THE SHAPE THE GENERATOR ACTUALLY WRITES: the plugin id under `plugin`, the sentence under
+  // `line`. This fixture wrote `pluginId` and `description`, which no catalog row has ever
+  // carried, so a green suite sat on top of an Add that told a customer Slack, Notion, Linear,
+  // Gmail, Google Calendar and Google Sheets were apps we do not carry.
   apps: [
-    { name: "notion-workspace", label: "Notion", description: "Keep the ideas board and briefs where the team already writes.", pluginId: "notion", offer: "connect" },
-    { name: "slack", label: "Slack", description: "Post the digest where people read it.", pluginId: "slack", offer: "connect" },
-    { name: "X", label: "X", description: "Read what people are asking.", pluginId: "", offer: "page" },
-    { name: "Profound", label: "Profound", description: "Pull the answer-engine numbers.", pluginId: "", offer: "byo" },
+    { name: "notion-workspace", label: "Notion", line: "Keep the ideas board and briefs where the team already writes.", plugin: "notion", offer: "connect" },
+    { name: "slack", label: "Slack", line: "Post the digest where people read it.", plugin: "slack", offer: "connect" },
+    { name: "X", label: "X", line: "Read what people are asking.", plugin: null, offer: "page" },
+    { name: "Profound", label: "Profound", line: "Pull the answer-engine numbers.", plugin: null, offer: "byo" },
   ],
 });
 
@@ -442,7 +446,11 @@ test("the apps split four ways, and an installed one is not offered again", () =
   const old = setup.planApps({ integrations: ["github", "slack"] }, ["github"]);
   assert.deepEqual(old.connected.map((a) => a.label), ["github"]);
   assert.deepEqual(old.addable.map((a) => a.label), ["slack"]);
+  // Both spellings, so a host older than this wave and every hand-written row still read.
+  const spelled = setup.planApps({ apps: [{ name: "slack", label: "Slack", description: "Post it.", pluginId: "slack", offer: "connect" }] }, []);
+  assert.deepEqual(spelled.addable.map((a) => a.label), ["Slack"]);
 });
+
 
 test("the message is one plain sentence a person reads, with no tool or field names in it", async () => {
   const box = fakeBox();

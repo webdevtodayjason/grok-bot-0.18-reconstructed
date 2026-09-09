@@ -19,10 +19,18 @@ Every bot page shows the same four blocks under the same four headings, in this 
 
 There is no Instructions block. The host has exactly one identity field -- the agent's description
 -- and `personaFor` composes it as `description + blank line + instructions`, so a row's
-`instructions` **is** its identity, and on every community row it is set to the bot's first memory.
-That means one paragraph is deliberately duplicated between the identity and the memory store on
-every row. It is consistent rather than accidental: the sentence that says what the bot is, is both
-the thing the model is told it is and the first thing it remembers.
+`instructions` **is** its identity, and on a community row that has memories it is set to the bot's
+first memory. That means one paragraph is deliberately duplicated between the identity and the
+memory store on those rows. It is consistent rather than accidental: the sentence that says what the
+bot is, is both the thing the model is told it is and the first thing it remembers.
+
+**A row the scrape gives no memories carries no instructions at all.** Four do: `chief-health`,
+`projects-manager`, `the-morning-newspaper` and `writing-bot`. The generator used to fall back to
+the description there, which composed `description + blank line + description` and told those four
+agents their own one-line bio twice as their whole identity. Empty means the description alone, the
+generator now fails the build when the two strings are equal, and their Memories block shows the
+honest empty state: *this bot knows nothing in advance; it starts with its description and learns as
+you work with it*.
 
 The first-party rows predate the Memories block and are not edited to gain one. `catalog.ts` derives
 it: a row that declares no memories gets one composed from its `instructions`. The six templates and
@@ -324,7 +332,10 @@ identical Marketing chips filtering to the same rows.
 
 **The creator stays**, as a credit line: `creator` is the person's name and `creatorNote` is
 "from the community", so a row reads "by Adam Tanguay, from the community". The upstream account
-handle is not shipped and neither is the creator's photo.
+handle is not shipped and neither is the creator's photo. One scraped description ended
+"Created by @karenxcheng", which shipped that credit a second time as a handle on another product's
+platform; the overlay strips it, and the generator fails on any string matching `Created by @handle`
+so a re-scrape cannot bring it back.
 
 **Tiles are drawn, never fetched.** `tile.file` is absent on every community row, so each one gets
 the console's drawn face and nothing is fetched from the internet. The scrape's eleven colour words
@@ -397,6 +408,44 @@ desk's six integrations all offer Add on the demo tenant.
 
 ---
 
+## What the page draws, and the words on the controls
+
+**The row is titled by the app the bot names, not by the plugin that covers it.** One plugin covers
+several surfaces -- Gmail, Google Calendar, Google Sheets and Google Drive are all the Google
+Workspace connector -- and titling each row with the plugin drew three rows that were the same
+string end to end, each with its own Add. Measured on the R750 demo tenant 2026-09-09: Account
+Research Desk drew four Google rows, three of them identical, and 23 of the 65 community rows draw
+two to four. So the title is the surface (`Gmail`), the plugin is named under it ("through Google
+Workspace"), and **only the first row for a plugin carries the Add** -- the rest say "the same
+connection as above", because the second press would install what the first already did.
+
+**No app row is ever drawn without a line.** The generator demotes a sentence that repeats verbatim
+across bots -- that is the app vendor's tagline rather than this bot's reason -- but it no longer
+drops it: it ships as `fallbackLine`, and the page draws `line`, then `fallbackLine`, then the
+plugin's own tagline. Before that, 99 of the 244 app rows had no line and 19 of those had no plugin
+to fall back on either, so the page drew a name, "not available yet", and nothing that said what the
+app was. For an app the scrape gives no sentence at all and we carry no plugin for, the mapping table
+in the generator carries an `about` line of our own (Granola, Salesforce); the build fails on any
+new name that would go out bare, which asks a person for one line rather than shipping an empty row.
+
+**The Skills and Routines blocks are not truncated.** The list rows and the cards run their text
+through `oneLine`, which cuts at 140 characters, because one line is the promise there. On the bot's
+own page the "Use when…" sentence IS the block: 108 of the pack's 263 skill descriptions are longer
+than that (the longest 436) and 19 of the 104 routine summaries are, so both are drawn whole and CSS
+wraps them.
+
+**"On the roster" comes off the box, not off this browser session.** The tab does one `listAgents`
+read when it opens and matches by name, the same match the setup's own roster check uses. Without it
+every one of the 72 rows drew Add again on any fresh page load, and the only way to find out was to
+press one and read the refusal. A team pack is never one agent, so the roster names are not consulted
+for one.
+
+**The words on the controls.** A list row draws a round **Add**; a bot's own page draws **Import
+Bot**; a team pack draws **Import team (n)**. The first two differ deliberately -- they are the two
+controls in Jason's screenshots, and the page's word is the same verb the pack beside it uses, so the
+tab never offers "Add bot" here and "Import team" there for the same gesture. The intro sentence
+names both.
+
 ## What bites
 
 - **The list is a card now.** A row fetched from `listMarketplace` has no `instructions`, `skills`,
@@ -435,6 +484,27 @@ desk's six integrations all offer Add on the demo tenant.
 - **The app buckets hold apps, not names.** `apps.addable`, `apps.byo` and `apps.informational`
   carry `{name, label, description, pluginId}`. Rendering them through a string helper prints
   `[object Object]`, which is what the setup receipt did on its first live run.
+- **The catalog writes `plugin` and `line`; both readers want `pluginId` and `description`.** The
+  generator emits an app row as `{name, label, line, fallbackLine, plugin, offer}`. The page half
+  (`marketplace-bots.js` `appsOf`) and the setup half (`bot-setup.js` `appsOf`) each normalise both
+  spellings. Anything new that reads `bot.apps` must do the same: the setup half did not, so every
+  generated app arrived with an empty plugin id, fell into the add-your-own bucket, and the receipt
+  told a customer that Slack, Notion, Linear, Gmail, Google Calendar and Google Sheets are apps we
+  do not carry -- on the same page that had just drawn an Add for them. Every fixture in the suite
+  wrote the reader's spelling, so it was green throughout; the shape is now pinned against a real
+  catalog row in `tests/community-bots.test.mjs`.
+- **The setup reports lists, not counts.** `skills.imported` and `skills.reused` are arrays of
+  document names. `Number([...])` is `NaN` and `NaN > 0` is false, which silently dropped the
+  playbook clause from every receipt of every bot while the sentence under it, built from the same
+  lists, named them correctly. The card counts either shape now, and the gate fails a receipt that
+  names no playbooks for a row that carries some.
+- **The receipt says facts, the block says memories, and both are right.** The Memories block draws
+  the catalog's paragraphs; the store holds the facts those paragraphs were split into at the host's
+  500-character cap. Recruiting Coordinator is 5 paragraphs and 8 facts. Anything that counts one
+  and labels it the other reads as a page disagreeing with itself.
+- **A team pack seeds no memory store.** Its import creates one bot per member with that member's
+  own written brief as its identity and never calls `addAgentMemories`. The Memories block on a pack
+  says so; the single-bot footnote would be a promise the press does not keep.
 
 ## What is not proven yet
 

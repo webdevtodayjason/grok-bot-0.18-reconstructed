@@ -134,7 +134,11 @@ test("every bot names real plugins, a declared category and at least one skill",
         : skill.name;
       assert.match(skill.body, new RegExp(`^---\\nname: ${documentName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`), `bot ${bot.id} skill name mismatch`);
     }
-    assert.ok(bot.instructions.length > 0, `bot ${bot.id} has no persona`);
+    // A first-party row's persona is its instructions. A community row the scrape gives no memories
+    // carries none: personaFor writes `description + blank line + instructions`, so repeating the
+    // description there told four agents their own one-line bio twice as their whole identity.
+    if (bot.origin !== "community") assert.ok(bot.instructions.length > 0, `bot ${bot.id} has no persona`);
+    else assert.notEqual(bot.instructions, bot.description, `bot ${bot.id} would be told its description twice`);
   }
 });
 

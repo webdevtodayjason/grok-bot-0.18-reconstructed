@@ -78,6 +78,28 @@
       "from": "launch a cloud coding agent (Fable 5) into the sticky demo monorepo",
       "to": "launch a cloud coding agent into the sticky demo monorepo",
       "why": "The phrase table already replaced the vendor's product name; the model in brackets was theirs to pin and is not ours to promise."
+    },
+    {
+      "id": "the-morning-newspaper",
+      "path": "description",
+      "from": " Created by @karenxcheng",
+      "to": "",
+      "why": "An account handle on the upstream's own platform, shipped as customer-facing copy on the row, the card and the bot page -- directly under the credit line that already reads \"by Karen X Cheng, from the community\". The credit stays; the handle from another product's platform does not, and the generator now fails on any that a re-scrape brings back."
+    }
+,
+    {
+      "id": "customer-call-coach",
+      "path": "integrations[0].description",
+      "from": "Granola gives Cursor access to",
+      "to": "Granola gives your bots access to",
+      "why": "The app vendor's own tagline, which names the old upstream as the thing it feeds. It is the sentence this bot carries about Granola and it is now shipped rather than dropped, so the vendor's name in it has to go; \"your bots\" is what the sentence means on this box."
+    },
+    {
+      "id": "customer-question-drafter",
+      "path": "integrations[2].description",
+      "from": "Granola gives Cursor access to",
+      "to": "Granola gives your bots access to",
+      "why": "The same vendor tagline on the second of the two bots that carry it."
     }
   ],
   "schedule": [

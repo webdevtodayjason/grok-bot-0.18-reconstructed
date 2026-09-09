@@ -141,6 +141,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -148,6 +149,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -169,6 +171,7 @@ const ROWS = [
         "name": "Google Sheets",
         "label": "Google Sheets",
         "line": "",
+        "fallbackLine": "Read and write Google Sheets.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -176,6 +179,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "Read and update Salesforce records.",
         "plugin": null,
         "offer": "byo"
       }
@@ -282,6 +286,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "The CRM: accounts, contacts and pipeline.",
         "plugin": null,
         "offer": "byo"
       },
@@ -324,6 +329,7 @@ const ROWS = [
         "name": "Granola",
         "label": "Granola",
         "line": "",
+        "fallbackLine": "An AI notepad for meetings: notes and transcripts.",
         "plugin": null,
         "offer": "byo"
       }
@@ -494,6 +500,7 @@ const ROWS = [
         "name": "Google Sheets",
         "label": "Google Sheets",
         "line": "",
+        "fallbackLine": "Read and write Google Sheets.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -645,6 +652,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -652,6 +660,7 @@ const ROWS = [
         "name": "Google Sheets",
         "label": "Google Sheets",
         "line": "",
+        "fallbackLine": "Read and write Google Sheets.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -920,6 +929,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -927,6 +937,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -934,6 +945,7 @@ const ROWS = [
         "name": "Granola",
         "label": "Granola",
         "line": "",
+        "fallbackLine": "Your meetings in your workflow. Meeting notes, decisions, and commitments.",
         "plugin": null,
         "offer": "byo"
       },
@@ -948,6 +960,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "Read and update Salesforce records.",
         "plugin": null,
         "offer": "byo"
       }
@@ -1009,7 +1022,7 @@ const ROWS = [
       "shape": "squircle"
     },
     "description": "You're the Chief Health Officer. Every day, ask if training happened. If it did not, rewrite the next session so the week still holds. Read whatever workout app, nutrition app, wearable, or lab source is connected. Do not invent numbers. Never diagnose, prescribe, or post.",
-    "instructions": "You're the Chief Health Officer. Every day, ask if training happened. If it did not, rewrite the next session so the week still holds. Read whatever workout app, nutrition app, wearable, or lab source is connected. Do not invent numbers. Never diagnose, prescribe, or post.",
+    "instructions": "",
     "skills": [],
     "integrations": [],
     "routines": [
@@ -1183,6 +1196,7 @@ const ROWS = [
         "name": "Slack",
         "label": "Slack",
         "line": "",
+        "fallbackLine": "Slack MCP server. Search channels, send messages, and perform other Slack actions through MCP-compatible clients.",
         "plugin": "slack",
         "offer": "connect"
       },
@@ -1190,6 +1204,7 @@ const ROWS = [
         "name": "Notion",
         "label": "Notion",
         "line": "",
+        "fallbackLine": "Notion Skills + Notion MCP server packaged as a marketplace plugin.",
         "plugin": "notion",
         "offer": "connect"
       }
@@ -1370,6 +1385,7 @@ const ROWS = [
         "name": "Slack",
         "label": "Slack",
         "line": "",
+        "fallbackLine": "Slack MCP server. Search channels, send messages, and perform other Slack actions through MCP-compatible clients.",
         "plugin": "slack",
         "offer": "connect"
       }
@@ -1628,6 +1644,7 @@ const ROWS = [
         "name": "Granola",
         "label": "Granola",
         "line": "",
+        "fallbackLine": "Your meetings in your workflow. Granola gives your bots access to what your team discussed, decided, and committed to.",
         "plugin": null,
         "offer": "byo"
       },
@@ -1635,6 +1652,7 @@ const ROWS = [
         "name": "Slack",
         "label": "Slack",
         "line": "",
+        "fallbackLine": "Slack MCP server. Search channels, send messages, and perform other Slack actions through MCP-compatible clients.",
         "plugin": "slack",
         "offer": "connect"
       },
@@ -1642,6 +1660,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -1772,6 +1791,7 @@ const ROWS = [
         "name": "Slack",
         "label": "Slack",
         "line": "",
+        "fallbackLine": "Slack MCP server. Search channels, send messages, and perform other Slack actions through MCP-compatible clients.",
         "plugin": "slack",
         "offer": "connect"
       },
@@ -1779,6 +1799,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -1786,6 +1807,7 @@ const ROWS = [
         "name": "Granola",
         "label": "Granola",
         "line": "",
+        "fallbackLine": "Your meetings in your workflow. Granola gives your bots access to what your team discussed, decided, and committed to.",
         "plugin": null,
         "offer": "byo"
       }
@@ -1983,6 +2005,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -2068,6 +2091,7 @@ const ROWS = [
         "name": "Notion",
         "label": "Notion",
         "line": "",
+        "fallbackLine": "Notion Skills + Notion MCP server packaged as a marketplace plugin.",
         "plugin": "notion",
         "offer": "connect"
       },
@@ -2075,6 +2099,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -2202,6 +2227,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "The CRM: accounts, contacts and pipeline.",
         "plugin": null,
         "offer": "byo"
       },
@@ -2237,6 +2263,7 @@ const ROWS = [
         "name": "Granola",
         "label": "Granola",
         "line": "",
+        "fallbackLine": "An AI notepad for meetings: notes and transcripts.",
         "plugin": null,
         "offer": "byo"
       }
@@ -2469,6 +2496,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -2476,6 +2504,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -2483,6 +2512,7 @@ const ROWS = [
         "name": "Granola",
         "label": "Granola",
         "line": "",
+        "fallbackLine": "Your meetings in your workflow. Meeting notes, decisions, and commitments.",
         "plugin": null,
         "offer": "byo"
       },
@@ -2567,6 +2597,7 @@ const ROWS = [
         "name": "Notion",
         "label": "Notion",
         "line": "",
+        "fallbackLine": "Notion Skills + Notion MCP server packaged as a marketplace plugin.",
         "plugin": "notion",
         "offer": "connect"
       }
@@ -2990,6 +3021,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -2997,6 +3029,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -3011,6 +3044,7 @@ const ROWS = [
         "name": "Google Sheets",
         "label": "Google Sheets",
         "line": "",
+        "fallbackLine": "Read and write Google Sheets.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -3358,6 +3392,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "The CRM: accounts, contacts and pipeline.",
         "plugin": null,
         "offer": "byo"
       },
@@ -3386,6 +3421,7 @@ const ROWS = [
         "name": "Granola",
         "label": "Granola",
         "line": "",
+        "fallbackLine": "An AI notepad for meetings: notes and transcripts.",
         "plugin": null,
         "offer": "byo"
       },
@@ -3494,6 +3530,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -3501,6 +3538,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -3508,6 +3546,7 @@ const ROWS = [
         "name": "Slack",
         "label": "Slack",
         "line": "",
+        "fallbackLine": "Slack MCP server. Search channels, send messages, and perform other Slack actions through MCP-compatible clients.",
         "plugin": "slack",
         "offer": "connect"
       },
@@ -3515,6 +3554,7 @@ const ROWS = [
         "name": "Notion",
         "label": "Notion",
         "line": "",
+        "fallbackLine": "Notion Skills + Notion MCP server packaged as a marketplace plugin.",
         "plugin": "notion",
         "offer": "connect"
       },
@@ -4179,6 +4219,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "The CRM: accounts, contacts and pipeline.",
         "plugin": null,
         "offer": "byo"
       }
@@ -4442,6 +4483,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -4900,6 +4942,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -4963,6 +5006,7 @@ const ROWS = [
         "name": "Notion",
         "label": "Notion",
         "line": "",
+        "fallbackLine": "Notion Skills + Notion MCP server packaged as a marketplace plugin.",
         "plugin": "notion",
         "offer": "connect"
       }
@@ -5108,6 +5152,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -5115,6 +5160,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -5129,6 +5175,7 @@ const ROWS = [
         "name": "Google Sheets",
         "label": "Google Sheets",
         "line": "",
+        "fallbackLine": "Read and write Google Sheets.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -5136,6 +5183,7 @@ const ROWS = [
         "name": "Ashby",
         "label": "Ashby",
         "line": "",
+        "fallbackLine": "Search candidates, prep interviews, and manage pipeline tasks.",
         "plugin": null,
         "offer": "byo"
       }
@@ -5424,6 +5472,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -5431,6 +5480,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -5438,6 +5488,7 @@ const ROWS = [
         "name": "Google Sheets",
         "label": "Google Sheets",
         "line": "",
+        "fallbackLine": "Read and write Google Sheets.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -5821,6 +5872,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "The CRM: accounts, contacts and pipeline.",
         "plugin": null,
         "offer": "byo"
       },
@@ -5842,6 +5894,7 @@ const ROWS = [
         "name": "Granola",
         "label": "Granola",
         "line": "",
+        "fallbackLine": "An AI notepad for meetings: notes and transcripts.",
         "plugin": null,
         "offer": "byo"
       },
@@ -6249,7 +6302,7 @@ const ROWS = [
       "shape": "squircle"
     },
     "description": "Runs your team's projects from Notion: one row per project, a channel per project, and tasks your specialist bots claim. You decide, agents execute, and it never does the specialist work itself.",
-    "instructions": "Runs your team's projects from Notion: one row per project, a channel per project, and tasks your specialist bots claim. You decide, agents execute, and it never does the specialist work itself.",
+    "instructions": "",
     "skills": [
       {
         "name": "Titanium Bot project ops",
@@ -6266,6 +6319,7 @@ const ROWS = [
         "name": "Notion",
         "label": "Notion",
         "line": "",
+        "fallbackLine": "Notion Skills + Notion MCP server packaged as a marketplace plugin.",
         "plugin": "notion",
         "offer": "connect"
       },
@@ -6273,6 +6327,7 @@ const ROWS = [
         "name": "Slack",
         "label": "Slack",
         "line": "",
+        "fallbackLine": "Slack MCP server. Search channels, send messages, and perform other Slack actions through MCP-compatible clients.",
         "plugin": "slack",
         "offer": "connect"
       }
@@ -6340,6 +6395,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "The CRM: accounts, contacts and pipeline.",
         "plugin": null,
         "offer": "byo"
       }
@@ -6785,6 +6841,7 @@ const ROWS = [
         "name": "Google Sheets",
         "label": "Google Sheets",
         "line": "",
+        "fallbackLine": "Read and write Google Sheets.",
         "plugin": "google",
         "offer": "connect"
       }
@@ -6939,6 +6996,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -6946,6 +7004,7 @@ const ROWS = [
         "name": "Google Sheets",
         "label": "Google Sheets",
         "line": "",
+        "fallbackLine": "Read and write Google Sheets.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -6953,6 +7012,7 @@ const ROWS = [
         "name": "Ashby",
         "label": "Ashby",
         "line": "",
+        "fallbackLine": "Search candidates, prep interviews, and manage pipeline tasks.",
         "plugin": null,
         "offer": "byo"
       }
@@ -7287,6 +7347,7 @@ const ROWS = [
         "name": "X",
         "label": "X",
         "line": "",
+        "fallbackLine": "Search posts, read timelines, pull trends, and manage bookmarks.",
         "plugin": "x",
         "offer": "page"
       }
@@ -7363,8 +7424,8 @@ const ROWS = [
       "color": "#a996f5",
       "shape": "circle"
     },
-    "description": "A newspaper customized to you. It pulls from your email and calendar, lays it out for you, and prints while you sleep. Created by @karenxcheng",
-    "instructions": "A newspaper customized to you. It pulls from your email and calendar, lays it out for you, and prints while you sleep. Created by @karenxcheng",
+    "description": "A newspaper customized to you. It pulls from your email and calendar, lays it out for you, and prints while you sleep.",
+    "instructions": "",
     "skills": [
       {
         "name": "Morning newspaper bootstrap",
@@ -7415,6 +7476,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -7422,6 +7484,7 @@ const ROWS = [
         "name": "Google Calendar",
         "label": "Google Calendar",
         "line": "",
+        "fallbackLine": "Search events and schedule meetings.",
         "plugin": "google",
         "offer": "connect"
       },
@@ -7429,6 +7492,7 @@ const ROWS = [
         "name": "Slack",
         "label": "Slack",
         "line": "",
+        "fallbackLine": "Slack MCP server. Search channels, send messages, and perform other Slack actions through MCP-compatible clients.",
         "plugin": "slack",
         "offer": "connect"
       }
@@ -7578,6 +7642,7 @@ const ROWS = [
         "name": "Salesforce",
         "label": "Salesforce",
         "line": "",
+        "fallbackLine": "The CRM: accounts, contacts and pipeline.",
         "plugin": null,
         "offer": "byo"
       },
@@ -7696,6 +7761,7 @@ const ROWS = [
         "name": "X",
         "label": "X",
         "line": "",
+        "fallbackLine": "Search posts, read timelines, pull trends, and manage bookmarks.",
         "plugin": "x",
         "offer": "page"
       }
@@ -7833,7 +7899,7 @@ const ROWS = [
       "shape": "squircle"
     },
     "description": "A writing partner for drafting and revising essays, emails, docs, and other prose. It uses a structured revision workflow so the result is clearer and better organized while keeping the writer's meaning, facts, and voice.",
-    "instructions": "A writing partner for drafting and revising essays, emails, docs, and other prose. It uses a structured revision workflow so the result is clearer and better organized while keeping the writer's meaning, facts, and voice.",
+    "instructions": "",
     "skills": [
       {
         "name": "Writing revision",
@@ -7900,6 +7966,7 @@ const ROWS = [
         "name": "Notion",
         "label": "Notion",
         "line": "",
+        "fallbackLine": "Notion Skills + Notion MCP server packaged as a marketplace plugin.",
         "plugin": "notion",
         "offer": "connect"
       },
@@ -7907,6 +7974,7 @@ const ROWS = [
         "name": "Slack",
         "label": "Slack",
         "line": "",
+        "fallbackLine": "Slack MCP server. Search channels, send messages, and perform other Slack actions through MCP-compatible clients.",
         "plugin": "slack",
         "offer": "connect"
       },
@@ -7914,6 +7982,7 @@ const ROWS = [
         "name": "Gmail",
         "label": "Gmail",
         "line": "",
+        "fallbackLine": "Search, read, draft, and manage email.",
         "plugin": "google",
         "offer": "connect"
       },

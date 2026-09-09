@@ -405,21 +405,46 @@ try {
     await page.waitForTimeout(400);
     const appRows = await page.$$eval("[data-integration]", (els) => els.map((el) => ({
       id: el.dataset.integration,
+      app: el.dataset.app ?? "",
+      title: el.querySelector("strong")?.textContent?.trim() ?? "",
       offer: el.dataset.appOffer ?? "",
       line: el.querySelector("small")?.textContent?.trim() ?? "",
       add: el.querySelector("[data-add-integration]") != null,
       installed: /installed/i.test(el.querySelector(".status-pill")?.textContent ?? ""),
       unavailable: /not available yet/i.test(el.textContent ?? ""),
+      text: (el.textContent ?? "").replace(/\s+/g, " "),
     })));
     const declaredApps = appsOf(row);
     if (appRows.length === 0) skip(`${row.name}: the integrations block`, "this row names no apps");
     else {
-      check(appRows.every((app) => app.installed || app.add || app.unavailable || /nothing to install/.test(app.line) || app.offer === "page"),
+      check(appRows.every((app) => app.installed || app.add || app.unavailable || /nothing to install|the same connection as above/.test(app.text) || app.offer === "page"),
         `${row.name}: every app carries one of the three controls`,
         appRows.map((app) => `${app.id}:${app.installed ? "installed" : app.add ? "add" : app.offer}`).join(", "));
       check(!appRows.some((app) => app.offer === "page" && app.add), `${row.name}: and a row that installs nothing offers no Add`);
       check(!appRows.some((app) => app.offer === "byo" && app.add), `${row.name}: and neither does one this box has no plugin for`);
-      const sentences = declaredApps.map((app) => String(app.line ?? "").trim()).filter(Boolean);
+      // EVERY row says what the app is for. It used to be asserted only where the catalog kept the
+      // bot's own sentence, which excused exactly the rows that had lost theirs and shipped a name,
+      // a pill and nothing else.
+      const bare = appRows.filter((app) => app.line.length === 0);
+      check(bare.length === 0, `${row.name}: every app row says what the app is for`,
+        bare.map((app) => `${app.app || app.id} [${oneLine(app.text, 80)}]`).join(", "));
+      // And two surfaces of one plugin are two rows a person can tell apart, with one Add between.
+      const byPlugin = new Map();
+      for (const app of appRows) {
+        if (app.offer === "byo") continue;
+        byPlugin.set(app.id, [...(byPlugin.get(app.id) ?? []), app]);
+      }
+      for (const [pluginId, group] of byPlugin) {
+        if (group.length < 2) continue;
+        check(new Set(group.map((app) => app.title)).size === group.length,
+          `${row.name}: the ${group.length} ${pluginId} surfaces are drawn as different rows`,
+          group.map((app) => app.title).join(" / "));
+        check(group.filter((app) => app.add).length <= 1, `${row.name}: and they share one Add`,
+          group.map((app) => `${app.title}:${app.add ? "add" : "-"}`).join(", "));
+      }
+      // `line` where the row has its own sentence, `fallbackLine` where the generator demoted one it
+      // shares with another bot. Both are drawn, so both are looked for.
+      const sentences = declaredApps.map((app) => String(app.line ?? "").trim() || String(app.fallbackLine ?? "").trim()).filter(Boolean);
       if (sentences.length === 0) skip(`${row.name}: the apps' own sentences`, "this row writes none");
       else {
         const onScreen = await page.$eval("[data-bot-apps]", (el) => el.textContent.replace(/\s+/g, " "));
@@ -539,7 +564,19 @@ try {
     if (Number.isFinite(claimed)) {
       check(claimed <= newDocs.length, "and the count of playbooks it claims is the count it added",
         `${claimed} claimed, ${newDocs.length} added`);
+    } else if (wantedSkills.length > 0) {
+      // The clause was dropped from every receipt of every bot for a while: the count was read off
+      // a list with Number(), which is NaN, so the card said nothing about the documents it filed.
+      check(false, "and it names the playbooks it filed", oneLine(receipt, 200));
     }
+    // AND NOTHING IT CARRIES A PLUGIN FOR IS CALLED AN APP WE DO NOT CARRY. That sentence is what
+    // a customer reads after the press, and it disagreed with the Add button drawn above it.
+    const clause = receipt.split(/[.;]/).find((part) => /not something we carry yet/i.test(part)) ?? "";
+    const notCarried = clause.replace(/\s*(?:is|are)\s+not something we carry yet[\s\S]*/i, "")
+      .split(/,\s*/).map((name) => name.trim()).filter(Boolean);
+    const withPlugin = new Set(appsOf(subject).filter((app) => app.plugin ?? app.pluginId).map((app) => String(app.label ?? app.name)));
+    const wrong = notCarried.filter((name) => withPlugin.has(name));
+    check(wrong.length === 0, "and no app this box carries a plugin for is called one we do not carry", wrong.join(", "));
     await shot("receipt");
 
     // THE FIRST MESSAGE, on this one bot only.
@@ -569,9 +606,30 @@ try {
     await page.reload({ waitUntil: "load" });
     await page.waitForTimeout(3500);
     await openBots();
+    // The All view draws six rows per section, so the subject is searched for by name the way a
+    // person would, exactly as the page legs above do.
+    const searchAfterReload = await page.$("[data-bot-search]");
+    if (searchAfterReload != null && (await page.$$(`[data-bot-row="${subjectId}"]`)).length === 0) {
+      await searchAfterReload.fill(String(subject.name)).catch(() => {});
+      await page.waitForTimeout(900);
+    }
+    // AFTER A RELOAD THE ROW ALREADY KNOWS. The tab reads the roster once when it opens, so a bot
+    // that is on the box draws the pill rather than an Add, and there is no second press to make.
+    // The refusal underneath it is still there -- bot-setup's roster check, pinned in the unit
+    // suite -- and it is what an Add pressed from a stale page still lands on.
+    let pillAfterReload = null;
+    for (let n = 0; n < 20 && pillAfterReload == null; n += 1) {
+      pillAfterReload = await page.$(`[data-bot-row="${subjectId}"] .marketplace-bot-add-state`);
+      if (pillAfterReload == null) await page.waitForTimeout(500);
+    }
+    check(pillAfterReload != null, "a bot already on the box says so on a page that never added it",
+      pillAfterReload == null ? "the row still drew Add after a reload" : "on the roster");
     const secondTarget = await page.$(`[data-bot-row="${subjectId}"] [data-add-bot]`);
     if (secondTarget == null) {
-      skip("the second press", "the row draws no Add after a reload, so there was nothing to press");
+      const rosterAfter = await rosterOf();
+      const extra = added(rosterBeforeSecond, rosterAfter);
+      check(extra.length === 0, "and the roster is unmoved", extra.map(([, name]) => name).join(", "));
+      await shot("second-press");
     } else {
       await secondTarget.scrollIntoViewIfNeeded().catch(() => {});
       const second = await pressAtCentre(`[data-bot-row="${subjectId}"] [data-add-bot]`);

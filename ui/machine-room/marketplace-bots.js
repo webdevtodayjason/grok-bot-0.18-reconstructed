@@ -153,6 +153,11 @@
         name: text(row.name),
         label: text(row.label) || text(row.name),
         line: text(row.line ?? row.description),
+        // The sentence this bot wrote about the app, kept by the generator even when another bot
+        // wrote the same one. `line` is the sentence that is this row's alone; this is the shared
+        // one, and it is still the bot's own words about the app, so it is drawn rather than
+        // leaving a row with a name and nothing under it.
+        fallbackLine: text(row.fallbackLine),
         pluginId: text(row.pluginId ?? row.plugin),
         offer: text(row.offer) || (text(row.pluginId ?? row.plugin) ? "connect" : "byo"),
       }));
@@ -566,6 +571,14 @@
   let catalog = null;
   let catalogError = null;
   let installed = new Set();
+  // THE NAMES ALREADY ON THIS BOX, read once when the tab opens.
+  //
+  // "On the roster" used to be derived from `imports` alone -- this browser session's own Add
+  // outcomes -- so a reload drew a round "+" on all 72 rows and "Add bot" on every page, and the
+  // only way to find out was to press one and read the refusal. MEASURED ON THE R750 demo tenant
+  // 2026-09-09 after Recruiting Coordinator was added and confirmed on the roster. It is the same
+  // match the setup's own roster check uses: the agent's name equals the bot's.
+  let rosterNames = new Set();
   let container = null;
   let loading = false;
 
@@ -642,8 +655,7 @@
    */
   function featuredCardMarkup(bot) {
     const id = text(bot.id);
-    const outcome = imports.get(id);
-    const onRoster = outcome != null && (outcome.state === "done" || outcome.state === "already");
+    const onRoster = isOnRoster(bot);
     const skills = countOf(bot, "skills", listOf(bot.skills));
     const add = onRoster
       ? `<span class="status-pill success marketplace-bot-add-state" data-bot-added="${escapeHtml(id)}">on the roster</span>`
@@ -656,6 +668,20 @@
       + `<p style="margin:0">${escapeHtml(oneLine(bot.description))}</p>`
       + `<span class="tag-list" style="margin:0"><span class="tag">${escapeHtml(text(bot.category) || "Bots")}</span><span class="tag">${skills} skill${skills === 1 ? "" : "s"}</span></span>`
       + `</button>${add}</div>`;
+  }
+
+  /**
+   * Already here? Either this session added it, or the box was carrying it when the tab opened.
+   *
+   * A team pack is never one agent -- its members carry the pack's own prefix and its page counts
+   * them itself -- so the roster names are not consulted for one.
+   */
+  function isOnRoster(bot) {
+    const outcome = imports.get(text(bot && bot.id));
+    if (outcome != null && (outcome.state === "done" || outcome.state === "already")) return true;
+    if (isTeamPack(bot)) return false;
+    const name = text(bot && bot.name);
+    return name !== "" && rosterNames.has(name);
   }
 
   /** "by Anoop Baliga, from the community" on a community row; our own rows say only the team. */
@@ -674,8 +700,7 @@
    */
   function rowMarkup(bot) {
     const id = text(bot.id);
-    const outcome = imports.get(id);
-    const onRoster = outcome != null && (outcome.state === "done" || outcome.state === "already");
+    const onRoster = isOnRoster(bot);
     const add = onRoster
       ? `<span class="status-pill success marketplace-bot-add-state" data-bot-added="${escapeHtml(id)}">on the roster</span>`
       : `<button class="marketplace-bot-add" type="button" data-add-bot="${escapeHtml(id)}"`
@@ -710,7 +735,7 @@
   function listMarkup() {
     const bots = botsOf().filter((b) => matches(b) && inCategory(b, view.category));
     const total = botsOf().length;
-    const intro = `<div class="panel-intro"><p>A Bot is a ready-made agent: the facts it already knows, the playbooks it can run, the jobs it can run on its own, and the apps it uses. Add puts one on this box with all of that in place and it says hello in its own conversation. Its jobs arrive switched off, and nothing it needs is installed without you.</p><span class="status-pill">${total} bot${total === 1 ? "" : "s"}</span></div>`;
+    const intro = `<div class="panel-intro"><p>A Bot is a ready-made agent: the facts it already knows, the playbooks it can run, the jobs it can run on its own, and the apps it uses. The round Add on a row, or Import Bot on the bot's own page, puts one on this box with all of that in place and it says hello in its own conversation. Its jobs arrive switched off, and nothing it needs is installed without you.</p><span class="status-pill">${total} bot${total === 1 ? "" : "s"}</span></div>`;
     const search = `<div class="field" style="margin:0 0 12px"><label class="sr-only" for="marketplace-bot-search">Search bots</label><input id="marketplace-bot-search" class="search-input" type="search" data-bot-search autocomplete="off" placeholder="Search bots" value="${escapeHtml(view.query)}" /></div>`;
 
     if (bots.length === 0) {
@@ -780,8 +805,15 @@
     const paragraphs = memories
       .map((memory) => `<p class="marketplace-memory">${escapeHtml(text(memory.text ?? memory.description))}</p>`)
       .join("");
+    // A TEAM PACK SEEDS NOTHING. Its import creates one bot per member with the member's own
+    // written brief as its identity and never touches a memory store, so the footnote a single bot
+    // carries would be a promise the press does not keep. MEASURED ON THE R750 demo tenant
+    // 2026-09-09: the pack's Coordinator holds 0 memories after an import that reported done.
+    const hint = isTeamPack(bot)
+      ? "This is what the team is for. Adding it creates one bot per member, each with its own written brief as its identity; nothing here is written to a bot's memory."
+      : "These are seeded as the bot's own remembered facts when you add it, the first one is also what the bot is told it is, and you can edit or delete any of them from its Memory panel afterwards.";
     return `<div class="panel-card" data-bot-memories>${paragraphs}</div>`
-      + `<span class="field-hint">These are seeded as the bot's own remembered facts when you add it, the first one is also what the bot is told it is, and you can edit or delete any of them from its Memory panel afterwards.</span>`;
+      + `<span class="field-hint">${hint}</span>`;
   }
 
   function skillsMarkup(bot) {
@@ -792,7 +824,12 @@
         : "This bot has no playbooks; adding it creates the bot and nothing else.";
       return `<div class="empty-state">${escapeHtml(why)}</div>`;
     }
-    return `<div class="plugin-list" data-bot-skills>${skills.map((skill) => `<div class="setting-row"><div><strong>${escapeHtml(text(skill.name))}</strong><small>${escapeHtml(oneLine(skill.description))}</small></div></div>`).join("")}</div>`
+    // NOT oneLine. This block is where the "Use when…" sentence is the whole point, and oneLine cuts
+    // at 140 characters IN THE STRING, so a wider window never recovers it. MEASURED over the
+    // shipped catalog on this Mac 2026-09-09: 108 of 263 skill descriptions are longer than that,
+    // the longest 436, and six of Recruiting Coordinator's eight ended mid-sentence on the R750.
+    // oneLine still belongs on the list rows and the cards, where one line is the promise.
+    return `<div class="plugin-list" data-bot-skills>${skills.map((skill) => `<div class="setting-row"><div><strong>${escapeHtml(text(skill.name))}</strong><small>${escapeHtml(text(skill.description))}</small></div></div>`).join("")}</div>`
       + `<span class="field-hint">Each one is written into the box's shared library as its own playbook. The library is shared, so a playbook added here is offered to every bot on this box.</span>`;
   }
 
@@ -815,7 +852,9 @@
     const rows = routines.map((routine) => {
       // "Disabled by default." leads a lot of the source summaries, and the line under it says so
       // in our own words, so the sentence would be on the row twice.
-      const summary = oneLine(text(routine.summary).replace(/^disabled by default\.?\s*/i, ""));
+      // Whole, for the same reason the skill line is: 19 of the pack's 104 routine summaries are
+      // longer than a truncated line and the cadence is often in the tail.
+      const summary = text(routine.summary).replace(/^disabled by default\.?\s*/i, "").replace(/\s+/g, " ");
       const words = scheduleWords(routine);
       const when = text(routine.schedule)
         ? `${words || "On a schedule"} — off until you switch it on`
@@ -856,15 +895,32 @@
       return `<div class="empty-state">${escapeHtml(why)}</div>`;
     }
     let byo = 0;
+    // THE APP THE BOT NAMES IS THE TITLE, NOT THE PLUGIN THAT COVERS IT.
+    //
+    // One plugin covers several apps -- Gmail, Google Calendar, Google Sheets and Google Drive are
+    // all the Google Workspace connector -- and titling each row with the PLUGIN drew three rows
+    // that were the same string end to end, with an Add on each. MEASURED ON THE R750 demo tenant
+    // 2026-09-09: Account Research Desk drew four Google rows, three of them identical; 23 of 65
+    // community bots draw 2-4. So the title is the surface the bot asked for, the plugin is named
+    // under it, and only the first row for a plugin carries the Add -- the second press would
+    // install what the first already did.
+    const offered = new Set();
     const rows = apps.map((app) => {
       const plugin = app.pluginId ? pluginById(app.pluginId) : null;
-      const label = plugin ? text(plugin.name) : (app.label || app.name);
-      const line = app.line || (plugin ? oneLine(plugin.tagline || plugin.description) : "");
+      const label = app.label || app.name || (plugin ? text(plugin.name) : "");
+      const line = app.line || app.fallbackLine || (plugin ? oneLine(plugin.tagline || plugin.description) : "");
+      const through = plugin != null && text(plugin.name) && text(plugin.name) !== label
+        ? `through ${text(plugin.name)}`
+        : "";
       const here = plugin != null && installed.has(text(plugin.id));
+      const already = plugin != null && offered.has(text(plugin.id));
       let control;
       if (here) {
         control = `<span class="status-pill success">installed</span>`;
+      } else if (already) {
+        control = `<span class="marketplace-app-note">the same connection as above</span>`;
       } else if (plugin != null && plugin.installsNothing !== true && app.offer !== "page") {
+        offered.add(text(plugin.id));
         control = `<button class="ghost-button" type="button" data-add-integration="${escapeHtml(text(plugin.id))}">Add</button>`;
       } else if (plugin != null) {
         // Nothing to install, so no Add and no pill pretending there is a state to reach.
@@ -873,10 +929,13 @@
         byo += 1;
         control = `<span class="status-pill attention">not available yet</span>`;
       }
+      // data-integration stays the PLUGIN this row offers, which is what the Add is about; the app
+      // the bot named is carried beside it so a gate can tell three Google rows apart.
       const key = text(plugin ? plugin.id : app.name);
-      return `<div class="setting-row" data-integration="${escapeHtml(key)}" data-app-offer="${escapeHtml(plugin ? (plugin.installsNothing === true || app.offer === "page" ? "page" : "connect") : "byo")}"><div>`
+      return `<div class="setting-row" data-integration="${escapeHtml(key)}" data-app="${escapeHtml(text(app.name) || label)}" data-app-offer="${escapeHtml(plugin ? (plugin.installsNothing === true || app.offer === "page" ? "page" : "connect") : "byo")}"><div>`
         + `<strong>${escapeHtml(label)}</strong>`
         + (line ? `<small>${escapeHtml(line)}</small>` : "")
+        + (through ? `<small class="marketplace-app-through">${escapeHtml(through)}</small>` : "")
         + `</div>${control}</div>`;
     }).join("");
     const hint = byo > 0
@@ -927,9 +986,21 @@
     const apps = outcome.apps ?? {};
     const line = (n, one, many) => `${n} ${n === 1 ? one : many}`;
     const parts = [];
+    // FACTS, NOT MEMORIES. The block above shows the catalog's memory PARAGRAPHS; the store holds
+    // the facts those paragraphs were split into, and this number is the store's. Saying "8
+    // memories" under a page that drew 5 paragraphs is a card disagreeing with the page it sits on,
+    // and with its own sentence below, which has always said facts.
     const memoriesAdded = Number(memories.added ?? 0);
-    if (memoriesAdded > 0) parts.push(line(memoriesAdded, "memory", "memories"));
-    const skillsImported = Number(skills.imported ?? listOf(outcome.skills).length ?? 0);
+    if (memoriesAdded > 0) parts.push(line(memoriesAdded, "fact it remembers", "facts it remembers"));
+    // `imported` and `reused` are LISTS, the shape bot-setup.js returns. Number([...]) is NaN, so
+    // the playbook clause was dropped on every import of every bot while the sentence underneath it
+    // -- built by the setup, which counts the lists -- named the same documents. MEASURED ON THE
+    // R750 demo tenant 2026-09-09: "It has 8 memories, 4 jobs" over "8 playbooks" in one card.
+    // Lists, the shape both setup paths return. A count is still accepted so an outcome written by
+    // an older build is read rather than silently dropped -- which is exactly what Number([...])
+    // did to every import until this line was fixed.
+    const countOfEither = (value) => (Array.isArray(value) ? value.length : (Number.isFinite(Number(value)) ? Number(value) : 0));
+    const skillsImported = countOfEither(skills.imported) + countOfEither(skills.reused);
     if (skillsImported > 0) parts.push(line(skillsImported, "playbook", "playbooks"));
     const created = listOf(routines.created).length;
     if (created > 0) parts.push(`${line(created, "job", "jobs")}, switched off`);
@@ -1094,7 +1165,7 @@
     if (isTeamPack(bot)) return teamPageMarkup(bot);
     const outcome = imports.get(text(bot.id));
     const busy = outcome != null && outcome.state === "running";
-    const onRoster = outcome != null && (outcome.state === "done" || outcome.state === "already");
+    const onRoster = isOnRoster(bot);
     // Offline (index.html fell back to the demo factory) there is no gateway behind this page, so
     // createAgent would fail after the click rather than before it. A button that cannot work is
     // not drawn; the pill says why in its place.
@@ -1109,7 +1180,11 @@
       ? `<span class="status-pill">offline — no gateway to add through</span>`
       : onRoster
         ? `<span class="status-pill success" data-bot-on-roster="${escapeHtml(text(bot.id))}">on the roster</span>`
-        : `<button class="primary-button" type="button" data-import-bot="${escapeHtml(text(bot.id))}"${busy ? " disabled" : ""}>${busy ? "Adding…" : "Add bot"}</button>`;
+        // IMPORT BOT, the words on Jason's screenshot 3, and the same verb the pack beside it uses
+        // for Import team -- the tab had drawn "Add bot" here and "Import team" there, two words for
+        // one gesture. The round control on a list row stays "+", which is what screenshot 2 draws;
+        // the intro sentence names both, and docs/BOTS.md says why the two differ.
+        : `<button class="primary-button" type="button" data-import-bot="${escapeHtml(text(bot.id))}"${busy ? " disabled" : ""}>${busy ? "Importing…" : "Import Bot"}</button>`;
     const detailError = detailErrors.get(text(bot.id));
     const detailNote = detailError
       ? `<div class="panel-card" style="outline:1px solid var(--amber-500)" data-bot-detail-error><p>${escapeHtml(`This bot's own row could not be read from the host, so what is below is only what the list carries and adding it is refused: ${detailError}`)}</p></div>`
@@ -1181,6 +1256,7 @@
       };
       catalogError = null;
       installed = await readInstalledIds(gateway, catalog.plugins).catch(() => new Set());
+      rosterNames = await readRosterNames(gateway).catch(() => rosterNames);
     } catch (error) {
       const message = String(error?.message ?? error);
       catalogError = UNKNOWN_COMMAND.test(message)
@@ -1190,6 +1266,16 @@
       loading = false;
       paint();
     }
+  }
+
+  /**
+   * The names on the box, for the "on the roster" pill. One read per tab open; a box with a
+   * hundred agents answers it in one call, and a failure leaves the previous answer alone rather
+   * than drawing every bot as unadded.
+   */
+  async function readRosterNames(gateway) {
+    const roster = agentRecords(await gateway.call("listAgents", {}));
+    return new Set(roster.map((agent) => text(agent && agent.name)).filter(Boolean));
   }
 
   async function refreshInstalled() {
@@ -1284,9 +1370,11 @@
       // The names THIS run asked for that the read-back confirmed. Not `result.skills`, which is
       // the shared library filtered by those names: this box holds several rows under one name,
       // left by earlier imports, and the receipt read "13 playbooks" for a bot carrying one.
+      // Lists, the same shape bot-setup.js returns, so the receipt has one shape to read rather
+      // than two that look alike.
       skills: {
-        imported: listOf(result.imported).filter((name) => !listOf(result.missing).includes(name)).length,
-        reused: 0,
+        imported: listOf(result.imported).filter((name) => !listOf(result.missing).includes(name)),
+        reused: [],
         skipped: listOf(result.skipped),
       },
       routines: { created: [], notCreated: [] },
@@ -1439,6 +1527,10 @@
         })
         : await fallbackSetUp(gateway, bot);
       imports.set(id, outcome && typeof outcome === "object" ? outcome : { state: "failed", message: "the setup answered with nothing" });
+      // The list behind this page has to agree with the card in front of it, including after a
+      // reload, so the name goes into the roster set the moment the box confirms it.
+      const landed = text(outcome && outcome.agent && outcome.agent.name) || text(bot.name);
+      if (outcome && (outcome.state === "done" || outcome.state === "already") && landed) rosterNames.add(landed);
       // On screen first: the adapter refresh and the connector re-read below are both round trips
       // to the box, and the new bot must not wait behind them to be drawn.
       paint();
@@ -1590,7 +1682,7 @@
      */
     preview(state, what) {
       const kept = {
-        catalog, installed, view: { ...view },
+        catalog, installed, roster: rosterNames, view: { ...view },
         imports: new Map(imports), details: new Map(details), errors: new Map(detailErrors),
       };
       try {
@@ -1600,6 +1692,7 @@
           categories: listOf(state && state.categories),
         };
         installed = new Set(listOf(state && state.installed).map(text));
+        rosterNames = new Set(listOf(state && state.roster).map(text).filter(Boolean));
         view.category = text(state && state.category) || "All";
         view.query = String((state && state.query) ?? "");
         view.botId = text(state && state.botId) || null;
@@ -1617,6 +1710,7 @@
       } finally {
         catalog = kept.catalog;
         installed = kept.installed;
+        rosterNames = kept.roster;
         Object.assign(view, kept.view);
         imports.clear(); for (const [k, v] of kept.imports) imports.set(k, v);
         details.clear(); for (const [k, v] of kept.details) details.set(k, v);

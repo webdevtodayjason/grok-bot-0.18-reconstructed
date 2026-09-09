@@ -251,6 +251,47 @@ test("every app maps to a plugin this catalog carries, and Google claims only wh
   }
 });
 
+// ---------------------------------------------------------------- f2. the setup reads these rows
+//
+// THE SHAPE, AGAINST A REAL ROW. bot-setup.js reads `pluginId` and `description`; the generator
+// writes `plugin` and `line`. Every fixture in the suite wrote the reader's spelling, so the Add
+// path was green while it told a customer on the R750 that Slack, Notion, Linear, Gmail, Google
+// Calendar and Google Sheets "are not something we carry yet" -- on the page that had just drawn
+// an Add for them. This case builds the plan from the shipped catalog instead.
+test("the Add path plans a shipped row's apps against the plugins this catalog carries", async () => {
+  const { installBotSetupModule } = await import("./helpers/bot-setup-console.mjs");
+  const { module: setup } = installBotSetupModule();
+  const bot = community.find((row) => row.id === "mr-toms");
+  assert.ok(bot != null, "the catalog no longer carries mr-toms");
+  const plan = setup.planApps(bot, ["slack"]);
+  assert.deepEqual(plan.connected.map((app) => app.label), ["Slack"], "an installed plugin was reported as one we do not carry");
+  for (const label of ["Notion", "Linear", "Gmail", "Google Calendar", "Google Sheets"]) {
+    assert.ok(plan.addable.some((app) => app.label === label), `${label} has a plugin in this catalog and the plan filed it elsewhere`);
+  }
+  for (const label of ["Figma", "Granola", "Ashby"]) {
+    assert.ok(plan.byo.some((app) => app.label === label), `${label} has no plugin and the plan claimed one`);
+  }
+  const carried = new Set(["Slack", "Notion", "Linear", "Gmail", "Google Calendar", "Google Sheets"]);
+  assert.deepEqual(plan.byo.filter((app) => carried.has(app.label)), [], "an app with a plugin was offered as add-your-own");
+  // And every row the plan carries says what the bot does with it.
+  for (const app of [...plan.connected, ...plan.addable, ...plan.informational, ...plan.byo]) {
+    assert.ok(typeof app.description === "string", `${app.label} lost its sentence in the plan`);
+  }
+});
+
+// EVERY APP ROW HAS SOMETHING TO SAY. A repeated sentence is the vendor's tagline rather than this
+// bot's reason, so it ships as `fallbackLine` and loses to our own plugin's words -- but it is
+// never dropped, because 19 of the rows that lost theirs have no plugin to fall back on either and
+// were drawn as a name, "not available yet", and nothing at all.
+test("no app row would be drawn without a line", () => {
+  for (const bot of community) {
+    for (const app of bot.apps ?? []) {
+      const has = (app.line ?? "").length > 0 || (app.fallbackLine ?? "").length > 0 || app.plugin != null;
+      assert.ok(has, `bot ${bot.id} draws "${app.name}" with no line, no shared line and no plugin`);
+    }
+  }
+});
+
 // ---------------------------------------------------------------- g. the catalog holds together
 
 test("the catalog validates and serves 7 first-party rows before 65 community ones", () => {
@@ -271,8 +312,17 @@ test("the catalog validates and serves 7 first-party rows before 65 community on
     assert.equal(bot.tile.file, undefined, `bot ${bot.id} names a tile image; community tiles are drawn, never fetched`);
     assert.match(bot.tile.color, /^#[0-9a-f]{6}$/, `bot ${bot.id} tile colour "${bot.tile.color}"`);
     assert.ok(["circle", "squircle", "rounded", "square"].includes(bot.tile.shape), `bot ${bot.id} tile shape "${bot.tile.shape}" is not one the console draws`);
-    assert.ok(bot.instructions.length > 0, `bot ${bot.id} has no identity`);
-    assert.equal(bot.instructions, bot.memories[0].text, `bot ${bot.id} identity is not its first memory`);
+    // A row with memories is identified by its first one. A row the scrape gives NO memories carries
+    // no instructions at all: personaFor writes `description + blank line + instructions`, so
+    // falling back to the description handed four agents their own bio twice as their whole
+    // identity. Empty means the description alone, and the generator refuses the two being equal.
+    if (bot.memories == null) {
+      assert.equal(bot.instructions, "", `bot ${bot.id} has no memories, so its identity must be its description alone`);
+    } else {
+      assert.ok(bot.instructions.length > 0, `bot ${bot.id} has no identity`);
+      assert.equal(bot.instructions, bot.memories[0].text, `bot ${bot.id} identity is not its first memory`);
+    }
+    assert.notEqual(bot.instructions, bot.description, `bot ${bot.id} would be told its own description twice`);
   }
 
   // "From Grok Bot Team" was 44 of the scrape's 69 rows and is not a topic. It is dropped rather

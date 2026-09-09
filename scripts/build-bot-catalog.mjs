@@ -97,8 +97,12 @@ const APPS = {
   "linear": { label: "Linear", plugin: "linear", offer: "connect" },
   "x": { label: "X", plugin: "x", offer: "page" },
   "figma": { label: "Figma", plugin: null, offer: "byo" },
-  "granola": { label: "Granola", plugin: null, offer: "byo" },
-  "salesforce": { label: "Salesforce", plugin: null, offer: "byo" },
+  // `about` is OUR one line about an app we carry no plugin for, used only where the scrape gives
+  // this bot no sentence of its own. Without it the page drew a name, "not available yet" and
+  // nothing else. The build refuses any row that would go out bare, so a new name in a re-scrape
+  // asks a person for one line rather than shipping an empty row.
+  "granola": { label: "Granola", plugin: null, offer: "byo", about: "An AI notepad for meetings: notes and transcripts." },
+  "salesforce": { label: "Salesforce", plugin: null, offer: "byo", about: "The CRM: accounts, contacts and pipeline." },
   "hex": { label: "Hex", plugin: null, offer: "byo" },
   "databricks sql": { label: "Databricks SQL", plugin: null, offer: "byo" },
   "gong": { label: "Gong", plugin: null, offer: "byo" },
@@ -270,7 +274,7 @@ for (const row of overlay.schedule) if (!byId.has(row.id)) failures.push(`overla
 
 const DROPPED = new Set(overlay.drop.map((row) => row.id));
 const CATEGORY = new Map(overlay.category.map((row) => [row.id, row]));
-const SCHEDULE = new Map(overlay.schedule.map((row) => [`${row.id} ${row.routine}`, row]));
+const SCHEDULE = new Map(overlay.schedule.map((row) => [`${row.id}\u0000${row.routine}`, row]));
 
 /** The overlay rows for one bot and one path, applied in file order. */
 function overlaid(id, where, value) {
@@ -348,7 +352,7 @@ for (const bot of bots) {
     // "Disabled by default." is a statement about the upstream product, and the page already says
     // every routine lands switched off, so the sentence is stripped rather than shown twice.
     const summary = copy(bot.id, `routines[${index}].summary`, routine.summary).replace(/^Disabled by default\.\s*/i, "");
-    const pinned = SCHEDULE.get(`${bot.id} ${name}`);
+    const pinned = SCHEDULE.get(`${bot.id}\u0000${name}`);
     if (pinned != null) { applied.add(`schedule:${bot.id}:${name}`); return { name, summary, schedule: pinned.cron, scheduleNote: pinned.note }; }
     const resolved = resolveRoutine(name, summary);
     return { name, summary, schedule: resolved.schedule, scheduleNote: resolved.note };
@@ -360,11 +364,24 @@ for (const bot of bots) {
     const known = APPS[raw.toLowerCase()];
     if (known == null) { failures.push(`bot "${bot.id}" names the app "${raw}", which is not in the mapping table`); continue; }
     const written = collapse(entry.description);
-    const own = written.length > 0 && (lineCount.get(written) ?? 0) < 2;
+    // THE SENTENCE IS NEVER DROPPED, only demoted.
+    //
+    // A sentence that repeats verbatim across bots is the vendor's tagline rather than this bot's
+    // reason, so it does not win over our own plugin's words -- but dropping it left 99 of 244 app
+    // rows with no line, and 19 of those have no plugin to fall back on either, so the page drew a
+    // name, "not available yet", and nothing at all (Salesforce, Granola, Ashby: MEASURED on the
+    // R750 demo tenant 2026-09-09). It ships as `fallbackLine` instead, and the page draws it under
+    // the app's own line and above the plugin's tagline, so no row is ever drawn bare.
+    const shared = written.length > 0 && (lineCount.get(written) ?? 0) >= 2;
+    const sentence = written.length > 0
+      ? copy(bot.id, `integrations[${bot.integrations.indexOf(entry)}].description`, written)
+      : "";
+    const fallback = shared ? sentence : (sentence ? "" : collapse(known.about ?? ""));
     apps.push({
       name: raw,
       label: known.label,
-      line: own ? copy(bot.id, `integrations[${bot.integrations.indexOf(entry)}].description`, written) : "",
+      line: shared ? "" : sentence,
+      ...(fallback ? { fallbackLine: fallback } : {}),
       plugin: known.plugin,
       offer: known.offer,
     });
@@ -396,7 +413,12 @@ for (const bot of bots) {
     // `description + blank line + instructions`. So a community row's `instructions` is its first
     // memory: the paragraph that says what this bot is. One paragraph is therefore duplicated
     // between the identity and the memory store on every row, deliberately, and docs/BOTS.md says so.
-    instructions: memories[0]?.text ?? copy(bot.id, "description", bot.description),
+    // Empty when the scrape gives the bot no memories, NOT the description again: personaFor
+    // composes `description + blank line + instructions`, so falling back to the description told
+    // four agents (chief-health, projects-manager, the-morning-newspaper, writing-bot) their own
+    // one-line bio twice as their whole identity. Empty means the description alone, and the check
+    // below refuses any row where the two strings are the same.
+    instructions: memories[0]?.text ?? "",
     skills,
     integrations,
     ...(apps.length > 0 ? { apps } : {}),
@@ -423,6 +445,32 @@ const scan = (value, where) => {
 for (const row of rows) scan(row, `bot "${row.id}"`);
 for (const row of rows) for (const memory of row.memories ?? []) {
   for (const fact of memory.facts) if (collapse(fact).length > FACT_LIMIT) failures.push(`bot "${row.id}" has a fact of ${collapse(fact).length} characters, over the host's cap`);
+}
+
+// THE IDENTITY IS NEVER THE SAME SENTENCE TWICE. personaFor writes `description + blank line +
+// instructions`, so a row whose instructions ARE its description hands the agent its own bio twice
+// as its whole identity. Four rows did that before this check existed.
+for (const row of rows) {
+  if (row.instructions.length > 0 && collapse(row.instructions) === collapse(row.description)) {
+    failures.push(`bot "${row.id}" has instructions identical to its description, which would be its identity written twice`);
+  }
+}
+
+// NO APP ROW GOES OUT BARE. With a plugin the page falls to the plugin's own tagline; with none,
+// the row would be a name and a pill and nothing that says what the app is.
+for (const row of rows) for (const app of row.apps ?? []) {
+  if (!app.line && !app.fallbackLine && app.plugin == null) {
+    failures.push(`bot "${row.id}" names "${app.name}", which has no sentence in the scrape and no plugin: give it an \`about\` line in the mapping table`);
+  }
+}
+
+// AN UPSTREAM SOCIAL HANDLE IS A SECOND CREDIT LINE FROM ANOTHER PRODUCT'S PLATFORM. The row
+// already carries "by <creator>, from the community"; a trailing "Created by @handle" ships that
+// credit again, in a form the person cannot act on here. The overlay strips the one the scrape
+// carries and this refuses the next one a re-scrape brings in.
+for (const row of rows) {
+  const handle = JSON.stringify(row).match(/Created by @[A-Za-z0-9_]+/);
+  if (handle != null) failures.push(`bot "${row.id}" still carries an upstream handle: ${handle[0]}`);
 }
 
 if (failures.length > 0) {

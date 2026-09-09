@@ -80,7 +80,26 @@
 
   const skillsOf = (bot) => listOf(bot && bot.skills).filter((s) => s != null && typeof s === "object" && text(s.name));
   const routinesOf = (bot) => listOf(bot && bot.routines).filter((r) => r != null && typeof r === "object" && text(r.name));
-  const appsOf = (bot) => listOf(bot && bot.apps).filter((a) => a != null && typeof a === "object");
+  /**
+   * THE ROW IS NORMALISED HERE, THE WAY THE PAGE HALF NORMALISES IT.
+   *
+   * The generator writes the plugin id under `plugin` and the bot's own sentence under `line`
+   * (scripts/build-bot-catalog.mjs), while this file and marketplace-bots.js both read `pluginId`
+   * and `description`. The page half already reconciled that at appsOf(); this half did not, so
+   * every generated app arrived with an empty plugin id, fell into the "add your own" bucket, and
+   * the receipt told a customer that Slack, Notion, Linear, Gmail, Google Calendar and Google
+   * Sheets are apps we do not carry -- on the same page that had just drawn an Add button for
+   * them. MEASURED ON THE R750 demo tenant 2026-09-09 on one press of Add for mr-toms. Both
+   * spellings are accepted so a host older than this wave, and every hand-written fixture, still
+   * read the same.
+   */
+  const appsOf = (bot) => listOf(bot && bot.apps)
+    .filter((a) => a != null && typeof a === "object")
+    .map((row) => ({
+      ...row,
+      pluginId: text(row.pluginId ?? row.plugin),
+      description: text(row.description ?? row.line),
+    }));
 
   /**
    * The identity the agent runs with. The host has ONE identity field — the agent's description —

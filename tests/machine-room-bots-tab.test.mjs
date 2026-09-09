@@ -82,6 +82,12 @@ const SEO = {
   ],
 };
 
+// Three surfaces of one plugin, the shape 23 of the 65 community rows carry.
+const GOOGLE_APPS = [
+  { name: "Gmail", label: "Gmail", line: "Search, read and draft mail.", pluginId: "google", offer: "connect" },
+  { name: "Google Calendar", label: "Google Calendar", line: "Book and move meetings.", pluginId: "google", offer: "connect" },
+];
+
 const OURS = {
   id: "research-desk",
   name: "Research desk",
@@ -102,6 +108,7 @@ const PLUGINS = [
   { id: "slack", name: "Slack", tagline: "Read and post in Slack channels.", kind: "connector" },
   // The rule commit 1694a3f set: a row that installs nothing gets no Add, anywhere.
   { id: "x", name: "X", tagline: "What the vendor requires of you before anything can post.", installsNothing: true },
+  { id: "google", name: "Google Workspace", tagline: "Gmail, Docs and Drive through one server.", kind: "connector" },
 ];
 
 const CATALOG = {
@@ -109,6 +116,8 @@ const CATALOG = {
   plugins: PLUGINS,
   categories: ["Featured", "From Titanbot team", "Marketing", "Sales", "Recruiting & People"],
 };
+
+const escapeText = (value) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
 const list = (extra = {}) => bots.preview({ ...CATALOG, ...extra }, "list");
 const page = (botId, extra = {}) => bots.preview({ ...CATALOG, botId, ...extra }, "page");
@@ -151,6 +160,34 @@ test("memories are paragraphs of prose, with no heading and no bullet", () => {
   // The footnote says what adding the bot does with them, which is the one write on this page.
   assert.ok(html.includes("seeded as the bot's own remembered facts when you add it"), html.slice(-400));
   assert.ok(html.includes("edit or delete any of them from its Memory panel"));
+});
+
+// A team pack seeds no memory store: its import creates one bot per member with that member's own
+// written brief as its identity. The single-bot footnote would be a promise the press does not keep.
+test("a team pack's Memories block says what its import actually does", () => {
+  const pack = {
+    ...OURS,
+    id: "marketing-team",
+    name: "Marketing team",
+    memories: [{ text: "We run the marketing desk: briefs in, drafts out, nothing posted without a yes." }],
+    members: [{ id: "coord", role: "Coordinator", summary: "Runs the desk.", instructions: "Run the desk.", skills: [], integrations: [] }],
+    packaging: { agentPrefix: "mkt-", skillPrefix: "mkt-" },
+  };
+  const html = page("marketing-team", { page: "memories", bots: [pack] });
+  assert.ok(html.includes("one bot per member, each with its own written brief as its identity"), html.slice(-600));
+  assert.ok(!html.includes("seeded as the bot's own remembered facts"), "the pack promised a memory write its import never makes");
+  // And a single bot still carries the promise its Add does keep.
+  assert.ok(page("seo-aeo-desk", { page: "memories" }).includes("seeded as the bot's own remembered facts"));
+});
+
+// oneLine cuts at 140 characters IN THE STRING, so a wider window never recovers it. 108 of the
+// pack's 263 skill descriptions are longer than that and the "Use when…" sentence is the block.
+test("a long skill line is drawn whole on the Skills block", () => {
+  const long = `Use when the hiring manager asks for a slate: ${"read the tracker, pull the last five loops, and write the shortlist with a reason per name. ".repeat(4)}`;
+  const html = page("seo-aeo-desk", { page: "skills", bots: [OURS, { ...SEO, skills: [{ name: "Slate", description: long, body: "" }] }] });
+  assert.ok(long.length > 400, `the fixture is only ${long.length} characters`);
+  assert.ok(html.includes(escapeText(long.trim())), html.slice(0, 800));
+  assert.ok(!html.includes("…</small>"), "the line was truncated on the block that exists to show it");
 });
 
 // ---------------------------------------------------------------- 3. routines
@@ -197,9 +234,33 @@ test("the three controls: installed, Add, and a line with no Add at all", () => 
 
 test("an app row says which of the three it is, so the gate can read it off the page", () => {
   const html = page("seo-aeo-desk", { page: "integrations", installed: ["notion"] });
-  assert.match(html, /data-integration="notion" data-app-offer="connect"/);
-  assert.match(html, /data-integration="x" data-app-offer="page"/);
-  assert.match(html, /data-integration="Profound" data-app-offer="byo"/);
+  assert.match(html, /data-integration="notion" data-app="notion-workspace" data-app-offer="connect"/);
+  assert.match(html, /data-integration="x" data-app="X" data-app-offer="page"/);
+  assert.match(html, /data-integration="Profound" data-app="Profound" data-app-offer="byo"/);
+});
+
+// One plugin covers several apps. Titling the row with the PLUGIN drew Gmail, Google Calendar and
+// Google Sheets as three rows that were the same string end to end, each with its own Add.
+test("two surfaces of one plugin are two rows a person can tell apart, with one Add between them", () => {
+  const html = page("seo-aeo-desk", { page: "integrations", bots: [OURS, { ...SEO, apps: GOOGLE_APPS }] });
+  assert.ok(html.includes("<strong>Gmail</strong>"), html.slice(0, 900));
+  assert.ok(html.includes("<strong>Google Calendar</strong>"), "the second Google surface was drawn as the plugin again");
+  assert.ok(html.includes("Search, read and draft mail."), "the app's own line was replaced by the plugin's");
+  assert.ok(html.includes("Book and move meetings."));
+  // Named once, under both, so a person knows which connection covers them.
+  assert.equal((html.match(/through Google Workspace/g) ?? []).length, 2);
+  // And exactly one Add: the second press would install what the first already did.
+  assert.equal((html.match(/data-add-integration="google"/g) ?? []).length, 1, "one plugin drew two Adds");
+  assert.ok(html.includes("the same connection as above"));
+});
+
+// The generator drops a sentence that repeats across bots and ships it as `fallbackLine`; the row
+// must still say what the app is for rather than a name and a pill.
+test("an app whose own sentence is shared still draws a line", () => {
+  const shared = [{ name: "Ashby", label: "Ashby", line: "", fallbackLine: "Search candidates, prep interviews, and manage pipeline tasks.", pluginId: "", offer: "byo" }];
+  const html = page("seo-aeo-desk", { page: "integrations", bots: [OURS, { ...SEO, apps: shared }] });
+  assert.ok(html.includes("Search candidates, prep interviews, and manage pipeline tasks."), html.slice(0, 900));
+  assert.match(html, /data-integration="Ashby"[\s\S]*?not available yet/);
 });
 
 // ---------------------------------------------------------------- 5. the list
@@ -274,6 +335,22 @@ test("the filter reads a bot's second category as well as its first", () => {
   assert.ok(!list({ category: "Sales" }).includes('data-bot-row="research-desk"'));
 });
 
+// A bot already on the box looked unadded on every fresh page load: "on the roster" was derived
+// from this browser session's own Add outcomes alone, so at 72 rows the only way to find out was
+// to press one and read the refusal.
+test("a bot whose name is already on the box says so with no import of its own", () => {
+  const roster = ["SEO & AEO Desk"];
+  const rows = list({ roster });
+  assert.match(rows, /data-bot-row="seo-aeo-desk"[\s\S]*?on the roster/);
+  assert.ok(!/data-bot-row="seo-aeo-desk"[\s\S]*?data-add-bot="seo-aeo-desk"/.test(rows), "a bot already here still drew Add");
+  // The other row is untouched.
+  assert.match(rows, /data-add-bot="research-desk"/);
+  // And its own page says it too, rather than offering Import Bot a second time.
+  const html = page("seo-aeo-desk", { roster });
+  assert.match(html, /data-bot-on-roster="seo-aeo-desk"/);
+  assert.ok(!html.includes('data-import-bot="seo-aeo-desk"'));
+});
+
 // ---------------------------------------------------------------- 7. the outcome card
 test("a second Add says it is already on the roster and offers a deliberate second copy", () => {
   const html = page("seo-aeo-desk", { outcome: { state: "already", agent: { id: "a7", name: "SEO & AEO Desk" } } });
@@ -294,14 +371,18 @@ test("the receipt reports what landed, what was refused, and what is not connect
       state: "done",
       agent: { id: "a9", name: "SEO & AEO Desk" },
       memories: { added: 12, duplicates: 1, rejected: [{ text: "…", why: "it is longer than a memory can be" }] },
-      skills: { imported: 7, reused: 2, skipped: [{ source: "Brief writer", reason: "the host refused it" }] },
+      // LISTS, the shape both setup paths return. They were numbers here, so Number([...]) being
+      // NaN -- which dropped the playbook clause from every receipt of every bot -- passed.
+      skills: { imported: ["a", "b", "c", "d", "e", "f", "g"], reused: ["h", "i"], skipped: [{ source: "Brief writer", reason: "the host refused it" }] },
       routines: { created: [{ name: "Weekly search report", schedule: "0 9 * * 1" }], notCreated: [{ name: "Topic watch", why: "it names no schedule this box can run" }] },
       apps: { connected: ["Notion"], addable: ["Slack"], byo: ["Profound"], informational: ["X"] },
       message: "",
     },
   });
   assert.match(html, /data-imported-agent="a9"/);
-  assert.ok(html.includes("It has 12 memories, 7 playbooks, 1 job, switched off."), html.slice(-800));
+  // FACTS, not memories: the block above shows 5 paragraphs and the store holds the facts they were
+  // split into, so the card says what the sentence under it has always said.
+  assert.ok(html.includes("It has 12 facts it remembers, 9 playbooks, 1 job, switched off."), html.slice(-800));
   assert.ok(html.includes("it is longer than a memory can be"));
   assert.ok(html.includes("Brief writer was skipped"));
   assert.ok(html.includes("Topic watch was not created"));
