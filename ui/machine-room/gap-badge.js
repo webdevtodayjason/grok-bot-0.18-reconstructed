@@ -216,8 +216,15 @@
   }
 
   // ---- words ------------------------------------------------------------------------------------
+  // The span is the interval between the two bounding CHAT entries, which is the work only while
+  // the person was there for it. Measured on grok-bot-local-vm during integration: a gap of six
+  // steps whose closing chat came the next morning printed "Worked for 13 hr 9 min", and the agent
+  // had not been working for thirteen hours -- it finished, and then the conversation sat idle
+  // until somebody came back. Past this ceiling the two are no longer the same number, so the badge
+  // stops claiming they are and prints the step count alone, which it can still stand behind.
+  var SPAN_CEILING_MS = 90 * 60 * 1000;
   function spanWords(ms) {
-    if (!Number.isFinite(ms) || ms < 1000) return "";
+    if (!Number.isFinite(ms) || ms < 1000 || ms > SPAN_CEILING_MS) return "";
     var sec = Math.round(ms / 1000);
     if (sec < 60) return "Worked for " + sec + " sec";
     var min = Math.round(sec / 60);

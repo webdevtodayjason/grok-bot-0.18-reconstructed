@@ -366,7 +366,18 @@ test("the span reads in the unit a person would say it in", async () => {
   assert.equal(span(12_000), "Worked for 12 sec · 1 step");
   assert.equal(span(132_000), "Worked for 2 min · 1 step");
   assert.equal(span(4_800_000), "Worked for 1 hr 20 min · 1 step");
-  assert.equal(span(7_200_000), "Worked for 2 hr · 1 step");
+});
+
+// Measured on grok-bot-local-vm during integration: a real gap of six steps whose closing chat
+// arrived the next morning printed "Worked for 13 hr 9 min", and nothing had worked for thirteen
+// hours. The span is the interval between the bounding chat entries, which stops being the work as
+// soon as the conversation goes quiet, so past a ceiling the badge says the count alone.
+test("a span longer than a plausible run of work is not called work", async () => {
+  const { api } = await loadBadge();
+  const span = (ms) => api.headline({ steps: 6, spanMs: ms, forced: false, kinds: [] });
+  assert.equal(span(89 * 60_000), "Worked for 1 hr 29 min · 6 steps", "just inside the ceiling still reads as work");
+  assert.equal(span(91 * 60_000), "6 steps", "just outside it, the count alone");
+  assert.equal(span(13 * 3_600_000 + 9 * 60_000), "6 steps", "the reading that named this");
 });
 
 // ---- B4, state that is not in the DOM -----------------------------------------------------------

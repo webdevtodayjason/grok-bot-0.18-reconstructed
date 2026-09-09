@@ -481,13 +481,37 @@ async function legBoot(page) {
   }
 }
 
+// Opens each conversation in turn and keeps the one with the most scrollable transcript, because a
+// scroll leg run against a transcript that does not overflow proves nothing at all.
+async function pickLongestTranscript(page, limit = 10) {
+  const roster = await api("listAgents").then((r) => r.value).catch(() => []);
+  const workers = (Array.isArray(roster) ? roster : []).filter((a) => !a.isGroup).slice(0, limit);
+  let best = null;
+  for (const worker of workers) {
+    if (budgetLeft() < 40_000) break;
+    if (!(await openConversation(page, worker.id))) continue;
+    await sleep(1200);
+    const m = await page.evaluate(() => {
+      const el = document.getElementById("transcript");
+      return el ? { height: el.scrollHeight, client: el.clientHeight, rows: el.querySelectorAll("article.message-row").length } : null;
+    }).catch(() => null);
+    if (m && (!best || m.height > best.height)) best = { ...m, id: worker.id, name: worker.name ?? worker.id, of: workers.length };
+  }
+  if (best && !(await openConversation(page, best.id))) return null;
+  return best;
+}
+
 async function legScroll(page) {
   console.log("\n== --scroll: the transcript settles once and stays where the person left it");
   const booted = await bootConsole(page);
   if (booted !== true) { skip("the transcript settles and stays put", "the adapter never appeared"); return; }
-  const roster = await api("listAgents").then((r) => r.value).catch(() => []);
-  const busiest = (Array.isArray(roster) ? roster : []).filter((a) => !a.isGroup)[0];
-  if (!busiest || !(await openConversation(page, busiest.id))) { skip("the transcript settles and stays put", "no conversation to open on this box"); return; }
+  // The longest transcript on the box, not roster[0]. A five-row conversation that fits its
+  // viewport cannot drift by construction, so parking it and watching it not move measures the
+  // scrollbar's absence rather than the fix -- measured here, where the first agent in listAgents
+  // has 5 rows and 0 px of overflow.
+  const busiest = await pickLongestTranscript(page);
+  if (!busiest) { skip("the transcript settles and stays put", "no conversation to open on this box"); return; }
+  info(`measuring on ${busiest.name} — ${busiest.rows} rows, ${busiest.height}px in a ${busiest.client}px viewport (the longest of ${busiest.of} on this box)`);
   await sleep(2000);
   const behaviour = await page.evaluate(() => getComputedStyle(document.getElementById("transcript") ?? document.body).scrollBehavior);
   info(`.transcript scroll-behavior is ${behaviour}${behaviour === "smooth" ? " — every rebuild is an animation across the full height" : ""}`);
@@ -570,16 +594,42 @@ async function legPicker(page) {
   await shoot(page, `picker-${Date.now()}`);
 }
 
+// A leg that measures a thing has to open a conversation that HAS that thing. Taking roster[0] and
+// skipping when it comes up empty is how a gate reports "builder B's module has not merged" about a
+// module that is loaded and working -- measured on grok-bot-local-vm, where the first agent in
+// listAgents has a five-row transcript with no run of system rows in it at all. So these two legs
+// walk the roster until the page shows the shape, and say how many they opened before giving up.
+async function openFirstWith(page, probe, limit = 12) {
+  const roster = await api("listAgents").then((r) => r.value).catch(() => []);
+  const workers = (Array.isArray(roster) ? roster : []).filter((a) => !a.isGroup).slice(0, limit);
+  const tried = [];
+  for (const worker of workers) {
+    if (budgetLeft() < 25_000) break;
+    if (!(await openConversation(page, worker.id))) { tried.push(worker.name ?? worker.id); continue; }
+    await sleep(1400);
+    const got = await page.evaluate(probe).catch(() => null);
+    tried.push(worker.name ?? worker.id);
+    if (got) return { worker, got, tried };
+  }
+  return { worker: null, got: null, tried };
+}
+
 // ---- --badge (builder B's contract) -------------------------------------------------------------
 
 async function legBadge(page) {
   console.log("\n== --badge: everything between two chat messages folds into one badge that opens again");
   const booted = await bootConsole(page);
   if (booted !== true) { skip("a gap folds into one badge", "the adapter never appeared"); return; }
-  const roster = await api("listAgents").then((r) => r.value).catch(() => []);
-  const worker = (Array.isArray(roster) ? roster : []).filter((a) => !a.isGroup)[0];
-  if (!worker || !(await openConversation(page, worker.id))) { skip("a gap folds into one badge", "no conversation to open"); return; }
-  await sleep(2000);
+  const found = await openFirstWith(page, () => (document.querySelector("article.gap-badge[data-gap]") ? true : null));
+  if (!found.worker) {
+    const loaded = await page.evaluate(() => typeof window.__gapBadge?.render === "function");
+    skip("a gap folds into one badge", loaded
+      ? `the module is loaded and no conversation on this box has a run of ${await page.evaluate(() => window.__gapBadge?.MIN_FOLD ?? 2)} or more system rows — opened ${found.tried.length}: ${found.tried.slice(0, 6).join(", ")}`
+      : "window.__gapBadge is not on the page — the module has not merged");
+    return;
+  }
+  info(`measuring on ${found.worker.name ?? found.worker.id} (${found.tried.length} conversation(s) opened to find a gap)`);
+  await sleep(1200);
   const badge = await page.evaluate(() => {
     const el = document.querySelector("article.gap-badge[data-gap]");
     if (!el) return null;
@@ -595,7 +645,7 @@ async function legBadge(page) {
       rows: document.querySelectorAll("article.message-row").length,
     };
   });
-  if (!badge) { skip("a gap folds into one badge", "no article.gap-badge[data-gap] in the transcript — builder B's module has not merged"); return; }
+  if (!badge) { skip("a gap folds into one badge", "the badge was there when the conversation opened and is gone now"); return; }
   check(badge.expanded === "false" && badge.bodyHeight === 0, "a gap is one collapsed row by default", `"${badge.head}", ${badge.steps} steps, body ${badge.bodyHeight}px`);
   const target = await hitTest(page, "button.gap-badge-head[data-gap-toggle]");
   check(target.visible && target.hit, "the badge is where a mouse can reach it", `${target.w}x${target.h}, under its centre is ${target.on}`);
@@ -604,7 +654,7 @@ async function legBadge(page) {
     const el = document.querySelector("article.gap-badge[data-gap]");
     const body = el?.querySelector("div.gap-badge-body");
     const h = body ? Math.round(body.getBoundingClientRect().height) : 0;
-    return h > 0 ? { h, receipts: body.querySelectorAll("[data-evidence], [data-tool-row], .tool-row").length } : null;
+    return h > 0 ? { h, receipts: body.querySelectorAll("details.tool-receipt").length } : null;
   }), within(10_000), 300);
   check(open != null, "clicking it opens the rows that were folded", open ? `body ${open.h}px with ${open.receipts} receipt rows inside` : "the body never opened");
   await shoot(page, `badge-open-${Date.now()}`);
@@ -622,17 +672,23 @@ async function legFiles(page) {
   console.log("\n== --files: a file row opens a viewer and downloads");
   const booted = await bootConsole(page);
   if (booted !== true) { skip("a file row opens a viewer", "the adapter never appeared"); return; }
-  const roster = await api("listAgents").then((r) => r.value).catch(() => []);
-  const worker = (Array.isArray(roster) ? roster : []).filter((a) => !a.isGroup)[0];
-  if (!worker || !(await openConversation(page, worker.id))) { skip("a file row opens a viewer", "no conversation to open"); return; }
-  await sleep(1500);
+  const found = await openFirstWith(page, () => (document.querySelector("[data-file-open]") ? true : null));
+  if (!found.worker) {
+    const loaded = await page.evaluate(() => typeof window.__filesViewer?.open === "function");
+    skip("a file row opens a viewer", loaded
+      ? `the viewer is loaded and no conversation on this box carries a file — opened ${found.tried.length}: ${found.tried.slice(0, 6).join(", ")}`
+      : "window.__filesViewer is not on the page — the module has not merged");
+    return;
+  }
+  info(`measuring on ${found.worker.name ?? found.worker.id} (${found.tried.length} conversation(s) opened to find a file)`);
+  await sleep(1200);
   const rows = await page.evaluate(() => [...document.querySelectorAll("[data-file-open]")].map((el) => ({
     tag: el.tagName.toLowerCase(),
     path: el.dataset.fileOpen ?? "",
     name: el.dataset.fileName ?? "",
     clickable: el.tagName === "BUTTON" || el.tagName === "A",
   })));
-  if (rows.length === 0) { skip("a file row opens a viewer", "no [data-file-open] on the page — builder D's file rows have not merged"); return; }
+  if (rows.length === 0) { skip("a file row opens a viewer", "the rows were there when the conversation opened and are gone now"); return; }
   check(rows.every((r) => r.clickable), `every one of the ${rows.length} file rows is a real control`, rows.map((r) => r.name || r.path).slice(0, 4).join(", "));
   const markdown = rows.find((r) => /\.md$/i.test(r.path)) ?? rows[0];
   await page.click(`[data-file-open="${markdown.path.replaceAll('"', '\\"')}"]`, { timeout: 8000 }).catch(() => {});

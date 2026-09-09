@@ -3,9 +3,9 @@
 *Gap row CONSOLE-4. Four things Jason reported on 2026-09-08 about console.titanium.bot, each
 fixed at its cause rather than papered over.*
 
-This file is written in four sections because the wave was built by four people against one set of
-seams. Section 1 is the boot: the plate, the cover, and the transcript that settles. Sections 2, 3
-and 4 are the badge, the screen tile and the file viewer, each owned by the item that built it.
+Five sections. Section 1 is the boot: the plate before the first pixel, the cover, the picker's
+headings and the transcript that settles. Then the between-chats badge, the rail's screen tile and
+the files viewer, and last the gate that measures all four in a real browser.
 
 ---
 
@@ -248,8 +248,7 @@ all.
 
 ## 3. The rail's screen tile
 
-
-The broken image itself is fixed and is section 1's work, so it is recorded here:
+The broken image and the picture behind it were two separate faults. The markup fault first:
 
 Jason: *"The Titan screen at the top right says 'Click to open,' but there's a broken image there."*
 
@@ -264,7 +263,6 @@ re-set by a later edit.
 **Measured on `grok-bot-local-vm` across the first eight agents on the box:** before, **8 of 8**
 tiles carried an `<img>` with `src` null, `naturalWidth` 0 and computed `display: block`. After,
 **0 broken, 8 plates**.
-
 
 > "The Titan screen at the top right says 'Click to open,' but there's a broken image there. I think
 > that's supposed to be a screenshot of what's on the browser at that moment."
@@ -370,8 +368,7 @@ a live console.
 
 ## 4. The files viewer
 
-
-The controls are in place and are section 1's work:
+The dead click first, because it is what Jason actually put his mouse on:
 
 Jason: *"If I go to his desktop and click Files, it shows me files we've created, but I can't click,
 open, or view it."*
@@ -386,7 +383,6 @@ list actually lives in.
 **Measured on `grok-bot-local-vm`:** before, rows were `DIV`, `cursor: auto`, 0 of 2 carrying a path.
 After, `BUTTON`, `cursor: pointer`, 2 of 2 carrying a bare path, both transcript controls
 hit-testable to themselves.
-
 
 > "When there is a file and I click Files, like when Titan created a Markdown file for me, I can't do
 > anything with it. If I go to his desktop and click Files, it shows me files we've created, but I
@@ -458,8 +454,6 @@ Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 
 `scripts/verify-handoff.mjs --console` covers the same reader from the hand-off side and stays green;
 `scripts/verify-dashboard.mjs` covers the rest of the console.
-
-
 
 | Gate | What it covers |
 |---|---|
