@@ -671,13 +671,14 @@ node scripts/verify-mail.mjs --url http://127.0.0.1:7787 --stub --send --directo
 ```
 
 `--send` rides `--directory`, because the claim goes to a control plane and the one the gate stands
-up runs the real `cp/mail.mjs` over an in-memory store. It measures sixteen things: the From and the
+up runs the real `cp/mail.mjs` over an in-memory store. It measures eighteen things: the From and the
 Reply-To on the wire are the bot's own and a caller's supplied `from`, `replyTo` and `headers.From`
 are not there at all; the control plane holds one row carrying Resend's id and **no subject**; the
 answer to the bot names the recipient and the message id in plain words; the workspace's own ledger
 carries the row with its subject, newest first; the console draws it as "Sent an email to …" with no
-tool name and nothing to expand; and nine refusals, each of which must also leave the stub Resend
-untouched — no bearer, a stranger's bearer, a bot with no address, another workspace's bot, a
+tool name and nothing to expand, and draws a send the relay REFUSED as "Tried to email … · it did
+not send" rather than as one that went; and nine refusals, each of which must also leave the stub
+Resend untouched — no bearer, a stranger's bearer, a bot with no address, another workspace's bot, a
 retired address, an `attachments` field, the send past the hourly cap, a workspace on the no-send
 list, and a control plane that cannot be reached.
 
@@ -696,14 +697,18 @@ about (section 2), this box holds "Chief of staff" and "Chief of Staff", and the
 for the roster's ordering rather than for a fault — measured red one run and green the next on
 `grok-bot-local-vm`, 2026-09-09, with nothing changed between them.
 
-**Measured 2026-09-09 on this Mac, box `grok-bot-local-vm`,** scratch relay on 127.0.0.1 against a
-stub control plane, 8 bots on the box: with the relay route and the control plane's send log in the
-tree, **69 PASS, 0 FAIL**, twice. The forced From on the wire was
-`"New Agent (titanium)" <agent368910@verify-mail.invalid>` while the caller's
-`president@example.invalid` appeared nowhere in the body; the cap refused the 31st send in an hour
-naming 30; and with the control plane stopped mid-run the send answered 503 with nothing reaching
-Resend. On a tree with the control plane half absent the same command answers **52 PASS, 1 FAIL**,
-and the one failure names the missing export rather than failing sixteen times unreadably.
+**Measured 2026-09-09 on this Mac, box `grok-bot-local-vm`, on the merged tree,** scratch relay on
+127.0.0.1:7798 against a stub control plane on 7812, 10 bots on the box: **72 PASS, 0 FAIL**, 18:41Z.
+The forced From on the wire was `"Books (titanium)" <agent227050@verify-mail.invalid>` with Reply-To
+the same address, while the caller's `president@example.invalid`, supplied as `from`, `replyTo` and
+`headers.From` at once, appeared nowhere in the body Resend received. The control plane's row read
+`{tenant: titanium, code: 227050, to: gate-recipient@example.invalid, outcome: sent, resendId:
+em_stub_b6af7aeca21cfafa}` with no subject in the table; the workspace's own ledger carried the
+subject, newest first; the cap refused the 31st send in an hour naming 30 (`The next one can go in 1
+hour`); a workspace on the no-send list was refused before anything was claimed; and with the control
+plane stopped mid-run the send answered 503 with nothing reaching Resend. On a tree with the control
+plane half absent the same command answers **52 PASS, 1 FAIL**, and the one failure names the missing
+export (`createMailSends`) rather than failing eighteen times unreadably.
 
 ---
 
@@ -743,11 +748,16 @@ that was wrong for two days.** Every number below names the machine it was measu
 ### Measured, this Mac, box `grok-bot-local-vm`, 2026-09-09
 
 - The gate, against a scratch relay on loopback with a stub Resend and a stub control plane running
-  the real `cp/mail.mjs`: **69 PASS, 0 FAIL**, run twice. Section 7 lists what the sixteen send legs
-  assert.
-- The forced From on the wire: `"New Agent (titanium)" <agent368910@verify-mail.invalid>`, Reply-To
+  the real `cp/mail.mjs`: **72 PASS, 0 FAIL** on the merged tree, 18:41Z. Section 7 lists what the
+  eighteen send legs assert.
+- The forced From on the wire: `"Books (titanium)" <agent227050@verify-mail.invalid>`, Reply-To
   the same address, and the `president@example.invalid` the caller supplied as `from`, `replyTo` and
   `headers.From` appears nowhere in the body Resend received.
+- The tool is offered on exactly the fact that decides it, measured on the box rather than argued:
+  `scripts/verify-toolset.mjs --mail-send`, 18:54Z, the merged bundle `bb7112816aa7` swapped in — 36
+  tools offered with `canSend` true and `send_email` among them, 35 with it false and `SendEmail`
+  named on the withheld list with the reason `mail_send_off`. The box was put back on the bundle it
+  was found with (`8e89e4362681`).
 - The control plane's row for that send carried the recipient, the outcome `sent` and Resend's id,
   and **no subject anywhere in the table**.
 - The 31st send by one bot inside an hour answered 429 naming 30; the 30 before it went.
@@ -758,7 +768,12 @@ that was wrong for two days.** Every number below names the machine it was measu
   `Sep 9, 1:20 PM · Titan · jbrashear@titaniumcomputing.com · Test from Titan · sent` and, for a row
   the relay opened and never closed, the outcome column reading **not confirmed** rather than the
   relay's own word for it. No page errors from the card.
-- `npm test` 1930/1930, `source:typecheck` clean.
+- `npm test` **1996/1996**, `source:typecheck` and `typecheck` both clean, on the merged tree.
+- `scripts/verify-dashboard.mjs`, the console gate, in a real browser against a scratch relay:
+  **61 PASS / 11 FAIL** on the merged tree and **61 PASS / 11 FAIL** with a byte-identical failure
+  list at the pre-merge tip `a365b4e`. Not one of the eleven is a mail row; they are the leftover
+  probe agents and the skills panel this box has failed on since GATE-14. Sending moves that gate by
+  zero.
 
 ### Not measured here, and it is the ship that measures it
 

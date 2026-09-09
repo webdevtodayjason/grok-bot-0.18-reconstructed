@@ -68,13 +68,15 @@
 //                  are IGNORED, never honoured -- the From is the relay's to force. 401/403/400/
 //                  429/503 in the order docs/MAIL.md section 6 writes down, and the answer names
 //                  the recipient and Resend's id in plain words.
-//   control plane  cp/mail.mjs exports createMailSendLog({ store }) answering
-//                  open({slug, agentId, code, to}), close({id, outcome, resendId}) and list(slug).
+//   control plane  cp/mail.mjs exports createMailSends({ store }) answering
+//                  openSend({slug, agentId, code, to}), closeSend(id, outcome, resendId) and
+//                  listSends(slug).
 //   relay again    GET /mail/settings gains `sends`, that workspace's own sent ledger, NEWEST
 //                  FIRST like `recent`, carrying the subject the control plane deliberately does
 //                  not hold.
 //   console        gateway-adapter.js draws the row as "Sent an email to <to>" with an empty
-//                  detail, under the outline name sendToUserToolCall.
+//                  detail, under the outline name sendToUserToolCall, reading the recipient out of
+//                  the proto args field `message` -- prefixed "not sent: " when nothing went.
 // A tree missing any of those fails one named check rather than throwing somewhere unreadable.
 import { createHmac, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
@@ -445,7 +447,15 @@ try {
       // MAIL-3. The send log, over the SAME store the directory uses, so the row the send legs
       // read is the row cp/mail.mjs writes in production. Named rather than guessed; a tree
       // without it fails one check that says so instead of throwing here.
-      const sendLog = typeof cpMail.createMailSendLog === "function" ? cpMail.createMailSendLog({ store }) : null;
+      // cp/mail.mjs names these openSend/closeSend/listSends, and closeSend takes its arguments
+      // one at a time. The three names this gate reads them by are kept as one small adapter, so
+      // the legs below read as what they measure rather than as the control plane's spelling.
+      const cpSends = typeof cpMail.createMailSends === "function" ? cpMail.createMailSends({ store }) : null;
+      const sendLog = cpSends == null ? null : {
+        open: (body) => cpSends.openSend(body ?? {}),
+        close: (body) => cpSends.closeSend(body?.id, body?.outcome, body?.resendId, body?.detail),
+        list: (slug, limit) => cpSends.listSends(slug, limit),
+      };
       let cpClosed = false;
       const seen = { mint: [], directory: 0 };
       const cp = createServer((req, res) => {
@@ -560,9 +570,9 @@ try {
           const capBot = ours[1] ?? mine;
           if (sendLog == null) {
             check(false, "cp/mail.mjs holds the send log this gate claims a row through",
-              "expected createMailSendLog({ store }) answering open({slug, agentId, code, to}), "
-              + "close({id, outcome, resendId}) and list(slug). Without it the control plane half of "
-              + "MAIL-3 is not in this tree, so no send leg below can run.");
+              "expected createMailSends({ store }) answering openSend({slug, agentId, code, to}), "
+              + "closeSend(id, outcome, resendId) and listSends(slug). Without it the control plane "
+              + "half of MAIL-3 is not in this tree, so no send leg below can run.");
           } else if (mine == null) {
             check(false, `the directory holds an address for a bot in ${OWN}`,
               rows.map((entry) => `${entry.tenant}/${entry.agentName}`).join(" ") || "no active rows at all");
@@ -680,8 +690,14 @@ try {
                 const to = source.indexOf("  const messageKey =");
                 if (from < 0 || to <= from) return { error: "the tool-row block could not be found in gateway-adapter.js" };
                 const made = new Function(`${source.slice(from, to)}\nreturn { toolRowText, TOOL_LABELS };`)();
+                // The summary is the proto args as the outline serialises them, and the field the
+                // tool fills is SendToUserArgs.message -- one string, the recipient, with the
+                // refusal marker in front of it when nothing went. Both halves are drawn here,
+                // because a refused send that read "Sent an email to ..." on a customer's screen is
+                // the one failure this row exists to prevent.
                 return {
-                  row: made.toolRowText({ name: "sendToUserToolCall", summary: JSON.stringify({ to: RECIPIENT }), status: "done" }),
+                  row: made.toolRowText({ name: "sendToUserToolCall", summary: JSON.stringify({ message: RECIPIENT }), status: "done" }),
+                  failedRow: made.toolRowText({ name: "sendToUserToolCall", summary: JSON.stringify({ message: `not sent: ${RECIPIENT}` }), status: "done" }),
                   labelled: Object.prototype.hasOwnProperty.call(made.TOOL_LABELS, "sendToUserToolCall"),
                 };
               } catch (error) { return { error: String(error?.message ?? error) }; }
@@ -691,6 +707,11 @@ try {
               && String(drawn.row?.detail ?? "x") === "",
               'the row reads "Sent an email to ..." with no tool name and no expandable payload',
               drawn.error ?? `${JSON.stringify(drawn.row)}, labelled ${drawn.labelled}`);
+            check(drawn.error == null
+              && String(drawn.failedRow?.text ?? "") === `Tried to email ${RECIPIENT} · it did not send`
+              && String(drawn.failedRow?.detail ?? "x") === "",
+              "and a send the relay refused says so rather than reading as one that went",
+              drawn.error ?? JSON.stringify(drawn.failedRow));
 
             // ---- the caps ----------------------------------------------------------------------
             step("the caps, which the control plane counts and a box cannot reset by restarting");
