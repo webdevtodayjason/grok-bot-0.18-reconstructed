@@ -71,6 +71,7 @@ import {
   onboardingPromptRichText,
 } from "./extensions/onboarding/onboarding-prompt.js";
 import { evidenceRegistry, readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
+import { repairAgentTranscript } from "./extensions/transcript/repair-agent-transcript.js";
 import { GatewayCommandError } from "./gateway-command-error.js";
 import {
   JOB_BUS_API_VERSION,
@@ -886,6 +887,18 @@ export function createHostGatewayApi(
       const page = rows.slice(start, start + limit);
       const last = page.at(-1);
       return { rows: page, nextBefore: start + limit < rows.length && last != null ? String(last.eventId ?? "") || null : null };
+    },
+
+    // BOX-6b. Repairing a wedged conversation store from the console instead of from a shell inside
+    // the container. Returns the counts and what was set aside, so the operator can read what it
+    // did rather than trust it.
+    repairAgentTranscript: async (args: any) => {
+      const id = String(args.id ?? args.agentId ?? "");
+      const agentDir = (manager as any).sessionStore?.getAgentDir?.(id);
+      return await repairAgentTranscript({
+        agentId: id,
+        ...(typeof agentDir === "string" && agentDir.length > 0 ? { agentDir } : {}),
+      });
     },
 
     skillsCatalog: () => method(managedSetup, "skillsCatalog")(),

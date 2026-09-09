@@ -612,6 +612,25 @@
   function needsYouCount() {
     return [...state.workers, ...state.rooms].filter(needsYou).length;
   }
+  // ---- end QOL-NEEDS-YOU ---------------------------------------------------------------
+
+  // ---- BOX-6b: an agent whose conversation store needs repair --------------------------
+  // The same pill shape, its own class and its own words, and deliberately NOT in the "N need you"
+  // count: that count is a queue of things a person has been asked, and this is a machine that has
+  // stopped. It reads off needsRepair, which gateway-adapter.js carries from the host's own
+  // transcriptNeedsRepair and raises the moment a failed turn names a store that needs repairing.
+  function needsRepair(record) {
+    return record != null && record.needsRepair === true;
+  }
+
+  function needsRepairPillMarkup(record, className) {
+    if (!needsRepair(record)) return "";
+    const reason = typeof record.needsRepairReason === "string" ? record.needsRepairReason.trim() : "";
+    return `<span class="${className}" title="${escapeHtml(reason || "This agent's conversation store needs repair. Open Agent details to repair it.")}">Needs repair</span>`;
+  }
+  // ---- end BOX-6b ----------------------------------------------------------------------
+
+  // ---- QOL-NEEDS-YOU, continued --------------------------------------------------------
 
   function renderNeedsYouCount() {
     const slot = document.querySelector("[data-needs-you-count]");
@@ -663,7 +682,7 @@
     const selected = sameContext(activeContext(), { kind: "worker", id: worker.id });
     return `<button class="worker-card${selected ? " is-active" : ""}" type="button" data-context-kind="worker" data-context-id="${escapeHtml(worker.id)}" data-status="${escapeHtml(worker.status)}" style="--accent:${escapeHtml(worker.accent)}" aria-pressed="${selected}">
       ${avatarMarkup(worker, "worker-avatar")}
-      <span class="worker-copy"><span class="worker-name"><i class="status-dot ${statusClass(worker.status)}"></i>${escapeHtml(worker.name)}${needsYouPillMarkup(worker, "needs-you-pill")}</span><span class="worker-status">${escapeHtml(worker.statusText)}</span></span>
+      <span class="worker-copy"><span class="worker-name"><i class="status-dot ${statusClass(worker.status)}"></i>${escapeHtml(worker.name)}${needsYouPillMarkup(worker, "needs-you-pill")}${needsRepairPillMarkup(worker, "needs-repair-pill")}</span><span class="worker-status">${escapeHtml(worker.statusText)}</span></span>
     </button>`;
   }
 
@@ -1017,6 +1036,40 @@
 
   // Trigger one: a failed turn. Measured on grok-bot-local-vm 2026-09-09, a model-endpoint failure
   // writes no turn-failed row at all, so the adapter's tray queue is the only live signal there is.
+  // BOX-6b. A failed turn is not always "ask again". Measured on the demo tenant's box 2026-09-09,
+  // one agent had failed EVERY turn for two days on a conversation store that needed repairing, and
+  // the console told the person to ask again each time. This turns one seed into the words that
+  // failure deserves: the repair sentence FIRST when the box named a store that needs repairing,
+  // and the old sentence otherwise.
+  //
+  // The predicate and the sentence are the adapter's (gateway-adapter.js, the BOX-6b block), read
+  // through the global rather than copied here, because two copies of a predicate drift and then
+  // the card and the conversation line say different things about the same failure. With no
+  // adapter on the page — the offline demo — nothing named a store and the old words are right.
+  function failedTurnWords(seed) {
+    const words = (typeof window !== "undefined" ? window.__transcriptRepair : null) ?? null;
+    const who = String(seed?.agentName ?? "").trim() || "This agent";
+    const recorded = `What the box recorded: ${seed?.title ?? "error"}${seed?.detail ? ` — ${seed.detail}` : ""}`;
+    const needsRepair = seed?.needsRepair === true
+      || (words != null && words.wordsSeen(seed?.title, seed?.detail));
+    if (!needsRepair) {
+      return {
+        needsRepair: false,
+        title: `${who} could not finish that one`,
+        description: `${who} was asked something and the turn ended without an answer. ${recorded}`,
+      };
+    }
+    const sentence = words?.SENTENCE
+      ?? "This agent's conversation store needs repair. Repair it from the agent's details panel.";
+    return {
+      needsRepair: true,
+      title: `${who} needs its conversation store repaired`,
+      // The clause first, because it is the only sentence here that tells the person what to do,
+      // and because asking again — which the old wording invited — fails the same way every time.
+      description: `${sentence} Until it is repaired, every turn for ${who} will end this way. ${recorded}`,
+    };
+  }
+
   function drainFailedTurnOffers() {
     if (typeof adapter.takeFailedTurnReports !== "function") return [];
     const seeds = adapter.takeFailedTurnReports() ?? [];
@@ -1026,15 +1079,18 @@
     // tick on the active agent and until its next load on any other. That was equally true of the
     // raw line it replaced, so nothing was lost -- but it does mean the CARD has to carry the plain
     // words as well, because the card is the part that stays.
-    return seeds.map((seed) => offerProblemReport({
-      agentId: seed.agentId,
-      agentName: seed.agentName,
-      tier: "critical",
-      category: "turn",
-      title: `${seed.agentName || "This agent"} could not finish that one`,
-      description: `${seed.agentName || "This agent"} was asked something and the turn ended without an answer. What the box recorded: ${seed.title}${seed.detail ? ` — ${seed.detail}` : ""}`,
-      source: "failed-turn",
-    }));
+    return seeds.map((seed) => {
+      const words = failedTurnWords(seed);
+      return offerProblemReport({
+        agentId: seed.agentId,
+        agentName: seed.agentName,
+        tier: "critical",
+        category: "turn",
+        title: words.title,
+        description: words.description,
+        source: "failed-turn",
+      });
+    });
   }
 
   // Trigger two: the same tool failing three times in one conversation. Counted off the woven tool
@@ -1136,8 +1192,18 @@
     if (headerPill) {
       const record = contextRecord(context);
       const reason = needsYou(record) && typeof record.needsYouReason === "string" ? record.needsYouReason.trim() : "";
-      headerPill.hidden = !needsYou(record);
-      headerPill.title = reason || "This agent is waiting on you";
+      // BOX-6b shares this one capsule rather than adding a second: two pills side by side on the
+      // header would be two states competing for the same glance, and only one of them can be
+      // acted on from here. Blocked on you wins when both are true -- that one is a person's job
+      // and it is answerable in the composer right below it.
+      const repair = !needsYou(record) && needsRepair(record);
+      headerPill.hidden = !needsYou(record) && !repair;
+      headerPill.textContent = repair ? "Needs repair" : "Waiting on you";
+      headerPill.classList.toggle("needs-repair-pill", repair);
+      headerPill.title = repair
+        ? (typeof record.needsRepairReason === "string" && record.needsRepairReason.trim())
+          || "This agent's conversation store needs repair. Open Agent details to repair it."
+        : reason || "This agent is waiting on you";
     }
   }
 
@@ -3531,7 +3597,20 @@
     const audit = canAudit
       ? `<section class="settings-section" data-audit-for="${escapeHtml(worker.id)}"><div class="setting-row"><div><strong>Action ledger</strong><small>Every tool action the host recorded for this agent (getAgentActionAudit), newest first. Tool output is withheld until you ask for one row's.</small></div><button class="ghost-button" type="button" data-read-audit="${escapeHtml(worker.id)}">Read</button></div><div class="context-detail-list" data-audit-list></div></section>`
       : "";
-    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role || "No role set on the host.")}</p><div class="tag-list"><span class="tag">endpoint (box-wide) · ${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section><section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, the role and the routines shown here belong to this agent. The endpoint and the box's screens belong to the whole box and are shared with every other agent on it.</p>${identity}${role}${avatar}${switches}<div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div>${browser}${hygiene}</section>${memories}${audit}</div>`;
+    // BOX-6b. The repair itself, where the failed turn's line sends the person. Drawn only when
+    // this box's host has the verb AND this agent is in that state: a button offered to a healthy
+    // agent is an invitation to run a recovery on a store that does not need one. Nothing here is
+    // armed twice like Delete is -- a repair keeps every entry it can and quarantines rather than
+    // deletes, so the cost of pressing it is a few seconds, not a conversation.
+    const canRepair = typeof adapter.repairTranscript === "function"
+      && (typeof adapter.canRepairTranscript !== "function" || adapter.canRepairTranscript() === true);
+    const repair = canRepair && needsRepair(worker)
+      ? `<section class="settings-section" data-repair-for="${escapeHtml(worker.id)}"><div class="setting-row"><div><strong>Conversation store</strong><small>${escapeHtml(
+        (typeof worker.needsRepairReason === "string" && worker.needsRepairReason.trim())
+          || "This agent's conversation store needs repair, so every turn ends without an answer. Repairing rebuilds it from what the box already holds and keeps every entry it can. Nothing is deleted.",
+      )}</small></div><button class="primary-button" type="button" data-repair-transcript="${escapeHtml(worker.id)}">Repair</button></div><p class="field-hint" data-repair-note hidden></p></section>`
+      : "";
+    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role || "No role set on the host.")}</p><div class="tag-list"><span class="tag">endpoint (box-wide) · ${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section>${repair}<section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, the role and the routines shown here belong to this agent. The endpoint and the box's screens belong to the whole box and are shared with every other agent on it.</p>${identity}${role}${avatar}${switches}<div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div>${browser}${hygiene}</section>${memories}${audit}</div>`;
   }
 
   // The two async fills the panel above leaves placeholders for. Both are real host reads: the
@@ -3566,6 +3645,85 @@
         .catch((error) => { list.innerHTML = `<div class="empty-state">Could not read this agent's memories: ${escapeHtml(error.message)}</div>`; });
     }
   }
+
+  // ---- BOX-6b: pressing Repair -----------------------------------------------------------------
+  // The host answers {before, after, quarantined, outcome}. Two things this must not do. It must
+  // not read `quarantined: null` as a failure -- the one real case in production, the demo tenant's
+  // Titan, had two healthy databases and nothing to move aside, so a null there is the normal
+  // answer for the commonest damage shape. And it must not decide for itself that a repair worked:
+  // an outcome word it does not recognise is printed as the host said it, not translated into
+  // success.
+  //
+  // The judge of "did it work" is the adapter's, read through the global rather than copied. The
+  // adapter uses the same one to decide whether to forget the failure this page saw, and a console
+  // whose button says "Repaired" while its pill still says "Needs repair" has told the person two
+  // different things about one press. There is no fallback on purpose: the control is only drawn
+  // where `adapter.repairTranscript` exists, and the file that defines it is the file that
+  // publishes the judge, so one cannot be on the page without the other.
+  function repairOutcomeWords(answer) {
+    const kept = Number.isFinite(answer.after) ? answer.after : null;
+    const worked = (typeof window !== "undefined" ? window.__transcriptRepair : null)?.worked(answer) === true;
+    const moved = (answer.quarantined ?? []).length;
+    if (!worked) {
+      const said = (answer.reason || answer.outcome || "").trim();
+      // The host's own sentence, with no prefix and no status word in front of it.
+      return { worked: false, text: said ? `That did not repair it: ${said}` : "That did not repair it, and the box did not say why. The host log on this box has the detail." };
+    }
+    // MEASURED on grok-bot-local-vm: a store with nothing wrong with it answers `already-healthy`
+    // with before and after both 0. "Repaired, 0 entries kept" would be a strange thing to read
+    // after pressing Repair on an agent that was refusing every turn, so that case says what
+    // actually happened.
+    const headline = answer.outcome.toLowerCase() === "already-healthy" && !kept
+      ? "There was nothing to repair here."
+      : kept == null ? "Repaired." : `Repaired, ${kept} ${kept === 1 ? "entry" : "entries"} kept.`;
+    const set = moved === 0
+      ? ""
+      : moved === 1
+        ? ` The damaged file was set aside as ${answer.quarantined[0]}; nothing was deleted.`
+        : ` ${moved} damaged files were set aside; nothing was deleted.`;
+    const lost = kept != null && Number.isFinite(answer.before) && answer.before > kept
+      ? ` ${answer.before - kept} could not be read back.`
+      : "";
+    return { worked: true, text: `${headline}${lost}${set} Ask this agent something and it should answer now.` };
+  }
+
+  function repairTranscriptFromPanel(button, agentId) {
+    const note = elements.panelContent.querySelector("[data-repair-note]");
+    const say = (text) => { if (note) { note.hidden = false; note.textContent = text; } };
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = "Repairing…";
+    say("Repairing this agent's conversation store. On a long conversation this takes a moment.");
+    return Promise.resolve(adapter.repairTranscript(agentId))
+      .then((answer) => {
+        if (answer == null) {
+          // The box runs a bundle without the verb. Say so and take the button away rather than
+          // leaving a control that can only ever do nothing.
+          button.remove();
+          say("This box's software does not have the repair yet. It arrives with the next update.");
+          return null;
+        }
+        const words = repairOutcomeWords(answer);
+        say(words.text);
+        if (!words.worked) { button.disabled = false; button.textContent = label; return answer; }
+        button.remove();
+        // The pill and the status line go now rather than on the next 15 s heartbeat. The host's
+        // own verdict overwrites this on the next roster read either way, so a repair that only
+        // half worked does not stay hidden behind an optimistic console.
+        const record = workerById(agentId) ?? contextRecord();
+        if (record) { record.needsRepair = false; record.needsRepairReason = ""; }
+        renderRoster();
+        renderConversationHeader();
+        return answer;
+      })
+      .catch((error) => {
+        button.disabled = false;
+        button.textContent = label;
+        say(`That did not repair it: ${String(error?.message ?? error).replace(/\s*\.$/, "")}. Nothing was changed.`);
+        return null;
+      });
+  }
+  // ---- end BOX-6b ------------------------------------------------------------------------------
 
   function openAgentProfile(worker) {
     if (!worker) return;
@@ -5679,6 +5837,10 @@
       adapter.deleteAgent(agentId)
         .then((name) => { closePanelFrom(from); showToast(`${name} deleted on the host`); })
         .catch((error) => { target.disabled = false; target.textContent = "Delete"; showToast(`Not deleted: ${error.message}`); });
+    } else if (target.dataset.repairTranscript) {
+      // BOX-6b. No toast: host-notes-read-as-errors.md. The note lands in the panel, in plain
+      // words, next to the button that caused it, and stays there to be read.
+      repairTranscriptFromPanel(target, target.dataset.repairTranscript);
     } else if (target.dataset.readAudit || target.dataset.moreAudit) {
       const agentId = target.dataset.readAudit || target.dataset.moreAudit;
       const before = target.dataset.moreAudit ? target.dataset.before : null;

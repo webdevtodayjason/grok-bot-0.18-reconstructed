@@ -291,9 +291,64 @@ test("Resend refusing is said in plain words and the row is closed as failed", a
   });
   assert.equal(res.status, 502);
   assert.equal(res.body.sent, false);
-  assert.match(res.body.message, /did not send/);
+  assert.match(res.body.message, /nothing was sent/);
   assert.equal(seen.closed[0].outcome, "failed");
   assert.equal(seen.sent[0].row.outcome, "failed", "and the workspace's own ledger says so too");
+  // The provider's own words belong on the row an operator reads, and nowhere near the bot.
+  assert.match(String(seen.closed[0].detail), /HTTP 422/);
+});
+
+test("a 4xx and a 5xx from the mail service are told apart in the words the bot says", async () => {
+  const refused = await send(GOOD, {}, {
+    fetchImpl: async () => ({ ok: false, status: 422, text: async () => '{"message":"invalid recipient"}' }),
+  });
+  assert.match(refused.res.body.message, /would not accept/, "a message it will never take");
+  const wobbled = await send(GOOD, {}, {
+    fetchImpl: async () => ({ ok: false, status: 503, text: async () => "upstream unavailable" }),
+  });
+  assert.match(wobbled.res.body.message, /Try again/, "and a failure on their side is worth retrying");
+});
+
+// THE ROUTE NEVER READS A VENDOR OUT TO A CUSTOMER. The bot repeats the sentence it is given
+// verbatim, so a status code, a JSON brace or a provider's domain in any answer here lands on a
+// person's own screen. Every refusal this route can make is walked, including the one that used to
+// echo Resend's body straight through.
+test("no answer this route gives carries a status code, a JSON blob or a vendor's name", async () => {
+  const cases = [
+    ["no bearer", () => send(GOOD, { token: null }, {})],
+    ["a bearer this relay does not know", () => send(GOOD, { token: "someone-elses" }, {})],
+    ["sending switched off", () => send(GOOD, {}, { noSend: () => true })],
+    ["a body that is not JSON", () => send("not json at all", {}, {})],
+    ["an attachment", () => send({ ...GOOD, attachments: [{ name: "a.pdf" }] }, {}, {})],
+    ["no bot named", () => send({ ...GOOD, agentId: "" }, {}, {})],
+    ["no recipient", () => send({ ...GOOD, to: "" }, {}, {})],
+    ["no subject", () => send({ ...GOOD, subject: "" }, {}, {})],
+    ["nothing in it", () => send({ ...GOOD, text: "", html: "" }, {}, {})],
+    ["a bot with no address", () => send({ ...GOOD, agentId: "a_nobody" }, {}, {})],
+    ["over the cap", () => send(GOOD, {}, {
+      openSend: async () => ({
+        ok: false, error: "rate_limited", scope: "agent", cap: 30, retryAfterSeconds: 720,
+        message: "That bot has sent its 30 emails for this hour, so nothing was sent. The next one can go in 12 minutes.",
+      }),
+    })],
+    ["a control plane that will not answer", () => send(GOOD, {}, { openSend: async () => { throw new Error("connect ECONNREFUSED 10.0.0.4:8080"); } })],
+    ["no key stored", () => send(GOOD, {}, { ownerSettings: async () => ({ apiKey: "", domain: DOMAIN }) })],
+    ["the mail service saying no", () => send(GOOD, {}, {
+      fetchImpl: async () => ({
+        ok: false, status: 422,
+        text: async () => '{"statusCode":422,"name":"validation_error","message":"The gmail.com domain is not verified. Please verify at resend.com/domains"}',
+      }),
+    })],
+    ["the mail service falling over", () => send(GOOD, {}, { fetchImpl: async () => { throw new Error("fetch failed ECONNRESET"); } })],
+  ];
+  for (const [name, run] of cases) {
+    const { res } = await run();
+    const message = String(res.body?.message ?? "");
+    assert.ok(message.length > 0, `${name} says something`);
+    for (const leak of ["HTTP ", "{", "}", "resend", "Resend", "ECONN", "502", "422"]) {
+      assert.equal(message.includes(leak), false, `${name} must not say "${leak}": ${message}`);
+    }
+  }
 });
 
 // ---- threading and idempotency -------------------------------------------------------------------

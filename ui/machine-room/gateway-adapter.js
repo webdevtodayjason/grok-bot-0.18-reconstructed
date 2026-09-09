@@ -539,8 +539,91 @@
       }));
   }
 
+  // ---- BOX-6b: a conversation store that needs repair -------------------------------------------
+  // Measured on the demo tenant's box 2026-09-09: one agent had failed EVERY turn since 2026-09-07
+  // with `TranscriptJournalCorruptionError: transcript checkpoint must recover before preparing`,
+  // and all the person reading its conversation was told was "could not finish that one. Ask
+  // again". Asking again fails the same way for ever, so that sentence sends someone to retry a
+  // thing that cannot work.
+  //
+  // ONE predicate, published on the global so app.js reads this one rather than a copy of it. The
+  // sentence has to reach BOTH surfaces: the line reloadTrays pushes into the conversation, and the
+  // card app.js builds in drainFailedTurnOffers. UX-ERR-3 measured that the host's own turn-failed
+  // row often never lands, and the card is the part that survives the next transcript read, so a
+  // clause on only one of them is a clause most people never read.
+  const TRANSCRIPT_REPAIR_SENTENCE =
+    "This agent's conversation store needs repair. Repair it from the agent's details panel.";
+  // Both damage shapes the host can hit. The journal wording is the demo Titan's, measured; the
+  // sqlite wordings are BOX-6's, which the host's own turn-failed classifier already names.
+  const TRANSCRIPT_REPAIR_SIGNS =
+    /transcript checkpoint must recover|transcriptjournalcorruption|conversation store needs repair|database disk image is malformed|sqlite_corrupt|file is not a database|malformed database schema/i;
+  /** Did anything the box said about this failure name a store that needs repairing? */
+  function transcriptRepairWordsSeen(...parts) {
+    return parts.some((part) => part != null && TRANSCRIPT_REPAIR_SIGNS.test(String(part)));
+  }
+  /**
+   * Agents a failed turn on THIS page named, kept because the state outlives the tray. `attentionIds`
+   * beside it is cleared and rebuilt on every reloadTrays, and the tray is dismissed as it is read,
+   * so attention lasts one tick -- right for a one-off failure and wrong for this one, which lasts
+   * until somebody repairs it. Cleared only by a repair the host stood behind, and overruled either
+   * way by the host's own flag on the next roster read.
+   */
+  const repairIds = new Set();
+  /**
+   * The host's own verdict, when it has one. `transcriptNeedsRepair` reaches the roster record from
+   * session-summaries' buildSummary as either `true` or an object carrying the reason; both mean
+   * "this agent will fail every turn until somebody repairs it". A box on an older bundle sends
+   * neither, and then only the words above and the set above can say so.
+   */
+  function repairFlagOf(agent) {
+    const flag = agent?.transcriptNeedsRepair;
+    if (flag === true) return { needsRepair: true, needsRepairReason: "" };
+    if (flag != null && typeof flag === "object") {
+      const reason = typeof flag.reason === "string" ? flag.reason.trim() : "";
+      return { needsRepair: true, needsRepairReason: reason };
+    }
+    if (agent?.id != null && repairIds.has(agent.id)) return { needsRepair: true, needsRepairReason: "" };
+    return { needsRepair: false, needsRepairReason: "" };
+  }
+  /**
+   * Did the host stand behind the repair? ONE judge, here, used by the panel's wording and by the
+   * clearing above, because a console whose button says "Repaired" while its pill still says "Needs
+   * repair" has told the person two different things about one press.
+   *
+   * MEASURED against the host on grok-bot-local-vm, 2026-09-09: a repair with nothing to do answers
+   * `{before: 0, after: 0, quarantined: [], outcome: "already-healthy", reason: "this conversation
+   * store had nothing to repair"}`. Two things follow, and the first draft of this file got both
+   * wrong. `reason` is an explanation, NOT a refusal -- the host sends one on a success as well, so
+   * a judge that read a non-empty reason as failure would report every clean repair as broken. And
+   * an empty `quarantined` arrives as `[]`, not as null or a missing key.
+   *
+   * So the judgement is the outcome word alone. The host's vocabulary for this verb is
+   * `already-healthy`, `recovered`, `reset` and `refused`; `repaired`, `rebuilt` and `ok` ride along
+   * because they are unambiguous and cost nothing. Anything else is printed as the host said it and
+   * is never translated into success.
+   */
+  const REPAIR_WORKED = /^(repaired|recovered|rebuilt|reset|already-healthy|healthy|ok|done)$/i;
+  function repairWorked(answer) {
+    if (answer == null) return false;
+    const outcome = String(answer.outcome ?? "");
+    return REPAIR_WORKED.test(outcome) || (outcome === "" && Number.isFinite(answer.after));
+  }
+  global.__transcriptRepair = {
+    SENTENCE: TRANSCRIPT_REPAIR_SENTENCE,
+    wordsSeen: transcriptRepairWordsSeen,
+    flagOf: repairFlagOf,
+    worked: repairWorked,
+    remember: (id) => { if (id != null) repairIds.add(id); },
+    forget: (id) => { repairIds.delete(id); },
+  };
+  // ---- end BOX-6b -------------------------------------------------------------------------------
+
   function statusOf(agent) {
-    if (agent.isRunning) return { status: "working", statusText: "Working now", needsYou: false, needsYouReason: "" };
+    // BOX-6b rides alongside the status rather than inside it: a store that needs repair is true of
+    // an agent that is idle, working or blocked, and it must not move the status word or inflate
+    // the "N need you" count, which is a count of people-shaped jobs.
+    const repair = repairFlagOf(agent);
+    if (agent.isRunning) return { status: "working", statusText: "Working now", needsYou: false, needsYouReason: "", ...repair };
     // The third real state the old operator UI has and this one discarded: blocked on you.
     if (agent.awaitingUserResponse || attentionIds.has(agent.id)) {
       // QOL-NEEDS-YOU: "attention" covers two different things -- the host says this agent is
@@ -550,15 +633,16 @@
       const awaiting = agent.awaitingUserResponse;
       return {
         status: "attention",
-        statusText: awaiting ? "Waiting on you" : "The last turn failed",
+        statusText: awaiting ? "Waiting on you" : repair.needsRepair ? "Its conversation store needs repair" : "The last turn failed",
         needsYou: Boolean(awaiting),
         needsYouReason: awaiting && typeof awaiting.reason === "string" ? awaiting.reason : "",
+        ...repair,
       };
     }
     // The description is what the agent is for; it lives on the profile and the details panel. As
     // the idle status line it ran the whole persona across the sidebar card, the header and the
     // status pill (MR-28), so the status line says the state and nothing else.
-    return { status: "ready", statusText: "Ready for the next task", needsYou: false, needsYouReason: "" };
+    return { status: "ready", statusText: "Ready for the next task", needsYou: false, needsYouReason: "", ...repair };
   }
 
   // The automation record carries triggerDescription, schedule, isEnabled, lastRunAt and a runs[]
@@ -2221,7 +2305,10 @@
     // QOL-NEEDS-YOU adds needsYou: an agent already showing "attention" for a failed turn and
     // then blocked on the operator moves nothing else in this signature, and the pill would not
     // have been drawn until something unrelated changed.
-    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.needsYou ? 1 : 0}:${x.unread}:${x.preview}:${x.name}:${x.role}:${x.avatar}:${x.avatarShape ?? ""}:${x.hidden ? 1 : 0}:${x.notify ? 1 : 0}`).join("|") + `|${state.agentCount}`;
+    // BOX-6b adds needsRepair for the same reason: the host clearing or raising the repair state
+    // moves nothing else in this signature, so the pill would not be drawn or dropped until
+    // something unrelated changed.
+    const rosterSig = () => [...state.workers, ...state.rooms].map((x) => `${x.id}:${x.status}:${x.needsYou ? 1 : 0}:${x.needsRepair ? 1 : 0}:${x.unread}:${x.preview}:${x.name}:${x.role}:${x.avatar}:${x.avatarShape ?? ""}:${x.hidden ? 1 : 0}:${x.notify ? 1 : 0}`).join("|") + `|${state.agentCount}`;
     // app.js drives the "working" bubble from simulateReply's 1.15s timer, which is right for a
     // demo and wrong for a machine: a real reply takes tens of seconds, so the dots flashed and
     // died and the wait happened in silence. The adapter owns that bubble's lifetime instead --
@@ -2391,6 +2478,10 @@
         // count clear on the same heartbeat the host clears the badge.
         target.needsYou = next.needsYou;
         target.needsYouReason = next.needsYouReason;
+        // BOX-6b: carried the same way, so a repair that worked drops the pill on the next
+        // heartbeat rather than leaving a fixed agent wearing the badge until a browser reload.
+        target.needsRepair = next.needsRepair;
+        target.needsRepairReason = next.needsRepairReason;
         target.lastActivityAt = a.lastActivityAt ?? target.lastActivityAt;
         target.unread = Number(a.unreadCount) || 0;
         target.preview = typeof a.lastMessagePreview === "string" ? a.lastMessagePreview : target.preview;
@@ -2434,17 +2525,32 @@
         // Plain words, and the technical half kept off the page. The line this replaced read
         // "That turn failed: Agent failed to respond — fetch failed", which is the machine's own
         // spelling of a problem the person can do exactly one thing about.
+        //
+        // BOX-6b: one failure is not "ask again". A store that needs repair fails identically on
+        // every retry, so that agent's line names the repair and where to press it instead. The
+        // predicate is the shared one above; the seed carries the verdict so the card app.js keeps
+        // says the same thing without re-deciding it.
+        const needsRepair = transcriptRepairWordsSeen(tray.title, tray.detail) || owner.needsRepair === true;
         owner.messages.push({
           id: `tray-${tray.id}`, authorId: "system", authorName: "Machine Room", type: "system",
-          text: `${owner.name || "This agent"} could not finish that one. Ask again, or send the details to the developers.`,
+          text: needsRepair
+            ? TRANSCRIPT_REPAIR_SENTENCE
+            : `${owner.name || "This agent"} could not finish that one. Ask again, or send the details to the developers.`,
           time: timeOf(Date.now()),
         });
+        // A repair is a thing the operator does here, not a thing the developers do elsewhere, so
+        // the roster row wears the pill from this tick rather than waiting for the host's own flag
+        // on the next heartbeat -- and it is remembered, because reloadRosterInner runs a moment
+        // later and would otherwise paint the pill straight back off on a box whose bundle does
+        // not carry the host's flag yet.
+        if (needsRepair) { repairIds.add(owner.id); owner.needsRepair = true; }
         failedTurnReports.push({
           trayId: tray.id,
           agentId: owner.id,
           agentName: owner.name || "",
           title: String(tray.title ?? "error"),
           detail: String(tray.detail ?? ""),
+          needsRepair,
           at: Date.now(),
         });
         // The dedupe set dies with the page; without this, every reload re-narrates every historical
@@ -2899,6 +3005,67 @@
           isBusy: Boolean(status?.isBusy),
           capabilities: Array.isArray(status?.capabilities) ? status.capabilities : [],
         }));
+      },
+
+      // ---------------------------------------------------------------- BOX-6b
+      /**
+       * Repair one agent's conversation store, on demand, from the details panel.
+       *
+       * `tryCall`, so a box on a bundle without the verb answers null and app.js simply does not
+       * draw the control — the same degrade every other Wave D command uses. Anything else the
+       * host says is thrown, because a refusal the person cannot see is a repair they will believe
+       * happened.
+       *
+       * The host reads the agent under `id` the way every other per-agent command on this gateway
+       * does; `agentId` rides along because the BOX-6b brief named that key and a host that reads
+       * either one is then correct. Neither is a secret and neither is ambiguous.
+       *
+       * Shaped to {before, after, quarantined, outcome, reason}. An EMPTY `quarantined` is a NORMAL
+       * answer -- the demo Titan's databases were both healthy and there was nothing to move aside,
+       * which is the commonest damage shape rather than an unusual one -- so a console that read it
+       * as a failure would report the one real case in production as broken while it was fixed.
+       * The host sends it as an array of paths; a lone string is accepted too rather than dropped.
+       */
+      /**
+       * False once this box has answered "unknown gateway method" for the repair verb. The panel
+       * asks before it draws the control, so a box on an older bundle stops offering a button that
+       * cannot do anything the moment we learn it cannot. Before the first call it is true: the
+       * gateway carries no capability list for this, and a control that appears once and then goes
+       * away is better than one that never appears on a box that can repair.
+       */
+      canRepairTranscript() {
+        return !commandMissing("repairAgentTranscript");
+      },
+
+      repairTranscript(agentId) {
+        return tryCall("repairAgentTranscript", { id: agentId, agentId }).then((answer) => {
+          if (answer == null) return null;
+          // `Number(null)` is 0 and `Number("")` is 0, so a host that did not count has to be told
+          // apart from one that counted nothing: "before: 0" and "before: unknown" are different
+          // reports and only one of them is a number worth printing.
+          const count = (value) => {
+            if (value == null || value === "") return null;
+            const n = Number(value);
+            return Number.isFinite(n) ? n : null;
+          };
+          const list = (value) => (Array.isArray(value) ? value : value == null ? [] : [value])
+            .map((item) => String(item).trim())
+            .filter(Boolean);
+          const shaped = {
+            before: count(answer.before),
+            after: count(answer.after),
+            quarantined: list(answer.quarantined),
+            outcome: typeof answer.outcome === "string" && answer.outcome.trim() ? answer.outcome.trim() : "",
+            // The host's own sentence about what it did. Kept separate from `outcome` because it
+            // arrives on a success as well as a refusal, so the panel prints it either way rather
+            // than reading it as a verdict.
+            reason: typeof answer.reason === "string" ? answer.reason.trim() : "",
+          };
+          // Only a repair the host stood behind forgets the failure this page saw. A refusal leaves
+          // the pill and the control exactly where they were, which is the truth.
+          if (repairWorked(shaped)) repairIds.delete(agentId);
+          return shaped;
+        });
       },
 
       // ---------------------------------------------------------------- FEEDBACK-1

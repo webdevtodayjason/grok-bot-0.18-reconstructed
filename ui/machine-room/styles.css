@@ -3842,6 +3842,42 @@ body[data-composer-drop="1"] .composer {
   border-color: rgba(231, 162, 60, 0.34);
 }
 
+/* -- BOX-6b: an agent whose conversation store needs repair -----------------------------
+   The same capsule as the pill above, so the roster reads as one vocabulary rather than two.
+   It borrows the pill's shape and takes the error red, because this is not a person being
+   waited on: the machine has stopped and it will not start again on its own. Deliberately NOT
+   in the "N need you" count beside the agent count, which is a queue of things somebody asked.
+   The header capsule reuses the SAME element as the waiting pill and only adds this class, so
+   the .room-capsule rule above already carries its margin and size. */
+.needs-repair-pill {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 111, 114, 0.4);
+  border-radius: var(--radius-pill);
+  color: var(--danger-500);
+  background: rgba(255, 111, 114, 0.13);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Both pills on one card: the waiting one already took the auto margin, so this one sits beside
+   it with a gap rather than fighting for the same push. */
+.needs-you-pill + .needs-repair-pill {
+  margin-left: 6px;
+}
+
+.room-capsule > .needs-repair-pill {
+  margin-left: 0;
+  font-size: 10px;
+}
+
+.worker-card:has(.needs-repair-pill) {
+  border-color: rgba(255, 111, 114, 0.38);
+}
+
 .roster-needs-you {
   margin-right: 8px;
   padding: 2px 7px;

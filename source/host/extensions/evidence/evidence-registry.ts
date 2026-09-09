@@ -155,6 +155,13 @@ class EvidenceRegistry {
     };
   }
 
+  // BOX-6b. One row for something that happened TO an agent rather than something it did, so the
+  // repair leaves a receipt in the same ledger the console already reads. Goes through the same
+  // private append, so the per-agent serialisation and the PHANTOM-2 directory guard still apply.
+  note(agentId: string, row: Record<string, unknown>): void {
+    this.append(agentId, `${JSON.stringify({ ts: new Date().toISOString(), agentId, eventId: randomUUID(), ...row })}\n`);
+  }
+
   async readLedger(agentId: string): Promise<Record<string, unknown>[]> {
     try {
       const raw = await fs.readFile(this.ledgerPath(agentId), "utf8");

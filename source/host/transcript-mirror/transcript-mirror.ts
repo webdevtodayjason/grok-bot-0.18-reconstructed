@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { checkpointIdentity, fileIdentity, isMissingFile, parseDeferredStep, parsePendingCheckpoint, TranscriptJournalCorruptionError, writeAll, type DeferredTranscriptStep, type PendingTranscriptCheckpoint, type TranscriptCheckpoint } from "./transcript-journal-codec.js";
 import { RoutedTranscriptMirror, type LegacyMirrorPort } from "./transcript-mirror-router.js";
+import { repairTranscriptJournal, type TranscriptRepairReport } from "./transcript-journal-repair.js";
 import { SandError } from "../../shared/errors/registry.js";
 import { brandedErrno } from "../../shared/errors/bounded.js";
 
@@ -20,6 +21,11 @@ export class FileTranscriptMirror<Store = unknown> {
   private requireDeriver(): TranscriptDeriver<Store> { if (this.deriver == null) throw new TranscriptJournalCorruptionError("transcript occurrence derivation is unavailable"); return this.deriver; }
   private async withOutcomeReport<T extends { entryCount?: number; bytes?: number } | void>(op: string, conversationId: string, mintCause: (errno?: string) => unknown, operation: () => Promise<T>): Promise<T> { const startedAt = performance.now(); try { const counts = await operation(); this.reportOutcome({ op, outcome: "ok", conversationId, ...(counts ?? {}), durationMs: performance.now() - startedAt }); return counts; } catch (error) { if (typeof error !== "object" || error == null || !this.reportedFailures.has(error)) { if (typeof error === "object" && error != null) this.reportedFailures.add(error); const code = typeof error === "object" && error != null && "code" in error && typeof error.code === "string" ? brandedErrno(error.code) : undefined; this.reportOutcome({ op, outcome: "failed", conversationId, cause: mintCause(code), durationMs: performance.now() - startedAt }); } throw error; } }
   routed(legacy: LegacyMirrorPort<TranscriptCheckpoint, Store>, enabled: () => Promise<boolean>): RoutedTranscriptMirror<TranscriptCheckpoint, Store> { return new RoutedTranscriptMirror(this, legacy, enabled, this.routes); }
+  // BOX-6b. The door the turn path never had. recover() below is what writes the conversation file
+  // in the first place, and nothing on the turn path could reach it, so a conversation the journal
+  // owns but has never recovered refused every prepare for the life of the process. The router
+  // calls this when prepareCheckpoint says the checkpoint must recover first.
+  repairConversation(ctx: unknown, id: string, checkpoint: TranscriptCheckpoint, store: Store): Promise<TranscriptRepairReport> { return repairTranscriptJournal({ target: this, ctx, conversationId: id, checkpoint, store }); }
   jsonlPathFor(id: string): string { const safe = safeId(id); return join(this.transcriptsDir, safe, `${safe}.jsonl`); }
   pendingPathFor(id: string): string { const safe = safeId(id); return join(this.transcriptsDir, safe, `${safe}.journal-pending.json`); }
   cursorPathFor(id: string): string { const safe = safeId(id); return join(this.transcriptsDir, safe, `${safe}.journal-cursor.json`); }

@@ -1052,7 +1052,14 @@ export async function resendSend(fetchImpl, apiKey, payload, idempotencyKey = ""
     signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
   });
   const text = await response.text();
-  if (!response.ok) throw new Error(`HTTP ${response.status} ${text.slice(0, 200)}`);
+  if (!response.ok) {
+    // The status rides on the error so the caller can say WHICH KIND of failure it was in its own
+    // words. The message keeps the provider's body because the log row wants it; nothing that
+    // answers a bot may repeat it.
+    const error = new Error(`HTTP ${response.status} ${text.slice(0, 200)}`);
+    error.status = response.status;
+    throw error;
+  }
   let parsed;
   try { parsed = JSON.parse(text); } catch { throw new Error("Resend answered something that is not JSON"); }
   return { id: asString(parsed?.id) };
@@ -1263,11 +1270,22 @@ export function createMailSendRoute({
     let sent;
     try { sent = await resendSend(fetchImpl, apiKey, payload, asString(body.idempotencyKey)); }
     catch (error) {
+      // `why` is for the ROW, the workspace's ledger and this relay's log, where an operator wants
+      // the provider's own words. It is never handed back: the bot reads its answer out to the
+      // person, so a status code, a JSON blob and a vendor's domain would land on a customer's own
+      // screen. Two cases are worth telling apart and both are read off the status rather than
+      // echoed -- a message the service would not take, which retrying will not fix, and a
+      // failure on its side, which retrying will.
       const why = String(error?.message ?? error);
+      const status = Number(error?.status ?? 0);
+      const permanent = status >= 400 && status < 500 && status !== 408 && status !== 429;
       await settle("failed", "", why.slice(0, 300));
       await writeSent("failed", "", why.slice(0, 300), from);
       log(`mail  ${address} -> ${to} did not send: ${why}`);
-      return refuse(res, 502, `That email did not send: ${why.slice(0, 200)}`, "send_failed");
+      return refuse(res, 502, permanent
+        ? "The mail service would not accept that message, so nothing was sent. Check the address it was going to."
+        : "The mail service could not take that message just now, so nothing was sent. Try again in a few minutes.",
+        "send_failed");
     }
 
     await settle("sent", sent.id, "");

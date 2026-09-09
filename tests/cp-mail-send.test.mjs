@@ -6,8 +6,9 @@
 //   the row is written BEFORE the mail goes and settled after it, so a crash leaves a row reading
 //   `sending` rather than a send nobody can see;
 //
-//   the caps count what is in flight as well as what went, because a claim that was never settled
-//   is a mail we do not know the fate of and counting it low is the unsafe direction;
+//   the caps count EVERY CLAIMED ROW in the window -- what went, what is still in flight, and what
+//   the provider refused. Anything counted low is the unsafe direction, and a rejected send still
+//   cost a call to the operator's shared account, so a bot in a loop must run out of hour;
 //
 //   and the two new columns reach a database that already has this table. mail_send_log is LIVE on
 //   the R750 with seven columns and no resend_id, and CREATE TABLE IF NOT EXISTS does exactly
@@ -156,7 +157,7 @@ test("a workspace's two hundred and first send in a day is refused, and the refu
   } finally { store.close(); }
 });
 
-test("a claim that was never settled still counts, and a failed one does not", () => {
+test("every claimed row counts, whatever became of it, and a failure gets no place back", () => {
   const store = memory();
   const clock = clockFrom(Date.parse("2026-09-09T12:00:00Z"));
   try {
@@ -164,13 +165,18 @@ test("a claim that was never settled still counts, and a failed one does not", (
     // Twenty-nine crashes: rows left reading `sending`, which is "we do not know". They count,
     // because counting an unknown low is the direction that lets a bug send unbounded mail.
     for (let n = 0; n < 29; n += 1) sends.openSend({ slug: "demo", agentId: "a_titan", code: "247758", to: "j@x.example" });
-    // And one that we know did not go, which does not count.
+    // And one we know did not go. The first cut of this gave that one its place back, on the
+    // reasoning that no mail left. But a send the provider rejected still COST A CALL to the
+    // operator's shared account, and a bot in a loop fails every time -- so a cap that only
+    // counted successes was no cap at all against exactly the caller it exists to stop.
     const failed = sends.openSend({ slug: "demo", agentId: "a_titan", code: "247758", to: "j@x.example" });
     sends.closeSend(failed.id, "failed", "", "Resend said the domain is not verified");
-    assert.equal(sends.openSend({ slug: "demo", agentId: "a_titan", code: "247758", to: "j@x.example" }).ok, true,
-      "the failed one gave its place back");
     assert.equal(sends.openSend({ slug: "demo", agentId: "a_titan", code: "247758", to: "j@x.example" }).ok, false,
-      "and the thirty in flight and sent are the cap");
+      "thirty claims in the hour is thirty, and one of them having failed changes nothing");
+    // And an hour later the window has moved and the bot may send again.
+    clock.advance(3_600_001);
+    assert.equal(sends.openSend({ slug: "demo", agentId: "a_titan", code: "247758", to: "j@x.example" }).ok, true,
+      "the cap is a window and not a ban");
   } finally { store.close(); }
 });
 

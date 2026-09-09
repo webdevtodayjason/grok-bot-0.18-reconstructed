@@ -20,6 +20,7 @@ import {
   isTransientStreamError,
 } from "../../runner/transient-stream-error.js";
 import { isSqliteCorruptError } from "../../storage/sqlite-busy.js";
+import { isTranscriptJournalCorruptionError } from "../../transcript-mirror/transcript-journal-repair.js";
 // findBackendConnectError rather than connectCodeOf: the code lives in turn-runtime.ts, which
 // imports this file, and a cycle between the two would be a fragile way to answer the same
 // question. "The error came back from the backend" is what both are really asking.
@@ -27,11 +28,20 @@ import { findBackendConnectError } from "./agent-run-error.js";
 
 export const TURN_FAILED_ENTRY_KIND = "turn-failed";
 
+// BOX-6b. The one clause a person can act on, and the only one with a control behind it. Exported
+// so the console keys its Repair offer off the same idea rather than off a second guess at the
+// wording. Two shapes reach it: a store SQLite cannot read, and a journalled conversation whose
+// recovery gave up (measured on the R750 demo box 2026-09-09, 18 failed turns in one host log).
+export const STORE_NEEDS_REPAIR_CLAUSE = "the conversation store needs repair";
+export function turnFailureNeedsStoreRepair(error: unknown): boolean {
+  return isSqliteCorruptError(error) || isTranscriptJournalCorruptionError(error);
+}
+
 // One clause each, lower case, no full stop: they are dropped into the sentence below.
 export function plainWordsForTurnFailure(error: unknown): string {
   // BOX-6 first, because it is the failure this row was written about and it is the one an
   // operator can actually fix. The gap row names this wording.
-  if (isSqliteCorruptError(error)) return "the conversation store needs repair";
+  if (turnFailureNeedsStoreRepair(error)) return STORE_NEEDS_REPAIR_CLAUSE;
   if (isProviderCapacityError(error)) return "the model is busy right now";
   if (isFirstTokenStallError(error)) return "the model went quiet before it said anything";
   if (isContextOverflowDeadEnd(error) || isConversationTooLargeRefusal(error)) {
