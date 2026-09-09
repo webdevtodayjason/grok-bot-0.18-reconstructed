@@ -407,37 +407,49 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
    *
    * Rewriting connectors.json does not stop the bridge it used to name. Measured on the R750 demo
    * box on 2026-09-08, minutes after the swap that landed the migration: the entry was the link
-   * shape and `ps` still showed the same three `npx mcp-remote` processes, 29 hours old and
-   * carrying the live bearer, because the box's daemon stops a server only when it LEAVES the list
-   * it is pushed, not when that server's config changes underneath it.
+   * shape and `ps` still showed the same three `npx mcp-remote` processes, 29 hours old and still
+   * carrying the live bearer, because the box's daemon stops a server only when its NAME leaves the
+   * list it is pushed -- not when that name's config changes underneath it. Restarting the host
+   * changed nothing, and neither did the next start, when there was no longer a migration to
+   * trigger a per-entry fix off.
    *
-   * So each migrated connector is cycled: pushed absent, which stops it, then pushed back, which
-   * starts it in the shape with no argument list. Not on the first tick -- the box may not be
-   * answering yet at host start -- so it is tried a few times, spaced, and gives up quietly. The
-   * timer is unref'd: a host with nothing else to do must still be able to exit.
+   * So it is not tied to the migration at all. Once per host start, every connector that is now a
+   * LINK is stopped and started: the box is pushed a list with those names missing, which is the
+   * one thing that makes the daemon stop them, and then the full list, which opens them again as
+   * links. A link's start is the box making one request -- 120 ms measured -- so this costs a
+   * fraction of a second and cannot leave a process from an older shape running.
+   *
+   * Not on the first tick: the box may not be answering yet at host start, so it is tried at
+   * fifteen seconds, forty-five and two minutes, and gives up with a line. The timer is unref'd, so
+   * a host with nothing else to do can still exit.
    */
-  const cycleMigrated = (names: readonly string[]): void => {
-    if (names.length === 0) return;
-    const attempts = [15_000, 45_000, 120_000];
-    const pending = new Set(names);
-    const tryOnce = (index: number): void => {
-      const timer = setTimeout(() => {
-        void (async () => {
-          for (const name of [...pending]) {
-            if (await restartLocalConnector(name)) {
-              pending.delete(name);
-              log(`connector "${name}" was restarted after its migration, so the bridge that held its key in argv is gone`);
-            }
-          }
-          if (pending.size > 0 && index + 1 < attempts.length) tryOnce(index + 1);
-          else if (pending.size > 0) log(`connector(s) ${[...pending].join(", ")} were migrated but could not be restarted; their old bridge process may still be running until this box restarts`);
-        })();
-      }, attempts[index]);
-      timer.unref?.();
-    };
-    tryOnce(0);
+  const dropStaleRemoteProcesses = async (): Promise<boolean> => {
+    const boxExec = deps.boxMcpExec as { loadServers(configJson: string): Promise<void> } | undefined;
+    if (boxExec == null) return true;
+    const remotes = new Set(localRemoteConnectorNames(localConnectorRoot()));
+    if (remotes.size === 0) return true;
+    try {
+      const configs = await (manager.definitionSourceView() as { getBoxServerConfigs(): Promise<Record<string, unknown>> }).getBoxServerConfigs();
+      const others = Object.fromEntries(Object.entries(configs).filter(([name]) => !remotes.has(name)));
+      await boxExec.loadServers(JSON.stringify({ mcpServers: others }));
+      discovery.resetPushState();
+      await discovery.getTools({});
+      log(`link connectors restarted once at start (${[...remotes].join(", ")}), so nothing started under an older shape is still running`);
+      return true;
+      // Class only, never the message: the argument to the failing call is the merged config.
+    } catch (error) { log(`link connector restart failed (${error instanceof Error ? error.name : typeof error})`); return false; }
   };
-  cycleMigrated(migratedAtStart);
+  const scheduleStaleSweep = (index = 0): void => {
+    const attempts = [15_000, 45_000, 120_000];
+    const wait = attempts[index];
+    if (wait === undefined) { log("link connectors could not be restarted at start; a process from an older shape may still be running until this box restarts"); return; }
+    const timer = setTimeout(() => {
+      void dropStaleRemoteProcesses().then((done) => { if (!done) scheduleStaleSweep(index + 1); });
+    }, wait);
+    timer.unref?.();
+  };
+  scheduleStaleSweep();
+  if (migratedAtStart.length > 0) log(`${migratedAtStart.length} bridged connector(s) rewritten at start: ${migratedAtStart.join(", ")}`);
 
   const management = {
     // SECRET-2: a connectors.json entry this host refuses to run appears here with the reason,
