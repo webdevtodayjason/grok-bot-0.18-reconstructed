@@ -166,9 +166,17 @@ with a row of its own in the directory for the first time:
 
 — its exact address and no other bot's, out of the eight on that box.
 
-**The R750 demo tenant** (`titanbot-box-atonqjq7zx593jsacaccpfau`, bundle `3de23332477d`, model
-Qwen 3.8 Max), 14:25Z, 80 s: 13 of 13 PASS. The box's own facts that run were `maxAgents=100`,
-`doneReason=existing-box`, `domain=myagents.email canSend=false`, and the answers, verbatim:
+**The R750 demo tenant** (`titanbot-box-atonqjq7zx593jsacaccpfau`, bundle `7d653c9283a4`, model
+Qwen 3.8 Max), 17:39Z, 69 s: 13 of 13 PASS. The box's own facts that run were `maxAgents=40`,
+`doneReason=existing-box`, `domain=myagents.email canSend=false` over 8 addresses. Asked whether it
+has an address of its own, with a row of its own in the directory:
+
+> "Yes, my email address is agent994656@myagents.email. I can receive mail there, though sending
+> isn't wired up yet on this workspace."
+
+— its exact address, none of the other eight, and the send path described as it actually is. The
+first run at 14:25Z (bundle `3de23332477d`, ceiling 100) is below as it was recorded; its email row
+was the no-address branch, which is the hole PERSONA-1b closed:
 
 | question | answer | checked against |
 | --- | --- | --- |

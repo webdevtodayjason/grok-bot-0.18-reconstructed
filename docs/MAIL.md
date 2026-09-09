@@ -500,7 +500,11 @@ codes are five thousand distinct addresses and a retired one is never handed out
 address is delivered into its own workspace's box while the workspace that received the webhook
 gets nothing, `agent999999@` never reaches the catch-all, a name address carries the dated notice,
 a recipient at another domain is refused before any lookup, a bad signature is 401 with nothing
-looked up, and nothing is written inside Richard's box.
+looked up, a workspace an operator named read-only is not written inside while every other one is,
+an edge that does not hold the directory can never resolve a code however the body is signed, a
+roster without a bot retires that bot's address and an empty roster retires none, and (in
+`tests/relay-mail-tenant-claim.test.mjs`) a validly signed webhook from one workspace naming another
+workspace's code is refused while the directory owner's own mail still arrives.
 
 ---
 
@@ -515,12 +519,39 @@ looked up, and nothing is written inside Richard's box.
 - **No console affordance for the addresses yet.** The address on a bot's card, the codes column on
   the super admin's client row and the one-click "allow this sender" are filed as MAIL-2b. Today
   they are `node cp/cli.mjs mail list` and `GET /v1/admin/mail`.
-- **Nothing was written inside Richard Avery's box** by MAIL-2. His bots' codes are minted and
-  route, because routing is decided at the relay; his box keeps the older bundle until it is
-  swapped, so his Titan cannot yet name its own address.
+- **Nothing is written inside Richard Avery's box.** His bots' codes are minted and route, because
+  routing is decided at the relay; his box keeps the older bundle until it is swapped, so his Titan
+  cannot yet name its own address. That is now the relay's `mail-no-push.txt` saying so and not a
+  slug in the product's source; docs/GAP-ANALYSIS.md MAIL-2e owns taking the line out.
 - **Attachments are links, not files.** The relay never downloads one, and the links Resend hands
   over expire.
 
+
+---
+
+## 9a. Measured again on the R750 after the review round, 2026-09-09
+
+The blocker and the three smaller findings of the review round, on the same machine, same way.
+Bundle `7d653c9283a4` in both swappable boxes (`post-swap watch disarmed: host up 60s on
+7d653c9283a4 (healthy)` on each), control plane rebuilt and restarted first, relay last. Richard
+Avery's box was not swapped and nothing was written inside it.
+
+| what | measured |
+| --- | --- |
+| Mail to a per-bot code still arrives | 17:38:20Z, `noreply@titanium.bot` to `agent247758@myagents.email`: relay logged `agent247758@myagents.email -> Titan in demo`, and the demo tenant's own ledger holds the whole row. |
+| The door keeps nothing about it | The operator's `/state/mail-inbox.jsonl` row for that same `email_id` is `{at, email_id, outcome:"delivered", slug:"demo"}` with `from`, `to`, `subject` and `agentName` all empty. |
+| A read-only workspace is the relay's setting, not the source | Relay start: `richard-avery holds 1 address(es) and they route; nothing was written inside that box, which this relay is set to leave read-only` — from `/state/mail-no-push.txt`, which the product ships without. |
+| A dead bot loses its address | A leftover gate probe on the demo tenant was deleted; the next sweep logged `0 minted, 1 retired`, and `agent980656@myagents.email` reads `retired` in the directory. A second probe minted at 17:44 (`1 minted`) was retired at 17:52 after its agent was deleted (`1 retired`), so the whole life cycle is measured. |
+| A picture still reaches the model | `console.titanium.bot` in a real browser, demo tenant, a scratch agent: `img-6321dfa4.png`, a colour picked at random and named nowhere but in its pixels. The reply was "Yellow" and that turn's wire line reads `historyImageParts:1 imageParts:1 imagesAllowed:true`, model plan-qwen. |
+| Titan's facts | `scripts/verify-persona.mjs` on the demo box, 17:39Z, 69 s, 13 of 13 PASS. docs/PERSONA.md carries the answers. |
+
+**The cross-tenant injection is not reproduced live on purpose.** Reproducing it needs a second
+workspace's mail settings changed to claim `myagents.email`, which means writing a live customer's
+console settings, so it is measured where it can be: the reviewer's own reproduction script no
+longer delivers (it now falls through to the poster's own catch-all bot), and two tests in
+`tests/relay-mail-tenant-claim.test.mjs` post a validly signed webhook from one workspace naming
+another workspace's code and assert nothing is delivered. What is measured on the R750 is that the
+shipped relay carries the rule and that legitimate mail at that domain still arrives.
 
 ---
 
