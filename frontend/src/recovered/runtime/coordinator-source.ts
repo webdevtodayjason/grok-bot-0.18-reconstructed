@@ -532,7 +532,7 @@ const TELEMETRY_DOMAIN_BY_METHOD: Record<CoordinatorMethod, string> = {
   skillsCatalog: "skills", syncPluginSkills: "skills", getPluginSyncStatus: "skills",
   getSkillPublishTargets: "skills", publishSkill: "skills", resyncPublishedSkill: "skills", unpublishSkill: "skills",
   getSubagents: "subagents", getAsyncTasks: "subagents",
-  getForeverBoxStatus: "computer", ensureForeverBox: "computer", handBackForeverBox: "computer",
+  getForeverBoxStatus: "computer", ensureForeverBox: "computer", handBackForeverBox: "computer", skipBoxHandoff: "computer",
   isEgressTunnelAvailable: "computer",
   startTeachRecording: "teach", stopTeachRecording: "teach", getTeachRecordingStatus: "teach",
   getTrays: "trays", dismissTray: "trays", clearTrays: "trays",
