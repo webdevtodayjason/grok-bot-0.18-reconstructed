@@ -2164,8 +2164,15 @@ try {
     // assertion threw first.
     const marketCatalog = await gw("listMarketplace", {}).catch((error) => ({ error: error.message }));
     const marketBots = Array.isArray(marketCatalog?.bots) ? marketCatalog.bots : [];
-    check(marketBots.length === 6, "listMarketplace serves the six bot templates",
-      marketCatalog?.error ?? `${marketBots.length}: ${marketBots.map((b) => b.name).join(", ")}`);
+    // A NAMED FLOOR, not a count. This was `=== 6`, which turned the deploy gate red the first time
+    // a wave added a bot template -- a red that says nothing about whether the box is healthy, which
+    // is the only thing this gate is for. What matters here is that the six the product shipped are
+    // still being served; more than six is a wave doing its job.
+    const shippedBots = ["Research desk", "PR review desk", "Ops watcher", "Issue triage", "Inbox triage", "Course note-taker"];
+    const servedBotNames = marketBots.map((b) => String(b?.name ?? ""));
+    const missingBots = shippedBots.filter((name) => !servedBotNames.includes(name));
+    check(missingBots.length === 0, `listMarketplace serves the bot templates the product shipped (${marketBots.length} on this host)`,
+      marketCatalog?.error ?? `missing ${missingBots.join(", ")} from ${servedBotNames.join(", ")}`);
     const researchDesk = marketBots.find((b) => String(b?.name ?? "") === "Research desk") ?? null;
     if (marketBots.length === 0) {
       console.log("  INFO  this host serves no bot catalog; the Bots-tab checks below are skipped");

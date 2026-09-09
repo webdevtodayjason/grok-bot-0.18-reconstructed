@@ -2176,7 +2176,11 @@
   function marketplaceCategories() {
     const items = marketplaceItems();
     if (!items.length) return [MARKETPLACE_ALL];
-    const declared = (marketplaceCatalog?.categories ?? []).map(String);
+    // The adapter now keeps the host's { plugins, bots } shape rather than flattening it to the
+    // plugin half, so the Bots tab can draw ITS chips. This is the Plugins tab, so it reads the
+    // plugin half by name. A flat array is still accepted: an older adapter answered one.
+    const categories = marketplaceCatalog?.categories;
+    const declared = (Array.isArray(categories) ? categories : (categories?.plugins ?? [])).map(String);
     const used = [...new Set(items.map((item) => String(item.category ?? "")).filter(Boolean))];
     const featured = items.some((item) => item.featured === true) ? ["Featured"] : [];
     const ordered = declared.length ? declared : [...featured, ...used];
@@ -2354,7 +2358,129 @@
     const source = item?.source?.url
       ? `<a class="ghost-button" href="${escapeHtml(String(item.source.url))}" target="_blank" rel="noreferrer noopener" data-marketplace-source>View source ↗</a>`
       : "";
-    return `${back}<section class="plugin-detail"><div class="plugin-hero">${hero}<div class="plugin-hero-copy"><h3>${escapeHtml(name)}</h3><p>${escapeHtml(description)}</p></div><span class="status-pill${ready ? " success" : ""}">${escapeHtml(label)}</span></div><div class="form-actions marketplace-actions">${source}${marketplaceInstallControlMarkup(item, install, card)}</div><div class="plugin-sections">${marketplaceAccountsSectionMarkup(item, install, card, lead)}${card?.shellTool ? shellToolMarkup(card, lead) : ""}${marketplaceConnectorsSectionMarkup(item, card)}</div></section>`;
+    // MARKET-26. The dates and the steps go ABOVE the sections, because they are what somebody
+    // reads before they decide to spend an afternoon on a developer app, and the accounts section
+    // below is what they use afterwards.
+    return `${back}<section class="plugin-detail"><div class="plugin-hero">${hero}<div class="plugin-hero-copy"><h3>${escapeHtml(name)}</h3><p>${escapeHtml(description)}</p>${marketplaceVerificationMarkup(item)}</div><span class="status-pill${ready ? " success" : ""}">${escapeHtml(label)}</span></div><div class="form-actions marketplace-actions">${source}${marketplaceInstallControlMarkup(item, install, card)}</div><div class="plugin-sections">${marketplaceFirstStepsMarkup(item)}${marketplaceContradictionMarkup(item)}${marketplaceDocFactsMarkup(item)}${marketplaceAccountsSectionMarkup(item, install, card, lead)}${card?.shellTool ? shellToolMarkup(card, lead) : ""}${marketplaceConnectorsSectionMarkup(item, card)}</div></section>`;
+  }
+
+  // ---- MARKET-26: what the vendor requires, and when we last checked ----------------------------
+  //
+  // The catalog has carried a `verification` stamp on every row since MARKET-1 and the wire has
+  // always sent it. THIS PAGE HAS NEVER DRAWN IT. A person deciding whether to spend an afternoon
+  // creating a developer app had no way to tell whether the instructions in front of them were read
+  // last week or last year, and on Meta, X and LinkedIn that is the difference between a working
+  // sign-up and a dead one.
+  //
+  // Two dates, kept apart on the screen the way they are kept apart in the catalog, because they
+  // answer different questions:
+  //
+  //   VERIFIED  we ran this against the vendor on that date, from a box.
+  //   CHECKED   the vendor still documented what this page says, on that date.
+  //
+  // And one honest limitation said out loud. Nothing pushes control-plane state into a running box,
+  // so between releases this page cannot know that a re-read has since found something. What it can
+  // know is HOW OLD its own facts are, so once they are older than the row's own recheck interval
+  // it says the row is under review and to hold off -- before the person commits, and without
+  // blocking Install, which is theirs to press.
+
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function marketplaceDay(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ""));
+    if (!match) return "";
+    const month = MONTHS[Number(match[2]) - 1];
+    return month ? `${Number(match[3])} ${month} ${match[1]}` : "";
+  }
+
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  /** How old this row's own dated facts are, and whether that is past what the row asked for. */
+  function marketplaceRowAge(item, at = Date.now()) {
+    const docs = Array.isArray(item?.docs) ? item.docs : [];
+    const days = docs
+      .map((doc) => Date.parse(`${String(doc?.checkedOn ?? "")}T00:00:00Z`))
+      .filter((value) => Number.isFinite(value));
+    if (!days.length) return { oldest: "", days: null, stale: false, recheckDays: 0 };
+    const oldest = Math.min(...days);
+    const recheckDays = Number.isFinite(Number(item?.recheckDays)) && Number(item.recheckDays) > 0 ? Number(item.recheckDays) : 7;
+    return {
+      oldest: new Date(oldest).toISOString().slice(0, 10),
+      days: Math.floor((at - oldest) / DAY_MS),
+      stale: at - oldest > recheckDays * DAY_MS,
+      recheckDays,
+    };
+  }
+
+  function marketplaceVerificationMarkup(item) {
+    if (!item) return "";
+    const verification = item.verification ?? null;
+    const age = marketplaceRowAge(item);
+    const lines = [];
+    if (verification?.checkedOn) {
+      // A DATE AND NOTHING ELSE. `verification.how` is a sentence written for us -- it names an
+      // endpoint, a container and an HTTP status, and a customer reading "HTTP 403 Unsupported
+      // Authentication" under a plugin's title reads it as this page telling them something is
+      // broken. It is real evidence and it stays on the page, one disclosure down, with the rest of
+      // the working.
+      const ran = marketplaceDay(verification.checkedOn);
+      lines.push(`<p class="field-hint" data-marketplace-verified>Verified ${escapeHtml(ran || String(verification.checkedOn))}</p>`);
+    }
+    if (age.oldest) {
+      lines.push(age.stale
+        ? `<p class="field-hint" data-marketplace-under-review><strong>Under review</strong> — we are re-reading this vendor's own documentation. What is below was true on ${escapeHtml(marketplaceDay(age.oldest))} and these vendors change their requirements often, so hold off installing until this page says checked again.</p>`
+        : `<p class="field-hint" data-marketplace-checked>Checked ${escapeHtml(marketplaceDay(age.oldest))} against ${escapeHtml(String(item.source?.label ?? "the vendor's own documentation"))}.</p>`);
+    }
+    return lines.join("");
+  }
+
+  /** The steps that come BEFORE the key box is any use. Numbered, because they are in order. */
+  function marketplaceFirstStepsMarkup(item) {
+    const steps = Array.isArray(item?.firstSteps) ? item.firstSteps.filter((step) => String(step ?? "").trim().length > 0) : [];
+    if (!steps.length) return "";
+    // Styled inline rather than through styles.css, which belongs to nobody in this wave: this is
+    // one list in one section, and the alternative was an ordered list with the browser's own 40px
+    // indent inside a card that has none.
+    const list = steps.map((step) => `<li style="margin:0 0 8px">${escapeHtml(String(step))}</li>`).join("");
+    return `<section data-marketplace-first-steps><div class="plugin-section-title"><span>What you must do first</span><span>${steps.length} step${steps.length === 1 ? "" : "s"}</span></div><div class="secure-card"><ol class="marketplace-first-steps" style="margin:0;padding-left:20px;line-height:1.5">${list}</ol></div></section>`;
+  }
+
+  /**
+   * Where the vendor's own documentation says two different things. Not a bug in this row: a fact
+   * about the vendor, and the person is better off being told than discovering it against a rate
+   * limiter. Behind a disclosure so the page is not shouting at somebody who does not need it.
+   */
+  function marketplaceContradictionMarkup(item) {
+    const line = String(item?.knownContradiction ?? "").trim();
+    if (!line) return "";
+    return `<details class="panel-card" data-marketplace-contradiction><summary>One thing this vendor documents twice, differently</summary><p class="field-hint">${escapeHtml(line)}</p></details>`;
+  }
+
+  /**
+   * The dated facts themselves, behind a disclosure: what we depend on, where it is published, and
+   * what it said when we last read it. Any fact the last read could not confirm shows BOTH SIDES,
+   * because "something changed" without the two strings is a sentence that sends the reader to go
+   * and do the work again.
+   */
+  function marketplaceDocFactsMarkup(item) {
+    const docs = Array.isArray(item?.docs) ? item.docs : [];
+    if (!docs.length) return "";
+    // The working behind "Verified <date>" in the hero: what was actually run, against which
+    // address, and what came back. It belongs here rather than up there for the reason written
+    // beside that line.
+    const how = String(item?.verification?.how ?? "").trim();
+    const ran = how
+      ? `<div class="setting-row" data-marketplace-verified-how><div><strong>What we ran, and what it answered</strong><small>${escapeHtml(how)}</small></div><span class="status-pill success">${escapeHtml(marketplaceDay(item?.verification?.checkedOn) || String(item?.verification?.checkedOn ?? ""))}</span></div>`
+      : "";
+    const rows = docs.map((doc) => {
+      const state = String(doc?.state ?? "verified");
+      const word = state === "not-published"
+        ? "the vendor does not publish this"
+        : state === "changed" ? "this one has moved" : `read ${marketplaceDay(doc?.checkedOn) || String(doc?.checkedOn ?? "")}`;
+      const both = state === "changed"
+        ? `<div class="field-hint" data-marketplace-doc-sides="${escapeHtml(String(doc?.id ?? ""))}">we expect: ${escapeHtml(String(doc?.expected ?? ""))}<br />the page now says something else, so this row is being re-read</div>`
+        : "";
+      return `<div class="setting-row" data-marketplace-doc="${escapeHtml(String(doc?.id ?? ""))}"><div><strong>${escapeHtml(String(doc?.what ?? ""))}</strong><small>${escapeHtml(String(doc?.url ?? ""))}</small>${both}</div><span class="status-pill${state === "verified" ? " success" : ""}">${escapeHtml(word)}</span></div>`;
+    }).join("");
+    return `<details class="panel-card" data-marketplace-doc-facts><summary>What this page depends on, and where it is published</summary><div class="plugin-list">${ran}${rows}</div></details>`;
   }
 
   // Add, or Uninstall with the offer to clear what the host stores for it. The clear has to happen
@@ -2363,6 +2489,11 @@
   function marketplaceInstallControlMarkup(item, install, card) {
     const stored = (install?.storedCredentials ?? card?.storedFields ?? []).length;
     const installed = install?.installed === true || (install == null && card?.removable === true);
+    // MARKET-26. A row that puts nothing on the box has no Add: Meta, X and LinkedIn have nothing
+    // honest to install, and Browserbase's key is read by the host itself. Offering the button
+    // would call a host command with no entry behind it, and the person would press it once, get
+    // nothing, and reasonably conclude the page is broken.
+    if (item?.installsNothing === true) return "";
     if (!installed) return item ? `<button class="primary-button" type="button" data-marketplace-add="${escapeHtml(item.id)}">Add</button>` : "";
     // A shell tool has no inverse here: installShellTool runs an installer in the box and the host
     // has no command that removes it. Offering an Uninstall would call removeConnector with a name
@@ -2459,6 +2590,16 @@
   }
 
   function marketplaceAccountsSectionMarkup(item, install, card, lead) {
+    // MARKET-26. A row that installs nothing has no account state to report and must not be told it
+    // is "not installed": there is nothing to install. Where it carries a key the host reads for
+    // itself, the key box is still exactly the box every other row has.
+    if (item?.installsNothing === true) {
+      const home = pluginCredentialHomeMarkup(item, install, card);
+      const line = (item.credentials ?? []).length > 0
+        ? "The host stores this key in its own 0600 store and reads it itself. It is put into no connector, no request from this page, and no environment the agent's shell can read."
+        : "There is no account to connect from here. Everything this vendor needs is on your side of the line, and the steps above are it.";
+      return `<section data-marketplace-accounts><div class="plugin-section-title"><span>Accounts</span><span>${(item.credentials ?? []).length > 0 ? "1 key" : "nothing to connect"}</span></div><div class="setting-row" data-marketplace-account="${escapeHtml(String(item.id ?? ""))}"><div><strong>${escapeHtml(String(item.name ?? item.id ?? ""))}</strong><small>${escapeHtml(line)}</small></div></div>${home}</section>`;
+    }
     const label = install ? install.label : pluginStatusLabel(card?.status ?? "available");
     const ready = install ? install.ready === true : card?.status === "connected";
     const line = install?.includedWithPlan === true
@@ -2497,6 +2638,17 @@
   }
 
   function marketplaceConnectorsSectionMarkup(item, card) {
+    // MARKET-26, and this branch comes FIRST on purpose. A row that installs nothing derives
+    // `kind: "shell-tool"` on the wire, because the wire's vocabulary is older than this shape, and
+    // without this the Meta page would tell a person "a shell tool is not an MCP server: the agent
+    // runs its command itself" about a row that has no command and never will.
+    if (item?.installsNothing === true) {
+      return `<section data-marketplace-connectors><div class="plugin-section-title"><span>Connectors</span><span>nothing to install</span></div><div class="empty-state">${escapeHtml(
+        (item.credentials ?? []).length > 0
+          ? "There is no server to install for this one. What it needs is the key above, which the host reads itself."
+          : "There is nothing to install here. This page is the part that takes the time: what the vendor requires of you before anything can post on your behalf.",
+      )}</div></section>`;
+    }
     const shellTool = item?.kind === "shell-tool" || card?.shellTool != null;
     const count = `<span>${!shellTool && card?.tools?.length ? `${card.tools.filter((tool) => tool.enabled).length}/${card.tools.length} enabled` : !shellTool && card ? "1 connector" : "0 connectors"}</span>`;
     if (!card || shellTool) {

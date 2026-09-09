@@ -531,6 +531,10 @@ export function createAdminApi({
   // it an admin_actions row could say who and when and not where. The default is a sentence rather
   // than an empty string, so a row written by a caller that did not pass one reads as unmeasured.
   clientOf = () => "not measured",
+  // MARKET-26. The marketplace panel's read, built in cp/server.mjs and handed over, so this
+  // console and the operator's own /v1/marketplace/verification route cannot drift into two
+  // different answers about which of our own catalog rows may be stale.
+  marketplaceVerificationState = () => ({ measuredAt: new Date().toISOString(), rollup: null, records: [], catalog: [], catalogProblem: "this control plane was built without the marketplace verification job", ignores: [], meteredRuns: 0 }),
 } = {}) {
   // Made on the first refused sign-in rather than at boot, so a data directory that is not writable
   // yet cannot stop the service from starting.
@@ -3037,8 +3041,124 @@ export function createAdminApi({
       return true;
     }
 
+    // ---- MARKET-26 / CLOUD-BROWSER-1: the marketplace panel ------------------------------------
+    //
+    // Appended here, at the end, deliberately: everything above it belongs to another wave's
+    // panels, and a block that sits at the bottom is a block three parallel worktrees can add to
+    // the same file without meeting. It is READ-ONLY. The run is a CLI verb and a weekly timer;
+    // there is no button here that reaches out to seven vendors because somebody clicked Refresh.
+    //
+    // TWO THINGS ON ONE SCREEN, and they answer two different questions.
+    //
+    //   The rows. Which of our own marketplace rows may now be telling a customer something the
+    //   vendor no longer documents, with the fact named and BOTH SIDES quoted -- what the row
+    //   expects, and what the page says now -- so the operator does not have to go and read the
+    //   vendor's page to find out what moved. It also says what the CUSTOMER is being told right
+    //   now, which is a different fact: the customer's console reads dates compiled into the host
+    //   bundle, so between releases their page goes by age and can disagree with this screen. The
+    //   fix for that disagreement is a release, and the panel says so rather than hiding it.
+    //
+    //   The cloud-browser ledger. Every cloud browsing session a workspace has opened, with the
+    //   workspace named, the vendor, the minutes and the PROXY BYTES. Both numbers, because a
+    //   minutes-only ledger under-reports by an order of magnitude: browser time on these vendors
+    //   is cents an hour and the residential proxy is dollars a gigabyte, so a ten-minute session
+    //   can be a third of a penny of browser and ten pennies of proxy. Where a vendor publishes no
+    //   traffic figure the cell says "not reported by this vendor" and never 0, because a zero on
+    //   this screen reads as free.
+    if (rest.length === 1 && rest[0] === "marketplace" && method === "GET") {
+      const state = marketplaceVerificationState();
+      json(response, 200, {
+        ...state,
+        ledger: await cloudBrowserLedger(),
+      });
+      return true;
+    }
+
+    // ---- end MARKET-26 / CLOUD-BROWSER-1 --------------------------------------------------------
+
     json(response, 404, { error: "not_found" });
     return true;
+  }
+
+  /**
+   * CLOUD-BROWSER-1. Every cloud browsing session, per workspace, asked of the relay.
+   *
+   * ASKED OF THE RELAY, NOT READ OFF THE DISK, for the same reason Box health is: the ledger is
+   * `/home/box/sand-data/cloud-browser-ledger.jsonl` INSIDE each box, this container has no docker
+   * socket, and the relay is the one thing in the fleet that does. The written contract for that
+   * file is one JSON object per line, mode 0600, no secrets in it:
+   *
+   *   {tenant, agentId, vendor, sessionId, startedAt, endedAt, minutes, proxyBytes|null,
+   *    engine, reason, url}
+   *
+   * Two fields are the whole point of this panel and both are treated carefully.
+   *
+   *   `minutes` is browser time, which is the cheap half.
+   *   `proxyBytes` is residential proxy traffic, which is the expensive half and is NULLABLE. One
+   *   of the two vendors reports a per-session traffic figure and the other documents none, so a
+   *   null here means "this vendor does not publish it" and MUST NOT be summed as a zero. A zero on
+   *   a money screen reads as free, and free is the one thing this is not.
+   *
+   * A relay that has not landed the route yet answers 404, which comes back as "not measured" and
+   * why. That is the honest state while the engine half of this wave is still landing, and it is
+   * the same state a relay that is simply down would produce -- which is correct, because from here
+   * the two are the same fact.
+   */
+  const cloudLedgerPath = String(config.cloudLedgerPath ?? process.env.CP_CLOUD_LEDGER_PATH ?? "/admin/cloud-browser-ledger");
+  async function cloudBrowserLedger() {
+    const answer = await askRelay(cloudLedgerPath);
+    if (!answer.ok) {
+      return {
+        measured: false,
+        why: answer.why,
+        rows: [],
+        tenants: [],
+        note: "No cloud browsing session has been counted here yet. Either the relay has no ledger route on it, or it could not be reached.",
+      };
+    }
+    const rows = Array.isArray(answer.body?.rows) ? answer.body.rows : [];
+    const byTenant = new Map();
+    for (const row of rows) {
+      const tenant = String(row?.tenant ?? "unknown");
+      const current = byTenant.get(tenant) ?? { tenant, sessions: 0, minutes: 0, proxyBytes: 0, proxyReportedBy: [], proxyUnreportedBy: [], vendors: new Set() };
+      current.sessions += 1;
+      const minutes = Number(row?.minutes);
+      if (Number.isFinite(minutes)) current.minutes += minutes;
+      const vendor = String(row?.vendor ?? "unknown");
+      current.vendors.add(vendor);
+      // The nullable half, kept apart from the sum rather than folded into it.
+      if (row?.proxyBytes === null || row?.proxyBytes === undefined) {
+        if (!current.proxyUnreportedBy.includes(vendor)) current.proxyUnreportedBy.push(vendor);
+      } else if (Number.isFinite(Number(row.proxyBytes))) {
+        current.proxyBytes += Number(row.proxyBytes);
+        if (!current.proxyReportedBy.includes(vendor)) current.proxyReportedBy.push(vendor);
+      }
+      byTenant.set(tenant, current);
+    }
+    return {
+      measured: true,
+      measuredAt: new Date(now()).toISOString(),
+      rows: rows.map((row) => ({
+        tenant: String(row?.tenant ?? ""),
+        agentId: String(row?.agentId ?? ""),
+        vendor: String(row?.vendor ?? ""),
+        sessionId: String(row?.sessionId ?? ""),
+        startedAt: row?.startedAt ?? null,
+        endedAt: row?.endedAt ?? null,
+        minutes: Number.isFinite(Number(row?.minutes)) ? Number(row.minutes) : null,
+        // Carried through as null rather than coerced, and the console prints the sentence.
+        proxyBytes: row?.proxyBytes == null ? null : Number(row.proxyBytes),
+        engine: String(row?.engine ?? ""),
+        reason: String(row?.reason ?? ""),
+        url: String(row?.url ?? ""),
+      })),
+      tenants: [...byTenant.values()].map((row) => ({
+        ...row,
+        vendors: [...row.vendors],
+        proxyBytes: row.proxyReportedBy.length > 0 ? row.proxyBytes : null,
+      })),
+      note: "Minutes are browser time. Proxy bytes are the expensive half and one of the two vendors does not report them; where it does not, the figure is missing rather than zero.",
+    };
   }
 
   /**

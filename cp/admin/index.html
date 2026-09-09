@@ -246,6 +246,39 @@
       customer can open.</p>
   </section>
 
+  <!-- 7. Marketplace ------------------------------------------------------------------------- -->
+  <!--
+    MARKET-26 and CLOUD-BROWSER-1. The panel for the two things about the Marketplace that go wrong
+    quietly: a row that still tells a customer something the vendor stopped documenting, and a cloud
+    browsing session nobody counted.
+
+    Read-only, on purpose. The re-read runs weekly on a timer and from the CLI; there is no button
+    here that reaches out to seven vendors because somebody clicked Refresh.
+  -->
+  <section class="panel" id="panel-marketplace" data-panel="marketplace">
+    <h2>Marketplace</h2>
+    <p class="quiet" id="marketplaceNote">The vendor documentation our marketing rows depend on, and
+      what it says today. Meta, X and LinkedIn move scope names, review tiers and endpoint versions
+      between our releases, so these facts are re-read on a schedule rather than audited once.</p>
+
+    <h3>Rows and their vendor facts</h3>
+    <div class="scroll"><table id="marketplaceRows"><thead><tr>
+      <th>Row</th><th>Last run here</th><th>State</th><th>Facts</th><th>What the customer sees</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div id="marketplaceChanges" class="cards"></div>
+
+    <h3>Cloud browsing sessions</h3>
+    <p class="quiet" id="marketplaceLedgerNote">One row per session a workspace has opened on a cloud
+      browser. Minutes are browser time, which is the cheap half; proxy bytes are the expensive half
+      and one of the two vendors publishes no figure for them, so that cell says so rather than
+      showing a zero.</p>
+    <div class="scroll"><table id="marketplaceLedger"><thead><tr>
+      <th>Workspace</th><th>Sessions</th><th>Minutes</th><th>Proxy traffic</th><th>Vendors</th>
+    </tr></thead><tbody></tbody></table></div>
+
+    <p class="placeholder" id="marketplaceDelivery"></p>
+  </section>
+
   <footer class="foot">
     <span id="version" class="quiet"></span>
   </footer>

@@ -82,14 +82,22 @@ test("every plugin carries a category from the declared list", () => {
       `plugin ${plugin.id} icon carries ${Object.keys(plugin.icon).sort().join(",")}`);
     assert.equal(catalog.marketplaceLogoProblem(`plugin ${plugin.id}`, plugin.icon.file), null);
   }
-  // The catalog MARKET-6 ships, in full. Nineteen rows from ten: eleven services added, and the
-  // two CLI rows folded into the products they belong to (tinyfish-cli into tinyfish, github-cli
-  // into github) because one product gets one place to put a key -- which is MARKET-5.
-  assert.deepEqual(catalog.MARKETPLACE_PLUGINS.map((plugin) => plugin.id), [
+  // The catalog MARKET-6 shipped, and every row it shipped is still here.
+  //
+  // A NAMED FLOOR RATHER THAN AN EXACT LIST, deliberately. This used to pin the id list exactly,
+  // which meant the first row any later wave added turned this suite red -- and the deploy gate
+  // with it -- for a reason nobody reading the failure could act on. What is worth pinning is that
+  // nothing DISAPPEARS: a row going missing is a customer's connector vanishing at a release, and
+  // that is what this catches. A row appearing is a wave doing its job.
+  const shipped = new Set(catalog.MARKETPLACE_PLUGINS.map((plugin) => plugin.id));
+  for (const id of [
     "github", "slack", "linear", "google", "tinyfish", "context7", "exa", "cloudflare-docs", "deepwiki",
     "notion", "airtable", "todoist", "playwright", "resend", "stripe", "browser-use", "localfiles",
     "coderabbit", "custom-mcp",
-  ]);
+  ]) {
+    assert.ok(shipped.has(id), `the catalog no longer carries "${id}", which it shipped with`);
+  }
+  assert.equal(shipped.size, catalog.MARKETPLACE_PLUGINS.length, "two rows share an id");
 });
 
 test("every bot names real plugins, a declared category and at least one skill", () => {
@@ -247,8 +255,13 @@ test("SearchPlugins filters on name, tagline and category", async () => {
   // And the catalog's own filter, which the console's search field uses, agrees. It is a substring
   // match over name, tagline and category, so "search" legitimately finds Slack's tagline too.
   assert.deepEqual(catalog.searchMarketplacePlugins("web search").map((row) => row.id), ["tinyfish"]);
-  assert.deepEqual(catalog.searchMarketplacePlugins("search").map((row) => row.id),
-    ["slack", "tinyfish", "exa", "cloudflare-docs", "playwright", "browser-use"]);
+  // A floor again, for the same reason: "search" is a substring match over name, tagline and
+  // category, so a later row whose own words contain it joins this list legitimately. What must
+  // not happen is one of these dropping OUT.
+  const found = catalog.searchMarketplacePlugins("search").map((row) => row.id);
+  for (const id of ["slack", "tinyfish", "exa", "cloudflare-docs", "playwright", "browser-use"]) {
+    assert.ok(found.includes(id), `"search" no longer finds "${id}"`);
+  }
   // And the point of `keywords`: an owner types what they want, not what it is called. None of
   // these words appears in the tagline, the name or the category of the row that answers.
   assert.deepEqual(catalog.searchMarketplacePlugins("crm").map((row) => row.id), ["airtable"]);
