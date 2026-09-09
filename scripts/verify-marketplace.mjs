@@ -227,7 +227,11 @@ try {
   await page.waitForTimeout(1200);
   const preview = await page.$eval("[data-byo-preview]", (el) => el.textContent).catch(() => "");
   check(/What will be written/.test(preview), "the entry that will be written is shown before Add");
-  check(/NOTION_TOKEN/.test(preview) && !/Bearer /.test(preview), "and it names the stored key rather than carrying one", preview.replace(/\s+/g, " ").slice(0, 160));
+  // The claim is that the header shows a NAME where a key would be. It used to be written as "the
+  // word Bearer does not appear", which was only ever true by accident: the form wrote the
+  // placeholder with no scheme at all, which is what made every bearer server added through this
+  // door answer 401. The scheme belongs in the preview; the key never does.
+  check(/\(stored under NOTION_TOKEN\)/.test(preview), "and it names the stored key rather than carrying one", preview.replace(/\s+/g, " ").slice(0, 200));
 
   // The refusals, in a real browser.
   const refuse = async (url) => {
@@ -303,6 +307,23 @@ try {
     check(shaAfter === shaBefore, "connectors.json is byte-identical to what this run found", `${shaBefore.slice(0, 12)} -> ${shaAfter.slice(0, 12)}`);
   }
 
+  // Reopen the Marketplace and its Add-your-own card from a fresh load, and wait for the link door
+  // to actually be there. Used by the older-transport arm, which runs after a leg that navigates.
+  const openAddYourOwn = async () => {
+    await page.goto(`${GATEWAY}/`, { waitUntil: "load" });
+    await page.waitForTimeout(3500);
+    await page.click('[data-capability="marketplace"]');
+    await page.waitForTimeout(2500);
+    for (let n = 0; n < 40; n += 1) {
+      if ((await page.$$("[data-marketplace-card]")).length > 0) break;
+      await page.waitForTimeout(500);
+    }
+    // The card is a <details>: its doors are in the DOM but hidden until it is open, which is how
+    // the first pass of this helper managed to time out on an element it had already found.
+    await page.evaluate(() => document.querySelector("[data-connector-editor]")?.setAttribute("open", "open"));
+    await page.waitForSelector('[data-byo-door="link"]', { timeout: 30_000 });
+  };
+
   // ---- the older transport, opened rather than assumed ------------------------------------------
   // The picker has offered SSE since the card shipped and nothing had ever gone through it. The
   // claim is narrow and it is the whole point: an entry added through that door comes back
@@ -314,26 +335,41 @@ try {
     const shaBeforeSse = await connectorsSha();
     let address = null;
     try {
+      // The add leg above left the panel on the view it landed on, so the Add-your-own doors are
+      // no longer in the DOM. Reopen the card from a clean load rather than guessing what the
+      // panel is showing: this arm is about the transport, and it should not be able to fail for
+      // being pointed at the wrong screen.
       address = await boxAddress();
       const up = await startSseStub(address);
       check(up, `the in-box stub is serving the older transport on ${address}:${SSE_PORT} and refuses a wrong bearer`);
       if (up) {
-        // Through the form, because the form is what shipped: the transport is chosen in the picker
-        // and the header is marked secret, so what reaches the host is a stored NAME and no value.
-        await page.click('[data-byo-door="link"]');
-        await page.waitForTimeout(400);
-        await page.fill("#byo-url", `http://${address}:${SSE_PORT}/sse`);
-        await page.waitForTimeout(500);
-        await page.selectOption("#byo-transport", "sse");
-        await page.fill("#byo-name", SSE_NAME);
-        await page.fill('[data-byo-header-name="0"]', "Authorization");
-        await page.fill('[data-byo-header-env="0"]', SSE_FIELD);
-        await page.waitForTimeout(300);
-        await page.click("[data-byo-link] button[type=submit]");
-        await page.waitForTimeout(2500);
+        // NOT through the form, and the reason is worth stating because the first version of this
+        // arm was written that way and could never have passed. The console's link door refuses a
+        // plain-http address AND a private host -- two refusals this gate already proves above --
+        // and the only SSE far end we are willing to point at is a stub inside the box, which is
+        // both. The host is deliberately more permissive there than the console. So the add goes
+        // through the same gateway command the form submits to, with the spec shaped exactly as
+        // the console shapes it: a secret header carries a stored NAME and no value.
+        //
+        // What this costs is real and bounded: the picker's SSE option is proved above (it is in
+        // the transport list) and the wire is proved here. Nothing proves a person choosing SSE in
+        // the picker for a PUBLIC https server, because no shipping preset recommends SSE and the
+        // one obvious public candidate answers 410 on its /sse.
+        // Byte for byte what the console's own adapter puts on the wire for this spec
+        // (hostConnectorArgs in gateway-adapter.js): the transport as `type`, the secret header as
+        // a ${NAME} placeholder, and `env` carrying the field's NAME with no value anywhere.
+        const added = await gateway("addLocalConnector", {
+          name: SSE_NAME,
+          url: `http://${address}:${SSE_PORT}/sse`,
+          type: "sse",
+          headers: { Authorization: `Bearer \${${SSE_FIELD}}` },
+          env: [SSE_FIELD],
+          replace: true,
+        });
+        check(added.status < 400, `the older transport is accepted as an entry (${SSE_NAME})`, String(added.body).slice(0, 140));
 
         const written = await inBox(`cat ${DATA}/connectors.json`);
-        check(written.includes(`"${SSE_NAME}"`), `the entry was written under the name the form was given (${SSE_NAME})`);
+        check(written.includes(`"${SSE_NAME}"`), `the entry was written under the name it was given (${SSE_NAME})`);
         check(!written.includes(SSE_VALUE), "and connectors.json carries no value, only the field's name");
 
         // With nothing stored the far end refuses, which is the honest state to be in before a key.
