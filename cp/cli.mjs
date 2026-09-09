@@ -26,6 +26,7 @@
 //   node cp/cli.mjs mail retire <code>
 //   node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off
 //   node cp/cli.mjs mail sweep
+//   node cp/cli.mjs feedback list|show|approve|suppress|close|issue|digest|github-token
 //   node cp/cli.mjs session verify <token>
 //
 // `signup add` is the whole of adding a customer in one line: it makes the account, works the
@@ -55,6 +56,7 @@ import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias, tenantRoutesFo
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
 import { mailDomain } from "./mail.mjs";
+import { buildDigest } from "./feedback.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
@@ -1119,6 +1121,115 @@ async function sessionVerify(args) {
   return undefined;
 }
 
+// ---- what the agents reported (FEEDBACK-1) -----------------------------------------------------
+//
+// Everything here goes over the api through askAdmin, so it keeps the same rules the console keeps
+// and writes the same admin_actions row with `via` reading cli. The digest is a command today and a
+// timer later, deliberately: a digest nobody has read once is not a thing to put on a schedule.
+//
+// THE REPOSITORY TOKEN IS NEVER AN ARGUMENT, the same as every provider key: it is read off the
+// terminal with the echo off, or off stdin, and what this prints is a length and eight characters
+// of a digest.
+
+/** "7d", "24h", "30" (days) or an ISO date, as a millisecond stamp. */
+function sinceMs(value) {
+  const raw = String(value ?? "").trim();
+  if (raw.length === 0) return 0;
+  const match = /^(\d+)([dh])?$/.exec(raw);
+  if (match != null) {
+    const n = Number(match[1]);
+    return Date.now() - n * (match[2] === "h" ? 3600_000 : 86_400_000);
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+const feedbackQuery = (args) => {
+  const query = new URLSearchParams();
+  for (const name of ["tier", "state", "tenant"]) {
+    const value = flag(args, `--${name}`);
+    if (value) query.set(name, String(value));
+  }
+  const since = flag(args, "--since");
+  if (since) query.set("since", String(sinceMs(since)));
+  query.set("limit", String(flag(args, "--limit") ?? 200));
+  return query;
+};
+
+async function feedbackList(args) {
+  const answer = await askAdmin("GET", `/v1/admin/feedback?${feedbackQuery(args).toString()}`);
+  say(`${answer.total} report(s) on record: ${answer.counts.new} new, ${answer.counts.criticalNew} critical and unread, ${answer.counts.filed} filed`);
+  say(answer.github.stored ? `issues are filed in ${answer.github.repo} (token ${answer.github.evidence})` : answer.github.why);
+  say("");
+  say(`${pad("ID", 6)}${pad("WHEN", 26)}${pad("WORKSPACE", 18)}${pad("TIER", 14)}${pad("STATE", 12)}TITLE`);
+  for (const row of answer.rows) {
+    say(`${pad(String(row.id), 6)}${pad(row.at, 26)}${pad(row.tenant, 18)}${pad(row.tier, 14)}${pad(row.state, 12)}${row.title}`);
+    if (row.issueUrl) say(`      ${row.issueUrl}`);
+  }
+  if (answer.rows.length === 0) say("nothing in this filter, which is a real answer and not an empty page");
+}
+
+async function feedbackShow(args) {
+  const [id] = positional(args);
+  if (!id) die("usage: node cp/cli.mjs feedback show <id>");
+  const answer = await askAdmin("GET", `/v1/admin/feedback?limit=2000`);
+  const row = (answer.rows ?? []).find((one) => String(one.id) === String(id));
+  if (row == null) return die(`there is no report ${id}`, 2);
+  say(`#${row.id}  ${row.at}  ${row.tenant}  ${row.tier}  ${row.state}`);
+  if (row.agentName || row.agent) say(`reported by ${row.agentName || row.agent}`);
+  if (row.issueUrl) say(row.issueUrl);
+  say("");
+  say(row.title);
+  say("");
+  say(row.body);
+  if (row.payload) {
+    say("");
+    say("what the agent sent:");
+    say(JSON.stringify(row.payload, null, 2));
+  }
+  return undefined;
+}
+
+const feedbackDecide = (verb) => async (args) => {
+  const [id] = positional(args);
+  if (!id) die(`usage: node cp/cli.mjs feedback ${verb} <id>`);
+  const answer = await askAdmin("POST", `/v1/admin/feedback/${encodeURIComponent(id)}/${verb}`, {});
+  say(String(answer.message ?? "done"));
+};
+
+async function feedbackIssue(args) {
+  const [id] = positional(args);
+  if (!id) die("usage: node cp/cli.mjs feedback issue <id>");
+  const answer = await askAdmin("POST", `/v1/admin/feedback/${encodeURIComponent(id)}/issue`, {});
+  if (answer.filed === true) return say(String(answer.message));
+  // The prepared body, printed. The door is proven and the operator can paste it by hand today.
+  say(String(answer.message));
+  say("");
+  say(String(answer.title ?? ""));
+  say("");
+  say(String(answer.body ?? ""));
+  return undefined;
+}
+
+async function feedbackDigest(args) {
+  const query = feedbackQuery(args);
+  if (!query.get("tier")) query.set("tier", "quality");
+  if (!query.get("since")) query.set("since", String(sinceMs("7d")));
+  query.set("limit", "2000");
+  const answer = await askAdmin("GET", `/v1/admin/feedback?${query.toString()}`);
+  const rows = (answer.rows ?? []).map((row) => ({ ...row, at: Date.parse(row.at) }));
+  say(buildDigest(rows, { tier: query.get("tier"), since: Number(query.get("since")) }));
+}
+
+async function feedbackGithubToken(args) {
+  const [repo] = positional(args);
+  if (!repo) die("usage: node cp/cli.mjs feedback github-token <owner/name>");
+  const token = await readSecret(`Repository token for ${repo}: `);
+  const answer = await askAdmin("POST", "/v1/admin/feedback/github-token", { repo, token });
+  say(`${String(answer.message)} (${evidenceLine(token)})`);
+  say(`checked with ${answer.checkedWith}`);
+}
+
 const USAGE = [
   "node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"]",
   "node cp/cli.mjs account add <email> <tenant> [--name \"Jane Doe\"]",
@@ -1149,6 +1260,12 @@ const USAGE = [
   "node cp/cli.mjs mail retire <code>",
   "node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off",
   "node cp/cli.mjs mail sweep",
+  "node cp/cli.mjs feedback list [--tier critical|quality|observation] [--state new|approved|filed|suppressed|closed] [--tenant <slug>] [--since 7d]",
+  "node cp/cli.mjs feedback show <id>",
+  "node cp/cli.mjs feedback approve|suppress|close <id>",
+  "node cp/cli.mjs feedback issue <id>",
+  "node cp/cli.mjs feedback digest [--tier quality] [--since 7d]",
+  "node cp/cli.mjs feedback github-token <owner/name>",
   "node cp/cli.mjs session verify <token>",
   "",
   "signup add is the one line that adds a customer: account, workspace and box.",
@@ -1159,6 +1276,8 @@ const USAGE = [
   "mail list shows the address each bot answers at. A code is minted once and never reused; retire kills one for good.",
   "mail sweep goes through the relay, because the roster lives inside a box and only the relay can read one.",
   "account promote makes somebody a super admin, which opens the console at /admin.",
+  "feedback lists what the agents reported and their operators chose to send. Both gates already happened: approve, file or suppress.",
+  "feedback github-token reads the token off the terminal, proves it against the repository, and prints a length and a hash. Never an argument.",
   "CP_ADMIN_TOKEN and CP_PUBLIC_URL come from the environment.",
 ].join("\n");
 
@@ -1286,6 +1405,14 @@ const commands = {
   "mail allow": mailAllow,
   "mail only": mailOnly,
   "mail sweep": mailSweep,
+  "feedback list": feedbackList,
+  "feedback show": feedbackShow,
+  "feedback approve": feedbackDecide("approve"),
+  "feedback suppress": feedbackDecide("suppress"),
+  "feedback close": feedbackDecide("close"),
+  "feedback issue": feedbackIssue,
+  "feedback digest": feedbackDigest,
+  "feedback github-token": feedbackGithubToken,
   "session verify": sessionVerify,
 };
 const command = commands[`${group} ${action}`];

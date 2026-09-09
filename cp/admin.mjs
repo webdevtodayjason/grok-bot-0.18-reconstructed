@@ -44,10 +44,23 @@ import path from "node:path";
 // which is the point: a hash from here and a hash from there are never comparable, so neither salt
 // widens the other's blast radius.
 import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.mjs";
-import { normalizeEmail } from "./store.mjs";
 // MAIL-2. The product domain the per-bot addresses live at, so the panel names the same domain
 // the relay routes on rather than a second copy of the default.
 import { createMailDirectory, mailDomain } from "./mail.mjs";
+import { FEEDBACK_STATES, normalizeEmail } from "./store.mjs";
+// FEEDBACK-1. The payload's shape, the issue body, the GitHub call and the digest all live in their
+// own file, because every one of them is a pure function over a report and none of them needs a
+// store, a config or a request to be tested.
+import {
+  FEEDBACK_TIERS,
+  GITHUB_API,
+  TIER_ROUTING,
+  buildIssueBody,
+  fileIssue,
+  normalizeReport,
+  parseRepo,
+  proveRepoToken,
+} from "./feedback.mjs";
 import {
   PROVIDER_PRESETS,
   PROVIDER_QUOTA,
@@ -973,6 +986,10 @@ export function createAdminApi({
     for (const row of store.listLoginAttempts({ since: 0, outcome: "ok", limit: 5000 })) {
       if (!lastSignIn.has(row.email)) lastSignIn.set(row.email, row.at);
     }
+    // AGENTS-CAP-2. How many bots each workspace may hold, read off each box. One sweep for the
+    // whole panel, sharing the box cache window, so the column costs one round trip per customer
+    // rather than one per row rendered.
+    const ceilings = new Map((await boxCeilings()).map((row) => [row.slug, row]));
     const rows = [];
     for (const tenant of store.listTenants()) {
       const view = await tenantView(tenant);
@@ -995,6 +1012,13 @@ export function createAdminApi({
         // Named rather than left out, because a fact that could not be measured has to read as one
         // and never as an empty column.
         spend: byTenant.get(tenant.slug) ?? null,
+        // AGENTS-CAP-2. Always an object, never a bare number, because the three honest states
+        // (could not be read, pinned in the container environment, settable) each need a sentence
+        // and a bare number can only carry one of them.
+        ceiling: ceilings.get(tenant.slug) ?? {
+          slug: tenant.slug, read: false, maxAgents: null, bots: null, pinned: false, pinnedBy: null,
+          why: "this control plane did not ask about that workspace",
+        },
         model: {
           current,
           label: modelChoices.find((row) => row.alias === current)?.name ?? "",
@@ -1373,6 +1397,73 @@ export function createAdminApi({
       (error) => { boxLabelCache = { at: 0, rows: null, inFlight: null }; throw error; },
     );
   }
+
+  /**
+   * How many bots each workspace may hold, READ OFF EACH BOX and never out of this store.
+   * AGENTS-CAP-2.
+   *
+   * There is no ceiling column anywhere in the control plane, and that is the design rather than an
+   * omission. The number that decides whether a customer can add a bot is SAND_MAX_AGENTS in that
+   * box's own sand-host-settings.json, resolved by the host on every turn; a copy kept here would
+   * be a second answer that drifts the first time anybody edits the file, and the Clients panel
+   * would then show a number no box has ever honoured. So every panel load asks the relay, which
+   * asks each box's own gateway.
+   *
+   * A box that could not be read reports read:false with the reason. Not a zero, and not the
+   * default: "we could not look" and "this workspace holds forty" send an operator to different
+   * places, and a ceiling shown over a box nobody asked is the made-up green this file refuses.
+   *
+   * The same cache window and in-flight join boxLabels uses, for the same reason: one panel load
+   * asks once per workspace, sequentially, and the Clients panel is loaded beside five others.
+   */
+  let ceilingCache = { at: 0, rows: null, inFlight: null };
+  async function boxCeilings() {
+    if (ceilingCache.rows != null && now() - ceilingCache.at < BOXES_CACHE_MS) return ceilingCache.rows;
+    if (ceilingCache.inFlight != null) return ceilingCache.inFlight;
+    const pending = (async () => {
+      const rows = [];
+      for (const tenant of store.listTenants()) {
+        const answer = await askRelay(`/admin/tenants/${encodeURIComponent(tenant.slug)}/ceiling`, "");
+        if (!answer.ok) {
+          rows.push({ slug: tenant.slug, read: false, maxAgents: null, bots: null, pinned: false, pinnedBy: null, why: answer.why });
+          continue;
+        }
+        const body = answer.body ?? {};
+        // A NUMBER IS TAKEN ONLY WHEN THE BOX SAID IT READ ONE. The relay answers read:false with
+        // nulls, but a stale number beside a false flag is exactly the shape that puts a ceiling on
+        // the screen over a box nobody could ask, so the flag decides here rather than the field.
+        const read = body.read === true;
+        rows.push({
+          slug: tenant.slug,
+          read,
+          maxAgents: read && Number.isFinite(Number(body.maxAgents)) ? Number(body.maxAgents) : null,
+          bots: read && Number.isFinite(Number(body.bots)) ? Number(body.bots) : null,
+          pinned: body.pinned === true,
+          pinnedBy: body.pinnedBy ?? null,
+          why: read ? "" : String(body.why ?? "that workspace did not answer"),
+        });
+      }
+      return rows;
+    })();
+    ceilingCache = { ...ceilingCache, inFlight: pending };
+    return pending.then(
+      (rows) => { ceilingCache = { at: now(), rows, inFlight: null }; return rows; },
+      (error) => { ceilingCache = { at: 0, rows: null, inFlight: null }; throw error; },
+    );
+  }
+  /** A write invalidates the read, so the row shows what the box now says rather than the old sweep. */
+  const forgetCeilings = () => { ceilingCache = { at: 0, rows: null, inFlight: null }; };
+
+  /**
+   * The range a ceiling may be set to, checked HERE rather than left to the box.
+   *
+   * The host fails OPEN on a value it cannot use: anything outside this range, or a value that is
+   * not a string, drops that workspace back to the product default with nothing on any screen
+   * saying why. So a number that would do that is refused in a sentence before the relay is called,
+   * and the customer's box is never written with a value that quietly means something else.
+   */
+  const CEILING_MIN = 1;
+  const CEILING_MAX = 1000;
 
   /**
    * A vendor plan window for one key slot, in the vendor's own unit.
@@ -1925,6 +2016,90 @@ export function createAdminApi({
       rows.push({ slug: tenant.slug, ok: answer.ok === true, why: answer.ok ? "" : answer.why });
     }
     return { ok: rows.some((row) => row.ok), why: "", rows, models: served.aliases, routes };
+  }
+
+  // ---- what the agents reported (FEEDBACK-1) ---------------------------------------------------
+  //
+  // The panel's whole job is the SECOND of the two gates. The first one already happened inside the
+  // customer's console: the workspace operator saw the report, could edit it, add to it or drop it,
+  // and pressed Send. Everything listed here is therefore something a person chose to send, which
+  // is why the actions are approve, edit, suppress and close rather than triage-from-nothing.
+  //
+  // The tiers are filters and nothing more. All three passed through both gates; critical is drawn
+  // loudly because it blocks somebody's work today.
+
+  const SETTING_GITHUB_REPO = "github.repo";
+  const SETTING_GITHUB_TOKEN = "github.token";
+  // Where GitHub is. api.github.com unless somebody names another, which is what lets a gate stand
+  // a fake one up in its own process instead of filing a real issue at a real repository on every
+  // run, and what lets an operator on GitHub Enterprise point this at their own host. Anybody who
+  // can set this can already read this service's environment, so it is no weaker than CP_RELAY_URL.
+  const githubApiBase = String(config.githubApiUrl ?? process.env.CP_GITHUB_API_URL ?? GITHUB_API).replace(/\/+$/, "");
+
+  /** What is stored about the issue door, PROVED and never carried. Evidence only, at every caller. */
+  const githubDoor = () => {
+    const repo = store.getSetting(SETTING_GITHUB_REPO, "");
+    const token = store.getSetting(SETTING_GITHUB_TOKEN, "");
+    return {
+      repo,
+      stored: token.length > 0,
+      // The same string the ledger keeps forever. No fragment of the value is in it.
+      evidence: token.length > 0 ? keyEvidence(token) : "",
+      why: token.length > 0
+        ? ""
+        : "no repository token is stored, so an issue can be prepared here and filed by hand. Paste one below and the Create GitHub issue button files it.",
+    };
+  };
+
+  /**
+   * Wave B's verification records, if that table has landed.
+   *
+   * The Feedback panel is where a "needs re-verification" marketplace row is meant to surface
+   * (MARKET-26), and wave B owns the table it would come from. Probing sqlite_master rather than
+   * importing a module means this returns an empty list on a tree where that wave has not shipped,
+   * instead of a stack trace, and the panel simply draws three filters instead of four.
+   *
+   * WAVE B FILLS THIS IN. Point it at the table you create and give it a row shape; nothing else
+   * on this page has to change.
+   */
+  function verificationRows() {
+    const tables = typeof store.tableNames === "function" ? store.tableNames() : [];
+    const table = tables.find((name) => /verification/i.test(name)) ?? null;
+    return { table, rows: [] };
+  }
+
+  /**
+   * The panel's own answer. Filters are applied in the store, not here, so a workspace with
+   * thousands of observations does not have to be read into this process to show ten critical ones.
+   */
+  function feedback({ tier = "", state = "", tenant = "", sinceMs = 0, limit = 200 } = {}) {
+    const rows = store.listFeedback({ tier, state, tenant, sinceMs, limit });
+    // The counts are over EVERYTHING, not over the filtered list, because the number the operator
+    // needs on a bad morning is "how many critical reports are open", and a filter is exactly what
+    // hides that.
+    const open = store.listFeedback({ limit: 2000 });
+    const counting = (t, s) => open.filter((row) => (t === "" || row.tier === t) && (s === "" || row.state === s)).length;
+    return {
+      rows: rows.map((row) => ({ ...row, at: new Date(row.at).toISOString(), decidedAt: row.decidedAt > 0 ? new Date(row.decidedAt).toISOString() : "" })),
+      total: store.countFeedback(),
+      counts: {
+        new: counting("", "new"),
+        critical: counting("critical", ""),
+        criticalNew: open.filter((row) => row.tier === "critical" && row.state === "new").length,
+        filed: counting("", "filed"),
+      },
+      tiers: FEEDBACK_TIERS.map((name) => ({ name, means: TIER_ROUTING[name] })),
+      states: FEEDBACK_STATES,
+      github: githubDoor(),
+      verification: verificationRows(),
+      // The sentence the panel prints under its heading, so the two gates are on the screen rather
+      // than only in a document.
+      gates: "Every report here was written by an agent, shown to the workspace operator, and sent"
+        + " by that person. This is the second gate: what you approve becomes a GitHub issue, and"
+        + " what you suppress is kept with the decision on it.",
+      retention: "these rows are never pruned",
+      measuredAt: new Date(now()).toISOString(),
+    };
   }
 
   /** The relay's box door, which is the only thing that can write inside a customer's box. */
@@ -2987,6 +3162,54 @@ export function createAdminApi({
         });
         return true;
       }
+      // AGENTS-CAP-2. How many bots this one workspace may hold, from its own row.
+      //
+      // Jason, 2026-09-09: default 40, and the super admin raises a workspace's ceiling from its
+      // client row. Forty because flat coordination holds to about that many and the hierarchy
+      // tooling does not exist yet; a power user who wants a hundred asks and gets it here.
+      //
+      // THE RANGE IS CHECKED IN THIS PROCESS. The host fails open on a value it cannot use, so a
+      // zero or a five thousand written into a box drops that customer to the product default with
+      // nothing anywhere saying why. Refusing here is what keeps that from being a silent
+      // downgrade of somebody's live workspace.
+      if (action === "ceiling") {
+        const wanted = Number(body?.maxAgents);
+        if (!Number.isInteger(wanted) || wanted < CEILING_MIN || wanted > CEILING_MAX) {
+          json(response, 400, {
+            error: "bad_request",
+            message: `A ceiling is a whole number from ${CEILING_MIN} to ${CEILING_MAX}. Nothing was changed: a number outside that is one the box quietly ignores, which would put this workspace back on the default with nothing on any screen saying so.`,
+          });
+          return true;
+        }
+        const ledger = beginAction(guard, request, { action: "client.ceiling", target: slug, detail: `${slug} to ${wanted} bots` });
+        const answer = await askRelayPost(`/admin/tenants/${encodeURIComponent(slug)}/ceiling`, { maxAgents: wanted });
+        if (!answer.ok) { ledger.failed(answer.why); json(response, 502, { error: "relay", message: answer.why }); return true; }
+        forgetCeilings();
+        // WHAT THE BOX READ BACK, never what was sent. The relay writes the file and then asks the
+        // host what its ceiling now is, so this number is the live one; reporting the number that
+        // went out would report a success on a box that ignored it.
+        const read = answer.body?.read === true;
+        const live = read && Number.isFinite(Number(answer.body?.maxAgents)) ? Number(answer.body.maxAgents) : null;
+        const pinned = answer.body?.pinned === true;
+        ledger.done(pinned
+          ? `${slug} was written and its container environment pins ${String(answer.body?.pinnedBy ?? "SAND_MAX_AGENTS")}`
+          : `${slug} now holds ${live == null ? "a ceiling the box did not report" : live}`);
+        json(response, 200, {
+          slug,
+          asked: wanted,
+          maxAgents: live,
+          bots: read && Number.isFinite(Number(answer.body?.bots)) ? Number(answer.body.bots) : null,
+          pinned,
+          pinnedBy: answer.body?.pinnedBy ?? null,
+          // PINNED IS NOT A SUCCESS, said the way the model row two blocks up says it.
+          message: pinned
+            ? `${slug} was written, and it will keep the ceiling its container environment pins: ${String(answer.body?.pinnedBy ?? "SAND_MAX_AGENTS is set on the container")}. Nothing this console does takes effect there until that is gone.`
+            : live == null
+              ? `${slug} was written and its box did not report a ceiling back, so nothing here can say what it is now. ${String(answer.body?.why ?? "")}`.trim()
+              : `${slug} holds ${live} bots from now on. Their own page shows it on its next load.`,
+        });
+        return true;
+      }
       json(response, 404, { error: "not_found" });
       return true;
     }
@@ -3112,6 +3335,160 @@ export function createAdminApi({
       return true;
     }
 
+    // ---- FEEDBACK-1: the seventh panel ------------------------------------------------------------
+    //
+    // Appended at the end rather than beside the read routes, so the whole feature is one block a
+    // reader can take in at once. It is behind requireSuperAdmin like everything else here without
+    // saying so: the guard ran before `rest` was computed and returned already if it failed.
+
+    if (rest[0] === "feedback") {
+      if (rest.length === 1 && method === "GET") {
+        const sinceParam = url.searchParams.get("since");
+        const sinceMs = sinceParam
+          ? (Number.isFinite(Number(sinceParam)) ? Number(sinceParam) : Date.parse(sinceParam))
+          : 0;
+        json(response, 200, feedback({
+          tier: String(url.searchParams.get("tier") ?? ""),
+          state: String(url.searchParams.get("state") ?? ""),
+          tenant: String(url.searchParams.get("tenant") ?? ""),
+          sinceMs: Number.isFinite(sinceMs) ? sinceMs : 0,
+          limit: Number(url.searchParams.get("limit") ?? 200),
+        }));
+        return true;
+      }
+
+      // The repository token, and it is the FIRST secret this store has ever held.
+      //
+      // Proved before it is stored, exactly the way a provider key is: a token that GitHub will not
+      // take is a Create GitHub issue button that fails weeks later on somebody else's morning.
+      // Nothing about the value comes back out of this route or any other: the answer, the ledger
+      // row and the panel all carry a length and eight hex characters of a digest.
+      //
+      // It is here rather than at the proxy because there is no proxy for a repo token to hide
+      // behind, and it is never pushed into a box: every exec daemon in a customer's container runs
+      // as uid 0, so a super admin's token inside one is readable by that customer's own agents.
+      if (rest.length === 2 && rest[1] === "github-token" && method === "POST") {
+        const token = typeof body?.token === "string" ? body.token.trim() : "";
+        const repo = String(body?.repo ?? "").trim();
+        const parsed = parseRepo(repo);
+        if (parsed == null) { json(response, 400, { error: "bad_request", message: "Name the repository as owner/name. Nothing was stored." }); return true; }
+        if (token.length < 8) { json(response, 400, { error: "bad_request", message: "Paste the token. Nothing was stored." }); return true; }
+        const proof = await proveRepoToken({ token, repo: parsed.full, fetchImpl, apiBase: githubApiBase });
+        if (!proof.ok) {
+          json(response, 409, { error: "token_refused", message: `GitHub would not accept that token for ${parsed.full}, so nothing was stored. ${proof.why}` });
+          return true;
+        }
+        const ledger = beginAction(guard, request, {
+          action: "feedback.github-token",
+          target: parsed.full,
+          detail: `a repository token for ${parsed.full} (${keyEvidence(token)})`,
+        });
+        const actor = guard.account?.email ?? "the operator token";
+        store.setSetting(SETTING_GITHUB_REPO, parsed.full, actor);
+        store.setSetting(SETTING_GITHUB_TOKEN, token, actor);
+        ledger.done(`checked against ${proof.how}`);
+        json(response, 200, {
+          repo: parsed.full,
+          checkedWith: proof.how,
+          // NOT the token. Nothing on this service ever answers with it again.
+          evidence: keyEvidence(token),
+          message: `${parsed.full} accepted that token. Create GitHub issue files there from now on.`,
+        });
+        return true;
+      }
+
+      if (rest.length === 3 && method === "POST") {
+        const id = Number(rest[1]);
+        const verb = rest[2];
+        const row = Number.isFinite(id) ? store.getFeedback(id) : null;
+        if (row == null) { json(response, 404, { error: "not_found", message: "There is no report by that number." }); return true; }
+        const actor = guard.account?.email ?? "the operator token";
+
+        // Edit is the operator's own words added to somebody else's report, so the two are kept
+        // apart: the title and the description move, the PAYLOAD does not. What the agent actually
+        // sent is still exactly what it sent, whatever gets typed over the top of it.
+        if (verb === "edit") {
+          const title = String(body?.title ?? row.title).replace(/[\r\n\t]+/g, " ").trim().slice(0, 200);
+          const text = String(body?.body ?? row.body);
+          if (title.length === 0) { json(response, 400, { error: "bad_request", message: "A report needs a title. Nothing was changed." }); return true; }
+          const ledger = beginAction(guard, request, { action: "feedback.edit", target: String(id), detail: `report ${id} edited` });
+          let updated;
+          try { updated = store.updateFeedback(id, { title, body: text, decidedBy: actor }); }
+          catch (error) { ledger.failed(String(error?.message ?? error)); json(response, 400, { error: error?.code ?? "bad_request", message: String(error?.message ?? error) }); return true; }
+          ledger.done();
+          json(response, 200, { report: { ...updated, at: new Date(updated.at).toISOString() }, message: `Report ${id} now reads as you left it. What the agent sent is kept underneath it, unchanged.` });
+          return true;
+        }
+
+        if (verb === "approve" || verb === "suppress" || verb === "close") {
+          const state = verb === "approve" ? "approved" : (verb === "suppress" ? "suppressed" : "closed");
+          const ledger = beginAction(guard, request, { action: `feedback.${verb}`, target: String(id), detail: `report ${id} to ${state}` });
+          const updated = store.updateFeedback(id, { state, decidedBy: actor });
+          ledger.done();
+          json(response, 200, {
+            report: { ...updated, at: new Date(updated.at).toISOString() },
+            message: verb === "approve"
+              ? `Report ${id} is approved. Press Create GitHub issue to file it.`
+              : verb === "suppress"
+                ? `Report ${id} is suppressed. It stays on the record with your name on the decision, because "we looked at this and it was not a bug" is itself worth keeping.`
+                : `Report ${id} is closed.`,
+          });
+          return true;
+        }
+
+        // The issue. With a token stored it is filed and the URL is recorded; with none the body is
+        // PREPARED and handed back, and the answer says exactly that rather than pretending the
+        // door is broken. The body is built from the payload the agent sent, not from the edited
+        // title, so what lands on GitHub is the evidence.
+        if (verb === "issue") {
+          const door = githubDoor();
+          const payload = row.payload ?? normalizeReport({ tier: row.tier, title: row.title, description: row.body }).report;
+          const issueBody = buildIssueBody(payload ?? {}, { workspace: row.tenant, id: row.id });
+          const issueTitle = `[${row.tier}] ${row.title}`;
+          if (!door.stored) {
+            json(response, 200, {
+              filed: false,
+              title: issueTitle,
+              body: issueBody,
+              repo: door.repo,
+              message: "the issue body is ready; paste a repo token in the Feedback panel and press this again",
+            });
+            return true;
+          }
+          const ledger = beginAction(guard, request, { action: "feedback.issue", target: String(id), detail: `report ${id} to ${door.repo}` });
+          const filed = await fileIssue({
+            token: store.getSetting(SETTING_GITHUB_TOKEN, ""),
+            repo: door.repo,
+            title: issueTitle,
+            body: issueBody,
+            labels: ["titanium-bot", row.tier],
+            fetchImpl,
+            apiBase: githubApiBase,
+          });
+          if (!filed.ok) {
+            ledger.failed(filed.why);
+            json(response, 502, { error: "github", filed: false, title: issueTitle, body: issueBody, message: filed.why });
+            return true;
+          }
+          const updated = store.updateFeedback(id, { state: "filed", issueUrl: filed.url, decidedBy: actor });
+          ledger.done(`filed as ${filed.url}`);
+          json(response, 200, {
+            filed: true,
+            issueUrl: filed.url,
+            report: { ...updated, at: new Date(updated.at).toISOString() },
+            message: `Report ${id} is ${filed.url}.`,
+          });
+          return true;
+        }
+
+        json(response, 404, { error: "not_found" });
+        return true;
+      }
+
+      json(response, 404, { error: "not_found" });
+      return true;
+    }
+
     json(response, 404, { error: "not_found" });
     return true;
   }
@@ -3130,5 +3507,5 @@ export function createAdminApi({
     store.pruneLoginAttempts(at - ATTEMPT_RETENTION_MS);
   }
 
-  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer };
+  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback };
 }

@@ -24,7 +24,7 @@
 // would stage the version the box just installed and updateHostNow would rightly answer
 // "already-latest", which proves nothing.
 import { execFile, spawn } from "node:child_process";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { acquireBoxLock } from "./lib/box-lock.mjs";
@@ -73,9 +73,88 @@ const xvfbPidOf = async (display) => (await sh(`ps -eo pid,args | grep "[X]vfb :
 
 const SECRET_FIELD = `VERIFY_SHIP2_${Date.now()}`;
 const stage = mkdtempSync(path.join(tmpdir(), "ship2-runtime-"));
+
+// GH-1. Jason's box lost its GitHub CLI credential twice, on 2026-09-06 and again on 2026-09-08,
+// each time asking him to "gh auth re-login whenever you're ready". The row blamed host swaps, and
+// two of its premises turned out to be wrong when they were measured on grok-bot-local-vm
+// 2026-09-09:
+//
+//   * ~/.config/gh is ALREADY the first entry in the image's persist-cli-auth CLI_AUTH_TARGETS,
+//     mirrored to /home/box/cli-config every 30 s and copied back in on a container recreate.
+//   * A host bundle swap never touches a home at all. The supervisor writes under
+//     /home/box/sand-host and /usr/local/bin and nothing else.
+//   * The shell store's name rule already allows GITHUB_TOKEN, and gh honours GH_TOKEN then
+//     GITHUB_TOKEN AHEAD of hosts.yml, falling back to the file when the value is empty. Measured
+//     with gh 2.46.0 in the box: an unset environment gives "You are not logged into any GitHub
+//     hosts", a set one gives "Failed to log in to github.com using token (GITHUB_TOKEN)", so gh
+//     names the source it read.
+//
+// What actually bit is persist-cli-auth's PRUNE: when the live ~/.config/gh has no content, the
+// mirror is deleted too, so the one path that could have restored the credential is cleared by the
+// same sweep that was meant to protect it. That makes the stored GITHUB_TOKEN the primary path and
+// the file only a convenience, which is what these legs prove: the store's value still reaches an
+// agent's own shell after a real swap, gh's verdict is unchanged, and the config directory and its
+// mirror are byte-for-byte what they were. docs/CUSTODY.md carries the whole reasoning.
+const GH_FIELD = "GITHUB_TOKEN";
+const GH_SIGNATURE_SCRIPT = [
+  "#!/bin/sh",
+  "# GH-1: a signature of gh's config directory and its persist-cli-auth mirror. Names and content",
+  "# hashes only, never a value: hosts.yml holds an OAuth token and this output is printed.",
+  "for d in /root/.config/gh /home/box/.config/gh /home/box/cli-config/.config/gh; do",
+  '  if [ -d "$d" ]; then',
+  '    printf "%s " "$d"',
+  '    find "$d" -type f 2>/dev/null | LC_ALL=C sort | xargs -r sha256sum 2>/dev/null | sha256sum | cut -c1-16',
+  "  else",
+  '    echo "$d absent"',
+  "  fi",
+  "done",
+].join("\n");
+const GH_STATUS_SCRIPT = [
+  "#!/bin/sh",
+  "# GH-1: gh's own verdict, normalised to the shape rather than the wording, so a gh upgrade does",
+  "# not read as a regression. No token is ever printed: gh names the SOURCE, never the value.",
+  "out=$(gh auth status 2>&1)",
+  'case "$out" in',
+  '  *"using token (GH_TOKEN)"*) echo "verdict=token:GH_TOKEN" ;;',
+  '  *"using token (GITHUB_TOKEN)"*) echo "verdict=token:GITHUB_TOKEN" ;;',
+  '  *"Logged in to"*) echo "verdict=logged-in:config-file" ;;',
+  '  *"not logged into any"*) echo "verdict=no-credential" ;;',
+  '  *) echo "verdict=other" ;;',
+  "esac",
+].join("\n");
+
+/** Write a script into the box and run it. Nested quoting through `docker exec sh -c` does not survive. */
+const runScriptInBox = async (name, body) => {
+  const local = path.join(stage, name);
+  writeFileSync(local, body, { mode: 0o755 });
+  const copied = await run("docker", ["cp", local, `${BOX}:/tmp/${name}`]);
+  if (copied.code !== 0) return { code: copied.code, out: copied.err || copied.out };
+  const answer = await run("docker", ["exec", BOX, "sh", `/tmp/${name}`]);
+  await run("docker", ["exec", BOX, "rm", "-f", `/tmp/${name}`]);
+  return answer;
+};
+const ghSignature = async () => (await runScriptInBox("gh-signature.sh", GH_SIGNATURE_SCRIPT)).out.trim();
+const ghVerdict = async () => (await runScriptInBox("gh-status.sh", GH_STATUS_SCRIPT)).out.trim();
+
 let relay;
+/** Set only if this gate put it there. An operator's own stored token is never overwritten or removed. */
+let ghTokenIsOurs = false;
 const release = await acquireBoxLock({ what: "verify-host-upgrade.mjs (swaps the host process)", log: note });
 try {
+  // The gate before this one may have recreated the box, and the lock is released the moment its
+  // process exits rather than when the gateway is answering again. Measured on grok-bot-local-vm
+  // 2026-09-09 with three waves queued on this lock: this gate won the lock twice and died on its
+  // first call with a bare "fetch failed", which reads as a product fault and is not one. So the
+  // first thing it does with the lock is wait for the box to be up, and say so if it never is.
+  console.log("== the box answers");
+  let ready = false;
+  for (let i = 0; i < 60 && !ready; i += 1) {
+    try { await call("listAgents", {}, 10_000); ready = true; } catch { await sleep(2000); }
+  }
+  check(ready, "the box's gateway is answering before anything is measured",
+    ready ? "" : "no answer in 120 s: the box is down, or the gate that held the lock before this one left it recreating");
+  if (!ready) throw new Error("the box never came up");
+
   console.log("== the box's bundle source");
   // The base URL is baked in at container create, so a box that predates the SHIP-2 recreate cannot
   // be talked into this and should say so rather than fail six checks later.
@@ -137,6 +216,33 @@ try {
   check(stored?.stored === true, "a shell secret is set before the swap", `${SECRET_FIELD} applied=${stored?.applied}`);
   note(`host pid ${before.pid}, version ${before.version}, container ${before.container.slice(0, 12)} started ${before.startedAt}`);
 
+  // GH-1, the credential Jason actually lost. Set only if this box holds none: an operator's own
+  // stored token is read, used and left exactly where it was, never overwritten and never deleted
+  // by a gate.
+  const ghBefore = await call("probeShellSecret", { field: GH_FIELD }).catch((error) => ({ state: `unreadable: ${error.message}` }));
+  if (ghBefore?.state === "set") {
+    note(`${GH_FIELD} is already stored on this box; the gate reads it and leaves it alone`);
+  } else {
+    const ghStored = await call("setShellSecret", { field: GH_FIELD, value: `verify-host-upgrade-${target.version}` });
+    ghTokenIsOurs = ghStored?.stored === true;
+    check(ghTokenIsOurs, `${GH_FIELD} is in the store before the swap`, `applied=${ghStored?.applied}`);
+  }
+  // ENV-1 and GATE-11: probed through an agent that HAS a window, never the primary daemon. An
+  // agent with a desktop runs every command through that window's own exec daemon, which holds its
+  // own environment, and a probe of the primary answered "set" for a variable Chief of staff read
+  // zero characters from. `first` is the agent whose desktop was opened above.
+  const ghProbeBefore = await call("probeShellSecret", { field: GH_FIELD, agentId: first.id })
+    .catch((error) => ({ state: `unreadable: ${error.message}`, shell: "none" }));
+  check(ghProbeBefore?.state === "set" && String(ghProbeBefore?.shell ?? "").startsWith("agent:"),
+    `${GH_FIELD} reaches the shell of an agent that has a window`,
+    `${ghProbeBefore?.state} in ${ghProbeBefore?.shell}${ghProbeBefore?.windowIndex == null ? "" : ` (window ${ghProbeBefore.windowIndex})`}`);
+  // gh's own verdict and the two directories persist-cli-auth mirrors. This is the pair that was
+  // wiped: a swap must leave both untouched.
+  const ghVerdictBefore = await ghVerdict();
+  const ghSignatureBefore = await ghSignature();
+  note(`gh before the swap: ${ghVerdictBefore || "no answer"}`);
+  for (const line of ghSignatureBefore.split("\n")) note(`  ${line}`);
+
   console.log("== updateHostNow");
   let update = await call("updateHostNow", {}, 300_000);
   // "already-latest" naming a version that is NOT the one just staged is the ten-minute
@@ -178,14 +284,77 @@ try {
   check(rosterAfter.join("|") === rosterBefore.join("|"), "the roster is the same agents", `${rosterBefore.length} -> ${rosterAfter.length}: ${rosterAfter.join(" | ")}`);
   const probe = await call("probeShellSecret", { field: SECRET_FIELD });
   check(probe?.state === "set", "the shell secret set before the swap is still set", JSON.stringify(probe));
+
+  console.log("== AGENTS-CAP-2: the ceiling the new bundle brought with it");
+  // Measured HERE, inside the gate, while the lock is still held. Read after the gate exits it is
+  // not a measurement of this bundle: grok-bot-local-vm is shared, /opt/titanbot-runtime is a bind
+  // mount from another checkout, and on 2026-09-09 a `build-host.mjs --deploy` from a parallel
+  // worktree overwrote /home/box/sand-host/host-main.cjs two minutes after a green swap, leaving
+  // the version file naming a bundle whose bytes were gone.
+  //
+  // No literal, for GATE-15's reason: the expected number is read out of the source this bundle was
+  // built from. And the box's own setting wins over the default, so a box somebody raised is
+  // checked against ITS number rather than against the product's.
+  const declaredDefault = Number(
+    /SAND_DEFAULT_MAX_AGENTS\s*=\s*(\d+)/.exec(readFileSync(path.join(REPO, "source/shared/agents/agents.ts"), "utf8"))?.[1],
+  );
+  const settingsRaw = (await sh("cat /home/box/sand-data/sand-host-settings.json 2>/dev/null")).out.trim();
+  let pinned;
+  try {
+    const parsed = JSON.parse(settingsRaw || "{}");
+    const value = parsed?.SAND_MAX_AGENTS ?? parsed?.settings?.SAND_MAX_AGENTS;
+    // A number rather than a string is ignored by the host's own reader, so it is not a pin here either.
+    if (typeof value === "string" && /^\d+$/.test(value)) pinned = Number(value);
+  } catch {}
+  const containerPin = (await sh("printenv SAND_MAX_AGENTS")).out.trim();
+  const expected = containerPin.length > 0 ? Number(containerPin) : pinned ?? declaredDefault;
+  const capacity = await call("getAgentCapacity", {}, 30_000).catch((error) => ({ error: error.message }));
+  check(Number.isInteger(declaredDefault) && declaredDefault > 1,
+    "the tree this bundle was built from declares a default ceiling", `SAND_DEFAULT_MAX_AGENTS ${declaredDefault}`);
+  check(Number(capacity?.maxAgents) === expected,
+    "the box reports the ceiling this bundle carries",
+    `maxAgents ${capacity?.maxAgents ?? capacity?.error} against ${expected} (${containerPin.length > 0 ? "container env" : pinned != null ? "this box's own setting" : "the bundle's default"})`);
+  check(capacity?.refusal === `This workspace holds Titan and ${expected - 1} more bots. Remove one to add another.`,
+    "and the refusal a person would read names that number in plain words", capacity?.refusal ?? "no refusal");
+
+  console.log("== GH-1: the GitHub credential across a real swap");
+  // The same windowed agent, the same question. This is the leg that would have caught what Jason
+  // hit: if the swap ever costs an agent its credentials, this reads "unset" here.
+  const ghProbeAfter = await call("probeShellSecret", { field: GH_FIELD, agentId: first.id })
+    .catch((error) => ({ state: `unreadable: ${error.message}`, shell: "none" }));
+  check(ghProbeAfter?.state === "set" && String(ghProbeAfter?.shell ?? "").startsWith("agent:"),
+    `${GH_FIELD} still reaches that agent's own shell after the swap`,
+    `${ghProbeBefore?.state} -> ${ghProbeAfter?.state} in ${ghProbeAfter?.shell}`);
+  const ghVerdictAfter = await ghVerdict();
+  check(ghVerdictAfter === ghVerdictBefore && ghVerdictAfter.startsWith("verdict="),
+    "gh auth status gives the same verdict it gave before the swap",
+    `${ghVerdictBefore || "no answer"} -> ${ghVerdictAfter || "no answer"}`);
+  const ghSignatureAfter = await ghSignature();
+  check(ghSignatureAfter === ghSignatureBefore,
+    "gh's config directory and its persist-cli-auth mirror are unchanged",
+    ghSignatureAfter === ghSignatureBefore
+      ? ghSignatureAfter.split("\n").join(" | ")
+      : `before: ${ghSignatureBefore.split("\n").join(" | ")} / after: ${ghSignatureAfter.split("\n").join(" | ")}`);
+  // Said out loud rather than left for a reader to infer, because a green run means two different
+  // things depending on what the box holds. gh reads GH_TOKEN, then GITHUB_TOKEN, then
+  // ~/.config/gh/hosts.yml, so on a box with no gh login of its own the verdict compared above is
+  // "no credential" on both sides -- which proves the swap invented nothing and destroyed nothing,
+  // while the credential that actually survived is the stored one the probe just read. The two
+  // legs are not interchangeable and the log should never let them be confused.
+  note(ghVerdictAfter === "verdict=no-credential"
+    ? `this box holds no gh login of its own, so the verdict leg proves the swap left that state alone; the credential proved to survive is the stored ${GH_FIELD}, read through ${ghProbeAfter?.shell}`
+    : `gh is authenticating from ${ghVerdictAfter.replace("verdict=", "")}, unchanged across the swap`);
 } catch (error) {
   check(false, "the gate ran to the end", error instanceof Error ? error.message : String(error));
 } finally {
   console.log("== cleanup");
   try { await call("deleteShellSecret", { field: SECRET_FIELD }); } catch {}
+  // Only the placeholder this run put there. A token the operator stored is left where it was:
+  // removing somebody's real credential to tidy up after a gate is the failure this row is about.
+  if (ghTokenIsOurs) { try { await call("deleteShellSecret", { field: GH_FIELD }); } catch {} }
   if (relay != null) { relay.kill("SIGTERM"); await sleep(500); relay.kill("SIGKILL"); }
   try { rmSync(stage, { recursive: true, force: true }); } catch {}
-  note(`removed ${SECRET_FIELD}, stopped the gate's relay, removed ${stage}`);
+  note(`removed ${SECRET_FIELD}${ghTokenIsOurs ? ` and this gate's ${GH_FIELD}` : `, left ${GH_FIELD} as it was`}, stopped the gate's relay, removed ${stage}`);
   release();
 }
 

@@ -694,12 +694,24 @@
     renderNeedsYouCount();
   }
 
-  // ---- AGENTS-CAP-1: Titan and ninety-nine more ----------------------------------------------
-  // The box holds 100 bots at most and the host refuses the next one (SAND_MAX_AGENTS). Rooms are
-  // not bots and are not counted, so the number drawn here is the roster's own bot count rather
-  // than countAgents, which counts a room as an agent. The host's own number is kept on the
+  // ---- AGENTS-CAP-1: Titan and thirty-nine more ----------------------------------------------
+  // The box holds a fixed number of bots and the host refuses the next one (SAND_MAX_AGENTS).
+  // Rooms are not bots and are not counted, so the number drawn here is the roster's own bot count
+  // rather than countAgents, which counts a room as an agent. The host's own number is kept on the
   // tooltip, because when the two disagree that is worth being able to see.
-  const AGENT_CAP_DEFAULT = 100;
+  //
+  // AGENTS-CAP-2, decided by Jason 2026-09-09 06:34: the default is 40, not 100. Titan's own
+  // reasoning, which Jason took: flat coordination holds to roughly fifty bots, and the hierarchy
+  // tooling that would carry more (TEAMS-1) does not exist yet, so a hundred is a ceiling that
+  // promises something the product cannot yet do well. A workspace that wants more gets it from the
+  // super admin, who raises that one client's ceiling from its row in the admin console.
+  //
+  // This number is the FALLBACK and nothing else. Every box reports its own ceiling through
+  // getOnboardingState, and applyReportedCap below installs it on every load, so a workspace whose
+  // ceiling was raised draws its own number within one reload and never this one. The three live
+  // R750 boxes each pin SAND_MAX_AGENTS to "100" in their own settings file, so this default cannot
+  // move them.
+  const AGENT_CAP_DEFAULT = 40;
   const agentCap = () => (Number.isFinite(state.agentCap) && state.agentCap > 0 ? state.agentCap : AGENT_CAP_DEFAULT);
   const botCount = () => state.workers.length;
   // Titan is one of the hundred, so what is left to add is ninety-nine. This is the number the Add
@@ -719,7 +731,13 @@
     // The Add button says how much room is left before it is clicked, so the refusal is never the
     // first time anyone hears about the cap.
     const add = document.querySelector('[data-capability="add"] [data-add-count]');
-    if (add) add.textContent = `${extraBotCount()} of ${extraBotCap()}`;
+    if (add) {
+      add.textContent = `${extraBotCount()} of ${extraBotCap()}`;
+      // AGENTS-CAP-2: a full roster is not a dead end any more. The ceiling is one setting the
+      // super admin changes from this workspace's row, so the tooltip says who to ask rather than
+      // leaving the person to guess whether the number is a licence, a bug or the machine's limit.
+      add.title = extraBotCount() >= extraBotCap() ? CAP_RAISE_SENTENCE : "";
+    }
   }
 
   // The host's own words when it refuses. It sends this sentence back as {error}; the console says
@@ -727,7 +745,10 @@
   // when an older host refuses with something less readable. Read at the moment of the refusal, not
   // once at load: the cap can arrive from the host after this file has been evaluated, and a
   // sentence baked in at load would then name a number the box no longer holds to.
-  const agentCapRefusalText = () => `This workspace holds Titan and ${extraBotCap()} more bots. Remove one to add another.`;
+  // AGENTS-CAP-2. One sentence, used by the refusal and by the Add tile's tooltip, so the person is
+  // told the same thing whichever of the two they meet first.
+  const CAP_RAISE_SENTENCE = "Ask the operator to raise this workspace's ceiling if you need more.";
+  const agentCapRefusalText = () => `This workspace holds Titan and ${extraBotCap()} more bots. Remove one to add another, or ask the operator to raise this workspace's ceiling.`;
   function agentCapRefusal(error) {
     const said = String(error?.message ?? error ?? "").trim();
     if (/Titan and \d+ more bots/.test(said)) return said;
@@ -735,6 +756,347 @@
     return "";
   }
   // ---- end AGENTS-CAP-1 ----------------------------------------------------------------------
+
+  // ---- FEEDBACK-1: report a problem ------------------------------------------------------------
+  //
+  // Jason, 2026-09-07: "Titan tried to cover up failure. We need to instill in the agents that
+  // failure must be reported... 'Would you like to submit this feedback to the developers?'"
+  //
+  // TWO GATES, and the first of them is the person reading this page. Nothing an agent writes down
+  // leaves this workspace until they have seen it, edited it or dropped it. That is topology and
+  // not policy: the agent's tool writes a pending report into the box's own file and returns a
+  // sentence; this page, which is already signed in as the tenant, is the only thing that POSTs.
+  // The developers are the SECOND gate and see only what was sent.
+  //
+  // Everything here is page-local by construction, which is the honest cost: an offer nobody
+  // answers dies with the tab. That is exactly why the always-present Report a problem control
+  // beside the composer exists, and why the box's own pending file is re-read on every load.
+  const PROBLEM_TIERS = [
+    ["critical", "Blocks the work"],
+    ["quality", "Slowed me down"],
+    ["observation", "Worth noting"],
+  ];
+  const tierLabel = (tier) => (PROBLEM_TIERS.find((row) => row[0] === tier) ?? PROBLEM_TIERS[2])[1];
+
+  // What is sent, said as a promise the product can actually keep. The claim is deliberately the
+  // strongest one available -- what is on the card is what goes -- because the alternative, shipping
+  // an uneditable copy of something the person just deleted, is a custody lie of exactly the kind
+  // the secret card was rewritten to stop making.
+  const REPORT_CUSTODY = "What you see below is what is sent, along with this workspace's name, which agent it came from, and the build numbers of the box and this page. Your keys, your files and your other conversations are not sent. Edit anything you would rather not share; if you change the text, only your version goes.";
+
+  // The self-test, as Titan wrote it on Jason's box. Shipped as a constant rather than a saved
+  // skill so a box with no skills of its own still has it, and so the known-limitation line stays
+  // in step with the Read tool's refusal wording -- an out-of-date checklist is how an agent came
+  // to file a deliberate boundary as a bug.
+  const SELF_TEST_PROMPT = [
+    "Run a tool self-test and report what you find. Work through these six sections in order, one real call each, and do not skip a section because you expect it to pass:",
+    "",
+    "1. Shell and file I/O: run a command, write a file, read it back, delete it.",
+    "2. Web tools: fetch a public page and run one search.",
+    "3. Connectors: list what is connected and call one read-only tool on one of them.",
+    "4. Desktop and browser: take a screenshot and open one page, if you have a desktop.",
+    "5. State and memory: write one note to memory and read it back.",
+    "6. Agent management: report what you could do here. Do NOT create, change or delete any agent without being asked.",
+    "",
+    "Then give me one table with a row per tool: Tool | Status | Error. Quote each error word for word rather than summarising it.",
+    "",
+    "Known and not a fault: your Read tool refuses paths under your own sand-data store. That store holds this workspace's own settings and credentials, and keeping it out of what you read is deliberate. Your own working files live under /home/box and read normally. Do not report that refusal as a bug.",
+    "",
+    "When the table is done, use your reporting tool once, at tier observation, with the table as the description, so I can decide whether to send it on.",
+  ].join("\n");
+
+  // The console's own build number, which did not exist before this. The first eight hex of a
+  // sha256 over this very file, computed once at load: self-maintaining and true, where a
+  // hand-kept literal goes stale on the first ship. It needs nothing from the relay.
+  let consoleBuildValue = null;
+  function consoleBuild() { return consoleBuildValue; }
+  function loadConsoleBuild() {
+    try {
+      return Promise.resolve(fetch("app.js"))
+        .then((response) => response.text())
+        .then((text) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))
+        .then((digest) => {
+          consoleBuildValue = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 8);
+          return consoleBuildValue;
+        })
+        .catch(() => null);
+    } catch { return Promise.resolve(null); }
+  }
+
+  let hostBuildValue = null;
+  function loadHostBuild() {
+    if (typeof adapter.getHostStatus !== "function") return Promise.resolve(null);
+    return Promise.resolve(adapter.getHostStatus())
+      .then((status) => { hostBuildValue = status?.hostVersion ?? null; return hostBuildValue; })
+      .catch(() => null);
+  }
+
+  let problemOffers = [];
+  let problemOfferSeq = 0;
+  const problemOffersFor = (context = activeContext()) => problemOffers.filter((offer) => offer.agentId === context.id);
+
+  // Everything drawn on the card goes through this on the way in. The regex is the page's own
+  // (maskSecrets, further down), so a token pasted into a shell command and echoed back by the box
+  // is masked here for the same reason it is masked on an evidence receipt.
+  const reportRedact = (value) => maskSecrets(String(value ?? ""));
+
+  // What the conversation can say about a failure without opening a single file. Only what is
+  // already on this page: the tool rows the outline wove in, and the last few things that were
+  // said. No environment, no file, and nothing from the two secret stores.
+  function reportEvidence(context = activeContext()) {
+    const rows = contextMessages(context);
+    const calls = rows
+      .filter((row) => row.type === "system" && row.kind)
+      .slice(-12)
+      .map((row) => ({
+        name: String(row.kind),
+        status: / · failed(?: ·|$)/.test(String(row.text ?? "")) ? "failed" : "done",
+        summary: reportRedact(row.text).slice(0, 400),
+        output: reportRedact(row.detail).slice(0, 1200),
+      }));
+    const messages = rows
+      .filter((row) => (row.type === "text" || row.type === "attachment") && String(row.text ?? "").trim())
+      .slice(-6)
+      .map((row) => ({ role: row.authorId === "you" ? "you" : "agent", text: reportRedact(row.text).slice(0, 800) }));
+    return { calls, messages };
+  }
+
+  // The report as the person reads it. One block of plain text, because that is what they are
+  // being asked to check and edit, and because a form with nine fields is not something anyone
+  // fills in at the moment a thing has just broken.
+  function reportBodyText(seed) {
+    const lines = [seed.description ?? ""];
+    if ((seed.steps ?? []).length) lines.push("", "Steps:", ...seed.steps.map((step, i) => `${i + 1}. ${step}`));
+    if ((seed.tools ?? []).length) {
+      lines.push("", "Tools:");
+      for (const tool of seed.tools) lines.push(`- ${tool.name} · ${tool.status}${tool.error ? ` · ${reportRedact(tool.error)}` : ""}`);
+    }
+    if ((seed.calls ?? []).length) {
+      lines.push("", "What ran just before:");
+      for (const call of seed.calls) lines.push(`- ${call.summary}${call.output ? `\n  ${call.output.split("\n").join("\n  ")}` : ""}`);
+    }
+    if ((seed.messages ?? []).length) {
+      lines.push("", "Last said:");
+      for (const message of seed.messages) lines.push(`- ${message.role}: ${message.text}`);
+    }
+    return lines.join("\n").trim();
+  }
+
+  /**
+   * Mints one offer and puts it in front of the person. `pendingId` is set when the box already
+   * holds this report in its own file: resolving the card then clears it there too, so the same
+   * report is not offered again on the next load.
+   */
+  function offerProblemReport(seed) {
+    const context = seed.agentId ? { kind: "worker", id: seed.agentId } : activeContext();
+    const evidence = seed.calls || seed.messages ? { calls: seed.calls ?? [], messages: seed.messages ?? [] } : reportEvidence(context);
+    const full = { ...seed, ...evidence };
+    const offer = {
+      id: `offer-${problemOfferSeq += 1}`,
+      agentId: seed.agentId ?? context.id,
+      agentName: seed.agentName ?? "",
+      pendingId: seed.pendingId ?? null,
+      tier: seed.tier ?? "quality",
+      category: seed.category ?? "console",
+      title: seed.title ?? "Something went wrong",
+      steps: seed.steps ?? [],
+      tools: seed.tools ?? [],
+      calls: evidence.calls,
+      messages: evidence.messages,
+      body: reportBodyText(full),
+      status: "pending",
+      note: "",
+      source: seed.source ?? "console",
+    };
+    problemOffers.push(offer);
+    return offer;
+  }
+
+  const problemOfferById = (id) => problemOffers.find((offer) => offer.id === id);
+
+  // The payload the relay is handed. ProblemReport v1, minted the same way whether it came from the
+  // agent's tool, the automatic offer or the self-test. `workspace` is absent on purpose: the relay
+  // stamps it from its own registry, so this page can neither name its own tenant nor anyone else's.
+  function problemReportPayload(offer, body) {
+    const edited = String(body).trim() !== String(offer.body).trim();
+    return {
+      version: 1,
+      tier: offer.tier,
+      category: offer.category,
+      title: offer.title,
+      description: String(body),
+      // Edited means the person removed or reworded something, so the structured copies of what
+      // they were shown do not ride along behind their back. Untouched means what they approved is
+      // exactly what the agent wrote, and the developers get it in both forms.
+      steps: edited ? [] : offer.steps,
+      tools: (offer.tools ?? []).map((tool) => (edited ? { name: tool.name, status: tool.status } : tool)),
+      evidence: {
+        agent: offer.agentId,
+        agentName: offer.agentName,
+        conversation: offer.agentId,
+        hostVersion: hostBuildValue,
+        consoleVersion: consoleBuild(),
+        ...(edited ? {} : { calls: offer.calls, messages: offer.messages }),
+      },
+      at: new Date().toISOString(),
+    };
+  }
+
+  // The four honest states, in the manner of the decision card: sending, settled, pending with
+  // buttons, and pending again with one sentence saying why the last try did not land.
+  function reportCardMarkup(offer) {
+    const chip = `<span class="tag">${escapeHtml(tierLabel(offer.tier))}</span><span class="tag">${escapeHtml(offer.category)}</span>`;
+    if (offer.status === "sending") {
+      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">Sending this to the developers…</small></span></div></div></article>`;
+    }
+    if (offer.status === "sent" || offer.status === "dropped") {
+      const settled = offer.status === "sent"
+        ? "Sent. The developers have it, and you can see what you sent in your own copy above."
+        : "Kept to yourself. Nothing left this workspace.";
+      const accent = offer.status === "sent" ? "var(--green-500)" : "var(--amber-500)";
+      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${offer.status === "sent" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">${escapeHtml(settled)}</small></span></div></div></article>`;
+    }
+    const note = offer.note ? `<small class="field-hint">${escapeHtml(offer.note)}</small>` : "";
+    return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card problem-report-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small>Would you like to send this to the developers?</small></span></div><div class="tag-list">${chip}</div><div class="field"><label class="sr-only" for="report-body-${escapeHtml(offer.id)}">What is sent to the developers</label><textarea id="report-body-${escapeHtml(offer.id)}" data-report-body="${escapeHtml(offer.id)}" rows="8" aria-describedby="report-custody-${escapeHtml(offer.id)}">${escapeHtml(offer.body)}</textarea><small class="field-hint" id="report-custody-${escapeHtml(offer.id)}">${escapeHtml(REPORT_CUSTODY)}</small>${note}</div><div class="inline-card-actions"><button class="card-action primary" type="button" data-report-send="${escapeHtml(offer.id)}">Send</button><button class="card-action" type="button" data-report-drop="${escapeHtml(offer.id)}">Not now</button></div></div></article>`;
+  }
+
+  const reportCardsMarkup = () => problemOffersFor().map(reportCardMarkup).join("");
+
+  function settleProblemOffer(offer, status, note) {
+    offer.status = status;
+    offer.note = note ?? "";
+    if (offer.pendingId && (status === "sent" || status === "dropped") && typeof adapter.resolveProblemReport === "function") {
+      Promise.resolve(adapter.resolveProblemReport(offer.pendingId, status)).catch(() => {});
+    }
+    renderTranscript();
+  }
+
+  function sendProblemOffer(id, body) {
+    const offer = problemOfferById(id);
+    if (!offer || offer.status === "sending") return Promise.resolve(null);
+    if (typeof adapter.sendProblemReport !== "function") {
+      offer.note = "This console cannot reach the developers from here. Nothing was sent.";
+      renderTranscript();
+      return Promise.resolve(null);
+    }
+    const payload = problemReportPayload(offer, body);
+    offer.body = String(body);
+    offer.status = "sending";
+    renderTranscript();
+    // No toast: the card reports what happened, once it has happened.
+    return Promise.resolve(adapter.sendProblemReport(payload))
+      .then((answer) => { settleProblemOffer(offer, "sent"); return answer; })
+      .catch((error) => {
+        offer.status = "pending";
+        offer.note = `That did not send: ${error.message}. It is still here, so you can try again.`;
+        renderTranscript();
+        return null;
+      });
+  }
+
+  // Trigger one: a failed turn. Measured on grok-bot-local-vm 2026-09-09, a model-endpoint failure
+  // writes no turn-failed row at all, so the adapter's tray queue is the only live signal there is.
+  function drainFailedTurnOffers() {
+    if (typeof adapter.takeFailedTurnReports !== "function") return [];
+    const seeds = adapter.takeFailedTurnReports() ?? [];
+    // MEASURED in scripts/verify-feedback.mjs: the quiet note the adapter pushes into the
+    // conversation does NOT survive for the conversation you are looking at. reloadTrays runs
+    // first, then loadContext replaces that record's messages wholesale, so the note lives for one
+    // tick on the active agent and until its next load on any other. That was equally true of the
+    // raw line it replaced, so nothing was lost -- but it does mean the CARD has to carry the plain
+    // words as well, because the card is the part that stays.
+    return seeds.map((seed) => offerProblemReport({
+      agentId: seed.agentId,
+      agentName: seed.agentName,
+      tier: "critical",
+      category: "turn",
+      title: `${seed.agentName || "This agent"} could not finish that one`,
+      description: `${seed.agentName || "This agent"} was asked something and the turn ended without an answer. What the box recorded: ${seed.title}${seed.detail ? ` — ${seed.detail}` : ""}`,
+      source: "failed-turn",
+    }));
+  }
+
+  // Trigger two: the same tool failing three times in one conversation. Counted off the woven tool
+  // rows, which carry the tool's kind and say "failed" in their own text. Fired ONCE per kind per
+  // conversation, not once per failure -- three cards for one bad afternoon is its own fault.
+  const repeatedFailureOffered = new Set();
+  function noteRepeatedToolFailures(context = activeContext()) {
+    const counts = new Map();
+    for (const row of contextMessages(context)) {
+      if (row.type !== "system" || !row.kind) continue;
+      if (!/ · failed(?: ·|$)/.test(String(row.text ?? ""))) continue;
+      counts.set(row.kind, (counts.get(row.kind) ?? 0) + 1);
+    }
+    const made = [];
+    for (const [kind, count] of counts) {
+      const key = `${context.id}:${kind}`;
+      if (count < 3 || repeatedFailureOffered.has(key)) continue;
+      repeatedFailureOffered.add(key);
+      made.push(offerProblemReport({
+        agentId: context.id,
+        agentName: contextName(context),
+        tier: "quality",
+        category: String(kind).toLowerCase(),
+        title: `${kind} has failed ${count} times here`,
+        description: `The same tool has failed ${count} times in this conversation. What it answered each time is below.`,
+        source: "repeat",
+      }));
+    }
+    return made;
+  }
+
+  // The always-present control. Prefilled from whatever this conversation can say, which on a good
+  // day is nothing much -- and that is fine, because the person is about to type the part that
+  // matters into a box that is already open.
+  function openProblemReportCard() {
+    const context = activeContext();
+    offerProblemReport({
+      agentId: context.id,
+      agentName: contextName(context),
+      tier: "quality",
+      category: "console",
+      title: "A problem with this product",
+      description: "Say what happened, what you expected, and what you were doing at the time.",
+      source: "manual",
+    });
+    renderTranscript();
+  }
+
+  // The self-test. The same six sections Titan ran by hand, sent as a prompt; the answer comes back
+  // as an ordinary message and the agent's own reporting tool offers it at tier observation.
+  function runSelfTest() {
+    const context = activeContext();
+    if (typeof adapter.sendMessage !== "function") return null;
+    adapter.sendMessage({ ...context }, SELF_TEST_PROMPT, []);
+    return SELF_TEST_PROMPT;
+  }
+
+  // The box's own pending file, read on load and after each reload. A report an agent wrote while
+  // nobody had the console open is still waiting here.
+  const seenPendingReports = new Set();
+  function drainPendingProblemReports() {
+    if (typeof adapter.listProblemReports !== "function") return Promise.resolve([]);
+    return Promise.resolve(adapter.listProblemReports())
+      .then((rows) => (Array.isArray(rows) ? rows : []).filter((row) => row?.id && !seenPendingReports.has(row.id)))
+      .then((rows) => rows.map((row) => {
+        seenPendingReports.add(row.id);
+        const report = row.report ?? {};
+        return offerProblemReport({
+          agentId: row.agentId,
+          agentName: row.agentName ?? "",
+          pendingId: row.id,
+          tier: report.tier,
+          category: report.category,
+          title: report.title,
+          description: report.description,
+          steps: report.steps ?? [],
+          tools: report.tools ?? [],
+          source: "tool",
+        });
+      }))
+      .catch(() => []);
+  }
+  // ---- end FEEDBACK-1 --------------------------------------------------------------------------
 
   function renderConversationHeader() {
     const context = activeContext();
@@ -1146,9 +1508,12 @@
     // expanded view. With the module absent this is today's transcript, row for row.
     const rows = foldRepeatedRows(contextMessages());
     const gaps = window.__gapBadge;
+    // FEEDBACK-1: the offer cards for this conversation sit at the end, under the message that
+    // caused them. They are page-local and are not transcript entries, which is the honest cost of
+    // building the offer on the only failure signal that actually fires (see the block above).
     return older + (gaps && typeof gaps.render === "function"
       ? gaps.render(rows, messageMarkup, { agentId: contextLead()?.id ?? null, working: (record?.status ?? "") === "working" })
-      : rows.map(messageMarkup).join(""));
+      : rows.map(messageMarkup).join("")) + reportCardsMarkup();
   }
 
   // A row just revealed (a search hit) holds the reader on it: a refresh that lands in the next
@@ -5361,6 +5726,11 @@
 
   adapter.subscribe((event) => {
     state = event.snapshot;
+    // FEEDBACK-1: both automatic triggers run on the tick the conversation changed and before the
+    // redraw below, so an offer is drawn with the messages that caused it rather than one tick
+    // behind them. Both are cheap array reads over what is already on the page.
+    drainFailedTurnOffers();
+    noteRepeatedToolFailures();
     // CONSOLE-4: every route into another conversation, not only the roster click -- the palette's
     // jump, and landOn after a create, both reach the page through this event and nothing else.
     if (event.type === "context:selected") pinTranscriptToBottom();
@@ -5395,6 +5765,13 @@
     if (event.type === "desktop:pause") renderDesktop();
     // Not renderDesktop: that remounts the VNC frame. Only the hand-off banner follows state.
     else if (elements.desktopDialog.open) renderHandBack();
+  });
+
+  // FEEDBACK-1: the two controls that are there whether or not anything has gone wrong. Both are
+  // optional in the DOM so a page that has not shipped them yet still boots.
+  document.querySelector("[data-report-open]")?.addEventListener("click", () => openProblemReportCard());
+  document.querySelector("[data-run-self-test]")?.addEventListener("click", () => {
+    if (runSelfTest() == null) showToast("This console cannot send a prompt from here.");
   });
 
   // On the wheel, not on "scroll": replacing the transcript's markup clamps scrollTop to 0 for a
@@ -5518,6 +5895,21 @@
     if (evidence) { openEvidenceViewer(evidence.dataset.messageId); return; }
     const exchange = event.target.closest("[data-exchange]");
     if (exchange) { openExchangeViewer(exchange.dataset.messageId); return; }
+    // FEEDBACK-1: Send and Not now on a report card, through the same one handler every other
+    // in-transcript control goes through.
+    const reportSend = event.target.closest("[data-report-send]");
+    if (reportSend) {
+      const id = reportSend.dataset.reportSend;
+      const field = elements.transcript.querySelector(`[data-report-body="${CSS.escape(id)}"]`);
+      sendProblemOffer(id, field?.value ?? "");
+      return;
+    }
+    const reportDrop = event.target.closest("[data-report-drop]");
+    if (reportDrop) {
+      const offer = problemOfferById(reportDrop.dataset.reportDrop);
+      if (offer) settleProblemOffer(offer, "dropped");
+      return;
+    }
     const secret = event.target.closest("[data-submit-secret]");
     if (secret) {
       const id = secret.dataset.submitSecret;
@@ -6401,4 +6793,11 @@
   renderDesktop("browser");
   resumeTeachMode();
   maybeOpenOnboarding();
+  // FEEDBACK-1. The two build numbers a report has to carry, read once, and the box's own pending
+  // file, which holds anything an agent wrote down while nobody had this page open. All three are
+  // fire-and-forget: none of them may hold up the first paint, and a box too old for the pending
+  // command simply has nothing to offer.
+  loadConsoleBuild();
+  loadHostBuild();
+  drainPendingProblemReports().then((made) => { if (made.length) renderTranscript(); });
 })();

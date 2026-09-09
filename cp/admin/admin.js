@@ -1,6 +1,6 @@
 // cp/admin/admin.js -- the super admin console's whole behaviour. ADMIN-1.
 //
-// No framework and no build step. It fetches six routes, renders six panels, and offers the named
+// No framework and no build step. It fetches seven routes, renders seven panels, and offers the named
 // actions below. The session token lives in sessionStorage and nowhere else: it dies with the tab,
 // it is never in a URL, and it is never written into a cookie, so nothing carries it to a route
 // that did not ask for it.
@@ -397,6 +397,63 @@
     return row;
   }
 
+  /**
+   * How many bots this workspace may hold, on its own row under the customer. AGENTS-CAP-2.
+   *
+   * The same three honest states clientModelRow above has, and for the same reason. Not reported,
+   * which is the box that could not be asked and reads as the sentence saying so. Pinned in the
+   * container environment, which draws a chip and NO control, because a field that writes a file
+   * the host then ignores is worse than no field. Or settable, which is a number and a Save.
+   *
+   * THE NUMBER SHOWN IS THE ONE THE BOX REPORTED. Nothing here is read out of a store: the control
+   * plane asked each box on this page load, so what is on screen is what that box will enforce on
+   * its next turn rather than what somebody once typed.
+   */
+  function clientCeilingRow(client) {
+    // Its own class rather than modelRow's, even though the layout is identical: the gate selects
+    // `.client .modelRow` in strict mode and a second element under that name is a red gate on a
+    // correct page.
+    const row = el("div", "row capRow");
+    row.appendChild(el("span", "quiet", "Bots allowed"));
+    const ceiling = client.ceiling;
+    if (ceiling == null || ceiling.read !== true) {
+      row.appendChild(measured(null, String(ceiling?.why || "this control plane did not report a ceiling for this workspace")));
+      return row;
+    }
+    const holding = Number.isFinite(Number(ceiling.bots)) ? `${ceiling.bots} in use` : "";
+    if (ceiling.pinned === true) {
+      row.appendChild(el("strong", null, String(ceiling.maxAgents)));
+      if (holding) row.appendChild(el("span", "quiet", holding));
+      row.appendChild(el("span", "chip locked", "pinned"));
+      row.appendChild(el("span", "clock", String(ceiling.pinnedBy
+        || "This workspace's ceiling is fixed in its own environment, so changing it here would record a different answer and change nothing. Change it where it is pinned, or unpin it first.")));
+      return row;
+    }
+    const field = document.createElement("input");
+    field.type = "number";
+    field.min = "1";
+    field.max = "1000";
+    field.step = "1";
+    field.className = "clientCeiling";
+    field.value = String(ceiling.maxAgents);
+    row.appendChild(field);
+    if (holding) row.appendChild(el("span", "quiet", holding));
+    const save = el("button", "ghost small", "Save");
+    save.type = "button";
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        const result = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/ceiling`, { maxAgents: Number(field.value) });
+        banner(String(result.message || `${client.slug} holds ${result.maxAgents} bots.`), result.pinned !== true);
+        await loadClients();
+      } catch (error) { banner(String(error.message)); }
+      finally { save.disabled = false; }
+    });
+    row.appendChild(save);
+    row.appendChild(el("span", "clock", "The box takes this from its next turn. Their own page shows it the next time that page loads."));
+    return row;
+  }
+
   async function loadClients() {
     const answer = await api("GET", "/v1/admin/clients");
     const host = $("clients");
@@ -445,6 +502,8 @@
       // gets said out loud rather than a select that appears to work: a control that silently does
       // nothing is worse than no control.
       card.appendChild(clientModelRow(client));
+      // AGENTS-CAP-2. And how many bots it may hold, read off the box the same way.
+      card.appendChild(clientCeilingRow(client));
 
       const wrap = el("div", "scroll users");
       const table = document.createElement("table");
@@ -1595,6 +1654,160 @@
     renderLedger(answer.actions ?? []);
   }
 
+  // ---- panel 7: feedback (FEEDBACK-1) ----------------------------------------------------------
+  //
+  // The second of two gates, and the page says so out loud under the heading. Everything listed
+  // here was written by an agent, shown to the workspace operator in their own console, and sent by
+  // that person. This screen is what the developers do next.
+  //
+  // No key value and no token ever renders here. The paste row is the masked field the providers
+  // panel already uses, cleared on the way back, and what comes out of the service is a length and
+  // eight characters of a digest.
+
+  const TIER_LABEL = { critical: "critical", quality: "quality of life", observation: "observation" };
+  const STATE_CHIP = { new: "chip", approved: "chip ok", filed: "chip super", suppressed: "chip off", closed: "chip locked" };
+  const STATE_LABEL = { new: "new", approved: "approved", filed: "issue filed", suppressed: "suppressed", closed: "closed" };
+
+  function renderFeedbackCard(report) {
+    // Not the client card's own class, though it is drawn the same way: the gate counts `.client`
+    // in strict mode to say the Clients panel drew one workspace, and a report wearing that name
+    // makes a correct page read as three customers.
+    const card = el("div", "feedbackCard");
+    const head = el("div", "head");
+    head.appendChild(el("strong", null, report.title || "(no title)"));
+    head.appendChild(el("span", "quiet", report.tenant || "no workspace"));
+    // Critical is the only chip on this panel that is ever red, because it is the only tier that
+    // means somebody is stopped right now.
+    head.appendChild(el("span", report.tier === "critical" ? "chip attack" : "chip", TIER_LABEL[report.tier] ?? report.tier));
+    head.appendChild(el("span", STATE_CHIP[report.state] ?? "chip", STATE_LABEL[report.state] ?? report.state));
+    if (report.category) head.appendChild(el("span", "quiet", report.category));
+    const seen = el("span", "quiet", ago(report.at));
+    seen.title = when(report.at);
+    head.appendChild(seen);
+    card.appendChild(head);
+
+    const who = [report.agentName || report.agent || "", report.payload?.evidence?.hostVersion || "", report.payload?.evidence?.consoleVersion || ""]
+      .filter((one) => String(one).length > 0).join(" - ");
+    if (who) card.appendChild(el("p", "quiet", who));
+
+    const body = el("textarea");
+    body.className = "feedbackBody";
+    body.rows = 6;
+    body.value = String(report.body ?? "");
+    card.appendChild(body);
+
+    const steps = report.payload?.steps ?? [];
+    const calls = report.payload?.evidence?.calls ?? [];
+    if (steps.length > 0 || calls.length > 0) {
+      const detail = document.createElement("details");
+      detail.appendChild(el("summary", "quiet", `what the agent sent: ${steps.length} step${steps.length === 1 ? "" : "s"}, ${calls.length} call${calls.length === 1 ? "" : "s"}`));
+      const pre = el("pre", "mono");
+      pre.appendChild(text([
+        ...steps.map((step, index) => `${index + 1}. ${step}`),
+        ...calls.map((call) => `${call.name} answered ${call.status || "nothing"}\n${call.output || call.summary || ""}`),
+      ].join("\n")));
+      detail.appendChild(pre);
+      card.appendChild(detail);
+    }
+
+    if (report.issueUrl) {
+      const link = document.createElement("a");
+      link.href = report.issueUrl;
+      link.target = "_blank";
+      link.rel = "noreferrer noopener";
+      link.appendChild(text(report.issueUrl));
+      const line = el("p", "quiet");
+      line.appendChild(text("filed as "));
+      line.appendChild(link);
+      card.appendChild(line);
+    }
+    if (report.decidedBy) card.appendChild(el("p", "quiet", `last decided by ${report.decidedBy} ${ago(report.decidedAt)}`));
+
+    const actions = el("div", "controls");
+    const run = async (button, verb, payload) => {
+      button.disabled = true;
+      try {
+        const result = await api("POST", `/v1/admin/feedback/${report.id}/${verb}`, payload);
+        // The prepared body, when there is no token yet. Shown rather than swallowed: the door is
+        // proven and the operator can paste the issue by hand today.
+        if (verb === "issue" && result.filed === false) {
+          banner(String(result.message), false);
+          const pre = el("pre", "mono");
+          pre.appendChild(text(`${result.title}\n\n${result.body}`));
+          card.appendChild(pre);
+          return;
+        }
+        banner(String(result.message ?? "Done."), true);
+        await loadFeedback();
+      } catch (error) { banner(String(error.message)); }
+      finally { button.disabled = false; }
+    };
+    for (const [verb, label] of [["edit", "Save this wording"], ["approve", "Approve"], ["issue", "Create GitHub issue"], ["suppress", "Suppress"], ["close", "Close"]]) {
+      const button = el("button", "ghost small", label);
+      button.type = "button";
+      button.addEventListener("click", () => run(button, verb, verb === "edit" ? { title: report.title, body: body.value } : {}));
+      actions.appendChild(button);
+    }
+    card.appendChild(actions);
+    return card;
+  }
+
+  async function loadFeedback() {
+    const tier = $("feedbackTier").value;
+    const state = $("feedbackState").value;
+    const answer = await api("GET", `/v1/admin/feedback?tier=${encodeURIComponent(tier)}&state=${encodeURIComponent(state)}&limit=200`);
+    $("feedbackGates").textContent = String(answer.gates ?? "");
+    const note = [
+      `${answer.total} report${answer.total === 1 ? "" : "s"} on record`,
+      `${answer.counts.new} new`,
+      `${answer.counts.criticalNew} critical and unread`,
+      `${answer.counts.filed} filed`,
+      `measured ${when(answer.measuredAt)}`,
+    ];
+    // Wave B's hook. The filter appears when the table behind it exists and is absent, rather than
+    // empty, when it does not: an empty filter reads as "nothing needs re-verification", which is a
+    // green light nobody measured.
+    if (answer.verification?.table) note.push(`verification records are in ${answer.verification.table}`);
+    $("feedbackNote").textContent = note.join(" - ");
+
+    const door = answer.github ?? {};
+    $("feedbackTokenNote").textContent = door.stored
+      ? `Issues are filed in ${door.repo}. The stored token is ${door.evidence}, and nothing here can show it. Paste a new one to replace it.`
+      : String(door.why ?? "no repository token is stored yet.");
+    $("githubRepo").value = String(door.repo ?? "");
+
+    const host = $("feedbackRows");
+    clear(host);
+    const rows = answer.rows ?? [];
+    if (rows.length === 0) {
+      host.appendChild(el("p", "empty", "Nothing reported in this filter. That is a real answer: no workspace has sent anything of this kind."));
+      return;
+    }
+    for (const report of rows) host.appendChild(renderFeedbackCard(report));
+  }
+
+  for (const id of ["feedbackTier", "feedbackState"]) {
+    $(id).addEventListener("change", () => { void loadFeedback().catch((error) => banner(String(error.message))); });
+  }
+
+  $("githubTokenForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const repo = $("githubRepo").value.trim();
+    const value = $("githubToken").value;
+    if (value.length === 0) { banner("Type the token before storing it."); return; }
+    // Cleared on the way out, not on the way back, so a failed request leaves nothing in the field
+    // either. Nothing on this page ever writes a value back into it.
+    $("githubToken").value = "";
+    const button = $("githubTokenSave");
+    button.disabled = true;
+    try {
+      const result = await api("POST", "/v1/admin/feedback/github-token", { repo, token: value });
+      banner(`${String(result.message)} The token is ${result.evidence}.`, true);
+      await loadFeedback();
+    } catch (error) { banner(String(error.message)); }
+    finally { button.disabled = false; }
+  });
+
   // ---- everything at once ----------------------------------------------------------------------
 
   async function loadAll() {
@@ -1602,14 +1815,14 @@
     const button = $("refresh");
     button.disabled = true;
     // Each panel loads on its own and reports its own failure into its own space, so one route
-    // being down does not blank the other four. `allSettled`, deliberately.
-    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend(), loadProviders()]);
+    // being down does not blank the other five. `allSettled`, deliberately.
+    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend(), loadProviders(), loadFeedback()]);
     button.disabled = false;
     const broken = results.filter((result) => result.status === "rejected" && String(result.reason?.message) !== "unauthorized");
     if (broken.length > 0) banner(`${broken.length} panel${broken.length === 1 ? "" : "s"} could not be loaded: ${broken.map((row) => row.reason.message).join("; ")}`);
     // The one flag a browser gate waits on, rather than a fixed sleep. It says the render finished,
     // not that everything in it succeeded, which is exactly what a gate wants to inspect.
-    window.__adminLive = { panels: 6, at: new Date().toISOString() };
+    window.__adminLive = { panels: 7, at: new Date().toISOString() };
     document.body.setAttribute("data-admin-loaded", "true");
   }
 

@@ -292,7 +292,70 @@ CREATE TABLE IF NOT EXISTS mail_send_log (
   outcome  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS mail_send_log_tenant ON mail_send_log (tenant, id);
+-- FEEDBACK-1. What an agent reported, after the workspace operator sent it and before the super
+-- admin decides what to do with it.
+--
+-- No TENANT_MIGRATIONS entry, for the reason written over admin_actions: db.exec(SCHEMA) runs on
+-- every open and CREATE TABLE IF NOT EXISTS makes a table that is not there. Only a new COLUMN on a
+-- table that already exists needs an ALTER.
+--
+-- Two gates decide what is in here and neither is a check in this file. The report was written by
+-- an agent into its own box, SHOWN TO THE WORKSPACE OPERATOR, who could edit it or drop it, and
+-- posted by that operator's own console. The tenant column is stamped by the relay out of its own
+-- registry and never read from the body, so a box cannot file as its neighbour. What the super
+-- admin then does with it is the state column, which moves new to approved to filed, or new to
+-- suppressed, or to closed.
+--
+-- NEVER PRUNED, the same as admin_actions and for the same reason: "did we ever hear about this
+-- before" is a question asked months later, and the rows are a few kilobytes each on a system where
+-- a report is a rare event.
+CREATE TABLE IF NOT EXISTS feedback (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  at        INTEGER NOT NULL,
+  tenant    TEXT NOT NULL DEFAULT '',
+  agent     TEXT NOT NULL DEFAULT '',
+  agentName TEXT NOT NULL DEFAULT '',
+  tier      TEXT NOT NULL DEFAULT 'observation',
+  category  TEXT NOT NULL DEFAULT '',
+  title     TEXT NOT NULL DEFAULT '',
+  body      TEXT NOT NULL DEFAULT '',
+  payload   TEXT NOT NULL DEFAULT '',
+  state     TEXT NOT NULL DEFAULT 'new',
+  issueUrl  TEXT NOT NULL DEFAULT '',
+  decidedAt INTEGER NOT NULL DEFAULT 0,
+  decidedBy TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS feedback_at ON feedback (at);
+CREATE INDEX IF NOT EXISTS feedback_state ON feedback (state);
 `;
+
+/**
+ * The five states a report can be in, and there is no sixth.
+ *
+ * `new` it arrived. `approved` a super admin read it and it is worth filing. `filed` it is a GitHub
+ * issue and issueUrl says which. `suppressed` it is noise and is kept rather than deleted, because
+ * "we decided this was not a bug" is itself a record. `closed` it is dealt with.
+ */
+export const FEEDBACK_STATES = ["new", "approved", "filed", "suppressed", "closed"];
+
+/**
+ * 256 KB each for the rendered body and the payload it was rendered from.
+ *
+ * The intake refuses a request body over 64 KB long before this, so nothing a console posts can
+ * reach this limit. It is here because the store is the last thing between a caller and the disk,
+ * and a table that is never pruned must not be a place one caller can fill.
+ */
+export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
+
+/**
+ * The setting names whose VALUE never comes back out of listSettings.
+ *
+ * admin_settings held nothing secret until FEEDBACK-1: a plan model alias, a quota, a provider
+ * list. It now holds the super admin's GitHub token, and listSettings hands every value back
+ * wholesale, so the two facts together would put that token in any answer that ever renders the
+ * settings. getSetting still returns it, for the one caller that files an issue.
+ */
+export const SECRET_SETTINGS = new Set(["github.token"]);
 
 const accountRow = (row) => (row == null ? null : {
   id: row.id,
@@ -336,6 +399,31 @@ const mailRow = (row) => (row == null ? null : {
   retiredAt: row.retired_at ?? null,
   state: row.state ?? "active",
 });
+// FEEDBACK-1. The payload is stored as text and handed back parsed, because every caller wants the
+// object and none of them wants to remember that the column is a string. A payload that will not
+// parse comes back null rather than throwing: a row whose evidence is unreadable is still a report
+// with a title, a workspace and a time, and losing the whole panel over one bad row is worse.
+const feedbackRow = (row) => {
+  if (row == null) return null;
+  let payload = null;
+  try { payload = JSON.parse(String(row.payload ?? "")); } catch { payload = null; }
+  return {
+    id: Number(row.id),
+    at: Number(row.at),
+    tenant: row.tenant ?? "",
+    agent: row.agent ?? "",
+    agentName: row.agentName ?? "",
+    tier: row.tier ?? "",
+    category: row.category ?? "",
+    title: row.title ?? "",
+    body: row.body ?? "",
+    payload,
+    state: row.state ?? "new",
+    issueUrl: row.issueUrl ?? "",
+    decidedAt: Number(row.decidedAt ?? 0),
+    decidedBy: row.decidedBy ?? "",
+  };
+};
 
 // The columns added after the first release, applied to a database that already exists.
 //
@@ -458,6 +546,14 @@ export function openStore(options = {}) {
   const deleteMailSender = statement("DELETE FROM mail_senders WHERE tenant = ? AND sender = ?");
   const insertMailSend = statement("INSERT INTO mail_send_log (tenant, agent_id, code, to_addr, at, outcome) VALUES (?, ?, ?, ?, ?, ?)");
   const countMailSendRows = statement("SELECT COUNT(*) AS n FROM mail_send_log WHERE tenant = ? AND at >= ?");
+  // FEEDBACK-1. The filters are built rather than prepared, because tier, state and tenant are each
+  // optional and a prepared statement per combination is eight statements for one list. The values
+  // are still bound and never interpolated: the only thing built is which `AND` clauses are in the
+  // string, and each clause's placeholder is filled from the argument list below.
+  const insertFeedback = statement("INSERT INTO feedback (at, tenant, agent, agentName, tier, category, title, body, payload, state, issueUrl, decidedAt, decidedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, '')");
+  const selectFeedbackRow = statement("SELECT * FROM feedback WHERE id = ?");
+  const countFeedbackRow = statement("SELECT COUNT(*) AS n FROM feedback");
+  const tableNamesRow = statement("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name");
 
   const insertFailure = statement("INSERT INTO login_failures (email, ip, at) VALUES (?, ?, ?)");
   const countFailuresByEmail = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM login_failures WHERE email = ? AND at >= ?");
@@ -688,11 +784,105 @@ export function openStore(options = {}) {
       const row = selectSetting.get(String(name));
       return { name: String(name), value: String(row?.value ?? ""), at: Number(row?.at ?? 0), actor: String(row?.actor ?? "") };
     },
+    // A SECRET NAME COMES BACK WITH NO VALUE. See SECRET_SETTINGS: this table now holds the super
+    // admin's GitHub token, and every caller of this method renders what it gets. `redacted` is on
+    // the row rather than the row being left out, because the panel has to be able to say "there is
+    // a token here" without being able to say what it is.
     listSettings() {
-      return selectSettings.all().map((row) => ({
-        name: row.name, value: row.value ?? "", at: Number(row.at), actor: row.actor ?? "",
-      }));
+      return selectSettings.all().map((row) => {
+        const secret = SECRET_SETTINGS.has(String(row.name));
+        return {
+          name: row.name,
+          value: secret ? "" : (row.value ?? ""),
+          redacted: secret,
+          at: Number(row.at),
+          actor: row.actor ?? "",
+        };
+      });
     },
+
+    // ---- what an agent reported (FEEDBACK-1) -----------------------------------------------------
+
+    /** One report, as the relay's forwarded workspace and the console's clamped payload. */
+    recordFeedback({ at = now(), tenant = "", agent = "", agentName = "", tier = "observation", category = "", title = "", body = "", payload = "", state = "new" }) {
+      const bodyText = String(body ?? "");
+      const payloadText = typeof payload === "string" ? payload : JSON.stringify(payload ?? {});
+      // Refused rather than truncated. A report cut in half reads as a whole one and sends whoever
+      // reads it looking for a step that was never written down.
+      if (bodyText.length > FEEDBACK_FIELD_LIMIT || payloadText.length > FEEDBACK_FIELD_LIMIT) {
+        const error = new Error(`a report has to fit in ${Math.round(FEEDBACK_FIELD_LIMIT / 1024)} KB, and this one does not, so nothing was stored`);
+        error.code = "too_large";
+        throw error;
+      }
+      if (!FEEDBACK_STATES.includes(String(state))) {
+        const error = new Error(`a report's state has to be one of ${FEEDBACK_STATES.join(", ")}`);
+        error.code = "bad_state";
+        throw error;
+      }
+      insertFeedback.run(
+        Number(at), String(tenant ?? ""), String(agent ?? ""), String(agentName ?? ""),
+        String(tier ?? ""), String(category ?? ""), String(title ?? ""),
+        bodyText, payloadText, String(state),
+      );
+      return feedbackRow(selectFeedbackRow.get(Number(db.prepare("SELECT last_insert_rowid() AS id").get()?.id ?? 0)));
+    },
+
+    getFeedback(id) { return feedbackRow(selectFeedbackRow.get(Number(id))); },
+
+    listFeedback({ tier = "", state = "", tenant = "", sinceMs = 0, limit = 200 } = {}) {
+      const where = ["at >= ?"];
+      const values = [Number(sinceMs) || 0];
+      if (String(tier ?? "").length > 0) { where.push("tier = ?"); values.push(String(tier)); }
+      if (String(state ?? "").length > 0) { where.push("state = ?"); values.push(String(state)); }
+      if (String(tenant ?? "").length > 0) { where.push("tenant = ?"); values.push(String(tenant)); }
+      const cap = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.min(Number(limit), 2000) : 200;
+      values.push(cap);
+      return db.prepare(`SELECT * FROM feedback WHERE ${where.join(" AND ")} ORDER BY at DESC, id DESC LIMIT ?`)
+        .all(...values).map(feedbackRow);
+    },
+
+    countFeedback() { return Number(countFeedbackRow.get()?.n ?? 0); },
+
+    /** A patch of the columns a super admin can move. Anything else on the row is what arrived. */
+    updateFeedback(id, patch = {}) {
+      const current = selectFeedbackRow.get(Number(id));
+      if (current == null) return null;
+      const sets = [];
+      const values = [];
+      if (patch.state !== undefined) {
+        if (!FEEDBACK_STATES.includes(String(patch.state))) {
+          const error = new Error(`a report's state has to be one of ${FEEDBACK_STATES.join(", ")}`);
+          error.code = "bad_state";
+          throw error;
+        }
+        sets.push("state = ?"); values.push(String(patch.state));
+      }
+      for (const [key, column] of [["title", "title"], ["body", "body"], ["issueUrl", "issueUrl"], ["decidedBy", "decidedBy"]]) {
+        if (patch[key] === undefined) continue;
+        const text = String(patch[key] ?? "");
+        if ((key === "body") && text.length > FEEDBACK_FIELD_LIMIT) {
+          const error = new Error(`a report has to fit in ${Math.round(FEEDBACK_FIELD_LIMIT / 1024)} KB, and this edit does not, so nothing was changed`);
+          error.code = "too_large";
+          throw error;
+        }
+        sets.push(`${column} = ?`); values.push(text);
+      }
+      if (sets.length === 0) return feedbackRow(current);
+      sets.push("decidedAt = ?"); values.push(now());
+      values.push(Number(id));
+      db.prepare(`UPDATE feedback SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+      return feedbackRow(selectFeedbackRow.get(Number(id)));
+    },
+
+    /**
+     * Every table in this database, by name.
+     *
+     * One caller: the Feedback panel asks whether wave B's verification table has landed yet, so
+     * the filter appears when there is something behind it and is absent rather than empty when
+     * there is not. Reading sqlite_master is the only way to ask that without importing a module
+     * that may not exist.
+     */
+    tableNames() { return tableNamesRow.all().map((row) => String(row.name)); },
 
     // ---- tenants -----------------------------------------------------------------------------
 

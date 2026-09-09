@@ -34,14 +34,24 @@
 //               container cannot read say "not measured" rather than zero
 //   contract    GET /v1/admin/providers, when this tree has it, answers the shape the page is
 //               written against. When it does not, that is SKIP with the reason, not a fail
-//   page        headless Chrome signs in at /admin and all six panels render from the fixture
+//   feedback    FEEDBACK-1: a report posted with the relay token lands and the admin token does
+//               not open that door; a slug in the body is ignored in favour of the relay's
+//               forwarded one; edit, approve and suppress each write a change record row;
+//               Create GitHub issue with no token answers the prepared-body sentence and sends
+//               nothing; a token the fake GitHub refuses is not stored; one it accepts files it
+//   ceiling     AGENTS-CAP-2: the clients panel reads the number off the box, 0, 5000, "forty",
+//               2.5 and null are each refused in a sentence and never reach the box, a write
+//               answers with what the box read back, and a pin reports a pin and not a success
+//   page        headless Chrome signs in at /admin and all seven panels render from the fixture
 //   providers   the sixth panel, driven through a real browser: a key typed into the masked field
 //               reaches no response body and no node of the DOM, a roll takes the pool from two to
 //               three to two with no key on screen, a plan model with no screenshot route is
 //               refused in a sentence a person reads, a remove with nothing typed is refused, and
 //               each of those writes a ledger row with an actor and a time and no key in it
 //   leak        no response body in the whole run carries the session secret, the admin token, the
-//               relay token, any password, or either key planted through the providers panel
+//               relay token, any password, either key planted through the providers panel, or
+//               the repository token planted through the Feedback panel; that token is in no row
+//               of the change record either, and the store that does hold it is 0600
 //
 // Exit status: 0 every leg passed, 1 a leg failed, 2 nothing was measured (the control plane could
 // not be started, or the browser leg could not resolve playwright).
@@ -49,7 +59,7 @@
 //   node scripts/verify-admin.mjs
 //   node scripts/verify-admin.mjs --no-browser     the API legs only
 //
-// Env: CP_GATE_PORT, CP_GATE_FAKE_PORT, CP_GATE_RELAY_PORT to pin ports instead of taking free
+// Env: CP_GATE_PORT, CP_GATE_FAKE_PORT, CP_GATE_RELAY_PORT, CP_GATE_GITHUB_PORT to pin ports instead of taking free
 //      ones; CP_GATE_TIMEOUT_MS for the boot wait (default 20000); GROK_BOT_PLAYWRIGHT_DIR for the
 //      browser leg, defaulting to .cache/playwright, which scripts/setup-gates.sh fills.
 
@@ -74,7 +84,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
     "  node scripts/verify-admin.mjs --no-browser",
     "",
     "Starts cp/server.mjs on a free port with a throwaway data dir, a fake Coolify and a fake relay",
-    "serving a built-in login-attempts fixture, then walks the super admin console: promote and",
+    "serving a built-in login-attempts fixture and a fake GitHub, then walks the super admin console:",
+    "promote and",
     "demote, the admin door against a normal account, the sign-in ledger and its keyed hash, the",
     "attack rule, the read routes, and the page itself in headless Chrome, including the providers",
     "panel: a key typed into its masked field, a key rolled with no gap, a plan model refused for",
@@ -97,6 +108,11 @@ const SESSION_SECRET = randomBytes(32).toString("hex");
 const ADMIN_TOKEN = randomBytes(24).toString("base64url");
 const RELAY_TOKEN = randomBytes(24).toString("base64url");
 const COOLIFY_KEY = `fake-${randomBytes(12).toString("hex")}`;
+// FEEDBACK-1. The repository token this run plants through the paste door. The leak leg at the end
+// hunts for it in every response body, every node of the rendered page, every ledger row and every
+// byte of the data directory: this store has never held a secret before, and the whole panel is
+// built on it never coming back out.
+const GITHUB_TOKEN = `ghp_${randomBytes(20).toString("hex")}`;
 const BASE_DOMAIN = "titanium.bot";
 const TENANT_SLUG = "titanium";
 const SERVICE_UUID = "fakeserviceuuid00001";
@@ -662,6 +678,10 @@ function fakeCoolifyHandler(req, res) {
 // it is refused here for the same reason it is refused there: this route is every failed sign-in on
 // the fleet.
 const relayCalls = [];
+// AGENTS-CAP-2. What each "box" holds, so a write and the read after it are the same fact. The one
+// workspace this gate builds starts where the R750's three do today, at 100.
+const fixtureCeilings = new Map([[TENANT_SLUG, { maxAgents: 100, bots: 6, pinned: false, read: true }]]);
+const ceilingWrites = [];
 function fakeRelayHandler(req, res) {
   const url = new URL(req.url, "http://fake");
   const header = String(req.headers.authorization ?? "");
@@ -686,8 +706,74 @@ function fakeRelayHandler(req, res) {
   if (url.pathname === "/admin/boxes") {
     return send(200, { measuredAt: new Date().toISOString(), boxes: fixtureBoxes });
   }
+  // AGENTS-CAP-2. The ceiling, read off "the box" and written into it. The fake keeps the number
+  // per workspace so a write really does change what the next read answers: a fake that echoed the
+  // request back would pass a control plane that never called it.
+  const ceiling = /^\/admin\/tenants\/([^/]+)\/ceiling$/.exec(url.pathname);
+  if (ceiling != null) {
+    const slug = decodeURIComponent(ceiling[1]);
+    const state = fixtureCeilings.get(slug);
+    if (state == null) return send(404, { error: "not_found" });
+    const answer = () => send(200, {
+      slug, measuredAt: new Date().toISOString(),
+      read: state.read !== false, maxAgents: state.maxAgents, bots: state.bots,
+      pinned: state.pinned === true, pinnedBy: state.pinned === true ? "container env (SAND_MAX_AGENTS)" : null,
+      why: state.read === false ? "that box did not answer" : "",
+    });
+    if (req.method === "GET") return answer();
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let wanted = null;
+      try { wanted = Number(JSON.parse(raw || "{}").maxAgents); } catch { wanted = null; }
+      ceilingWrites.push({ slug, maxAgents: wanted });
+      // A pinned box takes the write into its file and keeps answering through its environment,
+      // which is the whole reason the control plane must report a pin rather than a success.
+      if (state.pinned !== true && Number.isInteger(wanted)) state.maxAgents = wanted;
+      answer();
+    });
+    return undefined;
+  }
   return send(404, { error: "not_found" });
 }
+
+// ---- the fake GitHub ---------------------------------------------------------------------------
+// FEEDBACK-1. The issue door is proved and fired against this, never against api.github.com: a gate
+// that filed a real issue every time somebody ran it would be a gate nobody runs. The control plane
+// is pointed here with CP_GITHUB_API_URL.
+//
+// It answers the way GitHub does for the three cases the door has to tell apart: a repository this
+// token can see with issues on, one whose issues are off, and a token it refuses outright.
+const githubCalls = [];
+const GOOD_REPO = "titanium/bot";
+const NO_ISSUES_REPO = "titanium/archive";
+function fakeGithubHandler(req, res) {
+  const url = new URL(req.url, "http://fake");
+  const header = String(req.headers.authorization ?? "");
+  const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
+  githubCalls.push({ method: req.method, path: url.pathname, token: presented });
+  const send = (status, payload) => {
+    const text = JSON.stringify(payload);
+    res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+    res.end(text);
+  };
+  if (presented !== GITHUB_TOKEN) return send(401, { message: "Bad credentials" });
+  if (req.method === "GET" && url.pathname === `/repos/${GOOD_REPO}`) return send(200, { full_name: GOOD_REPO, has_issues: true });
+  if (req.method === "GET" && url.pathname === `/repos/${NO_ISSUES_REPO}`) return send(200, { full_name: NO_ISSUES_REPO, has_issues: false });
+  if (req.method === "POST" && url.pathname === `/repos/${GOOD_REPO}/issues`) {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let issue = {};
+      try { issue = JSON.parse(raw || "{}"); } catch { issue = {}; }
+      githubIssues.push(issue);
+      send(201, { number: githubIssues.length, html_url: `https://github.com/${GOOD_REPO}/issues/${githubIssues.length}` });
+    });
+    return undefined;
+  }
+  return send(404, { message: "Not Found" });
+}
+const githubIssues = [];
 
 // ---- the run -----------------------------------------------------------------------------------
 
@@ -695,6 +781,7 @@ const bodiesSeen = [];
 let child = null;
 let fakeCoolify = null;
 let fakeRelay = null;
+let fakeGithub = null;
 let dataDir = null;
 let tenantRoot = null;
 let ledgerDir = null;
@@ -704,7 +791,7 @@ const childLog = [];
 const cleanup = () => {
   if (browser) { try { void browser.close(); } catch { /* already gone */ } }
   if (child && child.exitCode == null) { try { child.kill("SIGTERM"); } catch { /* already gone */ } }
-  for (const server of [fakeCoolify, fakeRelay]) { if (server) { try { server.close(); } catch { /* already closed */ } } }
+  for (const server of [fakeCoolify, fakeRelay, fakeGithub]) { if (server) { try { server.close(); } catch { /* already closed */ } } }
   for (const dir of [dataDir, tenantRoot, ledgerDir]) {
     if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* leave it */ } }
   }
@@ -724,6 +811,7 @@ if (!existsSync(path.join(repoRoot, "cp", "admin", "index.html"))) {
 const CP_PORT = Number(process.env.CP_GATE_PORT ?? await freePort());
 const FAKE_PORT = Number(process.env.CP_GATE_FAKE_PORT ?? await freePort());
 const RELAY_PORT = Number(process.env.CP_GATE_RELAY_PORT ?? await freePort());
+const GITHUB_PORT = Number(process.env.CP_GATE_GITHUB_PORT ?? await freePort());
 const BASE = `http://127.0.0.1:${CP_PORT}`;
 
 dataDir = mkdtempSync(path.join(tmpdir(), "admin-gate-data-"));
@@ -734,6 +822,8 @@ fakeCoolify = http.createServer(fakeCoolifyHandler);
 await new Promise((resolve, reject) => { fakeCoolify.once("error", reject); fakeCoolify.listen(FAKE_PORT, "127.0.0.1", resolve); });
 fakeRelay = http.createServer(fakeRelayHandler);
 await new Promise((resolve, reject) => { fakeRelay.once("error", reject); fakeRelay.listen(RELAY_PORT, "127.0.0.1", resolve); });
+fakeGithub = http.createServer(fakeGithubHandler);
+await new Promise((resolve, reject) => { fakeGithub.once("error", reject); fakeGithub.listen(GITHUB_PORT, "127.0.0.1", resolve); });
 
 const call = async (method, pathname, { body, token, admin, raw } = {}) => {
   const headers = {};
@@ -768,6 +858,9 @@ child = spawn(process.execPath, [SERVER], {
     CP_ADMIN_TOKEN: ADMIN_TOKEN,
     CP_RELAY_TOKEN: RELAY_TOKEN,
     CP_RELAY_URL: `http://127.0.0.1:${RELAY_PORT}`,
+    // FEEDBACK-1. The issue door is pointed at this run's own fake, so no run of this gate ever
+    // reaches api.github.com and no run ever files a real issue at a real repository.
+    CP_GITHUB_API_URL: `http://127.0.0.1:${GITHUB_PORT}`,
     CP_BASE_DOMAIN: BASE_DOMAIN,
     CP_COOLIFY_URL: `http://127.0.0.1:${FAKE_PORT}`,
     COOLIFY_API_KEY: COOLIFY_KEY,
@@ -1187,6 +1280,167 @@ step("the providers route contract");
   }
 }
 
+// ---- the feedback channel (FEEDBACK-1) --------------------------------------------------------
+//
+// The intake, the panel, the two decisions and the issue door, over HTTP the way the relay and the
+// console reach them. The page leg below drives the same rows through a real browser.
+step("the feedback channel");
+let plantedReportId = 0;
+{
+  const report = {
+    version: 1,
+    tier: "critical",
+    category: "tools",
+    title: "The browser tool answered 500 four times in a row",
+    description: "Every attempt to open a page failed and I could not finish the task.",
+    steps: ["Ask Titan to read a page", "Watch it fail"],
+    tools: [{ name: "openPage", status: "failed", error: "500 from the box" }],
+    evidence: {
+      agent: "agent-7", agentName: "Titan", conversation: "conv-3",
+      hostVersion: "0.18.4", consoleVersion: "gate",
+      calls: [{ name: "openPage", status: "500", summary: "the box refused", output: "Internal error" }],
+      messages: [{ role: "assistant", text: "I could not open that page." }],
+    },
+  };
+  const postReport = (body, { token, tenant } = {}) => {
+    const headers = { "content-type": "application/json" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    if (tenant !== undefined) headers["x-titanbot-tenant"] = tenant;
+    return fetch(`${BASE}/v1/feedback`, { method: "POST", headers, body: JSON.stringify(body) })
+      .then(async (res) => {
+        const text = await res.text();
+        bodiesSeen.push(text);
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* the leg says so */ }
+        return { status: res.status, json, text };
+      })
+      .catch((error) => ({ status: 0, json: null, text: String(error?.message ?? error) }));
+  };
+
+  // The credential. CP_RELAY_TOKEN and nothing else: the admin token adds accounts and deletes
+  // services, and neither door may ever do the other's job.
+  check((await postReport(report, { tenant: TENANT_SLUG })).status === 401, "a report with no bearer is refused");
+  check((await postReport(report, { token: ADMIN_TOKEN, tenant: TENANT_SLUG })).status === 401,
+    "and the operator token does not open the intake either");
+  const landed = await postReport(report, { token: RELAY_TOKEN, tenant: TENANT_SLUG });
+  check(landed.status === 201, "a report posted with the relay token lands", `status ${landed.status}`);
+  plantedReportId = Number(landed.json?.id ?? 0);
+  check(plantedReportId > 0, "and comes back with its number", String(plantedReportId));
+
+  // A slug in the body is IGNORED, not trusted. This is the leg that says a box cannot file as its
+  // neighbour: the relay stamps the workspace out of its own registry and nothing reads the body.
+  const lying = await postReport({ ...report, title: "filed by a liar", workspace: "victim", slug: "victim", tenant: "victim" },
+    { token: RELAY_TOKEN, tenant: TENANT_SLUG });
+  check(lying.status === 201, "a report naming somebody else's workspace still lands");
+  const listedAfterLie = await call("GET", "/v1/admin/feedback?limit=50", { token: bossToken });
+  const liar = (listedAfterLie.json?.rows ?? []).find((row) => row.title === "filed by a liar");
+  check(liar?.tenant === TENANT_SLUG, "under the relay's workspace and not the body's", String(liar?.tenant));
+  check(!JSON.stringify(liar ?? {}).includes("victim"), "and the body's own name is nowhere in the record");
+
+  // The panel.
+  const listed = await call("GET", "/v1/admin/feedback?limit=50", { token: bossToken });
+  check(listed.status === 200, "the Feedback panel answers the super admin", `status ${listed.status}`);
+  check((listed.json?.rows ?? []).length >= 2, "and lists what arrived", String((listed.json?.rows ?? []).length));
+  check(listed.json?.counts?.criticalNew >= 2, "with the critical count over everything rather than over the filter",
+    String(listed.json?.counts?.criticalNew));
+  check(listed.json?.github?.stored === false, "and says no repository token is stored yet");
+  check((await call("GET", "/v1/admin/feedback", {})).status === 401, "and it refuses a caller with no session");
+  const filtered = await call("GET", "/v1/admin/feedback?tier=observation", { token: bossToken });
+  check((filtered.json?.rows ?? []).length === 0, "a tier nothing was filed under lists nothing");
+  check(filtered.json?.counts?.criticalNew >= 2, "and the counts still count everything");
+
+  // Every decision writes a row in the change record, with an actor and a time.
+  const actionsBefore = (await call("GET", "/v1/admin/actions", { token: bossToken })).json?.rows ?? [];
+  const edited = await call("POST", `/v1/admin/feedback/${plantedReportId}/edit`, { token: bossToken, body: { title: "The browser tool keeps failing", body: "Edited by the super admin." } });
+  check(edited.status === 200 && edited.json?.report?.title === "The browser tool keeps failing", "an edit takes", `status ${edited.status}`);
+  const stillSent = await call("GET", `/v1/admin/feedback?limit=50`, { token: bossToken });
+  const editedRow = (stillSent.json?.rows ?? []).find((row) => row.id === plantedReportId);
+  check(editedRow?.payload?.description === report.description, "and what the agent sent is kept underneath it, unchanged");
+  const approved = await call("POST", `/v1/admin/feedback/${plantedReportId}/approve`, { token: bossToken, body: {} });
+  check(approved.status === 200 && approved.json?.report?.state === "approved", "approve moves the state", `status ${approved.status}`);
+  const suppressed = await call("POST", `/v1/admin/feedback/${liar?.id}/suppress`, { token: bossToken, body: {} });
+  check(suppressed.status === 200 && suppressed.json?.report?.state === "suppressed", "suppress moves the state");
+  check(String(suppressed.json?.message ?? "").includes("stays on the record"), "and says the row is kept with the decision on it");
+  const actionsAfter = (await call("GET", "/v1/admin/actions", { token: bossToken })).json?.rows ?? [];
+  const wrote = actionsAfter.length - actionsBefore.length;
+  check(wrote === 3, "each of those three wrote a row in the change record", String(wrote));
+  const ours = actionsAfter.filter((row) => String(row.action).startsWith("feedback."));
+  check(ours.every((row) => String(row.actor).length > 0 && String(row.at).length > 0), "each with an actor and a time");
+
+  // The issue, with no token stored: the body is PREPARED and the answer says so in those words.
+  const prepared = await call("POST", `/v1/admin/feedback/${plantedReportId}/issue`, { token: bossToken, body: {} });
+  check(prepared.status === 200 && prepared.json?.filed === false, "with no token, Create GitHub issue prepares rather than files");
+  check(String(prepared.json?.message ?? "") === "the issue body is ready; paste a repo token in the Feedback panel and press this again",
+    "and says exactly that", String(prepared.json?.message ?? "").slice(0, 60));
+  check(String(prepared.json?.body ?? "").includes("openPage"), "and the prepared body carries the evidence");
+  check(githubCalls.length === 0, "and nothing was sent anywhere", String(githubCalls.length));
+
+  // The token. Proved before it is stored, and a token GitHub refuses is not kept.
+  const wrongRepo = await call("POST", "/v1/admin/feedback/github-token", { token: bossToken, body: { repo: NO_ISSUES_REPO, token: GITHUB_TOKEN } });
+  check(wrongRepo.status === 409 && String(wrongRepo.json?.message ?? "").includes("issues turned off"),
+    "a repository with its issues off is refused, and nothing is stored", `status ${wrongRepo.status}`);
+  const wrongToken = await call("POST", "/v1/admin/feedback/github-token", { token: bossToken, body: { repo: GOOD_REPO, token: "ghp_not_the_one" } });
+  check(wrongToken.status === 409 && String(wrongToken.json?.message ?? "").includes("nothing was stored"),
+    "a token GitHub refuses is not stored", `status ${wrongToken.status}`);
+  const stored = await call("POST", "/v1/admin/feedback/github-token", { token: bossToken, body: { repo: GOOD_REPO, token: GITHUB_TOKEN } });
+  check(stored.status === 200, "a token GitHub accepts is stored", `status ${stored.status}`);
+  check(/^\d+ characters, sha256 [0-9a-f]{8}$/.test(String(stored.json?.evidence ?? "")),
+    "and what comes back is a length and a hash", String(stored.json?.evidence ?? ""));
+
+  // And now it files.
+  const filedIt = await call("POST", `/v1/admin/feedback/${plantedReportId}/issue`, { token: bossToken, body: {} });
+  check(filedIt.status === 200 && filedIt.json?.filed === true, "Create GitHub issue files it", `status ${filedIt.status}`);
+  check(String(filedIt.json?.issueUrl ?? "").startsWith(`https://github.com/${GOOD_REPO}/issues/`), "and records where it went", String(filedIt.json?.issueUrl ?? ""));
+  check(githubIssues.length === 1 && String(githubIssues[0].title ?? "").startsWith("[critical]"), "one issue, titled with its tier", String(githubIssues[0]?.title ?? "").slice(0, 40));
+  const afterFiling = await call("GET", "/v1/admin/feedback?state=filed", { token: bossToken });
+  check((afterFiling.json?.rows ?? []).length === 1, "and the row reads as filed");
+}
+
+// ---- the ceiling on a client row (AGENTS-CAP-2) -----------------------------------------------
+step("the ceiling");
+{
+  const read = await call("GET", "/v1/admin/clients", { token: bossToken });
+  const row = (read.json?.clients ?? []).find((one) => one.slug === TENANT_SLUG);
+  check(row?.ceiling?.read === true, "the clients panel reads a ceiling off the box");
+  check(row?.ceiling?.maxAgents === 100, "and it is the box's own number, not a stored one", String(row?.ceiling?.maxAgents));
+
+  // The range is checked in the control plane, because the host fails OPEN: a value it cannot use
+  // drops the workspace to the default with nothing on any screen saying why.
+  const writesBefore = ceilingWrites.length;
+  for (const bad of [0, 5000, "forty", 2.5, null]) {
+    const answer = await call("POST", `/v1/admin/clients/${TENANT_SLUG}/ceiling`, { token: bossToken, body: { maxAgents: bad } });
+    check(answer.status === 400, `a ceiling of ${JSON.stringify(bad)} is refused`, `status ${answer.status}`);
+    check(String(answer.json?.message ?? "").includes("whole number from 1 to 1000"), "in a sentence a person reads");
+  }
+  check(ceilingWrites.length === writesBefore, "and none of those reached the box", String(ceilingWrites.length - writesBefore));
+
+  const set = await call("POST", `/v1/admin/clients/${TENANT_SLUG}/ceiling`, { token: bossToken, body: { maxAgents: 40 } });
+  check(set.status === 200, "a ceiling of 40 is written", `status ${set.status}`);
+  check(set.json?.maxAgents === 40, "and the answer is what the box read back", String(set.json?.maxAgents));
+  check(set.json?.pinned === false, "with pinned false");
+  check(ceilingWrites.at(-1)?.maxAgents === 40, "and the relay was asked to write exactly that", JSON.stringify(ceilingWrites.at(-1) ?? {}));
+
+  // PINNED IS NOT A SUCCESS. The relay writes the file either way; a box whose container pins
+  // SAND_MAX_AGENTS keeps answering through that, and reporting a success would be a claim the box
+  // does not honour.
+  fixtureCeilings.get(TENANT_SLUG).pinned = true;
+  const pinned = await call("POST", `/v1/admin/clients/${TENANT_SLUG}/ceiling`, { token: bossToken, body: { maxAgents: 60 } });
+  check(pinned.status === 200 && pinned.json?.pinned === true, "a pinned box reports a pin", `status ${pinned.status}`);
+  check(pinned.json?.maxAgents === 40, "and reports the number the box still answers with, not the one that was sent", String(pinned.json?.maxAgents));
+  check(String(pinned.json?.message ?? "").includes("takes effect there until that is gone"), "and says so in the operator's own words");
+  fixtureCeilings.get(TENANT_SLUG).pinned = false;
+
+  // A box that cannot be asked reads as not measured and never as a default.
+  fixtureCeilings.get(TENANT_SLUG).read = false;
+  const blind = await call("GET", "/v1/admin/clients", { token: bossToken });
+  const blindRow = (blind.json?.clients ?? []).find((one) => one.slug === TENANT_SLUG);
+  check(blindRow?.ceiling?.read === false, "a box that did not answer reads as not measured");
+  check(blindRow?.ceiling?.maxAgents === null, "with no number at all, rather than the default", String(blindRow?.ceiling?.maxAgents));
+  fixtureCeilings.get(TENANT_SLUG).read = true;
+  // Put it back where the panel leg below expects it.
+  await call("POST", `/v1/admin/clients/${TENANT_SLUG}/ceiling`, { token: bossToken, body: { maxAgents: 40 } });
+}
+
 // ---- the page --------------------------------------------------------------------------------------
 step("the page");
 if (!WANT_BROWSER) {
@@ -1300,12 +1554,12 @@ if (!WANT_BROWSER) {
   const live = await page.evaluate(() => window.__adminLive ?? null);
   check(live != null, "the super admin gets in and the page finishes loading", live ? `${live.panels} panels at ${live.at}` : "no readiness flag");
 
-  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-spend", "panel-providers"];
+  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-spend", "panel-providers", "panel-feedback"];
   for (const id of panels) {
     check(await page.locator(`#${id}`).isVisible(), `the ${id.replace("panel-", "")} panel renders`);
   }
-  check((await page.locator(".panel").count()) === 6, "six panels and no more", String(await page.locator(".panel").count()));
-  check(live?.panels === 6, "and the readiness flag says six", String(live?.panels));
+  check((await page.locator(".panel").count()) === 7, "seven panels and no more", String(await page.locator(".panel").count()));
+  check(live?.panels === 7, "and the readiness flag says seven", String(live?.panels));
 
   const attackChips = await page.locator("#addresses .chip.attack").count();
   check(attackChips === 1, "one Attack chip, on the address that earned it", String(attackChips));
@@ -1594,6 +1848,34 @@ if (!WANT_BROWSER) {
     "and that row is on the screen without anybody pressing Refresh");
   clientModelInjection = null;
 
+  // ---- the seventh panel, in a browser (FEEDBACK-1) ------------------------------------------
+  //
+  // The rows the API leg above planted, drawn. What matters on the screen is the pair of facts the
+  // panel exists to carry: that both gates are real, and that the stored token is nowhere on it.
+  const feedbackText = await page.locator("#panel-feedback").textContent();
+  check(String(feedbackText).includes("shown to the workspace operator"),
+    "the Feedback panel says on the page that the operator saw the report first");
+  const feedbackCards = await page.locator("#feedbackRows .feedbackCard").count();
+  check(feedbackCards >= 2, "and draws the reports the intake took", String(feedbackCards));
+  check((await page.locator("#panel-feedback .chip.attack").count()) >= 1,
+    "a critical report is drawn loudly, because somebody is stopped right now");
+  check(String(await page.locator("#feedbackTokenNote").textContent()).includes("characters, sha256"),
+    "the token that was pasted is reported as a length and a hash",
+    String(await page.locator("#feedbackTokenNote").textContent()).slice(0, 80));
+  // The tier filter is a real filter and not decoration.
+  await page.selectOption("#feedbackTier", "observation");
+  await page.waitForFunction(() => document.querySelectorAll("#feedbackRows .empty").length > 0, null, { timeout: 10_000 }).catch(() => {});
+  check(String(await page.locator("#feedbackRows").textContent()).includes("Nothing reported in this filter"),
+    "a tier with nothing in it says so, rather than drawing an empty table");
+  await page.selectOption("#feedbackTier", "");
+  await page.waitForFunction(() => document.querySelectorAll("#feedbackRows .feedbackCard").length > 0, null, { timeout: 10_000 }).catch(() => {});
+
+  // AGENTS-CAP-2. The ceiling on the client row, in the browser: a number a person can read and a
+  // field a person can type in, drawn from what the box reported.
+  const ceilingField = await page.locator(".client .clientCeiling").first();
+  check(await ceilingField.isVisible(), "the client row carries a ceiling field a person can reach");
+  check(String(await ceilingField.inputValue()) === "40", "showing the number the box reported", String(await ceilingField.inputValue()));
+
   // The name of the thing under all this appears once, for the operator, and nowhere else.
   const wholePage = await page.evaluate(() => document.body.innerText);
   check((wholePage.match(/LiteLLM/g) ?? []).length <= 1, "the proxy's own name appears at most once on this page, in a footnote",
@@ -1639,6 +1921,9 @@ step("nothing leaked");
     // wave nothing had ever put a secret INTO this console and there was nothing here to plant.
     ["the key added through the providers panel", PLANTED_KEY_ADD],
     ["the key rolled to through the providers panel", PLANTED_KEY_ROLL],
+    // FEEDBACK-1. The repository token, which is the first secret this store has ever HELD rather
+    // than passed along. cp/README.md asks for this sweep by name.
+    ["the repository token pasted into the Feedback panel", GITHUB_TOKEN],
   ];
   // The fixture's own answers go into the same haystack. It is the thing that served the writes,
   // so a key coming back out of one of them is exactly the failure this leg exists to catch.
@@ -1650,12 +1935,38 @@ step("nothing leaked");
   for (const [label, secret] of secrets) {
     check(!log.includes(secret), `and the control plane's log did not print ${label}`);
   }
+
+  // FEEDBACK-1. The held token, hunted in the two places the other secrets cannot be: the change
+  // record, which keeps its rows forever, and the data directory, which is where this store now
+  // writes a secret for the first time. Both are asked for by name in cp/README.md.
+  const ledgerRows = (await call("GET", "/v1/admin/actions", { token: bossToken })).json?.rows ?? [];
+  check(!JSON.stringify(ledgerRows).includes(GITHUB_TOKEN), "no row in the change record carries the repository token");
+  check(ledgerRows.some((row) => String(row.action) === "feedback.github-token" && /characters, sha256/.test(String(row.detail))),
+    "and the row that recorded it holds a length and a hash instead");
+
+  // Every byte of the data directory. The token IS in the sqlite store on purpose, so this is not a
+  // search for absence: it is a search for the token in a form anything else could read it out of.
+  // What must not be true is that it reaches a response, a page or a log, which the checks above
+  // cover; what is checked here is that the file it does live in is 0600.
+  const modes = [];
+  const walkModes = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walkModes(full); continue; }
+      modes.push([path.relative(dataDir, full), statSync(full).mode & 0o777]);
+    }
+  };
+  walkModes(dataDir);
+  const store = modes.filter(([name]) => name.startsWith("control-plane.sqlite"));
+  check(store.length > 0, "the store is in the data directory", store.map(([name]) => name).join(", "));
+  check(store.every(([, mode]) => mode === 0o600), "and it and its sidecars are 0600, which is what holding a secret costs",
+    store.map(([name, mode]) => `${name} ${mode.toString(8)}`).join(", "));
 }
 
 // ---- out ------------------------------------------------------------------------------------------
 console.log("");
 if (failures === 0) {
-  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, the six panels, and a provider key that goes in through the screen and comes back out nowhere.");
+  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, the seven panels, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
 } else {
   console.log(`FAIL  ${failures} check${failures === 1 ? "" : "s"} did not hold.`);
   if (childLog.length > 0) {

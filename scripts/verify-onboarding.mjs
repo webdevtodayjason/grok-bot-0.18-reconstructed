@@ -501,7 +501,7 @@ async function offlineArm() {
     check(first.modal.agentId === "fixture-titan",
       "the dialog says which conversation it is bound to", first.modal.agentId ?? "no data-onboarding-agent");
 
-    // The Add button's count. Titan does not spend one of the twelve, so three agents read as two.
+    // The Add button's count. Titan holds one of the seats himself, so three agents read as two.
     const addLabel = await first.page.evaluate(() => {
       const button = document.querySelector('[data-capability="add"]');
       if (!button) return null;
@@ -851,7 +851,7 @@ async function liveArm(landed) {
       "the console behind it opens on the agent the modal was bound to",
       selected ?? "no card is marked active");
 
-    // The Add button's count, live. Titan does not spend one of the twelve.
+    // The Add button's count, live. Titan holds one of the seats himself.
     const addLabel = await page.evaluate(() => {
       const button = document.querySelector('[data-capability="add"]');
       if (!button) return null;
@@ -930,12 +930,12 @@ async function capArm(landed) {
     // nothing here depends on rooms being exempt from a cap that is already reached.
     const madeRoom = await gw("createGroup", { name: `probe-cap-room-${Math.random().toString(36).slice(2, 6)}`, description: "", memberAgentIds: roster.slice(0, 2).map((a) => a.id) });
     room = madeRoom.body?.id ?? madeRoom.body?.agent?.id ?? null;
-    if (room == null) skip("a room does not spend one of the thirteen", `createGroup answered ${madeRoom.status} ${String(madeRoom.body?.error ?? madeRoom.text).slice(0, 100)}`);
+    if (room == null) skip("a room does not spend one of the workspace's seats", `createGroup answered ${madeRoom.status} ${String(madeRoom.body?.error ?? madeRoom.text).slice(0, 100)}`);
     else {
       const withRoom = await must("getAgentCapacity").catch(() => null);
       const inclusiveNow = await must("countAgents").catch(() => null);
       check(Number(withRoom?.bots) === bots && Number(inclusiveNow) === Number(inclusive) + 1,
-        "a room does not spend one of the thirteen",
+        "a room does not spend one of the workspace's seats",
         `bots ${bots} -> ${withRoom?.bots}, countAgents ${inclusive} -> ${inclusiveNow}`);
     }
 

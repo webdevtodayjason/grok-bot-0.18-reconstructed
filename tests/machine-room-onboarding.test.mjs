@@ -14,6 +14,9 @@
 //   - an answer someone typed is drawn into the strip, so it goes through the page's own escaper.
 //   - the cap counts BOTS. Rooms are not bots and the host does not count them against the cap, so
 //     a console that counted them would refuse at twelve and blame the host.
+//   - AGENTS-CAP-2: the default is 40 (Jason, 2026-09-09 06:34), and it is a FALLBACK. Every box
+//     reports its own ceiling and applyReportedCap installs it, so a workspace the super admin
+//     raised draws its own number. The cap-from-the-host case below is what proves that.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -60,42 +63,71 @@ function makeDocument() {
 }
 
 // ---- the cap block -----------------------------------------------------------------------------
+//
+// AGENTS-CAP-2 and GATE-15. This file used to pin the literals 100 and 99. The default came down to
+// 40 on 2026-09-09 and the ceiling is per workspace now -- the super admin raises one from its row
+// in the admin console -- so a literal here is wrong for every workspace that has been raised, and
+// editing the literal only moves the failure to the next decision. The number comes out of app.js,
+// which is the file this suite is testing; what is pinned is the SHAPE and the arithmetic, which is
+// what could actually lie to a person: bots against the ceiling, rooms left out, and Titan holding
+// one of the seats.
+//
+// The marker is matched loosely for the same reason: the block's own comment names whichever row
+// last moved the number, and a suite that broke because a comment was reworded would be pinning
+// prose rather than behaviour.
+const CAP_START = /[ \t]*\/\/ ---- AGENTS-CAP-\d[^\n]*\n/;
+const CAP_END = "  // ---- end AGENTS-CAP";
+
+/** The ceiling the console falls back to when no host has told it one. Read, never assumed. */
+async function declaredCapDefault() {
+  const source = await readFile(appPath, "utf8");
+  const declared = Number(/AGENT_CAP_DEFAULT\s*=\s*(\d+)/.exec(source)?.[1]);
+  assert.ok(Number.isInteger(declared) && declared > 1,
+    "app.js must declare AGENT_CAP_DEFAULT: it is the number the console draws with no host behind it");
+  return declared;
+}
+
 async function loadCap({ workers = [], rooms = [], agentCount = null, agentCap } = {}) {
   const source = await readFile(appPath, "utf8");
-  const body = between(source, "  // ---- AGENTS-CAP-1: Titan and ninety-nine more", "  // ---- end AGENTS-CAP-1", "the cap block");
+  const startMatch = CAP_START.exec(source);
+  assert.ok(startMatch != null, "the cap block must be findable in app.js");
+  const body = between(source, startMatch[0], CAP_END, "the cap block");
   const state = { workers, rooms, agentCount, ...(agentCap === undefined ? {} : { agentCap }) };
   const doc = makeDocument();
   const exports = "return { renderAgentCount, agentCapRefusal, agentCapRefusalText, agentCap, botCount, extraBotCount, extraBotCap };";
   const cap = new Function("state", "document", `${body}\n${exports}`)(state, doc);
-  return { ...cap, doc, state };
+  return { ...cap, doc, state, capDefault: await declaredCapDefault() };
 }
 
 const bot = (id, extra = {}) => ({ id, name: id, isGroup: false, ...extra });
 
-test("AGENTS-CAP-1: the header and the Add button count bots against a hundred", async () => {
-  const { renderAgentCount, doc } = await loadCap({
+test("AGENTS-CAP-2: the header and the Add button count bots against the console's ceiling", async () => {
+  const { renderAgentCount, doc, capDefault } = await loadCap({
     workers: [bot("titan"), bot("books"), bot("inbox")],
     rooms: [{ id: "room", name: "Diag Room", isGroup: true }],
     agentCount: 4,
   });
   renderAgentCount();
-  assert.equal(doc.nodes["[data-agent-count]"].textContent, "3 / 100 bots");
-  // Titan is one of the hundred, so two of the ninety-nine beside him are taken.
-  assert.equal(doc.nodes['[data-capability="add"] [data-add-count]'].textContent, "2 of 99");
+  assert.equal(doc.nodes["[data-agent-count]"].textContent, `3 / ${capDefault} bots`);
+  // Titan holds one of the seats, so two of the rest are taken.
+  assert.equal(doc.nodes['[data-capability="add"] [data-add-count]'].textContent, `2 of ${capDefault - 1}`);
   // The host's own number counts the room, and it is on the tooltip rather than in the count.
   assert.match(doc.nodes["[data-agent-count]"].title, /The host counts 4, rooms included\./);
-  assert.match(doc.nodes["[data-agent-count]"].title, /Titan and 99 more bots\. Rooms do not count\./);
+  assert.match(doc.nodes["[data-agent-count]"].title,
+    new RegExp(`Titan and ${capDefault - 1} more bots\\. Rooms do not count\\.`));
 });
 
-test("AGENTS-CAP-1: a room is not a bot and does not eat a slot", async () => {
+test("AGENTS-CAP-2: a room is not a bot and does not eat a slot", async () => {
   const rooms = Array.from({ length: 6 }, (unused, i) => ({ id: `r${i}`, isGroup: true }));
-  const { renderAgentCount, doc } = await loadCap({ workers: [bot("titan")], rooms, agentCount: 7 });
+  const { renderAgentCount, doc, capDefault } = await loadCap({ workers: [bot("titan")], rooms, agentCount: 7 });
   renderAgentCount();
-  assert.equal(doc.nodes["[data-agent-count]"].textContent, "1 / 100 bots");
-  assert.equal(doc.nodes['[data-capability="add"] [data-add-count]'].textContent, "0 of 99");
+  assert.equal(doc.nodes["[data-agent-count]"].textContent, `1 / ${capDefault} bots`);
+  assert.equal(doc.nodes['[data-capability="add"] [data-add-count]'].textContent, `0 of ${capDefault - 1}`);
 });
 
-test("AGENTS-CAP-1: a cap the host reports wins over the console's default", async () => {
+// The one that matters most now that the ceiling is per workspace: a raised workspace is a number
+// the HOST reports, and the console has to draw that rather than its own fallback.
+test("AGENTS-CAP-2: a cap the host reports wins over the console's default", async () => {
   const { renderAgentCount, doc, agentCapRefusalText } = await loadCap({
     workers: [bot("titan"), bot("books")], agentCount: 2, agentCap: 5,
   });
@@ -104,29 +136,33 @@ test("AGENTS-CAP-1: a cap the host reports wins over the console's default", asy
   assert.equal(doc.nodes['[data-capability="add"] [data-add-count]'].textContent, "1 of 4");
   // The sentence is read at the moment of the refusal, so it names the cap the box is holding to
   // rather than the one this file was loaded with.
-  assert.equal(agentCapRefusalText(), "This workspace holds Titan and 4 more bots. Remove one to add another.");
+  assert.equal(agentCapRefusalText(), "This workspace holds Titan and 4 more bots. Remove one to add another, or ask the operator to raise this workspace's ceiling.");
 });
 
-test("AGENTS-CAP-1: with no cap from the host the sentence is the 100-bot one", async () => {
-  const { agentCapRefusalText } = await loadCap({ workers: [bot("titan")], agentCount: 1 });
-  assert.equal(agentCapRefusalText(), "This workspace holds Titan and 99 more bots. Remove one to add another.");
+test("AGENTS-CAP-2: with no cap from the host the sentence names the console's own default", async () => {
+  const { agentCapRefusalText, capDefault } = await loadCap({ workers: [bot("titan")], agentCount: 1 });
+  assert.equal(agentCapRefusalText(),
+    `This workspace holds Titan and ${capDefault - 1} more bots. Remove one to add another, or ask the operator to raise this workspace's ceiling.`);
 });
 
-test("AGENTS-CAP-1: an empty roster with no answer from the host draws nothing", async () => {
+test("AGENTS-CAP-2: an empty roster with no answer from the host draws nothing", async () => {
   const { renderAgentCount, doc } = await loadCap({ workers: [], rooms: [], agentCount: null });
   renderAgentCount();
   assert.equal(doc.nodes["[data-agent-count]"].hidden, true);
   assert.equal(doc.nodes["[data-agent-count]"].textContent, "");
 });
 
-test("AGENTS-CAP-1: the host's own refusal is what the toast says", async () => {
-  const { agentCapRefusal } = await loadCap({ workers: [bot("titan")] });
-  // Word for word, because the host is the one that knows what the cap is on this box.
+test("AGENTS-CAP-2: the host's own refusal is what the toast says", async () => {
+  const { agentCapRefusal, capDefault } = await loadCap({ workers: [bot("titan")] });
+  // Word for word, because the host is the one that knows what the ceiling is on this box, and on a
+  // workspace the super admin raised that number is not the console's default. A hundred here is a
+  // raised workspace's sentence, passed through untouched.
   const said = "This workspace holds Titan and 99 more bots. Remove one to add another.";
   assert.equal(agentCapRefusal(new Error(said)), said);
-  // A host that refuses with something less readable still gets a plain sentence.
+  // A host that refuses with something less readable still gets a plain sentence, and with nothing
+  // readable to go on the console falls back to its own default rather than inventing a number.
   assert.equal(agentCapRefusal(new Error("Agent limit of 100 reached")),
-    "This workspace holds Titan and 99 more bots. Remove one to add another.");
+    `This workspace holds Titan and ${capDefault - 1} more bots. Remove one to add another, or ask the operator to raise this workspace's ceiling.`);
   // Anything that is not a cap refusal is left alone, so a real failure is not dressed as one.
   assert.equal(agentCapRefusal(new Error("the host answered 502")), "");
   assert.equal(agentCapRefusal(null), "");

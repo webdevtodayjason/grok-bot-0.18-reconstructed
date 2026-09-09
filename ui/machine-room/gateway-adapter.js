@@ -211,7 +211,13 @@
   // transcript so a claim sits next to its receipt, the way the upstream desktop shows it. A row is
   // placed before the next transcript entry the outline also contains; rows after the last shared
   // entry go at the end, which is what "worked and never reported" looks like.
-  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task" };
+  // FEEDBACK-1. The reporting tool rides the protocol's `reportBugToolCall` case, so that is the
+  // name its outline row carries. It gets an entry here for one reason: a row whose name is not in
+  // this table is headlined with the raw name itself, and the rule for this tool is that the person
+  // never sees a tool name at all. The row's own sentence is below, in toolRowText.
+  const PROBLEM_REPORT_TOOL_CALL = "reportBugToolCall";
+  const PROBLEM_REPORT_ROW_TEXT = "Reported a problem to the developers";
+  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task", [PROBLEM_REPORT_TOOL_CALL]: "Report" };
   const oneLine = (value, max) => {
     const text = String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" · ");
     return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -253,6 +259,12 @@
   }
   function toolRowText(item) {
     const label = TOOL_LABELS[item.name] ?? String(item.name ?? "Tool").replace(/ToolCall$/, "");
+    // FEEDBACK-1. The one row in this table that is not a receipt of work done for the person, and
+    // the only one whose arguments must never reach the page: they are the agent's own account of a
+    // fault, which the person is about to read in full on the card and edit before it goes
+    // anywhere. One fixed sentence in plain words, and an EMPTY detail so app.js draws a muted
+    // bubble rather than an expandable receipt with the payload inside it.
+    if (item.name === PROBLEM_REPORT_TOOL_CALL) return { text: PROBLEM_REPORT_ROW_TEXT, detail: "", kind: label };
     const headline = item.name === "shellToolCall" ? shellHeadline(item.summary, item.output)
       : item.name === "readToolCall" ? readHeadline(item.summary)
       : null;
@@ -2330,6 +2342,24 @@
     // A failed turn used to leave no trace in this UI at all: the transcript simply never grew.
     // The host records it as an error tray, so read those and say so in the conversation.
     const reportedTrays = new Set();
+
+    /**
+     * FEEDBACK-1. Seeds for the automatic offer, queued here and drained by the page.
+     *
+     * MEASURED on grok-bot-local-vm, 2026-09-09: a model-endpoint failure writes NO turn-failed
+     * row. The host logged the failure in 3 s, the tray fired, both transcript reads returned
+     * messages only, and the page showed the person's own bubble plus "Accepted by the host" for
+     * thirty seconds with the roster card still green. An offer keyed on the turn-failed entry
+     * would therefore never fire on the commonest failure there is. The tray is the only live
+     * signal, so the offer is built at tray-narration time.
+     *
+     * The seed carries the tray's own words because the developers need them. They do NOT go into
+     * the conversation: the raw provider wording ("Agent failed to respond, fetch failed") is
+     * exactly the presentation host-notes-read-as-errors.md bans, and it was what this function
+     * used to push. The person reads the technical half on the card, where it is editable and where
+     * they are deciding whether to send it.
+     */
+    const failedTurnReports = [];
     async function reloadTrays() {
       const trays = await call("getTrays").catch(() => null);
       if (!Array.isArray(trays)) return;
@@ -2342,10 +2372,21 @@
           ?? state.rooms.find((r) => r.id === tray.agentId);
         if (!owner) continue;
         awaiting.delete(keyOf({ kind: owner.memberIds ? "room" : "worker", id: owner.id }));
+        // Plain words, and the technical half kept off the page. The line this replaced read
+        // "That turn failed: Agent failed to respond — fetch failed", which is the machine's own
+        // spelling of a problem the person can do exactly one thing about.
         owner.messages.push({
-          id: `tray-${tray.id}`, authorId: "system", authorName: "Machine Room", type: "text",
-          text: `That turn failed: ${tray.title ?? "error"}${tray.detail ? ` — ${tray.detail}` : ""}`,
+          id: `tray-${tray.id}`, authorId: "system", authorName: "Machine Room", type: "system",
+          text: `${owner.name || "This agent"} could not finish that one. Ask again, or send the details to the developers.`,
           time: timeOf(Date.now()),
+        });
+        failedTurnReports.push({
+          trayId: tray.id,
+          agentId: owner.id,
+          agentName: owner.name || "",
+          title: String(tray.title ?? "error"),
+          detail: String(tray.detail ?? ""),
+          at: Date.now(),
         });
         // The dedupe set dies with the page; without this, every reload re-narrates every historical
         // failure as though it had just happened.
@@ -2800,6 +2841,47 @@
           capabilities: Array.isArray(status?.capabilities) ? status.capabilities : [],
         }));
       },
+
+      // ---------------------------------------------------------------- FEEDBACK-1
+      // Four doors, and none of them decides anything. The page draws, the person decides, and
+      // only then does anything leave the workspace.
+
+      /** Seeds queued by reloadTrays since the last drain. Page-local; they die with the page. */
+      takeFailedTurnReports() {
+        return failedTurnReports.splice(0, failedTurnReports.length);
+      },
+
+      /**
+       * What agents have written down and nobody has decided about yet. `tryCall` rather than
+       * `call`: a box on an older bundle answers "unknown gateway method", which is "this box
+       * cannot say" and not an error worth putting on screen.
+       */
+      listProblemReports() {
+        return tryCall("listProblemReports").then((answer) => (Array.isArray(answer?.reports) ? answer.reports : []));
+      },
+
+      /** Clears one pending report out of the box, whichever way the person decided. */
+      resolveProblemReport(id, outcome) {
+        return tryCall("resolveProblemReport", { id, outcome: outcome === "sent" ? "sent" : "dropped" });
+      },
+
+      /**
+       * The send. Same-origin, the way this page already posts /endpoints/use and /box/launch, and
+       * for the same reason: the relay holds the control-plane credential and the box does not. The
+       * relay stamps the workspace from its own registry, so nothing here names a tenant and
+       * nothing here could name someone else's.
+       */
+      sendProblemReport(payload) {
+        return relayFetch("/feedback", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+        }).then(async (response) => {
+          const text = await response.text();
+          let body; try { body = JSON.parse(text); } catch { body = null; }
+          if (!response.ok) throw new Error(body?.error ?? `the report was not accepted (${response.status})`);
+          return body ?? {};
+        });
+      },
+
       // updateForeverBox { id, force? } recreates the box preserving data; resetForeverBox { id }
       // recreates it from the last snapshot and can lose unsynced work. Both are the desktop
       // app's Updates tab, which box-reference-docs.ts sends users to and which did not exist here.

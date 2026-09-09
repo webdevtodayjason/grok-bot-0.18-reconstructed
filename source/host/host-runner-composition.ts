@@ -76,6 +76,7 @@ import type {
   TurnCloudAgentToolFactoryInput,
   TurnFileTransferToolFactoryInput,
   TurnMcpManagementToolFactoryInput,
+  TurnProblemReportToolFactoryInput,
   TurnReadToolFactoryInput,
   TurnSubagentManagementToolFactoryInput,
   TurnWebFetchToolFactoryInput,
@@ -100,6 +101,7 @@ import {
   SAND_EXTERNAL_READ_TOOL_NAME,
 } from "./sand-activity.js";
 import { connectorCardEmissionToMessage, type BoxHelpOutcome } from "./runner/tools/box-help-tool.js";
+import { appendProblemReport } from "./extensions/feedback/problem-reports.js";
 import { createAgentPromptSession } from "./extensions/inference/extension.js";
 import { CONNECTOR_MANIFESTS } from "../shared/channels.js";
 import { parseStoredTrigger } from "./automations/automation-trigger.js";
@@ -2675,6 +2677,22 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               },
             }),
           }),
+      /**
+       * FEEDBACK-1. The reporting tool's only dependency is a place to put the report, and that
+       * place is a file in this box, not a network call. There is no `startHandoff`-style guard
+       * above it because there is nothing to guard: no credential, no tenant, no egress. The
+       * console reads the file, shows it to the operator, and is the only thing that ever sends.
+       */
+      createProblemReportToolInputs: (): TurnProblemReportToolFactoryInput => ({
+        dependencies: {
+          getAgentId: () => session.id,
+          getAgentName: () => {
+            const profile = method(sessionApi, "getAgentProfileText")?.(session.id);
+            return profile == null ? undefined : String(profile.name ?? "") || undefined;
+          },
+          savePending: entry => appendProblemReport(getSandRootDir(), entry),
+        },
+      }),
       createReactionToolInputs: turn => ({
         dependencies: turn.emitUpdate === undefined
           ? dependencies.reaction
