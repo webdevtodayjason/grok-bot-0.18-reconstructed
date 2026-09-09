@@ -476,3 +476,53 @@ Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 The ship is **relay-only by construction**: everything in this wave is `ui/`, tests, scripts and
 docs. `git diff <pre-wave>..HEAD -- source/ deploy/` must be empty before shipping. If it is not,
 stop and re-scope — a host swap is a different ship with a different risk.
+
+---
+
+## 6. What the ship measured
+
+Shipped 2026-09-09 03:30 UTC as merge commit `4b0c769`: a relay sync and one relay restart, nothing
+else. `git diff <pre-wave>..HEAD -- source/ deploy/` was empty, so the host bundle did not need to
+move and no box was touched — all three on the R750 were up 32, 32 and 41 hours afterwards. Every
+shipped file was hashed inside the relay container against the worktree and all fifteen matched.
+
+**One caveat worth knowing before the next ship.** `sync.sh` rebuilds the host bundle and restages
+`sand-host-bundle-latest.version` from the tree's git sha even when `source/` has not moved, and the
+rebuild is not byte-reproducible. Every box on this host runs `SAND_BOX_AUTO_UPDATE=1`, so leaving a
+new version string beside a bundle built from identical source would walk three boxes — one of them
+a paying customer's — through a host swap that changes nothing. This ship put the previous version
+string back afterwards, so no box swapped. A wave that really changes `source/` wants the opposite:
+leave the new version and do the documented `updateHostNow` in each box.
+
+### Before and after, on Jason's own console, read-only, across the same ship
+
+| | before | after |
+|---|---|---|
+| the plate at 50 ms | `data-bg` null, no cover | `data-bg="titan-nebula"`, cover showing "Reaching this box" |
+| the picker's series headings | Habitat and The Lab drawn 182x102, one tile's cell each | 20 cells, every heading spans the grid |
+| Titan's transcript, parked 5 s | — | 183 rows, 34,217 px in a 668 px viewport, parked at 11,406, **drift 0 px** over eleven samples |
+| the rail tile | one laid-out `<img>`, no src, `naturalWidth` 0, `display: block`, 231x75, alt "Titan's screen" | **0 broken images**, no src-less `<img>` in the markup at all, the plate, then a real 7,611-character webp off seat :3 in 1.2 s drawn 390 px wide |
+| a run of work between two chats | every row full height | one collapsed row: "Worked for 7 sec · 8 steps · shell 4, websearch 3, webfetch 1", 0 px of body, opening to 106 px on a click |
+| the Agent panel's file count | **Files 1** | **Files 10** |
+| `rsi-vs-agi-notes.md` | nothing happened on a click | rendered Markdown, 2,529 characters, 20 list items, 9 paragraphs, a secret still masked; Download carries its own filename; the route answers 200, 2,614 B, `text/markdown` |
+
+On `grok-bot-local-vm`: `npm test` 1,682 PASS / 0 FAIL, typecheck clean, the six polish legs
+20 PASS / 0 FAIL / 1 SKIP (files, because no conversation on that box carries one), and
+`verify-dashboard` reached **40 more checks inside the same 290 s with a byte-identical failure
+list** — 123 checks / 12 FAIL before, 163 / 12 after.
+
+### Three gate faults only a live console could find
+
+Each of these passed over loopback and lied over the internet, and each is fixed in
+`verify-console-polish.mjs`:
+
+- **`document.body` at 50 ms.** After `waitUntil: "commit"` on a real connection the parser may not
+  have reached `<body>`, so `getComputedStyle(document.body)` threw. A head-only document is not a
+  failure of the boot claim — it is the strongest form of it.
+- **`elementFromPoint` outside the viewport.** It answers null, so the badge in a 34,217 px
+  transcript read "under its centre is nothing" while being perfectly clickable. The hit test scrolls
+  an offscreen control into view first and still reads what is under its centre afterwards, so a
+  covered control fails as before.
+- **Looking for file rows on the shell.** They are drawn in the desktop's Files view, which is the
+  thing Jason clicks in his complaint. The leg reported "no conversation carries a file" against a
+  console whose Agent panel said Files 1.
