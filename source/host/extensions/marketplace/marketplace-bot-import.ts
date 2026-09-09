@@ -317,7 +317,13 @@ const routinePrompt = (routine: Row): string =>
  * module builds those rows itself from `integrations`, in the old vocabulary.
  */
 const appPluginId = (row: Row): string => text(row["plugin"]) || text(row["pluginId"]);
-const appLine = (row: Row): string => text(row["line"]) || text(row["description"]);
+// `fallbackLine` is the third one, and leaving it out is a silently empty sentence rather than a
+// wrong bucket: the generator writes an empty `line` on a row whose sentence another bot wrote
+// first and keeps the shared one here. Measured on grok-bot-local-vm 2026-09-09 — `account-book`
+// serves `"line": ""` for Gmail and Google Calendar — so a reader that stops at `line` gives a
+// person an app name with nothing under it. The Bots tab's own reader takes it, and so does this.
+const appLine = (row: Row): string =>
+  text(row["line"]) || text(row["fallbackLine"]) || text(row["description"]);
 
 /** Every plugin id this row could possibly need, so installed state is asked once per plugin. */
 function pluginIdsWanted(bot: Row): string[] {

@@ -29,33 +29,14 @@
 //   loads marketplace-bots.js into a stub window and asserts the two agree, because that is the
 //   drift a TypeScript module and a browser file cannot catch for each other.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import test, { after } from "node:test";
+import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+
+import { hostMarketplaceImport as importer, marketplaceCatalog as catalog } from "./helpers/host-marketplace-import.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-// Staged in the tree rather than os.tmpdir() so `require` walks up to this checkout's node_modules
-// for the three native modules the bundle leaves external. `.tmp-*` is ignored by git.
-const stage = mkdtempSync(path.join(repoRoot, ".tmp-marketplace-import-"));
-after(() => rmSync(stage, { recursive: true, force: true }));
-mkdirSync(stage, { recursive: true });
-const require_ = createRequire(import.meta.url);
-const bundle = async (entry, name) => {
-  const result = await build({
-    entryPoints: [path.join(repoRoot, entry)],
-    bundle: true, write: false, format: "cjs", platform: "node", target: "es2022",
-    external: ["jsonc-parser", "better-sqlite3", "node-pty"], logLevel: "silent",
-  });
-  const bundlePath = path.join(stage, name);
-  writeFileSync(bundlePath, result.outputFiles[0].text, "utf8");
-  return require_(bundlePath);
-};
-
-const importer = await bundle("source/host/extensions/marketplace/marketplace-bot-import.ts", "marketplace-bot-import.cjs");
-const catalog = await bundle("source/shared/marketplace/catalog.ts", "catalog.cjs");
 
 // ------------------------------------------------------------------ the fixture
 //
@@ -508,6 +489,9 @@ test("the apps split four ways off the catalog's own field names, and an install
   const legacy = importer.planApps({ apps: [{ name: "slack", label: "Slack", description: "Post it.", pluginId: "slack", offer: "connect" }] }, []);
   assert.deepEqual(legacy.addable.map((a) => a.label), ["Slack"]);
   assert.equal(legacy.addable[0].description, "Post it.");
+  // A row whose own sentence was written by another bot first carries it under `fallbackLine`.
+  const shared = importer.planApps({ apps: [{ name: "Gmail", label: "Gmail", line: "", fallbackLine: "Read and send from the address you already use.", plugin: "google", offer: "connect" }] }, []);
+  assert.equal(shared.addable[0].description, "Read and send from the address you already use.");
 });
 
 test("a REAL catalog row never reports an app we carry as one we do not", () => {
@@ -527,8 +511,18 @@ test("a REAL catalog row never reports an app we carry as one we do not", () => 
     assert.ok(offered.has(label), `${label} was not offered on a box that could add it`);
     assert.ok(!unavailable.has(label), `${label} was reported as something we do not carry`);
   }
-  // Each app carries the bot's OWN sentence about it, not an empty string.
+  // Each app carries the bot's OWN sentence about it, not an empty string. Some rows carry an empty
+  // `line` and the shared sentence under `fallbackLine` — measured on this row, Gmail and Google
+  // Calendar are two of them — so a reader that stops at `line` hands a person an app name with
+  // nothing under it.
   assert.equal(nothingInstalled.addable.find((a) => a.label === "Slack").description, named.get("Slack").line);
+  for (const app of [...nothingInstalled.addable, ...nothingInstalled.connected, ...nothingInstalled.byo]) {
+    const row = named.get(app.label);
+    if (!row) continue;
+    if (!row.line && !row.fallbackLine) continue;
+    assert.ok(app.description.length > 0, `${app.label} came back with no sentence under it`);
+    assert.equal(app.description, row.line || row.fallbackLine);
+  }
 
   // And a box that already holds Slack says so instead of offering it again.
   const withSlack = importer.planApps(row, ["slack"]);

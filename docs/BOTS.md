@@ -473,8 +473,10 @@ box is read back and every fact is compared character for character (the store s
 and says nothing); every job is on the box and switched off; **no app naming a plugin is ever
 reported as one we do not carry**; the same bot goes in again through `bot-setup.js` loaded into
 the gate process and the two agents are compared field for field; a third press writes nothing; and
-the bot's own introduction is waited for. Everything it creates is taken back and the roster ends at
-the count it started.
+the bot's own introduction is waited for. **Measured 2026-09-09: 34 PASS, 0 FAIL, exit 0**, with the
+bot's own words 15 s after the import. Everything it creates is taken back, and the check is that the
+bots THAT RUN made are off the roster — never that the roster count matches, because another wave was
+driving the same box that evening and its scratch agents came and went under the run.
 
 On the R750 demo tenant the introduction leg is NOT asserted. `BOX-7` is measured: that box starts
 no introduction for any new agent, including a plain one created with `isKickstartRequested: true`.

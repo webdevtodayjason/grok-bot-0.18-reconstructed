@@ -253,14 +253,17 @@ test("every app maps to a plugin this catalog carries, and Google claims only wh
 
 // ---------------------------------------------------------------- f2. the setup reads these rows
 //
-// THE SHAPE, AGAINST A REAL ROW. bot-setup.js reads `pluginId` and `description`; the generator
-// writes `plugin` and `line`. Every fixture in the suite wrote the reader's spelling, so the Add
-// path was green while it told a customer on the R750 that Slack, Notion, Linear, Gmail, Google
-// Calendar and Google Sheets "are not something we carry yet" -- on the page that had just drawn
-// an Add for them. This case builds the plan from the shipped catalog instead.
+// THE SHAPE, AGAINST A REAL ROW. The reader used to read `pluginId` and `description`; the
+// generator writes `plugin` and `line`. Every fixture in the suite wrote the reader's spelling, so
+// the Add path was green while it told a customer on the R750 that Slack, Notion, Linear, Gmail,
+// Google Calendar and Google Sheets "are not something we carry yet" -- on the page that had just
+// drawn an Add for them. This case builds the plan from the shipped catalog instead.
+//
+// TITAN-CATALOG-1 moved the Add sequence into the box, so the reader this case drives is the host's
+// (source/host/extensions/marketplace/marketplace-bot-import.ts), which is what both the console's
+// press and Titan's request now go through. The claim is unchanged; only the door is.
 test("the Add path plans a shipped row's apps against the plugins this catalog carries", async () => {
-  const { installBotSetupModule } = await import("./helpers/bot-setup-console.mjs");
-  const { module: setup } = installBotSetupModule();
+  const { hostMarketplaceImport: setup } = await import("./helpers/host-marketplace-import.mjs");
   const bot = community.find((row) => row.id === "mr-toms");
   assert.ok(bot != null, "the catalog no longer carries mr-toms");
   const plan = setup.planApps(bot, ["slack"]);
