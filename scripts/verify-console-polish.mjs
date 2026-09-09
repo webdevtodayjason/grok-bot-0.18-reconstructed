@@ -159,14 +159,27 @@ const bootConsole = async (page, ms = 60_000) => {
 };
 
 // Visible, with area, and the element under its own centre is itself or something inside it.
+// `elementFromPoint` answers null for anything outside the viewport, so a control sitting below the
+// fold reads as "under its centre is nothing" whether it is reachable or not -- measured on Jason's
+// console, where Titan's transcript is 34,217 px in a 668 px viewport and the badge under test was
+// 20,000 px up. This scrolls the element into the viewport FIRST and hit-tests where it lands, which
+// is what a person does: they scroll to a control and then click it. That is not the trap the rule
+// about page.click() names. page.click()'s scrollIntoViewIfNeeded hides the interesting failure
+// because it also passes when something is drawn ON TOP of the control; this still reads what is
+// under the centre afterwards, so a covered control still fails, and `scrolled` says whether the
+// page had to move at all.
 const hitTest = (page, selector) => page.evaluate((sel) => {
   const el = document.querySelector(sel);
   if (!el) return { found: false };
+  const before = el.getBoundingClientRect();
+  const offscreen = before.bottom < 0 || before.top > window.innerHeight
+    || before.right < 0 || before.left > window.innerWidth;
+  if (offscreen) el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
   const rect = el.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return { found: true, visible: false, w: 0, h: 0 };
+  if (rect.width === 0 || rect.height === 0) return { found: true, visible: false, w: 0, h: 0, scrolled: offscreen };
   const at = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
   return {
-    found: true, visible: true,
+    found: true, visible: true, scrolled: offscreen,
     w: Math.round(rect.width), h: Math.round(rect.height),
     hit: at != null && (at === el || el.contains(at) || at.contains(el)),
     on: at ? `${at.tagName.toLowerCase()}${at.id ? `#${at.id}` : ""}` : "nothing",
@@ -616,7 +629,10 @@ async function openFirstWith(page, probe, limit = 12) {
     if (budgetLeft() < 25_000) break;
     if (!(await openConversation(page, worker.id))) { tried.push(worker.name ?? worker.id); continue; }
     await sleep(1400);
-    const got = await page.evaluate(probe).catch(() => null);
+    // Twice, with a beat between: a probe that has to open a panel before it can look is asking
+    // about the render its own click caused.
+    let got = await page.evaluate(probe).catch(() => null);
+    if (!got) { await sleep(1200); got = await page.evaluate(probe).catch(() => null); }
     tried.push(worker.name ?? worker.id);
     if (got) return { worker, got, tried };
   }
@@ -657,7 +673,7 @@ async function legBadge(page) {
   if (!badge) { skip("a gap folds into one badge", "the badge was there when the conversation opened and is gone now"); return; }
   check(badge.expanded === "false" && badge.bodyHeight === 0, "a gap is one collapsed row by default", `"${badge.head}", ${badge.steps} steps, body ${badge.bodyHeight}px`);
   const target = await hitTest(page, "button.gap-badge-head[data-gap-toggle]");
-  check(target.visible && target.hit, "the badge is where a mouse can reach it", `${target.w}x${target.h}, under its centre is ${target.on}`);
+  check(target.visible && target.hit, "the badge is where a mouse can reach it", `${target.w}x${target.h}, under its centre is ${target.on}${target.scrolled ? " (scrolled to it first, as a person would)" : ""}`);
   await page.click("button.gap-badge-head[data-gap-toggle]", { timeout: 8000 }).catch(() => {});
   const open = await until(() => page.evaluate(() => {
     const el = document.querySelector("article.gap-badge[data-gap]");
@@ -681,11 +697,22 @@ async function legFiles(page) {
   console.log("\n== --files: a file row opens a viewer and downloads");
   const booted = await bootConsole(page);
   if (booted !== true) { skip("a file row opens a viewer", "the adapter never appeared"); return; }
-  const found = await openFirstWith(page, () => (document.querySelector("[data-file-open]") ? true : null));
+  // The file rows are drawn in the desktop's Files view, not on the shell -- Jason's own complaint
+  // is about clicking Files and finding nothing to open. So the probe opens that view the way he
+  // does, through the Agent panel's "Files N" row, and only then looks for rows. Reading a panel is
+  // not a write: renderDesktop's files branch draws markup, unlike Browser and Terminal, which
+  // mount a live surface. Without this the leg reported "no conversation carries a file" against a
+  // console whose Agent panel says Files 1.
+  const openFilesView = () => {
+    const row = [...document.querySelectorAll('[data-context-action="files"]')][0];
+    if (row) row.click();
+    return document.querySelector("[data-file-open]") ? true : null;
+  };
+  const found = await openFirstWith(page, openFilesView);
   if (!found.worker) {
     const loaded = await page.evaluate(() => typeof window.__filesViewer?.open === "function");
     skip("a file row opens a viewer", loaded
-      ? `the viewer is loaded and no conversation on this box carries a file — opened ${found.tried.length}: ${found.tried.slice(0, 6).join(", ")}`
+      ? `the viewer is loaded and the Files view of every conversation on this box was empty — opened ${found.tried.length}: ${found.tried.slice(0, 6).join(", ")}`
       : "window.__filesViewer is not on the page — the module has not merged");
     return;
   }
