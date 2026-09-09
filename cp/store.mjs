@@ -17,7 +17,7 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { randomBytes, randomUUID, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomInt, randomUUID, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
 
 // N is 2^15, one notch above the relay's own auth.json (ui/auth.mjs uses 2^14). The relay's file
 // is on a host an operator already has to be on; this one holds every customer, so it buys the
@@ -236,6 +236,62 @@ CREATE TABLE IF NOT EXISTS admin_settings (
   at    INTEGER NOT NULL,
   actor TEXT NOT NULL DEFAULT ''
 );
+-- MAIL-2. Every bot's own email address, which is the one thing about mail this service owns.
+--
+-- The address is agent<code>@<domain> and NOTHING ELSE. It never carries a name: a name is not
+-- unique across workspaces (two customers each have a Titan), it is guessable, and the old
+-- name-based rule is what made mail for an unknown localpart land in whichever workspace happened
+-- to claim the domain.
+--
+-- code is the PRIMARY KEY, so a code is unique across the whole fleet in the only way that matters
+-- to a router: one localpart, one bot, one workspace. UNIQUE(tenant, agent_id) is the other half --
+-- one bot has one address, and a sweep that runs every five minutes cannot mint a second one.
+--
+-- NOTHING IN THIS FILE DELETES A ROW. Retiring sets state and retired_at and leaves the row where
+-- it is, because the row IS the reservation: a deleted code could be minted again for a different
+-- bot in a different workspace, and mail still addressed to the old one would then be delivered to
+-- a stranger. A retired code is a dead address forever, which is the only safe meaning of retired.
+CREATE TABLE IF NOT EXISTS mail_addresses (
+  code       TEXT PRIMARY KEY,
+  tenant     TEXT NOT NULL,
+  agent_id   TEXT NOT NULL,
+  agent_name TEXT NOT NULL DEFAULT '',
+  address    TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  retired_at TEXT,
+  state      TEXT NOT NULL DEFAULT 'active'
+);
+-- One ACTIVE address per bot, and the WHERE is the whole reason this is an index rather than a
+-- constraint on the table. A plain UNIQUE(tenant, agent_id) would mean that retiring an address
+-- leaves that bot unable to ever have another one: the sweep would find the retired row, hand it
+-- back, and the bot would be unreachable for good. An operator who retires an address is killing
+-- the ADDRESS, usually because it is being spammed, and not the bot. So the dead row stays (its
+-- code is the PRIMARY KEY, so that number can never be minted for anybody again) and the next
+-- sweep gives the bot a fresh one, within five minutes.
+CREATE UNIQUE INDEX IF NOT EXISTS mail_addresses_active ON mail_addresses (tenant, agent_id) WHERE state = 'active';
+CREATE INDEX IF NOT EXISTS mail_addresses_tenant ON mail_addresses (tenant, agent_id);
+-- Approved senders, per workspace. The switch that turns them into a whitelist is one row in
+-- admin_settings (mail.approvedSenders.<slug>) and it is OFF for every workspace this wave: an
+-- on-by-default whitelist is exactly what would eat the first verification mail a new customer
+-- asks for. This table is the allow list the switch reads when somebody turns it on.
+CREATE TABLE IF NOT EXISTS mail_senders (
+  tenant TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  at     TEXT NOT NULL,
+  PRIMARY KEY (tenant, sender)
+);
+-- One row per message a bot sends through the relay's send route, so a per-customer send count
+-- exists at all. It holds addresses and an outcome and never a subject or a body.
+CREATE TABLE IF NOT EXISTS mail_send_log (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant   TEXT NOT NULL,
+  agent_id TEXT NOT NULL DEFAULT '',
+  code     TEXT NOT NULL DEFAULT '',
+  to_addr  TEXT NOT NULL DEFAULT '',
+  at       TEXT NOT NULL,
+  outcome  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS mail_send_log_tenant ON mail_send_log (tenant, id);
 `;
 
 const accountRow = (row) => (row == null ? null : {
@@ -267,6 +323,18 @@ const tenantRow = (row) => (row == null ? null : {
   boxReady: Number(row.box_ready ?? 0) === 1,
   createdAt: Number(row.created_at),
   updatedAt: Number(row.updated_at),
+});
+
+// MAIL-2. One directory row, as everything outside this file reads it.
+const mailRow = (row) => (row == null ? null : {
+  code: row.code,
+  tenant: row.tenant,
+  agentId: row.agent_id,
+  agentName: row.agent_name ?? "",
+  address: row.address,
+  createdAt: row.created_at,
+  retiredAt: row.retired_at ?? null,
+  state: row.state ?? "active",
 });
 
 // The columns added after the first release, applied to a database that already exists.
@@ -373,6 +441,23 @@ export function openStore(options = {}) {
   const selectSetting = statement("SELECT * FROM admin_settings WHERE name = ?");
   const upsertSetting = statement("INSERT INTO admin_settings (name, value, at, actor) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, at = excluded.at, actor = excluded.actor");
   const selectSettings = statement("SELECT * FROM admin_settings ORDER BY name");
+
+  // MAIL-2. The per-bot address directory. No TENANT_MIGRATIONS entry, for the reason written
+  // beside the admin statements above: these are whole new TABLES, and db.exec(SCHEMA) runs on
+  // every open, so CREATE TABLE IF NOT EXISTS makes them on an existing database too.
+  const insertMailAddress = statement("INSERT INTO mail_addresses (code, tenant, agent_id, agent_name, address, created_at, state) VALUES (?, ?, ?, ?, ?, ?, 'active')");
+  const selectMailByCode = statement("SELECT * FROM mail_addresses WHERE code = ?");
+  const selectMailByAgent = statement("SELECT * FROM mail_addresses WHERE tenant = ? AND agent_id = ? AND state = 'active'");
+  const selectMailByTenant = statement("SELECT * FROM mail_addresses WHERE tenant = ? ORDER BY created_at, code");
+  const selectMailAll = statement("SELECT * FROM mail_addresses ORDER BY tenant, created_at, code");
+  const updateMailName = statement("UPDATE mail_addresses SET agent_name = ? WHERE code = ?");
+  const retireMailRow = statement("UPDATE mail_addresses SET state = 'retired', retired_at = ? WHERE code = ?");
+  const countMailByTenant = statement("SELECT COUNT(*) AS n FROM mail_addresses WHERE tenant = ? AND state = 'active'");
+  const insertMailSender = statement("INSERT OR IGNORE INTO mail_senders (tenant, sender, at) VALUES (?, ?, ?)");
+  const selectMailSenders = statement("SELECT * FROM mail_senders WHERE tenant = ? ORDER BY sender");
+  const deleteMailSender = statement("DELETE FROM mail_senders WHERE tenant = ? AND sender = ?");
+  const insertMailSend = statement("INSERT INTO mail_send_log (tenant, agent_id, code, to_addr, at, outcome) VALUES (?, ?, ?, ?, ?, ?)");
+  const countMailSendRows = statement("SELECT COUNT(*) AS n FROM mail_send_log WHERE tenant = ? AND at >= ?");
 
   const insertFailure = statement("INSERT INTO login_failures (email, ip, at) VALUES (?, ?, ?)");
   const countFailuresByEmail = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM login_failures WHERE email = ? AND at >= ?");
@@ -704,6 +789,89 @@ export function openStore(options = {}) {
       for (const row of selectSteps.all(String(slug))) state.set(row.step, row.status);
       return new Set([...state.entries()].filter(([, status]) => status === "ok").map(([step]) => step));
     },
+
+    // ---- the per-bot mail directory (MAIL-2) ----------------------------------------------------
+
+    /**
+     * This bot's address, minted once and then handed back for ever.
+     *
+     * The code is SIX RANDOM DIGITS and it is INSERTED rather than chosen: a select-then-insert
+     * would let two sweeps running together pick the same free number, and one of those bots would
+     * lose its mail to the other. The insert IS the check -- a UNIQUE failure on `code` means
+     * somebody already holds that number, so it tries again. Twenty tries against a million values
+     * is not a number that runs out; the cap is there so a corrupt table cannot spin forever.
+     *
+     * A RETIRED ROW IS NEVER HANDED BACK, and is never reactivated either. Retiring kills the
+     * ADDRESS and not the bot, so the next sweep mints that bot a fresh one; the dead row stays
+     * where it is, and because `code` is the primary key that number can never be minted for
+     * anybody, ever. See the partial index on the table for why it is written that way.
+     */
+    mintMailCode({ tenant, agentId, agentName = "", domain }) {
+      const slug = String(tenant ?? "");
+      const id = String(agentId ?? "");
+      const name = String(agentName ?? "");
+      const at = String(domain ?? "").trim().toLowerCase();
+      if (slug.length === 0 || id.length === 0 || at.length === 0) return null;
+      const found = selectMailByAgent.get(slug, id);
+      if (found != null) {
+        // The display name is the one field that moves: an agent renamed in the console should read
+        // as its new name on the operator's list and in the From line. The address never moves.
+        if (name.length > 0 && name !== found.agent_name) {
+          updateMailName.run(name, found.code);
+          return mailRow(selectMailByCode.get(found.code));
+        }
+        return mailRow(found);
+      }
+      for (let tries = 0; tries < 20; tries += 1) {
+        const code = String(randomInt(0, 1000000)).padStart(6, "0");
+        try {
+          insertMailAddress.run(code, slug, id, name, `agent${code}@${at}`, new Date().toISOString());
+          return mailRow(selectMailByCode.get(code));
+        } catch (error) {
+          if (!/UNIQUE/i.test(String(error?.message ?? ""))) throw error;
+          // The other UNIQUE on this table is (tenant, agent_id), which means a sweep running
+          // beside this one minted the row between the select above and this insert. That is a
+          // success and not a collision: read its row and hand it back.
+          const raced = selectMailByAgent.get(slug, id);
+          if (raced != null) return mailRow(raced);
+        }
+      }
+      const exhausted = new Error("could not find a free six digit code in twenty tries");
+      exhausted.code = "mail_code_exhausted";
+      throw exhausted;
+    },
+
+    getMailAddressByCode(code) { return mailRow(selectMailByCode.get(String(code ?? ""))); },
+    /** This bot's LIVE address, or null. A bot whose address was retired has none until the next sweep. */
+    getMailAddressByAgent(tenant, agentId) { return mailRow(selectMailByAgent.get(String(tenant ?? ""), String(agentId ?? ""))); },
+    listMailAddresses(tenant = null) {
+      return (tenant == null ? selectMailAll.all() : selectMailByTenant.all(String(tenant))).map(mailRow);
+    },
+    countMailAddresses(tenant) { return Number(countMailByTenant.get(String(tenant ?? ""))?.n ?? 0); },
+    /** Sets the state and the date. It never deletes: see the comment on the table. */
+    retireMailAddress(code) {
+      const key = String(code ?? "");
+      if (selectMailByCode.get(key) == null) return null;
+      retireMailRow.run(new Date().toISOString(), key);
+      return mailRow(selectMailByCode.get(key));
+    },
+
+    allowSender(tenant, sender) {
+      const address = normalizeEmail(sender);
+      if (String(tenant ?? "").length === 0 || address.length === 0) return null;
+      insertMailSender.run(String(tenant), address, new Date().toISOString());
+      return { tenant: String(tenant), sender: address };
+    },
+    listSenders(tenant) {
+      return selectMailSenders.all(String(tenant ?? "")).map((row) => ({ tenant: row.tenant, sender: row.sender, at: row.at }));
+    },
+    blockSender(tenant, sender) { deleteMailSender.run(String(tenant ?? ""), normalizeEmail(sender)); },
+
+    /** One row per send. Addresses and an outcome; never a subject and never a body. */
+    recordMailSend({ tenant, agentId = "", code = "", to = "", outcome = "sent", at = new Date().toISOString() }) {
+      insertMailSend.run(String(tenant ?? ""), String(agentId), String(code), String(to), String(at), String(outcome));
+    },
+    countMailSends(tenant, since = "") { return Number(countMailSendRows.get(String(tenant ?? ""), String(since))?.n ?? 0); },
 
     // ---- login failures ------------------------------------------------------------------------
 

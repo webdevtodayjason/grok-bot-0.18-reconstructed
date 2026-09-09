@@ -22,6 +22,10 @@
 //   node cp/cli.mjs proxy model add|set|apply|vision-check|push-label|remove
 //   node cp/cli.mjs proxy catalog refresh <provider>
 //   node cp/cli.mjs proxy default-model [<alias>|none]
+//   node cp/cli.mjs mail list [<slug>]
+//   node cp/cli.mjs mail retire <code>
+//   node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off
+//   node cp/cli.mjs mail sweep
 //   node cp/cli.mjs session verify <token>
 //
 // `signup add` is the whole of adding a customer in one line: it makes the account, works the
@@ -50,6 +54,7 @@ import {
 import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias, tenantRoutesFor } from "./proxy.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
+import { createMailDirectory, mailDomain } from "./mail.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
@@ -1140,6 +1145,10 @@ const USAGE = [
   "node cp/cli.mjs proxy model apply <alias> | vision-check <alias> | push-label <alias> <slug>... | remove <alias> --confirm <alias>",
   "node cp/cli.mjs proxy catalog refresh <provider>",
   "node cp/cli.mjs proxy default-model [<alias>|none]",
+  "node cp/cli.mjs mail list [<slug>]",
+  "node cp/cli.mjs mail retire <code>",
+  "node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off",
+  "node cp/cli.mjs mail sweep",
   "node cp/cli.mjs session verify <token>",
   "",
   "signup add is the one line that adds a customer: account, workspace and box.",
@@ -1147,9 +1156,111 @@ const USAGE = [
   "proxy providers, seed, key, model, catalog and default-model go over the api, so they keep the same rules the console keeps and write the same record.",
   "a provider key is never an argument. These read it from the terminal with the echo off, or from stdin.",
   "proxy mint is the only way the operator's own workspace gets a key, because an adopted row is never re-provisioned.",
+  "mail list shows the address each bot answers at. A code is minted once and never reused; retire kills one for good.",
+  "mail sweep goes through the relay, because the roster lives inside a box and only the relay can read one.",
   "account promote makes somebody a super admin, which opens the console at /admin.",
   "CP_ADMIN_TOKEN and CP_PUBLIC_URL come from the environment.",
 ].join("\n");
+
+// ---- the per-bot mail directory (MAIL-2, docs/MAIL.md) -------------------------------------------
+//
+// The address every bot answers at is agent<code>@<domain>, six digits minted once per (workspace,
+// bot) and never reused. These verbs are the operator's whole view of it: what exists, killing one,
+// who is allowed to write to a workspace, and forcing a mint pass without waiting for the relay's
+// five minute timer.
+//
+// NOTHING HERE DELETES A ROW. `retire` sets the state, because the row is the reservation: a code
+// handed back to the pool could be minted for a different bot in a different workspace, and mail
+// still addressed to the old one would then reach a stranger. Retiring kills the ADDRESS and not
+// the bot, so the next sweep gives that bot a new one.
+const mailDirectoryFor = (store) => createMailDirectory({ store, domain: mailDomain() });
+
+async function mailList(args) {
+  const store = openLedger();
+  try {
+    const slug = positional(args)[0] ?? null;
+    const rows = store.listMailAddresses(slug);
+    if (rows.length === 0) {
+      out(slug ? `no addresses for ${slug} yet` : "no addresses yet");
+      out("the relay mints them when it sweeps, which is at its start and every five minutes; `mail sweep` asks for one now");
+      return;
+    }
+    // The bot's name is last because it is the one column with no length limit, so everything to
+    // the left of it stays lined up however a customer names their bots.
+    out(`${pad("code", 10)}${pad("address", 34)}${pad("workspace", 18)}${pad("state", 10)}bot`);
+    for (const row of rows) {
+      out(`${pad(row.code, 10)}${pad(row.address, 34)}${pad(row.tenant, 18)}${pad(row.state, 10)}${row.agentName || "(no name)"}`);
+    }
+    out(`${rows.length} address(es) at ${mailDomain()}`);
+  } finally { store.close(); }
+}
+
+async function mailRetire(args) {
+  const code = positional(args)[0] ?? "";
+  if (code.length === 0) die("node cp/cli.mjs mail retire <code>");
+  const store = openLedger();
+  try {
+    const row = store.retireMailAddress(code);
+    if (row == null) die(`no address holds the code ${code}`);
+    out(`${row.address} is retired. Mail to it is refused from now on, and that code is never given to anybody else.`);
+    out(`${row.agentName || "that bot"} gets a fresh address on the relay's next sweep, which is within five minutes.`);
+  } finally { store.close(); }
+}
+
+async function mailSenders(args) {
+  const [group, ...rest] = positional(args);
+  const store = openLedger();
+  try {
+    const directory = mailDirectoryFor(store);
+    // `mail senders <slug>` lists; `mail allow` and `mail only` are their own verbs below.
+    const slug = group ?? "";
+    if (slug.length === 0) die("node cp/cli.mjs mail senders <slug>");
+    const rows = store.listSenders(slug);
+    out(`${slug}: ${directory.approvedSendersOnly(slug) ? "only the addresses below can write to these bots" : "anybody can write to these bots (the default)"}`);
+    for (const row of rows) out(`  ${row.sender}`);
+    if (rows.length === 0) out("  (nobody has been allowed yet)");
+    void rest;
+  } finally { store.close(); }
+}
+
+async function mailAllow(args) {
+  const [slug, address] = positional(args);
+  if (!slug || !address) die("node cp/cli.mjs mail allow <slug> <address>");
+  const store = openLedger();
+  try {
+    const row = store.allowSender(slug, address);
+    if (row == null) die("name a workspace and an email address");
+    out(`${row.sender} may write to ${slug}'s bots`);
+    if (!mailDirectoryFor(store).approvedSendersOnly(slug)) {
+      out("note: this workspace takes mail from anybody today, so the list is not being enforced. `mail only <slug> on` enforces it.");
+    }
+  } finally { store.close(); }
+}
+
+async function mailOnly(args) {
+  const [slug, setting] = positional(args);
+  if (!slug || !["on", "off"].includes(String(setting))) die("node cp/cli.mjs mail only <slug> on|off");
+  const store = openLedger();
+  try {
+    const on = mailDirectoryFor(store).setApprovedSendersOnly(slug, setting === "on", "cli");
+    out(`${slug}: ${on ? "only allowed senders can write to these bots now" : "anybody can write to these bots now"}`);
+    if (on) {
+      out("WARNING: a verification mail from a site nobody has allowed yet will be refused. That is the shape that eats a first sign-up.");
+      out(`allowed today: ${store.listSenders(slug).map((row) => row.sender).join(", ") || "nobody"}`);
+    }
+    out("the relay picks this up on its next sweep, which is within five minutes");
+  } finally { store.close(); }
+}
+
+async function mailSweep() {
+  const answer = await askRelay("POST", "/mail/sweep");
+  for (const row of Array.isArray(answer?.swept) ? answer.swept : []) {
+    out(`${pad(row.slug, 20)}${row.addresses} address(es), ${row.minted} minted this pass`);
+  }
+  out(answer?.directory?.ok
+    ? `the relay re-read the directory: ${answer.directory.addresses} address(es)`
+    : `the relay could not re-read the directory: ${answer?.directory?.why ?? "it did not say"}`);
+}
 
 const [group, action, ...rest] = process.argv.slice(2);
 const commands = {
@@ -1176,6 +1287,12 @@ const commands = {
   "proxy model": proxyModel,
   "proxy catalog": proxyCatalog,
   "proxy default-model": proxyDefaultModel,
+  "mail list": mailList,
+  "mail retire": mailRetire,
+  "mail senders": mailSenders,
+  "mail allow": mailAllow,
+  "mail only": mailOnly,
+  "mail sweep": mailSweep,
   "session verify": sessionVerify,
 };
 const command = commands[`${group} ${action}`];

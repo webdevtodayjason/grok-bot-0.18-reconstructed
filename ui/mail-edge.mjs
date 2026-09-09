@@ -27,11 +27,22 @@
 // duplicate check reads.
 //
 // Nothing here imports anything outside node builtins: the relay has no node_modules at all.
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { appendFile, chmod, chown, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { stateFile } from "./state-dir.mjs";
+// MAIL-2. The half the control plane reads too, moved out whole rather than forked: the Svix
+// verification, the address readers, and the code address. Re-exported below so every caller of
+// this module -- the relay, the gate and the four mail tests -- keeps importing from one place.
+import {
+  MAIL_CODE_RE, SVIX_TOLERANCE_S, bareAddress, codeAddress, domainOf, localpartOf, mailCodeOf,
+  signSvix, svixHeaders, toAddressList, verifySvixSignature,
+} from "./mail-svix.mjs";
+
+export {
+  MAIL_CODE_RE, SVIX_TOLERANCE_S, bareAddress, codeAddress, domainOf, localpartOf, mailCodeOf,
+  signSvix, svixHeaders, toAddressList, verifySvixSignature,
+};
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // The env overrides are for tests, the same way ui/subscriptions.mjs carries one. Under
@@ -157,95 +168,10 @@ export function mailSettingsShape(settings, { webhookUrl = null, addresses = [],
 }
 
 // ---- the Svix signature ------------------------------------------------------------------------
-// Resend signs inbound webhooks with Svix. Ported from ~/code/titanium-mail/apps/web/lib/svix.ts,
-// which is the same three rules written in TypeScript:
-//
-//   signed content = "{svix-id}.{svix-timestamp}.{raw body}"
-//   key            = the base64 bytes of the secret after the "whsec_" prefix
-//   expected       = base64( HMAC-SHA256(key, signed content) )
-//   header         = svix-signature: space-separated "v1,<base64>" entries; other versions ignored
-//   timestamp      = unix seconds, within five minutes either way
-//
-// The raw request bytes as text, never a re-serialized parse: JSON.stringify of a parsed body is a
-// different string and would never verify.
-
-/** Five minutes either way, per the Svix spec. */
-export const SVIX_TOLERANCE_S = 300;
-
-/** The three svix-* headers off a node request, or null when any is missing. */
-export function svixHeaders(headers) {
-  const get = (name) => {
-    const value = headers?.[name] ?? headers?.get?.(name);
-    return Array.isArray(value) ? value[0] : value;
-  };
-  const id = asString(get("svix-id"));
-  const timestamp = asString(get("svix-timestamp"));
-  const signature = asString(get("svix-signature"));
-  if (id.length === 0 || timestamp.length === 0 || signature.length === 0) return null;
-  return { id, timestamp, signature };
-}
-
-const svixKey = (secret) => Buffer.from(
-  String(secret ?? "").startsWith("whsec_") ? String(secret).slice("whsec_".length) : String(secret ?? ""),
-  "base64",
-);
-
-export function verifySvixSignature(secret, headers, rawBody, nowMs = Date.now()) {
-  const seconds = Number.parseInt(String(headers?.timestamp ?? ""), 10);
-  if (!Number.isFinite(seconds)) return { ok: false, reason: "invalid svix-timestamp" };
-  if (Math.abs(nowMs - seconds * 1000) > SVIX_TOLERANCE_S * 1000) {
-    return { ok: false, reason: "svix-timestamp outside tolerance" };
-  }
-  const key = svixKey(secret);
-  if (key.length === 0) return { ok: false, reason: "empty webhook secret" };
-  const expected = createHmac("sha256", key)
-    .update(`${headers.id}.${headers.timestamp}.${rawBody}`, "utf8").digest();
-  for (const part of String(headers.signature ?? "").split(" ")) {
-    const [version, signature] = part.split(",", 2);
-    if (version !== "v1" || !signature) continue;
-    let candidate;
-    try { candidate = Buffer.from(signature, "base64"); } catch { continue; }
-    if (candidate.length === expected.length && timingSafeEqual(candidate, expected)) return { ok: true };
-  }
-  return { ok: false, reason: "no matching v1 signature" };
-}
-
-/** The header value Resend would send. Used by the gate and the tests, never in production. */
-export function signSvix(secret, { id, timestamp }, rawBody) {
-  return `v1,${createHmac("sha256", svixKey(secret)).update(`${id}.${timestamp}.${rawBody}`, "utf8").digest("base64")}`;
-}
+// Moved to ui/mail-svix.mjs and re-exported at the top of this file. The contract, the five rules
+// and the reason the raw bytes are verified rather than a re-serialized parse are written there.
 
 // ---- addresses and routing ---------------------------------------------------------------------
-
-/** "Titan <titan@titanium.bot>" and "titan@titanium.bot" both come out as the address. */
-export function bareAddress(value) {
-  const raw = String(value ?? "").trim();
-  const angled = /<([^>]+)>/.exec(raw);
-  return (angled ? angled[1] : raw).trim();
-}
-
-/** A to field is a string, a comma list, or an array of either. */
-export function toAddressList(value) {
-  const out = [];
-  const push = (entry) => {
-    if (entry == null) return;
-    if (Array.isArray(entry)) { for (const item of entry) push(item); return; }
-    if (typeof entry === "object") { push(entry.address ?? entry.email ?? null); return; }
-    for (const piece of String(entry).split(",")) {
-      const address = bareAddress(piece);
-      if (address.length > 0) out.push(address);
-    }
-  };
-  push(value);
-  return out;
-}
-
-/** The localpart, lowercased, with any +tag taken off. */
-export const localpartOf = (address) => bareAddress(address).split("@")[0].toLowerCase().split("+")[0].trim();
-export const domainOf = (address) => {
-  const parts = bareAddress(address).split("@");
-  return parts.length > 1 ? parts[parts.length - 1].toLowerCase().trim() : "";
-};
 
 /**
  * An agent's own localpart, and the only thing the router matches on, so the address the console
@@ -297,15 +223,25 @@ export function mailAddresses(agents, domain) {
 }
 
 /**
- * Which address the mail was for. The first one at the operator's own domain wins; with none at
- * that domain the first address is used, so a message that reached us through a forward still has
- * a localpart to route on rather than being dropped for a header we do not control.
+ * Which address the mail was for: the first one at the domain we were asked about, and NOTHING
+ * ELSE.
+ *
+ * MAIL-2 took the `list[0]` fallback out, and it was a real leak rather than a tidy-up. Resend's
+ * webhook is account-wide and not domain-scoped, so this account's OTHER domain (anvilmail.io)
+ * arrives at the same door. With the fallback, a message for a recipient at no configured domain
+ * at all was routed on its localpart anyway: it went by name, and failing that to the catch-all,
+ * which on a single-tenant install is Titan. So mail this workspace was never meant to see landed
+ * in the operator's own conversation. A recipient at no configured domain is now refused, the
+ * caller writes a no_route row and says so, and the catch-all is never reached.
+ *
+ * An operator with no domain set at all gets the same refusal, which is the honest answer: nothing
+ * can be routed until the card says which domain this workspace owns.
  */
 export function chooseRecipient(addresses, domain) {
-  const list = addresses.filter((address) => address.length > 0);
-  if (list.length === 0) return null;
-  const ours = String(domain ?? "").toLowerCase();
-  return list.find((address) => ours.length > 0 && domainOf(address) === ours) ?? list[0];
+  const ours = String(domain ?? "").toLowerCase().trim();
+  if (ours.length === 0) return null;
+  return addresses.filter((address) => address.length > 0)
+    .find((address) => domainOf(address) === ours) ?? null;
 }
 
 /**
@@ -334,6 +270,121 @@ export function routeMail({ addresses = [], agents = [], settings = MAIL_DEFAULT
     ?? null;
   if (chosen == null) return null;
   return { agentId: String(chosen.id), agentName: String(chosen.name ?? ""), address: to, localpart };
+}
+
+// ---- the directory router (MAIL-2) ---------------------------------------------------------------
+//
+// Every bot has an address of its own now -- agent<code>@<domain>, six digits the control plane
+// mints once per (workspace, bot) and never reuses -- and this is what reads one. It runs BEFORE
+// routeMail, and the ORDER OF ITS REFUSALS IS THE SECURITY. In order:
+//
+//   1. the recipient is not at the directory's domain      answer nothing, and look nothing up.
+//      Resend's webhook is account-wide, this account also receives anvilmail.io, and a lookup on
+//      a domain we do not own is a lookup somebody else's mail paid for. The caller carries on
+//      with the routing it always had, so a customer's own configured domain still works exactly
+//      as before, catch-all and all.
+//   2. a code localpart      resolved through the directory to a workspace and a bot, and
+//      delivered into THAT workspace's box, which is the whole point: one localpart, one bot, one
+//      customer, whoever else has a bot called Titan.
+//   3. a legacy NAME localpart the old rule would have matched      delivered to that bot with one
+//      plain line saying the address is going away and naming its own code address. A bounce would
+//      lose mail on the morning somebody starts, and a forward needs the send path, which is the
+//      sharpest edge in this design. A dated notice costs four lines and loses nothing.
+//   4. anything else at that domain      200 no_route, a ledger row, and THE CATCH-ALL IS NEVER
+//      REACHED. This is the leak that closes: today agent999999@myagents.email lands in whichever
+//      workspace claims the domain, which is the operator's own Titan.
+//
+// After the stop date a legacy name is refused like anything else, so the date on the notice is a
+// fact rather than a decoration.
+
+/** When name-based addresses stop working. Written into the notice, and enforced. */
+export const MAIL_LEGACY_STOP = "2026-10-01";
+
+/**
+ * The one line prepended to a message that arrived at a name address. It is deliberately written as
+ * the mail system talking and not the sender, because it sits above a fence whose whole job is to
+ * say which words came from a stranger.
+ */
+export function legacyNotice({ address, codeAddress = "", stopDate = MAIL_LEGACY_STOP } = {}) {
+  const own = String(codeAddress ?? "").length > 0
+    ? `Your own address is ${codeAddress}.`
+    : "Your own address has not been made yet; it appears on your card in the console as soon as it has.";
+  return `A note from the mail system, not from whoever wrote to you: this arrived at ${address}, `
+    + `which is an address made out of a name. Addresses like that stop working on ${stopDate}. `
+    + `${own} Use it from now on, and give that one out when you sign up for anything.`;
+}
+
+/**
+ * Whose mail this is, decided against the directory first.
+ *
+ * The answer is a decision and not a delivery, so the caller stays the only thing that talks to a
+ * gateway. Four kinds:
+ *
+ *   elsewhere  not this directory's domain, or no directory configured. Route it the old way.
+ *   code       a bot's own address. route.slug names the workspace, which may not be this one.
+ *   legacy     a name address in THIS workspace, with the line to put above the mail.
+ *   no_route   at the directory's domain and belonging to nobody. Write the row, answer 200.
+ *
+ * directoryRoute is async and may consult the network; directoryAddress answers this workspace's
+ * own bot's code address for the notice, and an empty answer is a fine answer.
+ */
+export async function routeDirectoryFirst({
+  addresses = [], agents = [], settings = MAIL_DEFAULTS,
+  directoryDomain = "", directoryRoute = null, directoryAddress = null,
+  legacyNoticeUntil = MAIL_LEGACY_STOP, now = () => Date.now(),
+} = {}) {
+  const at = (typeof directoryDomain === "function" ? directoryDomain() : directoryDomain);
+  const domain = String(at ?? "").trim().toLowerCase();
+  if (domain.length === 0 || typeof directoryRoute !== "function") {
+    return { kind: "elsewhere", why: "this relay has no address directory" };
+  }
+  // Refused before any lookup, and this line is the refusal: nothing at the directory's domain
+  // means nothing about the directory is read.
+  const to = chooseRecipient(addresses, domain);
+  if (to == null) return { kind: "elsewhere", why: `no recipient at ${domain}` };
+  const localpart = localpartOf(to);
+
+  if (MAIL_CODE_RE.test(localpart)) {
+    const found = await directoryRoute(localpart).catch(() => null);
+    if (found == null) return { kind: "no_route", to, why: "no bot holds that address" };
+    if (found.state === "retired") return { kind: "no_route", to, why: "that address has been retired" };
+    return {
+      kind: "code",
+      to,
+      route: {
+        slug: String(found.slug ?? ""),
+        agentId: String(found.agentId ?? ""),
+        agentName: String(found.agentName ?? ""),
+        address: String(found.address ?? to),
+        localpart,
+      },
+      approvedSendersOnly: found.approvedSendersOnly === true,
+      senders: Array.isArray(found.senders) ? found.senders.map((one) => String(one).toLowerCase()) : [],
+    };
+  }
+
+  // A name, which is the old rule. Only a bot this workspace actually holds, and only until the
+  // stop date: the catch-all is deliberately not consulted, because "somebody guessed a localpart"
+  // is exactly the case that used to land in the operator's Titan.
+  const roster = (Array.isArray(agents) ? agents : []).filter((agent) => !agent?.isGroup);
+  const byId = (id) => roster.find((agent) => String(agent?.id ?? "") === String(id ?? ""));
+  const routed = settings.routes?.[localpart] ?? settings.routes?.[agentLocalpart(localpart)];
+  const named = byId(routed) ?? roster.find((agent) => agentLocalpart(agent?.name) === agentLocalpart(localpart));
+  if (named == null) return { kind: "no_route", to, why: "no bot of that name, and it is not an address" };
+
+  const stop = Date.parse(`${legacyNoticeUntil}T00:00:00Z`);
+  if (Number.isFinite(stop) && now() >= stop) {
+    return { kind: "no_route", to, why: `addresses made out of a name stopped working on ${legacyNoticeUntil}` };
+  }
+  const own = typeof directoryAddress === "function"
+    ? await directoryAddress({ agentId: String(named.id) }).catch(() => "")
+    : "";
+  return {
+    kind: "legacy",
+    to,
+    route: { slug: "", agentId: String(named.id), agentName: String(named.name ?? ""), address: to, localpart },
+    notice: legacyNotice({ address: to, codeAddress: String(own ?? ""), stopDate: legacyNoticeUntil }),
+  };
 }
 
 // ---- the message ------------------------------------------------------------------------------
@@ -533,6 +584,22 @@ export function createMailEdge({
   // domain, by name, or null. A domain belongs to one workspace, and the console is where that is
   // said, because the webhook route on the far side cannot un-say a claim that is already on disk.
   domainClaimedElsewhere = null,
+  // MAIL-2, all four optional and all four absent on a relay with no control plane, which is every
+  // developer Mac. Absent, this edge behaves exactly as MAIL-1 shipped it.
+  //   directoryDomain   the product domain the per-bot codes live at, or a function answering it.
+  //   directoryRoute    async (localpart) -> {slug, agentId, agentName, address, state,
+  //                     approvedSendersOnly, senders} or null. It may refresh from the control
+  //                     plane on a miss; the cooldown for that lives with the caller.
+  //   directoryAddress  async ({agentId}) -> this workspace's own bot's code address, for the
+  //                     retiring notice. "" is a fine answer.
+  //   deliverTo         async ({slug, agentId, prompt, nonce, ledger}) -> {status, text}. How a
+  //                     message reaches a bot in ANOTHER workspace, which this process can do and
+  //                     this module deliberately cannot: the gateway bearers live in server.mjs.
+  directoryDomain = "",
+  directoryRoute = null,
+  directoryAddress = null,
+  deliverTo = null,
+  legacyNoticeUntil = MAIL_LEGACY_STOP,
   now = () => Date.now(),
   log = (line) => console.log(line),
 } = {}) {
@@ -679,15 +746,69 @@ export function createMailEdge({
       log(`mail  could not read the roster, so ${emailId} was not delivered: ${error?.message ?? error}`);
       return sendJson(res, 503, { error: "roster_unavailable" });
     }
-    const route = routeMail({ addresses, agents, settings });
+    // MAIL-2. The directory first, and its refusal order is written on routeDirectoryFirst. An
+    // answer of "elsewhere" means this is not the directory's domain at all, so the routing this
+    // workspace has always had takes it from here and a customer's own domain is untouched.
+    const decision = await routeDirectoryFirst({
+      addresses, agents, settings,
+      directoryDomain, directoryRoute, directoryAddress, legacyNoticeUntil, now,
+    });
+
+    if (decision.kind === "no_route") {
+      log(`mail  ${decision.to} was refused: ${decision.why}`);
+      await record({ emailId, messageId, from, to: decision.to, subject, outcome: "no_route" });
+      return sendJson(res, 200, { ignored: "no_route" });
+    }
+
+    if (decision.kind === "code") {
+      const target = decision.route;
+      // Approved senders, per workspace and OFF everywhere this wave. It is enforced here rather
+      // than left as a field nobody reads, because a switch wired to nothing is worse than no
+      // switch: docs/MAIL.md says which way it is set and why.
+      if (decision.approvedSendersOnly && !decision.senders.includes(String(from).toLowerCase())) {
+        log(`mail  ${target.address} only takes mail from addresses that have been allowed; ${from} is not one`);
+        await record({ emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "sender_not_approved" });
+        return sendJson(res, 200, { ignored: "sender_not_approved" });
+      }
+      const prompt = mailPrompt({
+        to: target.address, from, subject, date: createdAt, messageId,
+        body: mailBodyText(message), attachments,
+        // Its own address, which is the whole of MAIL-2: a bot answers as itself and never as a name.
+        replyAddress: target.address,
+      });
+      const ledger = { emailId, messageId, from, to: target.address, subject, agentName: target.agentName };
+      // deliverTo when the workspace is not this one, which is the ordinary case: one relay holds
+      // every customer's gateway bearer and this module holds none of them.
+      const answer = await (typeof deliverTo === "function"
+        ? deliverTo({ slug: target.slug, agentId: target.agentId, prompt, nonce: `mail:${emailId}`, ledger })
+        : gatewayCall("sendPrompt", { agentId: target.agentId, prompt, clientNonce: `mail:${emailId}` })
+      ).catch((error) => ({ status: 0, text: String(error?.message ?? error), type: "" }));
+      if (answer.status !== 200) {
+        log(`mail  ${emailId} did not reach ${target.agentName} in ${target.slug}: HTTP ${answer.status} ${String(answer.text).slice(0, 200)}`);
+        await record({ emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "send_failed" });
+        return sendJson(res, 200, { ignored: "send_failed" });
+      }
+      await record({ emailId, messageId, from, to: target.address, subject, agentId: target.agentId, agentName: target.agentName, outcome: "delivered" });
+      log(`mail  ${target.address} -> ${target.agentName} in ${target.slug}`);
+      return sendJson(res, 200, { delivered: { agentId: target.agentId, agentName: target.agentName, slug: target.slug } });
+    }
+
+    // A name address in this workspace, on its way out. Delivered as it always was, with one line
+    // above it naming the bot's own address and the date names stop working.
+    const route = decision.kind === "legacy"
+      ? decision.route
+      : routeMail({ addresses, agents, settings });
     if (route == null) {
       await record({ emailId, messageId, from, to: chooseRecipient(addresses, settings.domain) ?? "", subject, outcome: "no_route" });
       return sendJson(res, 200, { ignored: "no_route" });
     }
 
+    const body = decision.kind === "legacy"
+      ? `${decision.notice}\n\n${mailBodyText(message)}`
+      : mailBodyText(message);
     const prompt = mailPrompt({
       to: route.address, from, subject, date: createdAt, messageId,
-      body: mailBodyText(message), attachments,
+      body, attachments,
       replyAddress: agentAddress(route.agentName, settings.domain),
     });
     const answer = await gatewayCall("sendPrompt", {
@@ -699,8 +820,12 @@ export function createMailEdge({
       return sendJson(res, 200, { ignored: "send_failed" });
     }
 
-    await record({ emailId, messageId, from, to: route.address, subject, agentId: route.agentId, agentName: route.agentName, outcome: "delivered" });
-    log(`mail  ${route.address} -> ${route.agentName}`);
+    await record({
+      emailId, messageId, from, to: route.address, subject,
+      agentId: route.agentId, agentName: route.agentName,
+      outcome: decision.kind === "legacy" ? "legacy_name" : "delivered",
+    });
+    log(`mail  ${route.address} -> ${route.agentName}${decision.kind === "legacy" ? " (a name address, retiring)" : ""}`);
     return sendJson(res, 200, { delivered: { agentId: route.agentId, agentName: route.agentName } });
   }
 

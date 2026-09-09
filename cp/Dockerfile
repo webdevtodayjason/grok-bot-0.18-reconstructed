@@ -52,6 +52,14 @@ COPY ui/set-password.mjs /app/ui/set-password.mjs
 # line the image builds and then fails at import on the first sign-in.
 COPY ui/session-token.mjs /app/ui/session-token.mjs
 
+# ui/mail-svix.mjs is copied for the same reason session-token.mjs is: MAIL-2 gives every bot an
+# address at the product domain, the control plane mints and owns that directory, and the relay
+# routes on it. The address readers and the Svix verification are ONE piece of code in ui/ rather
+# than a copy on each side, because two readers of "what is a localpart" is how the two halves come
+# to disagree about whose mail a message is. ui/mail-edge.mjs is deliberately NOT copied: it pulls
+# in ./state-dir.mjs and the relay's whole receive side, none of which this service runs.
+COPY ui/mail-svix.mjs /app/ui/mail-svix.mjs
+
 # ui/login-ledger.mjs is copied because cp/admin.mjs imports the keyed hash and the row shape from
 # it. Both services write down who tried to sign in, and the super admin console shows the two
 # ledgers as one list, so the row shape has to be one shape and the hash has to be one function.

@@ -98,11 +98,17 @@ test("an address is read down to its localpart, tag and display name and all", (
   assert.equal(localpartOf("CHIEFOFSTAFF@titanium.bot"), "chiefofstaff");
 });
 
-test("the address at our own domain wins over whatever else is on the To line", () => {
+test("the address at our own domain wins, and nothing else is a recipient at all", () => {
   assert.equal(chooseRecipient(["someone@gmail.test", "books@titanium.bot"], DOMAIN), "books@titanium.bot");
-  // Nothing at our domain still routes on the first address rather than dropping the mail.
-  assert.equal(chooseRecipient(["someone@gmail.test", "other@x.test"], DOMAIN), "someone@gmail.test");
+  // MAIL-2. Nothing at our domain is refused rather than routed on whatever was first on the line.
+  // Resend's webhook is account-wide, this account also receives anvilmail.io, and the old
+  // `list[0]` fallback took a message for a domain we do not own, read its localpart, and handed it
+  // to the catch-all -- which on a single-tenant install is the operator's own Titan.
+  assert.equal(chooseRecipient(["someone@gmail.test", "other@x.test"], DOMAIN), null);
   assert.equal(chooseRecipient([], DOMAIN), null);
+  // And with no domain configured nothing routes, which is the honest answer: until the card says
+  // which domain this workspace owns, no recipient belongs to it.
+  assert.equal(chooseRecipient(["books@titanium.bot"], ""), null);
 });
 
 test("routing goes name, then a hand-written route, then catch-all, then Titan, then nobody", () => {

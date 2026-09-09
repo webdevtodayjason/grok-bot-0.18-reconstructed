@@ -65,8 +65,8 @@ import {
   newJobToken, resolveJobToken, routeJobBus,
 } from "./job-bus-edge.mjs";
 import {
-  MAIL_BODY_LIMIT, MAIL_LEDGER_FILE, MAIL_SETTINGS_FILE, createMailEdge, domainOf, readMailSettings,
-  svixHeaders, toAddressList, verifySvixSignature,
+  MAIL_BODY_LIMIT, MAIL_LEDGER_FILE, MAIL_SETTINGS_FILE, appendMailLedger, createMailEdge, domainOf,
+  mailLedgerRow, readMailSettings, svixHeaders, toAddressList, verifySvixSignature,
 } from "./mail-edge.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
 import { createLoginLedger, filterAttempts } from "./login-ledger.mjs";
@@ -79,7 +79,7 @@ import {
 import { NOT_AVAILABLE, createDockerProbe, notAvailable } from "./docker-edge.mjs";
 import { chmod, chown, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 
@@ -1933,10 +1933,295 @@ function mailEdgeFor(t) {
       }
       return null;
     },
+    // MAIL-2. The directory, and the door into another workspace's box. All four are read through
+    // a function rather than captured, so a sweep that lands after this edge was built is a sweep
+    // this edge sees.
+    directoryDomain: () => mailDirectoryDomain(),
+    directoryRoute: (localpart) => mailDirectoryRoute(localpart),
+    directoryAddress: ({ agentId }) => Promise.resolve(mailAddressOf(t.slug, agentId)),
+    deliverTo: (args) => mailDeliverTo(args, t.slug),
     log: (line) => console.log(line),
   });
   mailEdges.set(t.slug, { settingsFile: t.mailSettingsFile, edge });
   return edge;
+}
+
+// ---- the per-bot address directory (MAIL-2, docs/MAIL.md) ------------------------------------
+//
+// Every bot has an address of its own: agent<code>@<domain>, six digits the CONTROL PLANE mints
+// once per (workspace, bot) and never reuses. This relay does three things with that and owns none
+// of it: it sweeps each workspace's roster and asks the control plane to mint what is missing, it
+// caches the answer so a code still routes while the control plane is down, and it delivers a
+// message that resolved to another workspace into that workspace's box.
+//
+// WHY THE CACHE IS ON DISK. The registry already survives a control plane outage by serving its
+// last read from memory; this goes one step further and writes the answer down, because a relay
+// restarted during an outage has no memory to serve from and mail would stop routing entirely for
+// the length of it. No secret is in this file: it is codes, addresses, bot names and slugs, all of
+// which are printed on the agent cards in the console anyway.
+const MAIL_DIRECTORY_FILE = process.env.SAND_UI_MAIL_DIRECTORY_FILE?.trim() || stateFile("mail-directory.json", HERE);
+// Five minutes, so a bot created at 08:00 has a working address by 08:05 with nobody touching the
+// box it lives in. Plus one sweep at start, plus one refresh on a miss.
+const MAIL_SWEEP_MS = 5 * 60_000;
+// A miss is somebody guessing an address far more often than it is a code we have not read yet, so
+// the refresh a miss triggers is rate limited hard. Thirty seconds is one control plane read per
+// half minute in the worst case, and it is short enough that a bot minted a moment ago answers.
+const MAIL_MISS_COOLDOWN_MS = 30_000;
+// RICHARD'S BOX IS A REAL CUSTOMER AND READ-ONLY THIS WAVE. His codes are minted and they route,
+// because routing is decided here and not inside a box; what is skipped is the setAgentMail push,
+// which writes a file inside the box and is the only part of this that touches one. His Titan
+// therefore does not know its own address until his box is next swapped, and it can still be
+// written to. Named here rather than passed in so the reason travels with the name.
+const MAIL_NO_PUSH_SLUGS = new Set(["richard-avery"]);
+
+let mailDirectoryState = { domain: "", tenants: {}, measuredAt: "", readAt: 0, source: "never read" };
+let mailDirectoryLoadedFromDisk = false;
+let mailLastMissRefresh = 0;
+let mailSweepRunning = false;
+
+/** The last answer, from disk, once, so a relay restarted during an outage still routes codes. */
+function mailDirectoryFromDisk() {
+  if (mailDirectoryLoadedFromDisk) return;
+  mailDirectoryLoadedFromDisk = true;
+  try {
+    const parsed = JSON.parse(readFileSync(MAIL_DIRECTORY_FILE, "utf8"));
+    if (parsed?.tenants == null || typeof parsed.tenants !== "object") return;
+    mailDirectoryState = {
+      domain: String(parsed.domain ?? ""),
+      tenants: parsed.tenants,
+      measuredAt: String(parsed.measuredAt ?? ""),
+      readAt: 0,
+      source: `${MAIL_DIRECTORY_FILE}, measured ${String(parsed.measuredAt ?? "at an unknown time")}`,
+    };
+    console.log(`mail  the address directory was read back off the disk (${mailAddressCount()} address(es))`);
+  } catch { /* no file yet, which is every first start */ }
+}
+
+const mailAddressCount = () => Object.values(mailDirectoryState.tenants ?? {})
+  .reduce((total, entry) => total + (Array.isArray(entry?.addresses) ? entry.addresses.length : 0), 0);
+
+/** What the router reads. Never throws, and never empty once anything has ever been read. */
+function mailDirectory() {
+  mailDirectoryFromDisk();
+  return mailDirectoryState;
+}
+
+/** The product domain codes live at, or "" when there is no control plane to have one. */
+function mailDirectoryDomain() { return mailDirectory().domain; }
+
+function mailDirectoryWrite() {
+  try {
+    writeFileSync(MAIL_DIRECTORY_FILE, JSON.stringify({
+      domain: mailDirectoryState.domain,
+      tenants: mailDirectoryState.tenants,
+      measuredAt: mailDirectoryState.measuredAt,
+    }, null, 2), { mode: 0o600 });
+    void ownLikeParent(MAIL_DIRECTORY_FILE);
+  } catch (error) { console.log(`mail  could not write ${MAIL_DIRECTORY_FILE}: ${error?.message ?? error}`); }
+}
+
+/** One GET at the control plane, behind CP_RELAY_TOKEN, which is the credential this relay already
+ * holds for the registry. A failure keeps the last good answer rather than emptying it. */
+async function mailDirectoryRefresh() {
+  if (RELAY == null) return { ok: false, why: "this relay has no control plane" };
+  let response;
+  try {
+    response = await fetch(`${RELAY.cpUrl}/v1/relay/mail/directory`, {
+      headers: { authorization: `Bearer ${RELAY.relayToken}`, accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (error) { return { ok: false, why: error?.name === "TimeoutError" ? "timed out" : "no answer" }; }
+  if (response.status !== 200) return { ok: false, why: `HTTP ${response.status}` };
+  let body = null;
+  try { body = await response.json(); } catch { body = null; }
+  if (body?.tenants == null || typeof body.tenants !== "object") return { ok: false, why: "the answer carried no directory" };
+  mailDirectoryFromDisk();
+  mailDirectoryState = {
+    domain: String(body.domain ?? ""),
+    tenants: body.tenants,
+    measuredAt: String(body.measuredAt ?? new Date().toISOString()),
+    readAt: Date.now(),
+    source: "the control plane",
+  };
+  mailDirectoryWrite();
+  return { ok: true, addresses: mailAddressCount() };
+}
+
+/** A localpart against the cache. Sync, so the hot path costs one object walk and no await. */
+function mailDirectoryLookup(localpart) {
+  const want = String(localpart ?? "").toLowerCase();
+  const state = mailDirectory();
+  for (const [slug, entry] of Object.entries(state.tenants ?? {})) {
+    for (const row of Array.isArray(entry?.addresses) ? entry.addresses : []) {
+      if (String(row?.address ?? "").split("@")[0].toLowerCase() !== want) continue;
+      return {
+        slug,
+        agentId: String(row.agentId ?? ""),
+        agentName: String(row.agentName ?? ""),
+        address: String(row.address ?? ""),
+        state: String(row.state ?? "active"),
+        approvedSendersOnly: entry?.approvedSendersOnly === true,
+        senders: Array.isArray(entry?.senders) ? entry.senders : [],
+      };
+    }
+  }
+  return null;
+}
+
+/** The router's own reader: the cache, then ONE refresh on a miss behind the cooldown. */
+async function mailDirectoryRoute(localpart) {
+  const found = mailDirectoryLookup(localpart);
+  if (found != null) return found;
+  const since = Date.now() - mailLastMissRefresh;
+  if (since < MAIL_MISS_COOLDOWN_MS) return null;
+  mailLastMissRefresh = Date.now();
+  const answer = await mailDirectoryRefresh();
+  if (!answer.ok) console.log(`mail  the address directory could not be refreshed: ${answer.why}`);
+  return mailDirectoryLookup(localpart);
+}
+
+/** One workspace's own bot's code address, for the retiring notice on a name address. */
+function mailAddressOf(slug, agentId) {
+  const entry = mailDirectory().tenants?.[String(slug ?? "")];
+  const row = (Array.isArray(entry?.addresses) ? entry.addresses : [])
+    .find((one) => String(one?.agentId ?? "") === String(agentId ?? "") && String(one?.state ?? "active") !== "retired");
+  return String(row?.address ?? "");
+}
+
+/**
+ * A message that resolved to a bot in ANOTHER workspace, delivered into that workspace's box.
+ *
+ * This is the one thing ui/mail-edge.mjs cannot do and deliberately does not try to: the gateway
+ * bearers are per tenant and they live in this process. The row is mirrored into the receiving
+ * workspace's own ledger as well, so the customer's mail card shows what arrived for their bots
+ * rather than only the door it came through showing it.
+ */
+async function mailDeliverTo({ slug, agentId, prompt, nonce, ledger = {} }, fromSlug = "") {
+  const t = contextOf(slug);
+  if (t == null) return { status: 503, text: `${slug} is not a workspace this console can reach`, type: "application/json" };
+  const answer = await jobBusCall(t, "sendPrompt", { agentId, prompt, clientNonce: nonce })
+    .catch((error) => ({ status: 0, text: String(error?.message ?? error), type: "" }));
+  if (String(slug) !== String(fromSlug)) {
+    t.ensureDir();
+    await appendMailLedger(mailLedgerRow({
+      ...ledger, agentId,
+      outcome: answer.status === 200 ? "delivered" : "send_failed",
+    }), { file: t.mailLedgerFile, ownLikeParent })
+      .catch((error) => console.log(`mail  could not write ${slug}'s inbox ledger: ${error?.message ?? error}`));
+  }
+  return answer;
+}
+
+/**
+ * The sweep: every workspace this console serves, its roster read, its missing codes minted, and
+ * its addresses pushed into its box.
+ *
+ * setAgentMail is a host command that may not exist yet -- a box on an older bundle answers
+ * "unknown gateway method" -- and that is FINE and is why the push is swallowed rather than
+ * retried. Delivery never depends on that file; only the sentence Titan says about his own address
+ * does. It is what lets the rollout be control plane, then host swaps, then relay, with mail
+ * working at every step.
+ */
+async function mailMintSweep(reason = "the timer") {
+  if (RELAY == null) return { ok: false, why: "this relay has no control plane" };
+  if (mailSweepRunning) return { ok: false, why: "a sweep is already running" };
+  mailSweepRunning = true;
+  const swept = [];
+  try {
+    // The control plane FIRST, and nothing else happens if it does not answer.
+    //
+    // This is an order and not a tidy-up. A roster read is a call into every customer's box, and
+    // there is nothing to do with the answer when the mint that follows it cannot be posted: a
+    // control plane outage would otherwise cost one gateway call per customer every five minutes
+    // for the length of it, for no result. Measured through tests/relay-one-console, which counts
+    // the calls a box receives: with the control plane dead this now makes none at all.
+    const warmed = await mailDirectoryRefresh();
+    if (!warmed.ok) {
+      console.log(`mail  the control plane did not answer (${warmed.why}), so no roster was read `
+        + `and no address was minted this pass; ${mailAddressCount()} address(es) still route from the last read`);
+      return { ok: false, why: warmed.why, swept };
+    }
+    for (const entry of registry.all()) {
+      if (entry.reachable === false) continue;
+      const t = contextOf(entry.slug);
+      if (t == null) continue;
+      let agents = [];
+      try {
+        const answer = await jobBusCall(t, "listAgents", {});
+        if (answer.status !== 200) throw new Error(`listAgents answered HTTP ${answer.status}`);
+        const body = JSON.parse(answer.text);
+        agents = Array.isArray(body) ? body : Array.isArray(body?.agents) ? body.agents : [];
+      } catch (error) {
+        console.log(`mail  ${entry.slug}'s roster could not be read, so no address was minted for it: ${error?.message ?? error}`);
+        continue;
+      }
+      let minted;
+      try {
+        const response = await fetch(`${RELAY.cpUrl}/v1/relay/mail/mint`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${RELAY.relayToken}`, "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({ slug: entry.slug, agents: agents.map((agent) => ({ id: agent?.id, name: agent?.name, isGroup: agent?.isGroup === true })) }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
+        minted = await response.json();
+      } catch (error) {
+        console.log(`mail  the control plane did not mint addresses for ${entry.slug}: ${error?.message ?? error}`);
+        continue;
+      }
+      const addresses = Array.isArray(minted?.addresses) ? minted.addresses : [];
+      swept.push({ slug: entry.slug, addresses: addresses.length, minted: Number(minted?.minted ?? 0) });
+
+      if (MAIL_NO_PUSH_SLUGS.has(entry.slug)) {
+        console.log(`mail  ${entry.slug} holds ${addresses.length} address(es) and they route; nothing was written inside that box, which is read-only this wave`);
+        continue;
+      }
+      // The box's own copy, so the prompt can say what this bot's address is without a network
+      // call. An older bundle has no such command and says so; that is not a failure worth a line
+      // every five minutes, so it is counted and said once per sweep.
+      const push = await jobBusCall(t, "setAgentMail", {
+        domain: String(minted?.domain ?? ""),
+        canSend: false,
+        addresses: addresses.filter((row) => row.state !== "retired")
+          .map((row) => ({ agentId: row.agentId, code: row.code, address: row.address })),
+      }).catch((error) => ({ status: 0, text: String(error?.message ?? error), type: "" }));
+      if (push.status !== 200) {
+        console.log(`mail  ${entry.slug}'s box did not take the address list (HTTP ${push.status} ${String(push.text).slice(0, 120)}); `
+          + "delivery is unaffected, only what its bots can say about their own address");
+      }
+    }
+    // Re-read only when something was actually minted: the warm read at the top of this function
+    // is already this pass's directory otherwise.
+    const minted = swept.reduce((total, row) => total + row.minted, 0);
+    const refreshed = minted > 0 ? await mailDirectoryRefresh() : warmed;
+    console.log(`mail  swept ${swept.length} workspace(s) for addresses (${reason}); ${minted} minted, `
+      + (refreshed.ok ? `${refreshed.addresses} in the directory` : `the directory could not be re-read: ${refreshed.why}`));
+    return { ok: true, swept, directory: refreshed };
+  } finally { mailSweepRunning = false; }
+}
+
+/** One sweep at start and one every five minutes. Never awaited into the listen. */
+function mailSweepStart() {
+  if (RELAY == null) return;
+  void mailMintSweep("this relay started");
+  setInterval(() => { void mailMintSweep("the timer"); }, MAIL_SWEEP_MS).unref();
+}
+
+/**
+ * POST /mail/sweep, for `cp mail sweep`. Behind CP_RELAY_TOKEN, which is the one credential these
+ * two services already share, and mounted beside the webhook rather than behind the console login
+ * because the caller is the control plane and not a person.
+ */
+async function handleMailSweepRoute(req, res) {
+  const expected = String(RELAY?.relayToken ?? "");
+  if (expected.length === 0) return fail(res, 404, "not found");
+  if (req.method !== "POST") return fail(res, 405, "POST", { allow: "POST" });
+  const header = String(req.headers.authorization ?? "");
+  const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
+  if (presented.length === 0 || !safeEqual(presented, expected)) return fail(res, 401, "unauthorized");
+  const answer = await mailMintSweep("the operator asked for it");
+  res.writeHead(answer.ok ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify(answer));
 }
 
 // ---- POST /hooks/resend, for a console with more than one tenant on it ------------------------
@@ -2218,6 +2503,10 @@ const server = createServer(async (req, res) => {
     // webhook carries no cookie and no bearer. Its credential is the Svix signature on the body,
     // which the mail edge verifies before it reads a single field. MAIL-1.
     if (url.pathname === "/hooks/resend") return await handleMailWebhook(req, res);
+    // MAIL-2. The control plane asking this relay to mint the addresses a new bot is missing, out
+    // of band from the five minute timer. Its credential is CP_RELAY_TOKEN, the same one the two
+    // routes below take, so it sits here rather than behind the console login.
+    if (url.pathname === "/mail/sweep") return await handleMailSweepRoute(req, res);
     // Before the console's login as well, and behind a credential the console session cannot
     // present: this is the CONTROL PLANE asking the relay for the two things only the relay can
     // see. The failed sign-in ledger, because a refusal happens at this door and never reaches the
@@ -2832,6 +3121,11 @@ if (String(process.env.TITAN_JOB_TOKEN ?? "").trim().length > 0) {
   const operator = contextOf(OPERATOR_SLUG);
   if (operator != null) void armJobBus(operator, "TITAN_JOB_TOKEN is set in the environment");
 }
+// MAIL-2. One sweep now and one every five minutes: each workspace's roster read, its missing
+// addresses minted at the control plane, and the list pushed into its box. Not awaited, for the
+// same reason the job bus arm above is not: a control plane or a gateway that is not up yet must
+// not stop this console coming up, and the sweep logs either way.
+mailSweepStart();
 server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${OPERATOR_GATEWAY}${OPERATOR_TOKEN.length > 0 ? " (bearer)" : " (no auth)"} `

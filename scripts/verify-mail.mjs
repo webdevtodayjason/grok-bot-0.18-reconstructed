@@ -15,6 +15,20 @@
 //   replay    the same email_id again answers 200 duplicate, and is not delivered twice
 //   clean     the settings are put back and both secrets are cleared, whatever happened above
 //
+// --directory adds the MAIL-2 leg: every bot has an address of its own, agent<code>@<domain>, and
+// the refusal order that goes with it. It stands up a STUB CONTROL PLANE of its own (the real
+// cp/mail.mjs and cp/store.mjs over an in-memory database, so the minting under test is the
+// minting that ships), asks the relay to sweep, and then proves three things through the public
+// hook: a code address reaches the bot that holds it, an address nobody holds answers no_route and
+// reaches nothing, and a name address still arrives carrying its retiring line. It needs the relay
+// to have been started pointing at that stub:
+//
+//   CP_URL=http://127.0.0.1:7810 CP_RELAY_TOKEN=<32+ chars> node ui/server.mjs
+//   node scripts/verify-mail.mjs --url http://127.0.0.1:7777 --stub --directory --cp-port 7810
+//
+// If the relay is pointed somewhere else the sweep reaches nothing and this leg says so rather
+// than passing on a directory nobody read.
+//
 // The mutating legs need --stub, because they write this relay's real mail settings: the gate
 // stands up a tiny HTTP server of its own serving one synthetic received email and one attachment
 // list. Without --stub only the non-mutating legs run, which is what a production relay that is
@@ -52,6 +66,10 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
     "synthetic email is delivered to the first agent and lands in the ledger, a forged signature",
     "is 401, a replay is a duplicate, and the settings are restored with both secrets cleared.",
     "",
+    "--directory adds the per-bot address legs (MAIL-2). It needs the relay started with",
+    "CP_URL pointing at --cp-port on this machine and CP_RELAY_TOKEN set to the same value this",
+    "gate is given (--relay-token, or CP_RELAY_TOKEN in the environment).",
+    "",
     "--stub runs the mutating legs against a stub Resend this gate starts locally. It is refused",
     "unless --url is loopback, neither secret is stored on that relay, and the relay was started",
     "with GROK_BOT_MAIL_API_BASE pointing at a loopback address, which is where the stub listens.",
@@ -72,6 +90,10 @@ const flag = (name, fallback = null) => {
 
 const BASE = String(flag("url", process.env.MAIL_GATE_URL ?? "http://127.0.0.1:7777")).replace(/\/+$/, "");
 const STUB = process.argv.includes("--stub");
+// MAIL-2. The per-bot address legs, and where this gate's own stub control plane listens.
+const DIRECTORY = process.argv.includes("--directory");
+const CP_PORT = Number(flag("cp-port", process.env.MAIL_GATE_CP_PORT ?? "7810"));
+const CP_TOKEN = String(flag("relay-token", process.env.CP_RELAY_TOKEN ?? ""));
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 const hostOf = (value) => { try { return new URL(value).hostname.toLowerCase(); } catch { return ""; } };
 const isLoopback = (value) => LOOPBACK.has(hostOf(value));
@@ -289,8 +311,13 @@ try {
   const row = (after.body?.recent ?? []).find((entry) => entry.email_id === EMAIL_ID);
   check(row != null, "the ledger row is on GET /mail/settings.recent", JSON.stringify((after.body?.recent ?? [])[0] ?? null));
   if (row != null) {
-    check(row.outcome === "delivered" && row.agentId === target.agentId,
-      "and it names the agent it went to and says it was delivered", JSON.stringify(row));
+    // MAIL-2: this leg addresses the agent by NAME, and a name address at a domain the directory
+    // covers is delivered with its retiring notice and written down as legacy_name. Both outcomes
+    // are a delivery to the right agent, which is what this line is checking; which of the two it
+    // is depends on whether this relay has a directory yet, and the --directory step below is what
+    // measures that on purpose.
+    check(["delivered", "legacy_name"].includes(row.outcome) && row.agentId === target.agentId,
+      "and it names the agent it went to and says it arrived", JSON.stringify(row));
     check(!JSON.stringify(row).includes(BODY_LINE), "and it carries no body text", JSON.stringify(row));
   }
   check(!JSON.stringify(after.body ?? {}).includes(secret) && !JSON.stringify(after.body ?? {}).includes("re_gate_"),
@@ -311,6 +338,112 @@ try {
     "the same email_id again answers 200 duplicate", `HTTP ${replay.status} ${JSON.stringify(replayBody)}`);
   const rows = ((await readSettings()).body?.recent ?? []).filter((entry) => entry.email_id === EMAIL_ID);
   check(rows.length === 1, "and it wrote no second ledger row", `${rows.length} row(s)`);
+
+  // ---- the per-bot address directory (MAIL-2) ---------------------------------------------------
+  if (DIRECTORY) {
+    step("every bot has an address of its own");
+    if (CP_TOKEN.length < 32) {
+      check(false, "the relay credential is readable",
+        "pass --relay-token, or set CP_RELAY_TOKEN, to the same value the relay under test was started with. "
+        + "It is what opens the sweep route and the stub control plane below.");
+    } else {
+      const { openStore } = await import("../cp/store.mjs");
+      const { createMailDirectory } = await import("../cp/mail.mjs");
+      const store = openStore({ file: ":memory:" });
+      const directory = createMailDirectory({ store, domain: stubDomain });
+      const seen = { mint: [], directory: 0 };
+      const cp = createServer((req, res) => {
+        let raw = "";
+        req.on("data", (chunk) => { raw += chunk; });
+        req.on("end", () => {
+          const url = new URL(req.url, "http://cp.invalid");
+          const send = (status, body) => {
+            res.writeHead(status, { "content-type": "application/json" });
+            res.end(JSON.stringify(body));
+          };
+          if (String(req.headers.authorization ?? "") !== `Bearer ${CP_TOKEN}`) return send(401, { error: "unauthorized" });
+          // The registry route answers an empty fleet: the relay under test keeps serving its own
+          // workspace from its own environment, which is the whole compatibility story.
+          if (url.pathname === "/v1/relay/tenants") return send(200, { tenants: [], skipped: [] });
+          if (url.pathname === "/v1/relay/mail/directory") {
+            seen.directory += 1;
+            const slug = url.searchParams.get("slug");
+            return send(200, directory.directory(slug && slug.length > 0 ? slug : null));
+          }
+          if (url.pathname === "/v1/relay/mail/mint") {
+            let parsed; try { parsed = JSON.parse(raw || "{}"); } catch { parsed = {}; }
+            seen.mint.push(String(parsed.slug ?? ""));
+            return send(200, directory.mint(parsed.slug, parsed.agents));
+          }
+          return send(404, { error: "not_found" });
+        });
+      });
+      try {
+        await new Promise((resolve, reject) => { cp.once("error", reject); cp.listen(CP_PORT, "127.0.0.1", resolve); });
+        const swept = await hit("/mail/sweep", { method: "POST", headers: { authorization: `Bearer ${CP_TOKEN}` } });
+        const sweptBody = await swept.json().catch(() => null);
+        check(swept.status === 200 && seen.mint.length > 0,
+          "the relay swept its workspaces against this gate's control plane",
+          `HTTP ${swept.status} ${JSON.stringify(sweptBody)}; if nothing was minted the relay is pointed at a `
+          + `different control plane. Start it with CP_URL=http://127.0.0.1:${CP_PORT} and the same CP_RELAY_TOKEN.`);
+
+        const rows = store.listMailAddresses().filter((row) => row.state === "active");
+        check(rows.length > 0, "and every bot on it now holds a six digit address",
+          rows.map((row) => `${row.agentName}=${row.address}`).join(" "));
+        for (const row of rows) {
+          check(/^agent\d{6}@/.test(row.address), "no address carries a name", row.address);
+        }
+        if (rows.length > 0) {
+          const mine = rows[0];
+          const codeId = `${EMAIL_ID}_code`;
+          const toCode = JSON.stringify({
+            type: "email.received", created_at: new Date().toISOString(),
+            data: { email_id: codeId, to: [mine.address], from: "gate@example.invalid", subject: "verify-mail to a code address" },
+          });
+          const delivered = await signedPost(toCode, secret);
+          const deliveredBody = await delivered.json().catch(() => null);
+          check(delivered.status === 200 && deliveredBody?.delivered?.agentId === mine.agentId,
+            `a message to ${mine.address} reaches ${mine.agentName || "that bot"}`,
+            `HTTP ${delivered.status} ${JSON.stringify(deliveredBody)}`);
+
+          // The leak that closes. An address nobody holds is nobody's, and the catch-all -- which
+          // on a relay claiming this domain is its own Titan -- is never reached.
+          const nobodyId = `${EMAIL_ID}_nobody`;
+          const toNobody = JSON.stringify({
+            type: "email.received", created_at: new Date().toISOString(),
+            data: { email_id: nobodyId, to: [`agent999999@${stubDomain}`], from: "gate@example.invalid", subject: "verify-mail to nobody" },
+          });
+          const refused = await signedPost(toNobody, secret);
+          const refusedBody = await refused.json().catch(() => null);
+          check(refused.status === 200 && refusedBody?.ignored === "no_route",
+            "an address nobody holds answers no_route and reaches no agent at all",
+            `HTTP ${refused.status} ${JSON.stringify(refusedBody)}`);
+
+          // A name address still arrives, and the ledger says which kind of arrival it was.
+          const legacyId = `${EMAIL_ID}_legacy`;
+          const toName = JSON.stringify({
+            type: "email.received", created_at: new Date().toISOString(),
+            data: { email_id: legacyId, to: [`${String(target.address).split("@")[0]}@${stubDomain}`], from: "gate@example.invalid", subject: "verify-mail to a name" },
+          });
+          const legacy = await signedPost(toName, secret);
+          const legacyBody = await legacy.json().catch(() => null);
+          check(legacy.status === 200 && legacyBody?.delivered?.agentId === target.agentId,
+            "a name address still arrives while it is being retired",
+            `HTTP ${legacy.status} ${JSON.stringify(legacyBody)}`);
+          const ledger = (await readSettings()).body?.recent ?? [];
+          const kindOf = (id) => ledger.find((row) => row.email_id === id)?.outcome ?? "no row";
+          check(kindOf(codeId) === "delivered", "the ledger calls the code address delivered", kindOf(codeId));
+          check(kindOf(nobodyId) === "no_route", "and the unknown address no_route", kindOf(nobodyId));
+          check(kindOf(legacyId) === "legacy_name", "and the name address legacy_name, which is what dates it", kindOf(legacyId));
+        }
+      } catch (error) {
+        check(false, "the address legs ran to the end", String(error?.message ?? error));
+      } finally {
+        cp.close();
+        store.close();
+      }
+    }
+  }
 
   step("the receiving switch");
   // The card says "Mail sent to your agents is not being taken in" when this is off, so the hook

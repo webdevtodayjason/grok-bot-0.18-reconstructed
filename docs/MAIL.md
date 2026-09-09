@@ -1,4 +1,11 @@
-# Agent email (MAIL-1)
+# Agent email (MAIL-1, MAIL-2)
+
+> **MAIL-2 changed the addresses.** Every bot now has an address of its own at the product domain,
+> `agent<code>@myagents.email`, where the code is six digits the control plane mints once per bot
+> and never reuses. Addresses made out of a name are being retired and stop working on
+> **2026-10-01**. Section 2b is the whole of it; the rest of this document is the receive side,
+> which is unchanged.
+
 
 Every agent gets an email address at your own domain. Mail sent to one of those addresses lands in
 that agent's conversation as a message it can act on, and the agent writes back from the same
@@ -92,6 +99,119 @@ In this order, and the first one that answers wins:
    whichever agent happens to be first on the roster.
 
 When a message has several To addresses, the first one at your domain is the one it is routed on.
+
+---
+
+## 2b. Per-bot addresses (MAIL-2)
+
+### The address
+
+`agent<code>@myagents.email`. The code is **six digits**, minted once per (workspace, bot) by the
+control plane, and never handed to anybody else.
+
+| Bot | Workspace | Address |
+|---|---|---|
+| Titan | demo | `agent417265@myagents.email` |
+| Titan | richard-avery | `agent839014@myagents.email` |
+
+Two Titans, two addresses, and **no address carries a name**. That is the whole point. A name is
+not unique across customers, so `titan@myagents.email` was ambiguous the moment the second
+workspace had a Titan; and a name-based address is guessable, which is how mail for a localpart
+nobody owned came to land in whichever workspace claimed the domain.
+
+The address is on the bot's card in the console, and the bot itself is told what it is, so it can
+say it when somebody asks.
+
+### Who mints it, and when
+
+The **control plane** owns the directory: the code, the workspace, the bot id, its display name,
+when it was made, and whether it is active or retired. Nothing else is in it. No Resend key ever
+reaches that service and no webhook lands on it.
+
+The **relay** sweeps at its own start and every five minutes after: it reads each workspace's
+roster, posts it to the control plane, and gets that workspace's directory back. A bot created at
+08:00 has a working address by 08:05 with nobody touching the box it lives in. `node cp/cli.mjs
+mail sweep` asks for a pass right now.
+
+A bot that already has an address gets the same one back for ever. Renaming a bot moves the display
+name and never the address.
+
+### Who a message goes to, in this order
+
+The order is the security, so it is written as an order:
+
+1. **The recipient is not at `myagents.email`.** Nothing about the directory is read, and the
+   message is routed by the workspace's own rules in section 2 — which is what keeps a customer's
+   own domain, and its catch-all, working exactly as before. This is first because Resend's webhook
+   is **account-wide and not domain-scoped**: the same account receives `anvilmail.io`, and those
+   messages arrive at the same door.
+2. **A code localpart.** Looked up in the directory, and delivered into **that workspace's** box —
+   which may not be the workspace that received the webhook. One relay holds every customer's
+   gateway bearer, so the workspace a message belongs to is decided by the directory and never by
+   who claimed the domain. A retired code is refused.
+3. **A name localpart the old rule would have matched.** Delivered to that bot with one plain line
+   above the message naming its own address and the date name addresses stop working. Written down
+   as `legacy_name`. After **2026-10-01** it is refused like anything else.
+4. **Anything else at that domain.** `200 no_route`, a ledger row, and **the catch-all is never
+   reached**. Before MAIL-2, `agent999999@myagents.email` was handed to the catch-all, which on the
+   workspace claiming the domain is its own Titan.
+
+Deliver-with-a-notice rather than a bounce, deliberately: `titan@myagents.email` is an address that
+is already written down in people's heads and may be on a signup form. A bounce loses that mail; a
+forward needs the send path, which is the sharpest edge in this design. A dated line costs four
+lines of code and loses nothing.
+
+### Approved senders
+
+Per workspace, and **off for every workspace**, including new ones. On means only addresses
+somebody has allowed can write to that workspace's bots, and on-by-default is exactly what would
+eat the first verification mail a new customer asks for.
+
+```
+node cp/cli.mjs mail senders demo
+node cp/cli.mjs mail allow demo noreply@stripe.com
+node cp/cli.mjs mail only demo on
+```
+
+The one-click "allow this sender" on a delivered message is filed as MAIL-2b; today it is these
+three commands.
+
+### What the control plane holds, and what it never holds
+
+Holds: the code, the workspace, the bot id and display name, the date, the state, the allowed-sender
+list and the per-workspace switch. Never holds: a Resend key, a webhook signing secret, a gateway
+token, or the text of any message. The Resend credentials stay in the relay's own settings store,
+where they were, and the webhook still arrives at the relay.
+
+### Sending, as it is today
+
+**Unchanged by this wave.** An agent sends by posting to Resend from its own shell with a key the
+operator put there, and that key exists on exactly one box. So the address list pushed into every
+box carries `canSend: false`, and a bot tells the truth when it is asked whether it can send.
+
+The reason it is not more than that yet: a Resend key scoped to `myagents.email` can send **as any
+address at that domain**, so copying it into tenant boxes would let every customer send as every
+other customer and as Titan. The only sound shape is a relay route that holds the already-stored
+key and forces the From to the calling bot's own code address, with one row written per send. That
+route is filed and not shipped; `mail_send_log` in the control plane's database is the table it
+writes to when it lands.
+
+### What bites
+
+- **Resend's webhook is account-wide, not per domain.** Everything this account receives arrives at
+  the same URL, which is why refusal 1 above exists and comes first.
+- **An attachment's `download_url` ages out.** A confirmation code inside an attachment can become
+  unreadable if the bot waits. The prompt prints the expiry.
+- **A control plane outage stops new codes being minted**, but not delivery: the relay writes the
+  last good directory to `mail-directory.json` in its state directory (0600) and serves it. Measured
+  on this Mac 2026-09-09: with no control plane listening at all, a restarted relay read 22
+  addresses off that file and delivered a code address to its bot.
+- **Resend retries for about eighteen hours and stores the message either way**, so a non-200 during
+  an outage is the correct answer rather than a lost message. Every decision this edge makes on
+  purpose answers 200 for that reason.
+- **A box on an older bundle does not know its own address.** `setAgentMail` is a host command; a
+  box that has not been swapped answers "unknown gateway method" and the sweep carries on. Delivery
+  never depends on that file — only on what the bot can say about itself.
 
 ---
 
@@ -239,6 +359,13 @@ curl -sS -X POST https://api.resend.com/emails \
 `In-Reply-To` carrying the Message-ID of the mail it is answering is what puts the reply in the
 same thread. The skill says so, and says never to paste the key into a message.
 
+**MAIL-2 did not change this**, and section 2b says why: a Resend key scoped to the product domain
+can send as any address at it, so it stays on the one box that already has it rather than being
+copied into every customer's. Until the relay's own send route lands, the address list pushed into
+each box carries `canSend: false` and a bot answers honestly when somebody asks whether it can
+send. A bot on a workspace with no key can still be written TO at its own address; it just cannot
+write back by mail.
+
 ---
 
 ## 7. The gate
@@ -271,11 +398,47 @@ a relay with a password answers 401 (the earlier run with a generated password f
 passed: 503 unconfigured, delivered to the first address with its ledger row, forged and stale signatures refused,
 the replay a duplicate, the disabled switch honoured, no secret in the GET, settings restored.
 
+### The per-bot address legs (MAIL-2)
+
+```
+CP_URL=http://127.0.0.1:7810 CP_RELAY_TOKEN=<32+ chars> \
+GROK_BOT_MAIL_API_BASE=http://127.0.0.1:7809 node ui/server.mjs      # a scratch relay
+node scripts/verify-mail.mjs --url http://127.0.0.1:7787 --stub --directory --cp-port 7810
+```
+
+`--directory` stands up a stub control plane of its own running the real `cp/mail.mjs` and
+`cp/store.mjs` over an in-memory database, so the minting under test is the minting that ships. It
+asks the relay to sweep, then proves through the public hook that a code address reaches the bot
+holding it, that an address nobody holds answers `no_route` and reaches nothing, and that a name
+address still arrives and is written down as `legacy_name`. If the relay is pointed at a different
+control plane the sweep reaches nothing and the leg says so, rather than passing on a directory
+nobody read.
+
+**Measured 2026-09-09 12:47Z on this Mac, box `grok-bot-local-vm`,** scratch relay on
+127.0.0.1:7787 against a stub control plane on 7810: **66 PASS, 0 FAIL**. 21 bots on that box were
+swept and minted a six digit address each, none of them carrying a name; a message to
+`agent028382@verify-mail.invalid` reached Books; `agent999999@` answered `no_route` and reached no
+agent at all; a name address arrived and its ledger row read `legacy_name`. A second run against the
+same relay, with the directory already loaded, was also OK.
+
+**And with the control plane down,** same machine and minute: the relay was restarted with nothing
+listening on 7810, logged `the address directory was read back off the disk (22 address(es))`, and
+delivered `agent000399@verify-mail.invalid` to its bot. New codes stop being minted during an
+outage; delivery does not stop.
+
 The off-box half is `tests/mail-edge.test.mjs` in `npm test`: the signature and its timestamp
 window, the routing order, the prompt text and the boundary around the part a stranger wrote, the
 ledger row shape, the fact that no shape this module answers with can carry a secret, that ten
 copies of one webhook at once are one delivery, that a gateway that cannot be read answers 503 and
 writes no row, and that a save naming an `apiBase` cannot move where the key is sent.
+
+`tests/mail-directory.test.mjs` and `tests/cp-mail.test.mjs` are the MAIL-2 half: two workspaces
+each with a Titan hold two different codes and neither localpart is the other's, five thousand
+codes are five thousand distinct addresses and a retired one is never handed out again, a code
+address is delivered into its own workspace's box while the workspace that received the webhook
+gets nothing, `agent999999@` never reaches the catch-all, a name address carries the dated notice,
+a recipient at another domain is refused before any lookup, a bad signature is 401 with nothing
+looked up, and nothing is written inside Richard's box.
 
 ---
 
@@ -285,6 +448,13 @@ writes no row, and that a save naming an `apiBase` cannot move where the key is 
   its own conversation and in Resend's dashboard.
 - **No threading on the way in.** Each message is its own prompt. An agent that wants the history
   reads its own conversation.
-- **One domain.** The settings carry one, which is the operator's own.
+- **One domain per workspace's own settings.** Those carry one, which is that operator's own. The
+  product domain the per-bot codes live at is separate and is the control plane's.
+- **No console affordance for the addresses yet.** The address on a bot's card, the codes column on
+  the super admin's client row and the one-click "allow this sender" are filed as MAIL-2b. Today
+  they are `node cp/cli.mjs mail list` and `GET /v1/admin/mail`.
+- **Nothing was written inside Richard Avery's box** by MAIL-2. His bots' codes are minted and
+  route, because routing is decided at the relay; his box keeps the older bundle until it is
+  swapped, so his Titan cannot yet name its own address.
 - **Attachments are links, not files.** The relay never downloads one, and the links Resend hands
   over expire.

@@ -113,6 +113,8 @@ The console relay only, `Authorization: Bearer $CP_RELAY_TOKEN`:
 | route | answer |
 | --- | --- |
 | `GET /v1/relay/tenants` | `{tenants, skipped}`. Per tenant: its box container, its gateway address, its gateway token, its derived session key, its two directories |
+| `GET /v1/relay/mail/directory[?slug=]` | MAIL-2. `{domain, tenants}`. Per workspace: each bot's six digit code and address, whether it is active or retired, the approved-senders switch and its list |
+| `POST /v1/relay/mail/mint` | MAIL-2. `{slug, agents}`. Mints an address for every bot on that roster that has none, and answers that workspace's whole directory. Safe to call every five minutes for ever |
 
 ## What a tenant is
 
@@ -221,6 +223,25 @@ twice before this file existed.
 `ExperimentalWarning` on the first import. That warning in the container log is normal and is not
 a failure. An older 22.x needs `--experimental-sqlite` back, which is why `cp/Dockerfile` pins the
 image by digest and writes down the version it measured.
+
+## Per-bot email addresses (MAIL-2)
+
+Every bot has an address of its own at the product domain: `agent<code>@myagents.email`, six digits
+minted once per (workspace, bot) and never reused. This service owns the directory and nothing else
+about mail — no Resend key reaches it, and Resend's webhook still goes to the relay, which already
+verifies the Svix signature by hand and already holds every customer's gateway bearer.
+
+```
+node cp/cli.mjs mail list [<slug>]      every bot's address, and whether it is active
+node cp/cli.mjs mail retire <code>      kills one address for good. The row stays, so the code is never reissued
+node cp/cli.mjs mail senders <slug>     who may write to that workspace's bots
+node cp/cli.mjs mail allow <slug> <address>
+node cp/cli.mjs mail only <slug> on|off approved senders. OFF everywhere, which is what lets a first verification mail through
+node cp/cli.mjs mail sweep              mint now rather than waiting for the relay's five minute pass
+```
+
+`CP_MAIL_DOMAIN` sets the domain; it defaults to `myagents.email`. The full scheme, the refusal
+order and what bites are in `docs/MAIL.md` §2b.
 
 ## What never leaves this service
 

@@ -45,6 +45,7 @@ import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, 
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
+import { createMailDirectory, mailDomain } from "./mail.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
   NEW_TENANTS_BLOCKED,
@@ -566,6 +567,12 @@ export function createApp(options = {}) {
 
   // ---- the super admin console (ADMIN-1) --------------------------------------------------------
   //
+  // MAIL-2. The per-bot address directory, over the same store. It mints a six digit code per
+  // (workspace, agent), answers a lookup, and holds the approved-senders switch. No Resend key
+  // reaches this service and no webhook lands on it: the relay keeps both, and this answers the
+  // two routes below. cp/mail.mjs carries the reasoning.
+  const mail = createMailDirectory({ store, domain: mailDomain(), now });
+
   // Its own file, handed the pieces this one already owns, so there is one store, one Coolify
   // client and one session verifier in this process rather than two. It mounts below, before the
   // operator-token routes, and every route inside it refuses anything that is not a super admin.
@@ -858,6 +865,25 @@ export function createApp(options = {}) {
       if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       if (!requireRelay(request, response)) return undefined;
       return json(response, 200, await relayRegistry());
+    }
+
+    // ---- the per-bot mail directory (MAIL-2, docs/MAIL.md) --------------------------------------
+    // Beside the registry route and behind the same one credential, because they are the same kind
+    // of thing: what the one relay needs from this service to serve a customer. No new secret, and
+    // no public route -- Resend still calls the relay, which already verifies Svix by hand, so
+    // readJsonBody above is untouched and the raw-body trap never applies here.
+    if (segments[1] === "relay" && segments[2] === "mail" && segments[3] === "directory" && segments.length === 4) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      const slug = String(url.searchParams.get("slug") ?? "").trim();
+      return json(response, 200, mail.directory(slug.length > 0 ? slug : null));
+    }
+
+    if (segments[1] === "relay" && segments[2] === "mail" && segments[3] === "mint" && segments.length === 4) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      const answer = mail.mint(body.slug, body.agents);
+      return json(response, answer.error ? 400 : 200, answer);
     }
 
     if (segments[1] === "sessions" && segments[2] === "current" && segments.length === 3) {

@@ -45,6 +45,9 @@ import path from "node:path";
 // widens the other's blast radius.
 import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.mjs";
 import { normalizeEmail } from "./store.mjs";
+// MAIL-2. The product domain the per-bot addresses live at, so the panel names the same domain
+// the relay routes on rather than a second copy of the default.
+import { mailDomain } from "./mail.mjs";
 import {
   PROVIDER_PRESETS,
   PROVIDER_QUOTA,
@@ -984,6 +987,11 @@ export function createAdminApi({
       rows.push({
         ...view,
         users,
+        // MAIL-2. How many of this customer's bots hold an address at the product domain. One
+        // number on the row they are already looking at, so "has this workspace been swept" is a
+        // question the panel answers rather than a CLI call. The codes themselves are on
+        // /v1/admin/mail; the column that renders them on this row is filed as MAIL-2b.
+        mailCodes: store.countMailAddresses(tenant.slug),
         // Named rather than left out, because a fact that could not be measured has to read as one
         // and never as an empty column.
         spend: byTenant.get(tenant.slug) ?? null,
@@ -3034,6 +3042,28 @@ export function createAdminApi({
       }
 
       json(response, 404, { error: "not_found" });
+      return true;
+    }
+
+    // ---- MAIL-2. The per-bot address directory, read only ---------------------------------------
+    // Last in the chain and appended at the end of this file's route list on purpose: it is a new
+    // panel's data and it must not sit inside anything already here. ?slug= narrows it to one
+    // customer. It answers codes, addresses, bot names and states, and it holds no secret because
+    // the directory holds none: the Resend key lives on the relay and never reaches this service.
+    if (rest[0] === "mail" && rest.length === 1 && method === "GET") {
+      const slug = String(url.searchParams.get("slug") ?? "").trim();
+      const rows = store.listMailAddresses(slug.length > 0 ? slug : null);
+      json(response, 200, {
+        domain: mailDomain(),
+        rows,
+        counts: {
+          total: rows.length,
+          active: rows.filter((row) => row.state === "active").length,
+          retired: rows.filter((row) => row.state === "retired").length,
+        },
+        rule: "one code per bot, six digits, minted once and never reused. No address carries a name.",
+        measuredAt: new Date(now()).toISOString(),
+      });
       return true;
     }
 

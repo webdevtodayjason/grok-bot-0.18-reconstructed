@@ -162,3 +162,9 @@ import "./machine-room-handoff.test.mjs";
 import "./machine-room-boot.test.mjs";
 import "./machine-room-screen-tile.test.mjs";
 import "./machine-room-files.test.mjs";
+
+// MAIL-2: every bot has an address of its own, agent<code>@myagents.email. The directory the
+// control plane owns and mints, and the routing the relay does on it -- including the refusal that
+// stops a stranger's guess landing in the operator's own Titan.
+import "./cp-mail.test.mjs";
+import "./mail-directory.test.mjs";
