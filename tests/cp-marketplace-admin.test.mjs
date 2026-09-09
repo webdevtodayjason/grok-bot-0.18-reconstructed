@@ -80,14 +80,34 @@ test("the two marketplace routes answer only to the operator bearer", async () =
   });
 });
 
-test("what the customer sees is drawn from age, and disagrees with the record on purpose", async () => {
+// This column used to be computed from AGE ALONE, which made it its own lie: a `--write` moves the
+// read date forward on a fact it could not confirm, so the panel printed "checked today" beside a
+// row the same screen was calling NEEDS RE-VERIFICATION. Measured on the R750 on 2026-09-09 against
+// browserbase. It now decides the way the customer's page decides -- the row's own verdict first,
+// its age second -- and says which of the two kinds of under review it is.
+test("what the customer sees names the row's own verdict first, and its age second", async () => {
   await withPlane(async (plane) => {
     const answer = await plane.admin("GET", "/v1/marketplace/verification");
     for (const row of answer.body.catalog) {
-      assert.match(row.customerSees, /^(checked \d{4}-\d{2}-\d{2}|under review)$/, `${row.id}: ${row.customerSees}`);
+      assert.match(
+        row.customerSees,
+        /^(checked \d{4}-\d{2}-\d{2}|under review \((a fact on it changed|nobody has re-read it)\))$/,
+        `${row.id}: ${row.customerSees}`,
+      );
       assert.ok(Number.isInteger(row.recheckDays) && row.recheckDays > 0, row.id);
       assert.match(row.oldestCheckedOn, /^\d{4}-\d{2}-\d{2}$/, row.id);
+      // The one that was wrong: a row carrying a changed fact may never read as a reassuring date,
+      // however fresh that date is.
+      const flagged = (row.docs ?? []).some((doc) => doc.state === "changed");
+      if (flagged) {
+        assert.equal(row.customerSees, "under review (a fact on it changed)", row.id);
+      }
     }
+    // And the shipped catalog has to still carry the case, or this test guards nothing.
+    assert.ok(
+      answer.body.catalog.some((row) => (row.docs ?? []).some((doc) => doc.state === "changed")),
+      "no row in the shipped catalog carries a changed fact, so the branch above was never taken",
+    );
   });
 });
 
