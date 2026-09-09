@@ -528,12 +528,18 @@ try {
           const adapter = window.__machineRoomAdapter;
           if (adapter && typeof adapter.selectContext === "function") adapter.selectContext({ kind: "worker", id });
         }, coordinatorId);
-        await page.waitForTimeout(4000);
-        const card = await page.evaluate(() => {
-          const buttons = [...document.querySelectorAll("[data-decide]")];
-          const host = buttons[0]?.closest(".inline-card") ?? null;
-          return { buttons: buttons.map((b) => b.textContent.trim()), text: host ? host.textContent.replace(/\s+/g, " ").trim() : "" };
-        });
+        // Polled, not slept: the conversation is fetched when the context changes, and a fixed
+        // wait either flakes or wastes the run's budget.
+        let card = { buttons: [], text: "" };
+        for (let n = 0; n < 20; n += 1) {
+          await page.waitForTimeout(1000);
+          card = await page.evaluate(() => {
+            const buttons = [...document.querySelectorAll("[data-decide]")];
+            const host = buttons[0]?.closest(".inline-card") ?? null;
+            return { buttons: buttons.map((b) => b.textContent.trim()), text: host ? host.textContent.replace(/\s+/g, " ").trim() : "" };
+          });
+          if (card.buttons.length > 0) break;
+        }
         check(card.buttons.length >= 2, "the decision card is on screen with its options", card.buttons.join(" | "));
         check(/Northgate/.test(card.text), "and it names the client and the batch", oneLine(card.text));
         check(!/posted|published/i.test(card.text) || /Nothing goes out/.test(card.text),
