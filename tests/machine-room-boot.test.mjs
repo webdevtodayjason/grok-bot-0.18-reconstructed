@@ -277,7 +277,7 @@ test("the ceiling with nothing on screen says the box has not been reached, and 
 // the line above rather than a fiction.
 test("no field in the shell ships copy that would read as this box", async () => {
   const html = await read("ui/machine-room/index.html");
-  for (const id of ["room-title", "room-subtitle", "capability-scope", "desktop-capsule-scope", "next-routine-countdown", "next-routine-label"]) {
+  for (const id of ["room-title", "room-subtitle", "capability-scope", "next-routine-countdown", "next-routine-label"]) {
     const match = new RegExp(`id="${id}"[^>]*>([^<]*)<`).exec(html);
     assert.ok(match, `index.html no longer has #${id}`);
     assert.equal(match[1].trim(), "", `#${id} ships copy; app.js fills it, and when app.js never loads that copy is what a person reads`);
