@@ -212,10 +212,19 @@ pending hand-off, ticked every 3 s on its own timer, pushing its data URL into a
 - **The URL is built on the page's own origin**, never the host's `127.0.0.1` form. Building it the
   host's way is the bug VNC-2 closed: through the R750 it sent the operator's browser at his own Mac
   and the frame read "Failed to connect to downstream server".
-- **No seat means no picture, not a seat.** If the status has no `vncUrl`, the plate says
-  `Bringing the screen up`. We never call `ensureForeverBox` to get a picture: it allocates a seat,
-  and on a cold box it takes time (below). `Take over` is what allocates the seat, which is where
-  that cost belongs.
+- **No seat of its own means the shared seat, not a blank plate.** This is the one rule the R750
+  pass changed. It used to read "no seat means no picture": if `getForeverBoxStatus` carried no
+  `vncUrl`, the card drew `Bringing the screen up` and stopped. Measured while integrating, on
+  grok-bot-local-vm: an agent told to open a page in its browser still reported `state absent` with
+  `vncUrl` null **95 seconds later**, so that rule meant the ordinary hand-off never showed a
+  picture at all — the gate caught it as no thumbnail after 20 s. An agent with no forever box of
+  its own still has a screen: the shared seat on display `:1`, which is exactly what `ensureDesktop`
+  falls back to when `ensureForeverBox` hands back no token, and exactly what the desktop view then
+  paints. So the card falls back to the same one (`boxHandoffDisplayOf`). It is not somebody else's
+  screen — the product's own words for display `:1` are "the shared screen, every agent on this box
+  sees it". We still never call `ensureForeverBox` to get a picture: it allocates a seat and on a
+  cold box it takes time (below). `Take over` is what allocates the seat, which is where that cost
+  belongs.
 - **It never blocks the transcript.** The tick runs on its own timer; a frame that does not arrive
   leaves the previous one on screen.
 
@@ -230,9 +239,22 @@ pending hand-off, ticked every 3 s on its own timer, pushing its data URL into a
 | A second viewer on the same seat | does not kick the first |
 | `ensureForeverBox` on a cold box | 16,277 ms, and it allocates a seat |
 
-**Not yet measured on the R750.** Nothing in this table has been re-measured through
-`console.titanium.bot` against the demo tenant box. When it is, the numbers go in the HANDBACK-1 gap
-row with the machine named, separately from these.
+**Measured on the R750, 2026-09-08, in real Chrome from Jason's Mac against
+`console.titanium.bot`, demo tenant box `titanbot-box-atonqjq7zx593jsacaccpfau`, host
+`ee8c10006d40`.** Separate table, because these are a different machine and a different path:
+
+| Thing | Number |
+|---|---|
+| Prompt to the card on screen with `Action needed` | 10.3 s |
+| First thumbnail frame after the card | 1.5 s |
+| That frame | 5,395 characters of webp data URL, about 4 KB |
+| `I'm done, continue` click to the card reading `Done` | 1.1 s |
+| The agent's next message on screen, no reload | 22.0 s |
+
+The wire half, run inside the same box: prompt to a pending hand-off 7.6 s, status 293 B with the
+hand-off object 144 B and no image, `handBackForeverBox` **16 ms** with the entry `handed_back`
+21 ms later, `skipBoxHandoff` **6 ms** stamped `dismissed`, and an ordinary prompt after both
+decisions answered in 27.6 s. Screenshots of all five card states are in that run's scratchpad.
 
 ---
 
