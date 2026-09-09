@@ -239,6 +239,43 @@ function driverLine(extra = {}) {
   })}\n`;
 }
 
+/**
+ * A cloud seam that holds a browser per PAGE, the way the real service does.
+ *
+ * Every one of these tests used to hand the driver an `open` that minted a session and a `close`
+ * the driver called in a finally, which is exactly the shape that made a cloud sign-up impossible:
+ * the browser was gone before the tool result existed. The fake now keeps the same book the service
+ * keeps -- who holds which page -- so a test that clicks after an open sees what a box sees.
+ */
+function fakeSeam({ route, shouldEscalate, endpoint, stops = [] }) {
+  const held = new Map();
+  return {
+    held,
+    stops,
+    route,
+    shouldEscalate,
+    viewEngine: (viewId) => held.get(viewId)?.engine,
+    hold: async ({ viewId, engine }) => {
+      const existing = held.get(viewId);
+      if (existing !== undefined && existing.engine === engine) return existing.session;
+      if (existing !== undefined && existing.session !== null) stops.push(existing.session.sessionId);
+      if (engine === "box") {
+        held.set(viewId, { engine, session: null });
+        return null;
+      }
+      const session = endpoint();
+      held.set(viewId, { engine, session });
+      return session;
+    },
+    releaseView: async (viewId) => {
+      const existing = held.get(viewId);
+      if (existing === undefined) return;
+      held.delete(viewId);
+      if (existing.session !== null) stops.push(existing.session.sessionId);
+    },
+  };
+}
+
 /** Everything SandBrowserDriver needs, with the shell and the cloud both faked. */
 function harness({ cloudSeam, answers }) {
   const commands = [];
@@ -268,37 +305,35 @@ test("THE SHAPE PROMISE: a cloud read and a box read carry the same fields", asy
   const boxOutput = await boxDriver.run({}, { op: "open", toolCallId: "call-1", args: { url: "https://example.com/" }, useRuntimeDriver: true });
 
   const stops = [];
-  const cloudSeam = {
+  const cloudSeam = fakeSeam({
+    stops,
     route: () => ({ engine: "browser-use", reason: "this site is on the workspace's cloud list" }),
     shouldEscalate: () => false,
-    open: async () => ({
-      cdpUrl: "wss://vendor.example/session/abc?token=SECRET",
-      sessionId: "sess-1",
-      close: async () => { stops.push("sess-1"); },
-    }),
-  };
+    endpoint: () => ({ cdpUrl: "wss://vendor.example/session/abc?token=SECRET", sessionId: "sess-1" }),
+  });
   const cloudRun = harness({ cloudSeam, answers: [line] });
   const cloudDriver = new browserTools.SandBrowserDriver(cloudRun.dependencies);
   const cloudOutput = await cloudDriver.run({}, { op: "open", toolCallId: "call-2", args: { url: "https://example.com/" }, useRuntimeDriver: true });
 
   assert.deepEqual(Object.keys(boxOutput).sort(), Object.keys(cloudOutput).sort(), "the field SET is what a caller depends on");
   assert.deepEqual(boxOutput, cloudOutput, "and on the same page the values match too");
-  assert.deepEqual(stops, ["sess-1"], "the session is stopped, always");
+  // The browser is HELD after the call now, so the click that follows the open reaches it. The
+  // release is what stops it, and every test that needs the stop asks for one.
+  assert.deepEqual(stops, [], "the browser stays for the next click");
+  await cloudRun.dependencies.cloudBrowser.releaseView("view-1");
+  assert.deepEqual(stops, ["sess-1"], "and the release is what stops it");
 });
 
 test("a cloud request never puts the endpoint in a command line", async () => {
   // MARKET-17/MARKET-24 in one assertion. argv is readable from any process in the box, the agent's
   // own shell included, and a cloud endpoint carries the session's credential in its own path.
   const stops = [];
-  const cloudSeam = {
+  const cloudSeam = fakeSeam({
+    stops,
     route: () => ({ engine: "browser-use", reason: "pinned" }),
     shouldEscalate: () => false,
-    open: async () => ({
-      cdpUrl: "wss://api.browser-use.example/cdp/abc?token=SUPERSECRET",
-      sessionId: "sess-7",
-      close: async () => { stops.push("sess-7"); },
-    }),
-  };
+    endpoint: () => ({ cdpUrl: "wss://api.browser-use.example/cdp/abc?token=SUPERSECRET", sessionId: "sess-7" }),
+  });
   const run = harness({ cloudSeam, answers: [driverLine()] });
   const driver = new browserTools.SandBrowserDriver(run.dependencies);
   await driver.run({}, { op: "open", toolCallId: "call-3", args: { url: "https://example.com/" }, useRuntimeDriver: true });
@@ -318,6 +353,7 @@ test("a cloud request never puts the endpoint in a command line", async () => {
   assert.equal(statSync(path.dirname(file)).mode & 0o777, 0o700);
   assert.match(readFileSync(file, "utf8"), /SUPERSECRET/);
   rmSync(file, { force: true });
+  await cloudSeam.releaseView("view-1");
   assert.deepEqual(stops, ["sess-7"]);
 });
 
@@ -336,16 +372,16 @@ test("an empty page escalates exactly once, and never twice", async () => {
   const empty = driverLine({ emptyShell: true, emptyShellReason: "the page gave up its menus and none of its content" });
   const alsoEmpty = driverLine({ emptyShell: true, text: "still nothing" });
   const opens = [];
-  const cloudSeam = {
+  const cloudSeam = fakeSeam({
     route: (input) => (input.escalating === true
       ? { engine: "browser-use", reason: "the page came back with nothing worth reading" }
       : { engine: "box", reason: "the browser on the box is the default" }),
     shouldEscalate: (verdicts) => verdicts.emptyShell === true,
-    open: async () => {
+    endpoint: () => {
       opens.push("open");
-      return { cdpUrl: "wss://vendor.example/x", sessionId: `sess-${opens.length}`, close: async () => undefined };
+      return { cdpUrl: "wss://vendor.example/x", sessionId: `sess-${opens.length}` };
     },
-  };
+  });
   const run = harness({ cloudSeam, answers: [empty, alsoEmpty] });
   const driver = new browserTools.SandBrowserDriver(run.dependencies);
   const output = await driver.run({}, { op: "open", toolCallId: "call-5", args: { url: "https://www.instagram.com/x/" }, useRuntimeDriver: true });
@@ -357,11 +393,11 @@ test("an empty page escalates exactly once, and never twice", async () => {
 
 test("an empty page with no cloud engine available is still SAID, not summarised over", async () => {
   const run = harness({
-    cloudSeam: {
+    cloudSeam: fakeSeam({
       route: () => ({ engine: "box", reason: "no key is stored for it" }),
       shouldEscalate: () => true,
-      open: async () => { throw new Error("must not be called"); },
-    },
+      endpoint: () => { throw new Error("must not be called"); },
+    }),
     answers: [driverLine({ emptyShell: true })],
   });
   const driver = new browserTools.SandBrowserDriver(run.dependencies);
@@ -376,11 +412,12 @@ test("an empty page with no cloud engine available is still SAID, not summarised
 
 test("THE STOP: a session is stopped even when the tool call throws", async () => {
   const stops = [];
-  const cloudSeam = {
+  const cloudSeam = fakeSeam({
+    stops,
     route: () => ({ engine: "browser-use", reason: "pinned" }),
     shouldEscalate: () => false,
-    open: async () => ({ cdpUrl: "wss://vendor.example/x", sessionId: "sess-9", close: async () => { stops.push("sess-9"); } }),
-  };
+    endpoint: () => ({ cdpUrl: "wss://vendor.example/x", sessionId: "sess-9" }),
+  });
   const dependencies = {
     ...harness({ cloudSeam, answers: [""] }).dependencies,
     executeShell: async () => { throw new Error("the box went away mid-call"); },
@@ -393,14 +430,98 @@ test("THE STOP: a session is stopped even when the tool call throws", async () =
 test("a cloud attempt that fails leaves the box's own answer standing", async () => {
   const boxAnswer = driverLine({ emptyShell: true });
   const cloudFailure = `\n${MARKER}${JSON.stringify({ ok: false, error: "the cloud browser would not start (503)" })}\n`;
-  const cloudSeam = {
+  const cloudSeam = fakeSeam({
     route: (input) => (input.escalating === true ? { engine: "browser-use", reason: "empty" } : { engine: "box", reason: "default" }),
     shouldEscalate: (verdicts) => verdicts.emptyShell === true,
-    open: async () => ({ cdpUrl: "wss://vendor.example/x", sessionId: "sess-10", close: async () => undefined }),
-  };
+    endpoint: () => ({ cdpUrl: "wss://vendor.example/x", sessionId: "sess-10" }),
+  });
   const run = harness({ cloudSeam, answers: [boxAnswer, cloudFailure] });
   const driver = new browserTools.SandBrowserDriver(run.dependencies);
   const output = await driver.run({}, { op: "open", toolCallId: "call-8", args: { url: "https://www.instagram.com/x/" }, useRuntimeDriver: true });
   assert.notEqual(output.isError, true, "a vendor's failure is not what the person should be handed");
   assert.ok(output.text.includes("Example Domain"));
+});
+
+/* -------------------------------------------- 5. one page, one browser, however many tool calls */
+
+test("THE MULTI-STEP PROMISE: the click after a cloud open reaches the same browser", async () => {
+  // The whole reason this wave exists. Measured on the R750's demo box on 2026-09-09, before this:
+  // browser_open on instagram.com opened a cloud session and stopped it, and the browser_click that
+  // followed carried no address, so it routed from nothing, went to the box's own Chrome, and
+  // clicked a page that was never there. A sign-up cannot happen across two browsers.
+  const opens = [];
+  const cloudSeam = fakeSeam({
+    route: (input) => (input.url === undefined
+      ? { engine: "box", reason: "the browser on the box is the default" }
+      : { engine: "browser-use", reason: "this site is on the workspace's cloud list" }),
+    shouldEscalate: () => false,
+    endpoint: () => {
+      opens.push("open");
+      return { cdpUrl: "wss://vendor.example/session/one", sessionId: `sess-${opens.length}` };
+    },
+  });
+  const run = harness({ cloudSeam, answers: [driverLine(), driverLine(), driverLine()] });
+  const driver = new browserTools.SandBrowserDriver(run.dependencies);
+
+  await driver.run({}, { op: "open", toolCallId: "c1", args: { url: "https://www.instagram.com/x/" }, useRuntimeDriver: true });
+  await driver.run({}, { op: "click", toolCallId: "c2", args: { target: "Sign up" }, useRuntimeDriver: true });
+  await driver.run({}, { op: "type", toolCallId: "c3", args: { target: "Email", text: "a@b.example" }, useRuntimeDriver: true });
+
+  assert.equal(opens.length, 1, "three tool calls, one browser -- not one browser each");
+  assert.equal(run.commands.length, 3);
+  for (const command of run.commands) {
+    assert.match(command, /--request-file /, "every call went down the cloud road, none fell back to the box");
+  }
+  const endpoints = run.commands.map((command) => {
+    const file = command.split("--request-file ")[1].trim();
+    const request = JSON.parse(readFileSync(file, "utf8"));
+    rmSync(file, { force: true });
+    return request.cdpUrl;
+  });
+  assert.deepEqual(new Set(endpoints), new Set(["wss://vendor.example/session/one"]), "and at the same endpoint");
+  assert.equal(cloudSeam.viewEngine("view-1"), "browser-use", "the page is still held when the turn ends");
+});
+
+test("a page opened in the box is still clicked in the box, whatever the router would say", async () => {
+  // The mirror of the test above, and the one that was silently wrong in the other direction: with
+  // an engine pinned, a click minted a NEW cloud browser on a blank page and looked for a ref in it.
+  const opens = [];
+  const cloudSeam = fakeSeam({
+    route: () => ({ engine: "browser-use", reason: "this workspace is pinned to a cloud browser" }),
+    shouldEscalate: () => false,
+    endpoint: () => {
+      opens.push("open");
+      return { cdpUrl: "wss://vendor.example/x", sessionId: `sess-${opens.length}` };
+    },
+  });
+  // Nothing routed it to the cloud on the way in: the page was opened in the box by an earlier turn.
+  await cloudSeam.hold({ viewId: "view-1", engine: "box", reason: "", url: "" });
+  const run = harness({ cloudSeam, answers: [driverLine()] });
+  const driver = new browserTools.SandBrowserDriver(run.dependencies);
+  await driver.run({}, { op: "click", toolCallId: "c9", args: { target: "Sign up" }, useRuntimeDriver: true });
+
+  assert.equal(opens.length, 0, "a click never mints a browser");
+  assert.match(run.commands[0], /^node \S+ [A-Za-z0-9+/=]+$/, "it went to the box, base64 in argv as always");
+});
+
+test("browser_open at a new address moves the page, and gives the old browser back", async () => {
+  const stops = [];
+  const cloudSeam = fakeSeam({
+    stops,
+    route: (input) => (String(input.url ?? "").includes("instagram")
+      ? { engine: "browser-use", reason: "this site is on the workspace's cloud list" }
+      : { engine: "box", reason: "the browser on the box is the default" }),
+    shouldEscalate: () => false,
+    endpoint: () => ({ cdpUrl: "wss://vendor.example/x", sessionId: "sess-moved" }),
+  });
+  const run = harness({ cloudSeam, answers: [driverLine(), driverLine()] });
+  const driver = new browserTools.SandBrowserDriver(run.dependencies);
+  await driver.run({}, { op: "open", toolCallId: "d1", args: { url: "https://www.instagram.com/x/" }, useRuntimeDriver: true });
+  await driver.run({}, { op: "open", toolCallId: "d2", args: { url: "https://example.com/" }, useRuntimeDriver: true });
+
+  assert.deepEqual(stops, ["sess-moved"], "the cloud browser is stopped when the page leaves it");
+  assert.equal(cloudSeam.viewEngine("view-1"), "box");
+  for (const file of run.commands.filter((c) => c.includes("--request-file ")).map((c) => c.split("--request-file ")[1].trim())) {
+    rmSync(file, { force: true });
+  }
 });

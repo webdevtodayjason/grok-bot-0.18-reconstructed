@@ -1107,7 +1107,7 @@ const DECLARED_PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
       Object.freeze({
         field: "BROWSER_USE_API_KEY",
         label: "Browser Use API key",
-        hint: "An API key from cloud.browser-use.com under Billing → API keys. It is account-wide and it spends your balance on every run, so put it on an account with a cap you are comfortable with.",
+        hint: "An API key from cloud.browser-use.com under Billing → API keys. It is account-wide and it spends your balance on every run, so put it on an account with a cap you are comfortable with. Work the agent hands to this plugin's own server spends the same balance and does not show up in the cloud browser ledger; only the browsing the four browser tools do is metered there.",
         consumers: Object.freeze([
           Object.freeze({ kind: "connector", env: "BROWSER_USE_API_KEY" }),
           Object.freeze({ kind: "header", name: "X-Browser-Use-API-Key" }),
@@ -1438,7 +1438,7 @@ const DECLARED_PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
     name: "Browserbase",
     tagline: "A cloud browser the agent can drive, with a live view a person can take over",
     description:
-      "CLOUD-BROWSER-1's second engine. The same four browsing tools the agent already has, pointed at a browser running in Browserbase instead of the one in this box — which is what gets past a sign-up page that refuses the box's address, and what lets a person take the wheel for a code or an identity check without starting again. There is no server to install: the key is read by the host itself and reaches no process the agent can see.",
+      "The same four browsing tools the agent already has, pointed at a browser running in Browserbase instead of the one in this box — which is what gets past a sign-up page that refuses the box's address, and what lets a person take the wheel for a code or an identity check without starting again. There is no server to install: the key is read by the host itself and reaches no process the agent can see.",
     category: "Web & Search",
     featured: false,
     icon: Object.freeze({ letter: "BB", color: "#f97316" }),
@@ -1487,7 +1487,7 @@ const DECLARED_PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
         anchor: "Built-in proxies",
         expected: "By default, `proxies` is set to false",
         checkedOn: "2026-09-09",
-        state: "verified",
+        state: "changed",
       }),
       Object.freeze({
         id: "live-view-handover",
@@ -2161,6 +2161,31 @@ const PINNED_SEARCH_OWNER: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
+ * A tracker id in copy a customer reads. "CLOUD-BROWSER-1's second engine" shipped as the opening
+ * sentence of the Browserbase card and reached a live box before anybody noticed, because nothing
+ * looked. The shape is deliberately narrow -- two or more capitals, a hyphen, a number, optionally
+ * a letter after it -- so it catches our own row names and leaves ordinary words alone. Comments in
+ * this file keep their ids; only the strings a person is shown are checked.
+ */
+const TRACKER_ID = /\b[A-Z]{2,}(?:-[A-Z]+)*-\d+[a-z]?\b/;
+
+/** Every string in one row that a person reads, with a name for where it came from. */
+function customerFacingStrings(plugin: MarketplacePlugin): { readonly what: string; readonly text: string }[] {
+  const out: { readonly what: string; readonly text: string }[] = [
+    { what: "tagline", text: plugin.tagline },
+    { what: "description", text: plugin.description },
+  ];
+  for (const [index, step] of (plugin.firstSteps ?? []).entries()) {
+    out.push({ what: `first step ${index + 1}`, text: step });
+  }
+  for (const credential of plugin.credentials) {
+    out.push({ what: `the hint under "${credential.field}"`, text: credential.hint });
+    out.push({ what: `the label on "${credential.field}"`, text: credential.label });
+  }
+  return out;
+}
+
+/**
  * The catalog's own invariants, as a list of problems rather than a throw, so a test can print all
  * of them at once and the host can log rather than fail to start.
  */
@@ -2184,6 +2209,12 @@ export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETP
       }
     }
     if (plugin.keywords.length === 0) problems.push(`${where} carries no keywords, so an owner who does not know its name cannot find it`);
+    for (const { what, text } of customerFacingStrings(plugin)) {
+      const found = TRACKER_ID.exec(text);
+      if (found != null) {
+        problems.push(`${where} names our own tracker row "${found[0]}" in its ${what}; that is a string a customer reads, so say what the thing does instead`);
+      }
+    }
     const logoProblem = marketplaceLogoProblem(where, plugin.icon.file);
     if (logoProblem != null) problems.push(logoProblem);
 
@@ -2348,6 +2379,12 @@ export function validateMarketplaceCatalog(catalog: MarketplaceCatalog = MARKETP
     }
     const botLogoProblem = marketplaceLogoProblem(where, bot.tile.file);
     if (botLogoProblem != null) problems.push(botLogoProblem);
+    for (const [what, text] of [["description", bot.description], ["instructions", bot.instructions]] as const) {
+      const found = TRACKER_ID.exec(text);
+      if (found != null) {
+        problems.push(`${where} names our own tracker row "${found[0]}" in its ${what}; that is a string a customer reads, so say what the thing does instead`);
+      }
+    }
 
     // BOTS-4. These two rules are about a row WE WROTE. A first-party template with no skill or no
     // integration is a row somebody forgot to finish. A community row is a scrape: 15 of the 65 name

@@ -393,7 +393,22 @@ export interface CloudBrowserSeam {
     readonly blocked?: boolean | undefined;
     readonly emptyShell?: boolean | undefined;
   }): boolean;
-  open(input: {
+  /**
+   * Which browser is holding this page right now, or undefined when nothing has opened it yet.
+   *
+   * This is the whole answer to a session that could not survive its own tool call. A click carries
+   * no address, so `route({})` decided from nothing and sent it to the box -- a different browser,
+   * on a different page, from the one the open had used. Asking who holds the page first is what
+   * stops the two engines interleaving inside one page.
+   */
+  viewEngine(viewId: string): string | undefined;
+  /**
+   * Take, or keep, the browser that holds this page. Called on every action, the box included, so
+   * the box is recorded as a holder too. A cloud engine answers with the endpoint the driver
+   * attaches to; the box answers with null, which is what says to use the display and the port.
+   */
+  hold(input: {
+    readonly viewId: string;
     readonly engine: string;
     readonly reason: string;
     readonly url: string;
@@ -401,8 +416,9 @@ export interface CloudBrowserSeam {
     /** The websocket the box's driver attaches to. Never reaches argv; see `#requestFile`. */
     readonly cdpUrl: string;
     readonly sessionId: string;
-    close(): Promise<void>;
-  }>;
+  } | null>;
+  /** Give this page's browser back: stop a cloud session, or forget a box page. */
+  releaseView(viewId: string): Promise<void>;
 }
 
 export interface BrowserDriverOutput {
@@ -492,19 +508,45 @@ export class SandBrowserDriver<Context = unknown> {
      */
     const cloud = this.dependencies.cloudBrowser;
     const url = typeof input.args.url === "string" ? input.args.url : undefined;
+    const viewId = this.#viewIdFor(input.args);
+    /**
+     * WHO ALREADY HOLDS THIS PAGE, asked before anything is routed.
+     *
+     * The router only ever sees an address, and only browser_open and browser_navigate carry one.
+     * browser_click takes a ref, browser_type takes a ref and some text, browser_screenshot takes
+     * nothing -- so routing every call sent the open to a cloud browser and the click that followed
+     * it to the box's Chrome, which was showing a different page. Measured on the R750's demo box
+     * on 2026-09-09: two cloud sessions for one Instagram profile, five seconds apart, neither
+     * continued. An op with no address never routes; it goes to whichever browser has the page.
+     */
+    const held = cloud?.viewEngine(viewId);
+    const routing = held === undefined || url !== undefined;
     const first = cloud === undefined
       ? { engine: "box", reason: "" }
-      : cloud.route(url === undefined ? {} : { url });
+      : routing
+        ? cloud.route(url === undefined ? {} : { url })
+        : { engine: held as string, reason: "this page is already open in that browser" };
 
-    const attempt = await this.#runOnce(context, input, first.engine === "box" ? null : first);
-    if (cloud === undefined || first.engine !== "box" || attempt.response === undefined) return attempt.output;
+    const attempt = await this.#runOnce(context, input, first, viewId);
+    // An escalation is a SECOND browser for the same page, so it belongs only to the call that was
+    // routed in the first place. Escalating a click would mint a fresh browser on a blank page and
+    // then look for a ref that has never existed in it.
+    if (cloud === undefined || !routing || first.engine !== "box" || attempt.response === undefined) return attempt.output;
     if (!cloud.shouldEscalate(attempt.response)) return attempt.output;
     const second = cloud.route({ escalating: true, ...(url === undefined ? {} : { url }) });
     if (second.engine === "box") return attempt.output;
-    const escalated = await this.#runOnce(context, input, second);
+    const escalated = await this.#runOnce(context, input, second, viewId);
     // A cloud attempt that failed outright leaves the box's own answer standing. The person is
     // better served by a footer plus the sentence that says it is a footer than by a vendor error.
     return escalated.output.isError === true ? attempt.output : escalated.output;
+  }
+
+  /** The page these arguments act on. One agent's four tools never name one, so it is the default. */
+  #viewIdFor(args: Record<string, unknown>): string {
+    const requested = args.viewId;
+    return typeof requested === "string" && requested.length > 0
+      ? requested
+      : this.dependencies.getDefaultViewId();
   }
 
   /**
@@ -522,7 +564,8 @@ export class SandBrowserDriver<Context = unknown> {
       readonly skipScreenshot?: boolean;
       readonly useRuntimeDriver?: boolean;
     },
-    route: { readonly engine: string; readonly reason: string } | null,
+    route: { readonly engine: string; readonly reason: string },
+    viewId: string,
   ): Promise<{ readonly output: BrowserDriverOutput; readonly response?: BrowserDriverResponse }> {
     // The window index is resolved on BOTH paths, and deliberately so even though a cloud session
     // has no window on this box's screen. The predicate that offers these four tools already
@@ -537,19 +580,26 @@ export class SandBrowserDriver<Context = unknown> {
     const screenshotPath = input.skipScreenshot === true
       ? undefined
       : `${SAND_BROWSER_DRIVER_BOX_DIR}/shot-${sanitizeForBoxPath(input.toolCallId)}.png`;
-    const requestedViewId = input.args.viewId;
 
-    // The cloud session is minted here and stopped in the finally below, on EVERY exit path
-    // including a thrown tool error. Browser Use's own docs say closing the CDP connection does not
-    // stop the browser, so a missed stop is a browser billing by the hour with nothing driving it.
-    let lease: { readonly cdpUrl: string; readonly sessionId: string; close(): Promise<void> } | null = null;
-    if (route !== null && this.dependencies.cloudBrowser !== undefined) {
-      lease = await this.dependencies.cloudBrowser.open({
+    /**
+     * THE BROWSER THIS PAGE IS HELD IN, taken here and given back on an explicit close, on a call
+     * that threw, or when the idle timer notices nobody is using it.
+     *
+     * It used to be minted and stopped inside this one method, which is why a cloud page could
+     * never be clicked: the browser was gone before the tool result was assembled. The stop that
+     * finally guaranteed is kept for the case it was actually about -- a call that threw leaves the
+     * page in a state nothing can continue from -- and the money it was protecting is bounded by
+     * the idle timer instead, which is shorter than the vendor's own session ceiling.
+     */
+    const cloud = this.dependencies.cloudBrowser;
+    const session = cloud === undefined
+      ? null
+      : await cloud.hold({
+        viewId,
         engine: route.engine,
         reason: route.reason,
         url: typeof input.args.url === "string" ? input.args.url : "",
       });
-    }
 
     try {
       const request = {
@@ -557,12 +607,10 @@ export class SandBrowserDriver<Context = unknown> {
         op: input.op,
         // On the cloud path the display and the port are meaningless: there is no Chrome on this
         // box to reach and no seat on its screen to keep a window inside. The endpoint replaces both.
-        ...(lease === null
+        ...(session === null
           ? { display: windowIndex, cdpPort: BOX_CDP_PORT_BASE + windowIndex }
-          : { cdpUrl: lease.cdpUrl }),
-        viewId: typeof requestedViewId === "string" && requestedViewId.length > 0
-          ? requestedViewId
-          : this.dependencies.getDefaultViewId(),
+          : { cdpUrl: session.cdpUrl }),
+        viewId,
         // After the arguments, always, so an allowHosts the model made up is overwritten by the
         // operator's own list rather than adding to it.
         allowHosts: readAllowedBrowserHosts(),
@@ -583,7 +631,7 @@ export class SandBrowserDriver<Context = unknown> {
        * directory and the driver unlinks the moment it has read it. The gate greps every argument
        * list in the box after a cloud run and fails on any vendor host, key or session id.
        */
-      const command = lease === null
+      const command = session === null
         ? `node ${driverPath} ${Buffer.from(JSON.stringify(request), "utf8").toString("base64")}`
         : `node ${driverPath} --request-file ${this.#writeRequestFile(input.toolCallId, request)}`;
       const shell = await this.dependencies.executeShell(context, {
@@ -592,9 +640,16 @@ export class SandBrowserDriver<Context = unknown> {
         workingDirectory: "/workspace",
         toolCallId: `sand-browser-${input.op}-${sanitizeForBoxPath(input.toolCallId)}`,
       });
-      return await this.#readShellAnswer(context, shell, screenshotPath);
-    } finally {
-      if (lease !== null) await lease.close().catch(() => undefined);
+      const answered = await this.#readShellAnswer(context, shell, screenshotPath);
+      // Closing the tab is the one thing an agent does that says it is finished with the page.
+      // Give the browser back then rather than waiting for the idle timer to work it out.
+      if (cloud !== undefined && input.op === "tabs" && input.args.action === "close") {
+        await cloud.releaseView(viewId).catch(() => undefined);
+      }
+      return answered;
+    } catch (error) {
+      if (cloud !== undefined) await cloud.releaseView(viewId).catch(() => undefined);
+      throw error;
     }
   }
 

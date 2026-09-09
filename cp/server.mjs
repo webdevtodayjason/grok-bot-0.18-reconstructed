@@ -643,8 +643,14 @@ export function createApp(options = {}) {
           oldestCheckedOn: age.oldest,
           ageDays: age.days,
           // The word the customer's own plugin page uses for the same row, so an operator reading
-          // this screen knows what the customer is being told right now.
-          customerSees: age.stale ? "under review" : `checked ${age.oldest}`,
+          // this screen knows what the customer is being told right now. It has to be decided the
+          // SAME WAY the page decides it, or this column becomes its own lie: the page reads the
+          // row's own verdict first and its age second, because a `--write` moves the read date
+          // forward on a fact it could not confirm, and a column that only knew about age said
+          // "checked today" beside a row this very screen was calling NEEDS RE-VERIFICATION.
+          customerSees: (row.docs ?? []).some((doc) => String(doc.state) === "changed")
+            ? "under review (a fact on it changed)"
+            : age.stale ? "under review (nobody has re-read it)" : `checked ${age.oldest}`,
           docs: (row.docs ?? []).map((doc) => ({
             id: String(doc.id), what: String(doc.what), url: String(doc.url),
             anchor: String(doc.anchor), checkedOn: String(doc.checkedOn), state: String(doc.state),

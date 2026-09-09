@@ -52,7 +52,7 @@ const lines = (dir) => readFileSync(ledger.cloudBrowserLedgerPath(dir), "utf8")
   .split("\n").filter((line) => line.trim().length > 0).map((line) => JSON.parse(line));
 
 const OPENED = {
-  tenant: "demo",
+  boxName: "0e6e57702ef1",
   agentId: "agent-1",
   vendor: "browserbase",
   sessionId: "sess-abc",
@@ -71,7 +71,7 @@ test("the open row is written before anything else, and it names the session", (
     assert.equal(written[0].endedAt, null, "an open session is visibly unfinished");
     assert.equal(written[0].minutes, null);
     assert.equal(written[0].proxyBytes, null);
-    assert.equal(written[0].tenant, "demo");
+    assert.equal(written[0].boxName, "0e6e57702ef1", "the row says which BOX, because that is all a box knows about itself");
     assert.ok(Date.parse(row.startedAt) > 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -238,7 +238,7 @@ test("the service writes the open row before it connects, and stops on the way o
     const service = new cloud.CloudBrowserService({
       rootDir: dir,
       fetch: fakeFetch,
-      getTenant: () => "demo",
+      getBoxName: () => "0e6e57702ef1",
       getAgentId: () => "agent-1",
     }, register);
 
@@ -259,7 +259,7 @@ test("the service writes the open row before it connects, and stops on the way o
     const folded = ledger.readCloudBrowserLedger(dir);
     assert.equal(folded.length, 1);
     assert.equal(folded[0].proxyBytes, 7_654_321, "the proxy figure is read back AFTER the browsing, not off the create answer");
-    assert.equal(folded[0].tenant, "demo");
+    assert.equal(folded[0].boxName, "0e6e57702ef1");
 
     // The read comes before the stop, so the figure is the session's real traffic.
     const readAt = seen.findIndex((call) => call === "GET https://api.browserbase.com/v1/sessions/bb-1");
@@ -291,7 +291,7 @@ test("the per-turn ceiling is enforced by the service, not only by the policy fu
       return { ok: true, status: 200, text: async () => "{}" };
     };
     const service = new cloud.CloudBrowserService({
-      rootDir: dir, fetch: fakeFetch, getTenant: () => "demo", getAgentId: () => "agent-1",
+      rootDir: dir, fetch: fakeFetch, getBoxName: () => "0e6e57702ef1", getAgentId: () => "agent-1",
     }, new cloud.CloudBrowserLiveRegister());
 
     assert.equal(service.route({ url: "https://example.com/" }).engine, "browserbase");
@@ -301,6 +301,96 @@ test("the per-turn ceiling is enforced by the service, not only by the policy fu
     // A new turn gets the allowance back.
     service.beginTurn("agent-1");
     assert.equal(service.route({ url: "https://example.com/" }).engine, "browserbase");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a browser is held for the page, not for the call, and given back on release", async () => {
+  // CLOUD-BROWSER-2's real cause. The service used to hand out a lease the driver stopped in its
+  // own finally, so every tool call was a fresh browser on a fresh blank page and nothing
+  // multi-step -- a sign-up, a login, a code -- could ever be finished.
+  const dir = mkdtempSync(path.join(tmpdir(), "cloud-hold-"));
+  try {
+    cloud.writeCloudBrowserSecret(dir, cloud.BROWSER_USE_KEY_FIELD, "bu_key");
+    let opened = 0;
+    const stopped = [];
+    const fakeFetch = async (url, init) => {
+      if (init?.method === "POST" && url.includes("/browsers")) {
+        opened += 1;
+        return { ok: true, status: 201, text: async () => JSON.stringify({ id: `bu-${opened}`, cdpUrl: "wss://x.example/one", liveUrl: "https://live.example/one" }) };
+      }
+      if (init?.method === "PATCH") {
+        stopped.push(url);
+        return { ok: true, status: 200, text: async () => "{}" };
+      }
+      return { ok: true, status: 200, text: async () => "{}" };
+    };
+    const service = new cloud.CloudBrowserService({
+      rootDir: dir, fetch: fakeFetch, getBoxName: () => "0e6e57702ef1", getAgentId: () => "agent-1",
+    }, new cloud.CloudBrowserLiveRegister());
+
+    assert.equal(service.viewEngine("view-1"), undefined, "nothing holds a page nobody has opened");
+    const first = await service.hold({ viewId: "view-1", engine: "browser-use", reason: "pinned", url: "https://example.com/" });
+    assert.equal(first.cdpUrl, "wss://x.example/one");
+    const again = await service.hold({ viewId: "view-1", engine: "browser-use", reason: "pinned", url: "" });
+    assert.deepEqual(again, first, "the second call gets the browser the first one took");
+    assert.equal(opened, 1, "one browser, two calls");
+    assert.equal(service.viewEngine("view-1"), "browser-use");
+
+    // A turn boundary must NOT take it away: the hand-off card ends the turn on purpose, and the
+    // person finishes the step in that browser's live view before the bot picks it up again.
+    service.beginTurn("agent-1");
+    assert.equal(service.viewEngine("view-1"), "browser-use", "a new turn does not throw the page away");
+    assert.equal(service.live.all().length, 1, "and the console can still show it");
+
+    await service.releaseView("view-1");
+    assert.equal(service.viewEngine("view-1"), undefined);
+    assert.equal(service.live.all().length, 0);
+    assert.equal(stopped.length, 1, "the release is what stops the vendor's browser");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a held browser is given back when nothing has used it for a while", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cloud-idle-"));
+  try {
+    cloud.writeCloudBrowserSecret(dir, cloud.BROWSER_USE_KEY_FIELD, "bu_key");
+    const fakeFetch = async (url, init) => {
+      if (init?.method === "POST" && url.includes("/browsers")) {
+        return { ok: true, status: 201, text: async () => JSON.stringify({ id: "bu-idle", cdpUrl: "wss://x.example/one" }) };
+      }
+      return { ok: true, status: 200, text: async () => "{}" };
+    };
+    const service = new cloud.CloudBrowserService({
+      rootDir: dir, fetch: fakeFetch, getBoxName: () => "0e6e57702ef1", getAgentId: () => "agent-1", viewIdleMs: 20,
+    }, new cloud.CloudBrowserLiveRegister());
+    await service.hold({ viewId: "view-1", engine: "browser-use", reason: "pinned", url: "https://example.com/" });
+    assert.equal(service.viewEngine("view-1"), "browser-use");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(service.viewEngine("view-1"), undefined, "an idle browser is money nobody is spending on purpose");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a row written before the field was named honestly still reads back", () => {
+  // The ledger is a receipt. Rows already on live boxes carry the box's own name under `tenant`,
+  // and they are read as what they are rather than rewritten -- rewriting a receipt is the opposite
+  // of keeping one.
+  const dir = mkdtempSync(path.join(tmpdir(), "cloud-old-row-"));
+  try {
+    const old = {
+      tenant: "0e6e57702ef1", agentId: "agent-1", vendor: "browser-use", sessionId: "old-1",
+      startedAt: "2026-09-09T16:59:44.591Z", endedAt: "2026-09-09T16:59:50.002Z", minutes: 0.09,
+      proxyBytes: null, engine: "browser-use", reason: "pinned", url: "https://example.com/",
+    };
+    writeFileSync(ledger.cloudBrowserLedgerPath(dir), `${JSON.stringify({ ...old, event: "closed" })}\n`);
+    const [row] = ledger.readCloudBrowserLedger(dir);
+    assert.equal(row.boxName, "0e6e57702ef1", "the old field is read under the new name");
+    assert.equal(row.tenant, undefined, "and nothing goes on calling a container id a tenant");
+    assert.equal(row.minutes, 0.09);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

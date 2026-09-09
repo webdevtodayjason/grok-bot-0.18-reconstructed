@@ -847,10 +847,24 @@ which is which.
    the corrected `checkedOn` and `state` back into `source/shared/marketplace/catalog.ts`. Commit it,
    and the bundle carries it.
 
-**In between, the customer-facing half runs on age.** The plugin page draws "Checked 9 Sep 2026"
-until the row's own dates are older than its `recheckDays`, and "Under review — we are re-reading
-the vendor's docs, hold off installing" after that. It never blocks Install; it says so before the
-person commits.
+**The plugin page reads the row's own verdict first, and its age second.** A `--write` stamps two
+things into the catalog: the corrected `checkedOn`, and each fact's `state`. So the release that
+carries a flip carries it as `state: "changed"` on the fact itself, and the page says **Under
+review** on that row even though its date is today's. That ordering is not a detail. `--write`
+moves the date FORWARD on a fact it could not confirm, so a page that decided from age alone read
+"Checked 9 Sep 2026" on exactly the row the job had just flagged — measured on the R750 on
+2026-09-09, where `marketplace list` printed browserbase as NEEDS RE-VERIFICATION while its own page
+would have gone on saying checked for thirty days, with two credential boxes and an Add on it.
+
+Age still does its own job: a row nobody has re-read for longer than its `recheckDays` says Under
+review too, in different words, because "nobody has looked" and "somebody looked and it had moved"
+are different things to tell a customer.
+
+Neither one blocks Install. It says so before the person commits.
+
+**What still only lands at a release.** The flip reaches a running box no faster than the bundle
+does. Between the job flagging a row and the next ship, a customer's page carries the previous
+release's verdict — see `MARKET-31`.
 
 ### Running it
 
