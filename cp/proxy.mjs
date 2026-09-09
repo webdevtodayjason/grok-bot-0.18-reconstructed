@@ -453,6 +453,33 @@ export function monthStartDay(at) {
   return `${date.toISOString().slice(0, 7)}-01`;
 }
 
+// PROVIDERS-8. How many of a deployment's most recent requests the spend sweep carries back.
+//
+// A month total cannot tell a provider that is broken right now from one that broke on the 8th and
+// has answered every request since. MEASURED ON THE R750 2026-09-09 out of the proxy's own
+// database: tb-plan-qwen-qwen-1 holds 254 rows and 3 failures, all three on 2026-09-08 (22:45:34,
+// 22:47:11 and 22:48:09), and the twelve newest are all success -- while the panel said "not
+// answering" because one failure anywhere in the window turned the light red. Five is enough to
+// tell a vendor that is down from one bad request and small enough to keep per deployment for
+// every row in the log.
+export const RECENT_REQUESTS = 5;
+
+/**
+ * The newest RECENT_REQUESTS entries, kept as an insert rather than an append.
+ *
+ * /spend/logs is NOT ordered and the loop that fills this does not sort, so appending would keep
+ * whichever five rows happened to arrive last, which is a different set from the five that happened
+ * last. The ring is held newest first and an entry that cannot get in is dropped.
+ */
+export function keepRecent(ring, entry) {
+  let index = ring.length;
+  while (index > 0 && String(ring[index - 1].at) < String(entry.at)) index -= 1;
+  if (index >= RECENT_REQUESTS) return ring;
+  ring.splice(index, 0, entry);
+  if (ring.length > RECENT_REQUESTS) ring.length = RECENT_REQUESTS;
+  return ring;
+}
+
 /**
  * The client.
  *
@@ -752,13 +779,19 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         if (deploymentId.length === 0) continue;
         let target = byDeployment.get(deploymentId);
         if (target == null) {
-          target = { id: deploymentId, alias: model, dollars: 0, requests: 0, rows: 0, tokens: 0, failures: 0, lastFailureAt: "", lastFailureWhy: "" };
+          target = { id: deploymentId, alias: model, dollars: 0, requests: 0, rows: 0, tokens: 0, failures: 0, lastFailureAt: "", lastFailureWhy: "", recent: [] };
           byDeployment.set(deploymentId, target);
         }
         target.dollars += dollars;
         target.requests += requests;
         target.rows += 1;
         target.tokens += tokens;
+        // PROVIDERS-8. WHEN each of those outcomes happened, per deployment, inside the same
+        // window. What the month total cannot say is whether the failures are the newest thing that
+        // happened or the oldest, and that is the whole difference between a provider that is down
+        // now and one that had a bad night last week.
+        const startedAt = String(row?.startTime ?? row?.startTimeUtc ?? "");
+        keepRecent(target.recent, { at: startedAt, ok: String(row?.status ?? "").toLowerCase() !== "failure" });
         // PROVIDERS-1, the honest half of provider health. A spend row carries the outcome of the
         // request it records, and a failed one is the only evidence this install HAS that a key or a
         // vendor is unwell: background_health_checks is off and GET /health/latest answers an empty
@@ -767,7 +800,7 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         // Providers panel draws.
         if (String(row?.status ?? "").toLowerCase() === "failure") {
           target.failures += 1;
-          const at = String(row?.startTime ?? row?.startTimeUtc ?? "");
+          const at = startedAt;
           if (at > target.lastFailureAt) {
             target.lastFailureAt = at;
             target.lastFailureWhy = String(
@@ -819,8 +852,12 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         failures: entry.failures,
         lastFailureAt: entry.lastFailureAt,
         lastFailureWhy: entry.lastFailureWhy,
+        // The five newest requests this deployment served INSIDE THIS WINDOW, newest first. The
+        // window is on the answer as startDay and endDay, so a reader of this list always knows
+        // what "recent" was measured over rather than having to assume it.
+        recent: entry.recent.map((one) => ({ at: one.at, ok: one.ok === true })),
       }));
-      return { ok: true, keys, deployments, startDay: from, endDay: to };
+      return { ok: true, keys, deployments, startDay: from, endDay: to, recentKept: RECENT_REQUESTS };
     },
 
     /**

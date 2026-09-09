@@ -85,6 +85,14 @@ import {
   type ProblemReportDependencies,
 } from "./problem-report-tool.js";
 import {
+  SEND_EMAIL_TOOL_HINT,
+  SEND_EMAIL_TOOL_ID,
+  createSendEmailTool,
+  type SendEmailDependencies,
+} from "./send-email-tool.js";
+import { readAgentMail } from "../../extensions/mail/agent-mail-store.js";
+import { resolveRelaySend } from "../../extensions/mail/relay-send-client.js";
+import {
   createGenerateImageTool,
   type GenerateImageToolDependencies,
 } from "../../../packages/agent/tools/core/generate-image.js";
@@ -198,6 +206,7 @@ export const SAND_DYNAMIC_TOOL_HINTS: Readonly<Record<string, string>> = {
   COPY_FROM_BOX: "Copy a file from your box onto the user's computer.",
   REQUEST_BOX_HELP: "Hand your box's desktop to the user for a sign-in or manual step.",
   [PROBLEM_REPORT_TOOL_ID]: PROBLEM_REPORT_TOOL_HINT,
+  [SEND_EMAIL_TOOL_ID]: SEND_EMAIL_TOOL_HINT,
   CHECK_SUBAGENT: "Inspect a running background subagent's status and recent actions.",
   MESSAGE_SUBAGENT: "Send a new instruction into a running background subagent.",
   STOP_SUBAGENT: "Abort a running background subagent.",
@@ -598,6 +607,8 @@ export interface TurnToolFactories {
   requestBoxHelp?(): TurnTool;
   /** FEEDBACK-1. Unguarded: every agent has it, subagents and desktop-less boxes included. */
   problemReport?(): TurnTool;
+  /** MAIL-3. Guarded, unlike problemReport: see the push in buildTurnTools for the four facts. */
+  sendEmail?(): TurnTool;
   mcpMeta?(dynamicToolRegistry?: DynamicToolRegistry): readonly TurnTool[];
   mcpManagement?(): readonly TurnTool[];
   subagentManagement?(): readonly TurnTool[];
@@ -657,6 +668,10 @@ export interface TurnBoxHelpToolFactoryInput {
 
 export interface TurnProblemReportToolFactoryInput {
   readonly dependencies: ProblemReportDependencies;
+}
+
+export interface TurnSendEmailToolFactoryInput {
+  readonly dependencies: SendEmailDependencies;
 }
 
 export interface TurnGenerateImageToolFactoryInput {
@@ -736,6 +751,7 @@ export interface TurnToolsetFactoryInputs {
   readonly fileTransfer?: TurnFileTransferToolFactoryInput;
   readonly requestBoxHelp?: TurnBoxHelpToolFactoryInput;
   readonly problemReport?: TurnProblemReportToolFactoryInput;
+  readonly sendEmail?: TurnSendEmailToolFactoryInput;
   readonly generateImage?: TurnGenerateImageToolFactoryInput;
   readonly webSearch?: TurnWebSearchToolFactoryInput;
   readonly webFetch?: TurnWebFetchToolFactoryInput;
@@ -793,6 +809,10 @@ export interface TurnToolsetHostFactoryProvider {
     turn: TurnToolsetTurnInput,
     props: TurnToolsetBuildProps,
   ) => TurnProblemReportToolFactoryInput;
+  readonly createSendEmailToolInputs?: (
+    turn: TurnToolsetTurnInput,
+    props: TurnToolsetBuildProps,
+  ) => TurnSendEmailToolFactoryInput;
   readonly createGenerateImageToolInputs?: (
     turn: TurnToolsetTurnInput,
     props: TurnToolsetBuildProps,
@@ -1152,6 +1172,12 @@ export function createTurnProblemReportToolFactory(
   return () => asTurnTool(createProblemReportTool(input.dependencies));
 }
 
+export function createTurnSendEmailToolFactory(
+  input: TurnSendEmailToolFactoryInput,
+): () => TurnTool {
+  return () => asTurnTool(createSendEmailTool(input.dependencies));
+}
+
 export function createTurnGenerateImageToolFactory(
   input: TurnGenerateImageToolFactoryInput,
 ): () => TurnTool {
@@ -1273,7 +1299,7 @@ export function createTurnToolsetFactories(
 ): Pick<
   TurnToolFactories,
   "task" | "mcpMeta" | "computer" | "browser" | "browserDirect" | "screenshot"
-  | "fileTransfer" | "requestBoxHelp" | "problemReport" | "generateImage" | "webSearch" | "webFetch" | "externalAwait"
+  | "fileTransfer" | "requestBoxHelp" | "problemReport" | "sendEmail" | "generateImage" | "webSearch" | "webFetch" | "externalAwait"
   | "boxAwait" | "externalShell" | "externalRead" | "boxShell" | "boxRead"
   | "sendMessage" | "sendToAgent" | "reaction" | "createAgent" | "updateAgent" | "updateState"
   | "subagentManagement"
@@ -1313,6 +1339,9 @@ export function createTurnToolsetFactories(
     ...(input.problemReport === undefined
       ? {}
       : { problemReport: createTurnProblemReportToolFactory(input.problemReport) }),
+    ...(input.sendEmail === undefined
+      ? {}
+      : { sendEmail: createTurnSendEmailToolFactory(input.sendEmail) }),
     ...(input.generateImage === undefined
       ? {}
       : { generateImage: createTurnGenerateImageToolFactory(input.generateImage) }),
@@ -1413,6 +1442,9 @@ export function createTurnToolsetFactoriesForTurn(
     ...(provider.createProblemReportToolInputs === undefined
       ? {}
       : { problemReport: provider.createProblemReportToolInputs(turn, props) }),
+    ...(provider.createSendEmailToolInputs === undefined
+      ? {}
+      : { sendEmail: provider.createSendEmailToolInputs(turn, props) }),
     ...(provider.createGenerateImageToolInputs === undefined
       ? {}
       : { generateImage: provider.createGenerateImageToolInputs(turn, props) }),
@@ -1797,6 +1829,54 @@ export function buildTurnTools(
   {
     const problemReport = factories.problemReport?.();
     if (problemReport !== undefined) tools.push(problemReport);
+  }
+
+  // MAIL-3. Unlike the row above, this one is GUARDED, and on four facts rather than a preference.
+  //
+  //   - `canSend` on this box's own copy of the address directory. It is one boolean per workspace,
+  //     pushed by the relay's five-minute sweep, and standing-persona.ts already makes an agent say
+  //     "I can send from that address" the moment it is true. Offering the tool on a box the relay
+  //     still says false for would produce a bot that holds a capability its own words deny.
+  //   - a row for THIS agent in that directory. A bot with no address has nothing to send from, and
+  //     the relay would refuse it anyway; a tool that can only refuse is worse than no tool.
+  //   - a relay parses out of the bundle base URL, and its token is not empty. On a non-tenant
+  //     install that base is still the default S3 bucket, so this is also what keeps the tool off
+  //     an ordinary desktop build entirely.
+  //
+  // The count matters as much as the correctness: the fleet is measured at 26 schemas and local
+  // endpoints break above six, so gating here keeps every box that is not mail-enabled at exactly
+  // the count it has today rather than growing a 27th schema by accident.
+  //
+  // It is deliberately absent from SHARED_ROOM_TOOL_NAMES, which is an allowlist: absence is the
+  // whole change, and a cross-user room cannot send mail for free.
+  //
+  // A SUBAGENT never gets it, whatever the directory says, and that is its own guard rather than
+  // part of the four. Mail goes out under the business's name, and the chip that says it went is
+  // drawn in the conversation the person is watching -- which a subagent's run is not.
+  //
+  // MEASURED on grok-bot-local-vm 2026-09-09 18:26Z: a box-scoped computerUse subagent's trace line
+  // carries conversationId `sand-subagent-<uuid>`, so on that path it would find no directory row
+  // and be withheld anyway. This guard is for the other path: `getConversationId` in
+  // host-runner-composition.ts is `() => shellConversationId`, whose default is the PARENT's
+  // session id, so a call site that leaves it out hands a subagent the parent's identity and with
+  // it the parent's address. The reason is its own word so an operator reading the trace can tell
+  // this apart from a workspace whose sending is switched off.
+  {
+    const sendEmail = factories.sendEmail?.();
+    if (sendEmail !== undefined) {
+      if (host.isSubagentRunner) {
+        withheld.push({ tool: "SendEmail", reason: "subagent_runner" });
+      } else {
+        const mail = readAgentMail();
+        const relay = resolveRelaySend();
+        const offered = mail?.canSend === true
+          && mail.addresses[agentId] != null
+          && relay !== undefined
+          && relay.token.length > 0;
+        if (offered) tools.push(sendEmail);
+        else withheld.push({ tool: "SendEmail", reason: "mail_send_off" });
+      }
+    }
   }
 
   // The immutable builder only offers the MCP discovery/call pair when the

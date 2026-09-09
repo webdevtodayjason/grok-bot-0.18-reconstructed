@@ -20,12 +20,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { signSvix, routeDirectoryFirst, legacyNotice, MAIL_LEGACY_STOP } from "../ui/mail-edge.mjs";
 import { openStore } from "../cp/store.mjs";
-import { createMailDirectory } from "../cp/mail.mjs";
+import { createMailDirectory, createMailSends } from "../cp/mail.mjs";
 import { RELAY_TOKEN, startRelay, tenantRow, tenantsFile } from "./relay-tenant-support.mjs";
 
 const DOMAIN = "myagents.email";
@@ -160,7 +161,10 @@ function fakeBox(roster, { knowsSetAgentMail = true } = {}) {
 /** A control plane: the registry route it needs to be quiet, and the two directory routes. */
 function stubControlPlane(store) {
   const directory = createMailDirectory({ store, domain: DOMAIN });
-  const seen = { directory: 0, mint: [] };
+  // MAIL-3. The real send log over the same store, so the relay's claim and settle are checked
+  // against the code that actually runs on the control plane rather than against a stub of it.
+  const sends = createMailSends({ store });
+  const seen = { directory: 0, mint: [], sendOpen: [], sendClose: [] };
   const server = createServer((req, res) => {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });
@@ -181,6 +185,17 @@ function stubControlPlane(store) {
         let body; try { body = JSON.parse(raw || "{}"); } catch { body = {}; }
         seen.mint.push(body.slug);
         return send(200, directory.mint(body.slug, body.agents));
+      }
+      if (url.pathname === "/v1/relay/mail/send/open") {
+        let body; try { body = JSON.parse(raw || "{}"); } catch { body = {}; }
+        seen.sendOpen.push(body);
+        const answer = sends.openSend(body);
+        return send(answer.ok ? 200 : (answer.error === "rate_limited" ? 429 : 400), answer);
+      }
+      if (url.pathname === "/v1/relay/mail/send/close") {
+        let body; try { body = JSON.parse(raw || "{}"); } catch { body = {}; }
+        seen.sendClose.push(body);
+        return send(200, sends.closeSend(body.id, body.outcome, body.resendId, body.detail));
       }
       return send(404, { error: "not_found" });
     });
@@ -218,11 +233,24 @@ const post = (relay, raw, secret = SECRET) => {
 // not out of the webhook body, which is Resend's own shape: the event announces an id and the
 // message is fetched. Approved senders turns on exactly that difference, so the fake keeps it and
 // `senders` maps an email id to whoever wrote it.
-function fakeResend(senders = new Map()) {
+function fakeResend(senders = new Map(), outbound = []) {
   const server = createServer((req, res) => {
+    // MAIL-3. The send route's own POST. Every field it was given is kept, because the claims worth
+    // asserting are about what DID and did not reach this door.
+    if (req.method === "POST" && req.url === "/emails") {
+      let raw = "";
+      req.on("data", (chunk) => { raw += chunk; });
+      req.on("end", () => {
+        let body; try { body = JSON.parse(raw || "{}"); } catch { body = {}; }
+        outbound.push({ body, headers: req.headers });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: `re_${outbound.length}` }));
+      });
+      return undefined;
+    }
     const id = /\/emails\/receiving\/([^/]+)/.exec(req.url)?.[1] ?? "";
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify(req.url.endsWith("/attachments")
+    return res.end(JSON.stringify(req.url.endsWith("/attachments")
       ? { data: [] }
       : {
         from: senders.get(id) ?? "Jane <jane@client.test>",
@@ -248,24 +276,28 @@ const waitFor = async (predicate, why, ms = 20_000) => {
   throw new Error(`timed out waiting for ${why}`);
 };
 
-const ledgerOf = (dir) => {
+const jsonlOf = (dir, name) => {
   try {
-    return readFileSync(path.join(dir, "mail-inbox.jsonl"), "utf8").split("\n")
+    return readFileSync(path.join(dir, name), "utf8").split("\n")
       .filter((line) => line.trim().length > 0).map((line) => JSON.parse(line));
   } catch { return []; }
 };
+const ledgerOf = (dir) => jsonlOf(dir, "mail-inbox.jsonl");
+// MAIL-3. What this workspace's own bots sent, beside what arrived for them and on the same volume.
+const sentLedgerOf = (dir) => jsonlOf(dir, "mail-sent.jsonl");
 
 /**
  * A console with three workspaces on it: the one whose card claims myagents.email and receives the
  * webhook, a second one whose bots the mail is actually for, and Richard's, which is a real
  * customer and read-only this wave.
  */
-async function console3({ noPush = "richard-avery" } = {}) {
+async function console3({ noPush = "richard-avery", noSend = "", noSendFile = null } = {}) {
   const store = openStore({ file: ":memory:" });
   const cp = stubControlPlane(store);
   const cpUrl = await cp.start();
   const senders = new Map();
-  const resend = fakeResend(senders);
+  const outbound = [];
+  const resend = fakeResend(senders, outbound);
   const resendUrl = await resend.start();
 
   const alphaBox = fakeBox([{ id: "a_titan", name: "Titan" }, { id: "a_books", name: "Books" }]);
@@ -298,6 +330,15 @@ async function console3({ noPush = "richard-avery" } = {}) {
     // And which workspaces this relay must not write inside. Empty in the product; an operator
     // sets it, which is the whole point of the setting.
     SAND_UI_MAIL_NO_PUSH_SLUGS: noPush,
+    // MAIL-3, and a SEPARATE list from the one above: not-pushed is about a box on an old bundle,
+    // not-allowed-to-send is about custody. A workspace that is never pushed still holds a valid
+    // gateway token and could call the send route anyway.
+    SAND_UI_MAIL_NO_SEND_SLUGS: noSend,
+    // A relay container's environment is fixed when the container is made, and a live console is
+    // not recreated to stop one workspace sending for an afternoon. So a file of one slug per line
+    // beside the rest of the relay's state does it too, and that is the mechanism the ship plan
+    // actually uses -- which is why it is the mechanism a test drives.
+    ...(noSendFile == null ? {} : { SAND_UI_MAIL_NO_SEND_FILE: noSendFile }),
   }, { prefix: "relay-mail-directory-", pathValue: "/nonexistent" });
 
   // The sweep runs at start. Wait for it rather than racing it.
@@ -305,7 +346,15 @@ async function console3({ noPush = "richard-avery" } = {}) {
   await waitFor(() => store.listMailAddresses("beta").length === 2, "beta's addresses");
 
   return {
-    relay, cp, store, alpha, beta, richard, alphaBox, betaBox, richardBox, senders,
+    relay, cp, store, alpha, beta, richard, alphaBox, betaBox, richardBox, senders, outbound,
+    /** POST /mail/send as a box would: the box's own gateway token and nothing else. */
+    send(token, body) {
+      return fetch(`${relay.base}/mail/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(token == null ? {} : { authorization: `Bearer ${token}` }) },
+        body: JSON.stringify(body),
+      });
+    },
     codeOf(slug, agentId) {
       const row = store.listMailAddresses(slug).find((one) => one.agentId === agentId);
       if (row == null) throw new Error(`${slug}/${agentId} has no address`);
@@ -338,7 +387,7 @@ test("the relay sweeps every workspace, mints what is missing, and leaves a read
     // Beta's box is on the current bundle, alpha's too; the push carries the addresses and no key.
     const pushed = world.alphaBox.seen.find((one) => one.command === "setAgentMail");
     assert.equal(pushed.args.domain, DOMAIN);
-    assert.equal(pushed.args.canSend, false, "sending is unchanged this wave, and the box is told so");
+    assert.equal(pushed.args.canSend, true, "the relay carries the send route, so the box is told its bots can send");
     assert.equal(pushed.args.addresses.length, 2);
     assert.equal(JSON.stringify(pushed.args).includes("re_test"), false, "no key is ever in that push");
   } finally { world.stop(); }
@@ -478,5 +527,144 @@ test("the sweep route is the control plane's, and a console session does not ope
     const ok = await fetch(`${world.relay.base}/mail/sweep`, { method: "POST", headers: { authorization: `Bearer ${RELAY_TOKEN}` } });
     assert.equal(ok.status, 200);
     assert.equal((await ok.json()).ok, true);
+  } finally { world.stop(); }
+});
+
+// ---- POST /mail/send, against a running relay (MAIL-3) ------------------------------------------
+//
+// The rules of the route are walked case by case in tests/mail-send-route.test.mjs, where a failure
+// names the rule that broke. What only a real relay can prove is the DOOR: that the route is
+// mounted at all, that it sits in front of the console's login, that a box's own gateway token is
+// what opens it, and that the whole path from that token to Resend's request body is wired the way
+// the pieces say it is.
+
+test("a box's own gateway token sends from its bot's address, and the From is not the caller's to choose", async () => {
+  const world = await console3();
+  try {
+    const address = world.codeOf("alpha", "a_titan");
+    const answer = await world.send(world.alpha.row.token, {
+      agentId: "a_titan",
+      to: "jane@client.example",
+      subject: "September invoice",
+      text: "Here it is.",
+      // Everything a bot might guess at, ignored rather than honoured.
+      from: "Titan <titan@titaniumcomputing.test>",
+      replyTo: "someone@else.example",
+      headers: { From: "billing@bank.example" },
+    });
+    assert.equal(answer.status, 200);
+    const body = await answer.json();
+    assert.equal(body.sent, true);
+    assert.equal(body.from, `"Titan (alpha)" <${address}>`);
+    assert.match(body.message, new RegExp(`^Sent to jane@client\\.example from ${address}\\. Message id `));
+
+    // What actually reached Resend, over the wire, with the relay's own stored key on it.
+    assert.equal(world.outbound.length, 1);
+    assert.equal(world.outbound[0].body.from, `"Titan (alpha)" <${address}>`);
+    assert.equal(world.outbound[0].body.reply_to, address);
+    assert.deepEqual(world.outbound[0].body.to, ["jane@client.example"]);
+    assert.equal(world.outbound[0].headers.authorization, "Bearer re_test");
+    const sent = JSON.stringify(world.outbound[0].body);
+    assert.equal(sent.includes("titaniumcomputing.test"), false, "the caller's From never reached Resend");
+    assert.equal(sent.includes("someone@else.example"), false, "nor its Reply-To");
+    assert.equal(sent.includes("bank.example"), false, "nor its headers");
+
+    // One row on the control plane, settled with Resend's id and carrying no subject.
+    const rows = world.store.listMailSends("alpha", 10);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcome, "sent");
+    assert.equal(rows[0].to, "jane@client.example");
+    assert.equal(rows[0].agentName, "Titan");
+    assert.equal(JSON.stringify(rows[0]).includes("September"), false);
+
+    // And the readable row, with the subject, on that workspace's OWN volume.
+    const ledger = ledgerOf(world.alpha.state).concat(sentLedgerOf(world.alpha.state));
+    const line = sentLedgerOf(world.alpha.state).at(-1);
+    assert.equal(line.subject, "September invoice");
+    assert.equal(line.to, "jane@client.example");
+    assert.equal(line.outcome, "sent");
+    assert.equal(line.from, `"Titan (alpha)" <${address}>`);
+    void ledger;
+  } finally { world.stop(); }
+});
+
+test("the send route is in front of the console's login and takes a box token and nothing else", async () => {
+  const world = await console3();
+  try {
+    const body = { agentId: "a_titan", to: "jane@client.example", subject: "hi", text: "hi" };
+    assert.equal((await world.send(null, body)).status, 401, "no bearer");
+    assert.equal((await world.send("a token nobody was given", body)).status, 401, "a token no tenant holds");
+    // The console's own credential is not this door's credential, and the relay token is not either.
+    assert.equal((await world.send(RELAY_TOKEN, body)).status, 401, "the control plane's token does not send mail");
+    assert.equal((await fetch(`${world.relay.base}/mail/send`)).status, 405, "and it is a POST");
+    assert.equal(world.outbound.length, 0);
+    assert.equal(world.store.listMailSends("alpha", 10).length, 0, "and nothing was claimed either");
+  } finally { world.stop(); }
+});
+
+test("a bot in another workspace cannot be sent as, whichever box asks", async () => {
+  const world = await console3();
+  try {
+    // Beta's box, naming one of alpha's bots. The bearer proves the workspace, the body does not.
+    const answer = await world.send(world.beta.row.token, {
+      agentId: "a_titan", to: "jane@client.example", subject: "hi", text: "hi",
+    });
+    assert.equal(answer.status, 403);
+    const body = await answer.json();
+    assert.equal(body.sent, false);
+    assert.equal(body.error, "no_address");
+    assert.equal(world.outbound.length, 0);
+
+    // And it is the SAME sentence a bot with no address at all gets, so nothing about another
+    // workspace can be learned by comparing the two.
+    const unknown = await world.send(world.beta.row.token, {
+      agentId: "b_nobody", to: "jane@client.example", subject: "hi", text: "hi",
+    });
+    assert.equal((await unknown.json()).message, body.message);
+  } finally { world.stop(); }
+});
+
+test("a workspace an operator switched sending off for is refused at the route, and its box is told so", async () => {
+  // Richard's is the live case: his box is not swapped, so the push never reaches it and it never
+  // learns canSend -- but his box holds a valid gateway token and could call this route anyway. An
+  // absent push is not a rule, so the rule is the list, and it is read per request.
+  const world = await console3({ noPush: "", noSend: "richard-avery" });
+  try {
+    await waitFor(() => world.richardBox.seen.some((one) => one.command === "setAgentMail"),
+      "the push into Richard's box");
+    const pushed = world.richardBox.seen.find((one) => one.command === "setAgentMail");
+    assert.equal(pushed.args.canSend, false, "a workspace on the no-send list is told its bots cannot send");
+    assert.equal(world.alphaBox.seen.find((one) => one.command === "setAgentMail").args.canSend, true,
+      "and nobody else moved");
+
+    const answer = await world.send(world.richard.row.token, {
+      agentId: "r_titan", to: "jane@client.example", subject: "hi", text: "hi",
+    });
+    assert.equal(answer.status, 403);
+    assert.equal((await answer.json()).error, "sending_off");
+    assert.equal(world.outbound.length, 0, "nothing was sent");
+    assert.equal(world.store.listMailSends("richard-avery", 10).length, 0, "and nothing was claimed");
+  } finally { world.stop(); }
+});
+
+test("the no-send list is a file the relay reads per request, so a send is stopped without a restart", async () => {
+  // This is the mechanism the ship plan uses, so it is the mechanism a test drives: step 3 writes
+  // richard-avery into the relay's /state/mail-no-send.txt BEFORE the relay carries the route at
+  // all. Per request rather than per sweep, because a send is a thing an operator may want stopped
+  // in the next second and not within five minutes.
+  const file = path.join(mkdtempSync(path.join(tmpdir(), "relay-no-send-")), "mail-no-send.txt");
+  writeFileSync(file, "# one slug per line\nrichard-avery\n");
+  const world = await console3({ noPush: "", noSendFile: file });
+  try {
+    const body = { agentId: "r_titan", to: "jane@client.example", subject: "hi", text: "hi" };
+    assert.equal((await world.send(world.richard.row.token, body)).status, 403);
+    assert.equal(world.outbound.length, 0);
+
+    // Take the line out and the very next call goes through. Nothing restarted.
+    writeFileSync(file, "");
+    const after = await world.send(world.richard.row.token, body);
+    assert.equal(after.status, 200, "the file is read again on the next request");
+    assert.equal(world.outbound.length, 1);
+    assert.equal(world.outbound[0].body.from, `"Titan (richard-avery)" <${world.codeOf("richard-avery", "r_titan")}>`);
   } finally { world.stop(); }
 });

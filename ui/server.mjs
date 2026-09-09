@@ -65,8 +65,9 @@ import {
   newJobToken, resolveJobToken, routeJobBus,
 } from "./job-bus-edge.mjs";
 import {
-  MAIL_BODY_LIMIT, MAIL_LEDGER_FILE, MAIL_SETTINGS_FILE, appendMailLedger, createMailEdge, domainOf,
-  mailLedgerRow, readMailSettings, svixHeaders, toAddressList, verifySvixSignature,
+  MAIL_BODY_LIMIT, MAIL_LEDGER_FILE, MAIL_SENT_LEDGER_FILE, MAIL_SETTINGS_FILE, appendMailLedger,
+  createMailEdge, createMailSendRoute, domainOf, mailLedgerRow, readMailSettings, svixHeaders,
+  toAddressList, verifySvixSignature,
 } from "./mail-edge.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
 import { createLoginLedger, filterAttempts } from "./login-ledger.mjs";
@@ -615,6 +616,10 @@ function buildContext(entry) {
     endpointsFile: entry.operator && ENDPOINTS_OVERRIDE.length > 0 ? ENDPOINTS_OVERRIDE : file("endpoints.json"),
     mailSettingsFile: entry.operator ? MAIL_SETTINGS_FILE : file("mail.json"),
     mailLedgerFile: entry.operator ? MAIL_LEDGER_FILE : file("mail-inbox.jsonl"),
+    // MAIL-3. What this workspace's own bots sent, beside what arrived for them and on the same
+    // volume, so a customer's Mail card reads both out of their own state directory and nobody
+    // else's.
+    mailSentLedgerFile: entry.operator ? MAIL_SENT_LEDGER_FILE : file("mail-sent.jsonl"),
     jobTokenFile,
     // TITAN_JOB_TOKEN is a fact about this DEPLOYMENT, so it can only ever mean the operator. Read
     // for every tenant it would arm one environment value across every customer's box.
@@ -2189,6 +2194,7 @@ function mailEdgeFor(t) {
     ownLikeParent,
     settingsFile: t.mailSettingsFile,
     ledgerFile: t.mailLedgerFile,
+    sentLedgerFile: t.mailSentLedgerFile,
     limiter: mailLimiter,
     // Which OTHER workspace on this console already holds that domain. One file read per tenant,
     // and only on a save that actually changes the domain.
@@ -2286,6 +2292,40 @@ function mailNoPushSlugs() {
     }
   } catch { /* no file, which is every install that never held a workspace read-only */ }
   return new Set(slugs);
+}
+
+// WORKSPACES THIS RELAY MUST NOT SEND MAIL FOR (MAIL-3). The same shape and the same two ways of
+// setting it as the list above, and the product ships with it EMPTY for the same reason.
+//
+// It is a SEPARATE list from mail-no-push.txt on purpose. That one says "do not write inside this
+// box", which is about a box being on an old bundle; this one says "refuse this workspace's sends
+// at the route", which is about custody. A workspace that is not pushed never learns canSend and
+// so never offers its bots the tool -- but its box still holds a valid gateway token and could
+// call the route anyway, and an absent push is not a rule. This is the rule.
+//
+// Read per request rather than per sweep, because a send is a thing an operator may want stopped
+// in the next second and not within five minutes.
+const MAIL_NO_SEND_FILE = process.env.SAND_UI_MAIL_NO_SEND_FILE?.trim() || stateFile("mail-no-send.txt", HERE);
+function mailNoSendSlugs() {
+  const slugs = String(process.env.SAND_UI_MAIL_NO_SEND_SLUGS ?? "").split(",").map((one) => one.trim()).filter(Boolean);
+  try {
+    for (const line of readFileSync(MAIL_NO_SEND_FILE, "utf8").split("\n")) {
+      const slug = line.split("#")[0].trim();
+      if (slug.length > 0) slugs.push(slug);
+    }
+  } catch { /* no file, which is every install that has not switched a workspace's sending off */ }
+  return new Set(slugs);
+}
+
+/**
+ * Whether this workspace's bots may send, which is what the address push tells each box.
+ *
+ * Two conditions and both are facts this process holds: the workspace is not on the list above, and
+ * there is a directory domain at all -- a console with no control plane has no address to force a
+ * From to, so there is nothing its bots could send AS.
+ */
+function sendingIsOn(slug, noSend = mailNoSendSlugs()) {
+  return mailDirectoryDomain().length > 0 && !noSend.has(String(slug ?? ""));
 }
 
 let mailDirectoryState = { domain: "", tenants: {}, measuredAt: "", readAt: 0, source: "never read" };
@@ -2394,12 +2434,32 @@ async function mailDirectoryRoute(localpart) {
   return mailDirectoryLookup(localpart);
 }
 
-/** One workspace's own bot's code address, for the retiring notice on a name address. */
-function mailAddressOf(slug, agentId) {
+/**
+ * ONE workspace's own bot's directory row, and null for everything else.
+ *
+ * The scoping is the point. The send route looks a bot up by the slug its BEARER proved, so this
+ * one call refuses three different things with one answer: a bot that has no address, a bot whose
+ * address is retired, and a bot in somebody else's workspace. They cannot drift apart, and the
+ * route answers all three the same sentence, so a caller learns nothing about a workspace that is
+ * not theirs -- which is the MAIL-2c class of failure closed in one line.
+ */
+function mailDirectoryRowOf(slug, agentId) {
   const entry = mailDirectory().tenants?.[String(slug ?? "")];
   const row = (Array.isArray(entry?.addresses) ? entry.addresses : [])
     .find((one) => String(one?.agentId ?? "") === String(agentId ?? "") && String(one?.state ?? "active") !== "retired");
-  return String(row?.address ?? "");
+  if (row == null) return null;
+  return {
+    agentId: String(row.agentId ?? ""),
+    code: String(row.code ?? ""),
+    address: String(row.address ?? ""),
+    agentName: String(row.agentName ?? ""),
+    state: String(row.state ?? "active"),
+  };
+}
+
+/** One workspace's own bot's code address, for the retiring notice on a name address. */
+function mailAddressOf(slug, agentId) {
+  return mailDirectoryRowOf(slug, agentId)?.address ?? "";
 }
 
 /**
@@ -2444,6 +2504,9 @@ async function mailMintSweep(reason = "the timer") {
   // Read once per sweep rather than at import, so an operator adds or removes a workspace with a
   // file and a five minute wait instead of a restart.
   const noPush = mailNoPushSlugs();
+  // Read once per sweep rather than once per workspace, so every box in one pass is told the same
+  // thing about a file that could be edited between two of them.
+  const noSend = mailNoSendSlugs();
   try {
     // The control plane FIRST, and nothing else happens if it does not answer.
     //
@@ -2498,7 +2561,12 @@ async function mailMintSweep(reason = "the timer") {
       // every five minutes, so it is counted and said once per sweep.
       const push = await jobBusCall(t, "setAgentMail", {
         domain: String(minted?.domain ?? ""),
-        canSend: false,
+        // MAIL-3. This one boolean decides two things at once inside the box: whether the bot is
+        // offered the send tool at all, and whether its own facts say it can send. Both flip
+        // together on the sweep after the relay carries the route, which is why the ship order is
+        // boxes first and the relay last -- a relay that answered /mail/send while the boxes were
+        // still on the old bundle would be a fleet of bots claiming a capability they do not hold.
+        canSend: sendingIsOn(entry.slug, noSend),
         addresses: addresses.filter((row) => row.state !== "retired")
           .map((row) => ({ agentId: row.agentId, code: row.code, address: row.address })),
       }).catch((error) => ({ status: 0, text: String(error?.message ?? error), type: "" }));
@@ -2523,6 +2591,89 @@ function mailSweepStart() {
   if (RELAY == null) return;
   void mailMintSweep("this relay started");
   setInterval(() => { void mailMintSweep("the timer"); }, MAIL_SWEEP_MS).unref();
+}
+
+// ---- POST /mail/send, a bot sending from its own address (MAIL-3, docs/MAIL.md) ----------------
+//
+// This relay is the only process holding all three things a send needs: every tenant's gateway
+// bearer, the cached address directory, and the directory owner's Resend key. So it is the only
+// place the key can stay while a bot in a box still gets to send. The rules and the order of the
+// refusals are in ui/mail-edge.mjs; what is here is the three things that cannot leave this file.
+//
+// The credential is the box's OWN gateway token, which the registry already maps to a slug with no
+// early break -- the same value and the same comparison handleRuntimeBundle uses for the host
+// bundle. No new secret is minted anywhere in this wave.
+
+/** The claim, on the control plane, before anything is sent. */
+async function mailSendOpen(row) {
+  if (RELAY == null) return { ok: false, error: "unreachable", message: "this relay has no control plane" };
+  let response;
+  try {
+    response = await fetch(`${RELAY.cpUrl}/v1/relay/mail/send/open`, {
+      method: "POST",
+      body: JSON.stringify(row),
+      headers: { authorization: `Bearer ${RELAY.relayToken}`, "content-type": "application/json", accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (error) {
+    return { ok: false, error: "unreachable", message: error?.name === "TimeoutError" ? "timed out" : "no answer" };
+  }
+  let body = null;
+  try { body = await response.json(); } catch { body = null; }
+  if (response.status === 200 && body?.ok === true && Number(body.id) > 0) return { ok: true, id: Number(body.id) };
+  // A cap refusal is passed on WORD FOR WORD: the control plane counted the rows, so it is the one
+  // that knows the number and when the next one can go.
+  if (response.status === 429) return { ...body, ok: false, error: "rate_limited" };
+  return { ok: false, error: String(body?.error ?? `HTTP ${response.status}`), message: String(body?.message ?? "the claim was refused") };
+}
+
+/** And what happened to it. Never awaited into a refusal: a settle that fails is logged, not raised. */
+async function mailSendClose(id, outcome, resendId, detail) {
+  if (RELAY == null) return;
+  const response = await fetch(`${RELAY.cpUrl}/v1/relay/mail/send/close`, {
+    method: "POST",
+    body: JSON.stringify({ id, outcome, resendId, detail }),
+    headers: { authorization: `Bearer ${RELAY.relayToken}`, "content-type": "application/json", accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
+}
+
+let mailSendRouteBuilt = null;
+function mailSendRoute() {
+  if (mailSendRouteBuilt != null) return mailSendRouteBuilt;
+  mailSendRouteBuilt = createMailSendRoute({
+    readBody,
+    drainThenEnd,
+    // The bearer proves the WORKSPACE. Every entry is compared with no early break, so the time
+    // this takes says nothing about which one matched or how many there are.
+    workspaceOf: (bearer) => {
+      const entry = registry.matchToken(bearer);
+      return entry == null ? null : { slug: entry.slug, name: entry.name };
+    },
+    // Scoped to the caller's own slug, which is what makes one lookup refuse three things.
+    directoryRowFor: (slug, agentId) => mailDirectoryRowOf(slug, agentId),
+    // THE DIRECTORY OWNER'S settings and never the caller's. mailEdgeFor is per tenant and a
+    // customer's own mail.json has an empty apiKey, so a route written the obvious way would find
+    // no key on every customer and the bug would read as "Resend refused".
+    ownerSettings: () => {
+      const owner = contextOf(mailDirectoryOwnerSlug());
+      return owner == null ? Promise.resolve(null) : readMailSettings(owner.mailSettingsFile);
+    },
+    directoryDomain: () => mailDirectoryDomain(),
+    noSend: (slug) => mailNoSendSlugs().has(String(slug ?? "")),
+    openSend: mailSendOpen,
+    closeSend: mailSendClose,
+    // The workspace's own readable row, on the workspace's own volume, beside its inbox ledger.
+    appendSent: async (slug, row) => {
+      const t = contextOf(slug);
+      if (t == null) return;
+      t.ensureDir();
+      await appendMailLedger(row, { file: t.mailSentLedgerFile, ownLikeParent });
+    },
+    log: (line) => console.log(line),
+  });
+  return mailSendRouteBuilt;
 }
 
 /**
@@ -2840,6 +2991,11 @@ const server = createServer(async (req, res) => {
     // of band from the five minute timer. Its credential is CP_RELAY_TOKEN, the same one the two
     // routes below take, so it sits here rather than behind the console login.
     if (url.pathname === "/mail/sweep") return await handleMailSweepRoute(req, res);
+    // MAIL-3, and before the console's login for the same reason the runtime bundle is: the caller
+    // is a bot inside a box, which holds no session cookie. Its credential is the box's own gateway
+    // token, presented as a bearer and matched against the registry -- the one credential a box
+    // already has, so no new secret is minted for this.
+    if (url.pathname === "/mail/send") return await mailSendRoute().handleSend(req, res);
     // Before the console's login as well, and behind a credential the console session cannot
     // present: this is the CONTROL PLANE asking the relay for the two things only the relay can
     // see. The failed sign-in ledger, because a refusal happens at this door and never reaches the

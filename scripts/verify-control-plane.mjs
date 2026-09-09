@@ -57,6 +57,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { gateUserAgent } from "./gate-agent.mjs";
+
+// SIGNIN-1, and the one place in this wave where the header is sent ahead of anything reading it.
+// This gate knocks at the CONTROL PLANE's own door (POST /v1/sessions), and that service's
+// login_attempts table has no user_agent column at all: cp/store.mjs creates the table without one,
+// the insert never sends one, and listLoginAttempts hands the panel a hardcoded empty string. So
+// these rows cannot be labelled today and are not silenced by anything. The line is free, it is
+// right the day the column lands, and the migration is filed as SIGNIN-1b rather than left implied.
+const GATE_AGENT = gateUserAgent(import.meta.url);
+
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log([
     "verify-control-plane.mjs -- the TENANT-1 gate (docs/TENANCY.md).",
@@ -215,7 +225,7 @@ await new Promise((resolve, reject) => {
 // One request, recorded. Every body the server ever sends this run lands in bodiesSeen, which the
 // last leg searches for the three secrets.
 const call = async (method, pathname, { body, token, admin } = {}) => {
-  const headers = {};
+  const headers = { "user-agent": GATE_AGENT };
   if (body !== undefined) headers["content-type"] = "application/json";
   if (admin) headers.authorization = `Bearer ${ADMIN_TOKEN}`;
   else if (token) headers.authorization = `Bearer ${token}`;

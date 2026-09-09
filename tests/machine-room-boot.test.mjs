@@ -435,11 +435,14 @@ async function adapterHelpers() {
   return new Function(`
     ${grab("PROBLEM_REPORT_TOOL_CALL", "const")}
     ${grab("PROBLEM_REPORT_ROW_TEXT", "const")}
+    ${grab("MAIL_SEND_TOOL_CALL", "const")}
+    ${grab("MAIL_SEND_FAILED_PREFIX", "const")}
     ${TOOL_LABELS}
     ${grab("oneLine", "arrow-block")}
     ${grab("baseName", "const")}
     ${grab("shellHeadline")}
     ${grab("readHeadline")}
+    ${grab("mailSendRowText")}
     ${grab("toolRowText")}
     ${grab("localPathOf")}
     ${grab("imagesOf", "const")}

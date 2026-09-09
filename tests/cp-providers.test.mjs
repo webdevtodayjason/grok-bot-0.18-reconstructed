@@ -23,7 +23,7 @@ import { rm } from "node:fs/promises";
 import { openStore } from "../cp/store.mjs";
 import { createAdminApi } from "../cp/admin.mjs";
 import { loadConfig } from "../cp/provision.mjs";
-import { createProxyClient, includedModelRows, servedPlanModels, tenantRoutesFor, TB } from "../cp/proxy.mjs";
+import { RECENT_REQUESTS, createProxyClient, includedModelRows, keepRecent, servedPlanModels, tenantRoutesFor, TB } from "../cp/proxy.mjs";
 import { createApp } from "../cp/server.mjs";
 import { makeTempRoot } from "./cp-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
@@ -33,7 +33,7 @@ const PLANTED = "sk-zai-9f4c1d2e6b8a0357192a4c6e8d0f2b41";
 const OPERATOR = "operator-token-for-a-test";
 const CALLER_IP = "203.0.113.9";
 
-async function withPanel(run, { models, storeModelInDb } = {}) {
+async function withPanel(run, { models, storeModelInDb, stripRecent = false } = {}) {
   const root = await makeTempRoot("cp-providers-");
   const store = openStore({ dataDir: root });
   // NO MODELS TO START WITH, on purpose. Every case here builds the shape it needs through the
@@ -102,7 +102,11 @@ async function withPanel(run, { models, storeModelInDb } = {}) {
     tenantPower: async () => {}, tenantProvision: async () => {},
     currentSession: () => ({ ok: false }),
     log: () => {},
-    proxy: createProxyClient({ config }),
+    // PROVIDERS-8. `stripRecent` is a control plane whose cp/proxy.mjs predates the recency ring:
+    // the month totals are there and the per-request ordering is not. It exists so the case that
+    // matters can be asserted -- a rule that cannot see recency answers "not measured" and NEVER
+    // green, because green is the claim that would be believed.
+    proxy: stripRecent ? olderProxyClient(createProxyClient({ config })) : createProxyClient({ config }),
     proxyKeyOf: (slug) => keys.get(slug) ?? null,
     clientOf: () => CALLER_IP,
     fetchImpl,
@@ -120,6 +124,21 @@ async function withPanel(run, { models, storeModelInDb } = {}) {
 
   try { await run({ store, proxy, api, call, keys, relayCalls, readCalls, vendorCalls, vendor, boxes, config, root }); }
   finally { await proxy.close(); store.close(); await rm(root, { recursive: true, force: true }); }
+}
+
+/** The same client with the recency ring taken back off its spend report, and nothing else moved. */
+function olderProxyClient(client) {
+  return {
+    ...client,
+    async spendReport(window) {
+      const answer = await client.spendReport(window);
+      if (!answer.ok) return answer;
+      return {
+        ...answer,
+        deployments: answer.deployments.map(({ recent, ...rest }) => rest),
+      };
+    },
+  };
 }
 
 /** A provider with one key and one plan model on it, which is where most cases start. */
@@ -865,7 +884,15 @@ test("provider health says not checked until something has checked, and goes red
     const sick = await call("GET", "/v1/admin/providers");
     const red = sick.body.providers.find((row) => row.id === "zai");
     assert.equal(red.health.reachable, false, JSON.stringify(red.health));
-    assert.match(red.health.why, /2 of 2 request/);
+    // RED IS A CLAIM ABOUT NOW. Both of the requests this provider has ever served failed, and both
+    // of them are inside the five the rule reads.
+    assert.match(red.health.why, /the last 2 request\(s\) on Z\.AI all failed/);
+    assert.equal(red.health.recent.count, 2);
+    assert.equal(red.health.recent.failures, 2);
+    // The month count is on the answer whatever colour the light is, because the card draws it
+    // beside the chip rather than instead of it.
+    assert.equal(red.health.month.requests, 2);
+    assert.equal(red.health.month.failures, 2);
     assert.equal(red.health.checkedAt.length > 0, true);
   });
 
@@ -981,4 +1008,231 @@ test("a tenant key is not given a pass-through whose key is not set", async () =
     assert.equal(routes.includes("/mcp/"), true, "the MCP mount stayed shut after the key went in");
     assert.ok(config != null);
   });
+});
+
+/**
+ * PROVIDERS-8. The case Jason found by hand, as a test.
+ *
+ * MEASURED ON THE R750 2026-09-09 12:02: plan-qwen answered HTTP 200 in 2,357 ms through the proxy
+ * while this panel said "not answering". The old rule went red on any failure anywhere in the month
+ * window -- 3 of 220 on that key, every one of them on 2026-09-08 before the key moved endpoints --
+ * so a light that had been fixed for a day was still red and would have stayed red until October.
+ * The proxy's own database on the same server: tb-plan-qwen-qwen-1 held 254 rows and 3 failures, at
+ * 22:45:34, 22:47:11 and 22:48:09 on 2026-09-08, and the twelve newest rows were all success.
+ */
+test("old failures behind newer successes read as answering, with the month count still on the card", async () => {
+  await withPanel(async ({ call, proxy, store, keys }) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    await seedZai(call);
+    const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+    const minted = await client.mintKey({ slug: "demo", models: ["plan-zai"] });
+    keys.set("demo", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] });
+
+    // The shape of the real log: three failures early in the month, then everything since works.
+    // The successes are written FIRST so the ring cannot be an append -- an append would keep the
+    // three failures, which arrive last, and paint the light red.
+    const month = new Date().toISOString().slice(0, 7);
+    for (let index = 0; index < 217; index += 1) {
+      proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", at: `${month}-09T1${index % 5}:00:0${index % 10}.000Z` });
+    }
+    for (const at of [`${month}-02T22:45:34.000Z`, `${month}-02T22:47:11.000Z`, `${month}-02T22:48:09.000Z`]) {
+      proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure", at });
+    }
+
+    const answer = await call("GET", "/v1/admin/providers");
+    const zai = answer.body.providers.find((row) => row.id === "zai");
+    assert.equal(zai.health.reachable, true, JSON.stringify(zai.health));
+    assert.equal(zai.health.recent.count, 5);
+    assert.equal(zai.health.recent.failures, 0, "an old failure got into the five most recent");
+    // THE AMBER COUNT IS STILL THERE. Answering is not the same claim as nothing ever went wrong,
+    // and the card draws both.
+    assert.equal(zai.health.month.requests, 220);
+    assert.equal(zai.health.month.failures, 3);
+    assert.equal(zai.health.month.lastFailureAt, `${month}-02T22:48:09.000Z`);
+    assert.match(zai.health.how, /of the last 5 request/);
+
+    // And the key row's LAST ERROR reads the same rows rather than the health endpoint, which
+    // answers an empty object on this install for ever.
+    assert.equal(zai.keys[0].lastError.at, `${month}-02T22:48:09.000Z`);
+    assert.match(zai.keys[0].lastError.why, /the vendor refused this request/);
+  });
+});
+
+test("five failures in a row is not answering, however good the month was", async () => {
+  await withPanel(async ({ call, proxy, store, keys }) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    await seedZai(call);
+    const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+    const minted = await client.mintKey({ slug: "demo", models: ["plan-zai"] });
+    keys.set("demo", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] });
+
+    const month = new Date().toISOString().slice(0, 7);
+    for (let index = 0; index < 40; index += 1) {
+      proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", at: `${month}-03T0${index % 9}:00:00.000Z` });
+    }
+    for (let index = 0; index < 5; index += 1) {
+      proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure", at: `${month}-09T23:5${index}:00.000Z` });
+    }
+
+    const answer = await call("GET", "/v1/admin/providers");
+    const zai = answer.body.providers.find((row) => row.id === "zai");
+    assert.equal(zai.health.reachable, false, JSON.stringify(zai.health));
+    assert.equal(zai.health.recent.failures, 5);
+    assert.equal(zai.health.month.requests, 45, "the month total is still the month total");
+    assert.equal(zai.health.month.failures, 5);
+  });
+});
+
+test("a report with no recency in it says not measured, never green", async () => {
+  await withPanel(async ({ call, proxy, store, keys }) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    await seedZai(call);
+    const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+    const minted = await client.mintKey({ slug: "demo", models: ["plan-zai"] });
+    keys.set("demo", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] });
+    const month = new Date().toISOString().slice(0, 7);
+    for (let index = 0; index < 6; index += 1) {
+      proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", at: `${month}-05T0${index}:00:00.000Z` });
+    }
+
+    const answer = await call("GET", "/v1/admin/providers");
+    const zai = answer.body.providers.find((row) => row.id === "zai");
+    assert.equal(zai.health.reachable, null, "a rule that cannot see recency painted a light anyway");
+    assert.equal(zai.health.recent, null);
+    assert.match(zai.health.why, /most recent/);
+    // The month totals are still honest and still drawn.
+    assert.equal(zai.health.month.requests, 6);
+    assert.equal(zai.health.month.failures, 0);
+  }, { stripRecent: true });
+});
+
+/**
+ * PROVIDERS-9. A provider taken off the panel.
+ *
+ * MEASURED ON THE R750 2026-09-09: the panel listed Alibaba Model Studio twice, `qwen` (the preset
+ * with an override, one key, 220 requests) and `qwen-plan` (a leftover of the endpoint recovery the
+ * day before: same name, same base url, no key, nothing ever run). Taking the second one off meant
+ * editing a settings row by hand on the server.
+ */
+test("a provider with no key and no deployment comes off, and its catalog goes with it", async () => {
+  await withPanel(async ({ call, store }) => {
+    const added = await call("POST", "/v1/admin/providers", {
+      id: "qwen-plan", name: "Alibaba Model Studio", kind: "openai",
+      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", catalogPath: "/models",
+    });
+    assert.equal(added.status, 200, JSON.stringify(added.body));
+    store.setSetting("catalog:qwen-plan", JSON.stringify({ models: ["qwen3.8-max"], live: false, readAt: "", why: "" }), "a test");
+
+    const typo = await call("DELETE", "/v1/admin/providers/qwen-plan", { confirm: "qwen" });
+    assert.equal(typo.status, 409);
+    assert.equal(typo.body.error, "confirm_mismatch");
+
+    const gone = await call("DELETE", "/v1/admin/providers/qwen-plan", { confirm: "qwen-plan" });
+    assert.equal(gone.status, 200, JSON.stringify(gone.body));
+    assert.equal(gone.body.removed, true);
+    assert.equal(gone.body.wasPreset, false);
+    assert.equal(gone.body.catalogSwept, 1, "a stale catalog was left for the next provider of this name to inherit");
+    // The spend rows are named as what stays, rather than quietly deleted or quietly kept.
+    assert.equal(gone.body.left.some((line) => /spend rows/.test(line)), true, JSON.stringify(gone.body.left));
+    assert.equal(store.getSetting("catalog:qwen-plan", ""), "");
+
+    const after = await call("GET", "/v1/admin/providers");
+    assert.equal(after.body.providers.some((row) => row.id === "qwen-plan"), false, "the card is still on the panel");
+    // The three built-ins are untouched, which is the whole difference between removing a leftover
+    // and removing a provider.
+    assert.deepEqual(after.body.providers.map((row) => row.id).sort(), ["minimax", "qwen", "zai"]);
+
+    // And the change is on the record like every other change here.
+    const record = store.listAdminActions({ limit: 10 }).find((row) => row.action === "provider.remove");
+    assert.equal(record.target, "qwen-plan");
+    assert.equal(record.outcome, "ok");
+  });
+});
+
+test("a provider that still holds a key is refused, and the name prefix is not what decides it", async () => {
+  await withPanel(async ({ call }) => {
+    // THE TRAP THIS GUARD IS WRITTEN AGAINST. `qwen-plan-1` starts with `qwen-`, so a guard that
+    // matched a key by name prefix -- which is how the panel DRAWS a pool, deliberately, for the
+    // rows that predate the recorded field -- would refuse to remove a clean `qwen-plan` and let a
+    // dirty `qwen` through. Exactly backwards, on the two providers this route was written for.
+    await call("POST", "/v1/admin/providers", { id: "qwen-plan", name: "Alibaba Model Studio", kind: "openai", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", catalogPath: "/models" });
+    const keyed = await call("POST", "/v1/admin/providers/qwen/keys", { apiKey: `${PLANTED}-qwen`, slot: "qwen-plan-1", label: "the token plan" });
+    assert.equal(keyed.status, 200, JSON.stringify(keyed.body));
+    assert.equal(keyed.body.slot, "qwen-plan-1");
+
+    const clean = await call("DELETE", "/v1/admin/providers/qwen-plan", { confirm: "qwen-plan" });
+    assert.equal(clean.status, 200, `a clean provider was refused because another provider's slot is named after it: ${JSON.stringify(clean.body)}`);
+
+    const dirty = await call("DELETE", "/v1/admin/providers/qwen", { confirm: "qwen", andOverride: true });
+    assert.equal(dirty.status, 409, JSON.stringify(dirty.body));
+    assert.equal(dirty.body.error, "has_keys");
+    assert.match(dirty.body.message, /qwen-plan-1/);
+  });
+});
+
+test("a built-in is refused unless you say so, and the refusal says the built-in comes back", async () => {
+  await withPanel(async ({ call, store }) => {
+    const refused = await call("DELETE", "/v1/admin/providers/minimax", { confirm: "minimax" });
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    assert.equal(refused.body.error, "preset_override");
+    // NEVER "deleted". providerList reseeds every preset on the next read, so the card WILL come
+    // back, and an operator told otherwise concludes the button is broken.
+    assert.match(refused.body.message, /built-in/);
+    assert.doesNotMatch(refused.body.message, /delet/i);
+
+    // With the flag, what was stored for it goes and the built-in is back on the next read.
+    store.setSetting("providers", JSON.stringify([{ id: "minimax", name: "MiniMax (edited)", kind: "minimax", baseUrl: "" }]), "a test");
+    const done = await call("DELETE", "/v1/admin/providers/minimax", { confirm: "minimax", andOverride: true });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.equal(done.body.wasPreset, true);
+    assert.match(done.body.message, /built-in is back/);
+    const after = await call("GET", "/v1/admin/providers");
+    const minimax = after.body.providers.find((row) => row.id === "minimax");
+    assert.equal(minimax.name, "MiniMax", "the override was cleared and the built-in did not come back");
+  });
+});
+
+test("a provider that still serves a plan model is refused", async () => {
+  await withPanel(async ({ call }) => {
+    await seedZai(call);
+    const refused = await call("DELETE", "/v1/admin/providers/zai", { confirm: "zai", andOverride: true });
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    // The key guard runs first and it is the one that fires here, which is the honest order: a key
+    // is a subscription somebody is paying for and it is the bigger fact about the card.
+    assert.equal(refused.body.error, "has_keys");
+  });
+});
+
+test("a provider nobody has heard of is a 404, not a silent success", async () => {
+  await withPanel(async ({ call }) => {
+    const missing = await call("DELETE", "/v1/admin/providers/nobody", { confirm: "nobody" });
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error, "not_found");
+  });
+});
+
+/**
+ * PROVIDERS-8, the one function the whole rule rests on.
+ *
+ * /spend/logs is not ordered and the loop that fills the ring does not sort, so an APPEND would
+ * keep whichever five rows happened to arrive last, which is a different set from the five that
+ * happened last. On the R750's real log that is the difference between a green light and a red one.
+ */
+test("the recency ring keeps the newest five however they arrive", () => {
+  const ring = [];
+  // Deliberately out of order, the way the log answers.
+  for (const at of ["03", "09", "01", "07", "05", "02", "08", "04", "06"]) {
+    keepRecent(ring, { at: `2026-09-${at}T00:00:00.000Z`, ok: at !== "01" });
+  }
+  assert.equal(ring.length, RECENT_REQUESTS);
+  assert.deepEqual(ring.map((one) => one.at.slice(8, 10)), ["09", "08", "07", "06", "05"], "the ring kept what arrived last rather than what happened last");
+
+  // An entry older than everything in a full ring is dropped rather than pushing a newer one out.
+  keepRecent(ring, { at: "2026-09-01T00:00:00.000Z", ok: false });
+  assert.deepEqual(ring.map((one) => one.at.slice(8, 10)), ["09", "08", "07", "06", "05"]);
+
+  // And one newer than everything goes to the front and takes the oldest off the back.
+  keepRecent(ring, { at: "2026-09-10T00:00:00.000Z", ok: false });
+  assert.deepEqual(ring.map((one) => one.at.slice(8, 10)), ["10", "09", "08", "07", "06"]);
+  assert.equal(ring[0].ok, false);
 });

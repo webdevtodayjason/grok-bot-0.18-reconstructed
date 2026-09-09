@@ -171,3 +171,126 @@ export function createMailDirectory({ store, domain = mailDomain(), now = () => 
 }
 
 export { MAIL_CODE_RE };
+
+// ---- the send log and its caps (MAIL-3, docs/MAIL.md) -------------------------------------------
+//
+// WHAT THIS OWNS: the record that a bot sent a mail, and the two numbers that say how many more it
+// may send. It still holds no Resend key and makes no Resend call -- the relay does the sending and
+// this service says whether it may and writes down that it did.
+//
+// WHY THE COUNT IS HERE AND NOT IN THE RELAY OR THE BOX. A limit a box counts is a limit a box can
+// reset by restarting, and an in-process limiter (ui/job-bus-edge.mjs createRateLimiter) is
+// forgiven by a relay restart, which is a thing that happens on every ship. Counting rows in this
+// table is the only version of the number that survives both.
+
+/** Thirty an hour for one bot. A bot sends tens of mails a day, not thousands. */
+export const SEND_CAP_HOURLY_AGENT = 30;
+/** Two hundred a day for a whole workspace. */
+export const SEND_CAP_DAILY_WORKSPACE = 200;
+
+export const SEND_HOURLY_SETTING = "mail.send.hourlyPerAgent";
+export const SEND_DAILY_SETTING = "mail.send.dailyPerWorkspace";
+/**
+ * Either cap, for one workspace, when the operator wants a different number for that customer:
+ * `mail.send.hourlyPerAgent.<slug>` and `mail.send.dailyPerWorkspace.<slug>`. The per-workspace row
+ * wins over the global one, and neither exists until somebody writes it.
+ */
+export const sendCapSetting = (name, slug) => `${name}.${String(slug ?? "")}`;
+
+const HOUR_MS = 60 * 60_000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** "in 12 minutes". Plain words, because a bot reads this sentence out to a person. */
+function inWords(seconds) {
+  const whole = Math.max(1, Math.ceil(Number(seconds) || 0));
+  if (whole < 60) return "in under a minute";
+  if (whole < 3600) { const n = Math.ceil(whole / 60); return `in ${n} minute${n === 1 ? "" : "s"}`; }
+  const n = Math.ceil(whole / 3600);
+  return `in ${n} hour${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * The send log, over a store.
+ *
+ * openSend is a CLAIM and not a note taken afterwards: it checks both caps and inserts the row
+ * reading `sending` before the relay has called Resend at all. An unsent mail is recoverable and an
+ * unlogged send is not, and "every send is on the record" is the whole justification for the relay's
+ * send route existing.
+ */
+export function createMailSends({ store, now = () => Date.now() } = {}) {
+  const capOf = (name, slug, fallback) => {
+    for (const value of [store.getSetting(sendCapSetting(name, slug), ""), store.getSetting(name, "")]) {
+      const asked = Number.parseInt(String(value ?? "").trim(), 10);
+      // A row that is not a positive number falls back rather than uncapping anybody: a typo in a
+      // settings row must never be the thing that takes a limit off.
+      if (Number.isFinite(asked) && asked > 0) return asked;
+    }
+    return fallback;
+  };
+
+  /**
+   * What this workspace may send. Jason's own workspace gets the same numbers as a customer: a cap
+   * that exempted the operator would hide its own bugs from the only person who would notice.
+   */
+  const sendCaps = (slug) => ({
+    hourlyPerAgent: capOf(SEND_HOURLY_SETTING, slug, SEND_CAP_HOURLY_AGENT),
+    dailyPerWorkspace: capOf(SEND_DAILY_SETTING, slug, SEND_CAP_DAILY_WORKSPACE),
+  });
+
+  const refusal = (scope, cap, window, what, oldest, at) => {
+    // When the next one can go: the oldest send in the window leaves it one window after it went.
+    const leaves = Date.parse(oldest);
+    const seconds = Number.isFinite(leaves) ? Math.max(1, Math.round((leaves + window - at) / 1000)) : Math.round(window / 1000);
+    return {
+      ok: false,
+      error: "rate_limited",
+      scope,
+      cap,
+      retryAfterSeconds: seconds,
+      message: `${what} ${cap} email${cap === 1 ? "" : "s"} for ${scope === "agent" ? "this hour" : "today"}, `
+        + `so nothing was sent. The next one can go ${inWords(seconds)}.`,
+    };
+  };
+
+  return {
+    sendCaps,
+
+    /**
+     * Both caps, then the row. The order matters only in what it says: an over-cap call writes no
+     * row at all, so a workspace cannot be pushed further over its limit by being refused.
+     */
+    openSend({ slug, agentId, code = "", to = "", idem = "" } = {}) {
+      const tenant = String(slug ?? "").trim();
+      const agent = String(agentId ?? "").trim();
+      if (tenant.length === 0 || agent.length === 0) {
+        return { ok: false, error: "bad_request", message: "Name the workspace and the bot this send is from." };
+      }
+      const caps = sendCaps(tenant);
+      const at = now();
+      const perAgent = store.agentMailSendWindow(tenant, agent, new Date(at - HOUR_MS).toISOString());
+      if (perAgent.count >= caps.hourlyPerAgent) {
+        return refusal("agent", caps.hourlyPerAgent, HOUR_MS, "That bot has sent its", perAgent.oldest, at);
+      }
+      const perWorkspace = store.tenantMailSendWindow(tenant, new Date(at - DAY_MS).toISOString());
+      if (perWorkspace.count >= caps.dailyPerWorkspace) {
+        return refusal("workspace", caps.dailyPerWorkspace, DAY_MS, "This workspace has sent its", perWorkspace.oldest, at);
+      }
+      const id = store.claimMailSend({ tenant, agentId: agent, code, to, at: new Date(at).toISOString() });
+      // `idem` is the relay's business and Resend's; it is not written down, because it is derived
+      // from a tool call id and says nothing an operator reading this table would want.
+      void idem;
+      return { ok: true, id, caps };
+    },
+
+    /** What happened to a claimed row. `sent`, `failed` or `no_key`, with Resend's id when there is one. */
+    closeSend(id, outcome = "", resendId = "", detail = "") {
+      const row = Number(id);
+      if (!Number.isFinite(row) || row <= 0) return { ok: false, error: "bad_request", message: "Name the row to settle." };
+      store.settleMailSend(row, { outcome, resendId, detail });
+      return { ok: true, id: row };
+    },
+
+    /** The operator's list for one workspace, newest first. */
+    listSends(slug, limit = 50) { return store.listMailSends(String(slug ?? ""), limit); },
+  };
+}

@@ -53,6 +53,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // variable that was declared and never given a value.
 export const MAIL_SETTINGS_FILE = process.env.GROK_BOT_MAIL_FILE?.trim() || stateFile("mail.json", HERE);
 export const MAIL_LEDGER_FILE = process.env.GROK_BOT_MAIL_LEDGER_FILE?.trim() || stateFile("mail-inbox.jsonl", HERE);
+// MAIL-3. What this workspace's own bots SENT, beside what arrived for them and on the same
+// volume. This is the readable row -- it carries the subject -- and only this workspace's own
+// console reads it; the operator's record of every workspace's sends is mail_send_log in the
+// control plane, which deliberately holds no subject at all.
+export const MAIL_SENT_LEDGER_FILE = process.env.GROK_BOT_MAIL_SENT_FILE?.trim() || stateFile("mail-sent.jsonl", HERE);
 
 export const RESEND_API_BASE = "https://api.resend.com";
 // A webhook body is an event envelope, not a message: Resend hands over ids and headers and the
@@ -155,7 +160,7 @@ export function mergeMailSettings(current, patch) {
  * never as a value: this shape is the only thing either route returns, so there is no route on
  * this server that can read a key back out once it is set.
  */
-export function mailSettingsShape(settings, { webhookUrl = null, addresses = [], recent = [] } = {}) {
+export function mailSettingsShape(settings, { webhookUrl = null, addresses = [], recent = [], sends = [] } = {}) {
   const value = normalizeMailSettings(settings);
   return {
     enabled: value.enabled,
@@ -169,6 +174,9 @@ export function mailSettingsShape(settings, { webhookUrl = null, addresses = [],
     webhookUrl,
     addresses,
     recent,
+    // MAIL-3. What this workspace's own bots sent, newest first, from its own sent ledger. Empty
+    // on a console with no send route, which is every install before this wave.
+    sends,
   };
 }
 
@@ -620,6 +628,9 @@ export function createMailEdge({
   fetchImpl = fetch,
   settingsFile = MAIL_SETTINGS_FILE,
   ledgerFile = MAIL_LEDGER_FILE,
+  // MAIL-3. The same generic ledger reader over the file the send route appends to, so the card
+  // shows what this workspace's bots sent beside what arrived for them.
+  sentLedgerFile = MAIL_SENT_LEDGER_FILE,
   limiter = null,
   // On a console with more than one workspace on it: which OTHER workspace already holds this
   // domain, by name, or null. A domain belongs to one workspace, and the console is where that is
@@ -694,6 +705,7 @@ export function createMailEdge({
       webhookUrl,
       addresses: mailAddresses(agents, settings.domain),
       recent: recentMail(await readMailLedger(ledgerFile, { maxBytes: MAIL_LEDGER_TAIL_BYTES })),
+      sends: recentMail(await readMailLedger(sentLedgerFile, { maxBytes: MAIL_LEDGER_TAIL_BYTES })),
     });
   }
 
@@ -953,4 +965,322 @@ export function createMailEdge({
   }
 
   return { handleWebhook, handleSettings };
+}
+
+// ---- sending (MAIL-3, docs/MAIL.md) ------------------------------------------------------------
+//
+// CUSTODY IS THE WHOLE DESIGN. A Resend key scoped to the directory's domain can send as ANY
+// address at that domain, so a copy of it inside a tenant box is a copy that can send as every
+// other customer and as Titan. The key therefore never leaves this process, and the From is never
+// chosen by the caller: a bot posts here with the one credential its box already holds, and this
+// route decides which address the mail leaves from.
+//
+// WHAT THE BEARER PROVES, said plainly rather than implied: it proves the WORKSPACE. The agentId in
+// the body does not prove the AGENT, so a box somebody has taken over can send as any of its own
+// bots. That is a far smaller blast radius than a copied key -- which is any bot in any workspace,
+// Titan included -- and it is the honest description of what this buys.
+//
+// THE ORDER OF THE REFUSALS IS THE SECURITY, so it is written as an order and the tests walk it one
+// case at a time.
+
+// One row is one mail, so the body is small on purpose. The receive side's limit is larger because
+// a webhook envelope is an event and not a message.
+export const MAIL_SEND_BODY_LIMIT = 64 * 1024;
+// A display name is a customer's typed string, so it is capped before it goes near a header line.
+// 64 characters is longer than every live bot name and short enough to be a header.
+export const MAIL_SEND_NAME_CHARS = 64;
+// Resend's own cap on an idempotency key is 256; longer than that is the caller's bug, not ours.
+export const MAIL_IDEMPOTENCY_CHARS = 256;
+
+/**
+ * A display name fit to sit inside a quoted string in a From header.
+ *
+ * This text is attacker-adjacent: it is the bot's name, typed by a customer, and live names already
+ * carry spaces and a middle dot. CR and LF would end the header line and a quote or a backslash
+ * would end the quoted string, so all three are taken out rather than escaped -- an escape is a
+ * thing to get subtly wrong and no bot name needs one. Nothing left means no display name and the
+ * address goes out bare, which is a valid From and not a broken one.
+ */
+export function sanitizeFromName(name, limit = MAIL_SEND_NAME_CHARS) {
+  return String(name ?? "")
+    .replace(/[\r\n\u2028\u2029]+/g, " ")
+    .replace(/["\\]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit)
+    .trim();
+}
+
+/**
+ * The From, forced. `"Titan (demo)" <agent247758@myagents.email>`.
+ *
+ * The workspace is in the display name because somebody who gets mail from two Titans has nothing
+ * else to tell them apart: the address is six digits on purpose. It is the SLUG rather than the
+ * workspace's display name, because the slug is what the operator's own `mail sends <slug>` takes
+ * and what the console shows, so the three agree.
+ */
+export function buildFrom({ name = "", workspace = "", address = "" } = {}) {
+  const at = asString(address);
+  if (at.length === 0) return "";
+  const who = sanitizeFromName(name);
+  const where = sanitizeFromName(workspace);
+  if (who.length === 0 && where.length === 0) return at;
+  const display = where.length === 0 ? who : (who.length === 0 ? where : `${who} (${where})`);
+  return `"${display}" <${at}>`;
+}
+
+/**
+ * The first POST this module makes. The same base as every other Resend call, and for the reason
+ * written over resendApiBase: the stored key travels on this request, so the address is the relay's
+ * own environment and never a request field. That one override is also what lets a gate stub it.
+ *
+ * The idempotency key is Resend's own 24 hour dedupe, and it is what stops a tool retry sending
+ * twice. A replay answers the same id, so a duplicate reads as two rows carrying one id, which is
+ * honest rather than hidden.
+ */
+export async function resendSend(fetchImpl, apiKey, payload, idempotencyKey = "", env = process.env) {
+  const key = asString(idempotencyKey).replace(/[\r\n\s]+/g, "").slice(0, MAIL_IDEMPOTENCY_CHARS);
+  const response = await fetchImpl(`${resendApiBase(env)}/emails`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+      accept: "application/json",
+      ...(key.length > 0 ? { "idempotency-key": key } : {}),
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`HTTP ${response.status} ${text.slice(0, 200)}`);
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { throw new Error("Resend answered something that is not JSON"); }
+  return { id: asString(parsed?.id) };
+}
+
+/**
+ * One line in the workspace's OWN sent ledger, beside its inbox ledger on its own volume.
+ *
+ * This one carries the subject and the control plane's row deliberately does not. The split is the
+ * one the receive side already uses: the control plane holds who sent to whom, whether it went and
+ * the provider's id -- the operator's fact -- and the readable row with the subject on it belongs
+ * to the workspace, on the workspace's own disk, read by that workspace's own console. Never a
+ * body, in either place.
+ */
+export function mailSentLedgerRow({ at, agentId, agentName, code, from, to, subject, outcome, resendId, detail }) {
+  return {
+    at: at ?? new Date().toISOString(),
+    agentId: asString(agentId),
+    agentName: asString(agentName),
+    code: asString(code),
+    from: asString(from),
+    to: asString(to),
+    subject: asString(subject),
+    outcome: asString(outcome) || "unknown",
+    resend_id: asString(resendId),
+    detail: asString(detail),
+  };
+}
+
+// ONE RECIPIENT PER CALL. One row is one mail, so the cap arithmetic, the log row and the chip in
+// the transcript each mean exactly one thing. No cc, no bcc, no arrays. Several recipients in one
+// call is filed rather than built.
+const SEND_ADDRESS_RE = /^[^\s@,<>"]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+const oneAddress = (value) => {
+  const at = typeof value === "string" ? value.trim() : "";
+  return SEND_ADDRESS_RE.test(at) ? at : "";
+};
+
+/**
+ * POST /mail/send.
+ *
+ * Everything it needs is injected, the way createMailEdge's is and for the same reason: the parts
+ * with rules worth testing have to be reachable without a relay, and the gateway bearers live in
+ * server.mjs and must stay there.
+ */
+export function createMailSendRoute({
+  readBody,
+  drainThenEnd,
+  // (bearer) -> {slug, name} or null. registry.matchToken, which compares every tenant with no
+  // early break, so the time it takes says nothing about which one matched.
+  workspaceOf,
+  // async (slug, agentId) -> the whole non-retired directory row for THAT SLUG, or null. One call
+  // refuses no-address, a retired address and a bot in another workspace, and all three meet the
+  // same sentence, because a caller must learn nothing about a workspace that is not theirs.
+  directoryRowFor,
+  // async () -> the DIRECTORY OWNER's mail settings, never the caller's. A customer's own mail.json
+  // has an empty apiKey, so a route written the obvious way finds no key on every customer and the
+  // bug reads as "Resend refused".
+  ownerSettings,
+  // The domain the directory's codes live at, or a function answering it.
+  directoryDomain = "",
+  // (slug) -> true when this workspace may not send. Read per request, so a slug added to the
+  // relay's list takes effect on the next call with nothing restarted.
+  noSend = () => false,
+  // async ({slug, agentId, code, to, idem}) -> {ok:true, id} | {ok:false, error, ...}. The claim on
+  // the control plane: both caps checked and the row inserted reading `sending`, BEFORE Resend.
+  openSend,
+  // async (id, outcome, resendId, detail) -> void.
+  closeSend,
+  // async (slug, row) -> void. The workspace's own readable ledger line.
+  appendSent = null,
+  fetchImpl = fetch,
+  log = (line) => console.log(line),
+} = {}) {
+  const sendJson = (res, status, value, headers = {}) => {
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
+    return res.end(JSON.stringify(value));
+  };
+  // `message` is first in every shape because it is the string the model reads back to the person
+  // verbatim, and it is always one plain sentence.
+  const refuse = (res, status, message, error, headers = {}) =>
+    sendJson(res, status, { message, sent: false, error }, headers);
+  const domainNow = () => String(typeof directoryDomain === "function" ? directoryDomain() : directoryDomain).toLowerCase();
+
+  // The same sentence for no address, a retired address and a bot in another workspace. They are
+  // one lookup, so they cannot drift apart, and they answer alike so a caller learns nothing about
+  // a workspace that is not theirs. That is the MAIL-2c class of failure closed in one line.
+  const NO_ADDRESS = "That bot has no email address it can send from, so nothing was sent. "
+    + "Its address appears on its card in the console once it has one.";
+
+  async function handleSend(req, res) {
+    if (req.method !== "POST") return refuse(res, 405, "Send an email with POST.", "method_not_allowed", { allow: "POST" });
+
+    const header = String(req.headers.authorization ?? "");
+    const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
+    const workspace = presented.length === 0 ? null : workspaceOf(presented);
+    if (workspace == null) {
+      return refuse(res, 401, "This box is not one this relay knows, so nothing was sent.", "unauthorized");
+    }
+    const slug = String(workspace.slug ?? "");
+
+    // Before the body is even read. AN ABSENT ADDRESS PUSH IS NOT A RULE: a workspace that never
+    // learns canSend still holds a valid gateway token and could call this route anyway. This is
+    // the rule.
+    if (noSend(slug)) {
+      return refuse(res, 403, "Sending is switched off for this workspace, so nothing was sent.", "sending_off");
+    }
+
+    let raw;
+    try { raw = await readBody(req, MAIL_SEND_BODY_LIMIT); }
+    catch (error) {
+      if (error?.code !== "BODY_TOO_LARGE") throw error;
+      return drainThenEnd(req, res, 400, { "content-type": "application/json", "cache-control": "no-store" },
+        JSON.stringify({ message: "That email is too large to send from here, so nothing was sent.", sent: false, error: "too_large" }));
+    }
+    let body;
+    try { body = JSON.parse(raw || "{}"); } catch { body = null; }
+    if (body == null || typeof body !== "object" || Array.isArray(body)) {
+      return refuse(res, 400, "That send request was not readable, so nothing was sent.", "bad_request");
+    }
+
+    // Refused BY NAME, so a bot that tries is told what is missing rather than watching a field
+    // vanish. Attachments on send are not wired up in this wave.
+    if (body.attachments != null) {
+      return refuse(res, 400, "Attachments cannot be sent from here yet, so nothing was sent. Send the message without one.",
+        "attachments_unsupported");
+    }
+
+    const agentId = asString(body.agentId);
+    if (agentId.length === 0) {
+      return refuse(res, 400, "That send request did not say which bot it is from, so nothing was sent.", "bad_request");
+    }
+    const to = oneAddress(body.to);
+    if (to.length === 0) {
+      return refuse(res, 400, "That send request needs exactly one recipient, written as a plain email address, so nothing was sent.", "bad_request");
+    }
+    const subject = oneLine(body.subject);
+    if (subject.length === 0) return refuse(res, 400, "That email has no subject, so nothing was sent.", "bad_request");
+    const text = typeof body.text === "string" ? body.text : "";
+    const html = typeof body.html === "string" ? body.html : "";
+    if (text.trim().length === 0 && html.trim().length === 0) {
+      return refuse(res, 400, "That email has nothing in it, so nothing was sent.", "bad_request");
+    }
+    const inReplyTo = oneLine(body.inReplyTo);
+
+    const row = await Promise.resolve().then(() => directoryRowFor(slug, agentId)).catch(() => null);
+    if (row == null) return refuse(res, 403, NO_ADDRESS, "no_address");
+    const address = asString(row.address);
+    const owner = domainNow();
+    if (address.length === 0 || (owner.length > 0 && domainOf(address) !== owner)) {
+      return refuse(res, 403, NO_ADDRESS, "no_address");
+    }
+
+    // CLAIM BEFORE RESEND. An unsent mail is recoverable; an unlogged send is not, and "every send
+    // is on the record" is the entire justification for this route existing. A crash after this
+    // point leaves a row reading `sending`, which counts toward the cap and reads as "we do not
+    // know" -- the safe direction.
+    const claim = await Promise.resolve()
+      .then(() => openSend({ slug, agentId, code: asString(row.code), to, idem: asString(body.idempotencyKey) }))
+      .catch((error) => ({ ok: false, error: "unreachable", message: String(error?.message ?? error) }));
+    if (claim?.ok !== true) {
+      if (claim?.error === "rate_limited") {
+        const wait = Number(claim.retryAfterSeconds ?? 0);
+        return refuse(res, 429,
+          String(claim.message ?? "That is more mail than this workspace may send right now, so nothing was sent."),
+          "rate_limited", wait > 0 ? { "retry-after": String(Math.ceil(wait)) } : {});
+      }
+      log(`mail  a send from ${slug} could not be recorded, so it was not sent: ${claim?.message ?? "no answer"}`);
+      return refuse(res, 503, "The record every send is written to could not be reached, so nothing was sent. Try again in a minute.", "no_record");
+    }
+    const claimId = claim.id;
+
+    const settle = (outcome, resendId, detail) => Promise.resolve()
+      .then(() => closeSend(claimId, outcome, resendId, detail))
+      .catch((error) => log(`mail  could not close send row ${claimId}: ${error?.message ?? error}`));
+    const writeSent = (outcome, resendId, detail, from) => (typeof appendSent !== "function"
+      ? Promise.resolve()
+      : Promise.resolve()
+        .then(() => appendSent(slug, mailSentLedgerRow({
+          agentId, agentName: asString(row.agentName), code: asString(row.code),
+          from, to, subject, outcome, resendId, detail,
+        })))
+        .catch((error) => log(`mail  could not write ${slug}'s sent ledger: ${error?.message ?? error}`)));
+
+    // The DIRECTORY OWNER's key, never the caller's.
+    const settings = await Promise.resolve().then(() => ownerSettings()).catch(() => null);
+    const apiKey = asString(settings?.apiKey);
+    if (apiKey.length === 0) {
+      await settle("no_key", "", "the directory owner has no Resend key stored");
+      return refuse(res, 503, "This console has no mail key stored yet, so nothing was sent. The operator sets one on the Email card.", "no_key");
+    }
+
+    const from = buildFrom({ name: row.agentName, workspace: slug, address });
+    // Built field by field out of what was checked above and NEVER spread from the request body:
+    // `from`, `replyTo` and `headers` are not accepted fields, and a supplied one is ignored rather
+    // than refused, because a bot that guessed at a field should still get its mail sent from its
+    // own address. A test asserts none of them ever reaches Resend.
+    const payload = {
+      from,
+      to: [to],
+      subject,
+      ...(text.length > 0 ? { text } : {}),
+      ...(html.length > 0 ? { html } : {}),
+      reply_to: address,
+      ...(inReplyTo.length > 0 ? { headers: { "In-Reply-To": inReplyTo, References: inReplyTo } } : {}),
+    };
+
+    let sent;
+    try { sent = await resendSend(fetchImpl, apiKey, payload, asString(body.idempotencyKey)); }
+    catch (error) {
+      const why = String(error?.message ?? error);
+      await settle("failed", "", why.slice(0, 300));
+      await writeSent("failed", "", why.slice(0, 300), from);
+      log(`mail  ${address} -> ${to} did not send: ${why}`);
+      return refuse(res, 502, `That email did not send: ${why.slice(0, 200)}`, "send_failed");
+    }
+
+    await settle("sent", sent.id, "");
+    await writeSent("sent", sent.id, "", from);
+    log(`mail  ${address} -> ${to} sent (${sent.id})`);
+    return sendJson(res, 200, {
+      message: `Sent to ${to} from ${address}. Message id ${sent.id}.`,
+      sent: true,
+      id: sent.id,
+      from,
+      to,
+    });
+  }
+
+  return { handleSend };
 }

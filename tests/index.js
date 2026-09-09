@@ -109,6 +109,11 @@ import "./cp-providers.test.mjs";
 import "./cp-provision.test.mjs";
 import "./cp-proxy.test.mjs";
 import "./cp-server.test.mjs";
+// ADMIN-2. Adding a client from the console, and the rule that holds it to the same refusals the
+// customer's own sign-up door gives.
+import "./cp-signup.test.mjs";
+// SIGNIN-1. This operator's own verification gates, told apart from strangers.
+import "./cp-signins-gate.test.mjs";
 import "./control-plane-deploy.test.mjs";
 // PROXY-1. The proxy's deploy: the compose properties the design rests on, the two scripts held to
 // running twice, and the isolation rule that opens one address and port to a box.
@@ -129,6 +134,7 @@ import "./cursor-free.test.mjs";
 import "./agent-cap.test.mjs";
 import "./read-fence.test.mjs";
 import "./problem-report-tool.test.mjs";
+import "./send-email-tool.test.mjs";
 import "./box-secrets-preserve.test.mjs";
 import "./box-store-secret-exclusion.test.mjs";
 import "./box-copy-in-agent-db.test.mjs";
@@ -149,6 +155,7 @@ import "./cp-feedback.test.mjs";
 import "./cp-relay-pair.test.mjs";
 import "./cp-relay-registry.test.mjs";
 import "./deploy-sync-ships-browser-driver.test.mjs";
+import "./gate-agent.test.mjs";
 import "./login-ledger.test.mjs";
 import "./machine-room-onboarding.test.mjs";
 import "./mail-edge-routing.test.mjs";
@@ -175,6 +182,7 @@ import "./machine-room-handoff.test.mjs";
 // a gap of work into one row, and files that open -- the viewer, the download and the /files route.
 import "./machine-room-boot.test.mjs";
 import "./machine-room-feedback.test.mjs";
+import "./machine-room-mail-chip.test.mjs";
 import "./machine-room-screen-tile.test.mjs";
 import "./machine-room-files.test.mjs";
 
@@ -183,6 +191,12 @@ import "./machine-room-files.test.mjs";
 // stops a stranger's guess landing in the operator's own Titan.
 import "./cp-mail.test.mjs";
 import "./mail-directory.test.mjs";
+
+// MAIL-3: a bot sends from its own address. The relay holds the key and forces the From; the
+// control plane holds the record and the caps. The refusal order is the security, so both files
+// walk it a case at a time.
+import "./mail-send-route.test.mjs";
+import "./cp-mail-send.test.mjs";
 
 // BOTS-4: the write path behind Add on a catalog row. The host verb that seeds an agent's own
 // remembered facts and refuses one over the store's ceiling rather than storing it short, and the

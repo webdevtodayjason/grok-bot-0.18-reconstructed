@@ -46,7 +46,22 @@
 //   ceiling     AGENTS-CAP-2: the clients panel reads the number off the box, 0, 5000, "forty",
 //               2.5 and null are each refused in a sentence and never reach the box, a write
 //               answers with what the box read back, and a pin reports a pin and not a success
-//   page        headless Chrome signs in at /admin and all eight panels render from the fixture
+//   page        headless Chrome signs in at /admin and the nine panels are walked one at a time
+//               through the rail: each opens from its own hash, is the only one on screen, does not
+//               push the document past 900 px at 1440x900, and still carries every control it had
+//               (ADMIN-3). The rail is reachable by Tab and by the pointer, and a cold load at a
+//               panel's own link opens that panel
+//   client      ADMIN-2: the add-client form goes out as a fetch, the row comes back, the temporary
+//               password is on the whole document exactly once and is gone after a Refresh, the
+//               welcome mail box is present, off and disabled with the reason, and the same address
+//               a second time prints the route's own sentence and creates nothing
+//   health      PROVIDERS-8: a provider whose most recent requests answered reads as answering with
+//               the month's failures beside the chip in amber, its key's last error column reads the
+//               same sweep, and Check now is off with the reason on screen when there is no key
+//   remove      PROVIDERS-9: Remove is off on a provider that holds a key or serves a plan model,
+//               with the reason beside it; on a keyless duplicate it is on, it is what is really
+//               under the pointer, an empty confirmation removes nothing, and the typed name takes
+//               the duplicate away and leaves the real one
 //   providers   the sixth panel, driven through a real browser: a key typed into the masked field
 //               reaches no response body and no node of the DOM, a roll takes the pool from two to
 //               three to two with no key on screen, a plan model with no screenshot route is
@@ -62,6 +77,7 @@
 //
 //   node scripts/verify-admin.mjs
 //   node scripts/verify-admin.mjs --no-browser     the API legs only
+//   CP_GATE_SHOT_DIR=... node scripts/verify-admin.mjs   and a 1440x900 picture of each of the nine
 //
 // Env: CP_GATE_PORT, CP_GATE_FAKE_PORT, CP_GATE_RELAY_PORT, CP_GATE_GITHUB_PORT to pin ports instead of taking free
 //      ones; CP_GATE_TIMEOUT_MS for the boot wait (default 20000); GROK_BOT_PLAYWRIGHT_DIR for the
@@ -274,7 +290,12 @@ const providersFixture = {
     {
       id: "zai", name: "Z.AI", kind: "openai", baseUrl: "https://api.z.ai/api/coding/paas/v4",
       fromPreset: true, bootstrapEnv: ["PROXY_ZAI_KEY_1", "PROXY_ZAI_KEY_2"],
-      health: { reachable: true, why: "", checkedAt: nowIso(), how: "412 request(s) went through inside this window and none failed", requests: 412, failures: 0 },
+      health: {
+        reachable: true, why: "", checkedAt: nowIso(),
+        how: "the most recent 5 requests on this provider all answered", requests: 412, failures: 0,
+        recent: { count: 5, failures: 0, oldestAt: nowIso(), newestAt: nowIso() },
+        month: { requests: 412, failures: 0, lastFailureAt: "", lastFailureWhy: "" },
+      },
       catalog: {
         models: ["glm-5.3", "glm-5.3-flash", "glm-5", "glm-4.7", "glm-4.6", "glm-4.6v"],
         live: true,
@@ -316,7 +337,12 @@ const providersFixture = {
     {
       id: "minimax", name: "MiniMax", kind: "openai", baseUrl: "https://api.minimax.io/v1",
       fromPreset: true, bootstrapEnv: ["PROXY_MINIMAX_KEY"],
-      health: { reachable: null, why: "nothing has run on MiniMax inside this window and no check has been made, so there is nothing to report", checkedAt: "", requests: 0, failures: 0 },
+      health: {
+        reachable: null, why: "nothing has run on MiniMax inside this window and no check has been made, so there is nothing to report",
+        checkedAt: "", requests: 0, failures: 0,
+        recent: { count: 0, failures: 0, oldestAt: "", newestAt: "" },
+        month: { requests: 0, failures: 0, lastFailureAt: "", lastFailureWhy: "" },
+      },
       catalog: {
         models: ["MiniMax-M3", "MiniMax-M2"], live: false, readAt: "",
         why: "This is the short list this product has actually run. Refresh reads the vendor's own list once a key is in.",
@@ -336,6 +362,72 @@ const providersFixture = {
           },
         },
       ],
+    },
+    // PROVIDERS-8 AND PROVIDERS-9, AS THE R750 REALLY HAD THEM ON 2026-09-09.
+    //
+    // The Alibaba token plan was listed TWICE. `qwen` is the preset with the override, one key and
+    // 254 requests behind it, three of which failed on the evening of 2026-09-08 before the key
+    // moved endpoints; the twelve newest all answered. The old rule went red on any failure inside
+    // the month window, so the panel said "not answering" while the same model answered HTTP 200 in
+    // 2,357 ms through the proxy. The new rule reads the most recent five and this card is GREEN,
+    // with the month's three failures beside the chip in amber where they can be acted on.
+    {
+      id: "qwen", name: "Alibaba Model Studio", kind: "openai",
+      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      fromPreset: true, bootstrapEnv: ["PROXY_QWEN_KEY"],
+      health: {
+        reachable: true, why: "", checkedAt: nowIso(),
+        how: "the most recent 5 requests on this provider all answered",
+        requests: 254, failures: 3,
+        recent: { count: 5, failures: 0, oldestAt: nowIso(), newestAt: nowIso() },
+        month: {
+          requests: 254, failures: 3,
+          lastFailureAt: "2026-09-08T22:48:09Z",
+          lastFailureWhy: "litellm.APIConnectionError: the address the key was on stopped answering",
+        },
+      },
+      catalog: {
+        models: ["qwen3-max", "qwen3-coder-plus"], live: false, readAt: "",
+        why: "This is the short list this product has actually run.",
+        note: "This is a list of names. The context window and whether a model takes an image are things you set.",
+        ready: false, liveNeedsKey: true, leftoverDoor: false,
+      },
+      keys: [
+        {
+          slot: "qwen-1", label: "Alibaba token plan", order: 1, masked: "sk-****2b90", parked: false,
+          serves: ["plan-qwen"],
+          // Read off the request log the same sweep the health rule reads, rather than out of the
+          // proxy's /health/latest, which answers an empty list on this build and always did.
+          lastError: { at: "2026-09-08T22:48:09Z", why: "litellm.APIConnectionError: the address the key was on stopped answering" },
+          spend: { month: 4.02, requests: 254, tokens: 2_100_000, priced: true, why: "" },
+          quota: {
+            unit: "tokens", window: "7 days", used: 2_100_000, total: 10_000_000, remaining: 7_900_000, pct: 21,
+            resetAt: new Date(Date.now() + 4 * 86400 * 1000).toISOString(), warn: false, live: false,
+            why: "Our own count of what went through this key.",
+            byWorkspace: [],
+          },
+        },
+      ],
+    },
+    // The leftover of the 2026-09-08 recovery: the same name, the same address, no key, and nothing
+    // ever run through it. Two identical cards is two chances to point a plan model at the dead one,
+    // which is what PROVIDERS-9's Remove control exists to end.
+    {
+      id: "qwen-plan", name: "Alibaba Model Studio", kind: "openai",
+      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      fromPreset: false, bootstrapEnv: [],
+      health: {
+        reachable: null, why: "nothing has ever run on this provider and no check has been made",
+        checkedAt: "", requests: 0, failures: 0,
+        recent: { count: 0, failures: 0, oldestAt: "", newestAt: "" },
+        month: { requests: 0, failures: 0, lastFailureAt: "", lastFailureWhy: "" },
+      },
+      catalog: {
+        models: [], live: false, readAt: "", why: "nobody has read this provider's model list yet",
+        note: "This is a list of names. The context window and whether a model takes an image are things you set.",
+        ready: false, liveNeedsKey: true, leftoverDoor: false,
+      },
+      keys: [],
     },
   ],
   planModels: [
@@ -375,6 +467,17 @@ const providersFixture = {
       runningHere: [], labelBehind: 0, labelBehindSlugs: [], labelBehindWhy: "",
     },
     {
+      alias: "plan-qwen", provider: "qwen", vendorModel: "openai/qwen3-max",
+      customerName: "Qwen3 Max", customerLabel: "Qwen3-Max", servedBy: "Alibaba Model Studio",
+      contextWindow: 256_000, supportsVision: false, visionFallback: "plan-zai-vision",
+      vision: { ok: false, at: nowIso(), why: "messages.content.type is invalid" },
+      plans: ["included"], customerVisible: true, shownToCustomers: true,
+      deployments: [{ id: "tb-plan-qwen-qwen-1", keySlot: "qwen-1", fromDb: true, healthy: true, why: "" }],
+      workspaces: 0, workspaceSlugs: [], workspacesWhy: "",
+      inputCostPerToken: 0.0000004, outputCostPerToken: 0.0000016, priced: true, pricedWhy: "",
+      runningHere: [], labelBehind: 0, labelBehindSlugs: [], labelBehindWhy: "",
+    },
+    {
       alias: "plan-minimax", provider: "minimax", vendorModel: "openai/MiniMax-M3",
       customerName: "MiniMax-M3", customerLabel: "MiniMax-M3", servedBy: "MiniMax",
       contextWindow: 200_000, supportsVision: false, visionFallback: "plan-zai-vision",
@@ -394,7 +497,7 @@ const providersFixture = {
 // Every mutation appends the pool size AFTER it, per provider. A roll that never leaves a gap reads
 // 2, 3, 2 in that order: the new key was in before the old one came out. A delete-then-add would
 // read 2, 1, 2, and there is no way to tell those apart from the answer alone.
-const poolHistory = { zai: [], minimax: [] };
+const poolHistory = { zai: [], minimax: [], qwen: [], "qwen-plan": [] };
 const pushBodies = [];
 const recordPool = (id) => {
   const provider = providersFixture.providers.find((one) => one.id === id);
@@ -411,6 +514,15 @@ const fixtureLedger = (action, target, detail, outcome = "ok") => {
 // plane's. A fixture that leaked a key would otherwise be invisible to the leg that exists to
 // notice exactly that.
 const fixtureBodiesSeen = [];
+
+// ADMIN-2. The workspaces the add-client leg creates, merged into the real control plane's own
+// /v1/admin/clients answer so the panel draws them the way it would draw a real one. Provisioning a
+// container is not a thing a gate on a laptop can do twice, and the whole point of the check is the
+// half that CAN be repeated: the form goes out, the row comes back, the password is on screen once,
+// and the same address a second time is refused and creates nothing.
+const addedClients = [];
+const takenEmails = new Set();
+const mintedPasswords = [];
 
 /**
  * The whole fixture as one Playwright route handler. Returns [status, body] for a request, or null
@@ -443,6 +555,84 @@ function providersFixtureAnswer(method, pathname, body) {
     fixtureLedger("added a provider", id, `${body?.kind ?? "openai"} at ${body?.baseUrl ?? ""}`);
     return [200, { ok: true, message: `${body?.name} was added. Add a key to it before pointing a plan model at it.` }];
   }
+  // PROVIDERS-9. Removing a provider. Before the branch below, because that one takes every
+  // /v1/admin/providers/:id request and would swallow this one into a fall-through.
+  if (method === "DELETE" && at[0] === "providers" && at.length === 2) {
+    const id = decodeURIComponent(at[1]);
+    const provider = find(id);
+    if (provider == null) return [404, { error: "not_found", message: `There is no provider called ${id}.` }];
+    if (String(body?.confirm ?? "") !== id) {
+      fixtureLedger("tried to remove a provider", id, "the confirmation did not match", "refused");
+      return [409, { error: "confirm_mismatch", message: `Type ${id} to confirm. Nothing was removed.` }];
+    }
+    if ((provider.keys ?? []).length > 0) {
+      return [409, { error: "has_keys", message: `${provider.name} still holds ${provider.keys.length} key(s). Remove them first: taking a provider away under a live key stops every workspace on it.` }];
+    }
+    const serving = providersFixture.planModels.filter((one) => one.provider === id);
+    if (serving.length > 0) {
+      return [409, { error: "has_deployments", message: `${serving.map((one) => one.alias).join(", ")} still runs on ${provider.name}. Point it somewhere else first.` }];
+    }
+    if (provider.fromPreset === true && body?.andOverride !== true) {
+      return [409, { error: "preset_override", message: `${provider.name} is one of the built-in providers and this one carries an override. Removing it takes the override off and puts the built-in back, which is a different thing, so say so.` }];
+    }
+    providersFixture.providers = providersFixture.providers.filter((one) => one.id !== id);
+    fixtureLedger("removed a provider", id, provider.fromPreset === true
+      ? "the override came off and the built-in came back"
+      : "it held no key and served nothing");
+    return [200, {
+      removed: id,
+      wasPreset: provider.fromPreset === true,
+      catalogSwept: true,
+      left: providersFixture.providers.length,
+      message: `${provider.name} is gone. ${providersFixture.providers.length} providers are left.`,
+    }];
+  }
+
+  // ADMIN-2. Adding a client. Before the /v1/admin/clients/:slug/model branch further down, which
+  // only matches a longer path, and before anything else claims the bare collection.
+  if (method === "POST" && pathname === "/v1/admin/clients") {
+    const email = String(body?.email ?? "").trim().toLowerCase();
+    const company = String(body?.company ?? "").trim();
+    if (email.length === 0 || !email.includes("@")) {
+      return [400, { error: "bad_request", message: "That is not an email address." }];
+    }
+    if (!/[a-z0-9]/i.test(company)) {
+      return [400, { error: "bad_company", message: "That company name has no letters or numbers in it, so there is nothing to name the workspace after. Send a different one." }];
+    }
+    // The control plane's own words, verbatim, from cp/server.mjs's signup handler. The panel prints
+    // whatever the route says without rewording it, so this is what the check below reads.
+    if (takenEmails.has(email)) {
+      return [409, { error: "duplicate_email", message: "That email address already has an account. Sign in instead." }];
+    }
+    takenEmails.add(email);
+    const slug = company.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+    const temporaryPassword = `tmp-${randomBytes(9).toString("base64url")}`;
+    mintedPasswords.push(temporaryPassword);
+    addedClients.push({
+      slug, name: company, status: "provisioning", lastError: "",
+      coolify: { reachable: false, status: "" },
+      users: [{
+        id: `acct-${slug}`, email, name: String(body?.name ?? ""),
+        createdAt: nowIso(), lastSignInAt: null, superAdmin: false, disabled: false,
+      }],
+      model: null,
+      ceiling: { read: false, why: "this workspace's box is still being built, so it has not reported a ceiling yet" },
+      spend: null,
+    });
+    fixtureLedger("added a client", slug, `${email}, ceiling ${body?.ceiling ?? "the default"}`);
+    return [201, {
+      tenant: { slug, name: company },
+      account: { email, name: String(body?.name ?? "") },
+      temporaryPassword,
+      signIn: `https://console.titanium.bot/${slug}`,
+      state: "building",
+      planModel: { applied: String(body?.planModel ?? ""), why: "the workspace starts on it at its first turn" },
+      ceiling: { applied: Number(body?.ceiling ?? 40), why: "written into the box's own environment" },
+      welcomeMail: { sent: false, why: "this control plane sends no mail yet" },
+      message: `${company} was added. The workspace is still coming up.`,
+    }];
+  }
+
   // /v1/admin/providers/:id/...
   if (at[0] === "providers" && at.length >= 2) {
     const provider = find(at[1]);
@@ -1284,6 +1474,87 @@ step("the providers route contract");
   }
 }
 
+// ---- the routes the page was written against, in their own words -------------------------------
+//
+// THIS IS THE LEG THE FIXTURE CANNOT BE. The page leg below drives the panel against this gate's own
+// fixture, which is the only way to repeat a write; but a fixture is written by the same hand as the
+// page, so the two can agree perfectly while the real route answers something else. That is not a
+// hypothetical: this file once served key.name, key.mask and defaults.newWorkspaceModel while the
+// route answered slot, masked and defaults.planModel, every check passed, and the panel drew an
+// empty card against a route that was working.
+//
+// So each of the three answers this wave added is asked for the FIELD NAMES the page reads, and the
+// refusals are asked for the SENTENCES the page prints without rewording. A route that has not
+// landed in this tree yet is a SKIP with the reason, never a pass.
+step("the routes the page reads");
+{
+  // SIGNIN-1. The gate marker, and the three things a summary needs to say what it set aside.
+  const signIns = await call("GET", "/v1/admin/sign-ins?hours=24", { token: bossToken });
+  check(signIns.status === 200, "GET /v1/admin/sign-ins answers", `status ${signIns.status}`);
+  const gates = signIns.json?.gates;
+  if (gates == null) {
+    console.log("  SKIP  this tree's sign-ins route carries no gates block yet, so the panel's grey rows are measured against the fixture only");
+  } else {
+    check(typeof gates.rows === "number", "the sign-ins answer says how many rows were set aside as our own gates", String(gates.rows));
+    check(Array.isArray(gates.scripts), "and which scripts they were");
+    check(typeof gates.setAsideNote === "string" && gates.setAsideNote.length > 0,
+      "and carries the sentence the panel prints", String(gates.setAsideNote).slice(0, 70));
+    const address = (signIns.json?.addresses ?? [])[0];
+    if (address != null) {
+      check("gateRows" in address, "an address summary says how many of its rows were set aside");
+      check("yourAddress" in address, "and whether it is one of ours");
+    }
+  }
+
+  // PROVIDERS-8. The two windows the chip and the amber line are drawn from.
+  const providers = await call("GET", "/v1/admin/providers", { token: bossToken });
+  const health = (providers.json?.providers ?? [])[0]?.health;
+  if (health == null) {
+    console.log("  SKIP  no proxy is configured on this control plane, so provider health carries nothing to measure");
+  } else {
+    check(health.recent != null && typeof health.recent === "object",
+      "provider health carries the recent window the chip is decided on");
+    check(health.month != null && typeof health.month === "object",
+      "and the month window the amber count is drawn from");
+    for (const field of ["requests", "failures", "lastFailureAt"]) {
+      check(health.month != null && field in health.month, `and the month window carries ${field}`);
+    }
+  }
+
+  // PROVIDERS-9. The route exists and it refuses rather than 404s, which is the difference between
+  // a control that is off and a control that is wired to nothing.
+  const removed = await call("DELETE", "/v1/admin/providers/not-a-provider", { token: bossToken, body: { confirm: "not-a-provider" } });
+  if (removed.status === 404 && String(removed.json?.error ?? "") !== "not_found") {
+    console.log("  SKIP  this tree does not serve DELETE /v1/admin/providers/<id> yet");
+  } else {
+    check(removed.status === 404 || removed.status === 409 || removed.status === 400,
+      "DELETE /v1/admin/providers refuses a provider that is not there rather than doing something",
+      `status ${removed.status}`);
+    check(String(removed.json?.message ?? "").length > 0, "in a sentence, which is what the panel puts on the screen",
+      String(removed.json?.message ?? "").slice(0, 70));
+  }
+
+  // ADMIN-2. The two refusals the form can produce without provisioning anything, in the words the
+  // panel prints unchanged. The happy path writes a container and is measured on the R750.
+  const dup = await call("POST", "/v1/admin/clients", { token: bossToken, body: { email: BOSS_EMAIL, company: "Anything At All" } });
+  if (dup.status === 404) {
+    console.log("  SKIP  this tree does not serve POST /v1/admin/clients yet, so the add-client form is measured against the fixture only");
+  } else {
+    check(dup.status === 409, "an address that already has an account is refused", `status ${dup.status}`);
+    check(String(dup.json?.error ?? "") === "duplicate_email", "by name", String(dup.json?.error));
+    // The exact string the page leg below reads off the banner. If these two ever drift the operator
+    // meets one sentence from the CLI and another from the console for the same refusal.
+    check(String(dup.json?.message ?? "") === "That email address already has an account. Sign in instead.",
+      "in the sentence the console prints unchanged", String(dup.json?.message ?? "").slice(0, 80));
+    const noName = await call("POST", "/v1/admin/clients", { token: bossToken, body: { email: `fresh+${randomBytes(4).toString("hex")}@example.com`, company: "!!!" } });
+    check(noName.status === 400 && String(noName.json?.error ?? "") === "bad_company",
+      "a company name with nothing in it to name a workspace after is refused", `status ${noName.status} ${noName.json?.error}`);
+    check(String(noName.json?.message ?? "").length > 0, "with the reason in words", String(noName.json?.message ?? "").slice(0, 80));
+    check((await call("POST", "/v1/admin/clients", { body: { email: "x@example.com", company: "X" } })).status === 401,
+      "and the whole door refuses a caller with no session");
+  }
+}
+
 // ---- the feedback channel (FEEDBACK-1) --------------------------------------------------------
 //
 // The intake, the panel, the two decisions and the issue door, over HTTP the way the relay and the
@@ -1527,9 +1798,15 @@ if (!WANT_BROWSER) {
   // What the clients route says this workspace runs on. null leaves the real answer alone, which is
   // the state this tree is in and the state the panel has to say "not measured" about.
   let clientModelInjection = null;
+  // SIGNIN-1. Off until the leg that needs it, so every check before that one reads the ledger the
+  // fixture actually wrote.
+  let signInGateInjection = false;
 
   browser = await playwright.chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
+  // 1440x900 is the size ADMIN-3 is measured at: a laptop, which is where this console is read. The
+  // page must not scroll at it on any panel, which is the whole of what the row asked for.
+  const VIEW = { width: 1440, height: 900 };
+  const page = await browser.newPage({ viewport: VIEW });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
   page.on("console", (message) => {
@@ -1542,6 +1819,9 @@ if (!WANT_BROWSER) {
     const text = message.text();
     const where = String(message.location?.()?.url ?? "");
     if (/status of 409/.test(text) && /push-label/.test(where)) return;
+    // ADMIN-2's duplicate address is the same shape: the form asks, the route refuses in a sentence,
+    // and the panel prints it. Chrome logs the 409 anyway.
+    if (/status of 409/.test(text) && /\/v1\/admin\/clients$/.test(where)) return;
     pageErrors.push(text);
   });
 
@@ -1564,10 +1844,46 @@ if (!WANT_BROWSER) {
     const posted = request.postData();
     if (posted) { try { body = JSON.parse(posted); } catch { body = null; } }
     const pathname = new URL(request.url()).pathname;
-    if (request.method() === "GET" && pathname === "/v1/admin/clients" && clientModelInjection != null) {
+    // SIGNIN-1. The gate fields on the sign-ins answer belong to the route, which is another item of
+    // this wave, so this run puts them on the real answer the way the model block below is put on
+    // the clients answer. What is measured here is what THIS page does with them: a row the route
+    // recognised as one of our own verification gates is greyed and named, it is left out of the
+    // Attack pill, and every summary says how many were set aside. Off by default, so every check
+    // before this one still sees the ledger exactly as it is.
+    if (request.method() === "GET" && pathname === "/v1/admin/sign-ins" && signInGateInjection) {
       const real = await route.fetch();
       const answer = await real.json().catch(() => null);
-      if (answer?.clients?.[0]) answer.clients[0].model = clientModelInjection;
+      if (answer != null) {
+        let set = 0;
+        for (const row of answer.rows ?? []) {
+          if (row.ip !== ATTACK_IP) continue;
+          row.gate = true;
+          row.gateScript = "verify-deploy";
+          set += 1;
+        }
+        for (const row of answer.addresses ?? []) {
+          if (row.ip !== ATTACK_IP) continue;
+          row.attack = false;
+          row.gateRows = set;
+          row.yourAddress = true;
+        }
+        answer.gates = {
+          rows: set,
+          scripts: ["verify-deploy"],
+          setAsideNote: `${set} attempts were this product's own verification gates and are not counted above`,
+        };
+      }
+      await route.fulfill({ status: real.status(), contentType: "application/json", body: JSON.stringify(answer) });
+      return;
+    }
+    if (request.method() === "GET" && pathname === "/v1/admin/clients" && (clientModelInjection != null || addedClients.length > 0)) {
+      const real = await route.fetch();
+      const answer = await real.json().catch(() => null);
+      if (answer?.clients?.[0] && clientModelInjection != null) answer.clients[0].model = clientModelInjection;
+      // ADMIN-2. The workspaces this run added through the form, appended to the real answer so the
+      // panel draws them beside the real one. They are pushed at the END, so every check written
+      // against `.first()` still reads the workspace the control plane actually holds.
+      if (Array.isArray(answer?.clients)) answer.clients.push(...addedClients);
       await route.fulfill({ status: real.status(), contentType: "application/json", body: JSON.stringify(answer) });
       return;
     }
@@ -1610,15 +1926,175 @@ if (!WANT_BROWSER) {
   const live = await page.evaluate(() => window.__adminLive ?? null);
   check(live != null, "the super admin gets in and the page finishes loading", live ? `${live.panels} panels at ${live.at}` : "no readiness flag");
 
-  // Eight since the marketplace panel landed (MARKET-26). The count is pinned rather than left
-  // open because a panel that stops rendering is invisible on a page that draws seven others.
-  const panels = ["panel-signins", "panel-clients", "panel-boxes", "panel-system", "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace"];
+  // ---- ADMIN-3: nine panels, one on screen, and a page that never scrolls -----------------------
+  //
+  // Nine since the Overview landed, and eight loaders, which are deliberately different numbers: the
+  // Overview fetches nothing and is drawn from what the eight registered. The readiness flag counts
+  // LOADERS, because that is the thing a gate has to wait for.
+  //
+  // The old form of this leg asserted isVisible on all eight ids at once, which was right when they
+  // were stacked and is seven guaranteed failures now. Each panel is opened by its own hash instead,
+  // which is also the check that a pasted link opens a panel.
+  const panels = [
+    "panel-overview", "panel-signins", "panel-clients", "panel-boxes", "panel-system",
+    "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace",
+  ];
+
+  // What each panel had before this wave and must still have. Presence, not visibility: several of
+  // these are forms that open on a button, and a form that is on screen before it is asked for is
+  // the defect the providers panel already has a rule about.
+  const PANEL_CONTROLS = {
+    "panel-overview": ["#overview"],
+    "panel-signins": ["#hours", "#outcome", "#signInsNote", "#addresses", "#accounts", "#attempts"],
+    "panel-clients": ["#clients", "#addClientShow", "#addClientForm", "#acEmail", "#acCompany", "#acCeiling", "#acWelcome"],
+    "panel-boxes": ["#boxes"],
+    "panel-system": ["#system"],
+    "panel-spend": ["#spend", "#spendNote", "#panel-spend .placeholder"],
+    "panel-providers": [
+      "#providersNote", "#providers", "#addProviderShow", "#addProviderForm", "#planModels",
+      "#addPlanModelShow", "#planModelForm", "#providerDefaults", "#adminLedger",
+    ],
+    "panel-feedback": ["#feedbackGates", "#feedbackTier", "#feedbackState", "#feedbackNote", "#feedbackRows", "#feedbackTokenNote", "#githubTokenForm", "#githubRepo", "#githubToken"],
+    "panel-marketplace": ["#marketplaceNote", "#marketplaceRows", "#marketplaceChanges", "#marketplaceLedger", "#marketplaceLedgerNote", "#marketplaceDelivery"],
+  };
+
+  /** Open a panel the way a person does, by its hash, and wait for it to actually be the open one. */
+  const openPanel = async (id) => {
+    await page.evaluate((want) => { window.location.hash = want; }, `#${id}`);
+    await page.waitForFunction((want) => document.getElementById(want)?.hidden === false, id, { timeout: 10_000 })
+      .catch(() => {});
+  };
+
+  /**
+   * Is this thing actually clickable by a person?
+   *
+   * The memory note verify-ui-in-a-real-browser: a passing page.click() is not evidence a human can
+   * click, because Playwright will scroll to and dispatch at an element another element is sitting
+   * on top of. So the centre of the box is asked what is really there.
+   */
+  const hittable = (selector) => page.evaluate((sel) => {
+    const node = document.querySelector(sel);
+    if (node == null) return "there is no such element";
+    const box = node.getBoundingClientRect();
+    if (box.width === 0 || box.height === 0) return "it has no size";
+    if (box.bottom < 0 || box.top > window.innerHeight) return "it is off the screen";
+    const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    if (at == null) return "nothing is at its centre";
+    if (node === at || node.contains(at) || at.contains(node)) return "";
+    return `${at.tagName.toLowerCase()}${at.id ? `#${at.id}` : ""} is on top of it`;
+  }, selector);
+
   for (const id of panels) {
-    check(await page.locator(`#${id}`).isVisible(), `the ${id.replace("panel-", "")} panel renders`);
+    await openPanel(id);
+    const open = await page.locator(`#${id}`).isVisible();
+    check(open, `the ${id.replace("panel-", "")} panel opens from its own hash`);
+    const others = await page.evaluate((ids) => ids.filter((one) => document.getElementById(one)?.hidden !== true),
+      panels.filter((one) => one !== id));
+    check(others.length === 0, "and it is the only panel on screen", others.join(", "));
+
+    // THE HEADLINE PROOF. The body must not scroll on any panel at a laptop's size: the rail scrolls
+    // and the panel scrolls, and nothing pushes the document taller than the window.
+    const tall = await page.evaluate(() => document.documentElement.scrollHeight);
+    check(tall <= VIEW.height, `and the page itself does not scroll at ${VIEW.width}x${VIEW.height}`, `${tall} px`);
+
+    // AND IT DOES NOT SCROLL SIDEWAYS. `overflow-y: auto` makes the other axis auto as well, so a
+    // panel that is one pixel too wide becomes a horizontal scroller, and anything that scrolls it
+    // takes the left edge of every heading and every table off the screen with no sign of why. It
+    // is what a screenshot of the providers panel showed on this Mac while every check above passed.
+    // Everything genuinely wide on this page already has its own scrolling box, so the honest state
+    // of a panel is that it never needs one.
+    const wide = await page.evaluate((want) => {
+      const node = document.getElementById(want);
+      if (node == null) return { over: 0, who: "" };
+      const over = node.scrollWidth - node.clientWidth;
+      if (over <= 0) return { over: 0, who: "" };
+      const inner = node.clientWidth;
+      const who = Array.from(node.querySelectorAll("*"))
+        .filter((one) => one.offsetWidth > inner)
+        .slice(0, 4)
+        .map((one) => `${one.tagName.toLowerCase()}${one.id ? `#${one.id}` : String(one.className) ? `.${String(one.className).split(" ")[0]}` : ""} ${one.offsetWidth}`)
+        .join(", ");
+      return { over, who };
+    }, id);
+    check(wide.over <= 0, `and the ${id.replace("panel-", "")} panel does not scroll sideways`,
+      `${wide.over} px over ${wide.who}`);
+
+    for (const selector of PANEL_CONTROLS[id]) {
+      const found = await page.locator(selector).count();
+      check(found >= 1, `  ${id.replace("panel-", "")} still has ${selector}`, String(found));
+    }
   }
   check((await page.locator(".panel").count()) === panels.length, `${panels.length} panels and no more`, String(await page.locator(".panel").count()));
-  check(live?.panels === panels.length, `and the readiness flag says ${panels.length}`, String(live?.panels));
+  check(live?.panels === 8, "and the readiness flag says eight loaders ran, which is a different number on purpose", String(live?.panels));
 
+  // ---- the rail, as a person uses it ------------------------------------------------------------
+  for (const id of panels) {
+    const why = await hittable(`.rail a[href="#${id}"]`);
+    check(why === "", `the rail entry for ${id.replace("panel-", "")} is what is under the pointer at its own centre`, why);
+  }
+  await openPanel("panel-overview");
+  await page.click('.rail a[href="#panel-boxes"]');
+  // Waiting on the PANEL and not on the hash. `location.hash` is updated the moment the anchor is
+  // followed and the hashchange event that acts on it fires after that, so a wait on the hash can
+  // resolve a tick before the panel has moved: this leg failed once and passed once on identical
+  // code before the wait was moved to the thing it is actually asserting.
+  await page.waitForFunction(() => document.getElementById("panel-boxes")?.hidden === false, null, { timeout: 5_000 }).catch(() => {});
+  check(await page.locator("#panel-boxes").isVisible() && await page.evaluate(() => window.location.hash) === "#panel-boxes",
+    "clicking a rail entry opens its panel and puts it in the address bar",
+    String(await page.evaluate(() => window.location.hash)));
+  check(await page.locator('.rail a[href="#panel-boxes"]').getAttribute("aria-current") === "page",
+    "and the rail says which one you are on, in a way a screen reader can read too");
+
+  // Reachable by keyboard, which for nine plain anchors means Tab and nothing of our own.
+  await page.evaluate(() => document.getElementById("signout").focus());
+  const tabbed = [];
+  for (let i = 0; i < 14 && tabbed.length < panels.length; i += 1) {
+    await page.keyboard.press("Tab");
+    const href = await page.evaluate(() => {
+      const node = document.activeElement;
+      return node && node.tagName === "A" && node.closest(".rail") ? node.getAttribute("href") : "";
+    });
+    if (href) tabbed.push(href);
+  }
+  check(tabbed.length === panels.length, "Tab reaches every rail entry", `${tabbed.length} of ${panels.length}`);
+
+  // ON A PHONE the rail is a strip across the top rather than a quarter of the screen, and the page
+  // still does not scroll: the strip scrolls sideways and the panel scrolls inside itself. One leg,
+  // because the single media block this page has is the whole of what makes that true.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openPanel("panel-signins");
+  const stacked = await page.evaluate(() => {
+    const rail = document.querySelector(".rail").getBoundingClientRect();
+    const panels = document.querySelector(".panels").getBoundingClientRect();
+    return { above: rail.bottom <= panels.top + 1, tall: document.documentElement.scrollHeight };
+  });
+  check(stacked.above, "on a narrow screen the rail is a strip above the panel and not a column beside it");
+  check(stacked.tall <= 844, "and the page still does not scroll", `${stacked.tall} px`);
+  check(await page.locator('.rail a[href="#panel-marketplace"]').isVisible(), "with every entry still reachable");
+  await page.setViewportSize(VIEW);
+
+  // A LINK STRAIGHT TO A PANEL. Not the same check as the hash walk above: this is a cold load, so
+  // it also proves the panel the hash names is the one that is open when the page first paints.
+  await page.goto(`${BASE}/admin#panel-marketplace`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => document.body.getAttribute("data-admin-loaded") === "true", null, { timeout: 30_000 })
+    .catch(() => {});
+  check(await page.locator("#panel-marketplace").isVisible(), "a fresh load at a panel's own link opens that panel");
+  check(!(await page.locator("#panel-overview").isVisible()), "and not the Overview with it");
+
+  // ---- the Overview -----------------------------------------------------------------------------
+  await openPanel("panel-overview");
+  const overviewChips = await page.locator("#overview .stat").count();
+  check(overviewChips === 6, "the Overview draws its six figures", String(overviewChips));
+  const overviewLinks = await page.locator("#overview a.stat[href^='#panel-']").count();
+  check(overviewLinks === 6, "and every one of them is a link into the panel it came from", String(overviewLinks));
+  await page.click("#overview a.stat[href='#panel-clients']");
+  await page.waitForFunction(() => document.getElementById("panel-clients")?.hidden === false, null, { timeout: 5_000 }).catch(() => {});
+
+  check(await page.locator("#panel-clients").isVisible(), "and clicking one opens that panel");
+  const strips = await page.locator(".panel .strip .stat").count();
+  check(strips >= 20, "every panel that loaded carries its own strip of figures", String(strips));
+
+  await openPanel("panel-signins");
   const attackChips = await page.locator("#addresses .chip.attack").count();
   check(attackChips === 1, "one Attack chip, on the address that earned it", String(attackChips));
   const attackRow = await page.locator("#addresses tbody tr", { hasText: ATTACK_IP }).first().textContent();
@@ -1626,16 +2102,55 @@ if (!WANT_BROWSER) {
   const sameRow = await page.locator("#addresses tbody tr", { hasText: SAME_IP }).first().textContent();
   check(String(sameRow).includes("the same password 4 times"), "the other address's row says the same password four times", String(sameRow).replace(/\s+/g, " ").slice(0, 90));
 
+  // SIGNIN-1, ON THE SCREEN. Jason, 2026-09-09 11:43, holding two screenshots of this panel with his
+  // own address marked "Attack": every one of those bursts was our own deploy gate spending the
+  // relay's lockout on purpose. The route decides what is one of ours; this is what the page does
+  // with the answer.
+  signInGateInjection = true;
+  await page.selectOption("#hours", "24");
+  await page.waitForFunction(() => document.querySelectorAll("#attempts tr.gateRow").length > 0, null, { timeout: 15_000 })
+    .catch(() => {});
+  const gateRows = await page.locator("#attempts tr.gateRow").count();
+  check(gateRows === 6, "a gate's attempts are drawn as gate rows", String(gateRows));
+  const gateRowText = String(await page.locator("#attempts tr.gateRow").first().textContent());
+  check(gateRowText.includes("your own verification gate (verify-deploy)"),
+    "each one saying whose gate it was and which script", gateRowText.replace(/\s+/g, " ").slice(0, 90));
+  check((await page.locator("#addresses .chip.attack").count()) === 0,
+    "and the address they came from carries no Attack pill any more",
+    String(await page.locator("#addresses .chip.attack").count()));
+  const gateAddress = String(await page.locator("#addresses tbody tr", { hasText: ATTACK_IP }).first().textContent());
+  check(gateAddress.includes("your address"), "the address is marked as one of ours", gateAddress.replace(/\s+/g, " ").slice(0, 80));
+  check(gateAddress.includes("6 of our own gate rows set aside"),
+    "with how many were set aside, so nothing is quietly uncounted", gateAddress.replace(/\s+/g, " ").slice(0, 100));
+  const gateStrip = String(await page.locator("#panel-signins .strip").textContent());
+  check(gateStrip.includes("YOUR OWN GATES") || gateStrip.includes("Your own gates"),
+    "and the panel's own summary carries the same count", gateStrip.replace(/\s+/g, " ").slice(0, 110));
+  await openPanel("panel-overview");
+  const attackChip = String(await page.locator("#overview a.stat[href='#panel-signins']").textContent());
+  check(attackChip.includes("gate rows set aside"), "the Overview says the same thing about the same window",
+    attackChip.replace(/\s+/g, " ").slice(0, 90));
+  signInGateInjection = false;
+  await openPanel("panel-signins");
+  await page.selectOption("#hours", "24");
+  await page.waitForFunction(() => document.querySelectorAll("#attempts tr.gateRow").length === 0, null, { timeout: 15_000 })
+    .catch(() => {});
+  check((await page.locator("#addresses .chip.attack").count()) === 1,
+    "and with the marker gone the same address is an attack again, so the rule is the marker and not the address",
+    String(await page.locator("#addresses .chip.attack").count()));
+
   const sprayChips = await page.locator("#accounts .chip.attack").count();
   check(sprayChips === SPRAY_EMAILS.length, "a Spray chip on every account the one password was tried on", String(sprayChips));
   const sprayRow = await page.locator("#accounts tbody tr", { hasText: SPRAY_EMAILS[0] }).first().textContent();
   check(String(sprayRow).includes("the same password 1 time"), "and that row says one password, once, which is why nothing else caught it",
     String(sprayRow).replace(/\s+/g, " ").slice(0, 90));
 
+  await openPanel("panel-clients");
   const clientCards = await page.locator(".client").count();
   check(clientCards === 1, "the clients panel drew the workspace", String(clientCards));
+  await openPanel("panel-boxes");
   const boxRows = await page.locator("#boxes tbody tr").count();
   check(boxRows === 1, "the box health panel drew a row", String(boxRows));
+  await openPanel("panel-system");
   const cards = await page.locator("#system .card").count();
   check(cards >= 8, "the system panel drew its cards", String(cards));
 
@@ -1646,6 +2161,17 @@ if (!WANT_BROWSER) {
   // killed the process here: everything below this line, the leak sweep and the em dash check
   // included, had not run since. The wait is bounded now as well as correct, so a future rename is
   // a FAIL with the reason on it rather than a dead gate.
+  await openPanel("panel-spend");
+  // A ZERO FROM A PROXY NOBODY ASKED. This control plane has no proxy configured and the route says
+  // so in words at the top of the panel, and every row under it drew $0.00 all the same. On this
+  // fixture the two sat an inch apart and the wrong one was the one that looked like data.
+  const spendTable = String(await page.locator("#spend").textContent());
+  const spendNote = String(await page.locator("#spendNote").textContent());
+  if (spendNote.includes("Not measured")) {
+    check(!spendTable.includes("$0.00"), "a panel that says the proxy was never asked draws no dollar figure under it",
+      spendTable.replace(/\s+/g, " ").slice(0, 90));
+    check(spendTable.includes("not measured"), "it says not measured in the cell as well as in the note");
+  }
   const spendPlaceholder = await page.locator("#panel-spend .placeholder").textContent({ timeout: 10_000 })
     .catch((error) => `NOT FOUND: ${String(error?.message ?? error).split("\n")[0]}`);
   check(String(spendPlaceholder).replace(/\s+/g, " ").trim()
@@ -1658,10 +2184,11 @@ if (!WANT_BROWSER) {
   // screen and a button clicked. The two key values are planted, they are registered with the leak
   // sweep at the end of this run, and between them they turn "the panel never renders a key" from
   // a claim into a measurement.
+  await openPanel("panel-providers");
   const providerCards = await page.locator("#providers .provider").count();
-  check(providerCards === 2, "the providers panel drew both providers", String(providerCards));
+  check(providerCards === 4, "the providers panel drew every provider", String(providerCards));
   const modelCards = await page.locator("#planModels .planModel").count();
-  check(modelCards === 3, "and every plan model", String(modelCards));
+  check(modelCards === 4, "and every plan model", String(modelCards));
 
   // THE ALIAS IS NOT THE NAME. A plan model that has a customer name shows that name at the top and
   // the routing alias only on its own captioned line underneath. This is the check that stops the
@@ -1670,7 +2197,7 @@ if (!WANT_BROWSER) {
   check(!String(named).includes("plan-zai"), "a plan model with a label leads with the label and not the routing name",
     String(named).replace(/\s+/g, " ").slice(0, 70));
   const aliasLines = await page.locator("#planModels .aliasLine").count();
-  check(aliasLines === 3, "and each one says what the routing calls it, captioned as that", String(aliasLines));
+  check(aliasLines === 4, "and each one says what the routing calls it, captioned as that", String(aliasLines));
   const aliasLine = await page.locator('#planModels .planModel[data-alias="plan-zai"] .aliasLine').textContent();
   check(String(aliasLine).includes("what the routing calls it") && String(aliasLine).includes("plan-zai"),
     "on a line an operator can read without guessing what it is", String(aliasLine).replace(/\s+/g, " ").slice(0, 60));
@@ -1839,6 +2366,90 @@ if (!WANT_BROWSER) {
   check(String(catalogBanner).includes("names and nothing else"), "a catalog refresh says it returned names and nothing else",
     String(catalogBanner).replace(/\s+/g, " ").slice(0, 90));
 
+  // ---- PROVIDERS-8: a colour that can go back to green -------------------------------------------
+  //
+  // Measured on the R750 2026-09-09 12:02: plan-qwen answered HTTP 200 in 2,357 ms through the proxy
+  // while this panel said "not answering", because the rule went red on ANY failure inside the month
+  // window and three of that key's 254 requests had failed the previous evening, before the key moved
+  // endpoints. The fixture is that provider, to the number: 254 requests, 3 failures, the newest five
+  // all fine.
+  const qwen = page.locator('.provider[data-provider="qwen"]');
+  const qwenHead = String(await qwen.locator(".head").first().textContent());
+  check(qwenHead.includes("answering") && !qwenHead.includes("not answering"),
+    "a provider whose most recent requests all answered reads as answering, whatever failed a week ago",
+    qwenHead.replace(/\s+/g, " ").slice(0, 80));
+  check(qwenHead.includes("3 of 254 failed this month"),
+    "and the month's failures are beside the green chip, not instead of it",
+    qwenHead.replace(/\s+/g, " ").slice(0, 110));
+  check(qwenHead.includes("last 2026-09-08 22:48 UTC"),
+    "with the clock time of the last one, which is what an operator matches against a log",
+    qwenHead.replace(/\s+/g, " ").slice(0, 110));
+  const qwenChipTitle = await qwen.locator(".head .chip.ok").first().getAttribute("title");
+  check(String(qwenChipTitle).includes("most recent"), "and the green says what it stands on", String(qwenChipTitle).slice(0, 70));
+  // The key row's own column, which read "none" on the R750 for a key that had failed three times,
+  // because it was reading the proxy's /health/latest and that answers an empty list on this build.
+  const qwenKeyRow = String(await qwen.locator('tr[data-key="qwen-1"]').textContent());
+  check(qwenKeyRow.includes("an error"), "the key's last error column reads the same sweep the chip does",
+    qwenKeyRow.replace(/\s+/g, " ").slice(0, 90));
+  const zaiHead = String(await zai.locator(".head").first().textContent());
+  check(!/failed this month/.test(zaiHead), "a provider with no failure this month says nothing about failures",
+    zaiHead.replace(/\s+/g, " ").slice(0, 80));
+
+  // A CHECK NEEDS SOMETHING TO CHECK WITH. It sends one real request per model this provider serves,
+  // and there is nothing to send it with until a key is in. Said on the screen, not in a tooltip on a
+  // control that cannot be hovered.
+  const leftover = page.locator('.provider[data-provider="qwen-plan"]');
+  const leftoverCheck = leftover.locator(".actions button", { hasText: "Check now" });
+  check(await leftoverCheck.isDisabled(), "Check now is off on a provider with no key");
+  check(String(await leftover.locator(".head").first().textContent()).includes("add a key first, then this can check it"),
+    "and says why on the screen", String(await leftover.locator(".head").first().textContent()).replace(/\s+/g, " ").slice(0, 110));
+  check(await zai.locator(".actions button", { hasText: "Check now" }).isDisabled() === false,
+    "while a provider that has a key can still be checked, so the working path was not made harder");
+
+  // ---- PROVIDERS-9: removing the duplicate -------------------------------------------------------
+  //
+  // On the R750 the Alibaba token plan was listed twice: `qwen`, the preset with the key and the
+  // requests, and `qwen-plan`, a leftover of the 2026-09-08 recovery with the same name, the same
+  // address, no key and nothing ever run through it.
+  check(await qwen.locator(".removeProvider").isDisabled(),
+    "Remove is off on a provider that still holds a key");
+  check(String(await qwen.locator(".head").first().textContent()).includes("Remove the keys first"),
+    "and the reason is on the screen beside it");
+  check(await page.locator('.provider[data-provider="minimax"] .removeProvider').isDisabled(),
+    "and off on one a plan model still runs on");
+  check(String(await page.locator('.provider[data-provider="minimax"] .head').first().textContent()).includes("plan-minimax still runs on it"),
+    "naming the plan model that would stop as well as the key that is in it",
+    String(await page.locator('.provider[data-provider="minimax"] .head').first().textContent()).replace(/\s+/g, " ").slice(0, 130));
+  // A built-in is never really removed: the override comes off and the built-in comes back, and the
+  // confirmation has to say that or it is a sentence that turns out to be false on the next load.
+  check(String(await zai.locator(".providerRemoveForm").textContent()).includes("removing it only takes the override off and puts the built-in back"),
+    "a built-in card's confirmation says what removing one actually does");
+
+  const leftoverRemove = leftover.locator(".removeProvider");
+  check(await leftoverRemove.isDisabled() === false, "Remove is on for a provider with no key and nothing running on it");
+  await leftoverRemove.scrollIntoViewIfNeeded();
+  const removeReach = await hittable('.provider[data-provider="qwen-plan"] .removeProvider');
+  check(removeReach === "", "and it is what is under the pointer at its own centre, so a person can press it", removeReach);
+  await leftoverRemove.click();
+  check(await leftover.locator(".providerRemoveForm").isVisible(), "pressing it asks for the name to be typed");
+  // Nothing typed, so nothing goes.
+  await leftover.locator(".providerRemoveForm button[type=submit]").click();
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("Nothing was removed") === true, null, { timeout: 10_000 })
+    .catch(() => {});
+  check(String(await page.locator("#banner").textContent()).includes("Nothing was removed"),
+    "an empty confirmation removes nothing", String(await page.locator("#banner").textContent()).replace(/\s+/g, " ").slice(0, 80));
+  check((await page.locator("#providers .provider").count()) === 4, "and every card is still there",
+    String(await page.locator("#providers .provider").count()));
+
+  await leftover.locator(".providerRemoveForm .confirmProvider").fill("qwen-plan");
+  await leftover.locator(".providerRemoveForm button[type=submit]").click();
+  await page.waitForFunction(() => document.querySelectorAll("#providers .provider").length === 3, null, { timeout: 15_000 })
+    .catch(() => {});
+  check((await page.locator("#providers .provider").count()) === 3, "typing the name takes the duplicate away",
+    String(await page.locator("#providers .provider").count()));
+  check((await page.locator('.provider[data-provider="qwen-plan"]').count()) === 0, "and it is the leftover that went");
+  check((await page.locator('.provider[data-provider="qwen"]').count()) === 1, "while the one with the key and the requests stayed");
+
   // WHAT CHANGED. One row per change, with who and when on it, and no key value in any of them.
   const ledgerRows = await page.locator("#adminLedger tbody tr").count();
   check(ledgerRows >= 4, "every change wrote a row under What changed", String(ledgerRows));
@@ -1865,6 +2476,7 @@ if (!WANT_BROWSER) {
   // and the other two are injected into that same answer. The middle one is the one that matters:
   // a workspace whose model is pinned in its own environment must SAY so, because a picker that
   // saves a value the box will never read is a control that lies about having worked.
+  await openPanel("panel-clients");
   const modelRow = page.locator(".client .modelRow");
   check((await modelRow.count()) === 1, "the customer's row says what that workspace runs on");
   check(String(await modelRow.textContent()).includes("not measured"),
@@ -1910,9 +2522,21 @@ if (!WANT_BROWSER) {
   //
   // The rows the API leg above planted, drawn. What matters on the screen is the pair of facts the
   // panel exists to carry: that both gates are real, and that the stored token is nowhere on it.
+  // THE PANEL IS A PANEL AND NOT A WRAPPER. cp/admin/index.html carried eight section opens and
+  // seven closes: #panel-feedback never closed, so the browser parsed #panel-marketplace as its
+  // CHILD. Nothing on the screen looked wrong and every check below passed, because a child panel
+  // renders exactly where a sibling would. It matters the moment one panel is hidden at a time:
+  // hiding feedback would take marketplace off the screen with it. Asked of the browser's own tree
+  // rather than counted in the source, because counting tags is what missed it for two days.
+  const nested = await page.evaluate(() => document.getElementById("panel-feedback")
+    ?.contains(document.getElementById("panel-marketplace")) === true);
+  check(!nested, "the marketplace panel is a sibling of the feedback panel and not a child of it");
+  await openPanel("panel-feedback");
   const feedbackText = await page.locator("#panel-feedback").textContent();
   check(String(feedbackText).includes("shown to the workspace operator"),
     "the Feedback panel says on the page that the operator saw the report first");
+  check(!String(feedbackText).includes("Cloud browsing sessions"),
+    "and reading that panel reads that panel, not the one that used to be inside it");
   const feedbackCards = await page.locator("#feedbackRows .feedbackCard").count();
   check(feedbackCards >= 2, "and draws the reports the intake took", String(feedbackCards));
   check((await page.locator("#panel-feedback .chip.attack").count()) >= 1,
@@ -1930,30 +2554,125 @@ if (!WANT_BROWSER) {
 
   // AGENTS-CAP-2. The ceiling on the client row, in the browser: a number a person can read and a
   // field a person can type in, drawn from what the box reported.
+  await openPanel("panel-clients");
   const ceilingField = await page.locator(".client .clientCeiling").first();
   check(await ceilingField.isVisible(), "the client row carries a ceiling field a person can reach");
   check(String(await ceilingField.inputValue()) === "40", "showing the number the box reported", String(await ceilingField.inputValue()));
 
+  // ---- ADMIN-2: adding a client from the screen ---------------------------------------------------
+  //
+  // Jason, 2026-09-09 11:43: "if I was going to onboard a new client, would that be something I would
+  // do from this console or is this console merely reporting?" Provisioning a real container is not a
+  // thing a gate on a laptop repeats, so what is measured here is the half that CAN be: the form goes
+  // out, the row comes back, the password is on the screen exactly once, and the same address a second
+  // time is refused and creates nothing. The other half is measured on the R750.
+  await openPanel("panel-clients");
+  check(!(await page.locator("#addClientForm").isVisible()), "the add-client form is closed until somebody asks for it");
+  const showReach = await hittable("#addClientShow");
+  check(showReach === "", "and the button that opens it is what is under the pointer at its own centre", showReach);
+  await page.click("#addClientShow");
+  check(await page.locator("#addClientForm").isVisible(), "pressing it opens the form");
+
+  // THE MAIL TICK IS NOT A GREEN LIGHT. This control plane sends no mail at all, so the box is
+  // present, off, and disabled with the reason beside it.
+  check(await page.locator("#acWelcome").isDisabled(), "the welcome mail box is disabled");
+  check(await page.locator("#acWelcome").isChecked() === false, "and unchecked, so nothing on the screen suggests mail went out");
+  check(String(await page.locator("#acWelcomeWhy").textContent()).includes("does not send mail yet"),
+    "with the reason next to it", String(await page.locator("#acWelcomeWhy").textContent()).replace(/\s+/g, " ").slice(0, 70));
+
+  // Three of the four, because plan-zai-vision is the model everything else falls back TO and no
+  // customer is ever put on it: it carries no customer name, so offering it here would put a routing
+  // alias in a picker and a workspace on a model its own Settings page cannot name.
+  const planOptions = await page.locator("#acPlanModel option").allTextContents();
+  check(planOptions.length === 3, "the plan model picker is filled from what the providers panel read", planOptions.join(", ").slice(0, 90));
+  check(!planOptions.join(" ").includes("plan-"), "in the names a customer would see and not the routing ones", planOptions.join(", ").slice(0, 90));
+
+  const NEW_EMAIL = `newclient+${randomBytes(4).toString("hex")}@example.com`;
+  const clientsBefore = await page.locator(".client").count();
+  await page.fill("#acEmail", NEW_EMAIL);
+  await page.fill("#acCompany", "Northwind Plumbing");
+  await page.fill("#acName", "Dale Northwind");
+  await page.fill("#acCeiling", "40");
+  await page.click("#addClientSave");
+  await page.waitForSelector("#addClientResult .newClient", { timeout: 20_000 }).catch(() => {});
+  const newCard = String(await page.locator("#addClientResult").textContent());
+  check(newCard.includes("still coming up"),
+    "the form adds the client and says what state the workspace is in", newCard.replace(/\s+/g, " ").slice(0, 90));
+  check(newCard.includes("This password is shown once. Copy it now."),
+    "the card says the password will not be shown again");
+  check(newCard.includes("northwind-plumbing"), "and names the workspace the company gave its name to",
+    newCard.replace(/\s+/g, " ").slice(0, 90));
+  check(newCard.includes("No welcome mail was sent"), "and says plainly that no mail went out");
+  check((await page.locator("#addClientResult button", { hasText: "Copy the welcome note" }).count()) === 1,
+    "with a note to copy instead");
+  const clientsAfter = await page.locator(".client").count();
+  check(clientsAfter === clientsBefore + 1, "the new workspace has a row on the panel", `${clientsBefore} then ${clientsAfter}`);
+
+  // THE PASSWORD IS ON THE SCREEN ONCE. Not in the banner, not in a second card, not written back
+  // into a field: the whole document is searched, attributes and input values included.
+  const minted = mintedPasswords[mintedPasswords.length - 1];
+  const documentNow = await page.content();
+  check(minted != null && documentNow.split(minted).length - 1 === 1,
+    "and the temporary password is in exactly one place on the whole document",
+    String(minted == null ? "none was minted" : documentNow.split(minted).length - 1));
+
+  // THE SAME ADDRESS AGAIN, in the route's own words and with nothing created.
+  await page.click("#addClientShow");
+  await page.fill("#acEmail", NEW_EMAIL);
+  await page.fill("#acCompany", "Northwind Heating");
+  await page.click("#addClientSave");
+  await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("already has an account") === true, null, { timeout: 15_000 })
+    .catch(() => {});
+  const duplicate = String(await page.locator("#banner").textContent());
+  check(duplicate.includes("That email address already has an account. Sign in instead."),
+    "a second client on the same address is refused in the route's own sentence, unchanged",
+    duplicate.replace(/\s+/g, " ").slice(0, 90));
+  check((await page.locator(".client").count()) === clientsAfter, "and nothing was created",
+    String(await page.locator(".client").count()));
+  check((await page.locator("#addClientResult .newClient").count()) === 0,
+    "and no second card, so no password from a client that does not exist is on the screen");
+
+  // Refresh takes the card away, because a temporary password must not sit on a screen an operator
+  // walked away from.
+  await page.click("#refresh");
+  await page.waitForFunction(() => document.body.getAttribute("data-admin-loaded") === "true", null, { timeout: 30_000 }).catch(() => {});
+  check((await page.locator("#addClientResult .newClient").count()) === 0, "Refresh takes the new-client card off the screen");
+  check(minted != null && !(await page.content()).includes(minted), "and the password with it");
+
+  // ---- the whole console, panel by panel, after every write ---------------------------------------
+  //
+  // Read off the SCREEN and not out of the DOM. `innerText` is what is painted, and with one panel on
+  // screen at a time that means walking all nine: the two rules below are about what a person sees, so
+  // a textContent sweep would fail on an em dash inside a node nobody draws and pass on a page that
+  // draws one in a panel it did not happen to open.
+  const finalText = [];
+  for (const id of panels) {
+    await openPanel(id);
+    const tall = await page.evaluate(() => document.documentElement.scrollHeight);
+    check(tall <= VIEW.height, `${id.replace("panel-", "")} still does not scroll the page after every write`, `${tall} px`);
+    finalText.push(await page.evaluate(() => document.body.innerText));
+    // A picture of each panel, when somebody asked for one. A gate saying a page renders and a person
+    // looking at that page are not the same evidence, and the second is what a report carries. Off
+    // unless CP_GATE_SHOT_DIR is set, so the default run writes nothing anywhere.
+    if (process.env.CP_GATE_SHOT_DIR) {
+      const shot = path.join(process.env.CP_GATE_SHOT_DIR, `${id}.png`);
+      await page.screenshot({ path: shot }).catch(() => {});
+      console.log(`  shot   ${shot}  ${tall} px tall in a ${VIEW.width}x${VIEW.height} window`);
+      if (id === "panel-providers") {
+        const one = path.join(process.env.CP_GATE_SHOT_DIR, "providers-panel.png");
+        await page.locator("#panel-providers").screenshot({ path: one }).catch(() => {});
+        console.log(`  shot   ${one}`);
+      }
+    }
+  }
+  const wholePage = finalText.join("\n");
+
   // The name of the thing under all this appears once, for the operator, and nowhere else.
-  const wholePage = await page.evaluate(() => document.body.innerText);
-  check((wholePage.match(/LiteLLM/g) ?? []).length <= 1, "the proxy's own name appears at most once on this page, in a footnote",
+  check((wholePage.match(/LiteLLM/g) ?? []).length <= 1, "the proxy's own name appears at most once on this console, in a footnote",
     String((wholePage.match(/LiteLLM/g) ?? []).length));
 
-  // A picture of the panel, when somebody asked for one. A gate that says a page renders and a
-  // person looking at that page are not the same evidence, and the second one is what a report
-  // carries. Off unless CP_GATE_SHOT_DIR is set, so the default run writes nothing anywhere.
-  if (process.env.CP_GATE_SHOT_DIR) {
-    const shot = path.join(process.env.CP_GATE_SHOT_DIR, "providers-panel.png");
-    await page.locator("#panel-providers").screenshot({ path: shot }).catch(() => {});
-    const whole = path.join(process.env.CP_GATE_SHOT_DIR, "admin-console.png");
-    await page.screenshot({ path: whole, fullPage: true }).catch(() => {});
-    console.log(`  shot   ${shot}`);
-    console.log(`  shot   ${whole}`);
-  }
-
   // No em dashes anywhere on the screen. Jason's rule, and the panel is copy a business owner reads.
-  const visible = await page.evaluate(() => document.body.innerText);
-  check(!visible.includes("—"), "no em dash on the whole screen");
+  check(!wholePage.includes("—"), "no em dash on any of the nine panels");
 
   check(pageErrors.length === 0, "and the page threw nothing", pageErrors.slice(0, 2).join(" | "));
   } catch (error) {
@@ -2024,7 +2743,7 @@ step("nothing leaked");
 // ---- out ------------------------------------------------------------------------------------------
 console.log("");
 if (failures === 0) {
-  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, the eight panels, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
+  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, nine panels behind a rail on a page that never scrolls, a client added and a duplicate refused, provider health that can go back to green, a duplicate provider removed, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
 } else {
   console.log(`FAIL  ${failures} check${failures === 1 ? "" : "s"} did not hold.`);
   if (childLog.length > 0) {

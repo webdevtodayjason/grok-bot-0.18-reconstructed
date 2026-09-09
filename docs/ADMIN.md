@@ -7,9 +7,27 @@ accounts, payment details that we don't have yet, the health of their boxes, the
 overall system." And at 15:12: "we should capture tries, users and passwords tried and report in the
 Super admin for failures with IP."
 
-Everything on it is read-only except the named actions: stop, start, restart or rebuild a customer's
-workspace; turn one person's sign-in off, back on, or reset their password; set what a workspace runs
-on and how many bots it may hold; and decide what happens to a problem report an agent sent.
+## What this console is for
+
+Jason, 2026-09-09 11:43: "If I was going to onboard a new client, would that be something I would do
+from this console or is this console merely reporting? Where do I control things like the GitHub
+token, managing providers, and the model we want to use from that provider?"
+
+**You run the business from here.** It is not a reporting screen. This is where you:
+
+- **add a client** and watch their workspace build, and then stop, start, restart or rebuild it
+- **turn a person's sign-in off**, back on, or reset their password
+- **hold the provider keys**: add one, roll one, remove one, add a provider, remove a provider
+- **pick which model a workspace runs on**, and how many bots it may hold
+- **paste the GitHub token** the Feedback panel files issues with
+- **approve, suppress or close what an agent reported**
+- **read** sign-ins, spend, box health and system health
+
+The CLI is the second door, not the first one. `cp/cli.mjs` does every one of those things and writes
+the same change record, so a script can do what you can do; it is there for when the console is not,
+and for the two commands below that make the first account on a system that has none.
+
+Everything not in that list is read-only. Payments are the one thing that is on neither door yet.
 
 ---
 
@@ -128,19 +146,124 @@ table is for, and by which password was tried, which is what raises the chip.
 Same window and same number as the attack rule, for the same reasons, and the passwords are still
 counted per source because the two services keep different salts.
 
+### Telling a gate from an attacker
+
+Jason, 2026-09-09 11:43, holding two screenshots of this panel: his own address marked **Attack**,
+101 tries, 58 locked out, 23 different passwords, one of the accounts named his own. Nothing hostile
+had happened. Every burst was this repository's own deploy gate doing exactly what it is written to
+do: it types two wrong instance passwords, then seven more until the throttle answers, because the
+rule it measures **is** the lockout. One burst per ship, from this Mac, since 2026-09-07.
+
+The panel could not tell that from a stranger, and it could not because the rows carried nothing
+about the caller but a user agent reading `node`, which is what node's own `fetch` sends when
+nobody sets one.
+
+**So the gates say their own name at the door.** Every gate that knocks at a login door sends
+`User-Agent: titanbot-gate/<script name>`, so `titanbot-gate/verify-deploy`,
+`titanbot-gate/verify-one-console`, and so on. The name is built from the script's own filename in
+`scripts/gate-agent.mjs` rather than typed into each one, so a gate written next year gets it by
+importing rather than by remembering.
+
+**The header alone buys nothing, and that is the important half.** A user agent is a string a
+stranger writes. Anybody can send `titanbot-gate/verify-deploy`, so if the prefix were the whole
+rule, the rule would be an invitation. A row is set aside as one of ours only when **all three** of
+these are true:
+
+1. its user agent starts with `titanbot-gate/`, and
+2. the address it came from **also signed in successfully as an operator or a super admin inside the
+   same hour**, and
+3. it is a refusal or a lockout, not a sign-in that worked.
+
+The second condition is the one an outsider cannot forge, and it is the same test that puts **"your
+address"** beside an address on the panel. Somebody who has the operator's password does not need to
+disguise their traffic.
+
+**A set-aside row is still drawn and still counted.** It stays in Every attempt, greyed, reading
+"your own verification gate (verify-deploy)", and every summary carries its own count of how many
+rows it set aside. What changes is that those rows do not raise the Attack pill and are not in the
+by-address distinct-password counts. Nothing disappears; a row that vanished would be worse than a
+row that was miscounted, because you cannot audit what is not on the screen.
+
+**A blank user agent is never enough on its own, ever.** Measured on this Mac: node's `fetch` with
+no headers set sends `user-agent: node`, and node's raw `http.request` sends no user agent header at
+all. Both shapes are in the live ledger, and the second comes from the deploy gate's one leg that uses
+raw https, which runs three times a run. But a blank agent is **also** what every row written by the
+control plane's own door carries, because that service does not record the field at all, and it is
+what a stranger who sends no header carries too. A rule that read absence as "one of ours" would
+silence all three. Absence is never a reason to set a row aside.
+
+**One dated clause, for the rows already written.** The rows in the live ledger from before this
+shipped carry no marker and will not age out on their own, because the file is small against its 5 MB
+rotation cap. So they are read through one bounded exception: the instance door only, refused or
+locked only, a user agent of exactly `node` or empty, the same operator-address test as above, and a
+timestamp earlier than the cutover constant stamped in the code the day it shipped. It is dated on
+purpose. It cannot grow, it stops mattering as the old rows rotate out, and the comment beside the
+constant says why it exists so that nobody later mistakes it for a rule.
+
+Measured on the R750, replaying the panel's own window logic over the live rows for the address that
+raised Jason's screenshot: at 24 hours the distinct passwords fall from 6 to 1 and Attack goes false;
+at 72 hours they fall from 10 to 3 and Attack goes false.
+
+### The rows this can never label, and why that is right
+
+**Rows written by the control plane's own door carry no user agent at all, so they are never
+labelled as a gate and can never be silenced by one.** That service's `login_attempts` table has no
+column for it: it is not recorded on the way in and the panel is handed a hardcoded empty string on
+the way out. `scripts/verify-control-plane.mjs` sends the header anyway, because the line costs
+nothing and is right the day the column lands, and the migration is filed as **SIGNIN-1b** rather
+than left as a comment.
+
+Read plainly, that is a gap in the labelling and a floor under it. A sign-in posted straight at
+`api.titanium.bot`, which is the path that never touches a customer's console, is the one an
+attacker is most likely to use, and it is exactly the path where this label does not apply at all.
+
 ---
 
-## The eight panels, and where every number comes from
+## The rail, panel by panel: what each one controls and where every number comes from
+
+Jason, 2026-09-09 12:13: "I think we're going to have to turn that into more of a dashboard
+left-hand nav, your standard dashboard, because stuff is all jumbled and there is a lot of
+scrolling." It was one long page with eight panels stacked down it.
+
+So there is a **left-hand rail with nine entries and one panel on screen at a time**. The URL hash
+names the panel, so a link opens the panel it points at and the browser's own back button walks
+where you have been. Each panel carries its own summary strip and scrolls inside itself rather than
+scrolling the page. The rail entries are ordinary links, so Tab and Enter reach every one of them
+with no keyboard handling of our own.
+
+The nine, in rail order, are **Overview**, Sign-in attempts, Clients and users, Box health, System
+health, Spend, Providers, Feedback and Marketplace. Overview is new and is a summary of the other
+eight; the eight themselves are the same panels with the same buttons on the same routes, moved into
+a rail rather than rewritten.
 
 Every number carries the moment it was measured. Anything that could not be measured says **"not
-measured"** and why, and never a zero, a dash, or a green tick.
+measured"** and why, and never a zero, a dash, or a green tick. That rule is the reason the Overview
+below is a summary and not a scoreboard.
 
-Five of them are the console as it shipped. The sixth, **Providers**, is what PROVIDERS-1 adds, and
-it is the one that takes a text file plus a proxy restart out of the operator's hands. The seventh,
-**Feedback**, is what FEEDBACK-1 adds, and it is the only panel somebody else fills in: what the
-agents reported and what their own operators chose to send on.
+### Overview
 
-### 1. Sign-in attempts
+**Controls: nothing.** It is the only panel with no action on it, deliberately. It answers "what
+needs me this morning" and then sends you to the panel that can do something about it.
+
+Six chips, each one a link into the panel it came from: clients running of total, boxes healthy of
+total, spend this month, reports waiting, rows needing re-verification, and sign-in attacks in the
+last day with this repository's own gates left out.
+
+**No chip has a source of its own.** Every number on it is already in one of the eight answers the
+page fetches, so each panel registers its own headline as it loads and the Overview draws what it is
+given. There is no ninth request, and there is deliberately no Overview API route in front of these
+chips: a summary computed somewhere else is a second answer that drifts from the panels the first
+time either side changes.
+
+**A chip whose panel could not load reads "not measured" with the reason on it.** Never a zero and
+never a tick. A dashboard that shows a green light for a number it failed to fetch is how an outage
+gets missed, and the top of the console is the worst place in the product to start doing that.
+
+### Sign-in attempts
+
+**Controls: nothing; it is the panel you read before you act on another one.** What it changes is
+what you do next: an address worth blocking is blocked at the edge, and a person worth stopping is
+stopped from Clients and users.
 
 Both ledgers, merged, and three tables over the same rows.
 
@@ -157,7 +280,65 @@ address list, for the reason in the merge section above.
 **Every attempt** is the rows themselves. Filters for the window and the outcome are at the top; the
 "Seen by" column says whether a row came from the console or from this service.
 
-### 2. Clients and users
+**This repository's own verification gates are greyed rather than hidden.** A row set aside by the
+three conditions in "Telling a gate from an attacker" above reads "your own verification gate
+(verify-deploy)" in grey, stays in Every attempt, and is counted on its own line in each summary. It
+is left out of the Attack pill and out of the distinct-password counts, and nothing else about it
+changes. An address that has also signed in as an operator or a super admin within the hour reads
+**"your address"** beside it.
+
+### Clients and users
+
+**Controls: this is where a customer starts and where they are stopped.** Add a client. Stop, start,
+restart or rebuild a workspace. Turn a person's sign-in off, back on, or reset their password. Set
+which plan model that workspace runs on and how many bots it may hold.
+
+#### Add a client
+
+The first step of onboarding used to be the one step this console did not have: adding a customer
+was a CLI line on the R750 and nothing else. It is a form on this panel now: email, company, the
+person's name, which plan model their workspace runs on, and how many bots they may hold, which
+defaults to 40.
+
+**What it creates, in one press:** an account they sign in with, a workspace whose name is derived
+from the company, and a box. It runs the same sequence the CLI's `signup add` runs, so a client
+added here and a client added from a terminal are the same client, made the same way.
+
+**Three outcomes, and the form says which one happened.** The workspace is **running**, or it is
+still **building** and the row appears in the list and fills itself in as it provisions, or the
+build **failed** and the reason is on the card. A client whose box is still building is a real
+client with a real account; they simply cannot sign in to anything yet.
+
+**The temporary password is shown once and never again.** It is generated here, shown in the success
+card, and stored the way every other password on this service is stored, as a scrypt hash. Nothing
+can ask for it back: not this console, not the CLI, not the database. If it is lost before it
+reaches the person, reset it from their row, which mints another one and shows that once too. A
+**Copy the welcome note** button puts the sign-in address, their email and that password on the
+clipboard as plain sentences, so it can go into a mail you write yourself.
+
+**No mail is sent, and the checkbox says so rather than lying about it.** This service has no
+outbound sender at all today, so "send the welcome mail" is present, unchecked and disabled, with
+the reason beside it. Richard's welcome mail in September was sent by hand. Wiring it is filed as
+**ADMIN-2c** and is one line in this route the day an outbound path exists.
+
+**The refusals are the sign-up sequence's own sentences, word for word**, because two doors that
+refuse the same thing in two different sets of words are two doors that will drift: an address that
+already has an account, a company name that yields no usable workspace name, a workspace name
+already taken or held back after a previous customer was removed, and new tenants being switched off
+on this install. Nothing is created when any of them fires: no account, no workspace, no box.
+
+The CLI stays as the second door and does the same thing:
+
+```sh
+node cp/cli.mjs signup add <email> <company>
+```
+
+One thing this shares with nothing else on the panel and is worth knowing: the add sequence
+currently exists in two places, this route's copy and the public sign-up route's, holding the same
+refusal sentences through a test that pins both to the same words. Collapsing them is filed as
+**ADMIN-2b**.
+
+#### The cards
 
 One card per customer: the workspace, its status in our own ledger, what Coolify says about it right
 now, and `plan: none`, which is said out loud rather than left blank because "we do not bill yet" is
@@ -241,7 +422,10 @@ at all. Both messages on screen say so. If somebody hostile is inside an account
 the password is not the whole answer; stop that customer's workspace from the Clients panel, which
 takes the box away from anybody holding a session for it.
 
-### 3. Box health
+### Box health
+
+**Controls: nothing.** Every button that acts on a box is on Clients and users, one row per
+customer. This panel is what you read to decide which of them to press.
 
 | What | Where it comes from |
 |---|---|
@@ -269,7 +453,11 @@ inside a five second window from one sweep, because a single click on Refresh lo
 System health together and both want the same answer. The control plane waits fifteen seconds for
 it, which is longer than the budget plus the trip; `CP_RELAY_TIMEOUT_MS` moves that.
 
-### 4. System health
+### System health
+
+**Controls: nothing.** It is the one panel about the machine rather than about a customer, and four
+of its cards are honest holes rather than lights. See "What is not measured" below for each one and
+what would fill it in.
 
 | What | Where it comes from |
 |---|---|
@@ -295,7 +483,11 @@ makes it if it is not there yet, and says whether the record is being written an
 not. The failure also goes to the container log with the path in it, and it is retried on the next
 sign-in rather than remembered for the life of the process.
 
-### 5. Spend
+### Spend
+
+**Controls: nothing yet, and two things that should be here are still CLI lines**: revoking a
+customer's inference credential and minting them a new one, both named at the end of this section.
+Payments are a placeholder paragraph on this panel and nowhere else.
 
 Per client, this month and today: requests and dollars, one row per customer, read from the proxy's
 own spend API through the master key the control plane already holds. The handle is the virtual key,
@@ -326,7 +518,13 @@ and mint them a new one. Until they are, both are `cp/cli.mjs proxy revoke <slug
 Payments stay where they were: "Not connected yet. Plan and billing appear here when Stripe is
 wired in."
 
-### 6. Providers (PROVIDERS-1)
+### Providers
+
+**Controls: every provider key on the system, and which model each plan runs.** Add a provider, add
+a key to a pool, roll one, remove one, remove a provider, refresh a vendor's model catalog, set a
+plan model's vendor model, context window, customer label and price, and push a label to the
+workspaces on it. This is the panel Jason's second question was about: the keys and the models are
+here, and the GitHub token is on Feedback.
 
 The panel that ends the hand operation. Before it, adding a provider, adding a second key to a plan,
 rolling a key or repointing a plan alias were an ssh, an edit of
@@ -355,7 +553,9 @@ Four things it holds, and where each number comes from:
    through stored it in `LiteLLM_Config` in cleartext and handed it back unmasked.
 3. **Health has three states and one of them is "not checked".** Nothing on this install checks in
    the background, so a green light is either real traffic with no failures inside the window or a
-   *Check now* somebody pressed. It used to be `true` always, with a fresh timestamp on it.
+   *Check now* somebody pressed. It used to be `true` always, with a fresh timestamp on it. **The
+   red one means the LAST requests, not the month**. See "What the health chip means" below, which
+   is the rule that replaced a chip reading "not answering" beside a provider that was answering.
 4. **Which workspaces run a model is joined on the deployment id.** The spend log records the VENDOR
    model, so matching the alias against it hid two live customers, one of them paying, from the
    guard that refuses to delete a model people are on.
@@ -369,6 +569,54 @@ attempts are pruned at 30 days because they are noise after that; "who changed t
 March" is a question asked in June, so this table keeps everything. No key value ever reaches a row:
 names, lengths and sha256 prefixes only, and a test plants a key value and asserts it does not
 appear.
+
+#### What the health chip means
+
+Jason sent a screenshot on 2026-09-09 of a provider drawn as **not answering** that was answering
+perfectly well: measured on the R750 at 12:02 CDT, a chat request through that provider came back
+HTTP 200 in 2,357 ms. The chip was red because the rule behind it was "any failure this month", and
+the month held three failures out of a couple of hundred requests, all of them from the day before,
+all from before its key was moved to a different endpoint. A provider that failed three times
+yesterday and has answered every time since read "not answering" for the rest of the month, while
+the key row beside it said "LAST ERROR none", because that column was reading a different source
+that is always empty on this install. Two contradictory signals on one card, both wrong.
+
+**So the chip is about the last requests, not the month.** It is red when the most recent five
+requests on that provider **all** failed, or when a live check somebody pressed failed and has not
+expired. Otherwise it is green, and the month's failures are kept beside it as an amber count, in
+words: "3 of 220 failed this month, last 2026-09-08 22:48 UTC". The history is not hidden, it is
+just no longer pretending to be the present.
+
+**The key row's LAST ERROR reads the same request log** as the chip, so the two halves of a card can
+no longer disagree. Empty means the log holds no failure for that key's slots, not that nothing was
+looked at.
+
+**Check now with no key pasted says it needs the key**, rather than sitting silently beside a red
+chip as though it had been pressed and failed.
+
+#### Remove a provider
+
+A provider card carries a **Remove** control, and it is enabled only when that provider holds no
+keys and serves no deployment. This exists because the recovery of 2026-09-08 left a duplicate
+behind: two cards with the same name and the same endpoint, one of them with no key and nothing
+ever run through it. There was no way to take it off the screen except editing the store by
+hand, which is the kind of hand operation this panel exists to end.
+
+Removal asks you to type the provider's own name back, because a provider is not a row you can put
+back by pressing undo.
+
+**A built-in provider comes back.** The presets ship with the product, so removing one takes away
+this install's copy and the preset itself returns as an unconfigured card the next time the list is
+read. That is the intended behaviour and it is why the refusal below exists: if the preset carries
+an override, meaning an endpoint or a model list you set on top of it, removing the provider would silently
+throw that away and leave a card that looks the same and behaves differently. So a preset with an
+override is refused unless you say explicitly that the override goes too.
+
+The same from the CLI, which writes the same change record:
+
+```sh
+node cp/cli.mjs proxy providers remove <id> [--and-override]
+```
 
 **The customer half of this panel is `docs/PROXY.md` §6a–6d**: what a customer reads instead of the
 routing alias, how they pick a model on their own provider, the three clocks a change runs on, and
@@ -399,7 +647,12 @@ and then sweeps every GET route in the file for its bytes; `scripts/verify-admin
 through the masked field in a real browser and 20 checks confirm neither reaches a response body, a
 DOM node, or the control plane's log.
 
-### 7. Feedback (FEEDBACK-1)
+### Feedback
+
+**Controls: what happens to a report an agent sent, and the GitHub token.** Approve, suppress or
+close a report, edit its wording, file it as a GitHub issue, and paste the repository token those
+issues are filed with. That token is the only secret this service holds rather than passes along,
+and the three rules that go with it are below.
 
 Jason, 2026-09-07: "Titan tried to cover up failure. We need to instill in the agents that failure
 must be reported... 'Would you like to submit this feedback to the developers?'... it should come in
@@ -508,6 +761,22 @@ anything an agent ever printed. Those three are the ones whose appearance here w
 and are also the only ones this service can recognise. The card the person sees before they press
 Send says what will and will not be sent, in its own words, rather than making a promise the product
 cannot keep.
+
+### Marketplace
+
+The ninth rail entry, and the one this document never had a section for: the heading above it used
+to say eight panels and the numbered subsections stopped at seven. That was not only a counting
+mistake in prose. The page's own markup had the same hole: the Feedback section was never closed,
+so Marketplace was parsed as a child of it, which is a thing you cannot see until something tries to
+hide one panel and takes the other with it. Both are closed now, and this section is the other half
+of that fix.
+
+**Controls: what a customer is offered.** It is the catalog behind the bots and plugins a workspace
+can install, and the panel is where an entry is added, edited, published or taken back down.
+
+**Its numbers and its behaviour belong to the marketplace work, not to this document.** What this
+section is for is the rail: Marketplace is a panel like the other eight, reachable by its own hash,
+with its own summary strip and its own scroll, and every button it had before the rail it still has.
 
 ## What changed, and how long it is kept
 
@@ -646,6 +915,21 @@ and no network. The fixture has three stories in it because those are the three 
 tell apart: six different passwords from one address, the same password four times from another, and
 one ordinary bad morning.
 
+**The page leg walks the rail**: every panel is opened by its own hash the way a pasted link would
+open it, every button that was on the page before the rail is still found on it, and no panel makes
+the page itself scroll at 1440x900. A panel that can only be reached by scrolling past another one
+is the thing the rail exists to end, so it is measured rather than looked at.
+
+**The gates name themselves at any login door they knock at.** `scripts/gate-agent.mjs` builds
+`titanbot-gate/<script name>` from the calling script's own filename, and `verify-deploy`,
+`verify-one-console`, `verify-one-console-browser` and `verify-control-plane` all send it. The other
+gates do not, and that is deliberate: they either serve their own fixture login page, carry a bearer
+token, or never reach a login door at all, and changing the user agent of a browser context that
+measures rendering would change what the page under test reads for no gain.
+`tests/gate-agent.test.mjs` is what keeps the four wired, including the two ways the header is
+silently lost: a fetch helper whose caller's headers replace the default instead of merging over it,
+and the one leg that uses node's raw https, which sends no user agent unless it is written by hand.
+
 **Nothing in this gate ever reaches api.github.com**, because a gate that filed a real issue at a
 real repository every time somebody ran it is a gate nobody runs. `CP_GITHUB_API_URL` points the
 control plane at the fake, which answers the way GitHub does for the three cases the door has to tell
@@ -664,10 +948,15 @@ somewhere else if yours is elsewhere, or pass `--no-browser`.
 
 Exit 0 every leg passed, 1 a leg failed, 2 nothing was measured.
 
-The unit tests are `tests/login-ledger.test.mjs` and `tests/cp-admin.test.mjs`, in
-`node --test tests/*.test.mjs`. Use the glob. Both of those files were missing from
-`tests/index.js`, so the directory form `node --test tests/` did not run either of them until
-2026-09-07; the count in this document's own gap row was taken with them absent.
+The unit tests are `tests/login-ledger.test.mjs`, `tests/relay-admin-routes.test.mjs`,
+`tests/gate-agent.test.mjs` and `tests/cp-admin.test.mjs`, in `node --test tests/*.test.mjs`. Use
+the glob. Several of those were once missing from `tests/index.js`, so the directory form
+`node --test tests/` did not run them at all until 2026-09-07; the count in this document's own gap
+row was taken with them absent. A new suite has to be added to that list in the same commit, and
+`tests/test-index-covers-the-suite.test.mjs` is what makes that safe: it goes red naming the file
+when the list and the directory disagree in either direction. Exactly one suite is left out on
+purpose, with the reason written into that guard beside it, and adding it anyway is also red. Both
+of those legs were confirmed on this Mac on 2026-09-09.
 
 ---
 
@@ -678,6 +967,6 @@ Super admins will be required to enrol, which is the right order: this console i
 protecting most, and today it is one password.
 
 Stripe fills in the **Spend** panel's billing half. The old line here said "Payments panel" and there
-is no such panel: the eight are Sign-in attempts, Clients and users, Box health, System health,
-Spend, Providers, Feedback and Marketplace, and payments are a placeholder paragraph inside Spend
-saying billing is not wired in yet.
+is no such panel: the rail holds Overview, Sign-in attempts, Clients and users, Box health, System
+health, Spend, Providers, Feedback and Marketplace, and payments are a placeholder paragraph inside
+Spend saying billing is not wired in yet.

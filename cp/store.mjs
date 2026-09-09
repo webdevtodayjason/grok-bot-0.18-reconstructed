@@ -281,17 +281,38 @@ CREATE TABLE IF NOT EXISTS mail_senders (
   PRIMARY KEY (tenant, sender)
 );
 -- One row per message a bot sends through the relay's send route, so a per-customer send count
--- exists at all. It holds addresses and an outcome and never a subject or a body.
+-- exists at all. It holds addresses and an outcome and never a subject or a body -- and that is
+-- still true of resend_id (the provider's id for the message) and detail (why an outcome is what
+-- it is, never any of the mail). The readable row with the subject on it belongs to the workspace,
+-- in its own mail-sent.jsonl on its own volume, read by its own console.
+--
+-- outcome is "sending" from the moment the row is claimed, then "sent", "failed" or "no_key".
+-- The claim comes BEFORE the mail goes: an unsent mail is recoverable and an unlogged send is not,
+-- so a crash in between leaves a row reading "sending", which counts toward the cap and reads as
+-- "we do not know", which is the safe direction.
+--
+-- MAIL-3 ADDED resend_id AND detail TO A TABLE THAT ALREADY EXISTED, so they are written in TWO
+-- places and both are needed: here, for a database made fresh, and in TENANT_MIGRATIONS, for every
+-- database that already has this table. CREATE TABLE IF NOT EXISTS does nothing whatever to a
+-- table that is already there, and on the R750 this one was live with seven columns and no
+-- resend_id. Editing only this DDL would have shipped a claim that fails in a way reading like
+-- Resend refusing.
 CREATE TABLE IF NOT EXISTS mail_send_log (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  tenant   TEXT NOT NULL,
-  agent_id TEXT NOT NULL DEFAULT '',
-  code     TEXT NOT NULL DEFAULT '',
-  to_addr  TEXT NOT NULL DEFAULT '',
-  at       TEXT NOT NULL,
-  outcome  TEXT NOT NULL DEFAULT ''
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant    TEXT NOT NULL,
+  agent_id  TEXT NOT NULL DEFAULT '',
+  code      TEXT NOT NULL DEFAULT '',
+  to_addr   TEXT NOT NULL DEFAULT '',
+  at        TEXT NOT NULL,
+  outcome   TEXT NOT NULL DEFAULT '',
+  resend_id TEXT NOT NULL DEFAULT '',
+  detail    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS mail_send_log_tenant ON mail_send_log (tenant, id);
+-- The per-bot hourly cap counts on (tenant, agent_id, at), which is a different shape from the
+-- list above. An index needs no migration entry of its own: CREATE INDEX IF NOT EXISTS runs on
+-- every open and makes one on an existing table, which is exactly what a new COLUMN cannot do.
+CREATE INDEX IF NOT EXISTS mail_send_log_agent ON mail_send_log (tenant, agent_id, at);
 -- FEEDBACK-1. What an agent reported, after the workspace operator sent it and before the super
 -- admin decides what to do with it.
 --
@@ -444,6 +465,12 @@ const TENANT_MIGRATIONS = [
   // the relay wrote its own richer row for the same attempt at its own door. Empty is the ordinary
   // case, a client posting straight at this service. See recordLoginAttempt.
   "ALTER TABLE login_attempts ADD COLUMN via TEXT NOT NULL DEFAULT ''",
+  // MAIL-3. The provider's id for a message and the reason an outcome is what it is. The same two
+  // columns are on the CREATE TABLE in SCHEMA and BOTH places are needed: the DDL makes them on a
+  // database that has no mail_send_log, and these make them on the R750's, which has held that
+  // table with seven columns since MAIL-2. Neither ever holds a subject or a body.
+  "ALTER TABLE mail_send_log ADD COLUMN resend_id TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE mail_send_log ADD COLUMN detail TEXT NOT NULL DEFAULT ''",
 ];
 
 export function openStore(options = {}) {
@@ -546,6 +573,29 @@ export function openStore(options = {}) {
   const deleteMailSender = statement("DELETE FROM mail_senders WHERE tenant = ? AND sender = ?");
   const insertMailSend = statement("INSERT INTO mail_send_log (tenant, agent_id, code, to_addr, at, outcome) VALUES (?, ?, ?, ?, ?, ?)");
   const countMailSendRows = statement("SELECT COUNT(*) AS n FROM mail_send_log WHERE tenant = ? AND at >= ?");
+  // MAIL-3. The claim, the settle, the operator's list, and the two counts the caps read.
+  //
+  // BOTH COUNTS TAKE `sending` AND `sent` AND NOTHING ELSE. A row still reading `sending` is a
+  // message we do not know the fate of, and not counting it is what would let a bug that crashes
+  // between the claim and Resend send without limit. A `failed` row gave its place back on purpose:
+  // we know that one did not go.
+  const claimMailSendRow = statement("INSERT INTO mail_send_log (tenant, agent_id, code, to_addr, at, outcome, resend_id, detail) VALUES (?, ?, ?, ?, ?, 'sending', '', '')");
+  const settleMailSendRow = statement("UPDATE mail_send_log SET outcome = ?, resend_id = ?, detail = ? WHERE id = ?");
+  const selectMailSends = statement("SELECT * FROM mail_send_log WHERE tenant = ? ORDER BY id DESC LIMIT ?");
+  const countAgentSendRows = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM mail_send_log WHERE tenant = ? AND agent_id = ? AND at >= ? AND outcome IN ('sending', 'sent')");
+  const countTenantSendRows = statement("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM mail_send_log WHERE tenant = ? AND at >= ? AND outcome IN ('sending', 'sent')");
+  const sendWindow = (row) => ({ count: Number(row?.n ?? 0), oldest: String(row?.oldest ?? "") });
+  const mailSendRow = (record) => (record == null ? null : {
+    id: Number(record.id),
+    tenant: String(record.tenant ?? ""),
+    agentId: String(record.agent_id ?? ""),
+    code: String(record.code ?? ""),
+    to: String(record.to_addr ?? ""),
+    at: String(record.at ?? ""),
+    outcome: String(record.outcome ?? ""),
+    resendId: String(record.resend_id ?? ""),
+    detail: String(record.detail ?? ""),
+  });
   // FEEDBACK-1. The filters are built rather than prepared, because tier, state and tenant are each
   // optional and a prepared statement per combination is eight statements for one list. The values
   // are still bound and never interpolated: the only thing built is which `AND` clauses are in the
@@ -1062,6 +1112,41 @@ export function openStore(options = {}) {
       insertMailSend.run(String(tenant ?? ""), String(agentId), String(code), String(to), String(at), String(outcome));
     },
     countMailSends(tenant, since = "") { return Number(countMailSendRows.get(String(tenant ?? ""), String(since))?.n ?? 0); },
+
+    /**
+     * MAIL-3. The claim, made before the mail is, answering the row's id so the settle can find it.
+     * The row reads `sending` until somebody says otherwise.
+     */
+    claimMailSend({ tenant, agentId = "", code = "", to = "", at = new Date().toISOString() }) {
+      const answer = claimMailSendRow.run(String(tenant ?? ""), String(agentId), String(code), String(to), String(at));
+      return Number(answer?.lastInsertRowid ?? 0);
+    },
+    /** And the settle. It updates the claimed row rather than writing a second one. */
+    settleMailSend(id, { outcome = "", resendId = "", detail = "" } = {}) {
+      settleMailSendRow.run(String(outcome), String(resendId), String(detail).slice(0, 500), Number(id));
+    },
+    /** The operator's list, newest first, for one workspace and never for all of them at once. */
+    listMailSends(tenant, limit = 50) {
+      const rows = selectMailSends.all(String(tenant ?? ""), Math.max(1, Math.min(500, Number(limit) || 50)));
+      return rows.map(mailSendRow).map((row) => ({
+        ...row,
+        // The bot's NAME is read out of the directory by its code rather than copied into this
+        // table when the send happened: a name is a customer's string and a copy of one goes stale
+        // the moment the bot is renamed. Empty when the code has no row, which a very old send has.
+        agentName: String(selectMailByCode.get(row.code)?.agent_name ?? ""),
+      }));
+    },
+    /** What one bot has in flight or away inside the window, and when the oldest of those went. */
+    agentMailSendWindow(tenant, agentId, since = "") {
+      return sendWindow(countAgentSendRows.get(String(tenant ?? ""), String(agentId ?? ""), String(since)));
+    },
+    /** The same for a whole workspace. */
+    tenantMailSendWindow(tenant, since = "") {
+      return sendWindow(countTenantSendRows.get(String(tenant ?? ""), String(since)));
+    },
+    countAgentMailSends(tenant, agentId, since = "") {
+      return sendWindow(countAgentSendRows.get(String(tenant ?? ""), String(agentId ?? ""), String(since))).count;
+    },
 
     // ---- login failures ------------------------------------------------------------------------
 
