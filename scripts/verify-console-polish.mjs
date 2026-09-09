@@ -453,15 +453,21 @@ async function legBoot(page) {
   // so what is on screen at that instant is what the stylesheet painted, not what hydrate chose.
   await page.goto(`${ORIGIN}/`, { waitUntil: "commit", timeout: within(30_000) });
   await sleep(50);
+  // `document.body` is read through a guard on purpose. At 50 ms after commit over the internet the
+  // parser may not have reached <body> yet -- measured against console.titanium.bot, where this leg
+  // threw "getComputedStyle: parameter 1 is not of type Element" while passing over loopback, where
+  // the body is always already there. A head-only document is not a failure of this claim; it is the
+  // strongest possible version of it, because the plate is on <html> before a body exists at all.
   const early = await page.evaluate(() => ({
     bg: document.documentElement.dataset.bg ?? null,
     custom: getComputedStyle(document.documentElement).getPropertyValue("--machine-room-bg").trim().slice(0, 80),
-    body: getComputedStyle(document.body).backgroundImage.slice(0, 120),
+    body: document.body ? getComputedStyle(document.body).backgroundImage.slice(0, 120) : "(no body parsed yet)",
+    hasBody: document.body != null,
     cover: document.getElementById("boot-cover")?.dataset.bootState ?? null,
     step: document.querySelector("[data-boot-step]")?.textContent?.trim().slice(0, 60) ?? null,
   }));
   const shot = await shoot(page, `boot-50ms-${Date.now()}`);
-  info(`at 50 ms: data-bg=${JSON.stringify(early.bg)} cover=${JSON.stringify(early.cover)} step=${JSON.stringify(early.step)} · ${shot}`);
+  info(`at 50 ms: data-bg=${JSON.stringify(early.bg)} cover=${JSON.stringify(early.cover)} step=${JSON.stringify(early.step)}${early.hasBody ? "" : " body=not parsed yet"} · ${shot}`);
   const mountains = /warmwind-landscape/.test(early.body) || /warmwind-landscape/.test(early.custom);
   if (early.bg == null && !mountains) {
     skip("the chosen background is on <html> before first paint", "no data-bg and no mountains at 50 ms — builder A's inline boot script has not merged into index.html yet");
@@ -513,7 +519,10 @@ async function legScroll(page) {
   if (!busiest) { skip("the transcript settles and stays put", "no conversation to open on this box"); return; }
   info(`measuring on ${busiest.name} — ${busiest.rows} rows, ${busiest.height}px in a ${busiest.client}px viewport (the longest of ${busiest.of} on this box)`);
   await sleep(2000);
-  const behaviour = await page.evaluate(() => getComputedStyle(document.getElementById("transcript") ?? document.body).scrollBehavior);
+  const behaviour = await page.evaluate(() => {
+    const el = document.getElementById("transcript") ?? document.body;
+    return el ? getComputedStyle(el).scrollBehavior : "(no element to read)";
+  });
   info(`.transcript scroll-behavior is ${behaviour}${behaviour === "smooth" ? " — every rebuild is an animation across the full height" : ""}`);
   // Park the reader half way up and leave the page alone. `behavior: "auto"` deliberately: with
   // scroll-behavior smooth an assignment animates, and reading scrollTop straight afterwards gives
