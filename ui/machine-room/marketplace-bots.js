@@ -185,6 +185,202 @@
     };
   }
 
+  // ------------------------------------------------------------------ a TEAM, not a bot
+  // TEAMS-1's first slice. A pack row carries `members`, and importing one is a different sequence
+  // from importing a bot: the cap is read before anything is written, seven agents are created
+  // under names Remove team can find again, and a skill the box's shared library already holds is
+  // reused rather than imported a second time.
+  //
+  // It does NOT reuse importBot above. That function appends " copy" to a name already taken,
+  // which is right for a template somebody deliberately imports twice and exactly wrong for a
+  // team: a second import must land on the same seven bots, not on seven more called "copy".
+  //
+  // Three things this fixes, all measured on grok-bot-local-vm on 2026-09-09:
+  //   - the shared library on that box holds web-research-pass, -2 and -3, three copies of one
+  //     skill left by three imports, because the host suffixes on a name collision and never
+  //     dedupes. So every pack skill is namespaced and the library is read BEFORE the first write.
+  //   - deleting an agent leaves its skills behind, and there is no undo on the roster. So the
+  //     pack has a Remove team that takes back both, found by the two prefixes the catalog row
+  //     declares rather than by a manifest a different browser would not have.
+  //   - a half-imported team cannot be undone by hand, so a member that fails rolls back every
+  //     agent and every skill THIS import created, and nothing it merely found.
+
+  const packMembersOf = (bot) => listOf(bot && bot.members).filter((m) => m != null && typeof m === "object");
+  const isTeamPack = (bot) => packMembersOf(bot).length > 0;
+
+  // The prefixes and the refusal come off the catalog row (marketing-team.ts's `packaging`),
+  // because this file is served to a browser and cannot import that module. The fallbacks are for
+  // a host older than the field, where a pack simply does not draw.
+  function packagingOf(bot) {
+    const declared = (bot && bot.packaging) || {};
+    // NOT text(): the roster prefix is "Marketing \u00b7 " and its trailing space is load-bearing.
+    // Trimming it produced "Marketing \u00b7Coordinator" on the roster, which Remove team still
+    // matched but no person would have written.
+    const raw = (value) => (typeof value === "string" ? value : "");
+    return {
+      agentPrefix: raw(declared.agentPrefix),
+      skillPrefix: raw(declared.skillPrefix),
+      capacityRefusal: raw(declared.capacityRefusal),
+    };
+  }
+
+  /** The same two substitutions renderCapacityRefusal does in the catalog. Pinned equal by the unit test. */
+  function renderRefusal(template, remaining, needed) {
+    const room = Math.max(0, Math.trunc(Number(remaining) || 0));
+    const want = Math.max(0, Math.trunc(Number(needed) || 0));
+    return String(template || "")
+      .replace("{room}", String(room))
+      .replace("{bots}", room === 1 ? "bot" : "bots")
+      .replace("{needed}", String(want))
+      .replace("{short}", String(Math.max(0, want - room)));
+  }
+
+  const memberAgentName = (bot, member) => `${packagingOf(bot).agentPrefix}${text(member && member.role)}`;
+  const memberPersona = (member) => {
+    const summary = text(member && member.summary);
+    const instructions = text(member && member.instructions);
+    if (!instructions) return summary;
+    if (!summary) return instructions;
+    return `${summary}\n\n${instructions}`;
+  };
+
+  /**
+   * Every workflow the box holds. The library is shared, so any agent answers with the same list --
+   * but ONE agent failing to answer must not read as an empty library, because an empty library is
+   * exactly the answer that makes the import re-write all ten documents and leave doubles behind.
+   * Measured on grok-bot-local-vm 2026-09-09: a single anchor agent stopped answering mid-run and
+   * the read came back empty on a box holding 55 rows. So it walks the roster until one answers.
+   */
+  async function sharedLibrary(gateway, agentId, roster) {
+    const ids = [];
+    for (const id of [text(agentId), ...listOf(roster).map((agent) => text(agent && agent.id))]) {
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    for (const id of ids) {
+      let rows;
+      try { rows = await gateway.call("getAgentWorkflows", { id }); } catch { continue; }
+      if (!Array.isArray(rows)) continue;
+      return rows.filter((row) => row != null && row.source !== "automation");
+    }
+    return [];
+  }
+
+  /** Delete named rows out of the shared library. Used by the rollback and by Remove team. */
+  async function deleteSkillsNamed(gateway, agentId, names, failures, roster) {
+    if (!agentId || names.size === 0) return 0;
+    let removed = 0;
+    for (const row of await sharedLibrary(gateway, agentId, roster)) {
+      if (!names.has(text(row.name))) continue;
+      try {
+        await gateway.call("deleteAgentWorkflow", { id: agentId, workflowId: text(row.id) });
+        removed += 1;
+      } catch (error) {
+        if (failures != null) failures.push(`${text(row.name)}: ${String(error?.message ?? error)}`);
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Import a team. Exported on the namespace and driven by a fake gateway in the unit test,
+   * because the ORDER of these calls is the contract and a click in a browser is no place to pin
+   * it: capacity, roster, library, then one createAgent per member that is missing.
+   */
+  async function importMarketingTeam(gateway, bot, onProgress) {
+    const report = typeof onProgress === "function" ? onProgress : () => {};
+    const members = packMembersOf(bot);
+    if (members.length === 0) throw new Error("this template carries no team members");
+    const { agentPrefix, capacityRefusal } = packagingOf(bot);
+    if (!agentPrefix) throw new Error("this template does not say what to call its bots on the roster");
+
+    // FIRST, before a single write. A team that half-fits is worse than one that is refused,
+    // because the roster has no undo and nobody can tell which four of seven arrived.
+    const capacity = await gateway.call("getAgentCapacity", {}).catch(() => null);
+    const roster = agentRecords(await gateway.call("listAgents", {}));
+    const byName = new Map(roster.map((agent) => [text(agent.name), agent]));
+    const plan = members.map((member) => ({ member, name: memberAgentName(bot, member) }));
+    const toCreate = plan.filter((row) => !byName.has(row.name));
+    const remaining = Number(capacity && capacity.remaining);
+    if (Number.isFinite(remaining) && remaining < toCreate.length) {
+      return { state: "refused", message: renderRefusal(capacityRefusal, remaining, toCreate.length), members: [] };
+    }
+
+    // The library is read once, through whatever agent already exists. On an empty box there is
+    // nothing to ask through and nothing to collide with, so an empty list is the right answer.
+    const held = new Set((await sharedLibrary(gateway, text(roster[0] && roster[0].id), roster))
+      .map((row) => text(row.name)).filter(Boolean));
+
+    const createdAgents = [];
+    const createdSkills = new Set();
+    const done = [];
+    try {
+      let at = 0;
+      for (const row of plan) {
+        at += 1;
+        report({ at, total: plan.length, role: text(row.member.role), phase: "creating" });
+        let agent = byName.get(row.name) ?? null;
+        const reused = agent != null;
+        if (agent == null) {
+          const created = await gateway.call("createAgent", { name: row.name, description: memberPersona(row.member) });
+          const id = text(created?.agent?.id ?? created?.id);
+          if (!id) throw new Error(`the host accepted ${row.name} and reported no bot`);
+          agent = { id, name: row.name };
+          createdAgents.push(id);
+        }
+        const skills = [];
+        for (const skill of listOf(row.member.skills)) {
+          const name = text(skill && skill.name);
+          const body = text(skill && skill.body);
+          if (!name || !body) continue;
+          // Namespaced, so a name already in the library IS this pack's own and reusing it is
+          // right. Without the namespace this read would happily adopt a stranger's skill.
+          if (held.has(name)) { skills.push({ name, reused: true }); continue; }
+          report({ at, total: plan.length, role: text(row.member.role), phase: "importing", skill: name });
+          await gateway.call("importAgentWorkflowText", { id: text(agent.id), markdown: body, name });
+          held.add(name);
+          createdSkills.add(name);
+          skills.push({ name, reused: false });
+        }
+        done.push({ id: text(row.member.id), role: text(row.member.role), agentId: text(agent.id), name: row.name, reused, skills });
+      }
+    } catch (error) {
+      // Roll back exactly what this run made. Skills first, while an agent it can be asked
+      // through is still alive.
+      const anchor = createdAgents[0] ?? text(roster[0] && roster[0].id);
+      await deleteSkillsNamed(gateway, anchor, createdSkills, null, roster).catch(() => {});
+      for (const id of createdAgents) await gateway.call("deleteAgent", { id }).catch(() => {});
+      return { state: "failed", message: String(error?.message ?? error), members: [] };
+    }
+    return { state: "done", members: done, created: createdAgents.length, imported: createdSkills.size };
+  }
+
+  /**
+   * Take a team back: the bots AND the documents. Found from the two prefixes the row declares, so
+   * this works in a browser that never ran the import, which is the case a stored manifest fails.
+   */
+  async function removeMarketingTeam(gateway, bot) {
+    const { agentPrefix, skillPrefix } = packagingOf(bot);
+    const failures = [];
+    if (!agentPrefix || !skillPrefix) return { agents: 0, skills: 0, failures };
+    const roster = agentRecords(await gateway.call("listAgents", {}));
+    const mine = roster.filter((agent) => text(agent.name).startsWith(agentPrefix));
+
+    // Skills first, while one of this pack's own bots is still there to ask through. They outlive
+    // their bot, so a sweep runs even when the roster holds none: a previous removal that deleted
+    // the bots and failed on the documents left exactly that.
+    const anchor = text((mine[0] ?? roster[0] ?? {}).id);
+    const names = new Set((await sharedLibrary(gateway, anchor, roster))
+      .map((row) => text(row.name)).filter((name) => name.startsWith(skillPrefix)));
+    const skills = await deleteSkillsNamed(gateway, anchor, names, failures, roster);
+
+    let agents = 0;
+    for (const agent of mine) {
+      try { await gateway.call("deleteAgent", { id: text(agent.id) }); agents += 1; }
+      catch (error) { failures.push(`${text(agent.name)}: ${String(error?.message ?? error)}`); }
+    }
+    return { agents, skills, failures };
+  }
+
   // ------------------------------------------------------------------ installed state
   // The contract's rule, read from the box rather than remembered: a plugin is installed when its
   // connector name -- the catalog's own `connectorName` field -- is a key in connectors.json; a
@@ -246,6 +442,14 @@
   // ------------------------------------------------------------------ view state
   // One module-level view, because the panel re-renders the whole tab on every tab switch and a
   // half-read bot page that forgot which tab was open reads as a bug.
+  /** The BOT category list a listMarketplace answer carries, or null when it carries none of its own. */
+  function botCategoriesOf(answer) {
+    const raw = answer && answer.categories;
+    if (raw == null || Array.isArray(raw)) return null;
+    const declared = listOf(raw.bots).map((entry) => (typeof entry === "string" ? entry : text(entry && entry.name))).filter(Boolean);
+    return declared.length ? declared : null;
+  }
+
   const view = { botId: null, page: "instructions", query: "", category: "All", notice: "" };
   const imports = new Map();  // bot id -> { state: "running" | "done" | "failed", ... }
   let catalog = null;
@@ -421,13 +625,134 @@
     return `<div class="panel-card" data-imported-agent="${escapeHtml(agent.id)}"><h3>Imported as “${escapeHtml(agent.name)}”</h3><p>${escapeHtml(oneLine(agent.description))}</p>${skillTags}${skippedNote}${open}</div>${missingRows}`;
   }
 
+  // ------------------------------------------------------------------ the team pages
+  // A pack gets two pages the six single-bot templates do not have: who the seven are, and what
+  // the operator has to provide. Both are read BEFORE the Import button, which is the whole point:
+  // the two prerequisites below take days of somebody else\'s time and finding that out afterwards
+  // is what strands people.
+
+  function membersMarkup(bot) {
+    const members = packMembersOf(bot);
+    if (!members.length) return `<div class="empty-state">This template is a single bot, not a team.</div>`;
+    const outcome = imports.get(text(bot.id));
+    const byId = new Map(listOf(outcome && outcome.members).map((row) => [text(row.id), row]));
+    const rows = members.map((member) => {
+      const landed = byId.get(text(member.id)) ?? null;
+      const reports = member.reportsTo == null
+        ? "Reports to Titan"
+        : `Reports to the ${text((members.find((other) => other.id === member.reportsTo) || {}).role || member.reportsTo).toLowerCase()}`;
+      const skills = listOf(member.skills).map((skill) => `<span class="tag">${escapeHtml(text(skill.name))}</span>`).join("");
+      const tools = listOf(member.integrations).map((id) => {
+        const plugin = pluginById(id);
+        return `<span class="tag">${escapeHtml(plugin ? text(plugin.name) : text(id))}</span>`;
+      }).join("");
+      const state = landed == null
+        ? ""
+        : `<span class="status-pill ${landed.reused ? "" : "success"}">${landed.reused ? "already here" : "created"}</span>`;
+      return `<div class="setting-row" data-team-member="${escapeHtml(text(member.id))}" style="align-items:flex-start">`
+        + `<div style="min-width:0"><strong>${escapeHtml(text(member.role))}</strong><small>${escapeHtml(oneLine(member.summary))}</small>`
+        + `<small style="opacity:0.75">${escapeHtml(reports)}</small>`
+        + `<span class="tag-list" style="margin:6px 0 0">${skills}${tools}</span></div>${state}</div>`;
+    }).join("");
+    return `<div class="panel-card"><h3>The team</h3><p>Import creates ${members.length} bots on this box, each with its own instructions and its own playbooks. They are shared across every client you run; what changes per client is a brand profile.</p></div>`
+      + `<div class="plugin-list" data-team-members>${rows}</div>`
+      + `<span class="field-hint">Every one of them stops at a decision card before anything is posted, sent or published. Remove team on the Instructions page takes back the bots and their documents together.</span>`;
+  }
+
+  function firstRunMarkup(bot) {
+    const firstRun = (bot && bot.firstRun) || null;
+    if (firstRun == null) return `<div class="empty-state">This template says nothing about what it needs first.</div>`;
+    const needs = listOf(firstRun.needs).map((line) => `<li>${escapeHtml(text(line))}</li>`).join("");
+    const before = listOf(firstRun.prerequisites).map((line) => `<li>${escapeHtml(text(line))}</li>`).join("");
+    const beforeCard = before
+      ? `<div class="panel-card" style="outline:1px solid var(--amber-500)"><h3>Do these first, they are not quick</h3><ul style="margin:8px 0 0;padding-left:18px">${before}</ul></div>`
+      : "";
+    return `<div class="panel-card"><h3>${escapeHtml(text(firstRun.headline) || "Before you import")}</h3><ul style="margin:8px 0 0;padding-left:18px">${needs}</ul></div>`
+      + beforeCard
+      + `<div class="panel-card"><p style="white-space:pre-wrap;margin:0">${escapeHtml(text(firstRun.body))}</p></div>`;
+  }
+
   const PAGES = [
     { id: "instructions", label: "Instructions", hint: "How this Bot should work", icon: "✎" },
     { id: "skills", label: "Skills", hint: "Playbooks it can run", icon: "▤" },
     { id: "integrations", label: "Integrations", hint: "Tools it can use", icon: "✦" },
   ];
 
+  const TEAM_PAGES = [
+    { id: "members", label: "The team", hint: "Who you get, and what each one does", icon: "☰" },
+    { id: "firstrun", label: "What you provide", hint: "Keys, adds, and the two slow ones", icon: "！" },
+    { id: "instructions", label: "How it works", hint: "The team, and the approval rule", icon: "✎" },
+    { id: "skills", label: "Documents", hint: "Playbooks and brand profiles", icon: "▤" },
+    { id: "integrations", label: "Integrations", hint: "Tools the team uses", icon: "✦" },
+  ];
+
+  /** What Remove team offers, and what it just did. Only on a pack, and only once one is drawn. */
+  function teamControlsMarkup(bot) {
+    const outcome = imports.get(text(bot.id));
+    if (outcome == null) return "";
+    if (outcome.state === "running") {
+      return `<div class="panel-card"><h3>Importing the team…</h3><p>${escapeHtml(text(outcome.step) || "Reading this workspace's limit before anything is created.")}</p></div>`;
+    }
+    if (outcome.state === "refused") {
+      // One plain sentence, and it is the catalog\'s own. Nothing was created.
+      return `<div class="panel-card" style="outline:1px solid var(--amber-500)"><h3>Not imported</h3><p data-team-refusal>${escapeHtml(outcome.message)}</p></div>`;
+    }
+    if (outcome.state === "failed") {
+      return `<div class="panel-card" style="outline:1px solid var(--amber-500)"><h3>Not imported</h3><p data-team-failure>${escapeHtml(outcome.message)}</p><p>Everything this import had created was taken back, so the roster is as you found it.</p></div>`;
+    }
+    if (outcome.state === "removed") {
+      return `<div class="panel-card" data-team-removed><h3>Team removed</h3><p>${escapeHtml(outcome.message)}</p></div>`;
+    }
+    if (outcome.state === "confirm") {
+      // Asked out loud, before anything is written: what will be created, and what will NOT be
+      // installed. A team that quietly added six connectors would be the CONNECT-13 defect with
+      // more moving parts.
+      const missing = listOf(outcome.missing);
+      const keys = listOf(outcome.keys);
+      return `<div class="panel-card" data-team-confirm><h3>Press Import team again to go ahead</h3>`
+        + `<p>This creates ${outcome.members} bots and imports ${outcome.skills} documents into this box's shared library.</p>`
+        + (missing.length
+          ? `<p>It installs nothing. ${escapeHtml(missing.join(", "))} ${missing.length === 1 ? "is" : "are"} not on this box yet, and you add ${missing.length === 1 ? "it" : "them"} yourself from ${missing.length === 1 ? "its" : "their"} own card.</p>`
+          : `<p>It installs nothing, and every plugin the team needs is already on this box.</p>`)
+        + (keys.length ? `<p>No key is written either. ${escapeHtml(keys.join(", "))} stay yours to enter.</p>` : "")
+        + `</div>`;
+    }
+    const created = listOf(outcome.members).filter((row) => row.reused !== true).length;
+    const reused = listOf(outcome.members).length - created;
+    const skills = listOf(outcome.members).reduce((n, row) => n + listOf(row.skills).filter((s) => s.reused !== true).length, 0);
+    const line = `${created} bot${created === 1 ? "" : "s"} created${reused ? `, ${reused} already here` : ""}, ${skills} document${skills === 1 ? "" : "s"} imported.`;
+    return `<div class="panel-card" data-team-imported><h3>The team is on this box</h3><p>${escapeHtml(line)}</p>`
+      + `<p>Nothing of theirs runs until you message one. Give the brand profile keeper a client and it will interview you.</p>`
+      + `<button class="ghost-button" type="button" data-remove-team="${escapeHtml(text(bot.id))}">Remove team</button></div>`;
+  }
+
+  function teamPageMarkup(bot) {
+    const outcome = imports.get(text(bot.id));
+    const busy = outcome != null && outcome.state === "running";
+    const canImport = global.__machineRoomLive !== false;
+    const pages = TEAM_PAGES;
+    const page = pages.some((entry) => entry.id === view.page) ? view.page : "members";
+    const nav = pages.map((entry) => `<button class="plugin-nav-button${page === entry.id ? " is-active" : ""}" type="button" data-bot-tab="${entry.id}"><span class="plugin-icon">${entry.icon}</span><span><strong>${entry.label}</strong><small>${entry.hint}</small></span></button>`).join("");
+    const body = page === "members" ? membersMarkup(bot)
+      : page === "firstrun" ? firstRunMarkup(bot)
+        : page === "skills" ? skillsMarkup(bot)
+          : page === "integrations" ? integrationsMarkup(bot)
+            : instructionsMarkup(bot);
+    const members = packMembersOf(bot);
+    // The button is deliberately the same primary-button every other Import is, at the same size,
+    // in the same place. The gate measures the rectangle a person has to hit.
+    const importButton = canImport
+      ? `<button class="primary-button" type="button" data-import-bot="${escapeHtml(text(bot.id))}"${busy ? " disabled" : ""}>${busy ? "Importing…" : `Import team (${members.length})`}</button>`
+      : `<span class="status-pill">offline — no gateway to import through</span>`;
+    return `<div data-bot-page="${escapeHtml(text(bot.id))}" data-team-page="${escapeHtml(text(bot.id))}">`
+      + `<button class="quiet-button" type="button" data-bots-back style="margin-bottom:12px">← All bots</button>`
+      + `<div class="plugin-hero">${tileMarkup(bot, "large")}<div class="plugin-hero-copy"><h3>${escapeHtml(text(bot.name))}</h3><p>By ${escapeHtml(text(bot.creator) || "Titanbot team")} · ${escapeHtml(text(bot.category) || "Bots")} · ${members.length} bots</p><p>${escapeHtml(text(bot.description))}</p></div><div style="display:grid;gap:6px;align-content:start">${importButton}</div></div>`
+      + `<div class="plugin-browser" style="min-height:300px;margin-top:16px"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail"><div class="plugin-sections">${body}${teamControlsMarkup(bot)}</div></section></div>`
+      + `</div>`;
+  }
+
   function botPageMarkup(bot) {
+    if (isTeamPack(bot)) return teamPageMarkup(bot);
     const outcome = imports.get(text(bot.id));
     const busy = outcome != null && outcome.state === "running";
     // Offline (index.html fell back to the demo factory) there is no gateway behind this page, so
@@ -485,10 +810,18 @@
       const answer = adapter != null && typeof adapter.listMarketplace === "function"
         ? await adapter.listMarketplace()
         : await gateway.call("listMarketplace", {});
+      // THE CHIP DEFECT. The host serves categories as { plugins, bots }; the adapter's cache is
+      // built for the Plugins tab and flattens that to the PLUGIN list, which arrives here as a
+      // flat array and drew "Development", "Code review" and "Shell tools" as bot categories on
+      // screen. A flat array is therefore not trusted as this tab's own list: one gateway read
+      // gets the shape the host actually serves. Once the adapter stops flattening, the fallback
+      // never fires and this costs nothing.
+      let categories = botCategoriesOf(answer);
+      if (categories == null) categories = botCategoriesOf(await gateway.call("listMarketplace", {}).catch(() => null)) ?? [];
       catalog = {
         plugins: listOf(answer && answer.plugins),
         bots: listOf(answer && answer.bots),
-        categories: (answer && answer.categories) ?? [],
+        categories,
       };
       catalogError = null;
       installed = await readInstalledIds(gateway, catalog.plugins).catch(() => new Set());
@@ -509,9 +842,98 @@
   }
 
   // ------------------------------------------------------------------ events
+  /**
+   * Importing a team never installs a connector and never writes a key: it lists what is missing
+   * and the operator adds each one on its own card. So the click asks once, out loud, naming every
+   * plugin it will NOT install, before it creates anything.
+   */
+  function teamConfirmation(bot) {
+    const need = listOf(bot.integrations).map(text).filter(Boolean);
+    const missing = need.filter((id) => !installed.has(id));
+    const names = missing.map((id) => { const plugin = pluginById(id); return plugin ? text(plugin.name) : id; });
+    const keys = [];
+    for (const id of need) {
+      const plugin = pluginById(id);
+      for (const credential of listOf(plugin && plugin.credentials)) {
+        const field = text(credential.field);
+        if (field && !keys.includes(field)) keys.push(field);
+      }
+    }
+    return {
+      members: packMembersOf(bot).length,
+      skills: listOf(bot.skills).length,
+      missing: names,
+      keys,
+    };
+  }
+
+  async function onImportTeamClick(bot) {
+    const id = text(bot.id);
+    imports.set(id, { state: "running", step: "Reading this workspace\'s limit before anything is created." });
+    view.notice = "";
+    paint();
+    let outcome;
+    try {
+      outcome = await importMarketingTeam(relayGateway(), bot, (progress) => {
+        const step = progress.phase === "importing"
+          ? `${progress.role}: ${progress.skill}`
+          : `${progress.role} (${progress.at} of ${progress.total})`;
+        imports.set(id, { state: "running", step });
+        paint();
+      });
+    } catch (error) {
+      outcome = { state: "failed", message: String(error?.message ?? error), members: [] };
+    }
+    imports.set(id, outcome);
+    paint();
+    const adapter = adapterOf();
+    if (adapter != null && typeof adapter.refresh === "function") await adapter.refresh().catch(() => {});
+    await refreshInstalled();
+    paint();
+  }
+
+  async function onRemoveTeamClick(botId) {
+    const bot = botById(botId);
+    if (bot == null) return;
+    const id = text(bot.id);
+    imports.set(id, { state: "running", step: "Taking back the bots and their documents." });
+    paint();
+    let message;
+    try {
+      const removed = await removeMarketingTeam(relayGateway(), bot);
+      message = `${removed.agents} bot${removed.agents === 1 ? "" : "s"} and ${removed.skills} document${removed.skills === 1 ? "" : "s"} taken back.`
+        + (removed.failures.length ? ` ${removed.failures.length} could not be removed: ${removed.failures.join("; ")}` : "");
+    } catch (error) {
+      message = String(error?.message ?? error);
+    }
+    imports.set(id, { state: "removed", message, members: [] });
+    paint();
+    const adapter = adapterOf();
+    if (adapter != null && typeof adapter.refresh === "function") await adapter.refresh().catch(() => {});
+    paint();
+  }
+
   async function onImportClick(botId) {
     const bot = botById(botId);
     if (bot == null) return;
+    if (isTeamPack(bot)) {
+      // The confirmation is a step, not a modal: the notice names every plugin the import will not
+      // install and every key it will not write, and a second press goes ahead. A team that
+      // silently added six connectors would be the CONNECT-13 failure with more moving parts.
+      const state = imports.get(text(bot.id));
+      if (state == null || state.state !== "confirm") {
+        const summary = teamConfirmation(bot);
+        imports.set(text(bot.id), { state: "confirm", ...summary });
+        view.notice = `Import creates ${summary.members} bots and imports ${summary.skills} documents. It installs nothing`
+          + (summary.missing.length ? `: ${summary.missing.join(", ")} ${summary.missing.length === 1 ? "is" : "are"} not on this box yet and you add ${summary.missing.length === 1 ? "it" : "them"} yourself` : " and every plugin it needs is already here")
+          + (summary.keys.length ? `. No key is written either; ${summary.keys.join(", ")} stay yours to enter.` : ".")
+          + " Press Import team again to go ahead.";
+        paint();
+        return;
+      }
+      await onImportTeamClick(bot);
+      return;
+    }
     imports.set(text(bot.id), { state: "running" });
     view.notice = "";
     paint();
@@ -565,6 +987,8 @@
     if (importer != null) { void onImportClick(importer.dataset.importBot); return; }
     const add = target.closest("[data-add-integration]");
     if (add != null) { void onAddClick(add.dataset.addIntegration); return; }
+    const remove = target.closest("[data-remove-team]");
+    if (remove != null) { void onRemoveTeamClick(remove.dataset.removeTeam); return; }
     const open = target.closest("[data-open-agent]");
     if (open != null) {
       const adapter = adapterOf();
@@ -572,7 +996,15 @@
       return;
     }
     const card = target.closest("[data-bot-id]");
-    if (card != null) { view.botId = card.dataset.botId; view.page = "instructions"; view.notice = ""; paint(); }
+    if (card != null) {
+      view.botId = card.dataset.botId;
+      // A team opens on its members. Measured on screen 2026-09-09: it opened on "How it works"
+      // like a single bot does, so the seven a person is meant to read BEFORE importing were
+      // behind a click nobody is told to make.
+      view.page = isTeamPack(botById(card.dataset.botId)) ? "members" : "instructions";
+      view.notice = "";
+      paint();
+    }
   }
 
   function onInput(event) {
@@ -601,6 +1033,22 @@
     // unit test rather than re-implemented there.
     importBot,
     personaFor,
+    // TEAMS-1. The team sequence, for the same reason: the ORDER of the calls is the contract.
+    importMarketingTeam,
+    removeMarketingTeam,
+    renderRefusal,
+    packMembersOf,
+    memberAgentName,
+    // The pack page's own markup, so the states the gate cannot reach in one run -- a failed
+    // import, a removal -- are still rendered by something before they are rendered at a person.
+    renderTeamState(bot, outcome) {
+      const previous = imports.get(text(bot && bot.id));
+      if (outcome == null) imports.delete(text(bot && bot.id)); else imports.set(text(bot && bot.id), outcome);
+      try { return teamControlsMarkup(bot); }
+      finally { if (previous == null) imports.delete(text(bot && bot.id)); else imports.set(text(bot && bot.id), previous); }
+    },
+    renderTeamMembers: (bot) => membersMarkup(bot),
+    renderFirstRun: (bot) => firstRunMarkup(bot),
     reload() { catalog = null; catalogError = null; return load(); },
   };
 })(typeof window !== "undefined" ? window : globalThis);
