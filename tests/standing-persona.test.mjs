@@ -201,8 +201,13 @@ test("the retrigger phrase is wired to a real file, not just promised", () => {
   // path the managed-skills cache actually writes.
   assert.ok(text.includes(`${root}/managed-skills/skills/onboarding/SKILL.md`),
     `it names the skill's real path: ${text}`);
-  assert.ok(/send that first question before the turn ends/.test(text),
-    "and it asks for the first question in the same turn, not an acknowledgement alone");
+  // Measured twice: "acknowledge, then read the file, then ask" is a turn the model satisfies by
+  // acknowledging alone. The first question therefore has to be IN the prompt and in the same
+  // message, so nothing has to be fetched before the interview can start.
+  assert.ok(text.includes('"What should I call you?"'),
+    "the first question is spelled out, so no read stands between the phrase and the interview");
+  assert.ok(/in the same message as any acknowledgement/.test(text),
+    "and it must not arrive as a message of its own after an acknowledgement");
   assert.ok(/does not reopen the setup window/.test(text),
     "and says the one thing it cannot do, rather than over-promising");
 });

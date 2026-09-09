@@ -87,19 +87,34 @@ not do.
 There was no shipped retrigger before this. `resetOnboarding` answers 403 without
 `SAND_TEST_HOOKS`, and `startOnboarding` refuses any agent that has already been talked to — and
 both are console commands anyway, while the person types the phrase into the chat. So the wiring
-is the standing instruction itself: when the agent hears the phrase it Reads the interview's
-`SKILL.md` at `<sandRoot>/managed-skills/skills/onboarding/SKILL.md` and runs it from the first
-question, sending that question in the same turn.
+is the standing instruction itself.
 
-The exact path is in the prompt because a name was not enough. **Measured on grok-bot-local-vm at
-12:53 UTC on 2026-09-09**: told to "open the `onboarding` skill in your own skill library", the
-agent answered *"On it — starting the setup interview now."* and then said nothing else. The
-workflows section of the prompt points at `<sandRoot>/workflows`, which is where a person's own
-saved skills live; the managed seed skills are written somewhere else entirely, so the agent
-looked, found nothing, and the turn ended on an acknowledgement. That failure — "On it", then
-silence — is the worst of the three possible outcomes, worse than a refusal, because the person
-sits waiting. The prompt now names the file and says to send the first question before the turn
-ends, and `tests/standing-persona.test.mjs` pins both.
+**What it took to make that instruction actually fire, measured three times on
+grok-bot-local-vm.** The first two shapes both failed the same way:
+
+| UTC | The instruction | What the agent did |
+| --- | --- | --- |
+| 12:53 | "open the `onboarding` skill in your own skill library" | *"On it — starting the setup interview now."* then silence |
+| 13:04 | the same, with the skill's exact path spelled out | *"On it — starting the setup interview now."* then silence |
+| 13:2x | the first question written into the prompt, to send in the same message | the interview starts |
+
+The path was never the problem. The shape was. The prompt's very first rule is to open every turn
+with a plain acknowledgement before any tool call, so an instruction of the form *acknowledge, then
+go and read a file, then ask* gives the model a turn it can satisfy by acknowledging alone — and
+that is exactly what it did, twice, with two different wordings. "On it", then nothing, is the
+worst of the three possible outcomes, worse than a refusal, because the person sits waiting for a
+question that never comes.
+
+So the first question — *"What should I call you?"* — is written into the section itself and has to
+go in the same message. Nothing needs fetching before the interview can start; the skill file at
+`<sandRoot>/managed-skills/skills/onboarding/SKILL.md` is where the rest of it comes from, read
+while the person answers. `tests/standing-persona.test.mjs` pins the question and the
+same-message rule, so a later edit that turns it back into "go and read this first" fails the
+suite rather than the customer.
+
+The general lesson is worth more than this one phrase: **an instruction that puts a tool call
+between the person and the first visible thing they are waiting for is an instruction the model
+can drop.** Put the visible part first.
 
 That skill named two tools, `save_onboarding_answer` and `finish_onboarding`, which the toolset
 offers only while the box's record says setup is open. On a workspace that has already finished

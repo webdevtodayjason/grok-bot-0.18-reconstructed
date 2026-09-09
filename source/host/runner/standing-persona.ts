@@ -208,20 +208,27 @@ function readOnboardingRecord(sandRoot: string): SandOnboardingRecord | null {
 function onboardingSentences(record: SandOnboardingRecord | null, sandRoot: string): string[] {
   const retrigger = `Say "${SAND_ONBOARDING_RETRIGGER_PHRASE}" and I will run that interview again`
     + " here in the chat; it does not reopen the setup window in the console.";
-  // The exact file, not "your skill library". Measured on grok-bot-local-vm at 12:53 UTC on
-  // 2026-09-09: told only to open the skill by name, the agent answered "On it — starting the
-  // setup interview now." and then said nothing else, because the workflows section points at
-  // <sandRoot>/workflows and the managed seed skills live somewhere else entirely. An
-  // acknowledgement followed by silence is the worst outcome of the three, so the path is spelled
-  // out and the first question is named as the thing to send in the same turn.
+  // Measured twice on grok-bot-local-vm, at 12:53 and 13:04 UTC on 2026-09-09. Told to open the
+  // interview skill -- first by name, then by its exact path -- the agent answered "On it —
+  // starting the setup interview now." and the turn ended there, both times. An acknowledgement
+  // followed by silence is the worst of the three possible outcomes, worse than a refusal,
+  // because the person sits waiting for a question that never comes.
+  //
+  // The cause is the shape of the instruction, not the path: the prompt's first rule is to open
+  // every turn with a plain acknowledgement, so "acknowledge, then go and read a file, then ask"
+  // gives the model a turn it can satisfy by acknowledging alone. So the first question is now IN
+  // this sentence and goes in the SAME message. Nothing has to be fetched before the interview
+  // can start, and the file is where the REST of it comes from.
   const skillPath = toModelVisiblePath(join(
     sandRoot, MANAGED_SKILLS_DIRNAME, MANAGED_SKILL_FILES_DIRNAME,
     SAND_ONBOARDING_SKILL_LOOKUP, "SKILL.md",
   ));
-  const how = `When somebody says "${SAND_ONBOARDING_RETRIGGER_PHRASE}", I start it in that same`
-    + ` turn: I Read ${skillPath} and follow it from its first question, and I send that first`
-    + " question before the turn ends. I do not ask whether they are sure, I do not say I cannot,"
-    + " and I never answer with an acknowledgement alone.";
+  const how = `When somebody says "${SAND_ONBOARDING_RETRIGGER_PHRASE}", my very next message asks`
+    + " them the first question, in the same message as any acknowledgement and never in a message"
+    + ' of its own: "What should I call you?" I do not stop at "on it" and I do not end the turn'
+    + " without that question, because a person who is told setup is starting and then hears"
+    + ` nothing has been left waiting. The rest of the interview is at ${skillPath}: I read it`
+    + " while they answer and follow it from its second question on, one question at a time.";
   const state = record == null || record.done !== true
     ? "First-time setup has not finished in this workspace."
     : record.doneReason === "existing-box"
