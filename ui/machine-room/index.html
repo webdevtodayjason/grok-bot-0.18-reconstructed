@@ -182,6 +182,13 @@
         <!-- The host's acceptance ledger for the last send, never the click: promptAcceptanceStatus
              fills this after every sendPrompt, which itself answers "accepted" unconditionally. -->
         <div class="composer-status" id="composer-status" data-composer-status data-composer-state="idle" hidden></div>
+        <!-- FEEDBACK-1: always here, whether or not anything has gone wrong. The automatic offer
+             only appears when the console can see a failure, and an offer nobody answers dies with
+             the tab, so this is the door that is always open. -->
+        <div class="composer-aside">
+          <button class="ghost-button" type="button" id="report-problem" data-report-open>Report a problem</button>
+          <button class="ghost-button" type="button" id="run-self-test" data-run-self-test>Run a self-test</button>
+        </div>
         <form class="composer" id="composer">
           <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachment">＋</button>
           <input id="composer-file" type="file" multiple hidden />

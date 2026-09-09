@@ -34,6 +34,10 @@ import {
   shellEnvSecretFieldRefusal,
 } from "./extensions/shell-tools/shell-secret-field.js";
 import {
+  readProblemReports,
+  resolveProblemReport as resolveHostProblemReport,
+} from "./extensions/feedback/problem-reports.js";
+import {
   fetchShellToolSkill,
   probeShellToolBinary,
   readShellSecretProbe,
@@ -1365,6 +1369,22 @@ export function createHostGatewayApi(
     // Names only, from both lists, for the same reason listConnectorSecretFields answers two:
     // `fields` is what a value may be stored under, `stored` is what the 0600 store holds.
     listShellSecretFields: () => shellSecretsSnapshot(),
+
+    // ---------------------------------------------------------------- FEEDBACK-1, problem reports
+    // What an agent has written down and the operator has not decided about yet. The console is
+    // authenticated as the tenant and is the only thing that sends one on; the box holds no
+    // control-plane credential and never names its own tenant, so a report can only ever leave
+    // through a person who has read it.
+    listProblemReports: () => ({ reports: readProblemReports(shellRoot()) }),
+    // `sent` and `dropped` both land here: once the operator has seen it, the box's queue is done
+    // with it either way. What happened to a sent report is the control plane's record.
+    resolveProblemReport: (args: any) => {
+      const id = typeof args?.id === "string" ? args.id.trim() : "";
+      if (id.length === 0) throw new Error("resolveProblemReport needs an `id`");
+      const outcome = args?.outcome === "sent" || args?.outcome === "dropped" ? args.outcome : "dropped";
+      return { id, outcome, resolved: resolveHostProblemReport(shellRoot(), id) };
+    },
+
     setShellSecret: async (args: any) => {
       const field = requireShellField(args?.field, "setShellSecret");
       if (typeof args?.value !== "string" || args.value.length === 0) {

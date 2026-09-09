@@ -192,6 +192,10 @@ export const SAND_GATEWAY_COMMANDS = {
   setShellSecret: (api: GatewayApi, body: string) => api.setShellSecret(parseCommandArgs(body)),
   deleteShellSecret: (api: GatewayApi, body: string) => api.deleteShellSecret(parseCommandArgs(body)),
   probeShellSecret: (api: GatewayApi, body: string) => api.probeShellSecret(parseCommandArgs(body)),
+  // FEEDBACK-1. The box's pending problem reports and the console's answer to one. Reads and
+  // removes; nothing here sends anything anywhere, which is the whole point of the design.
+  listProblemReports: (api: GatewayApi) => api.listProblemReports(),
+  resolveProblemReport: (api: GatewayApi, body: string) => api.resolveProblemReport(parseCommandArgs(body)),
   installShellTool: (api: GatewayApi, body: string) => api.installShellTool(parseCommandArgs(body)),
   teachShellTool: (api: GatewayApi, body: string) => api.teachShellTool(parseCommandArgs(body))
 };
