@@ -1013,8 +1013,7 @@ select:focus-visible {
    loopback page with no login) still painted. */
 .icon-button[hidden] { display: none; }
 
-.context-island,
-.desktop-capsule {
+.context-island {
   border: 1px solid var(--glass-edge);
   background: rgba(20, 30, 34, 0.58);
   box-shadow: var(--shadow-small), var(--inset-highlight);
@@ -1310,65 +1309,14 @@ select:focus-visible {
   box-shadow: 0 0 15px var(--teal-500);
 }
 
-.desktop-capsule {
-  display: grid;
-  grid-template-columns: 34px 1fr 28px;
-  align-items: center;
-  gap: 10px;
-  min-height: 58px;
-  padding: 8px 9px 8px 12px;
-  border-radius: var(--radius-pill);
-  color: var(--text-primary);
-  text-align: left;
-}
 
-.desktop-capsule:hover {
-  background: rgba(29, 42, 47, 0.76);
-}
 
-.desktop-symbol {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--glass-edge-soft);
-  border-radius: 50%;
-  color: var(--teal-300);
-}
 
-.desktop-capsule > span:nth-child(2) {
-  display: grid;
-  min-width: 0;
-}
 
 /* A long agent name once pushed the capsule under the shelf utilities and no click reached it. */
-.desktop-capsule {
-  max-width: 380px;
-}
-.desktop-capsule strong,
-.desktop-capsule small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.desktop-capsule strong {
-  font-size: 12px;
-}
 
-.desktop-capsule small {
-  color: var(--text-tertiary);
-  font-size: 9px;
-}
 
-.capsule-chevron {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--glass-edge-soft);
-  border-radius: 50%;
-}
 
 .control-shelf {
   position: relative;
@@ -2746,7 +2694,6 @@ dialog[open] {
 [data-theme="mist"] .worker-card,
 [data-theme="mist"] .room-capsule,
 [data-theme="mist"] .context-island,
-[data-theme="mist"] .desktop-capsule,
 [data-theme="mist"] .control-shelf,
 [data-theme="mist"] .capability-dock {
   background: rgba(239, 240, 235, 0.7);
@@ -2898,9 +2845,6 @@ dialog[open] {
     display: none;
   }
 
-  .desktop-capsule {
-    background: rgba(16, 25, 29, 0.82);
-  }
 
   .control-shelf {
     grid-template-columns: auto minmax(280px, 1fr) auto;

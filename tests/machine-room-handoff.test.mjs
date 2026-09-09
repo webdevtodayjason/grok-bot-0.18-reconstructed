@@ -328,9 +328,11 @@ test("the rail's two sections sit above the context card, in that order", async 
   const screen = html.indexOf('id="rail-screen"');
   const context = html.indexOf('id="context-card"');
   assert.ok(handoff > 0 && screen > handoff && context > screen, "rail-handoff, then rail-screen, then the context card");
-  // The Now island and the desktop capsule keep their order below, and no Routines list is added.
+  // The Now island keeps its order below, and no Routines list is added. The desktop capsule that
+  // used to sit at the foot of the rail is gone (Jason, 2026-09-08 22:42): the screen tile above
+  // is the one way into the desktop, so its absence is asserted rather than its order.
   assert.ok(html.indexOf('class="context-island now-island') > context);
-  assert.ok(html.indexOf('id="open-desktop"') > context);
+  assert.equal(html.indexOf('id="open-desktop"'), -1, "the desktop capsule must not come back");
 });
 
 test("Take over is the only route that goes full window", async () => {

@@ -688,7 +688,7 @@ try {
   // the console can see rather than countAgents. That also settles the discrepancy described above:
   // the header no longer reads 0 while a card is on screen, because it counts the cards.
   const count = await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent?.trim() ?? "");
-  check(/\d+\s*\/\s*13\s*bots/.test(count), "the roster header shows this box's bots against the cap of 13", count || "empty");
+  check(/\d+\s*\/\s*13\s*bots/.test(count), "the roster header shows this box's bots against the cap of 100", count || "empty");
 
   // A gateway the page cannot reach shows up here long before it shows up as a blank panel.
   const gatewayErrors = pageErrors.filter((t) => /gateway|api\/|fetch|502|401/i.test(t));

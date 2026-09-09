@@ -479,7 +479,6 @@
     messageInput: document.getElementById("message-input"),
     contextCard: document.getElementById("context-card"),
     capabilityScope: document.getElementById("capability-scope"),
-    desktopCapsuleScope: document.getElementById("desktop-capsule-scope"),
     scheduleButton: document.getElementById("schedule-button"),
     countdown: document.getElementById("next-routine-countdown"),
     countdownLabel: document.getElementById("next-routine-label"),
@@ -1291,7 +1290,6 @@
       button.setAttribute("aria-label", `${label} for ${kind === "worker" ? "agent" : "room"} ${name}`);
       button.title = `${name} · ${label}`;
     });
-    elements.desktopCapsuleScope.textContent = kind === "worker" ? `${name} · private` : `${name} · shared`;
   }
 
   function renderNowAndSchedule() {
@@ -5943,7 +5941,6 @@
     renderPaletteAffordance();
   }
 
-  document.getElementById("open-desktop").addEventListener("click", () => openDesktop("browser"));
   wireDesktopPaste(); // qol/vnc-paste
   elements.scheduleButton.addEventListener("click", renderRoutinesPanel);
   document.getElementById("teach-button").addEventListener("click", (event) => openTeachMode(event.currentTarget));
