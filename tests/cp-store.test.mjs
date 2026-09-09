@@ -433,3 +433,31 @@ test("the console's own settings survive a reopen and remember who set them", as
     assert.equal(store.listSettings()[0].actor, "jason@example.com");
   } finally { store.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+// FEEDBACK-1. The feedback table grows on an existing database with no migration step, the same way
+// admin_actions and admin_settings did, and it survives the reopen with its rows.
+test("the feedback table appears on an existing database and keeps what is in it", async () => {
+  const root = await makeTempRoot("cp-store-feedback-");
+  const file = path.join(root, "control-plane.sqlite");
+  let store = openStore({ file });
+  let id = 0;
+  try {
+    // A database that already has customers in it, made before this wave existed.
+    store.createAccount({ email: "owner@example.com", password: "a-good-password", tenant: "demo" });
+    id = store.recordFeedback({
+      tenant: "demo", agent: "agent-7", agentName: "Titan", tier: "critical",
+      category: "tools", title: "a tool failed", body: "it failed four times",
+      payload: { version: 1, evidence: { workspace: "demo" } },
+    }).id;
+    assert.equal(store.countFeedback(), 1);
+  } finally { store.close(); }
+  store = openStore({ file });
+  try {
+    const row = store.getFeedback(id);
+    assert.equal(row.tenant, "demo");
+    assert.equal(row.state, "new");
+    assert.equal(row.payload.evidence.workspace, "demo");
+    // Nothing prunes it. "Did we ever hear about this before" is a question asked months later.
+    assert.equal(store.listFeedback({ sinceMs: 0 }).length, 1);
+  } finally { store.close(); await rm(root, { recursive: true, force: true }); }
+});

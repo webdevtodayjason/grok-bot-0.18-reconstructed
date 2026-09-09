@@ -134,6 +134,7 @@ import "./browser-driver-protocol.test.mjs";
 import "./browser-tools-prompt.test.mjs";
 import "./browser-tools.test.mjs";
 import "./cp-admin.test.mjs";
+import "./cp-feedback.test.mjs";
 import "./cp-relay-pair.test.mjs";
 import "./cp-relay-registry.test.mjs";
 import "./deploy-sync-ships-browser-driver.test.mjs";

@@ -542,3 +542,76 @@ test("the system panel says whether the sign-in record can be signed at all", as
     assert.equal(retried.signInRecord.signing, false, "still broken, and still asked");
   });
 });
+
+// ---- the ceiling on a client row (AGENTS-CAP-2) --------------------------------------------------
+//
+// Jason, 2026-09-09: default 40, the super admin raises a workspace's ceiling from its client row.
+// The three facts these cover are the three the panel gets wrong if nobody watches: the number is
+// READ off the box and never remembered here, a box that could not be asked reads as not measured
+// rather than as a default, and a pin is reported as a pin rather than as a success.
+
+// A relay that answers the ceiling route and records what it was asked.
+function fakeCeilingRelay(answerFor) {
+  const asked = [];
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(url).pathname;
+    asked.push({ pathname, method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : null });
+    const answer = answerFor(pathname, init.method ?? "GET");
+    if (answer == null) return { ok: false, status: 404, text: async () => "", json: async () => ({}) };
+    return { ok: true, status: 200, text: async () => JSON.stringify(answer), json: async () => answer };
+  };
+  return { asked, fetchImpl };
+}
+
+function ceilingApi({ store, root, fetchImpl }) {
+  return createAdminApi({
+    config: { dataDir: root, tenantRoot: root, relayUrl: "http://relay.invalid", relayToken: "r".repeat(32) },
+    store,
+    client: { base: "", call: async () => ({}) },
+    json: () => {}, noContent: () => {},
+    publicAccount: (account) => account,
+    publicTenant: (tenant) => tenant,
+    tenantView: async (row) => ({ slug: row.slug, status: row.status, coolify: { reachable: false } }),
+    tenantPower: async () => {}, tenantProvision: async () => {},
+    currentSession: () => ({ ok: false }),
+    log: () => {},
+    fetchImpl,
+  });
+}
+
+test("the clients panel reads each box's ceiling rather than remembering one", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    store.createTenant({ slug: "titanium", name: "Titanium", status: "running" });
+    const relay = fakeCeilingRelay((pathname) => (pathname.includes("/demo/ceiling")
+      ? { read: true, maxAgents: 40, bots: 6, pinned: false, pinnedBy: null, why: "" }
+      : pathname.includes("/titanium/ceiling")
+        ? { read: true, maxAgents: 100, bots: 13, pinned: true, pinnedBy: "container env (SAND_MAX_AGENTS)" }
+        : { read: false }));
+    const answer = await ceilingApi({ store, root, fetchImpl: relay.fetchImpl }).clients();
+    const demo = answer.clients.find((row) => row.slug === "demo");
+    const titanium = answer.clients.find((row) => row.slug === "titanium");
+    assert.equal(demo.ceiling.read, true);
+    assert.equal(demo.ceiling.maxAgents, 40, "the number on the row is the box's own");
+    assert.equal(demo.ceiling.bots, 6);
+    assert.equal(demo.ceiling.pinned, false);
+    // A pin is a pin on the row, so the panel can refuse to draw a control that would do nothing.
+    assert.equal(titanium.ceiling.pinned, true);
+    assert.match(String(titanium.ceiling.pinnedBy), /container env/);
+    // One ask per workspace, not one per row rendered.
+    assert.equal(relay.asked.filter((one) => one.pathname.endsWith("/ceiling")).length, 2);
+  });
+});
+
+test("a box that could not be asked reads as not measured, never as the default", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    const api = ceilingApi({ store, root, fetchImpl: async () => { throw new Error("the relay is down"); } });
+    const answer = await api.clients();
+    const ceiling = answer.clients[0].ceiling;
+    assert.equal(ceiling.read, false);
+    // A ceiling shown over a box nobody asked is the made-up green light this console refuses.
+    assert.equal(ceiling.maxAgents, null);
+    assert.ok(String(ceiling.why).length > 0);
+  });
+});
