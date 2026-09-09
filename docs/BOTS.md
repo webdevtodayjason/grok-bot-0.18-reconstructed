@@ -94,6 +94,11 @@ fit would be a host-wide behaviour change nobody asked for. Nothing is truncated
   of them is over 400 characters, which is what the test pins.
 - A row carries **both** forms: `text` is the paragraph the page shows, `facts` is the list the
   import seeds. Rejoining the facts recovers the paragraph, and the test asserts it for all 423.
+- `text` keeps the source's own line breaks. 42 of the shipped memories have real structure --
+  `JOB BOUNDARY`, then `Owns:`, then `Does not own:`, each on its own line -- and flattening every
+  run of whitespace turned those into one unreadable paragraph. The memory store collapses
+  whitespace itself when a fact is written, which is exactly why `facts` is built from the collapsed
+  form and `text` is not.
 - The new host verb **refuses** anything still over the cap rather than writing a cut version, and
   reports it under `rejected`.
 
@@ -249,7 +254,7 @@ never invents filler.
 open. Its bot rows carried `instructions` and `skills` in full.
 
 **Measured on this Mac, 2026-09-09, in process, with this wave's catalog built:** serving the 72 rows
-whole is **995,548 bytes**, nearly a megabyte per panel opening on a relay that buffers each body
+whole is **996,262 bytes**, nearly a megabyte per panel opening on a relay that buffers each body
 whole, per tenant. That is not a page being slow, it is a list paying for detail nobody is reading.
 
 So `marketplaceCatalogWireView` projects each bot to a **card**: everything the row and its chips are
@@ -271,7 +276,7 @@ catalog character for character, and there is no envelope between the two figure
 | before this wave, on grok-bot-local-vm over HTTP | 24 | 7 | 110,564 B |
 | before this wave, in process on this Mac | 24 | 7 | 110,564 B |
 | after, in process on this Mac | 24 | 72 | **95,455 B** |
-| after, if the rows were served whole | 24 | 72 | 995,548 B |
+| after, if the rows were served whole | 24 | 72 | 996,262 B |
 
 `getMarketplaceItem` serves the whole row and is untouched. It already existed, already worked, and
 the console had never called it.
@@ -411,7 +416,7 @@ desk's six integrations all offer Add on the demo tenant.
 - **Calendar is read only** on the Google server this catalog installs, and its credential hint is
   short by the Sheets and Calendar scopes. Both belong to the plugin row, which this wave does not
   own; the owner and the next action are under "The Google measurement" above.
-- **The generated module is close to a megabyte of TypeScript.** That is data, not code, and it is
+- **The generated module is 945 KB of TypeScript.** That is data, not code, and it is
   what a checked-in generated file costs when the diff has to stay reviewable. It bundles into a
   20 MB host and the wire never sees more than a card of it.
 - **Do not edit `community-bots.ts`.** The test regenerates it and compares byte for byte. Edit the

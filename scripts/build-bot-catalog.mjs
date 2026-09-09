@@ -284,7 +284,14 @@ function overlaid(id, where, value) {
     applied.add(index);
     out = out.split(row.from).join(row.to);
   }
-  return out.replace(/\s{2,}/g, " ").trim();
+  // Tidy up after a replacement without FLATTENING the source. 43 of the 444 memories carry real
+  // line structure -- "JOB BOUNDARY", then "Owns:", then "Does not own:" on their own lines -- and
+  // collapsing every run of whitespace turned those into one unreadable run-on. So: runs of spaces
+  // collapse, trailing spaces on a line go, three or more blank lines become one, and line breaks
+  // survive. The memory STORE collapses whitespace on its own when a fact is written, which is why
+  // `facts` is built from the collapsed form and `text`, which is what the page shows, is not.
+  // Every other field in the scrape is a single line already, so this only ever affects memories.
+  return out.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /** scrub, then the overlay: the table runs first so every overlay `from` is post-rename text. */

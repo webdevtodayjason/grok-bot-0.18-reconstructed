@@ -72,8 +72,10 @@ test("the pack is a bot row the catalog serves, in a category the catalog declar
   const { memories, ...declared } = served;
   assert.deepEqual(declared, theTeam, "the catalog serves a different row than the module declares");
   assert.ok(Array.isArray(memories) && memories.length === 1, "the pack should have exactly one derived memory");
-  assert.equal(memories[0].text, theTeam.instructions.replace(/\s+/g, " ").trim(),
+  assert.equal(memories[0].text, theTeam.instructions.trim(),
     "the derived memory is not the pack's own instructions");
+  assert.equal(memories[0].facts.join(" "), theTeam.instructions.replace(/\s+/g, " ").trim(),
+    "the facts seeded from it do not rejoin to the paragraph");
   assert.ok(catalog.MARKETPLACE_BOT_CATEGORIES.includes(served.category),
     `the pack's category "${served.category}" is not a declared bot category`);
   assert.equal(served.creator, "Titanbot team");

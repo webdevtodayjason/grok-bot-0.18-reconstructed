@@ -1826,7 +1826,10 @@ const BOTS: readonly MarketplaceBot[] = Object.freeze([...DECLARED_BOTS, ...COMM
   if (facts.length === 0) return bot;
   return Object.freeze({
     ...bot,
-    memories: Object.freeze([Object.freeze({ text: bot.instructions.replace(/\s+/g, " ").trim(), facts: Object.freeze(facts) })]),
+    // `text` keeps the paragraph breaks the persona was written with -- the page shows it as prose,
+    // and flattening a three-paragraph persona into one line reads as a wall. `facts` is the
+    // collapsed form, because that is what the memory store writes.
+    memories: Object.freeze([Object.freeze({ text: bot.instructions.trim(), facts: Object.freeze(facts) })]),
   }) as MarketplaceBot;
 }));
 
