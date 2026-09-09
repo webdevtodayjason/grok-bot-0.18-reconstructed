@@ -757,7 +757,7 @@ try {
   }, probeName));
   check(selected === true, "the probe agent is on the roster and can be selected", selected ? probeName : "no card within the deadline");
   await page.waitForTimeout(1200);
-  await page.click("#open-desktop");
+  await page.click("#rail-screen .rail-screen-button");
 
   // One read of the frame, once its document has finished loading. Same origin now, so the parent
   // can see inside it -- which is itself part of the proof: a frame on 127.0.0.1:6081 could not be
