@@ -47,6 +47,9 @@ import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.
 // MAIL-2. The product domain the per-bot addresses live at, so the panel names the same domain
 // the relay routes on rather than a second copy of the default.
 import { createMailDirectory, mailDomain } from "./mail.mjs";
+// ADMIN-2. The sequence that turns a company into a customer, in its own file so this console runs
+// the same eight steps the customer's own door runs and cannot drift into a ninth.
+import { addClient } from "./signup.mjs";
 import { FEEDBACK_STATES, normalizeEmail } from "./store.mjs";
 // FEEDBACK-1. The payload's shape, the issue body, the GitHub call and the digest all live in their
 // own file, because every one of them is a pure function over a report and none of them needs a
@@ -64,6 +67,7 @@ import {
 import {
   PROVIDER_PRESETS,
   PROVIDER_QUOTA,
+  RECENT_REQUESTS,
   TB,
   TENANT_ALLOWED_ROUTES,
   tenantRoutesFor,
@@ -129,6 +133,127 @@ export function adminSalt(dataDir, { name = ADMIN_SALT_NAME } = {}) {
   return readOrCreateSalt(path.join(String(dataDir ?? "."), name));
 }
 
+// ---- SIGNIN-1: this operator's own verification gates, told apart from strangers ---------------
+//
+// Jason, 2026-09-09 11:43, over two screenshots of this panel: 147.136.44.142 marked "Attack", 101
+// tries, 58 locked out, 23 different passwords, one of the accounts named being his own. Read out
+// of the relay's ledger the same morning: every one of those bursts is scripts/verify-deploy.mjs
+// steps 3 and 8 -- two wrong instance passwords refused, then seven more until the throttle answers
+// -- run from this Mac behind his home address, one burst per wave ship since 2026-09-05. The panel
+// was right about every number and wrong about the only thing that mattered, which is who it was.
+//
+// THE LABEL IS NARROW ON PURPOSE, AND IT IS NOT CLAIMABLE. A user agent is a string a stranger
+// writes, so the prefix alone can never buy silence. A row is set aside only when the prefix is
+// there AND the address it came from also has a SUCCESSFUL operator or super admin sign-in inside
+// the same hour. The second half is the part an outsider cannot fake, because faking it means
+// already holding the password.
+
+/** What every verification gate in scripts/ puts in front of its own name. */
+export const GATE_AGENT_PREFIX = "titanbot-gate/";
+
+/**
+ * How close a successful operator sign-in has to be for a row from the same address to read as
+ * that operator's own gate. One hour: a gate run takes minutes, and a window wider than a working
+ * session would start lending the label to whoever else is behind the same address later that day.
+ */
+export const GATE_OPERATOR_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * The bounded, dated clause for rows that were already written before any gate sent a header.
+ *
+ * There are 178 of them in the live ledger and they will not age out on their own: the file is
+ * 39 KB against a 5 MB rotation cap, so they would sit under an Attack pill for months. They carry
+ * no marker at all, so the only honest way to recognise them is by their whole shape -- the
+ * instance door, refused or locked, the bare agent node had in 2026, from an address that was
+ * signing in successfully as the operator at the time -- and by being OLDER THAN THIS INSTANT.
+ * Nothing written after it can reach this clause, so it cannot become a permanent hole: a gate
+ * from the shipped build has to send the header like anything else.
+ *
+ * NEVER AN ABSENCE TEST ON ITS OWN. 58 of the 222 live rows carry an empty agent, 10 of them
+ * written by this service's own door, which hardcodes an empty string (cp/store.mjs). A blank
+ * agent on the ACCOUNT door stays counted, whoever it came from.
+ */
+export const GATE_LABEL_BEFORE = "2026-09-09T18:00:00.000Z";
+
+/**
+ * Which rows were this operator's own gate, decided once for the whole merged set.
+ *
+ * Mutates each row with `gate` and `gateScript` and hands back what the panel needs at the top of
+ * the answer. The rows themselves are LEFT IN the list: a set-aside row is drawn in grey reading
+ * "your own verification gate", never hidden. A row nobody can see is a row nobody can check.
+ */
+export function markGateRows(rows, {
+  isOperatorAccount = () => false,
+  windowMs = GATE_OPERATOR_WINDOW_MS,
+  before = GATE_LABEL_BEFORE,
+} = {}) {
+  // Every successful sign-in only an operator could have made, by address. The instance door is the
+  // operator's own password and names nobody; an account door row counts when that account is a
+  // super admin.
+  const operatorAt = new Map();
+  for (const row of rows ?? []) {
+    if (String(row?.outcome ?? "") !== "ok") continue;
+    // A row this service wrote for a sign-in that arrived through the relay carries the relay's own
+    // egress address rather than the visitor's, so it says nothing about where a person was.
+    if (String(row?.via ?? "") === "relay") continue;
+    const email = String(row?.email ?? "");
+    const operator = email.length === 0
+      ? String(row?.door ?? "instance") !== "account"
+      : isOperatorAccount(email) === true;
+    if (!operator) continue;
+    const at = Date.parse(String(row?.at ?? ""));
+    const ip = String(row?.ip ?? "");
+    if (!Number.isFinite(at) || ip.length === 0) continue;
+    const seen = operatorAt.get(ip) ?? [];
+    seen.push(at);
+    operatorAt.set(ip, seen);
+  }
+
+  const yoursAt = (ip, at) => (operatorAt.get(String(ip ?? "")) ?? []).some((seen) => Math.abs(seen - at) <= windowMs);
+  const floor = Date.parse(String(before));
+  const scripts = new Set();
+  const yourAddresses = new Set();
+  let counted = 0;
+
+  for (const row of rows ?? []) {
+    row.gate = false;
+    row.gateScript = "";
+    const at = Date.parse(String(row?.at ?? ""));
+    if (!Number.isFinite(at)) continue;
+    if (!yoursAt(row?.ip, at)) continue;
+    yourAddresses.add(String(row?.ip ?? ""));
+    const agent = String(row?.userAgent ?? "");
+    const outcome = String(row?.outcome ?? "");
+    if (agent.startsWith(GATE_AGENT_PREFIX)) {
+      row.gate = true;
+      // titanbot-gate/verify-deploy, and nothing after the first word of it. The rest is a string
+      // a stranger writes and it is never anything but a label on this screen.
+      row.gateScript = agent.slice(GATE_AGENT_PREFIX.length).split(/[\s/]/)[0].slice(0, 40);
+    } else if (
+      String(row?.email ?? "").length === 0
+      && String(row?.door ?? "instance") !== "account"
+      && (outcome === "refused" || outcome === "locked")
+      && (agent === "node" || agent.length === 0)
+      && Number.isFinite(floor) && at < floor
+    ) {
+      row.gate = true;
+    }
+    if (!row.gate) continue;
+    counted += 1;
+    if (row.gateScript.length > 0) scripts.add(row.gateScript);
+  }
+
+  const named = [...scripts].sort();
+  return {
+    rows: counted,
+    scripts: named,
+    yourAddresses,
+    setAsideNote: counted === 0
+      ? "Nothing here was one of your own verification gates."
+      : `${counted} of these were your own verification gate${named.length > 0 ? ` (${named.join(", ")})` : ""} running against this server from an address that was signing in as you at the time. They are still listed, in grey, and they are left out of the attack counts.`,
+  };
+}
+
 /**
  * The two stories the panel has to tell apart, per address.
  *
@@ -143,7 +268,7 @@ export function adminSalt(dataDir, { name = ADMIN_SALT_NAME } = {}) {
  * would count as two different passwords and every ordinary sign-in loop would look like an attack.
  */
 export function summariseByAddress(rows, {
-  windowMs = ATTACK_WINDOW_MS, threshold = ATTACK_DISTINCT_PASSWORDS,
+  windowMs = ATTACK_WINDOW_MS, threshold = ATTACK_DISTINCT_PASSWORDS, yourAddresses = new Set(),
 } = {}) {
   const byAddress = new Map();
   for (const row of rows ?? []) {
@@ -156,9 +281,18 @@ export function summariseByAddress(rows, {
     const ip = String(row?.ip ?? "") || "unknown";
     let bucket = byAddress.get(ip);
     if (bucket == null) {
-      bucket = { ip, attempts: 0, refused: 0, locked: 0, ok: 0, emails: new Set(), tries: [], firstAt: "", lastAt: "" };
+      bucket = { ip, attempts: 0, refused: 0, locked: 0, ok: 0, emails: new Set(), tries: [], firstAt: "", lastAt: "", gateRows: 0 };
       byAddress.set(ip, bucket);
     }
+    // SIGNIN-1. A row this operator's own gate wrote is counted and then set aside, the same way a
+    // relay-egress row is skipped above. It keeps the address's window honest -- first and last
+    // still cover it -- and it is kept out of every number a verdict is made from.
+    const stamp = Date.parse(String(row?.at ?? ""));
+    if (Number.isFinite(stamp)) {
+      if (bucket.firstAt === "" || stamp < Date.parse(bucket.firstAt)) bucket.firstAt = new Date(stamp).toISOString();
+      if (bucket.lastAt === "" || stamp > Date.parse(bucket.lastAt)) bucket.lastAt = new Date(stamp).toISOString();
+    }
+    if (row?.gate === true) { bucket.gateRows += 1; continue; }
     bucket.attempts += 1;
     const outcome = String(row?.outcome ?? "");
     if (outcome === "refused") bucket.refused += 1;
@@ -166,13 +300,10 @@ export function summariseByAddress(rows, {
     else if (outcome === "ok") bucket.ok += 1;
     const email = String(row?.email ?? "");
     if (email.length > 0) bucket.emails.add(email);
-    const at = Date.parse(String(row?.at ?? ""));
-    if (Number.isFinite(at)) {
+    if (Number.isFinite(stamp)) {
       const hash = String(row?.triedHash ?? "");
       // The salt differs per source, so the source is part of the identity of a password.
-      if (hash.length > 0) bucket.tries.push({ at, key: `${String(row?.source ?? "relay")}:${hash}` });
-      if (bucket.firstAt === "" || at < Date.parse(bucket.firstAt)) bucket.firstAt = new Date(at).toISOString();
-      if (bucket.lastAt === "" || at > Date.parse(bucket.lastAt)) bucket.lastAt = new Date(at).toISOString();
+      if (hash.length > 0) bucket.tries.push({ at: stamp, key: `${String(row?.source ?? "relay")}:${hash}` });
     }
   }
 
@@ -197,6 +328,11 @@ export function summariseByAddress(rows, {
       repeatedMost: topRepeat,
       distinctInWindow: worst,
       attack: worst >= threshold,
+      // SIGNIN-1. How many of this address's rows were set aside as this operator's own gate, and
+      // whether the address is one the operator was signing in from. Both are said out loud so a
+      // set-aside row is never an invisible one.
+      gateRows: bucket.gateRows,
+      yourAddress: yourAddresses.has(bucket.ip),
       firstAt: bucket.firstAt,
       lastAt: bucket.lastAt,
       // The sentence the panel prints, written here so the page never has to decide what a number
@@ -244,6 +380,9 @@ export function summariseByPassword(rows, {
 } = {}) {
   const byKey = new Map();
   for (const row of rows ?? []) {
+    // SIGNIN-1. A gate's own refusals are never a spray, and counting them as one is how a real
+    // spray gets ignored.
+    if (row?.gate === true) continue;
     const hash = String(row?.triedHash ?? "");
     const email = String(row?.email ?? "");
     const at = Date.parse(String(row?.at ?? ""));
@@ -294,7 +433,7 @@ export function summariseByPassword(rows, {
  * against inside one window.
  */
 export function summariseByAccount(rows, {
-  windowMs = ATTACK_WINDOW_MS, threshold = ATTACK_SPRAY_ACCOUNTS,
+  windowMs = ATTACK_WINDOW_MS, threshold = ATTACK_SPRAY_ACCOUNTS, yourAddresses = new Set(),
 } = {}) {
   const sprayed = new Set();
   for (const password of summariseByPassword(rows, { windowMs, threshold })) {
@@ -308,9 +447,19 @@ export function summariseByAccount(rows, {
     if (email.length === 0) continue;
     let bucket = byEmail.get(email);
     if (bucket == null) {
-      bucket = { email, tenant: "", attempts: 0, refused: 0, locked: 0, ok: 0, addresses: new Set(), tries: [], firstAt: "", lastAt: "" };
+      bucket = { email, tenant: "", attempts: 0, refused: 0, locked: 0, ok: 0, addresses: new Set(), tries: [], firstAt: "", lastAt: "", gateRows: 0, yours: false };
       byEmail.set(email, bucket);
     }
+    // SIGNIN-1, said the way the address table says it: the row is counted as a gate and then left
+    // out of everything a verdict is made from. Whether it came from one of the operator's own
+    // addresses is read before the set-aside, because that is true of the gate rows too.
+    if (yourAddresses.has(String(row?.ip ?? ""))) bucket.yours = true;
+    const stamp = Date.parse(String(row?.at ?? ""));
+    if (Number.isFinite(stamp)) {
+      if (bucket.firstAt === "" || stamp < Date.parse(bucket.firstAt)) bucket.firstAt = new Date(stamp).toISOString();
+      if (bucket.lastAt === "" || stamp > Date.parse(bucket.lastAt)) bucket.lastAt = new Date(stamp).toISOString();
+    }
+    if (row?.gate === true) { bucket.gateRows += 1; continue; }
     bucket.attempts += 1;
     const outcome = String(row?.outcome ?? "");
     if (outcome === "refused") bucket.refused += 1;
@@ -319,12 +468,9 @@ export function summariseByAccount(rows, {
     if (bucket.tenant === "" && String(row?.tenant ?? "").length > 0) bucket.tenant = String(row.tenant);
     const ip = String(row?.ip ?? "");
     if (ip.length > 0 && String(row?.via ?? "") !== "relay") bucket.addresses.add(ip);
-    const at = Date.parse(String(row?.at ?? ""));
-    if (Number.isFinite(at)) {
+    if (Number.isFinite(stamp)) {
       const hash = String(row?.triedHash ?? "");
-      if (hash.length > 0) bucket.tries.push({ at, key: `${String(row?.source ?? "relay")}:${hash}` });
-      if (bucket.firstAt === "" || at < Date.parse(bucket.firstAt)) bucket.firstAt = new Date(at).toISOString();
-      if (bucket.lastAt === "" || at > Date.parse(bucket.lastAt)) bucket.lastAt = new Date(at).toISOString();
+      if (hash.length > 0) bucket.tries.push({ at: stamp, key: `${String(row?.source ?? "relay")}:${hash}` });
     }
   }
 
@@ -347,6 +493,8 @@ export function summariseByAccount(rows, {
       repeatedMost: topRepeat,
       distinctInWindow: widestInWindow(bucket.tries, windowMs),
       sprayed: sprayed.has(bucket.email),
+      gateRows: bucket.gateRows,
+      yourAddress: bucket.yours,
       firstAt: bucket.firstAt,
       lastAt: bucket.lastAt,
       passwordStory: distinct === 0
@@ -930,12 +1078,21 @@ export function createAdminApi({
       const account = String(row.email ?? "").length > 0 ? store.getAccountByEmail(row.email) : null;
       row.tenant = account?.tenant ?? "";
     }
+    // SIGNIN-1. WHICH OF THESE WERE OUR OWN GATES, decided before any summary is made, because
+    // every verdict below is made from counts and a gate row must not be in them.
+    const gates = markGateRows(merged, {
+      isOperatorAccount: (email) => store.getAccountByEmail(email)?.superAdmin === true,
+    });
+    const yourAddresses = gates.yourAddresses;
     return {
       rows: merged,
-      addresses: summariseByAddress(merged),
+      addresses: summariseByAddress(merged, { yourAddresses }),
       // The mirror of the address table, and the only one a spray shows up in.
-      accounts: summariseByAccount(merged),
+      accounts: summariseByAccount(merged, { yourAddresses }),
       passwords: summariseByPassword(merged),
+      // The rows themselves stay above, in grey. This is the count and the names, so the panel can
+      // say what it left out rather than quietly leaving it out.
+      gates: { rows: gates.rows, scripts: gates.scripts, setAsideNote: gates.setAsideNote },
       relay: relay.ok ? { reachable: true } : { reachable: false, why: relay.why },
       measuredAt: new Date(now()).toISOString(),
     };
@@ -1528,19 +1685,49 @@ export function createAdminApi({
    * on a value nothing had measured, which is what made an unchecked provider look freshly green.
    */
   function providerHealth(provider, keys, sweep, deployments, at) {
-    if (keys.length === 0) return { reachable: null, why: "no key here yet, so there is nothing to reach", checkedAt: "", requests: 0, failures: 0 };
-    if (!sweep?.month?.ok) return { reachable: null, why: sweep?.month?.why ?? "the proxy's request log could not be read, so nothing here has been checked", checkedAt: "", requests: 0, failures: 0 };
+    const nothing = { recent: null, month: null };
+    if (keys.length === 0) return { reachable: null, why: "no key here yet, so there is nothing to reach", checkedAt: "", requests: 0, failures: 0, ...nothing };
+    if (!sweep?.month?.ok) return { reachable: null, why: sweep?.month?.why ?? "the proxy's request log could not be read, so nothing here has been checked", checkedAt: "", requests: 0, failures: 0, ...nothing };
     const mine = new Set(deployments.filter((row) => String(row.provider ?? "") === provider.id).map((row) => String(row.id)));
     let requests = 0;
     let failures = 0;
     let lastAt = "";
     let lastWhy = "";
+    // The most recent requests across every one of this provider's deployments, merged and sorted
+    // again here: each deployment carries its own five, and the provider's five are the newest of
+    // those however they are spread over a pool.
+    const newest = [];
+    let ringSeen = false;
     for (const row of sweep.month.deployments ?? []) {
       if (!mine.has(String(row.id))) continue;
       requests += row.requests;
       failures += Number(row.failures ?? 0);
       if (String(row.lastFailureAt ?? "") > lastAt) { lastAt = String(row.lastFailureAt ?? ""); lastWhy = String(row.lastFailureWhy ?? ""); }
+      if (Array.isArray(row.recent)) {
+        ringSeen = true;
+        for (const one of row.recent) newest.push({ at: String(one?.at ?? ""), ok: one?.ok === true });
+      }
     }
+    newest.sort((a, b) => (a.at < b.at ? 1 : (a.at > b.at ? -1 : 0)));
+    const recentRows = newest.slice(0, RECENT_REQUESTS);
+    // THE AMBER COUNT, on the answer whatever colour the light is. A provider can be answering
+    // perfectly well today and still have cost somebody three requests on the 8th, and both of
+    // those are facts the operator wants on the same card.
+    const month = {
+      requests,
+      failures,
+      lastFailureAt: lastAt,
+      lastFailureWhy: lastWhy,
+      window: `${String(sweep.monthStart ?? "")} to ${String(sweep.today ?? "")}`.trim(),
+    };
+    const recent = ringSeen
+      ? {
+        count: recentRows.length,
+        failures: recentRows.filter((row) => row.ok !== true).length,
+        oldestAt: recentRows.length > 0 ? recentRows[recentRows.length - 1].at : "",
+        newestAt: recentRows.length > 0 ? recentRows[0].at : "",
+      }
+      : null;
     // A live check the operator asked for beats the log, when there is one on record.
     const probe = readJsonSetting(healthSetting(provider.id), null);
     if (probe != null && Number(probe.at) > 0 && Number(probe.at) > at - HEALTH_PROBE_TTL_MS) {
@@ -1551,22 +1738,77 @@ export function createAdminApi({
         how: "a check you asked for",
         requests,
         failures,
+        recent,
+        month,
       };
     }
     if (requests === 0) {
-      return { reachable: null, why: `nothing has run on ${provider.name} inside this window and no check has been made, so there is nothing to report`, checkedAt: "", requests, failures };
+      return { reachable: null, why: `nothing has run on ${provider.name} inside this window and no check has been made, so there is nothing to report`, checkedAt: "", requests, failures, recent, month };
     }
-    if (failures > 0) {
+    // A RULE THAT CANNOT SEE RECENCY MUST NOT PAINT A LIGHT. An older proxy answer carries the
+    // month totals and no per-request ordering, and the honest thing to say then is that nothing
+    // has measured this. Never green: green is the claim that would be believed.
+    if (recent == null) {
       return {
-        reachable: false,
-        why: `${failures} of ${requests} request(s) on ${provider.name} failed inside this window${lastWhy ? `; the last one said: ${lastWhy}` : ""}`,
-        checkedAt: lastAt,
-        how: "the proxy's own request log",
+        reachable: null,
+        why: `this proxy's report does not say which of these requests were the most recent, so whether ${provider.name} is answering now cannot be told from it. ${failures} of ${requests} request(s) failed inside this window.`,
+        checkedAt: "",
         requests,
         failures,
+        recent,
+        month,
       };
     }
-    return { reachable: true, why: "", checkedAt: new Date(at).toISOString(), how: `${requests} request(s) went through inside this window and none failed`, requests, failures };
+    // PROVIDERS-8. RED IS A CLAIM ABOUT NOW, not about the month.
+    //
+    // MEASURED ON THE R750 2026-09-09 12:02: plan-qwen answered HTTP 200 in 2,357 ms through the
+    // proxy while this card read "not answering", because the line that used to be here went red on
+    // any failure anywhere in the window -- 3 of 220, every one of them on 2026-09-08 before the key
+    // moved endpoints. A light that stays red for three weeks after the fault is fixed is a light
+    // nobody looks at, which is the same failure as a green one that cannot go red.
+    if (recent.count > 0 && recent.failures === recent.count) {
+      return {
+        reachable: false,
+        why: `the last ${recent.count} request(s) on ${provider.name} all failed${lastWhy ? `; the last one said: ${lastWhy}` : ""}`,
+        checkedAt: recent.newestAt || lastAt,
+        how: "the proxy's own request log, most recent first",
+        requests,
+        failures,
+        recent,
+        month,
+      };
+    }
+    return {
+      reachable: true,
+      why: "",
+      checkedAt: recent.newestAt || new Date(at).toISOString(),
+      how: `${recent.count - recent.failures} of the last ${recent.count} request(s) went through`,
+      requests,
+      failures,
+      recent,
+      month,
+    };
+  }
+
+  /**
+   * The most recent failure the request log holds for ONE key slot's deployments.
+   *
+   * Not proxy.healthLatest(). config.yaml sets background_health_checks false and nothing calls
+   * /health, so MEASURED ON THE R750 2026-09-08 that endpoint answers
+   * `{"latest_health_checks":{},"total_models":0}` -- for ever, on this install -- and the LAST
+   * ERROR column read off it was empty beside a key that really had failed 26 times. This reads the
+   * same rows the amber count is made of, so the column and the chip cannot disagree.
+   */
+  function slotLastError(sweep, deploymentIds) {
+    if (!sweep?.month?.ok) return null;
+    const ids = new Set(deploymentIds.map(String));
+    let at = "";
+    let why = "";
+    for (const row of sweep.month.deployments ?? []) {
+      if (!ids.has(String(row.id))) continue;
+      if (String(row.lastFailureAt ?? "") > at) { at = String(row.lastFailureAt ?? ""); why = String(row.lastFailureWhy ?? ""); }
+    }
+    return at.length === 0 ? null : { at, why };
   }
 
   /** One key slot's share of a window, and each workspace's share of that. */
@@ -1646,10 +1888,16 @@ export function createAdminApi({
       const keys = mine.map((credential) => {
         const serving = deployments.filter((row) => row.keySlot === credential.name);
         const share = slotShare(sweep, serving.map((row) => row.id));
-        const lastError = serving
+        // PROVIDERS-8. THE SWEEP FIRST, and the health endpoint only where it carries something
+        // newer. The shape stays { at, why } because cp/cli.mjs already prints it that way.
+        const fromHealth = serving
           .map((row) => healthById.get(row.id))
           .filter((row) => row != null && String(row.status ?? "").toLowerCase() !== "healthy")
-          .map((row) => ({ at: row.at, why: row.why }))[0] ?? null;
+          .map((row) => ({ at: String(row.at ?? ""), why: String(row.why ?? "") }))[0] ?? null;
+        const fromLog = slotLastError(sweep, serving.map((row) => row.id));
+        const lastError = fromHealth != null && String(fromHealth.at) > String(fromLog?.at ?? "")
+          ? fromHealth
+          : (fromLog ?? fromHealth);
         return {
           slot: credential.name,
           label: credential.label,
@@ -2247,6 +2495,123 @@ export function createAdminApi({
       return true;
     }
 
+    // ADMIN-2. A CLIENT ADDED, from the panel that already runs every one of them.
+    //
+    // Jason, 2026-09-09 11:43: "if I was going to onboard a new client, would that be something I
+    // would do from this console or is this console merely reporting?" It was reporting. This is
+    // the answer: the account, the workspace named after the company, the box, and the plan model
+    // and bot ceiling applied on top, in one request. The CLI stays as the second door and runs the
+    // same steps, because a console that is the ONLY door is a console whose outage is an outage of
+    // onboarding.
+    //
+    // THE TEMPORARY PASSWORD IS IN THIS ANSWER AND NOWHERE ELSE. It is generated here, stored as a
+    // scrypt hash, and there is no route that can be asked for it again -- the same shape the
+    // reset-password action has. It is in no ledger row and no log line.
+    if (rest.length === 1 && rest[0] === "clients" && method === "POST") {
+      const email = normalizeEmail(body?.email);
+      const company = String(body?.company ?? "").trim();
+      const ledger = beginAction(guard, request, {
+        action: "client.add",
+        target: email,
+        detail: `adding ${email} for ${company || "no company named"}`,
+      });
+      let added;
+      try {
+        added = await addClient({
+          store, config, fetchImpl,
+          email: body?.email, company, name: String(body?.name ?? ""),
+        });
+      } catch (error) {
+        ledger.failed(notMeasured(error));
+        json(response, 500, { error: "add_failed", message: `Nothing was added: ${notMeasured(error)}` });
+        return true;
+      }
+      if (!added.ok) {
+        ledger.failed(added.error);
+        json(response, added.status, { error: added.error, message: added.message });
+        return true;
+      }
+      const slug = added.slug;
+
+      // WHAT THE WORKSPACE RUNS ON, through the same door its own row uses. Reported as applied or
+      // not with the reason, never failing the whole add: the customer exists either way, and a
+      // relay that did not answer is a thing to fix rather than a reason to leave a half-made
+      // account behind with its password already shown once.
+      const wantedModel = String(body?.planModel ?? "").trim();
+      let planModel = { applied: false, why: "no plan model was asked for, so this workspace gets whatever a new one gets", alias: "" };
+      if (wantedModel.length > 0) {
+        if (!isPlanModel(wantedModel)) {
+          planModel = { applied: false, why: `${wantedModel} is not a plan model, so nothing was pointed at it`, alias: wantedModel };
+        } else {
+          const answer = await pointWorkspaceAt(slug, wantedModel);
+          planModel = answer.ok
+            ? {
+              applied: answer.body?.pinned !== true,
+              alias: wantedModel,
+              why: answer.body?.pinned === true
+                ? `this workspace's container environment pins its model (${String(answer.body?.pinnedBy ?? "SAND_OPENAI_COMPATIBLE_* is set on the container")}), so nothing here takes effect there until that is gone`
+                : "",
+            }
+            : { applied: false, alias: wantedModel, why: answer.why };
+        }
+      }
+
+      // AGENTS-CAP-2. How many bots this workspace may hold, same door as its own row's control.
+      const wantedCeiling = Number(body?.ceiling);
+      let ceiling = { applied: false, asked: null, maxAgents: null, why: "no ceiling was asked for, so this workspace keeps the product default" };
+      if (String(body?.ceiling ?? "").length > 0) {
+        if (!Number.isInteger(wantedCeiling) || wantedCeiling < CEILING_MIN || wantedCeiling > CEILING_MAX) {
+          ceiling = { applied: false, asked: wantedCeiling, maxAgents: null, why: `a ceiling is a whole number from ${CEILING_MIN} to ${CEILING_MAX}, and a number outside that is one the box quietly ignores` };
+        } else {
+          const answer = await askRelayPost(`/admin/tenants/${encodeURIComponent(slug)}/ceiling`, { maxAgents: wantedCeiling });
+          forgetCeilings();
+          const read = answer.ok && answer.body?.read === true;
+          ceiling = {
+            applied: read && answer.body?.pinned !== true,
+            asked: wantedCeiling,
+            // WHAT THE BOX READ BACK, never what was sent, the way the ceiling route already says it.
+            maxAgents: read && Number.isFinite(Number(answer.body?.maxAgents)) ? Number(answer.body.maxAgents) : null,
+            why: answer.ok
+              ? (answer.body?.pinned === true
+                ? `this workspace's container environment pins its ceiling (${String(answer.body?.pinnedBy ?? "SAND_MAX_AGENTS")})`
+                : (read ? "" : `the box did not report a ceiling back. ${String(answer.body?.why ?? "")}`.trim()))
+              : answer.why,
+          };
+        }
+      }
+
+      // THE WELCOME MAIL IS NOT DRAWN AS A GREEN LIGHT, because this control plane sends no mail at
+      // all: there is no sender in it, and the agent-address directory beside this file is a
+      // different thing entirely. The flag is accepted so the form can carry it and the day a sender
+      // lands this is one line; until then it answers sent false with the reason, and the operator
+      // sends the note themselves from the success card. ADMIN-2c is filed to flip it.
+      const welcomeMail = {
+        sent: false,
+        asked: body?.sendWelcome === true,
+        why: "this control plane sends no mail yet, so nothing was sent. Copy the note from this card and send it the way you would send any password.",
+      };
+
+      ledger.done(`${email} on workspace ${slug}, box ${added.state}`);
+      json(response, 201, {
+        tenant: publicTenant(added.tenant),
+        account: publicAccount(added.account),
+        // ONCE. This is the only time this value exists outside a scrypt hash.
+        temporaryPassword: added.temporaryPassword,
+        signIn: added.signIn,
+        state: added.state,
+        planModel,
+        ceiling,
+        welcomeMail,
+        provisioning: added.provisioning,
+        message: added.state === "failed"
+          ? `${email} can sign in at ${added.signIn} with the password on this card, and the workspace ${slug} did not finish building (${added.provisioning.step || "no step named"}: ${added.provisioning.why || "no reason given"}). Press Provision on its row to pick up where it stopped.`
+          : added.state === "building"
+            ? `${email} can sign in at ${added.signIn} with the password on this card. The workspace ${slug} was created and is still starting; the first one on a server takes a few minutes because the image is large.`
+            : `${email} can sign in at ${added.signIn} with the password on this card, and the workspace ${slug} is up and answering.`,
+      });
+      return true;
+    }
+
     if (rest.length === 1 && rest[0] === "boxes" && method === "GET") {
       json(response, 200, await boxes());
       return true;
@@ -2308,6 +2673,100 @@ export function createAdminApi({
       writeJsonSetting(SETTING_PROVIDERS, rows, guard.account?.email ?? "the operator token");
       ledger.done();
       json(response, 200, { provider: providerById(id), message: `${String(body?.name ?? id)} is registered. Add a key to it and it can serve a plan model.` });
+      return true;
+    }
+
+    // PROVIDERS-9. A provider taken off the panel.
+    //
+    // MEASURED ON THE R750 2026-09-09: the panel listed Alibaba Model Studio TWICE -- `qwen`, the
+    // preset with an override on it, one key and 220 requests, and `qwen-plan`, a leftover of the
+    // 2026-09-08 endpoint recovery with the same name, the same base url, no key and nothing ever
+    // run on it. There was no way to take the second one off except editing a settings row by hand
+    // on the server, which is the kind of hand operation this console exists to end.
+    //
+    // WHAT "REMOVE" CAN AND CANNOT MEAN. providerList() reseeds every preset on the next read, so
+    // removing a preset id does not delete anything: it drops the OVERRIDE and the built-in comes
+    // straight back. Both the refusal and the success say that in those words, because an operator
+    // who reads "deleted" and then sees the card again concludes the button is broken.
+    if (rest.length === 2 && rest[0] === "providers" && method === "DELETE") {
+      let id = rest[1];
+      try { id = decodeURIComponent(rest[1]); } catch { id = rest[1]; }
+      const provider = providerById(id);
+      if (provider == null) { json(response, 404, { error: "not_found", message: "There is no provider by that name." }); return true; }
+      if (String(body?.confirm ?? "") !== id) {
+        json(response, 409, { error: "confirm_mismatch", message: `Type ${id} to remove it. Nothing was changed.` });
+        return true;
+      }
+      const credentials = await askProxy("/credentials", () => proxy.listCredentials());
+      if (!credentials.ok) { json(response, 502, { error: "proxy", message: credentials.why }); return true; }
+      // OWNERSHIP BY THE RECORDED ID AND NOTHING ELSE. The panel above also matches a key by the
+      // `${id}-` name prefix, which is right for DRAWING a pool that predates the recorded field and
+      // wrong for a guard: slot `qwen-plan-1` starts with `qwen-`, so the loose test would refuse to
+      // remove a clean `qwen` and let a dirty `qwen-plan` through. Exactly backwards, on the two
+      // providers this route was written for.
+      const heldKeys = credentials.rows.filter((row) => String(row.provider ?? "") === provider.id).map((row) => row.name);
+      if (heldKeys.length > 0) {
+        json(response, 409, {
+          error: "has_keys",
+          message: `${provider.name} still holds ${heldKeys.length} key${heldKeys.length === 1 ? "" : "s"} (${heldKeys.join(", ")}). Remove the key first; a provider with a key in it is a subscription somebody is paying for.`,
+        });
+        return true;
+      }
+      const models = await askProxy("/model/info", () => proxy.listModels());
+      if (!models.ok) { json(response, 502, { error: "proxy", message: models.why }); return true; }
+      const serving = models.rows.filter((row) => String(row.provider ?? "") === provider.id);
+      if (serving.length > 0) {
+        const aliases = [...new Set(serving.map((row) => row.alias))];
+        json(response, 409, {
+          error: "has_deployments",
+          message: `${provider.name} still serves ${aliases.join(", ")}. Point those at another provider or remove them first.`,
+        });
+        return true;
+      }
+      const stored = readJsonSetting(SETTING_PROVIDERS, []);
+      const rows = (Array.isArray(stored) ? stored : []);
+      const hasOverride = rows.some((row) => String(row?.id ?? "") === id);
+      const wasPreset = Object.prototype.hasOwnProperty.call(PROVIDER_PRESETS, id);
+      const andOverride = body?.andOverride === true;
+      if (wasPreset && !andOverride) {
+        json(response, 409, {
+          error: "preset_override",
+          message: `${provider.name} is built in, so removing it ${hasOverride ? "clears what is stored for it and puts the built-in back" : "would clear nothing and the built-in stays"}. The card comes back on the next read either way. Send andOverride if that is what you want.`,
+        });
+        return true;
+      }
+      const actor = guard.account?.email ?? "the operator token";
+      const ledger = beginAction(guard, request, {
+        action: "provider.remove",
+        target: id,
+        detail: `removing ${provider.name}${wasPreset ? ", a built-in, which puts the built-in back" : ""}`,
+      });
+      writeJsonSetting(SETTING_PROVIDERS, rows.filter((row) => String(row?.id ?? "") !== id), actor);
+      // THE CATALOG GOES WITH IT. A stored model list under this id would be inherited whole by a
+      // different provider registered under the same name later, which is how a card comes back
+      // carrying somebody else's models with a read date on it.
+      let catalogSwept = 0;
+      for (const name of [catalogSetting(id), catalogSlotSetting(id)]) {
+        if (store.getSetting(name, "").length === 0) continue;
+        store.setSetting(name, "", actor);
+        catalogSwept += 1;
+      }
+      const left = [
+        `the proxy's spend rows for ${provider.name} stay where they are. Nothing reads them any more and they are not deleted, because a spend row is a record of money that was really spent.`,
+      ];
+      if (store.getSetting(healthSetting(id), "").length > 0) {
+        left.push("the last check you asked for on this provider is still on the record and is not shown anywhere now.");
+      }
+      ledger.done(`${provider.name} removed${catalogSwept > 0 ? `, ${catalogSwept} catalog row(s) swept` : ""}`);
+      json(response, 200, {
+        removed: true,
+        wasPreset,
+        catalogSwept,
+        left,
+        message: wasPreset
+          ? `What was stored for ${provider.name} is gone and the built-in is back, so the card stays on the panel with its own name and base url. ${catalogSwept} catalog row(s) were swept with it.`
+          : `${provider.name} is off the panel. It held no key and served nothing, so nothing went out of service. ${catalogSwept} catalog row(s) were swept with it.`,
+      });
       return true;
     }
 

@@ -581,7 +581,7 @@ export async function startFakeProxy(options = {}) {
      * `status` is the outcome of the request, which is the only evidence this install has that a
      * provider is unwell.
      */
-    chargeAlias(alias, dollars, requests = 1, model = "plan-zai", { recordedModel = "", status = "success" } = {}) {
+    chargeAlias(alias, dollars, requests = 1, model = "plan-zai", { recordedModel = "", status = "success", at = "" } = {}) {
       const record = keys.get(byAlias.get(alias));
       if (record == null) return false;
       record.spend += dollars;
@@ -594,7 +594,10 @@ export async function startFakeProxy(options = {}) {
       for (let i = 0; i < requests; i += 1) {
         logs.push({
           api_key: record.keyId, key_alias: record.alias, spend: dollars / requests,
-          model: recordedModel || model, startTime: nowIso(), status,
+          // PROVIDERS-8. WHEN, so a case can put old failures behind newer successes. The real log
+          // is not ordered and neither is this one, which is the point of the assertions that read
+          // it: an appended ring would keep the wrong five.
+          model: recordedModel || model, startTime: String(at) || nowIso(), status,
           model_id: behind?.model_info?.id ?? "", prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
           ...(status === "failure" ? { metadata: { error_information: { error_message: "the vendor refused this request" } } } : {}),
         });

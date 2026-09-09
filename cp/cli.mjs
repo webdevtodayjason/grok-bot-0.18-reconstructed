@@ -738,7 +738,27 @@ async function readSecret(label) {
 const say = (line) => out(line);
 const evidenceLine = (value) => `${String(value).length} characters, sha256 ${sha256Of(value).slice(0, 8)}`;
 
-async function proxyProviders() {
+/**
+ * The panel, printed. And, with a verb, the one thing the panel could not do.
+ *
+ * PROVIDERS-9. `proxy providers` on its own prints exactly what it has always printed, byte for
+ * byte; `proxy providers remove <id> --confirm <id>` calls the same route the console's Remove
+ * control calls, with the same typed confirmation, because a provider going off the panel is a
+ * decision and not a click. A preset id needs --and-override as well, and the sentence that comes
+ * back says the built-in comes straight back rather than pretending anything was deleted.
+ */
+async function proxyProviders(args = []) {
+  const [action, target] = positional(args);
+  if (action === "remove") {
+    if (!target) die("usage: node cp/cli.mjs proxy providers remove <id> --confirm <id> [--and-override]");
+    const answer = await askAdmin("DELETE", `/v1/admin/providers/${encodeURIComponent(target)}`, {
+      confirm: String(flag(args, "--confirm") ?? ""),
+      andOverride: hasFlag(args, "--and-override"),
+    });
+    for (const line of Array.isArray(answer.left) ? answer.left : []) say(`  ${line}`);
+    return say(answer.message);
+  }
+  if (action !== undefined) die("usage: node cp/cli.mjs proxy providers [remove <id> --confirm <id> [--and-override]]");
   const answer = await askAdmin("GET", "/v1/admin/providers");
   if (answer.configured !== true) return say(answer.why || "this control plane has no proxy configured");
   say(`the proxy stores its model list in its database: ${answer.db.on === true ? "yes" : (answer.db.on === false ? "NO -- changes made here will not take" : "cannot be told yet")}`);
@@ -1333,7 +1353,7 @@ const USAGE = [
   "node cp/cli.mjs proxy limits <slug|--all>",
   "node cp/cli.mjs proxy migrate <slug|--all> [--forget <sha256 prefix>] [--dry-run]",
   "node cp/cli.mjs proxy rollback <slug>",
-  "node cp/cli.mjs proxy providers",
+  "node cp/cli.mjs proxy providers [remove <id> --confirm <id> [--and-override]]",
   "node cp/cli.mjs proxy seed [--file <path>] [--dry-run]",
   "node cp/cli.mjs proxy key add <provider> [--label \"subscription two\"] | roll <slot> | park <slot> | unpark <slot> | remove <slot> --confirm <slot> | quota <slot> --total n --unit \"...\"",
   "node cp/cli.mjs proxy model add <alias> --provider <id> --vendor-model <model> --name \"...\" --label \"...\" [--context n] [--vision-fallback <alias>] [--vision] [--hidden] [--keys a,b]",
