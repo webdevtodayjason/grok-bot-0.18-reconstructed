@@ -164,25 +164,35 @@ nobody sets one.
 `scripts/gate-agent.mjs` rather than typed into each one, so a gate written next year gets it by
 importing rather than by remembering.
 
-**The header alone buys nothing, and that is the important half.** A user agent is a string a
-stranger writes. Anybody can send `titanbot-gate/verify-deploy`, so if the prefix were the whole
-rule, the rule would be an invitation. A row is set aside as one of ours only when **all three** of
-these are true:
+**The header is a label and never a decision, and that is the important half.** A user agent is a
+string a stranger writes. Anybody can send `titanbot-gate/verify-deploy`. The first shape of this
+rule tried to make the header worth something by pairing it with a second test the outsider could
+not forge -- the address had also signed in successfully as an operator inside the hour -- and then
+letting the pair take those rows **out** of the Attack maths. Measured on this Mac on 2026-09-09,
+that pair was broken: eight refusals with eight distinct passwords from one address read
+`attack: true` with a plain agent and `attack: false` with the header on the identical rows, because
+one operator sign-in from that address earlier in the hour was enough. Anyone sharing an office NAT,
+a VPN egress or a compromised laptop with an operator who signed in that hour could turn the pill off
+by writing a string.
 
-1. its user agent starts with `titanbot-gate/`, and
-2. the address it came from **also signed in successfully as an operator or a super admin inside the
-   same hour**, and
-3. it is a refusal or a lockout, not a sign-in that worked.
+**So nothing is subtracted.** A labelled row is drawn in grey, named, and **counted like every other
+row**: it is in its address's attempts, in the distinct-password window, in the Attack rule and in
+the spray table. What the label buys is ink and a sentence beside the number -- "116 tries, 11 of
+them look like our own gates" -- so you can read a burst you recognise without the panel deciding for
+you that it was harmless.
 
-The second condition is the one an outsider cannot forge, and it is the same test that puts **"your
-address"** beside an address on the panel. Somebody who has the operator's password does not need to
-disguise their traffic.
+A row is marked, in one of two ways:
 
-**A set-aside row is still drawn and still counted.** It stays in Every attempt, greyed, reading
-"your own verification gate (verify-deploy)", and every summary carries its own count of how many
-rows it set aside. What changes is that those rows do not raise the Attack pill and are not in the
-by-address distinct-password counts. Nothing disappears; a row that vanished would be worse than a
-row that was miscounted, because you cannot audit what is not on the screen.
+1. **it said so at the door** -- the user agent starts with `titanbot-gate/` and the attempt was
+   refused or locked out. That is what every gate in `scripts/` sends. A gate that **gets in** made a
+   successful sign-in and stays in the ok count, whatever its agent says.
+2. **the dated clause** -- an attempt written before any gate carried a header, matched on its shape
+   alone. That one has no name to go on, so it does ask that the address was signing in as the
+   operator at the time, and the panel prints a different sentence for it: "an older row, from before
+   gates named themselves".
+
+The operator-address test still puts **"your address"** beside an address on the panel, which is a
+fact about where you were signing in from and nothing more.
 
 **A blank user agent is never enough on its own, ever.** Measured on this Mac: node's `fetch` with
 no headers set sends `user-agent: node`, and node's raw `http.request` sends no user agent header at
@@ -190,37 +200,46 @@ all. Both shapes are in the live ledger, and the second comes from the deploy ga
 raw https, which runs three times a run. But a blank agent is **also** what every row written by the
 control plane's own door carries, because that service does not record the field at all, and it is
 what a stranger who sends no header carries too. A rule that read absence as "one of ours" would
-silence all three. Absence is never a reason to set a row aside.
+mark all three. Absence is never a reason to mark a row.
 
 **One dated clause, for the rows already written.** The rows in the live ledger from before this
 shipped carry no marker and will not age out on their own, because the file is small against its 5 MB
 rotation cap. So they are read through one bounded exception: the instance door only, refused or
-locked only, a user agent of exactly `node` or empty, the same operator-address test as above, and a
+locked only, a user agent of exactly `node` or empty, the operator-address test above, and a
 timestamp earlier than the cutover constant stamped in the code the day it shipped. It is dated on
 purpose. It cannot grow, it stops mattering as the old rows rotate out, and the comment beside the
 constant says why it exists so that nobody later mistakes it for a rule.
 
-**What the ship actually measured, and the half of this that does not work yet.** Measured on the
-R750 on 2026-09-09 between 19:20 and 19:45 UTC, from this Mac, against `api.titanium.bot/admin` in a
-real browser signed in with the operator token.
+### Which gates get labelled, and what an unlabelled burst means
 
-The panel half is real. The Sign-in attempts panel draws **11 grey rows reading "your own
-verification gate"**, its summary strip reads **YOUR OWN GATES 11, set aside, still listed below**,
-147.136.44.142 carries **"your address"** and **"11 of our own gate rows set aside"** beside it, and
-the sentence under the filters says the same thing in words. Those 11 are the dated clause's rows.
+Four scripts reach a live login door and all four send the header: `verify-deploy`,
+`verify-one-console`, `verify-one-console-browser` and `verify-control-plane`. Every other
+`scripts/verify-*.mjs` -- 42 of the 46 as of 2026-09-09 -- either never posts a password anywhere or
+posts one to a fixture server it started itself, so it writes no row in anybody's ledger. Anything
+that grows a login leg later gets the header with one import, from `scripts/gate-agent.mjs`.
 
-The gate half does not close, and the reason is worth knowing before you read the panel. A real
-`verify-deploy --url https://console.titanium.bot` was run after the ship. Its eleven login and
-lockout rows arrived in the relay's ledger carrying the exact agent `titanbot-gate/verify-deploy`, so
-that part landed and the relay records it with no relay change at all. But every one of those rows
-reads `gate: false`, because condition 2 above was not met: **the deploy gate deliberately holds no
-password.** Its own header says so. It is let in by the gateway bearer, which is a page request that
-writes no ledger row, so it can never produce the successful operator sign-in that the rule requires.
-The rule is right and the gate cannot satisfy it. Until that is closed, the Attack pill stays on a
-normal ship, and the way to clear it by hand is to sign in at `console.titanium.bot` from the same
-machine inside the hour of a gate run. The durable fix is filed as **SIGNIN-1c**: have the relay
-write an `ok` instance-door row when a request carrying the gateway bearer is given a session, which
-is at least as hard to forge as a password and is already the thing the gate proves it holds.
+**An unlabelled burst is not automatically a stranger.** Two shapes of ours are unlabelled and both
+are on the R750 today:
+
+- **rows written before 2026-09-09 18:00 UTC**, which is when the header shipped. Measured on the
+  R750 that day: 147.136.44.142 held 30 instance-door lockouts and 28 refusals with agent `node`,
+  plus 21 with a blank agent, spread from 03:55 to 15:22 UTC. Every one of them is a deploy gate run
+  from before the header existed. They are behind the Attack pill on that address, and the dated
+  clause reaches only the ones that sit within an hour of a real operator sign-in.
+- **rows written by the control plane's own door**, which records no user agent at all. See below.
+
+So when you see a burst on your own address: check the times against your own ship log before you
+treat it as an intrusion, and check whether the addresses and the accounts named are ones you know.
+The panel deliberately will not make that call for you any more.
+
+**What the ship measured.** On the R750 on 2026-09-09, `verify-deploy --url
+https://console.titanium.bot` put eleven login and lockout rows into the relay's ledger carrying the
+exact agent `titanbot-gate/verify-deploy`, so the relay records the header with no relay change at
+all. Under the first shape of the rule not one of them was labelled, because the deploy gate holds no
+password on purpose -- it is let in by the gateway bearer, which writes no ledger row -- so it could
+never produce the successful operator sign-in that rule asked for, and the 11 grey rows on the panel
+that day were the dated clause's rows at a different hour entirely. With the label no longer deciding
+anything, that second test is gone from this clause and a named row is named on its own evidence.
 
 ### The rows this can never label, and why that is right
 
@@ -312,12 +331,13 @@ address list, for the reason in the merge section above.
 **Every attempt** is the rows themselves. Filters for the window and the outcome are at the top; the
 "Seen by" column says whether a row came from the console or from this service.
 
-**This repository's own verification gates are greyed rather than hidden.** A row set aside by the
-three conditions in "Telling a gate from an attacker" above reads "your own verification gate
-(verify-deploy)" in grey, stays in Every attempt, and is counted on its own line in each summary. It
-is left out of the Attack pill and out of the distinct-password counts, and nothing else about it
-changes. An address that has also signed in as an operator or a super admin within the hour reads
-**"your address"** beside it.
+**This repository's own verification gates are greyed rather than hidden, and counted rather than
+excused.** A row marked by either clause in "Telling a gate from an attacker" above reads "says it is
+our own verification gate (verify-deploy)" in grey -- or, for the dated clause, "an older row, from
+before gates named themselves" -- stays in Every attempt, and is counted on its own line in each
+summary beside the number it is part of. It stays in the Attack pill and in the distinct-password
+counts, because the header that names it is a string anyone can write. An address that has also
+signed in as an operator or a super admin within the hour reads **"your address"** beside it.
 
 ### Clients and users
 
@@ -436,7 +456,7 @@ is installed in every box and reads a token out of the environment or out of `~/
 neither by default, so `gh auth status` answers *"You are not logged into any GitHub hosts"* and the
 agent reports it as a fault. The remedy is the box's own shell store, not this console and not an
 environment variable: `setShellSecret GITHUB_TOKEN <value>` through that box's gateway, after which
-every agent shell — the window daemons' shells included — carries `GITHUB_TOKEN`, which is the name
+every agent shell -- the window daemons' shells included -- carries `GITHUB_TOKEN`, which is the name
 `gh` itself says it reads ("Failed to log in to github.com using token (GITHUB_TOKEN)", measured in
 the box), and `gh` is signed in. **It survives a host swap** (the shell store lives in the box's data directory, and
 `persist-cli-auth` carries `.config/gh` across one) and **is lost on a container recreate**, which is
@@ -619,6 +639,14 @@ expired. Otherwise it is green, and the month's failures are kept beside it as a
 words: "3 of 220 failed this month, last 2026-09-08 22:48 UTC". The history is not hidden, it is
 just no longer pretending to be the present.
 
+**Red also needs a sample deep enough and fresh enough to be about now.** At least three of those
+recent requests, and the newest of them no more than two hours old. Below either, the chip reads
+"not checked" with the reason rather than red -- and never green. Measured on the R750 on
+2026-09-09: MiniMax's entire recent window was one request, from the evening before, and nothing
+else is ever run through it. Without the floor, one unlucky request would have painted that card
+"not answering" until the calendar month rolled over, on a sample of one, with no traffic coming to
+change it. The amber month count carries those failures either way.
+
 **The key row's LAST ERROR reads the same request log** as the chip, so the two halves of a card can
 no longer disagree. Empty means the log holds no failure for that key's slots, not that nothing was
 looked at.
@@ -722,13 +750,13 @@ at this and it was not a bug" is itself a record. The rows are **never pruned**,
 `admin_actions` and for the same reason. Every state change writes an `admin_actions` row.
 
 **A decided report is not filed, and filing an undecided one IS the decision.** Create GitHub issue
-refuses a report that was **suppressed** or **closed**, in a sentence naming who decided and when —
+refuses a report that was **suppressed** or **closed**, in a sentence naming who decided and when -- 
 because filing wrote `state`, `decidedBy` and `decidedAt` over the row, so the suppression the
 paragraph above promises is kept would have survived only in `admin_actions` and been gone from the
 panel. Reopen it by approving it again if that decision has changed. A report still in `new` files
 without a second press: pressing Create GitHub issue is a deliberate act by the same person the
-Approve button belongs to. It is written down as the approval it is — the answer says so and the
-change record row carries "filing is the approval" — rather than left implied. Both legs are measured
+Approve button belongs to. It is written down as the approval it is -- the answer says so and the
+change record row carries "filing is the approval" -- rather than left implied. Both legs are measured
 by `scripts/verify-admin.mjs`.
 
 **Edit changes the wording, never the evidence.** The title and the body move; the payload the agent
@@ -780,7 +808,7 @@ offer, and the self-test) and with the intake, which for this one route reads up
 `cp/feedback.mjs`'s `INTAKE_BYTES` (96 KB) because a report carries its evidence twice: as the block
 of text the person read and edited, and as the structured copy. `cp/feedback.mjs`'s `LIMITS` are the
 numbers, every one of them the console's own maximum or larger, and **a field over its limit is
-refused with a sentence naming it, never truncated** — a report cut down to fit reads as a whole one
+refused with a sentence naming it, never truncated** -- a report cut down to fit reads as a whole one
 and sends whoever reads it looking for a step that was never written down. A report at every one of
 them at once is **65,671 bytes of JSON, measured on this Mac**, which leaves room under the intake
 for the envelope. A console that mints inside them always lands. One that does not is refused by the

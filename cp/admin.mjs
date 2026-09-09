@@ -142,19 +142,27 @@ export function adminSalt(dataDir, { name = ADMIN_SALT_NAME } = {}) {
 // -- run from this Mac behind his home address, one burst per wave ship since 2026-09-05. The panel
 // was right about every number and wrong about the only thing that mattered, which is who it was.
 //
-// THE LABEL IS NARROW ON PURPOSE, AND IT IS NOT CLAIMABLE. A user agent is a string a stranger
-// writes, so the prefix alone can never buy silence. A row is set aside only when the prefix is
-// there AND the address it came from also has a SUCCESSFUL operator or super admin sign-in inside
-// the same hour. The second half is the part an outsider cannot fake, because faking it means
-// already holding the password.
+// THE LABEL BUYS NOTHING, WHICH IS WHY IT IS SAFE. A user agent is a string a stranger writes, so
+// the prefix can never be allowed to change a number. It greys the row and names the script, and
+// the row goes on counting in its address's attempts, in the distinct-password window, in the
+// Attack rule and in the spray table.
+//
+// It was not built that way. The first shape paired the prefix with "the address also signed in as
+// an operator inside the hour" -- called the half an outsider cannot fake -- and let the pair take
+// the rows OUT of the counts. MEASURED ON THIS MAC 2026-09-09: eight refusals with eight distinct
+// passwords from one address, with one operator sign-in from that address earlier in the hour,
+// read attack=true with a plain agent and attack=false with the header on the identical rows. An
+// office NAT, a VPN egress or a compromised laptop is enough to be that address, so the pair was
+// not unfakeable at all; it was a switch, and the switch is gone.
 
 /** What every verification gate in scripts/ puts in front of its own name. */
 export const GATE_AGENT_PREFIX = "titanbot-gate/";
 
 /**
- * How close a successful operator sign-in has to be for a row from the same address to read as
- * that operator's own gate. One hour: a gate run takes minutes, and a window wider than a working
- * session would start lending the label to whoever else is behind the same address later that day.
+ * How close a successful operator sign-in has to be for an address to read as one of the operator's
+ * own, and for the dated clause below to reach a row from it. One hour: a gate run takes minutes,
+ * and a window wider than a working session would start lending the words to whoever else is behind
+ * the same address later that day.
  */
 export const GATE_OPERATOR_WINDOW_MS = 60 * 60 * 1000;
 
@@ -178,9 +186,30 @@ export const GATE_LABEL_BEFORE = "2026-09-09T18:00:00.000Z";
 /**
  * Which rows were this operator's own gate, decided once for the whole merged set.
  *
- * Mutates each row with `gate` and `gateScript` and hands back what the panel needs at the top of
- * the answer. The rows themselves are LEFT IN the list: a set-aside row is drawn in grey reading
- * "your own verification gate", never hidden. A row nobody can see is a row nobody can check.
+ * Mutates each row with `gate`, `gateScript` and `gateWhy`, and hands back what the panel needs at
+ * the top of the answer. The rows themselves are LEFT IN the list and, since the review of
+ * 2026-09-09, LEFT IN THE MATHS: a labelled row is drawn in grey and named, and it still counts
+ * towards its address's attempts, its distinct-password window, the Attack rule and the spray
+ * table. A row nobody can see is a row nobody can check; a row that leaves the counts is worse,
+ * because the label that removes it is a header a stranger can write.
+ *
+ * WHAT THE LABEL IS AND IS NOT. It is a hint, in two flavours:
+ *
+ *   named   the agent starts with titanbot-gate/ and the attempt was refused or locked out. This
+ *           is what the four gates that knock at a live login door send. It is self-declared and buys
+ *           nothing but grey ink and a count beside the number ("116 tries, 11 of them our own
+ *           gate"), which is why it needs no second half and works on the first run of a gate from
+ *           an address nobody has ever signed in from.
+ *   before  the bounded, dated clause for rows written before any gate sent a header. That one is
+ *           shape-based, so it DOES ask that the address was signing in as the operator at the
+ *           time, and it can never match anything written from now on.
+ *
+ * The earlier design let a named row leave the attack maths, and asked for a neighbouring operator
+ * sign-in as the half "an outsider cannot fake". MEASURED ON THIS MAC 2026-09-09: eight refusals
+ * with eight distinct passwords from one address read attack=false with the header on them and
+ * attack=true without, so anyone behind the same NAT, VPN egress or compromised laptop as an
+ * operator who signed in that hour could turn the pill off by writing a string. Nothing is
+ * subtracted any more.
  */
 export function markGateRows(rows, {
   isOperatorAccount = () => false,
@@ -214,43 +243,65 @@ export function markGateRows(rows, {
   const scripts = new Set();
   const yourAddresses = new Set();
   let counted = 0;
+  let older = 0;
 
   for (const row of rows ?? []) {
     row.gate = false;
     row.gateScript = "";
+    row.gateWhy = "";
     const at = Date.parse(String(row?.at ?? ""));
     if (!Number.isFinite(at)) continue;
-    if (!yoursAt(row?.ip, at)) continue;
-    yourAddresses.add(String(row?.ip ?? ""));
+    const yours = yoursAt(row?.ip, at);
+    if (yours) yourAddresses.add(String(row?.ip ?? ""));
     const agent = String(row?.userAgent ?? "");
     const outcome = String(row?.outcome ?? "");
-    if (agent.startsWith(GATE_AGENT_PREFIX)) {
+    // A GATE THAT GETS IN IS A SIGN-IN. Only a refusal or a lockout can be one of our own gates
+    // spending the throttle on purpose; an "ok" row belongs in the ok count whatever its agent says,
+    // and the row in docs/GAP-ANALYSIS.md always said so.
+    const turnedAway = outcome === "refused" || outcome === "locked";
+    if (agent.startsWith(GATE_AGENT_PREFIX) && turnedAway) {
       row.gate = true;
+      row.gateWhy = "named";
       // titanbot-gate/verify-deploy, and nothing after the first word of it. The rest is a string
       // a stranger writes and it is never anything but a label on this screen.
       row.gateScript = agent.slice(GATE_AGENT_PREFIX.length).split(/[\s/]/)[0].slice(0, 40);
     } else if (
-      String(row?.email ?? "").length === 0
+      yours
+      && String(row?.email ?? "").length === 0
       && String(row?.door ?? "instance") !== "account"
-      && (outcome === "refused" || outcome === "locked")
+      && turnedAway
       && (agent === "node" || agent.length === 0)
       && Number.isFinite(floor) && at < floor
     ) {
       row.gate = true;
+      row.gateWhy = "before";
     }
     if (!row.gate) continue;
     counted += 1;
+    if (row.gateWhy === "before") older += 1;
     if (row.gateScript.length > 0) scripts.add(row.gateScript);
   }
 
-  const named = [...scripts].sort();
+  const scriptNames = [...scripts].sort();
+  const clauses = [];
+  if (counted - older > 0) {
+    clauses.push(`${counted - older} said so at the door${scriptNames.length > 0 ? ` (${scriptNames.join(", ")})` : ""}`);
+  }
+  if (older > 0) {
+    clauses.push(`${older} came from an address that was signing in as you at the time, before gates named themselves`);
+  }
   return {
     rows: counted,
-    scripts: named,
+    named: counted - older,
+    older,
+    scripts: scriptNames,
     yourAddresses,
+    // WHICH CLAUSE MATCHED, said out loud. The two are not the same evidence and a strip reading
+    // one number for both was read as proof the header works when every row under it was the dated
+    // clause instead.
     setAsideNote: counted === 0
       ? "Nothing here was one of your own verification gates."
-      : `${counted} of these were your own verification gate${named.length > 0 ? ` (${named.join(", ")})` : ""} running against this server from an address that was signing in as you at the time. They are still listed, in grey, and they are left out of the attack counts.`,
+      : `${counted} of these look like your own verification gates: ${clauses.join("; ")}. A user agent is a string anyone can write, so they are marked in grey and NOT taken out of the counts or the Attack rule.`,
   };
 }
 
@@ -284,15 +335,16 @@ export function summariseByAddress(rows, {
       bucket = { ip, attempts: 0, refused: 0, locked: 0, ok: 0, emails: new Set(), tries: [], firstAt: "", lastAt: "", gateRows: 0 };
       byAddress.set(ip, bucket);
     }
-    // SIGNIN-1. A row this operator's own gate wrote is counted and then set aside, the same way a
-    // relay-egress row is skipped above. It keeps the address's window honest -- first and last
-    // still cover it -- and it is kept out of every number a verdict is made from.
+    // SIGNIN-1, as the review of 2026-09-09 left it. A row our own gate wrote is COUNTED like any
+    // other and then annotated: gateRows says how many of this address's attempts said they were a
+    // gate, and nothing is subtracted. A label that removed rows from these numbers would be a way
+    // to turn the Attack pill off by writing a user agent, which is what it was measured doing.
     const stamp = Date.parse(String(row?.at ?? ""));
     if (Number.isFinite(stamp)) {
       if (bucket.firstAt === "" || stamp < Date.parse(bucket.firstAt)) bucket.firstAt = new Date(stamp).toISOString();
       if (bucket.lastAt === "" || stamp > Date.parse(bucket.lastAt)) bucket.lastAt = new Date(stamp).toISOString();
     }
-    if (row?.gate === true) { bucket.gateRows += 1; continue; }
+    if (row?.gate === true) bucket.gateRows += 1;
     bucket.attempts += 1;
     const outcome = String(row?.outcome ?? "");
     if (outcome === "refused") bucket.refused += 1;
@@ -380,9 +432,9 @@ export function summariseByPassword(rows, {
 } = {}) {
   const byKey = new Map();
   for (const row of rows ?? []) {
-    // SIGNIN-1. A gate's own refusals are never a spray, and counting them as one is how a real
-    // spray gets ignored.
-    if (row?.gate === true) continue;
+    // SIGNIN-1, as the review of 2026-09-09 left it. A gate's own refusals stay in this table: the
+    // spray detector is the one view a one-password-many-accounts run appears in at all, and a
+    // header a stranger can write must not be able to empty it.
     const hash = String(row?.triedHash ?? "");
     const email = String(row?.email ?? "");
     const at = Date.parse(String(row?.at ?? ""));
@@ -450,16 +502,15 @@ export function summariseByAccount(rows, {
       bucket = { email, tenant: "", attempts: 0, refused: 0, locked: 0, ok: 0, addresses: new Set(), tries: [], firstAt: "", lastAt: "", gateRows: 0, yours: false };
       byEmail.set(email, bucket);
     }
-    // SIGNIN-1, said the way the address table says it: the row is counted as a gate and then left
-    // out of everything a verdict is made from. Whether it came from one of the operator's own
-    // addresses is read before the set-aside, because that is true of the gate rows too.
+    // SIGNIN-1, said the way the address table says it: a gate's row is counted like any other and
+    // then annotated, never subtracted.
     if (yourAddresses.has(String(row?.ip ?? ""))) bucket.yours = true;
     const stamp = Date.parse(String(row?.at ?? ""));
     if (Number.isFinite(stamp)) {
       if (bucket.firstAt === "" || stamp < Date.parse(bucket.firstAt)) bucket.firstAt = new Date(stamp).toISOString();
       if (bucket.lastAt === "" || stamp > Date.parse(bucket.lastAt)) bucket.lastAt = new Date(stamp).toISOString();
     }
-    if (row?.gate === true) { bucket.gateRows += 1; continue; }
+    if (row?.gate === true) bucket.gateRows += 1;
     bucket.attempts += 1;
     const outcome = String(row?.outcome ?? "");
     if (outcome === "refused") bucket.refused += 1;
@@ -1078,8 +1129,9 @@ export function createAdminApi({
       const account = String(row.email ?? "").length > 0 ? store.getAccountByEmail(row.email) : null;
       row.tenant = account?.tenant ?? "";
     }
-    // SIGNIN-1. WHICH OF THESE WERE OUR OWN GATES, decided before any summary is made, because
-    // every verdict below is made from counts and a gate row must not be in them.
+    // SIGNIN-1. WHICH OF THESE SAY THEY WERE OUR OWN GATES, decided once for the whole merged set
+    // so the panel can grey and name them. The summaries below still count every one of them: the
+    // label is ink and a note, never a subtraction.
     const gates = markGateRows(merged, {
       isOperatorAccount: (email) => store.getAccountByEmail(email)?.superAdmin === true,
     });
@@ -1092,7 +1144,15 @@ export function createAdminApi({
       passwords: summariseByPassword(merged),
       // The rows themselves stay above, in grey. This is the count and the names, so the panel can
       // say what it left out rather than quietly leaving it out.
-      gates: { rows: gates.rows, scripts: gates.scripts, setAsideNote: gates.setAsideNote },
+      gates: {
+        rows: gates.rows,
+        // Which clause matched, separately, so a strip reading "11" can be checked against the one
+        // thing it is evidence of.
+        named: gates.named,
+        older: gates.older,
+        scripts: gates.scripts,
+        setAsideNote: gates.setAsideNote,
+      },
       relay: relay.ok ? { reachable: true } : { reachable: false, why: relay.why },
       measuredAt: new Date(now()).toISOString(),
     };
@@ -1315,6 +1375,15 @@ export function createAdminApi({
   // How long an operator-triggered check is worth showing before the request log is the better
   // evidence again. Five minutes: long enough to still be on the page after the click that made it.
   const HEALTH_PROBE_TTL_MS = 5 * 60 * 1000;
+  // PROVIDERS-8, the low-volume half. "Not answering" is a claim about NOW, so it needs a sample
+  // that is both deep enough to mean something and recent enough to still be about now. MEASURED ON
+  // THE R750 2026-09-09: MiniMax's whole recent window was one request, from 2026-09-08T23:40:44Z --
+  // had it failed, the card would have read "not answering" off a twenty-hour-old sample and gone on
+  // reading it for the rest of the month, since nothing else is ever run through that provider. Two
+  // hours and three requests: below either, the honest answer is that nothing recent enough has
+  // measured it, which is the reachable-null branch and not a green light.
+  const RECENT_MIN_REQUESTS = 3;
+  const RECENT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
   // How far back "a box has run this model" looks. Thirty days rather than the spend panel's
   // calendar month, because "nobody has used this since the 2nd" on the 3rd of the month is not
   // evidence that a model is unused.
@@ -1766,6 +1835,23 @@ export function createAdminApi({
     // any failure anywhere in the window -- 3 of 220, every one of them on 2026-09-08 before the key
     // moved endpoints. A light that stays red for three weeks after the fault is fixed is a light
     // nobody looks at, which is the same failure as a green one that cannot go red.
+    const newestAge = Date.parse(String(recent.newestAt ?? ""));
+    const stale = !Number.isFinite(newestAge) || (at - newestAge) > RECENT_MAX_AGE_MS;
+    if (recent.count > 0 && recent.failures === recent.count && (recent.count < RECENT_MIN_REQUESTS || stale)) {
+      // Every request we can see failed, and there are too few of them or they are too old for that
+      // to be a statement about now. Never green either: what is true is that nothing recent has
+      // measured this.
+      return {
+        reachable: null,
+        why: `every request the log holds for ${provider.name} failed, but ${recent.count < RECENT_MIN_REQUESTS ? `there ${recent.count === 1 ? "is" : "are"} only ${recent.count} of them` : `the most recent is from ${recent.newestAt}`}, so whether it is answering now cannot be told from it${lastWhy ? `. The last failure said: ${lastWhy}` : ""}`,
+        checkedAt: recent.newestAt || lastAt,
+        how: "the proxy's own request log, most recent first",
+        requests,
+        failures,
+        recent,
+        month,
+      };
+    }
     if (recent.count > 0 && recent.failures === recent.count) {
       return {
         reachable: false,

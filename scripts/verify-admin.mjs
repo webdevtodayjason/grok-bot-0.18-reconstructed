@@ -624,10 +624,14 @@ function providersFixtureAnswer(method, pathname, body) {
       tenant: { slug, name: company },
       account: { email, name: String(body?.name ?? "") },
       temporaryPassword,
-      signIn: `https://console.titanium.bot/${slug}`,
+      // THE TYPES THE ROUTE REALLY ANSWERS, not the ones that read well on a card. This fixture
+      // once answered a model name and a number here while cp/admin.mjs answered two booleans, and
+      // the page leg passed on "Plan model: plan-zai" while the console printed "Plan model: false"
+      // to the operator. The contract leg above now asks the live route for these same types.
+      signIn: "https://console.titanium.bot",
       state: "building",
-      planModel: { applied: String(body?.planModel ?? ""), why: "the workspace starts on it at its first turn" },
-      ceiling: { applied: Number(body?.ceiling ?? 40), why: "written into the box's own environment" },
+      planModel: { applied: String(body?.planModel ?? "").length > 0, why: "the workspace starts on it at its first turn" },
+      ceiling: { applied: String(body?.ceiling ?? "").length > 0, asked: body?.ceiling == null ? null : Number(body.ceiling), maxAgents: null, why: "written into the box's own environment" },
       welcomeMail: { sent: false, why: "this control plane sends no mail yet" },
       message: `${company} was added. The workspace is still coming up.`,
     }];
@@ -1060,6 +1064,11 @@ child = spawn(process.execPath, [SERVER], {
     COOLIFY_API_KEY: COOLIFY_KEY,
     COOLIFY_PROJECT_UUID: "fakeprojectuuid00001",
     COOLIFY_SERVER_UUID: "fakeserveruuid000001",
+    // ADMIN-2. Every new workspace is another container, so a real control plane keeps this off
+    // until somebody turns it on deliberately. The gate's Coolify is a fake and its tenant root is a
+    // throwaway directory, so the add-client contract leg turns it on here rather than measuring the
+    // refusal it would otherwise get and calling that the success shape.
+    CP_ALLOW_NEW_TENANTS: "1",
     CP_TENANT_ROOT: tenantRoot,
     CP_RELEASE_ROOT: tenantRoot,
     CP_PUBLIC_URL: BASE,
@@ -1488,20 +1497,24 @@ step("the providers route contract");
 // landed in this tree yet is a SKIP with the reason, never a pass.
 step("the routes the page reads");
 {
-  // SIGNIN-1. The gate marker, and the three things a summary needs to say what it set aside.
+  // SIGNIN-1. The gate marker, and the fields a summary needs to say what it marked.
   const signIns = await call("GET", "/v1/admin/sign-ins?hours=24", { token: bossToken });
   check(signIns.status === 200, "GET /v1/admin/sign-ins answers", `status ${signIns.status}`);
   const gates = signIns.json?.gates;
   if (gates == null) {
     console.log("  SKIP  this tree's sign-ins route carries no gates block yet, so the panel's grey rows are measured against the fixture only");
   } else {
-    check(typeof gates.rows === "number", "the sign-ins answer says how many rows were set aside as our own gates", String(gates.rows));
+    check(typeof gates.rows === "number", "the sign-ins answer says how many rows look like our own gates", String(gates.rows));
+    // WHICH CLAUSE MATCHED, separately. A single number for both was read on the R750 as proof the
+    // titanbot-gate header works when every row under it had come from the dated shape clause.
+    check(typeof gates.named === "number", "and how many of them said so at the door", String(gates.named));
+    check(typeof gates.older === "number", "and how many matched the dated clause instead", String(gates.older));
     check(Array.isArray(gates.scripts), "and which scripts they were");
     check(typeof gates.setAsideNote === "string" && gates.setAsideNote.length > 0,
       "and carries the sentence the panel prints", String(gates.setAsideNote).slice(0, 70));
     const address = (signIns.json?.addresses ?? [])[0];
     if (address != null) {
-      check("gateRows" in address, "an address summary says how many of its rows were set aside");
+      check("gateRows" in address, "an address summary says how many of its rows claimed to be a gate");
       check("yourAddress" in address, "and whether it is one of ours");
     }
   }
@@ -1552,6 +1565,7 @@ step("the routes the page reads");
     check(String(noName.json?.message ?? "").length > 0, "with the reason in words", String(noName.json?.message ?? "").slice(0, 80));
     check((await call("POST", "/v1/admin/clients", { body: { email: "x@example.com", company: "X" } })).status === 401,
       "and the whole door refuses a caller with no session");
+
   }
 }
 
@@ -1844,12 +1858,14 @@ if (!WANT_BROWSER) {
     const posted = request.postData();
     if (posted) { try { body = JSON.parse(posted); } catch { body = null; } }
     const pathname = new URL(request.url()).pathname;
-    // SIGNIN-1. The gate fields on the sign-ins answer belong to the route, which is another item of
-    // this wave, so this run puts them on the real answer the way the model block below is put on
-    // the clients answer. What is measured here is what THIS page does with them: a row the route
-    // recognised as one of our own verification gates is greyed and named, it is left out of the
-    // Attack pill, and every summary says how many were set aside. Off by default, so every check
-    // before this one still sees the ledger exactly as it is.
+    // SIGNIN-1. The gate fields on the sign-ins answer belong to the route, so this run puts them on
+    // the real answer the way the model block below is put on the clients answer -- IN THE SHAPE THE
+    // ROUTE REALLY SENDS, which since the review of 2026-09-09 means the marker and nothing else:
+    // `attack` is left exactly as the maths found it, because a user agent is a string anyone can
+    // write and a label that could turn the pill off would be a way to turn the pill off. What is
+    // measured here is what THIS page does with the marker: the rows are greyed and named, the
+    // summaries say how many claimed to be gates, and the verdict does not move. Off by default, so
+    // every check before this one still sees the ledger exactly as it is.
     if (request.method() === "GET" && pathname === "/v1/admin/sign-ins" && signInGateInjection) {
       const real = await route.fetch();
       const answer = await real.json().catch(() => null);
@@ -1858,19 +1874,21 @@ if (!WANT_BROWSER) {
         for (const row of answer.rows ?? []) {
           if (row.ip !== ATTACK_IP) continue;
           row.gate = true;
+          row.gateWhy = "named";
           row.gateScript = "verify-deploy";
           set += 1;
         }
         for (const row of answer.addresses ?? []) {
           if (row.ip !== ATTACK_IP) continue;
-          row.attack = false;
           row.gateRows = set;
           row.yourAddress = true;
         }
         answer.gates = {
           rows: set,
+          named: set,
+          older: 0,
           scripts: ["verify-deploy"],
-          setAsideNote: `${set} attempts were this product's own verification gates and are not counted above`,
+          setAsideNote: `${set} of these look like your own verification gates: ${set} said so at the door (verify-deploy). A user agent is a string anyone can write, so they are marked in grey and NOT taken out of the counts or the Attack rule.`,
         };
       }
       await route.fulfill({ status: real.status(), contentType: "application/json", body: JSON.stringify(answer) });
@@ -2113,30 +2131,39 @@ if (!WANT_BROWSER) {
   const gateRows = await page.locator("#attempts tr.gateRow").count();
   check(gateRows === 6, "a gate's attempts are drawn as gate rows", String(gateRows));
   const gateRowText = String(await page.locator("#attempts tr.gateRow").first().textContent());
-  check(gateRowText.includes("your own verification gate (verify-deploy)"),
-    "each one saying whose gate it was and which script", gateRowText.replace(/\s+/g, " ").slice(0, 90));
-  check((await page.locator("#addresses .chip.attack").count()) === 0,
-    "and the address they came from carries no Attack pill any more",
+  check(gateRowText.includes("says it is our own verification gate (verify-deploy)"),
+    "each one saying which script claimed it, in the words of a claim rather than a finding",
+    gateRowText.replace(/\s+/g, " ").slice(0, 100));
+  // THE VERDICT DOES NOT MOVE. This is the check the earlier shape of this leg had backwards: it
+  // asserted the pill went out, which is exactly the behaviour that let a header silence a spray.
+  check((await page.locator("#addresses .chip.attack").count()) === 1,
+    "and the address they came from still carries its Attack pill, because a user agent decides nothing",
     String(await page.locator("#addresses .chip.attack").count()));
   const gateAddress = String(await page.locator("#addresses tbody tr", { hasText: ATTACK_IP }).first().textContent());
   check(gateAddress.includes("your address"), "the address is marked as one of ours", gateAddress.replace(/\s+/g, " ").slice(0, 80));
-  check(gateAddress.includes("6 of our own gate rows set aside"),
-    "with how many were set aside, so nothing is quietly uncounted", gateAddress.replace(/\s+/g, " ").slice(0, 100));
+  check(gateAddress.includes("6 of them look like our own gates"),
+    "with how many claimed it, beside the count rather than instead of it", gateAddress.replace(/\s+/g, " ").slice(0, 110));
+  check(gateAddress.includes("6 different passwords"),
+    "and the six passwords are still counted against the address", gateAddress.replace(/\s+/g, " ").slice(0, 110));
   const gateStrip = String(await page.locator("#panel-signins .strip").textContent());
-  check(gateStrip.includes("YOUR OWN GATES") || gateStrip.includes("Your own gates"),
-    "and the panel's own summary carries the same count", gateStrip.replace(/\s+/g, " ").slice(0, 110));
+  check(/look like our own gates/i.test(gateStrip),
+    "and the panel's own summary carries the same count", gateStrip.replace(/\s+/g, " ").slice(0, 120));
+  check(/ATTACKS\s*1/i.test(gateStrip.replace(/\s+/g, " ")),
+    "with the Attacks chip still reading one", gateStrip.replace(/\s+/g, " ").slice(0, 120));
   await openPanel("panel-overview");
   const attackChip = String(await page.locator("#overview a.stat[href='#panel-signins']").textContent());
-  check(attackChip.includes("gate rows set aside"), "the Overview says the same thing about the same window",
-    attackChip.replace(/\s+/g, " ").slice(0, 90));
+  check(attackChip.includes("look like our own gates"), "the Overview says the same thing about the same window",
+    attackChip.replace(/\s+/g, " ").slice(0, 100));
   signInGateInjection = false;
   await openPanel("panel-signins");
   await page.selectOption("#hours", "24");
   await page.waitForFunction(() => document.querySelectorAll("#attempts tr.gateRow").length === 0, null, { timeout: 15_000 })
     .catch(() => {});
   check((await page.locator("#addresses .chip.attack").count()) === 1,
-    "and with the marker gone the same address is an attack again, so the rule is the marker and not the address",
+    "and with the marker gone the address reads exactly the same, which is the whole point of the change",
     String(await page.locator("#addresses .chip.attack").count()));
+  check(!String(await page.locator("#addresses tbody tr", { hasText: ATTACK_IP }).first().textContent()).includes("look like our own gates"),
+    "with the gate line gone from its row");
 
   const sprayChips = await page.locator("#accounts .chip.attack").count();
   check(sprayChips === SPRAY_EMAILS.length, "a Spray chip on every account the one password was tried on", String(sprayChips));
@@ -2603,6 +2630,16 @@ if (!WANT_BROWSER) {
   check(newCard.includes("northwind-plumbing"), "and names the workspace the company gave its name to",
     newCard.replace(/\s+/g, " ").slice(0, 90));
   check(newCard.includes("No welcome mail was sent"), "and says plainly that no mail went out");
+  // ADMIN-2. THE TWO LINES THAT PRINTED A RAW BOOLEAN. `applied` is a boolean on the route, and the
+  // card read it with `?? "not applied"`, which never fires on false: the operator's success card
+  // said "Plan model: false" and "Agent ceiling: false" in production while this leg passed, because
+  // this leg never looked at these two lines and the fixture answered a string and a number.
+  check(/Plan model: (applied|not applied)/.test(newCard) && /Agent ceiling: (applied|not applied)/.test(newCard),
+    "the card says in words whether the plan model and the ceiling were applied",
+    (newCard.match(/Plan model: [^.]{0,24}/) ?? ["not on the card"])[0]);
+  check(!/(Plan model|Agent ceiling): (true|false|undefined|null|\[object)/.test(newCard),
+    "and never prints a raw value from the answer at the operator",
+    (newCard.match(/(Plan model|Agent ceiling): (true|false|undefined|null|\[object)[^.]{0,20}/) ?? ["none"])[0]);
   check((await page.locator("#addClientResult button", { hasText: "Copy the welcome note" }).count()) === 1,
     "with a note to copy instead");
   const clientsAfter = await page.locator(".client").count();
@@ -2680,6 +2717,43 @@ if (!WANT_BROWSER) {
   } finally {
     if (browser) { try { await browser.close(); } catch { /* already gone */ } browser = null; }
   }
+}
+
+// ---- the add-client answer's own shape (ADMIN-2) -----------------------------------------------
+//
+// LAST, ON PURPOSE. This leg adds a real workspace to the gate's own throwaway control plane, and a
+// workspace that exists changes what the clients and box-health panels draw, so it runs after the
+// page has been walked rather than before it.
+step("what a successful add really answers");
+{
+  // ADMIN-2, THE SUCCESS SHAPE. The refusals above were the only half of this form the contract
+  // ever measured, and the fixture's own answer disagreed with the route on the TYPE of the two
+  // fields the success card prints: the route answers booleans, the fixture answered a string and
+  // a number, so the page rendered "Plan model: false" to the operator while 485 checks passed.
+  // This asks the live route what it really sends. The workspace it makes is thrown away with the
+  // gate's data directory.
+  const fresh = `added+${randomBytes(4).toString("hex")}@example.com`;
+  const made = await call("POST", "/v1/admin/clients", {
+    token: bossToken,
+    body: { email: fresh, company: `Contract ${randomBytes(3).toString("hex")}`, name: "A Person", ceiling: 40 },
+  });
+  check(made.status === 201, "a fresh address is added", `status ${made.status} ${String(made.json?.message ?? "").slice(0, 60)}`);
+  const body = made.json ?? {};
+  check(body.tenant != null && typeof body.tenant.slug === "string" && body.tenant.slug.length > 0,
+    "and the answer names the workspace it made", String(body.tenant?.slug));
+  check(typeof body.temporaryPassword === "string" && body.temporaryPassword.length > 0,
+    "and carries the temporary password once");
+  check(typeof body.signIn === "string" && /^https:\/\/[^/]+$/.test(String(body.signIn ?? "")),
+    "and a sign-in address with no path on it, which is the one console every customer uses", String(body.signIn));
+  for (const [field, block] of [["planModel", body.planModel], ["ceiling", body.ceiling]]) {
+    check(block != null && typeof block === "object", `the answer carries ${field}`);
+    check(typeof block?.applied === "boolean",
+      `and ${field}.applied is a boolean, which is what the success card has to read rather than print`,
+      `${typeof block?.applied}: ${JSON.stringify(block?.applied)}`);
+    check(typeof block?.why === "string", `and ${field}.why is the sentence beside it`, String(block?.why ?? "").slice(0, 60));
+  }
+  check(body.welcomeMail != null && typeof body.welcomeMail.sent === "boolean",
+    "and says whether a welcome mail went out", JSON.stringify(body.welcomeMail?.sent));
 }
 
 // ---- leak -----------------------------------------------------------------------------------------

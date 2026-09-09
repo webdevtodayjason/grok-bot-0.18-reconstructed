@@ -28,7 +28,7 @@
 // "Telling a gate from an attacker", is where that rule lives.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -77,6 +77,40 @@ test("every gate that knocks at a login door imports the name rather than spelli
     // file so the panel and the documents quote the same string.
     const literals = source.split("\n").filter((line) => line.includes(GATE_AGENT_PREFIX) && !line.trim().startsWith("//"));
     assert.deepEqual(literals, [], `${gate} spells the prefix out in code instead of importing it: ${literals.join(" | ")}`);
+  }
+});
+
+/**
+ * The other 42, checked rather than asserted.
+ *
+ * SIGNIN-1, from the review of 2026-09-09: the list above is only worth its comment for as long as
+ * nothing else grows a login leg. MEASURED ON THE R750 that day, the residual noise behind the
+ * Attack pill on the operator's own address was 79 unlabelled rows, every one of them written by
+ * this same deploy gate BEFORE the header shipped -- not by an unlabelled script. That is the shape
+ * of the risk here: a script that reaches a real login door without the header writes rows nobody
+ * can tell from a stranger's, and nothing would notice for weeks.
+ *
+ * So every verify script that mentions a login path at all has to be either one of the four that
+ * send the header or named here with the reason it cannot reach a live door. A new one is a failing
+ * test rather than a surprise on the panel.
+ */
+const NO_LIVE_LOGIN_DOOR = new Map([
+  ["verify-browser-tools.mjs", "serves its own login page from its own fixture server on 127.0.0.1 and posts to that"],
+  ["verify-console-polish.mjs", "reads with a bearer; the word login is in a message about being bounced to one"],
+  ["verify-job-bus.mjs", "checks that an unauthenticated call is bounced to /login and never posts a password"],
+  ["verify-admin.mjs", "drives a control plane and a relay it starts itself, on a throwaway data directory"],
+]);
+
+test("no other gate reaches a login door without saying its own name at it", () => {
+  const names = readdirSync(path.join(repo, "scripts")).filter((name) => /^verify-.*\.mjs$/.test(name)).sort();
+  assert.equal(names.length >= 40, true, `expected the whole verify family, found ${names.length}`);
+  for (const name of names) {
+    if (GATES.includes(name)) continue;
+    const source = sourceOf(name);
+    if (!/["'`][^"'`]*\/(login|auth\/login)\b/.test(source)) continue;
+    assert.equal(NO_LIVE_LOGIN_DOOR.has(name), true,
+      `${name} names a login path but neither imports scripts/gate-agent.mjs nor is listed as unable to reach a live one. `
+      + "Either give it the header (one import and one const) or add it here with the reason.");
   }
 });
 

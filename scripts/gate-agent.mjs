@@ -14,11 +14,15 @@
 //
 // WHAT THIS HEADER IS WORTH, said out loud, because it would be easy to read it as more than it is.
 // A user agent is a string a stranger writes. Sending "titanbot-gate/verify-deploy" is a HINT and
-// never a credential, and the prefix alone can never buy an attacker silence. The panel's rule is
-// deliberately narrower than this header: a row counts as a gate's own only when the address it
-// arrived from ALSO signed in successfully as an operator or a super admin inside the same hour,
-// which is the half nobody outside can forge. docs/ADMIN.md, "Telling a gate from an attacker",
-// carries the whole rule. Nothing here decides anything; it only makes the honest case nameable.
+// never a credential, and the panel treats it as one: a labelled row is drawn in grey and named, and
+// it is still counted in its address's attempts, in the distinct-password window, in the Attack rule
+// and in the spray table. Nothing is subtracted, so there is nothing here for a stranger to buy.
+// (An earlier shape did subtract, pairing this header with "the address also signed in as an
+// operator inside the hour" as the half nobody could forge. MEASURED ON THIS MAC 2026-09-09: that
+// pair turned eight distinct passwords in eight minutes from Attack into silence for anyone sharing
+// an egress address with an operator who signed in that hour, which is the ordinary shape of an
+// office or a home network.) docs/ADMIN.md, "Telling a gate from an attacker", carries the whole
+// rule. Nothing here decides anything; it only makes the honest case nameable.
 //
 // The name is derived from the calling script's own filename rather than typed into it, so a gate
 // written next year gets this by importing the file rather than by remembering a string.

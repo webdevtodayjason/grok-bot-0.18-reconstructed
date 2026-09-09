@@ -347,12 +347,14 @@
   // "Attack", 101 tries, 58 locked out, 23 different passwords, one of the accounts named being his
   // own. Every one of those bursts was our own deploy gate spending the relay's lockout on purpose.
   //
-  // A gate row is set aside by the ROUTE, not here, and on two facts rather than one: the user agent
-  // says titanbot-gate, AND the same address signed in successfully as an operator inside the hour.
-  // The second half is the part a stranger cannot write into a header. What this file does with the
-  // answer is draw those rows greyed and NAMED, in the same table as everything else, and print how
-  // many were set aside on every summary. A row that is quietly uncounted is a row nobody can audit,
-  // so none of them disappear.
+  // A gate row is labelled by the ROUTE, not here, and after the review of 2026-09-09 the label
+  // COUNTS FOR NOTHING BUT INK: a labelled row is still in its address's attempts, in the
+  // distinct-password window, in the Attack rule and in the spray table. It has to be. The header
+  // that carries the label is a string anyone can write, and the earlier rule -- which took the
+  // labelled rows out of the counts when the address had also signed in as an operator that hour --
+  // was measured turning eight distinct passwords in eight minutes from Attack into silence for
+  // anyone sharing an office NAT with the operator. So: grey ink, a name, and a count beside the
+  // number ("116 tries, 11 of them our own gate"). Nothing is subtracted.
   const gateRowsIn = (answer) => Number(answer?.gates?.rows ?? 0);
   const attacksIn = (answer) => (answer.addresses ?? []).filter((row) => row.attack).length;
 
@@ -368,9 +370,9 @@
     const gates = gateRowsIn(answer);
     if (gates > 0) {
       chips.push({
-        label: "Your own gates",
+        label: "Look like our own gates",
         value: gates,
-        detail: "set aside, still listed below",
+        detail: "counted like everything else, marked in grey below",
         why: String(answer.gates?.setAsideNote || (answer.gates?.scripts ?? []).join(", ")),
       });
     }
@@ -388,23 +390,33 @@
       tone: attacks > 0 ? "bad" : "good",
       detail: [
         hours === "1" ? "in the last hour" : hours === "24" ? "in the last day" : `in the last ${hours} hours`,
-        gates > 0 ? `${gates} of our own gate rows set aside` : "",
+        gates > 0 ? `${gates} row${gates === 1 ? "" : "s"} look like our own gates, and are counted anyway` : "",
       ].filter(Boolean).join(", "),
     };
   };
 
-  /** "your own verification gate (verify-deploy)", beside a row the route recognised as one. */
+  /**
+   * The note beside a labelled row, and the two clauses do NOT get the same sentence.
+   *
+   * A named row said titanbot-gate/<script> at the door, which is a self-declared hint. An older
+   * row said nothing: it matched a dated, shape-based clause for attempts written before any gate
+   * carried a header, and calling that "your own verification gate" was reading one clause's
+   * evidence as the other's.
+   */
   function gateNote(row) {
     const script = String(row.gateScript ?? "").trim();
-    const node = el("span", "quiet", script.length > 0
-      ? `your own verification gate (${script})`
-      : "your own verification gate");
-    node.title = "This attempt came from one of this product's own verification gates, from an address that also signed in as an operator inside the hour. It is left out of the Attack rule and out of the counts above, and it is still listed here.";
+    const named = String(row.gateWhy ?? "") === "named" || script.length > 0;
+    const node = el("span", "quiet", named
+      ? `says it is our own verification gate${script.length > 0 ? ` (${script})` : ""}`
+      : "an older row, from before gates named themselves");
+    node.title = named
+      ? "This attempt arrived with a user agent saying it was one of this product's own verification gates. A user agent is a string anyone can write, so it is marked here and still counted in everything above, including the Attack rule."
+      : "This attempt was written before any gate said its own name at the door. It matched on its shape alone -- the instance door, turned away, the bare agent, from an address that was signing in as you at the time -- and it is still counted in everything above.";
     return node;
   }
 
-  /** "N of our own gate rows" under a summary figure, so a set-aside row is never an invisible one. */
-  const gateSetAside = (count) => el("div", "quiet", `${count} of our own gate ${count === 1 ? "row" : "rows"} set aside`);
+  /** "N of them look like our own gates" under a summary figure, beside the number, never instead of it. */
+  const gateSetAside = (count) => el("div", "quiet", `${count} of ${count === 1 ? "them looks" : "them look"} like our own gate${count === 1 ? "" : "s"}, and ${count === 1 ? "is" : "are"} counted above`);
 
   async function loadSignIns() {
     const hours = $("hours").value;
@@ -946,7 +958,11 @@
     // neither.
     for (const [label, applied] of [["Plan model", result.planModel], ["Agent ceiling", result.ceiling]]) {
       if (applied == null) continue;
-      const line = el("p", "quiet", `${label}: ${applied.applied ?? "not applied"}${applied.why ? ` -- ${applied.why}` : ""}`);
+      // `applied` is a BOOLEAN on the route (cp/admin.mjs's POST /v1/admin/clients answers
+      // {applied:false, why} when no plan model was asked for). Printing it straight put the word
+      // "false" on the operator's success card; the `??` never fired, because false is not null.
+      const said = applied.applied === true ? "applied" : "not applied";
+      const line = el("p", "quiet", `${label}: ${said}${applied.why ? ` -- ${applied.why}` : ""}`);
       card.appendChild(line);
     }
     if (result.welcomeMail && result.welcomeMail.sent !== true) {

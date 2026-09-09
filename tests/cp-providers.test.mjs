@@ -880,20 +880,58 @@ test("provider health says not checked until something has checked, and goes red
     const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
     const minted = await client.mintKey({ slug: "demo", models: ["plan-zai"] });
     keys.set("demo", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] });
-    proxy.chargeAlias("titanbot-demo", 0, 2, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure" });
+    proxy.chargeAlias("titanbot-demo", 0, 3, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure" });
     const sick = await call("GET", "/v1/admin/providers");
     const red = sick.body.providers.find((row) => row.id === "zai");
     assert.equal(red.health.reachable, false, JSON.stringify(red.health));
-    // RED IS A CLAIM ABOUT NOW. Both of the requests this provider has ever served failed, and both
-    // of them are inside the five the rule reads.
-    assert.match(red.health.why, /the last 2 request\(s\) on Z\.AI all failed/);
-    assert.equal(red.health.recent.count, 2);
-    assert.equal(red.health.recent.failures, 2);
+    // RED IS A CLAIM ABOUT NOW. All three of the requests this provider has ever served failed,
+    // they are inside the five the rule reads, and they are minutes old.
+    assert.match(red.health.why, /the last 3 request\(s\) on Z\.AI all failed/);
+    assert.equal(red.health.recent.count, 3);
+    assert.equal(red.health.recent.failures, 3);
     // The month count is on the answer whatever colour the light is, because the card draws it
     // beside the chip rather than instead of it.
-    assert.equal(red.health.month.requests, 2);
-    assert.equal(red.health.month.failures, 2);
+    assert.equal(red.health.month.requests, 3);
+    assert.equal(red.health.month.failures, 3);
     assert.equal(red.health.checkedAt.length > 0, true);
+  });
+
+  // PROVIDERS-8, the low-volume half, from the review of 2026-09-09. MEASURED ON THE R750 the same
+  // day: MiniMax's whole recent window was ONE request, from 2026-09-08T23:40:44Z, and nothing else
+  // is ever run through it. Had that request failed, the old rule -- `recent.failures ===
+  // recent.count` with no floor and no age -- would have painted "not answering" off a twenty-hour
+  // old sample of one and gone on painting it until the calendar month rolled over. A light that
+  // cannot change is not a light.
+  await withPanel(async ({ call, proxy, store, keys }) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    await seedZai(call);
+    const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+    const minted = await client.mintKey({ slug: "demo", models: ["plan-zai"] });
+    keys.set("demo", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] });
+
+    proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure" });
+    const thin = (await call("GET", "/v1/admin/providers")).body.providers.find((row) => row.id === "zai");
+    assert.equal(thin.health.reachable, null, `one failure painted a red light: ${JSON.stringify(thin.health)}`);
+    assert.match(thin.health.why, /only 1 of them/);
+    assert.equal(thin.health.month.failures, 1, "and the failure is still on the card as the amber count");
+  });
+
+  await withPanel(async ({ call, proxy, store, keys }) => {
+    store.createTenant({ slug: "demo", name: "Demo", status: "running" });
+    await seedZai(call);
+    const client = createProxyClient({ config: { proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey } });
+    const minted = await client.mintKey({ slug: "demo", models: ["plan-zai"] });
+    keys.set("demo", { key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] });
+
+    // Deep enough -- four failures -- and every one of them a day old. Nothing has been asked of
+    // this provider since, so the honest answer is that nothing recent has measured it.
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    proxy.chargeAlias("titanbot-demo", 0, 4, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure", at: yesterday });
+    const stale = (await call("GET", "/v1/admin/providers")).body.providers.find((row) => row.id === "zai");
+    assert.equal(stale.health.reachable, null, `a day-old sample painted a red light: ${JSON.stringify(stale.health)}`);
+    assert.match(stale.health.why, /the most recent is from/);
+    assert.equal(stale.health.recent.count, 4);
+    assert.equal(stale.health.month.failures, 4);
   });
 
   // And the operator-triggered check, which is the only thing on this install that makes a real
