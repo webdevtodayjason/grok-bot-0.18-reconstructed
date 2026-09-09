@@ -47,7 +47,7 @@ import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.
 import { normalizeEmail } from "./store.mjs";
 // MAIL-2. The product domain the per-bot addresses live at, so the panel names the same domain
 // the relay routes on rather than a second copy of the default.
-import { mailDomain } from "./mail.mjs";
+import { createMailDirectory, mailDomain } from "./mail.mjs";
 import {
   PROVIDER_PRESETS,
   PROVIDER_QUOTA,
@@ -1998,6 +1998,11 @@ export function createAdminApi({
 
   // ---- the routes ------------------------------------------------------------------------------
 
+  // One directory object per call rather than one per module: createMailDirectory closes over the
+  // store and holds nothing else, so building it here keeps the mail routes from adding any state
+  // to this service.
+  const mailDirectory = () => createMailDirectory({ store, domain: mailDomain(), now });
+
   async function handle(request, response, { segments, method, body, url }) {
     if (servePage(url.pathname, response)) return true;
     if (segments[0] !== "v1" || segments[1] !== "admin") return false;
@@ -3064,6 +3069,46 @@ export function createAdminApi({
         rule: "one code per bot, six digits, minted once and never reused. No address carries a name.",
         measuredAt: new Date(now()).toISOString(),
       });
+      return true;
+    }
+
+    // The same directory's WRITE side, and it lives here for one measured reason: cp/cli.mjs used
+    // to open the sqlite store itself for these four. That works on the machine holding the store
+    // and nowhere else, so on the R750 -- where the store is inside the container and the operator
+    // types the command on his Mac -- `mail list` answered "no addresses yet" over a directory of
+    // nine (measured 2026-09-09 14:07Z). Every other verb in that CLI already goes over HTTP; these
+    // now do too, and the store is read in exactly one process again.
+    if (rest[0] === "mail" && rest[1] === "retire" && rest.length === 2 && method === "POST") {
+      const code = String(body?.code ?? "").trim();
+      const row = store.retireMailAddress(code);
+      if (row == null) { json(response, 404, { error: "no_such_code", code }); return true; }
+      json(response, 200, { retired: row });
+      return true;
+    }
+    if (rest[0] === "mail" && rest[1] === "senders" && rest.length === 2 && method === "GET") {
+      const slug = String(url.searchParams.get("slug") ?? "").trim();
+      if (slug.length === 0) { json(response, 400, { error: "slug_required" }); return true; }
+      json(response, 200, {
+        slug,
+        approvedSendersOnly: mailDirectory().approvedSendersOnly(slug),
+        senders: store.listSenders(slug).map((entry) => entry.sender),
+      });
+      return true;
+    }
+    if (rest[0] === "mail" && rest[1] === "senders" && rest.length === 2 && method === "POST") {
+      const slug = String(body?.slug ?? "").trim();
+      const sender = String(body?.sender ?? "").trim();
+      if (slug.length === 0 || sender.length === 0) { json(response, 400, { error: "slug_and_sender_required" }); return true; }
+      const row = store.allowSender(slug, sender);
+      if (row == null) { json(response, 400, { error: "not_an_address", sender }); return true; }
+      json(response, 200, { allowed: row, approvedSendersOnly: mailDirectory().approvedSendersOnly(slug) });
+      return true;
+    }
+    if (rest[0] === "mail" && rest[1] === "only" && rest.length === 2 && method === "POST") {
+      const slug = String(body?.slug ?? "").trim();
+      if (slug.length === 0) { json(response, 400, { error: "slug_required" }); return true; }
+      const on = mailDirectory().setApprovedSendersOnly(slug, body?.on === true, "cli");
+      json(response, 200, { slug, approvedSendersOnly: on, senders: store.listSenders(slug).map((entry) => entry.sender) });
       return true;
     }
 

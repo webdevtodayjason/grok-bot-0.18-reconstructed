@@ -242,3 +242,72 @@ test("the super admin sees how many addresses a workspace holds, and never a sec
     assert.equal((await cp.request("GET", "/v1/admin/mail", { token: relayToken })).status, 401);
   } finally { await cp.dispose(); }
 });
+
+// The operator's four other mail verbs, over HTTP against a running service.
+//
+// This is here because of what it caught on the R750 on 2026-09-09 at 14:07Z. Every mail verb in
+// cp/cli.mjs opened the sqlite store itself, which is the right database only on the machine that
+// holds it. The store lives inside the control plane container on the server and the operator types
+// the command on his Mac, so `cp mail list` opened an empty file of its own and answered "no
+// addresses yet" over a live directory of nine. Nothing failed and nothing said anything: the verb
+// the ship plan and docs/MAIL.md tell him to trust just quietly disagreed with the truth.
+//
+// So the verbs now go over the same API as every other verb in that file, and these are the routes
+// they use. The test asserts what a store-reading CLI could never have satisfied: the ANSWER comes
+// out of the service that holds the rows.
+test("retiring, listing senders and the approved-senders switch all answer over the admin API", async () => {
+  const relayToken = randomBytes(24).toString("hex");
+  const cp = await startControlPlane({ env: { CP_RELAY_TOKEN: relayToken } });
+  try {
+    const admin = cp.config.adminToken;
+    await cp.request("POST", "/v1/relay/mail/mint", {
+      body: { slug: "demo", agents: [{ id: "a1", name: "Titan" }] },
+      token: relayToken,
+    });
+    const listed = await cp.request("GET", "/v1/admin/mail?slug=demo", { token: admin });
+    const code = listed.body.rows[0].code;
+
+    // Approved senders is off until somebody turns it on, and the switch reads back.
+    const before = await cp.request("GET", "/v1/admin/mail/senders?slug=demo", { token: admin });
+    assert.equal(before.status, 200);
+    assert.equal(before.body.approvedSendersOnly, false);
+    assert.deepEqual(before.body.senders, []);
+
+    const allowed = await cp.request("POST", "/v1/admin/mail/senders", {
+      body: { slug: "demo", sender: "noreply@example.com" }, token: admin,
+    });
+    assert.equal(allowed.status, 200);
+    assert.equal(allowed.body.allowed.sender, "noreply@example.com");
+
+    const on = await cp.request("POST", "/v1/admin/mail/only", { body: { slug: "demo", on: true }, token: admin });
+    assert.equal(on.body.approvedSendersOnly, true);
+    assert.deepEqual(on.body.senders, ["noreply@example.com"]);
+    const off = await cp.request("POST", "/v1/admin/mail/only", { body: { slug: "demo", on: false }, token: admin });
+    assert.equal(off.body.approvedSendersOnly, false);
+
+    // Retiring kills the address and keeps the row, so the code is never handed to anybody else.
+    const retired = await cp.request("POST", "/v1/admin/mail/retire", { body: { code }, token: admin });
+    assert.equal(retired.status, 200);
+    assert.equal(retired.body.retired.state, "retired");
+    const after = await cp.request("GET", "/v1/admin/mail?slug=demo", { token: admin });
+    assert.equal(after.body.counts.retired, 1);
+    assert.equal((await cp.request("POST", "/v1/admin/mail/retire", { body: { code: "000000" }, token: admin })).status, 404);
+
+    // Super admin routes like every other one on that panel: the relay's credential does not open them.
+    assert.equal((await cp.request("GET", "/v1/admin/mail/senders?slug=demo")).status, 401);
+    assert.equal((await cp.request("POST", "/v1/admin/mail/only", { body: { slug: "demo", on: true }, token: relayToken })).status, 401);
+  } finally { await cp.dispose(); }
+});
+
+// And the verbs themselves: not one of them may open the store, or the bug above comes straight
+// back the next time somebody adds a verb by copying its neighbour.
+test("no mail verb in the CLI opens the database directly", async () => {
+  const source = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../cp/cli.mjs", import.meta.url), "utf8"));
+  const section = source.slice(source.indexOf("async function mailList"), source.indexOf("const [group, action, ...rest]"));
+  assert.ok(section.length > 500, "the mail section of cp/cli.mjs was not found");
+  assert.equal(/openLedger\s*\(/.test(section), false, "a mail verb opens the sqlite store; it must ask the service instead");
+  for (const verb of ["mailList", "mailRetire", "mailSenders", "mailAllow", "mailOnly"]) {
+    assert.ok(section.includes(`function ${verb}`), `${verb} is missing from the mail section`);
+  }
+});

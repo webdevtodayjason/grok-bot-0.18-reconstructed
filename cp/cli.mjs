@@ -54,7 +54,7 @@ import {
 import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias, tenantRoutesFor } from "./proxy.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
-import { createMailDirectory, mailDomain } from "./mail.mjs";
+import { mailDomain } from "./mail.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
@@ -1173,83 +1173,76 @@ const USAGE = [
 // handed back to the pool could be minted for a different bot in a different workspace, and mail
 // still addressed to the old one would then reach a stranger. Retiring kills the ADDRESS and not
 // the bot, so the next sweep gives that bot a new one.
-const mailDirectoryFor = (store) => createMailDirectory({ store, domain: mailDomain() });
-
+// EVERY MAIL VERB GOES OVER HTTP, like every other verb in this file. They used to open the sqlite
+// store directly, which reads the right database only on the machine that holds it. On the R750 the
+// store is inside the control plane container and the operator types this on his Mac, so `mail
+// list` opened an empty file of its own and said "no addresses yet" over a live directory of nine
+// (measured 2026-09-09 14:07Z, api.titanium.bot). Reading the service is also the only way these
+// answers can agree with the console's.
 async function mailList(args) {
-  const store = openLedger();
-  try {
-    const slug = positional(args)[0] ?? null;
-    const rows = store.listMailAddresses(slug);
-    if (rows.length === 0) {
-      out(slug ? `no addresses for ${slug} yet` : "no addresses yet");
-      out("the relay mints them when it sweeps, which is at its start and every five minutes; `mail sweep` asks for one now");
-      return;
-    }
-    // The bot's name is last because it is the one column with no length limit, so everything to
-    // the left of it stays lined up however a customer names their bots.
-    out(`${pad("code", 10)}${pad("address", 34)}${pad("workspace", 18)}${pad("state", 10)}bot`);
-    for (const row of rows) {
-      out(`${pad(row.code, 10)}${pad(row.address, 34)}${pad(row.tenant, 18)}${pad(row.state, 10)}${row.agentName || "(no name)"}`);
-    }
-    out(`${rows.length} address(es) at ${mailDomain()}`);
-  } finally { store.close(); }
+  const slug = positional(args)[0] ?? null;
+  const answer = await api("GET", slug ? `/v1/admin/mail?slug=${encodeURIComponent(slug)}` : "/v1/admin/mail");
+  const rows = Array.isArray(answer?.rows) ? answer.rows : [];
+  if (rows.length === 0) {
+    out(slug ? `no addresses for ${slug} yet` : "no addresses yet");
+    out("the relay mints them when it sweeps, which is at its start and every five minutes; `mail sweep` asks for one now");
+    return;
+  }
+  // The bot's name is last because it is the one column with no length limit, so everything to
+  // the left of it stays lined up however a customer names their bots.
+  out(`${pad("code", 10)}${pad("address", 34)}${pad("workspace", 18)}${pad("state", 10)}bot`);
+  for (const row of rows) {
+    out(`${pad(row.code, 10)}${pad(row.address, 34)}${pad(row.tenant, 18)}${pad(row.state, 10)}${row.agentName || "(no name)"}`);
+  }
+  out(`${rows.length} address(es) at ${answer?.domain || mailDomain()}`);
 }
 
 async function mailRetire(args) {
   const code = positional(args)[0] ?? "";
   if (code.length === 0) die("node cp/cli.mjs mail retire <code>");
-  const store = openLedger();
-  try {
-    const row = store.retireMailAddress(code);
-    if (row == null) die(`no address holds the code ${code}`);
-    out(`${row.address} is retired. Mail to it is refused from now on, and that code is never given to anybody else.`);
-    out(`${row.agentName || "that bot"} gets a fresh address on the relay's next sweep, which is within five minutes.`);
-  } finally { store.close(); }
+  const answer = await api("POST", "/v1/admin/mail/retire", { code }).catch(() => null);
+  const row = answer?.retired ?? null;
+  if (row == null) die(`no address holds the code ${code}`);
+  out(`${row.address} is retired. Mail to it is refused from now on, and that code is never given to anybody else.`);
+  out(`${row.agentName || "that bot"} gets a fresh address on the relay's next sweep, which is within five minutes.`);
 }
 
 async function mailSenders(args) {
   const [group, ...rest] = positional(args);
-  const store = openLedger();
-  try {
-    const directory = mailDirectoryFor(store);
-    // `mail senders <slug>` lists; `mail allow` and `mail only` are their own verbs below.
-    const slug = group ?? "";
-    if (slug.length === 0) die("node cp/cli.mjs mail senders <slug>");
-    const rows = store.listSenders(slug);
-    out(`${slug}: ${directory.approvedSendersOnly(slug) ? "only the addresses below can write to these bots" : "anybody can write to these bots (the default)"}`);
-    for (const row of rows) out(`  ${row.sender}`);
-    if (rows.length === 0) out("  (nobody has been allowed yet)");
-    void rest;
-  } finally { store.close(); }
+  // `mail senders <slug>` lists; `mail allow` and `mail only` are their own verbs below.
+  const slug = group ?? "";
+  if (slug.length === 0) die("node cp/cli.mjs mail senders <slug>");
+  const answer = await api("GET", `/v1/admin/mail/senders?slug=${encodeURIComponent(slug)}`);
+  const senders = Array.isArray(answer?.senders) ? answer.senders : [];
+  out(`${slug}: ${answer?.approvedSendersOnly ? "only the addresses below can write to these bots" : "anybody can write to these bots (the default)"}`);
+  for (const sender of senders) out(`  ${sender}`);
+  if (senders.length === 0) out("  (nobody has been allowed yet)");
+  void rest;
 }
 
 async function mailAllow(args) {
   const [slug, address] = positional(args);
   if (!slug || !address) die("node cp/cli.mjs mail allow <slug> <address>");
-  const store = openLedger();
-  try {
-    const row = store.allowSender(slug, address);
-    if (row == null) die("name a workspace and an email address");
-    out(`${row.sender} may write to ${slug}'s bots`);
-    if (!mailDirectoryFor(store).approvedSendersOnly(slug)) {
-      out("note: this workspace takes mail from anybody today, so the list is not being enforced. `mail only <slug> on` enforces it.");
-    }
-  } finally { store.close(); }
+  const answer = await api("POST", "/v1/admin/mail/senders", { slug, sender: address }).catch(() => null);
+  const row = answer?.allowed ?? null;
+  if (row == null) die("name a workspace and an email address");
+  out(`${row.sender} may write to ${slug}'s bots`);
+  if (!answer?.approvedSendersOnly) {
+    out("note: this workspace takes mail from anybody today, so the list is not being enforced. `mail only <slug> on` enforces it.");
+  }
 }
 
 async function mailOnly(args) {
   const [slug, setting] = positional(args);
   if (!slug || !["on", "off"].includes(String(setting))) die("node cp/cli.mjs mail only <slug> on|off");
-  const store = openLedger();
-  try {
-    const on = mailDirectoryFor(store).setApprovedSendersOnly(slug, setting === "on", "cli");
-    out(`${slug}: ${on ? "only allowed senders can write to these bots now" : "anybody can write to these bots now"}`);
-    if (on) {
-      out("WARNING: a verification mail from a site nobody has allowed yet will be refused. That is the shape that eats a first sign-up.");
-      out(`allowed today: ${store.listSenders(slug).map((row) => row.sender).join(", ") || "nobody"}`);
-    }
-    out("the relay picks this up on its next sweep, which is within five minutes");
-  } finally { store.close(); }
+  const answer = await api("POST", "/v1/admin/mail/only", { slug, on: setting === "on" });
+  const on = answer?.approvedSendersOnly === true;
+  out(`${slug}: ${on ? "only allowed senders can write to these bots now" : "anybody can write to these bots now"}`);
+  if (on) {
+    out("WARNING: a verification mail from a site nobody has allowed yet will be refused. That is the shape that eats a first sign-up.");
+    out(`allowed today: ${(Array.isArray(answer?.senders) ? answer.senders : []).join(", ") || "nobody"}`);
+  }
+  out("the relay picks this up on its next sweep, which is within five minutes");
 }
 
 async function mailSweep() {
