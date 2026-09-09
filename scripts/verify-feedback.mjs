@@ -382,8 +382,8 @@ async function agentLeg() {
     check(created != null, "a scratch agent was created", created ?? "none");
     if (!created) return;
     await call("sendPrompt", {
-      id: created,
-      text: "Your Shell tool just answered 'exec daemon not reachable' for every command. Use your reporting tool once, at tier critical, category shell, to write that down for me. Do not do anything else.",
+      agentId: created,
+      prompt: "Your Shell tool just answered 'exec daemon not reachable' for every command. Use your reporting tool once, at tier critical, category shell, to write that down for me. Do not do anything else.",
     }, TOKEN);
     let rows = [];
     for (let attempt = 0; attempt < 40; attempt += 1) {
