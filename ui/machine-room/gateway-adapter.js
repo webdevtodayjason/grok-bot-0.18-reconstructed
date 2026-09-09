@@ -1482,10 +1482,13 @@
   // A host that has not landed the commands answers "unknown gateway method", tryCall turns that
   // into null, and the panel says the catalog is not on this host rather than drawing an empty one.
   let marketplaceCatalogCache = null;
-  // BOTS-1. The IN-FLIGHT promise, not only the settled answer. Measured on grok-bot-local-vm
-  // 2026-09-09: opening Marketplace fetched listMarketplace TWICE, because the panel and the Bots
-  // tab both ask on the same tick and the settled-answer cache is still empty when the second one
-  // arrives. At 110,564 B that is a wasted body per open, and the catalog only grows from here.
+  // BOTS-4. The read IN FLIGHT, not only the settled answer. Measured on grok-bot-local-vm
+  // 2026-09-09: opening Marketplace fetched listMarketplace TWICE -- 221,128 B on a box serving
+  // seven bots -- because the Plugins half and the Bots half both ask on the same tick and a cache
+  // that only holds settled answers is still empty when the second one arrives. With 72 bots in the
+  // catalog that is the difference between one body and two on a relay that buffers each one whole.
+  // Two builders wrote this fix independently; this is the one that keeps a forced read out of the
+  // shared slot, so a deliberate refresh cannot be handed to a caller that asked for the cache.
   let marketplaceCatalogInFlight = null;
   function marketplaceCatalog(force) {
     if (marketplaceCatalogCache && force !== true) return Promise.resolve(marketplaceCatalogCache);
