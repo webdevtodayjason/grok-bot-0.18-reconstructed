@@ -282,10 +282,19 @@ try {
   step("the box, and what it serves");
   const served = await gw("listMarketplace", {}).catch((error) => ({ error: error.message }));
   if (served?.error) bail(`the host would not serve a catalog: ${served.error}`);
-  const pack = (served.bots ?? []).find((bot) => String(bot?.id ?? "") === PACK_ID) ?? null;
+  // BOTS-4. `listMarketplace` serves a CARD -- the row and its chips, plus a count per block -- and
+  // `getMarketplaceItem` serves the whole row, which is where the pack's skill documents and its
+  // members' personas now live. The card is merged under the detail so this gate still runs against
+  // a bundle older than the projection, where the detail call simply adds nothing.
+  const packCard = (served.bots ?? []).find((bot) => String(bot?.id ?? "") === PACK_ID) ?? null;
+  const pack = packCard == null ? null : {
+    ...packCard,
+    ...(await gw("getMarketplaceItem", { kind: "bot", id: PACK_ID }).catch(() => ({}))),
+  };
   check(pack != null, "the host serves the Marketing team pack", pack == null
     ? `bots: ${(served.bots ?? []).map((b) => b.id).join(", ")}`
-    : `${(pack.members ?? []).length} members, ${(pack.skills ?? []).length} documents`);
+    // `counts` is what the card carries when the detail call above found nothing to merge.
+    : `${(pack.members ?? []).length} members, ${(pack.skills ?? []).length || (pack.counts?.skills ?? 0)} documents`);
   if (pack == null) bail("this box is running a bundle without the pack in it; build and deploy this tree's host first");
   const declaredBotCategories = (served.categories?.bots ?? []).map(String);
   const declaredPluginCategories = (served.categories?.plugins ?? []).map(String);

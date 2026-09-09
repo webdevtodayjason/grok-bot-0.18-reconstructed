@@ -2203,7 +2203,16 @@ try {
       .filter((id) => !servedBotIds.has(id));
     check(missingBots.length === 0, `listMarketplace serves the bot templates the product shipped (${marketBots.length} on this host)`,
       marketCatalog?.error ?? (missingBots.length ? `missing ${missingBots.join(", ")}` : marketBots.map((b) => b.name).join(", ")));
-    const researchDesk = marketBots.find((b) => String(b?.name ?? "") === "Research desk") ?? null;
+    // BOTS-4. The LIST is a card now: `listMarketplace` serves what the rows and chips are drawn
+    // from plus a count per block, and drops instructions, memories, skills, routines and apps,
+    // because serving 72 rows whole is close to a megabyte per panel opening. The detail comes from
+    // `getMarketplaceItem`, which has always served the whole row. The list row is kept as the
+    // fallback so this gate still passes against a bundle older than the projection.
+    const researchDeskCard = marketBots.find((b) => String(b?.name ?? "") === "Research desk") ?? null;
+    const researchDesk = researchDeskCard == null ? null : {
+      ...researchDeskCard,
+      ...(await gw("getMarketplaceItem", { kind: "bot", id: researchDeskCard.id }).catch(() => ({}))),
+    };
     if (marketBots.length === 0) {
       console.log("  INFO  this host serves no bot catalog; the Bots-tab checks below are skipped");
     } else {
@@ -2218,7 +2227,14 @@ try {
       else if (listed.includes(String(researchDesk.id))) {
         await page.click(`[data-bot-id="${researchDesk.id}"]`); await page.waitForTimeout(1000);
         const tabs = await page.$$eval("[data-bot-tab]", (els) => els.map((e) => e.dataset.botTab));
-        check(["instructions", "skills", "integrations"].every((t) => tabs.includes(t)), "the bot page carries its three left tabs", tabs.join(", "));
+        // BOTS-4 renamed the first block: what a bot IS became Memories ("facts it already knows"),
+        // because the memories are what the import seeds and what the identity is composed from,
+        // and Instructions stopped being a block at all. Written to pass on either vocabulary so a
+        // bundle from before that change is not a red deploy gate; the console wave tightens it to
+        // the four exact names once every build serves them.
+        const identityTab = tabs.includes("memories") ? "memories" : "instructions";
+        check(["skills", "integrations"].every((t) => tabs.includes(t)) && tabs.includes(identityTab),
+          `the bot page carries its left rail (identity block: ${identityTab})`, tabs.join(", "));
         check((await page.$$(`[data-import-bot="${researchDesk.id}"]`)).length === 1, "and one Import Bot button");
         // Tools it can use: one row per integration the template names, each either already
         // installed or carrying the Add that goes through the Plugins tab's own install path.

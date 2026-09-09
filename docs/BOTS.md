@@ -258,16 +258,31 @@ heavy fields come off -- `instructions`, `memories`, `skills`, `routines`, `apps
 `members` are projected to `id`, `role`, `summary` and `reportsTo`. `integrations` stays: it is a
 short list of ids and the chips have always been drawn from it.
 
-**Measured on this Mac with the projection: 95,455 bytes** (54,146 of plugins, 40,988 of bots), which
-is smaller than the 110,564 the box serves today with seven bots in it.
+**Measured on this Mac with the projection: 95,455 bytes** (54,146 of plugins, 40,988 of bots) --
+smaller, with 72 bots in it, than the 110,564 the box serves today with seven.
+
+The two numbers are the same quantity and not two different ones. The pre-wave catalog was rebuilt
+straight out of git and serialized in process on this Mac: **110,564 bytes**, byte for byte what
+`curl` measured off the box's own gateway. The box has no proxy, so `catalogForBox` is the bundled
+catalog character for character, and there is no envelope between the two figures.
+
+| | Plugins | Bots | `listMarketplace` |
+| --- | --- | --- | --- |
+| before this wave, on grok-bot-local-vm over HTTP | 24 | 7 | 110,564 B |
+| before this wave, in process on this Mac | 24 | 7 | 110,564 B |
+| after, in process on this Mac | 24 | 72 | **95,455 B** |
+| after, if the rows were served whole | 24 | 72 | 995,548 B |
 
 `getMarketplaceItem` serves the whole row and is untouched. It already existed, already worked, and
 the console had never called it.
 
 > **This is a contract change.** Anything that imports a bot must fetch its row through
-> `getMarketplaceItem` first; a list card has no instructions, no skills and no memories. The bot
-> page and `bot-setup.js` do that. The live numbers after the projection get measured on the box and
-> on the R750 at ship time and recorded in the gap row.
+> `getMarketplaceItem` first; a list card has no instructions, no skills and no memories. The type
+> says so -- `MarketplaceBotCard` -- and `card.counts != null && card.skills == null` is how a
+> caller holding one of each tells them apart. `scripts/verify-dashboard.mjs` and
+> `scripts/verify-marketing.mjs` were changed in the same commit to fetch the detail row, and both
+> merge the card underneath it so they still run against a bundle older than the projection. The
+> live numbers after the projection get measured on the box and on the R750 at ship time.
 
 ---
 

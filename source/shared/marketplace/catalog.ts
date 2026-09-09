@@ -458,6 +458,30 @@ export interface MarketplaceBotMember {
   readonly reportsTo?: string | null;
 }
 
+/**
+ * BOTS-1. A bot as the LIST serves it: the row and its chips, and a count per block.
+ *
+ * The five heavy fields are absent, and `getMarketplaceItem` is where the whole row comes from.
+ * The type says so rather than leaving a reader to find out from a payload: `counts` is present on
+ * a card and never on a row, so `card.counts != null && card.skills == null` is how a caller that
+ * holds one of each tells them apart, and any code that would import a bot has to fetch the row.
+ */
+export interface MarketplaceBotCard extends Omit<MarketplaceBot, "instructions" | "memories" | "skills" | "routines" | "apps" | "members"> {
+  readonly counts: {
+    readonly memories: number;
+    readonly skills: number;
+    readonly routines: number;
+    readonly apps: number;
+  };
+  /** A pack's members, projected to what the pack row's own line is drawn from. */
+  readonly members?: readonly {
+    readonly id: string;
+    readonly role: string;
+    readonly summary: string;
+    readonly reportsTo: string | null;
+  }[];
+}
+
 export interface MarketplaceCatalog {
   readonly plugins: readonly MarketplacePlugin[];
   readonly bots: readonly MarketplaceBot[];
@@ -2056,7 +2080,11 @@ export function marketplaceCatalogWireView(
 ): MarketplaceCatalog {
   return {
     plugins: catalog.plugins.map((plugin) => marketplacePluginWireView(plugin, options)),
-    bots: catalog.bots.map(marketplaceBotCardView),
+    // The list's rows are CARDS (MarketplaceBotCard), not whole rows. The wire type still says
+    // MarketplaceCatalog because every reader of this answer -- the host, the console, four verify
+    // scripts -- would otherwise have to change in the same commit, and a card is a bot row with
+    // five fields absent rather than a different thing.
+    bots: catalog.bots.map(marketplaceBotCardView) as unknown as readonly MarketplaceBot[],
     categories: catalog.categories,
   };
 }
@@ -2079,7 +2107,7 @@ export function marketplaceCatalogWireView(
  * `integrations` STAYS on the card: it is a short list of ids, the row's chips are drawn from it,
  * and the Bots tab has always filtered on it.
  */
-export function marketplaceBotCardView(bot: MarketplaceBot): MarketplaceBot {
+export function marketplaceBotCardView(bot: MarketplaceBot): MarketplaceBotCard {
   const { instructions, memories, skills, routines, apps, members, ...card } = bot as MarketplaceBot & Record<string, unknown>;
   return {
     ...card,
@@ -2096,7 +2124,7 @@ export function marketplaceBotCardView(bot: MarketplaceBot): MarketplaceBot {
         id: member.id, role: member.role, summary: member.summary, reportsTo: member.reportsTo ?? null,
       })),
     } : {}),
-  } as unknown as MarketplaceBot;
+  } as unknown as MarketplaceBotCard;
 }
 
 /**
