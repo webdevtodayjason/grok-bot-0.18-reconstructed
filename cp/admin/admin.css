@@ -292,7 +292,12 @@ tbody tr.gateRow:hover td { background: #0E151E; }
 
 /* ---- clients ---------------------------------------------------------------------------- */
 
-.clients { display: grid; gap: 12px; }
+/* minmax(0, 1fr) and not the default `auto` track. An auto track is allowed to grow past its own
+   container to fit a card's min-content, and one long unbreakable thing inside a card then makes the
+   whole panel a horizontal scroller: every heading and every table slides left and there is no sign
+   on the screen of why. Everything genuinely wide in here already sits in its own .scroll box, which
+   is the thing that is supposed to scroll. */
+.clients { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 /* FEEDBACK-1's report card is drawn the way a client card is and deliberately does not share its
    name: a gate counts .client to say how many workspaces the Clients panel drew. */
 .client, .feedbackCard {
@@ -330,13 +335,17 @@ tbody tr.gateRow:hover td { background: #0E151E; }
 
 /* Hidden is decided once, at the top of this file, for every panel including this one. */
 
-.providers, .planModels { display: grid; gap: 12px; }
+.providers, .planModels { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .provider, .planModel {
   border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px; background: #0C131C;
 }
 .provider .head, .planModel .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .provider .head strong, .planModel .name { font-size: 15px; font-weight: 600; }
 .provider .actions, .planModel .actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+/* Why a control on this card is off, on its own line under the row of controls. It has to be a full
+   row: a sentence sitting inside the flex row of buttons makes that row as wide as the sentence, and
+   the whole card then runs wider than the panel it is in. */
+.provider .whyOff { flex-basis: 100%; margin-top: 2px; white-space: normal; color: var(--quiet); font-size: 12.5px; }
 
 /* PROVIDERS-8. The month's failures, beside the chip and never instead of it. A provider whose last
    five requests all answered is green, and a green chip that hides three failures earlier in the
@@ -374,7 +383,7 @@ form.stack .controls { margin: 0; }
 .keyForm .why { flex-basis: 100%; font-size: 12px; color: var(--quiet); white-space: normal; }
 .keyForm.danger input { border-color: #57303A; }
 
-.defaults { display: grid; gap: 10px; }
+.defaults { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .defaults .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .defaults select { padding: 6px 10px; font-size: 13px; }
 

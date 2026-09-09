@@ -135,9 +135,11 @@
       else link.removeAttribute("aria-current");
     }
     // Each panel scrolls inside itself, so a panel left half way down must not hand its scroll
-    // position to the next one an operator opens.
+    // position to the next one an operator opens. Sideways as well as down: everything wide on this
+    // page has its own scrolling box, so a panel that has been nudged right is a panel with its
+    // first column of text off the screen and no sign of why.
     const open = $(wanted);
-    if (open) open.scrollTop = 0;
+    if (open) { open.scrollTop = 0; open.scrollLeft = 0; }
   }
 
   window.addEventListener("hashchange", () => showPanel(location.hash));
@@ -196,7 +198,14 @@
       clear(host);
       for (const chip of chips) host.appendChild(statNode("div", chip));
     }
-    if (headline) headlines.set(headline.key, headline);
+    if (headline == null) return;
+    headlines.set(headline.key, headline);
+    // Redrawn here and not only after a full Refresh. Four of these panels reload on their own when
+    // a filter beside them changes -- the sign-in window, the feedback tier -- and an Overview that
+    // only moved on a Refresh sat there saying one attack in the last day while the panel behind the
+    // link said none. Two numbers for the same fact on the same screen is the failure this whole
+    // page is built to avoid, and it costs six nodes to draw.
+    renderOverview();
   }
 
   function renderOverview() {
@@ -852,7 +861,11 @@
     const select = $("acPlanModel");
     const typed = $("acPlanModelText");
     if (select == null || typed == null) return;
-    const models = (providersAnswer.planModels ?? []).filter((one) => String(one.alias ?? "").length > 0);
+    // Only the models a customer can actually be put on. plan-zai-vision and its kind are what other
+    // models fall back TO: they carry no customer name, so offering one here would put a routing
+    // alias in a picker and a workspace on a model its own Settings page could not name.
+    const models = (providersAnswer.planModels ?? []).filter((one) =>
+      String(one.alias ?? "").length > 0 && one.shownToCustomers === true);
     if (models.length === 0) {
       select.hidden = true;
       typed.hidden = false;
@@ -1528,7 +1541,6 @@
     if (keyCount === 0) {
       check.disabled = true;
       check.title = "Add a key first, then this can check it.";
-      actions.appendChild(el("span", "quiet", "add a key first, then this can check it"));
     }
 
     // PROVIDERS-9. REMOVING A PROVIDER.
@@ -1546,18 +1558,27 @@
       || (model.deployments ?? []).some((one) => String(one.keySlot ?? "").startsWith(`${provider.id}-`)));
     const removeProvider = el("button", "ghost small removeProvider", "Remove");
     removeProvider.type = "button";
-    const blocking = keyCount > 0
-      ? `This provider still holds ${keyCount === 1 ? "a key" : `${keyCount} keys`}. Remove the keys first.`
-      : servedBy.length > 0
+    // BOTH REASONS, when both are true. Naming only the first one sends the operator off to remove a
+    // key and back to a button that is still off, with a second reason they were never told about.
+    const blocking = [
+      keyCount > 0 ? `This provider still holds ${keyCount === 1 ? "a key" : `${keyCount} keys`}. Remove the keys first.` : "",
+      servedBy.length > 0
         ? `${servedBy.map((one) => one.alias).join(", ")} still ${servedBy.length === 1 ? "runs" : "run"} on it. Point ${servedBy.length === 1 ? "it" : "them"} somewhere else first.`
-        : "";
+        : "",
+    ].filter(Boolean).join(" ");
     if (blocking.length > 0) {
       removeProvider.disabled = true;
       removeProvider.title = blocking;
     }
     actions.appendChild(removeProvider);
-    if (blocking.length > 0) actions.appendChild(el("span", "quiet", blocking));
     head.appendChild(actions);
+    // Under the row of buttons and never in it. A sentence inside a flex row of controls sets that
+    // row's width to the sentence, and this card then ran 83 px wider than the panel: everything on
+    // this panel slid sideways and the left edge of every heading went off the screen. Measured on
+    // this Mac 2026-09-09 in a screenshot, while every other check on the panel passed.
+    for (const line of [keyCount === 0 ? "add a key first, then this can check it" : "", blocking]) {
+      if (line.length > 0) head.appendChild(el("div", "whyOff", line));
+    }
     card.appendChild(head);
 
     // WHERE THE MODEL LIST CAME FROM, in those words, because the two are not the same thing and
