@@ -421,3 +421,36 @@ desk's six integrations all offer Add on the demo tenant.
   20 MB host and the wire never sees more than a card of it.
 - **Do not edit `community-bots.ts`.** The test regenerates it and compares byte for byte. Edit the
   overlay, with a `why`, and rerun the generator.
+
+- **The All view draws six rows per section, not all of them.** Measured on
+  grok-bot-local-vm and on the R750 demo tenant, 2026-09-09: 40 of the 72 rows are on screen
+  in the All view; the rest are behind that section's own "See all N in <category>" chip or the
+  search box. Anything automated that looks for a bot on the list must search for it by name or
+  press its chip. A check that asserts "every bot is on one screen" was true of seven rows and is
+  not true of 72.
+- **A read still in flight is not a read that failed.** The page paints the card while
+  `getMarketplaceItem` is running. Until 2026-09-09 the four blocks said the row "could not be read
+  from the host" during that window and told the person to close the page. Any new block on this
+  page has to distinguish pending from failed, or it will lie for as long as the fetch takes.
+- **The app buckets hold apps, not names.** `apps.addable`, `apps.byo` and `apps.informational`
+  carry `{name, label, description, pluginId}`. Rendering them through a string helper prints
+  `[object Object]`, which is what the setup receipt did on its first live run.
+
+## What is not proven yet
+
+**The bot's own first message does not appear on the demo tenant's box.** Measured on the R750,
+2026-09-09, box `titanbot-box-atonqjq7zx593jsacaccpfau`: after Add, the agent is on the roster with
+its facts, playbooks and jobs, and nothing is ever written to its conversation. A PLAIN agent
+created with `isKickstartRequested: true` and then kickstarted on that same box answers
+`{"isIntroductionInFlight": false}` and writes nothing in 180 s either, so the introduction is not
+something the bot setup broke — that box starts no introduction for any new agent.
+
+On grok-bot-local-vm the same sequence works and the words are the bot's own, roughly 60 s after the
+press: *"Hey! I'm your account researcher. I dig into the companies you sell to and hand you back
+call briefs, stakeholder maps, and account plans worth using. Everything I pull off the web comes
+with a source and a date, so you always know what's solid."* followed by a question about what the
+person sells. That box answers `{"isIntroductionInFlight": true}` and reports 8 healthy endpoints.
+
+Owner: whoever next has the demo tenant. Next action: find out why that box declines to start an
+introduction (the endpoint it is pinned to, or a host setting), and re-run the Add there. It is
+filed as `BOX-7` in docs/GAP-ANALYSIS.md.
