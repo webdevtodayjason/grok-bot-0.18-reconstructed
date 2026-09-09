@@ -373,6 +373,11 @@
     <!-- The Marketplace's Bots tab. It only attaches window.__marketplaceBots at load and reads
          the adapter lazily, so it can come before app.js builds one. -->
     <script src="marketplace-bots.js"></script>
+    <!-- BOTS-1. The Add sequence behind a catalog bot, in its own module so the page that draws a
+         bot and the setup that creates one are not the same file. It attaches window.__botSetup at
+         load and reads the gateway lazily, the same contract marketplace-bots.js keeps; the Bots
+         tab falls back to its own Import Bot when this module is absent. -->
+    <script src="bot-setup.js"></script>
     <!-- CONSOLE-4: the three sibling modules items B, C and D fill. They sit here, beside
          marketplace-bots.js and ahead of app.js, for one reason: app.js consults all three seams
          inside its FIRST renderAll, and a module that arrives after that first paint would show

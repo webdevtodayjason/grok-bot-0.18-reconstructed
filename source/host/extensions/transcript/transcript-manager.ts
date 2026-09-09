@@ -2,6 +2,12 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  applyAgentMemorySeed,
+  type SeedAgentMemoriesResult,
+  type SeedMemoryKind,
+} from "../../agents/seed-agent-memories.js";
+
+import {
   createExpiryPolicy,
   realClock,
   type Clock,
@@ -367,6 +373,36 @@ export class TranscriptManager {
 
   async getAgentMemories(agentId: string) {
     return this.memory.list({ agentId });
+  }
+  /**
+   * BOTS-1. Seed an agent's own remembered facts. The catalog's Add button is the only caller: a
+   * community bot's operating rules belong where the agent's own facts live, and until this there
+   * was no write path for one at all -- the store is written by the agent itself, mid-turn, and by
+   * nothing else.
+   *
+   * Two things are load-bearing. A fact over the cap is REFUSED and named rather than silently cut
+   * (see seed-agent-memories.ts). And the prompt snapshot is cleared afterwards, without which the
+   * agent that was just seeded reads a frozen memory prompt for the rest of the session and answers
+   * as though it remembers nothing.
+   */
+  async addAgentMemories(
+    agentId: string,
+    memories: readonly unknown[],
+    kind?: SeedMemoryKind,
+  ): Promise<SeedAgentMemoriesResult> {
+    // NO_MEMORY has no store at all, and unavailableMemoryStore().addMemory answers null for every
+    // write -- which this path would otherwise report as "already known". A box with no memory
+    // service says so instead.
+    if (typeof this.memory?.storeForAgent !== "function") {
+      throw new Error("this box is not holding memory for its agents");
+    }
+    return applyAgentMemorySeed(
+      {
+        store: this.memory.storeForAgent(agentId),
+        clearPromptSnapshot: () => this.clearMemoryPromptSnapshot(agentId),
+      },
+      { memories: Array.isArray(memories) ? memories : [], ...(kind == null ? {} : { kind }) },
+    );
   }
   async deleteAgentMemory(agentId: string, memoryId: string) {
     // The store destructures `id`; passing `memoryId` silently removed nothing and reported success.

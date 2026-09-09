@@ -181,3 +181,10 @@ import "./machine-room-files.test.mjs";
 // stops a stranger's guess landing in the operator's own Titan.
 import "./cp-mail.test.mjs";
 import "./mail-directory.test.mjs";
+
+// BOTS-1: the write path behind Add on a catalog row. The host verb that seeds an agent's own
+// remembered facts and refuses one over the store's ceiling rather than storing it short, and the
+// console module that mints the bot, seeds it, installs its playbooks, creates its jobs switched
+// off, and asks for the introduction last.
+import "./agent-memory-seed.test.mjs";
+import "./bot-setup.test.mjs";
