@@ -1,10 +1,14 @@
-# Agent email (MAIL-1, MAIL-2)
+# Agent email (MAIL-1, MAIL-2, MAIL-3)
 
 > **MAIL-2 changed the addresses.** Every bot now has an address of its own at the product domain,
 > `agent<code>@myagents.email`, where the code is six digits the control plane mints once per bot
 > and never reuses. Addresses made out of a name are being retired and stop working on
-> **2026-10-01**. Section 2b is the whole of it; the rest of this document is the receive side,
-> which is unchanged.
+> **2026-10-01**. Section 2b is the whole of it.
+>
+> **MAIL-3 turned sending on.** A bot sends by asking the relay, which holds the Resend key and
+> decides which address the mail comes from; the bot cannot choose it, and every send is one row on
+> the control plane. Section 6 is the whole of it, and it replaces the shell recipe that used to be
+> there. Sections 3, 4 and 5 are the receive side and are unchanged by it.
 
 
 Every agent gets an email address at your own domain. Mail sent to one of those addresses lands in
@@ -12,8 +16,9 @@ that agent's conversation as a message it can act on, and the agent writes back 
 address. Titan's address on Jason's instance is `titan@titanium.bot`.
 
 Mail comes in through Resend. The relay in front of the box takes the message, works out which
-agent it belongs to, and hands it over as an ordinary prompt. Sending is the agent's own job: it
-posts to Resend from its shell with a key you gave it once.
+agent it belongs to, and hands it over as an ordinary prompt. Sending goes back out the same way:
+the agent asks the relay, and the relay holds the key and decides which address the mail comes
+from. No key for sending mail is ever inside a box.
 
 The receiving side lives entirely in the relay; the host bundle changed by one seed skill (the email skill agents read), so agents on a box built before it need a host update to see it. The relay half works without one. The receiving side lives entirely in the relay
 (`ui/mail-edge.mjs`), the way the job bus edge does.
@@ -42,16 +47,18 @@ You need a Resend account and a domain you control.
 6. **Type your domain** into the card, pick who gets mail nobody else is named for, and Save.
    Turn **Receiving** on. Until you do, a signed message is answered and thrown away, which is
    what the card says on its own line.
-7. **Make a second key, sending only, and give that one to each agent.** In Resend, create another
-   API key with sending access and nothing else. In the agent's conversation, ask it to send an
-   email; it asks for `RESEND_API_KEY` and you get a card to type the key into. The value lands in
-   that agent's shell as an environment variable and never appears in the conversation. Agents with
-   their own window get it through the same fan-out every other shell secret uses (ENV-1).
+7. **Nothing, for sending.** There is no second key and no key to give an agent. A bot sends by
+   asking the relay, which already has the key from step 5 and decides the address the mail comes
+   from; section 6 is the whole of it.
 
-   Two keys, on purpose. An agent runs shell commands, and mail arriving from outside is written by
-   whoever sent it, so treat everything in an agent's shell as reachable by a stranger. A sending
-   key can send from your domain and nothing else. The relay's key could read every message your
-   domain ever received, so it stays on the relay.
+   **This changed on 2026-09-09 (MAIL-3), and it is worth knowing why.** Until then an agent sent
+   by posting to Resend from its own shell with a `RESEND_API_KEY` you put there. An agent runs
+   shell commands and mail arriving from outside is written by whoever sent it, so everything in an
+   agent's shell is reachable by a stranger; and a key scoped to a domain can send as **any**
+   address at it. On one box that is a risk you can accept. Across customers it is not: one leaked
+   shell would send as every other customer's bots. So the key stayed on the relay and the relay
+   grew a send route instead. **If you set `RESEND_API_KEY` on a box before this, nothing uses it
+   any more and you can clear it from the console's Secrets card.**
 
 Both secrets are write-only. Once saved, no route on this server can read either one back: the
 console shows "Saved" or "Not saved yet", and a Clear button. The address the relay reads Resend at
@@ -213,18 +220,27 @@ list and the per-workspace switch. Never holds: a Resend key, a webhook signing 
 token, or the text of any message. The Resend credentials stay in the relay's own settings store,
 where they were, and the webhook still arrives at the relay.
 
-### Sending, as it is today
+### Sending, and why the key never leaves the relay
 
-**Unchanged by this wave.** An agent sends by posting to Resend from its own shell with a key the
-operator put there, and that key exists on exactly one box. So the address list pushed into every
-box carries `canSend: false`, and a bot tells the truth when it is asked whether it can send.
+**A bot sends by asking the relay, and it never touches Resend itself.** Section 6 is the route;
+this is why it has that shape.
 
-The reason it is not more than that yet: a Resend key scoped to `myagents.email` can send **as any
-address at that domain**, so copying it into tenant boxes would let every customer send as every
-other customer and as Titan. The only sound shape is a relay route that holds the already-stored
-key and forces the From to the calling bot's own code address, with one row written per send. That
-route is filed and not shipped; `mail_send_log` in the control plane's database is the table it
-writes to when it lands.
+A Resend key scoped to `myagents.email` can send **as any address at that domain**. A copy of it
+inside a tenant box is a copy that can send as every other customer and as Titan, so it was never
+copied and bots simply could not send at all until MAIL-3. The relay is the only process holding
+all three things a send needs: every tenant's gateway bearer, the cached address directory, and the
+directory owner's Resend key. So the route lives there, it forces the From to the calling bot's own
+code address, and it writes one row per send.
+
+**What the bearer proves, said plainly rather than implied.** A box presents one credential,
+`SAND_GATEWAY_TOKEN`, and the registry maps that value to a workspace. So the bearer proves the
+WORKSPACE. The `agentId` in the body does not prove the AGENT: a workspace whose box is compromised
+can send as any of its own bots. That is a far smaller blast radius than the copied key would have
+been — that one reached every bot in every workspace — but it is not per-agent custody and this
+document will not pretend it is.
+
+The address list pushed into each box now carries `canSend: true`, so a bot with an address holds
+the tool, and a bot without one says it has no address to send from.
 
 ### What bites
 
@@ -343,11 +359,19 @@ Behind the console session (or the relay bearer), like every other console route
   "catchAllAgentId": "", "routes": {}, "apiKeySet": true, "webhookSecretSet": true,
   "webhookUrl": "https://console.titanium.bot/hooks/resend",
   "addresses": [{ "agentId": "…", "name": "Titan", "address": "titan@titanium.bot", "note": "" }],
-  "recent": [ … the last 20 ledger rows, newest first … ] }
+  "recent": [ … the last 20 ledger rows, newest first … ],
+  "sends":  [ … the last 20 sent rows, newest first … ] }
 ```
 
 Neither secret is ever in this shape. `apiKeySet` and `webhookSecretSet` are the whole answer about
 them.
+
+`sends` is MAIL-3 and it is that workspace's own sent ledger: `{at, agentId, agentName, code, to,
+subject, outcome, resendId}`, newest first, the same order `recent` is in. **Newest first matters
+to the person, not to the code**: the card paints the array as it arrives and the operator reads the
+top row as the last thing that happened, so a relay that answered oldest first would draw a week-old
+send as the newest one. A relay that predates MAIL-3 answers no `sends` field at all, and the card
+leaves its table alone rather than claiming nothing has ever been sent.
 
 ### `POST /mail/settings`
 
@@ -367,6 +391,8 @@ the card save the rest of the form without ever holding a secret.
 | `ui/mail-inbox.jsonl` | One line per event: `{at, email_id, message_id, from, to, subject, agentId, agentName, outcome}`, plus `slug` on the rows described below. Mode 0600, gitignored. |
 | `ui/mail-owner.txt` | Optional. One workspace slug: the workspace whose Resend account holds the per-bot address domain, and the only one whose edge may resolve a code. Absent means the operator's. `CP_MAIL_OWNER_SLUG` is the same value as an environment variable and wins. Read per message. |
 | `ui/mail-no-push.txt` | Optional, and empty in the product. One workspace slug per line (`#` starts a comment): workspaces this relay must not write inside. Their codes are still minted and their mail still routes; only the `setAgentMail` push is skipped. `SAND_UI_MAIL_NO_PUSH_SLUGS` is the same list as a comma-separated environment variable. Read once per sweep, so a change takes effect within five minutes with nothing restarted. |
+| `ui/mail-sent.jsonl` | MAIL-3. One line per send by this workspace's bots: `{at, agentId, agentName, code, to, subject, outcome, resendId}`. Mode 0600, gitignored. **This is the only place a sent subject is kept**, and only this workspace's own Mail card reads it. |
+| `ui/mail-no-send.txt` | MAIL-3. Optional, and empty in the product. One workspace slug per line (`#` starts a comment): workspaces whose bots may not send. The same shape and the same reader as `mail-no-push.txt`, and `SAND_UI_MAIL_NO_SEND_SLUGS` is the same list as an environment variable — but read **per request** rather than per sweep, because it is a refusal and a refusal that takes five minutes to start is not one. It is separate from the no-push list on purpose: not being pushed `canSend` stops a bot offering to send, and a box that is never pushed still holds a valid gateway token and could call the route anyway. An absent push is not a rule. |
 
 The ledger is the "what arrived and where it went" record the console shows, and the duplicate
 check reads it. **It never holds a body or a secret.** It is not an archive of your mail; Resend has
@@ -406,27 +432,156 @@ been rotated away could be delivered a second time.
 
 ## 6. Sending
 
-There is no email tool. An agent sends through its shell:
+A bot sends by asking the relay. There is one route, one From the bot cannot choose, and one row on
+the control plane for every message that goes.
 
-```bash
-curl -sS -X POST https://api.resend.com/emails \
-  -H "Authorization: Bearer $RESEND_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"from":"Books <books@titanium.bot>","to":["jane@client.example"],
-       "subject":"Re: September invoice",
-       "headers":{"In-Reply-To":"<abc123@client.example>"},
-       "text":"Thanks Jane, that is received."}'
+### `POST /mail/send`
+
+Behind the box's own gateway bearer — `SAND_GATEWAY_TOKEN`, the value the relay's registry already
+maps to a workspace for every other call a box makes. No new secret is minted anywhere for this.
+
+```json
+{ "agentId": "…", "to": "jane@client.example", "subject": "September invoice",
+  "text": "Thanks Jane, that is received.", "html": "…",
+  "inReplyTo": "<abc123@client.example>" }
 ```
 
-`In-Reply-To` carrying the Message-ID of the mail it is answering is what puts the reply in the
-same thread. The skill says so, and says never to paste the key into a message.
+`inReplyTo` carrying the Message-ID of the mail being answered is what puts the reply in the same
+thread, and it is the only header a caller may set.
 
-**MAIL-2 did not change this**, and section 2b says why: a Resend key scoped to the product domain
-can send as any address at it, so it stays on the one box that already has it rather than being
-copied into every customer's. Until the relay's own send route lands, the address list pushed into
-each box carries `canSend: false` and a bot answers honestly when somebody asks whether it can
-send. A bot on a workspace with no key can still be written TO at its own address; it just cannot
-write back by mail.
+**One recipient.** No `cc`, no `bcc`, no arrays. One row is one mail, so the cap arithmetic, the log
+row and the line the person reads on screen each mean exactly one thing. Several recipients is filed
+as MAIL-3i, not built.
+
+**`from`, `replyTo` and `headers.From` are not fields this route accepts.** A supplied one is
+IGNORED rather than refused, and a test asserts it never appears in the body that reached Resend.
+
+### The refusal order, written as an order because the order is the security
+
+1. Not a `POST` → 405.
+2. No bearer, or a bearer no workspace holds → 401.
+3. The caller's workspace is on the relay's no-send list → 403, "sending is switched off for this
+   workspace". The list is `mail-no-send.txt` in the relay's state directory plus
+   `SAND_UI_MAIL_NO_SEND_SLUGS`, the same shape and the same reader as `mail-no-push.txt` (§5), read
+   per request so nothing restarts. **This is how a workspace held read-only is refused at the
+   route.** A workspace on the no-push list never learns `canSend`, so its bots never offer to send
+   — but its box still holds a valid gateway token and could call this route anyway. An absent push
+   is not a rule.
+4. The body cannot be read, is over 64 KB, names no `agentId`, names no single recipient, or carries
+   an `attachments` field → 400 and a plain sentence. Attachments are refused by name: not this
+   wave.
+5. The directory row for **this workspace** and that `agentId`. No row, a retired row, or a row that
+   belongs to somebody else → 403, and **all three answer the same sentence**, because a caller must
+   learn nothing at all about a workspace that is not theirs. One lookup closes all three, which is
+   the MAIL-2c class of mistake closed in one line rather than three.
+6. That row's domain is not the directory owner's → 403.
+7. **The claim, before Resend is called at all.** `POST /v1/relay/mail/send/open` on the control
+   plane checks both caps and writes the row with outcome `sending`, answering its id. Over a cap →
+   429 naming the number it hit and when the next one can go. **The control plane unreachable → 503
+   and nothing is sent.**
+8. The Resend key is read from the **directory owner's** settings, never the caller's. An empty key
+   closes the row `no_key` and answers 503.
+9. `POST <apiBase>/emails` with the stored key. The address is the relay's own environment
+   (`GROK_BOT_MAIL_API_BASE`, §1), never a request field, for the same reason it is fixed on the way
+   in: the stored key travels on it.
+10. The row is closed with the outcome and Resend's id, a line goes on that workspace's own sent
+    ledger, and the bot is answered in plain words — what went, to whom, and the message id.
+
+**Why the claim comes before the send.** An unsent mail is recoverable and an unlogged send is not,
+and "every send is on the record" is the entire justification for this route existing. A crash
+between the claim and the close leaves a row reading `sending`, which counts toward the cap and
+reads as "we do not know whether that went" — the safe direction to be wrong in.
+
+**Why the key comes from the directory owner and not the caller.** `mailEdgeFor` is per tenant, and
+a customer's own `mail.json` has an empty `apiKey`. A route written the obvious way would find no
+key on every customer, and the bug would read as "Resend refused".
+
+### The From, forced
+
+```
+"<display name> (<workspace>)" <agent<code>@myagents.email>
+```
+
+with Reply-To the same address. The bot cannot change either one, and that is the whole security
+story: a key scoped to `myagents.email` can send as any address at that domain, so the process that
+holds the key is the process that decides the address.
+
+The display name is a string a customer typed, and live names already carry spaces and a middle dot,
+so it is sanitised before it is quoted: CR and LF, quotes and backslashes taken out, whitespace
+collapsed, capped at 64 characters, and the bare address used when nothing survives. A name holding
+a quote, a comma and a newline is one of the tests.
+
+### The caps, and where they are counted
+
+| Setting | Default | What it limits |
+|---|---|---|
+| `mail.send.hourlyPerAgent` | 30 | one bot, one rolling hour |
+| `mail.send.dailyPerWorkspace` | 200 | one workspace, one rolling day |
+
+Both are `admin_settings` rows on the control plane, each with a documented per-slug override name,
+so the super admin can move them without a deploy. A refusal names the number it hit and when the
+next one can go.
+
+They are counted from `mail_send_log` rows whose outcome is `sending` or `sent`. **Not** from the
+relay's in-process rate limiter, which a relay restart forgives, and **not** in the box, because a
+limit a box counts is a limit a box can reset by restarting. A bot sends tens of mails a day, not
+thousands, so these are the shape of "something has gone wrong" rather than a billing meter.
+
+Jason's own workspace gets the same cap as a customer. A cap that exempts the operator hides its own
+bugs from the only person who would notice them.
+
+### Idempotency, and what a retry looks like
+
+Nothing else in this path is idempotent and a tool retry would send twice. The tool derives Resend's
+`Idempotency-Key` from `${agentId}:${toolCallId}` — stable per call rather than per attempt — and
+Resend's 24 hour window is the actual dedupe. A replay comes back with the same id, so a duplicate
+reads in the log as two rows carrying one Resend id. That is honest rather than hidden: the second
+row is a second attempt, and the shared id says only one message left.
+
+### What the log row holds, and what it deliberately does not
+
+`mail_send_log` on the control plane holds: the workspace, the bot, its code, the recipient, the
+time, the outcome, Resend's id, and a short detail on a failure. **It holds no subject and no body.**
+
+That is the same split the receive side already uses. The control plane holds who wrote to whom and
+whether it went; the WORKSPACE'S OWN relay ledger (`mail-sent.jsonl`, beside `mail-inbox.jsonl` on
+that tenant's volume) holds the readable row with the subject, and only that workspace's own Mail
+card reads it. So the super admin's `mail sends <slug>` shows when, which bot, which code, to whom,
+the outcome and the Resend id — enough to answer "did that customer's bot send it" without reading
+a line of anybody's mail — and the customer sees their own subjects on their own console.
+
+### Recipients
+
+Any address, on day one, for every workspace.
+
+`mail.approvedSenders.<slug>` is an INBOUND whitelist and it is not touched by this route. Reusing it
+would mean a customer who later turns it on to stop spam silently stops their bots emailing anyone
+new, which is a different decision wearing the same switch. A send-side allow list, if it is ever
+wanted, gets its own setting: filed as MAIL-3c.
+
+### Where the routes live
+
+The two relay-facing control plane routes sit with the rest of the `/v1/relay/mail/*` family behind
+`CP_RELAY_TOKEN`. The operator's read is `GET /v1/mail/sends` behind the admin session. None of them
+opens the sqlite store from the CLI: MAIL-CLI-1 forbids it outright and a test fails if a mail verb
+does. Folding `mail sends` under `/v1/admin` and into the super admin panel is MAIL-3b.
+
+### What the operator does now, which is nothing
+
+Nothing. The relay already has the key it needs, and the address list pushed into each box carries
+`canSend: true` for every workspace that is not on the no-send list.
+
+**The per-agent sending key is retired.** Before this route existed, an agent sent by posting to
+Resend from its own shell with a `RESEND_API_KEY` an operator put there, and the email skill carried
+that recipe. Both are gone. If you set that shell secret on a box before this wave, it is no longer
+used by anything and can be cleared from the console's Secrets card.
+
+### Bounces and complaints are not this wave
+
+A `sent` row means Resend accepted the message, not that it arrived. A hard bounce an hour later is
+invisible here and the bot will go on believing it sent. Closing that needs a second Resend webhook
+(`email.bounced`, `email.complained`), a route to verify and route it by Resend id back to the row
+it belongs to, and a way to tell the bot afterwards. Filed as MAIL-3e.
 
 ---
 
@@ -506,14 +661,65 @@ roster without a bot retires that bot's address and an empty roster retires none
 `tests/relay-mail-tenant-claim.test.mjs`) a validly signed webhook from one workspace naming another
 workspace's code is refused while the directory owner's own mail still arrives.
 
+### The send legs (MAIL-3)
+
+```
+SAND_UI_MAIL_NO_SEND_FILE=<state dir>/mail-no-send.txt \
+CP_URL=http://127.0.0.1:7810 CP_RELAY_TOKEN=<32+ chars> \
+GROK_BOT_MAIL_API_BASE=http://127.0.0.1:7809 node ui/server.mjs      # a scratch relay
+node scripts/verify-mail.mjs --url http://127.0.0.1:7787 --stub --send --directory --cp-port 7810
+```
+
+`--send` rides `--directory`, because the claim goes to a control plane and the one the gate stands
+up runs the real `cp/mail.mjs` over an in-memory store. It measures sixteen things: the From and the
+Reply-To on the wire are the bot's own and a caller's supplied `from`, `replyTo` and `headers.From`
+are not there at all; the control plane holds one row carrying Resend's id and **no subject**; the
+answer to the bot names the recipient and the message id in plain words; the workspace's own ledger
+carries the row with its subject, newest first; the console draws it as "Sent an email to …" with no
+tool name and nothing to expand; and nine refusals, each of which must also leave the stub Resend
+untouched — no bearer, a stranger's bearer, a bot with no address, another workspace's bot, a
+retired address, an `attachments` field, the send past the hourly cap, a workspace on the no-send
+list, and a control plane that cannot be reached.
+
+The three refusals for no-address, a foreign workspace and a retired address are asserted to answer
+**the same sentence**, because a caller must learn nothing about a workspace that is not its own.
+
+`--send-box` adds the live half: a bot on the box is asked to send, and its conversation outline is
+read for the row. It is behind its own flag because it is a model turn — the bot has to decide to
+use the tool — so it is slow and not deterministic, and the deterministic half of the same proof
+(the shipped `toolRowText`, run rather than pattern-matched) is in `--send`.
+
+The gate now sends its own name, `titanbot-gate/verify-mail`, on every request, and it addresses the
+signed-email leg to a bot whose **name is not shared** by another bot on the roster. That second
+thing is not fussiness: two agents whose names make one address is a supported state the card warns
+about (section 2), this box holds "Chief of staff" and "Chief of Staff", and the gate used to go red
+for the roster's ordering rather than for a fault — measured red one run and green the next on
+`grok-bot-local-vm`, 2026-09-09, with nothing changed between them.
+
+**Measured 2026-09-09 on this Mac, box `grok-bot-local-vm`,** scratch relay on 127.0.0.1 against a
+stub control plane, 8 bots on the box: with the relay route and the control plane's send log in the
+tree, **69 PASS, 0 FAIL**, twice. The forced From on the wire was
+`"New Agent (titanium)" <agent368910@verify-mail.invalid>` while the caller's
+`president@example.invalid` appeared nowhere in the body; the cap refused the 31st send in an hour
+naming 30; and with the control plane stopped mid-run the send answered 503 with nothing reaching
+Resend. On a tree with the control plane half absent the same command answers **52 PASS, 1 FAIL**,
+and the one failure names the missing export rather than failing sixteen times unreadably.
+
 ---
 
 ## 8. What this does not do
 
-- **No outbound record.** The relay sees mail coming in, not going out. What an agent sent is in
-  its own conversation and in Resend's dashboard.
 - **No threading on the way in.** Each message is its own prompt. An agent that wants the history
   reads its own conversation.
+- **Attachments cannot be sent.** They can be received as links (below); a send carrying an
+  `attachments` field is refused by name.
+- **A bounce is invisible.** `sent` means Resend accepted the message. If it bounces an hour later
+  nothing here knows, the log still reads `sent`, and the bot still believes it went (MAIL-3e).
+- **No DMARC record on the product domain.** SPF and DKIM are there; `p=none` with a report address
+  is not, so nobody is watching who else sends as it.
+- **No vanity aliases.** A bot's address is its code and only its code.
+- **One recipient per send.** No cc, no bcc, no lists (MAIL-3i).
+- **No send-side recipient allow list.** A bot may write to any address (MAIL-3c).
 - **One domain per workspace's own settings.** Those carry one, which is that operator's own. The
   product domain the per-bot codes live at is separate and is the control plane's.
 - **No console affordance for the addresses yet.** The address on a bot's card, the codes column on
@@ -526,6 +732,41 @@ workspace's code is refused while the directory owner's own mail still arrives.
 - **Attachments are links, not files.** The relay never downloads one, and the links Resend hands
   over expire.
 
+
+---
+
+## 9b. Sending (MAIL-3), 2026-09-09
+
+**Measured and planned are kept apart here on purpose, because sending is the half of this document
+that was wrong for two days.** Every number below names the machine it was measured on.
+
+### Measured, this Mac, box `grok-bot-local-vm`, 2026-09-09
+
+- The gate, against a scratch relay on loopback with a stub Resend and a stub control plane running
+  the real `cp/mail.mjs`: **69 PASS, 0 FAIL**, run twice. Section 7 lists what the sixteen send legs
+  assert.
+- The forced From on the wire: `"New Agent (titanium)" <agent368910@verify-mail.invalid>`, Reply-To
+  the same address, and the `president@example.invalid` the caller supplied as `from`, `replyTo` and
+  `headers.From` appears nowhere in the body Resend received.
+- The control plane's row for that send carried the recipient, the outcome `sent` and Resend's id,
+  and **no subject anywhere in the table**.
+- The 31st send by one bot inside an hour answered 429 naming 30; the 30 before it went.
+- With the stub control plane stopped mid-run, the next send answered 503 and nothing reached
+  Resend.
+- The Sent table, in a real browser (headless Chrome through playwright-core) signed in with the
+  console password and opened at Settings the way a person does: three rows, newest first, reading
+  `Sep 9, 1:20 PM · Titan · jbrashear@titaniumcomputing.com · Test from Titan · sent` and, for a row
+  the relay opened and never closed, the outcome column reading **not confirmed** rather than the
+  relay's own word for it. No page errors from the card.
+- `npm test` 1930/1930, `source:typecheck` clean.
+
+### Not measured here, and it is the ship that measures it
+
+The R750: the demo tenant's Titan sending one mail read back through the inbound ledger, Jason's own
+Titan sending "Test from Titan" to `jbrashear@titaniumcomputing.com`, `node cp/cli.mjs mail sends
+<slug>` against the live control plane, the chip in a browser on `console.titanium.bot`, and
+`richard-avery` refused at the route by `mail-no-send.txt`. None of that has run. When it does, the
+times in UTC and CDT, the Resend ids and the machine go here, under a heading of their own.
 
 ---
 

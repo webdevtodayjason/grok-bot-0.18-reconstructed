@@ -57,7 +57,7 @@ const CARD_SELECTORS = [
   "[data-mail-domain]", "[data-mail-from-name]", "[data-mail-webhook-url]", "[data-mail-catch-all]",
   "[data-mail-enabled]", "[data-mail-enabled-note]", "[data-mail-key-note]", "[data-mail-secret-note]",
   "[data-mail-key]", "[data-mail-secret]", "[data-mail-key-clear]", "[data-mail-secret-clear]",
-  "[data-mail-addresses]", "[data-mail-rows]",
+  "[data-mail-addresses]", "[data-mail-rows]", "[data-mail-sends]",
 ];
 
 function cardDom() {
@@ -107,11 +107,15 @@ test("the card names, in plain words, everything the operator has to fill in", a
   for (const label of [
     "Receiving", "Your domain", "Sender name", "Who gets mail nobody else is named for",
     "The address to paste into Resend", "Resend API key", "Webhook signing secret",
-    "Addresses", "Mail that arrived",
+    "Addresses", "Mail that arrived", "Sent",
   ]) assert.ok(markup.includes(label), `the card must say "${label}"`);
   // The four columns of the received table, in the words of somebody looking for their email.
   for (const column of ["<th>When</th>", "<th>From</th>", "<th>Subject</th>", "<th>Went to</th>"]) {
     assert.ok(markup.includes(column), `the received table must have ${column}`);
+  }
+  // MAIL-3: and the sent table's own five, which say who sent it rather than who got it.
+  for (const column of ["<th>Bot</th>", "<th>To</th>", "<th>Outcome</th>"]) {
+    assert.ok(markup.includes(column), `the sent table must have ${column}`);
   }
 });
 
@@ -215,6 +219,46 @@ test("the received rows say where a message went in words, and never print the m
   assert.doesNotMatch(rows, /no_route/, "the relay's own word for it is not what the operator reads");
   card.paintMail(card.dom, { ...SETTINGS, recent: [] });
   assert.match(card.dom.nodes["[data-mail-rows]"].innerHTML, /No mail has arrived yet/);
+});
+
+// ---- the Sent table (MAIL-3) -------------------------------------------------------------------
+
+const SENDS = [
+  { at: "2026-09-09T18:04:00.000Z", agentId: "a1", agentName: "Titan", to: "jane@client.example", subject: "September invoice", outcome: "sent" },
+  { at: "2026-09-09T18:01:00.000Z", agentId: "a2", agentName: "Chief of Staff", to: "bill@client.example", subject: "Re: the quote", outcome: "sending" },
+];
+
+test("the sent rows name the bot, the recipient and what happened, in words", async () => {
+  const card = await loadMailCard({ adapter: reader(), state: ROSTER });
+  card.paintMail(card.dom, { ...SETTINGS, sends: SENDS });
+  const rows = card.dom.nodes["[data-mail-sends]"].innerHTML;
+  assert.match(rows, /jane@client\.example/);
+  assert.match(rows, /September invoice/, "the subject is on the workspace's own card and nowhere else");
+  assert.match(rows, />Titan</, "a sent row says which bot sent it");
+  assert.match(rows, /not confirmed/, "a row the relay opened and never closed says so rather than claiming it went");
+  assert.doesNotMatch(rows, />sending</, "the relay's own word for it is not what the operator reads");
+});
+
+test("nothing sent says so, and a relay that answers no sent list is left alone", async () => {
+  const card = await loadMailCard({ adapter: reader(), state: ROSTER });
+  card.paintMail(card.dom, { ...SETTINGS, sends: [] });
+  assert.match(card.dom.nodes["[data-mail-sends]"].innerHTML, /Nothing has been sent yet/);
+  // Absent is not empty. A relay on an older build answers no `sends` at all, and "nothing has
+  // been sent yet" would then be the card's invention rather than the relay's answer.
+  card.dom.nodes["[data-mail-sends]"].innerHTML = "Reading from the relay…";
+  card.paintMail(card.dom, { ...SETTINGS });
+  assert.equal(card.dom.nodes["[data-mail-sends]"].innerHTML, "Reading from the relay…");
+});
+
+test("a hostile recipient or subject is escaped into the sent table rather than drawn", async () => {
+  const card = await loadMailCard({ adapter: reader(), state: ROSTER });
+  card.paintMail(card.dom, {
+    ...SETTINGS,
+    sends: [{ at: SENDS[0].at, agentName: "<img src=x onerror=alert(1)>", to: "<script>alert(2)</script>", subject: "<b>hi</b>", outcome: "sent" }],
+  });
+  const rows = card.dom.nodes["[data-mail-sends]"].innerHTML;
+  assert.doesNotMatch(rows, /<img|<script|<b>/);
+  assert.match(rows, /&lt;img/);
 });
 
 test("a hostile sender or subject is escaped into the table rather than drawn", async () => {

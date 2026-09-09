@@ -3882,6 +3882,15 @@
     delivered: "delivered", no_route: "nobody was named for it",
     fetch_failed: "could not be read back from Resend", send_failed: "did not reach the agent",
   };
+  // MAIL-3, the other direction. `sending` is the row the relay opens BEFORE it calls Resend and
+  // closes after, so a row still reading `sending` is a send nobody can say went or did not: it
+  // says exactly that rather than guessing either way. And `sent` means Resend accepted it, which
+  // is not the same as it arriving -- a bounce an hour later is invisible here (MAIL-3e).
+  const MAIL_SEND_OUTCOME = {
+    sent: "sent", sending: "not confirmed",
+    rate_limited: "held back, too many in the hour", no_key: "not sent, the mail key is missing",
+    refused: "Resend would not take it", failed: "did not send",
+  };
   const mailWhen = (at) => {
     const ms = Date.parse(String(at ?? ""));
     return Number.isFinite(ms) ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(ms) : "";
@@ -3911,6 +3920,9 @@
       + `<div class="form-actions"><button class="primary-button" type="button" data-mail-save>Save email settings</button></div>`
       + `<div class="mail-block"><strong>Addresses</strong><small class="field-hint">One per agent, made from its name. Renaming an agent changes its address.</small><div data-mail-addresses><p class="field-hint">Reading from the relay…</p></div></div>`
       + `<div class="mail-block"><strong>Mail that arrived</strong><div class="mail-table-wrap"><table class="mail-table"><thead><tr><th>When</th><th>From</th><th>Subject</th><th>Went to</th></tr></thead><tbody data-mail-rows><tr><td colspan="4">Reading from the relay…</td></tr></tbody></table></div></div>`
+      // MAIL-3. What your bots sent, beside what arrived. The subject is here and nowhere else:
+      // the control plane keeps who wrote to whom and whether it went, and never what it said.
+      + `<div class="mail-block"><strong>Sent</strong><small class="field-hint">What your bots sent, each from its own address. Only this workspace can read this list.</small><div class="mail-table-wrap"><table class="mail-table"><thead><tr><th>When</th><th>Bot</th><th>To</th><th>Subject</th><th>Outcome</th></tr></thead><tbody data-mail-sends><tr><td colspan="5">Reading from the relay…</td></tr></tbody></table></div></div>`
       + `</section>`;
   }
 
@@ -3979,6 +3991,19 @@
           // instead of a name and a reason that read as the same word twice.
           const said = went.length === 0 ? outcome : row.outcome === "delivered" ? went : `${went}, ${outcome}`;
           return `<tr><td>${escapeHtml(mailWhen(row.at))}</td><td class="mail-cell">${escapeHtml(row.from ?? "")}</td><td class="mail-cell">${escapeHtml(row.subject ?? "")}</td><td>${said}</td></tr>`;
+        }).join("");
+    }
+    // MAIL-3. ABSENT is not EMPTY. A relay that has not been swapped answers no `sends` field at
+    // all, and painting "nothing sent yet" from a field that was never there would tell the
+    // operator something the relay never said. So the table is only touched when the array is real.
+    const sendRows = root.querySelector("[data-mail-sends]");
+    if (sendRows && Array.isArray(settings.sends)) {
+      sendRows.innerHTML = settings.sends.length === 0
+        ? `<tr><td colspan="5">Nothing has been sent yet.</td></tr>`
+        : settings.sends.map((row) => {
+          const outcome = escapeHtml(MAIL_SEND_OUTCOME[row.outcome] ?? String(row.outcome ?? ""));
+          return `<tr><td>${escapeHtml(mailWhen(row.at))}</td><td>${escapeHtml(row.agentName ?? "")}</td>`
+            + `<td class="mail-cell">${escapeHtml(row.to ?? "")}</td><td class="mail-cell">${escapeHtml(row.subject ?? "")}</td><td>${outcome}</td></tr>`;
         }).join("");
     }
   }
