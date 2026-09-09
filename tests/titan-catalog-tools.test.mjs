@@ -433,3 +433,38 @@ test("TITAN-CATALOG-1: the onboarding skill sends them to the catalog before it 
   assert.ok(generated.includes(asTemplateLiteral),
     "onboarding/SKILL.md is what seed-skills.gen.ts carries — re-run scripts/gen-seed-skills.mjs");
 });
+
+// ------------------------------------------------- the seam between the wave's two halves
+
+// TITAN-CATALOG-1. The setup tool is only built when an importer is handed in, which is right --
+// but it means a broken wiring line does not fail anything above: the two read-only tools still
+// build, the bot still looks at the catalog, and the only symptom is that it can never actually
+// set one up. That is invisible in every case in this file. The box gate measures the live
+// article; these three cases stop the wiring being deleted between gates.
+test("TITAN-CATALOG-1: the host hands the catalog tools the one import the console's Add uses", () => {
+  const host = readFileSync(path.join(repoRoot, "source/host/sand-host.ts"), "utf8");
+  assert.match(host, /setMarketplaceImporter/,
+    "nothing wires the importer, so the setup tool is never offered on a real box");
+  assert.match(host, /getApi\(\)\.importMarketplaceBot/,
+    "the importer has to be the gateway api's own command, not a second sequence");
+});
+
+test("TITAN-CATALOG-1: the composition reads the importer per turn rather than capturing it", () => {
+  const composition = readFileSync(path.join(repoRoot, "source/host/host-runner-composition.ts"), "utf8");
+  assert.match(composition, /setMarketplaceImporter/);
+  assert.match(composition, /importBot: args => marketplaceImporter!\(args\)/,
+    "the holder is set after the composition is built, so capturing its value strands every turn");
+});
+
+test("TITAN-CATALOG-1: no second import adapter is built beside the gateway api's", () => {
+  const composition = readFileSync(path.join(repoRoot, "source/host/host-runner-composition.ts"), "utf8");
+  // The one adapter lives in host-gateway-api.ts and is built out of mintAgent,
+  // removeAgentCompletely, createAutomationFor and the host's kickstartIfPending. A second one
+  // assembled here out of the manager alone would differ in agent teardown, automation
+  // attribution and the introduction -- which is the drift this whole wave exists to end.
+  assert.doesNotMatch(composition, /from "[^"]*marketplace-bot-import/,
+    "two adapters means the console's Add and the bot's request reach different boxes");
+  const gatewayApi = readFileSync(path.join(repoRoot, "source/host/host-gateway-api.ts"), "utf8");
+  assert.match(gatewayApi, /const marketplaceImportBox: MarketplaceImportBox = \{/,
+    "the one adapter lives in the gateway api, beside mintAgent and removeAgentCompletely");
+});

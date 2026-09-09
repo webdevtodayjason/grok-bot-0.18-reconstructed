@@ -80,6 +80,9 @@ export interface HostLifecycleProgress {
 }
 
 export interface HostRunnerComposition {
+  setMarketplaceImporter(
+    importer: (args: { readonly id: string; readonly name?: string }) => Promise<unknown>
+  ): void;
   createRunner(session: unknown, hooks: unknown): unknown;
   createGroupMemberRunner(
     session: unknown,
@@ -400,6 +403,23 @@ export class SandHost {
     this.runnerComposition = this.runtime.createRunnerComposition({
       extensions,
       emitGatewayEvent: event => this.emit(event)
+    });
+    /**
+     * TITAN-CATALOG-1. The catalog tools set a bot up through the SAME import the console's Add
+     * goes through -- one sequence on the box, so the two doors cannot drift. The adapter that
+     * import runs against is built inside the gateway api out of `mintAgent`,
+     * `removeAgentCompletely`, `createAutomationFor` and this host's own `kickstartIfPending`,
+     * none of which the runner composition can reach; rebuilding a second one there would differ
+     * in agent teardown, automation attribution and the introduction. This is the only place that
+     * holds both objects, so the wiring belongs here. `getApi()` builds the api the same way a
+     * gateway request does, which is what a tool call is.
+     */
+    this.runnerComposition.setMarketplaceImporter(async args => {
+      const importMarketplaceBot = this.getApi().importMarketplaceBot;
+      if (typeof importMarketplaceBot !== "function") {
+        throw new Error("this box cannot set a bot up from the catalog");
+      }
+      return await importMarketplaceBot(args);
     });
     this.bindExecutionPorts();
 

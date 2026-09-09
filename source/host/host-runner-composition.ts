@@ -371,6 +371,14 @@ export interface HostRunnerCompositionDependencies<Runner extends ProductionSess
 }
 
 export interface RecoveredHostRunnerComposition<Runner extends ProductionSessionBoundRunner> {
+  /**
+   * TITAN-CATALOG-1. Hand the catalog tools the one marketplace import the console's Add also goes
+   * through. The host calls this as soon as it has both objects; before it does, the setup tool is
+   * not offered.
+   */
+  setMarketplaceImporter(
+    importer: (args: { readonly id: string; readonly name?: string }) => Promise<unknown>
+  ): void;
   createRunner(session: HostRunnerSession, hooks: HostRunnerHooks): Runner;
   createGroupMemberRunner(
     session: HostRunnerSession,
@@ -2499,25 +2507,23 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       const mcpManagement = dependencies.mcpManagement;
       const subagentManagement = dependencies.subagentManagement;
       /**
-       * TITAN-CATALOG-1, AND THE ONE SEAM THIS WAVE LEAVES OPEN. The other half of the wave is the
-       * host-side import, `importMarketplaceBot`, which runs the eight-step Add sequence the
-       * console's bot-setup.js runs, against a `MarketplaceImportBox` adapter that
-       * `host-gateway-api.ts` builds out of the manager plus `mintAgent`,
-       * `removeAgentCompletely`, `createAutomationFor` and `deps.kickstartIfPending`. NONE of those
-       * four is reachable from here, and building a SECOND adapter out of the manager alone would
-       * differ in exactly the places that matter -- agent teardown, automation attribution and the
-       * introduction -- which is the drift this whole wave exists to end. So it is discovered, not
-       * rebuilt: `method()` answers undefined when the manager carries no such method,
-       * `createCatalogTools` then builds only the two read-only tools, and the setup tool is not
-       * offered at all rather than offered against nothing.
+       * TITAN-CATALOG-1, THE SEAM BETWEEN THE WAVE'S TWO HALVES, CLOSED. The other half is the
+       * host-side import `importMarketplaceBot`, which runs the eight-step Add sequence the
+       * console's bot-setup.js used to run, against a `MarketplaceImportBox` adapter that
+       * `host-gateway-api.ts` builds out of the manager plus `mintAgent`, `removeAgentCompletely`,
+       * `createAutomationFor` and `deps.kickstartIfPending`. None of those four is reachable from
+       * here, and a SECOND adapter built out of the manager alone would differ in exactly the
+       * places that matter -- agent teardown, automation attribution and the introduction -- which
+       * is the drift this whole wave exists to end.
        *
-       * The zero-change way to close it is on the OTHER side: give the transcript manager an
-       * `importMarketplaceBot(args)` of its own that calls the import module with the same adapter,
-       * and this line connects as it stands. Failing that, the import module can hold the adapter
-       * the gateway api already builds and export a call that uses it, and this line becomes that
-       * import. What must NOT happen is a second adapter here.
+       * So the one adapter is late-bound instead of rebuilt. The host owns both objects: it builds
+       * this composition, and `getApi()` builds the gateway api that already holds the adapter. It
+       * hands that api's own `importMarketplaceBot` in here through `setMarketplaceImporter` as
+       * soon as the composition exists, which is before any turn can run. Until it does -- and on
+       * any bundle whose api carries no such command -- the holder is undefined,
+       * `createCatalogTools` builds only the two read-only tools, and the setup tool is not offered
+       * at all rather than offered against nothing.
        */
-      const importMarketplaceBot = method(transcript, "importMarketplaceBot");
       const startHandoff = method(extensions.api("session"), "startHandoff");
       const provider: TurnToolsetHostFactoryProvider = {
       createSendMessageToolInputs: turn => {
@@ -2964,9 +2970,9 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               createCatalogToolInputs: (): TurnCatalogToolFactoryInput => ({
                 dependencies: {
                   listPlugins: () => mcpManagement.listPlugins(),
-                  ...(importMarketplaceBot === undefined
+                  ...(marketplaceImporter === undefined
                     ? {}
-                    : { importBot: args => importMarketplaceBot(args) }),
+                    : { importBot: args => marketplaceImporter!(args) }),
                 },
               }),
             }),
@@ -3690,7 +3696,17 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
     return runner;
   }
 
+  /**
+   * TITAN-CATALOG-1. The gateway api's own catalog import, handed in by the host once both objects
+   * exist. Read per turn, never captured, so a host that sets it after the composition is built
+   * still reaches every turn that follows.
+   */
+  let marketplaceImporter: ((args: { readonly id: string; readonly name?: string }) => Promise<any>) | undefined;
+
   return {
+    setMarketplaceImporter: importer => {
+      marketplaceImporter = importer;
+    },
     createRunner: (session, hooks) => createRunner(session, hooks),
     createGroupMemberRunner: (session, hooks, groupOverrides) =>
       createRunner(session, hooks, {
