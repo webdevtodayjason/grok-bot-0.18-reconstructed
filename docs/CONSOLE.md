@@ -560,3 +560,30 @@ Each of these passed over loopback and lied over the internet, and each is fixed
 - **Looking for file rows on the shell.** They are drawn in the desktop's Files view, which is the
   thing Jason clicks in his complaint. The leg reported "no conversation carries a file" against a
   console whose Agent panel said Files 1.
+
+### The review pass, shipped and measured on his console (2026-09-09 04:40 UTC)
+
+Commit `7a3ea50`, relay-only again: `git diff e6a2c5d..HEAD -- source/ deploy/` empty, `sync.sh
+--no-install`, then one `docker restart` of the relay. No box was touched. `sync.sh` restaged the
+version string and rebuilt the bundle as the caveat above says it would, so both were put back
+exactly as they were — `sand-host-bundle-latest.version` at `e6a2c5d38993` and `host-main.cjs` at
+sha `cb42714d…`, which is the byte-for-byte bundle all three boxes are running — and no box swapped.
+`index.html`, `backgrounds.js` and `gap-badge.js` hash-identical inside the relay container against
+the worktree.
+
+| | before | after |
+|---|---|---|
+| the stalled boot (`/api/**` stalled **in my browser only**, nothing on his box touched) | cover gone at 8,675 ms, then at 14 s the page read "MSP Team", "3 members · ready", "2h 14m", "Atera Triage's desktop" with nothing marking it | cover at **207 ms**, gone at **8,721 ms**, and at 14 s: room title "Still connecting", subtitle "this console has not reached your box yet", transcript "Still reaching this box. Nothing on this page has loaded yet.", every other field empty, **no "MSP Team" and no "Atera Triage" anywhere in the body** |
+| the normal boot | — | `data-bg="titan-nebula"` at the first sample there was a root to carry it (**245 ms**), cover gone at **2,804 ms** onto his own console: "Titan", "Agent · Ready for the next task", "Titan tools", "4h 23m", "Ask Titan…", 6 workers |
+| the badge's kinds line | "shell 4, websearch 3, webfetch 1" | "5 commands, 1 message, 1 page read" (X Marketer), "15 commands, 1 computer step" and "12 commands, 2 files read" (Titan), "5 commands, 1 message, 1 file read" (Instagram Marketer) — **no tool identifier on any of them** |
+| src-less `<img>` | the doc claimed none page-wide | Titan's conversation: 4 images, **0 src-less, 0 broken**, the rail carrying a real frame. Scribe's: **1 src-less** — the hand-off thumb, `hidden`, `display: none`, laid out **0x0** — and still 0 broken |
+
+Same run on `grok-bot-local-vm`: the stalled boot gives cover at **91 ms**, gone at **8,555 ms**, the
+same three honest lines and nothing else; `npm test` **1,696 PASS / 0 FAIL**; typecheck clean;
+`verify-console-polish --boot --picker --badge --scroll --tile --files` **33 PASS / 0 FAIL / 1 SKIP**
+(the badge leg, because no conversation on that box has a run of two system rows — it is measured on
+Jason's console instead, above); `verify-dashboard` **164 PASS / 13 FAIL**, and not one of the
+thirteen is in a surface this pass touched: three avatar legs and three bot-cap legs are `GATE-14`'s
+leftover probe agents, three attachment legs are a probe turn that did not come back inside the 60 s
+budget, three are the marketplace legs belonging to the wave editing that code, and the last is the
+gate's own summary line.
