@@ -156,6 +156,8 @@ import "./test-index-covers-the-suite.test.mjs";
 import "./machine-room-handoff.test.mjs";
 
 // CONSOLE-4: the plate before the first pixel, the boot cover, the transcript that settles, the
-// adapter's data shapes, the four seams, the rail tile's reader and its plate.
+// adapter's data shapes, the four seams, the rail tile's reader and its plate, the badge that folds
+// a gap of work into one row, and files that open -- the viewer, the download and the /files route.
 import "./machine-room-boot.test.mjs";
 import "./machine-room-screen-tile.test.mjs";
+import "./machine-room-files.test.mjs";
