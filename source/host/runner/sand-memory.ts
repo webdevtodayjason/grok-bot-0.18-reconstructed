@@ -224,13 +224,16 @@ export function applyExtractedMemories(first: MemoryStore | readonly MemoryRecor
 export interface EpisodeTurn { readonly ts: number; readonly user: string; readonly agent: string }
 export function buildEpisodeSystemPrompt(): string { return [
   MEMORY_EPISODE_PROMPT_MARKER,
-  "You maintain the long-term memory of a personal desktop assistant named Grok Bot.",
-  "You are given the most recent turns of a conversation between the user and Grok Bot, in order, each tagged with its date.",
-  "Write ONE short journal-style sentence (two at most) capturing what the user and Grok Bot were actually working on across these turns \u2014 the throughline, key decisions, and outcomes \u2014 so it stays useful months from now.",
+  // PERSONA-1. This used to name the assistant, and the name it used was the wrong one, so the
+  // summarizer wrote it into durable episode summaries that then read back into later turns. The
+  // summarizer does not need a name to write a journal line; it needs the turns.
+  "You maintain the long-term memory of an assistant that works for one person.",
+  "You are given the most recent turns of a conversation between the user and the assistant, in order, each tagged with its date.",
+  "Write ONE short journal-style sentence (two at most) capturing what the user and the assistant were actually working on across these turns \u2014 the throughline, key decisions, and outcomes \u2014 so it stays useful months from now.",
   'Anchor any time references with the absolute dates shown, never relative words like "yesterday". Drop greetings, acknowledgements, and anything ephemeral. Never invent details.',
   `Output just the sentence(s), no preamble or bullets. Output exactly ${MEMORY_EXTRACTION_NONE_SENTINEL} if nothing in this stretch is worth remembering.`,
 ].join("\n"); }
-export function buildEpisodeUserPrompt(turns: readonly EpisodeTurn[]): string { return ["Recent turns, oldest first:", "", turns.map((turn) => [`(${formatMemoryDate(turn.ts)})`, ...(turn.user.trim() ? [`User: ${turn.user.trim()}`] : []), ...(turn.agent.trim() ? [`Grok Bot: ${turn.agent.trim()}`] : [])].join("\n")).join("\n\n")].join("\n"); }
+export function buildEpisodeUserPrompt(turns: readonly EpisodeTurn[]): string { return ["Recent turns, oldest first:", "", turns.map((turn) => [`(${formatMemoryDate(turn.ts)})`, ...(turn.user.trim() ? [`User: ${turn.user.trim()}`] : []), ...(turn.agent.trim() ? [`Assistant: ${turn.agent.trim()}`] : [])].join("\n")).join("\n\n")].join("\n"); }
 export async function summarizeEpisode(args: { executor: TextExecutor; ctx: unknown; turns: readonly EpisodeTurn[] }): Promise<string | null> {
   if (args.turns.length === 0) return null;
   args.executor.appendMessages([{ role: "system", content: buildEpisodeSystemPrompt() }, { role: "user", content: buildEpisodeUserPrompt(args.turns) }]);

@@ -36,8 +36,10 @@ const boxSection = (localMachineConnected) => glue.createPromptCollectorGlue({
   isLocalMachineConnected: () => localMachineConnected,
 }).getRemoteBoxSection();
 
+// CURSOR-1 part f dropped `cloudAgentsEnabled` from the options: every branch that swung on it
+// coached a tool the same turn's toolset withheld, so there is nothing left for it to select.
 const prompt = (localMachineConnected) =>
-  mod.buildSandBaseSystemPrompt({ cloudAgentsEnabled: true, localMachineConnected });
+  mod.buildSandBaseSystemPrompt({ localMachineConnected });
 
 // The marker host-runner-composition.ts reports as the `localMachine` prompt section, so the
 // integration gate and this suite are asserting the same string.
@@ -88,26 +90,26 @@ test("nothing tells the model to move a file onto a machine it cannot reach", ()
   }
 });
 
-// The per-turn attached-files note is prompt text too, and it names two of the five. It is built
-// from the desktop app's attachment paths, so the two facts usually agree -- but an app that
-// attaches a file and then drops its local-exec stream makes them disagree, and then the note was
-// telling the model to ExternalRead a file with no ExternalRead.
-test("the attached-files note stops naming ExternalRead when no computer is connected", () => {
-  const files = ["/Users/x/report.pdf"];
-  const staged = new Map([["/Users/x/report.pdf", "/workspace/uploads/report.pdf"]]);
-  const connected = mod.buildAttachedFilesNote(files, staged, new Map(), true);
-  assert.ok(connected.includes("ExternalRead"), "the connected wording is unchanged");
-  const withheld = mod.buildAttachedFilesNote(files, staged, new Map(), false);
-  assert.ok(!withheld.includes("ExternalRead"), "no ExternalRead in the withheld wording");
-  assert.ok(withheld.includes("/workspace/uploads/report.pdf"), "the box path it CAN read is still there");
-  const unstaged = mod.buildAttachedFilesNote(files, new Map(), new Map(), false);
-  for (const name of ["ExternalRead", "CopyToBox"]) {
-    assert.ok(!unstaged.includes(name), `${name} is not offered as a way to open the file`);
+// ATTACH-1. The per-turn attached-files note used to be part of this suite's subject, because it
+// named ExternalRead and CopyToBox and so had to swing with them. It no longer names either: the
+// console uploads an attachment into <sandRoot>/agents/<id>/attachments/, which IS this box, so
+// the note now points at a path the agent's own Read opens and says nothing about anybody else's
+// machine. What it says is asserted in tests/standing-persona.test.mjs, beside the rest of
+// PERSONA-1's wording; what belongs here is that the withhold no longer reaches it at all.
+test("the attached-files note is about this box, whatever the bridge is doing", () => {
+  const files = ["/home/box/sand-data/agents/a/attachments/report.pdf"];
+  for (const connected of [true, false]) {
+    const note = mod.buildAttachedFilesNote(files, new Map(), new Map(), connected);
+    assert.ok(note.includes("on this box"), "the files are on this box");
+    for (const name of ["ExternalRead", "CopyToBox", "the user's computer"]) {
+      assert.ok(!note.includes(name), `${name} is not named (bridge connected: ${connected})`);
+    }
+    assert.ok(note.includes(files[0]), "the path it can open is there");
   }
-  assert.ok(unstaged.includes("paste the contents"), "it says what the model should do instead");
 });
 
-test("a caller with no view of the bridge keeps the wording it always had", () => {
-  const note = mod.buildAttachedFilesNote(["/Users/x/a.txt"]);
-  assert.ok(note.includes("ExternalRead"), "the default is the connected wording");
+test("a staged box path is the one the note names", () => {
+  const staged = new Map([["/tmp/incoming/shot.png", "/workspace/uploads/shot.png"]]);
+  const note = mod.buildAttachedFilesNote(["/tmp/incoming/shot.png"], staged);
+  assert.ok(note.includes("/workspace/uploads/shot.png"), "the staged path wins");
 });

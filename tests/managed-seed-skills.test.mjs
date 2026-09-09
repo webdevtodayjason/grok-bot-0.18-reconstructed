@@ -67,20 +67,25 @@ test("the bundle carries the four real managed skills, frontmatter and all", () 
     "the skill is the thing that asks for the injected queue scope; a body without it is the wrong file");
   assert.ok(!learn.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
 
-  // MAIL-1. The email skill is the send half of agent email: the relay delivers a mail as a prompt,
-  // and this is the only thing that tells the agent how to answer it. Its description is folded the
-  // same way, so it is pinned the same way.
+  // MAIL-1, rewritten by MAIL-2. The email skill is what tells an agent what its address is and
+  // how to act on the mail that reaches it. Its description is folded the same way, so it is
+  // pinned the same way.
   const email = unionWithSeedSkills([]).find((skill) => skill.id === "email");
   assert.equal(email.name, "email", "the name comes from the file's frontmatter");
   assert.equal(email.description,
-    "Send and reply to email from this agent's own address with Resend. Use when someone asks you to email a person, "
-    + "when you have to answer an email that arrived in this conversation, or when a task ends with something a person "
-    + "needs in their inbox.");
+    "Read and act on the mail that arrives at this agent's own address, and send from it where "
+    + "sending is wired. Use when mail lands in this conversation, when someone asks you to email "
+    + "a person, or when a task ends with something a person needs in their inbox.");
   assert.match(email.body, /^# Email/m);
-  assert.match(email.body, /In-Reply-To/,
+  assert.match(email.body, /In-Reply-To|Message-ID/,
     "a reply that does not thread is the failure this skill exists to prevent");
-  assert.match(email.body, /\$RESEND_API_KEY/,
-    "the key is read from the shell environment; a body naming no variable is the wrong file");
+  // MAIL-2 retired the name-derived address and the shell-key send recipe together. A key scoped
+  // to the mail domain can send AS ANY address on it, so it is not put in a tenant's box at all,
+  // and a skill that tells an agent to go looking for one teaches it to ask for a key nobody has.
+  assert.match(email.body, /agent123456@/,
+    "the code address is the scheme; a body teaching a name-derived one is the old file");
+  assert.ok(!/RESEND_API_KEY|api\.resend\.com/.test(email.body),
+    "the skill no longer sends by curling a provider with a key from its own shell");
   assert.ok(!email.body.includes("re_"), "the skill must carry no key-shaped literal");
   assert.ok(!email.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
 
@@ -102,8 +107,14 @@ test("the bundle carries the four real managed skills, frontmatter and all", () 
     assert.match(onboarding.body, new RegExp(`\`${field}\``),
       `the recipe has to name the ${field} field it saves`);
   }
-  assert.match(onboarding.body, /ninety-nine more bots/,
-    "the crew size the person is told about is the box's own ceiling");
+  // PERSONA-1. This used to pin the words "ninety-nine more bots". The live ceiling on these
+  // boxes was 100, wave C's default is 40, and a number written into a skill body is a fact
+  // nothing updates -- so the assertion is now the opposite one: the recipe must NAME no count
+  // and must send the agent to its standing facts, which are read off the box every turn.
+  assert.ok(!/ninety-nine|twelve|\b99\b|\b12\b/i.test(onboarding.body),
+    "the recipe names no bot count of its own");
+  assert.match(onboarding.body, /standing facts/,
+    "it sends the agent to the live ceiling instead");
   assert.ok(!onboarding.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
 });
 

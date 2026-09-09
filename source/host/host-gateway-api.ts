@@ -48,6 +48,7 @@ import { createOnboardingService } from "./extensions/onboarding/onboarding-serv
 import { createHostBoxUseProbe } from "./extensions/onboarding/onboarding-probe.js";
 import { isUserMessageEntry } from "./extensions/transcript/send-message-shaping.js";
 import { isValidIanaTimeZoneName } from "./extensions/onboarding/onboarding-box-store.js";
+import { readAgentMail, writeAgentMail } from "./extensions/mail/agent-mail-store.js";
 import {
   SAND_ONBOARDING_START_PROMPT,
   onboardingPromptRichText,
@@ -1077,6 +1078,17 @@ export function createHostGatewayApi(
       }
       return onboarding.reset(args ?? {});
     },
+    // MAIL-2 / PERSONA-1. The box's copy of its agents' addresses, written by the relay after
+    // each roster sweep and read synchronously by the prompt assembly. Nothing here reaches the
+    // network, and nothing about DELIVERY depends on it: the relay routes on the control plane's
+    // directory whether or not this file exists. It exists so an agent can say its own address
+    // out loud instead of telling people it has no email.
+    //
+    // Deliberately NOT a box secret: `SAND_`-prefixed keys are reserved in box-secrets.json and
+    // BoxSecretsApplier bails out silently on one, which would stop every real secret from being
+    // injected and the next setBoxSecrets would wipe this back out.
+    setAgentMail: (args: any) => writeAgentMail(args ?? {}),
+    getAgentMail: () => readAgentMail(),
     getHostSettings: () => method(settings, "getHostSettings")(),
     setHostSettings: (args: any) => {
       const result = method(settings, "setHostSettings")(args);

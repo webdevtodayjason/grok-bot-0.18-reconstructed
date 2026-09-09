@@ -128,6 +128,11 @@ export const SAND_GATEWAY_COMMANDS = {
   startOnboarding: (api: GatewayApi, body: string) => api.startOnboarding(parseCommandArgs(body)),
   completeOnboarding: (api: GatewayApi, body: string) => api.completeOnboarding(parseCommandArgs(body)),
   resetOnboarding: (api: GatewayApi, body: string) => api.resetOnboarding(parseCommandArgs(body)),
+  // MAIL-2 / PERSONA-1. The relay pushes the tenant's directory in after each roster sweep; the
+  // gate reads it back. Safe to call on an older host through the console's tryCall: it answers
+  // "unknown gateway method" and the caller degrades to "this box has no address yet".
+  setAgentMail: (api: GatewayApi, body: string) => api.setAgentMail(parseCommandArgs(body)),
+  getAgentMail: (api: GatewayApi) => api.getAgentMail(),
   getHostSettings: (api: GatewayApi) => api.getHostSettings(),
   setHostSettings: (api: GatewayApi, body: string) => api.setHostSettings(parseCommandArgs(body)),
   setBoxSecrets: (api: GatewayApi, body: string) => api.setBoxSecrets(parseCommandArgs(body)),

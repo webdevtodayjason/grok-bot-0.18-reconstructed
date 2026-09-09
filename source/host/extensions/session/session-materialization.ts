@@ -16,6 +16,7 @@ import { getSandSettingsPath, writeSandSettingsFile } from "../../agents/setting
 import { SandAgentDb } from "./agent-db.js";
 import { getAgentDbPath } from "./session-paths.js";
 import { automationStoreForDbPath, channelStoreForDbPath, workflowStoreForDbPath } from "./session-store-factories.js";
+import { writeLeadAgentId } from "../../runner/standing-persona.js";
 import type { AgentWorkerPool } from "../../agent-isolation/agent-worker-pool.js";
 
 export const DEFAULT_AGENT_AUTOMATIONS: readonly unknown[] = [];
@@ -103,7 +104,17 @@ export class SandSessionMaterialization {
       }
       const isFirstAgent = (await this.countOwnedAgents()) === 0;
       const profile = isFirstAgent ? { name: SAND_FIRST_AGENT_NAME, avatarShape: SAND_FIRST_AGENT_AVATAR_SHAPE } : undefined;
-      return this.runMint(randomUUID(), (agentId) => this.materializeSession(agentId, profile, "user"));
+      return this.runMint(randomUUID(), async (agentId) => {
+        const session = await this.materializeSession(agentId, profile, "user");
+        // PERSONA-1. This is the one moment the host KNOWS which agent is the workspace's lead,
+        // so it is recorded here rather than guessed later. `writeLeadAgentId` keeps whatever is
+        // already on disk, so a box repaired at host start is never overwritten.
+        if (isFirstAgent) {
+          try { writeLeadAgentId(agentId); }
+          catch { /* no marker is a missing paragraph in one prompt, never a failed mint */ }
+        }
+        return session;
+      });
     });
   }
   private compose(agentId: string, dbPath: string, db: SandAgentDb): MaterializedSession {
