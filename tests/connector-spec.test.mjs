@@ -122,6 +122,18 @@ test("a remote URL that is itself the credential, or points inside the box, is r
     ["https://192.168.1.10/mcp", /private address/],
     ["https://172.16.4.4/mcp", /private address/],
     ["https://169.254.169.254/mcp", /private address/],
+    // MARKET-22. The same four addresses written the other way. Each of these was ACCEPTED by the
+    // shipped validators until the hostname was normalized before it was tested -- measured
+    // against the live gateway on the R750 demo box on 2026-09-08, where `[::ffff:127.0.0.1]:1341`
+    // and `[::]:1341` and `[::ffff:169.254.169.254]` all took a secret Authorization header while
+    // the plain `127.0.0.1` form was refused.
+    ["https://[::ffff:127.0.0.1]:1341/mcp", /private address/],
+    ["https://[::ffff:7f00:1]:1341/mcp", /private address/],
+    ["https://[::]:1341/mcp", /points inside the box/],
+    ["https://[::1]:1341/mcp", /points inside the box/],
+    ["https://[::ffff:169.254.169.254]/mcp", /private address/],
+    ["https://[::ffff:192.168.48.6]:1340/mcp", /private address/],
+    ["https://[fd00::1]/mcp", /private address/],
     ["not-a-url", /not a URL/],
   ];
   for (const [url, shape] of refused) {
@@ -130,7 +142,8 @@ test("a remote URL that is itself the credential, or points inside the box, is r
     assert.match(problem, shape, url);
   }
   // And the ones that must go through.
-  for (const url of ["https://mcp.example.com/mcp", "https://example.com/mcp?version=2"]) {
+  // A global-unicast v6 address is a real server and stays addable, coat and all.
+  for (const url of ["https://mcp.example.com/mcp", "https://example.com/mcp?version=2", "https://[2606:4700::1111]/mcp"]) {
     assert.equal(spec.remoteMcpUrlProblem("the server", url), null, url);
   }
 });

@@ -56,6 +56,7 @@ import "./machine-room-gateway.test.mjs";
 import "./machine-room-identity.test.mjs";
 import "./connector-literal-refusal.test.mjs";
 import "./connector-health.test.mjs";
+import "./connector-custody.test.mjs";
 import "./connector-plane.test.mjs";
 import "./machine-room-connectors.test.mjs";
 import "./machine-room-marketplace.test.mjs";

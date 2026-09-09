@@ -154,7 +154,14 @@ async function writeInBox(path, source) {
     `require("fs").writeFileSync(${JSON.stringify(path)}, Buffer.from(${JSON.stringify(Buffer.from(source, "utf8").toString("base64"))}, "base64"))`]);
 }
 
-/** The box's own address on the docker bridge: private, so the writer's rules allow plain http. */
+/** The address the box's own default route points at: the machine, and on the R750 its own proxy. */
+async function boxDefaultGateway() {
+  const out = await docker(["exec", BOX, "sh", "-c", "ip route | awk '/^default/{print $3; exit}'"]).catch(() => "");
+  const address = out.trim();
+  return /^\d+\.\d+\.\d+\.\d+$/.test(address) ? address : "192.168.32.1";
+}
+
+/** The box's own address on the docker bridge, where this gate's stub listens. */
 async function boxAddress() {
   const out = await docker(["inspect", BOX, "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"]);
   const address = out.trim().split(/\s+/).find((entry) => /^\d+\.\d+\.\d+\.\d+$/.test(entry)) ?? "";
@@ -216,6 +223,7 @@ async function main() {
   console.log(`secret store     ${beforeSecrets}`);
 
   const stubAddress = await startStub();
+  const defaultGateway = await boxDefaultGateway();
   ok(`the in-box stub is listening on ${stubAddress}:${STUB_PORT} and refuses a wrong bearer`);
 
   // ---------------------------------------------------------------- (a) the spike, (b) custody
@@ -225,8 +233,15 @@ async function main() {
     type: "http",
     url: `http://${stubAddress}:${STUB_PORT}/mcp`,
     headers: { Authorization: `Bearer \${${FIELD}}` },
+    // MARKET-15. The writer refuses the whole private space now, not loopback alone: the box's own
+    // address on this bridge answers this host's gateway on 1340 and its exec daemons on 1337 and
+    // 1338 -- measured from inside the R750 demo box on 2026-09-08, where a POST to
+    // 192.168.48.6:1340 with the box's own token answered the same bytes as 127.0.0.1:1340 did.
+    // This stub is on that network on purpose, and saying so is the only way in; leg (e) below
+    // proves the same address is refused without it.
+    allowPrivateNetwork: true,
     replace: true,
-  }).catch((error) => fail(`addLocalConnector refused the loopback stub: ${error.message}`));
+  }).catch((error) => fail(`addLocalConnector refused the in-box stub: ${error.message}`));
   ok(`added ${REMOTE_SERVER} as ${added.transport} in ${Date.now() - addedAt} ms; credential field ${added.fields.join(", ")}`);
   if (added.transport !== "http") fail(`expected a native http entry, got ${added.transport}`);
   if (!added.fields.includes(FIELD)) fail(`the placeholder did not become a credential field: ${JSON.stringify(added.fields)}`);
@@ -257,6 +272,59 @@ async function main() {
     fail(`the stored value is in the argument list of ${offenders} process(es) inside the box`);
   }
   ok(`the stored value is in no process argument list inside the box (${psOut.split("\n").length} processes read)`);
+
+  // ------------------------------------------------- (b2) the entries that predate the new shape
+  // The leak the first ship did not close. A bundle swap changes what the NEXT entry is written as;
+  // both R750 boxes kept the bridged entry they were given in July, so the stored bearer was still
+  // in three root process argument lists inside each on 2026-09-08. This leg seeds exactly that
+  // shape, asks the host to rebuild its server list, and holds it to two things: the file is
+  // rewritten to the shape with no command line, and the value is in no argument list afterwards.
+  const bridgedName = `${REMOTE_SERVER}-bridged`;
+  await removeProbe(bridgedName, true);
+  await call("addLocalConnector", {
+    name: bridgedName, type: "http", url: `http://${stubAddress}:${STUB_PORT}/mcp`,
+    headers: { Authorization: `Bearer \${${FIELD}}` }, allowPrivateNetwork: true, replace: true,
+  });
+  await call("setConnectorSecret", { server: bridgedName, field: FIELD, value: PROBE_VALUE });
+  // Now put the entry back in the OLD shape, the way a box that has been running since July holds
+  // it: this is the entry read out of the demo box, argument for argument, with its address swapped
+  // for the stub's so the migrated entry has something to connect to.
+  await inBoxScript(`
+    const { readFileSync, writeFileSync } = await import("node:fs");
+    const doc = JSON.parse(readFileSync(${JSON.stringify(CONNECTORS)}, "utf8"));
+    doc.mcpServers[${JSON.stringify(bridgedName)}] = {
+      command: "npx",
+      args: ["-y", "mcp-remote@0.8.3", "http://${stubAddress}:${STUB_PORT}/mcp", "--header", "Authorization:Bearer \${${FIELD}}"],
+      env: { MCP_REMOTE_CONFIG_DIR: "/home/box/sand-data/.mcp-auth", ${FIELD}: "" },
+    };
+    writeFileSync(${JSON.stringify(CONNECTORS)}, JSON.stringify({ mcpServers: doc.mcpServers }, null, 2), { mode: 0o600 });
+    console.log("seeded");
+  `);
+  const seeded = JSON.parse(await docker(["exec", BOX, "cat", CONNECTORS])).mcpServers[bridgedName];
+  if (seeded?.command !== "npx") fail("the old-shape seed did not land");
+  ok(`seeded ${bridgedName} in the pre-swap bridged shape (${seeded.args.join(" ")})`);
+
+  await call("refreshMcp");
+  let migratedEntry = null;
+  for (let attempt = 0; attempt < 30 && migratedEntry?.url == null; attempt += 1) {
+    await sleep(1000);
+    migratedEntry = JSON.parse(await docker(["exec", BOX, "cat", CONNECTORS])).mcpServers[bridgedName] ?? null;
+  }
+  if (migratedEntry?.url == null) fail(`the bridged entry was never rewritten: ${JSON.stringify(migratedEntry)}`);
+  if (migratedEntry.headers?.Authorization !== `Bearer \${${FIELD}}`) {
+    fail(`the rewritten entry lost its placeholder: ${JSON.stringify(migratedEntry)}`);
+  }
+  ok(`the host rewrote it to ${migratedEntry.type} ${migratedEntry.url} with the key still a name`);
+  const bridgedRow = await settle(bridgedName);
+  if (bridgedRow?.status !== "connected") {
+    fail(`the migrated entry did not connect: ${bridgedRow?.status} ${String(bridgedRow?.statusDetail ?? "").slice(0, 200)}`);
+  }
+  const psAfterMigration = await docker(["exec", BOX, "ps", "-eo", "args"]);
+  if (psAfterMigration.includes(PROBE_VALUE)) {
+    fail(`after the migration the stored value is still in ${psAfterMigration.split("\n").filter((line) => line.includes(PROBE_VALUE)).length} process argument list(s)`);
+  }
+  ok(`the migrated connector connected and its key is in no argument list (${psAfterMigration.split("\n").length} processes read)`);
+  await removeProbe(bridgedName, true);
 
   // ---------------------------------------------------------------- (c) a program the box runs
   await writeInBox(STDIO_PATH, STDIO_SOURCE);
@@ -293,6 +361,19 @@ async function main() {
   const shaBeforeRefusals = await sha256(CONNECTORS);
   const refusals = [
     ["a loopback address", { name: "chostprobe-refuse", type: "http", url: "http://127.0.0.1:1340/api" }],
+    // MARKET-22. The same address in its IPv6 coat. Each of these was ACCEPTED with a secret header
+    // by this very door on the R750 demo box on 2026-09-08, because the rule tested the text of the
+    // hostname and Node hands it `::ffff:7f00:1` and `::`.
+    ["loopback written as a v4-mapped v6 address", { name: "chostprobe-refuse", type: "http", url: "https://[::ffff:127.0.0.1]:1340/mcp" }],
+    ["the unspecified v6 address", { name: "chostprobe-refuse", type: "http", url: "https://[::]:1340/mcp" }],
+    ["the metadata address in a v6 coat", { name: "chostprobe-refuse", type: "http", url: "https://[::ffff:169.254.169.254]/mcp" }],
+    // MARKET-15. Refusing loopback and calling it done was the gap: a container reaches its own
+    // control plane and its host's services by their ordinary private addresses. The box's own
+    // address answers this host's gateway on 1340 and its exec daemons on 1337/1338, and the
+    // default gateway is the machine itself.
+    ["the box's own address on the bridge", { name: "chostprobe-refuse", type: "http", url: `http://${stubAddress}:1340/mcp` }],
+    ["the box's own stub without the opt-in", { name: "chostprobe-refuse", type: "http", url: `http://${stubAddress}:${STUB_PORT}/mcp` }],
+    ["the docker default gateway", { name: "chostprobe-refuse", type: "http", url: `http://${defaultGateway}:80/` }],
     ["a key in the query string", { name: "chostprobe-refuse", type: "http", url: "https://mcp.example.com/mcp?api_key=sk-live-1" }],
     ["a literal in an Authorization header", { name: "chostprobe-refuse", type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer sk-live-1" } }],
     ["plain http off the private network", { name: "chostprobe-refuse", type: "http", url: "http://mcp.example.com/mcp" }],

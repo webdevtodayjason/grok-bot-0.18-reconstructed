@@ -337,7 +337,12 @@ async function delegateConnectorChanges(t, held, submitted) {
     const command = change.op === "add" ? "addLocalConnector" : "removeLocalConnector";
     const args = change.op === "add"
       ? { ...connectorSpecFromEntry(change.name, change.config), replace: true }
-      : { server: change.name, name: change.name };
+      // MARKET-23. An entry deleted here loses its stored value too, the same as the card's Remove
+      // and the Marketplace's Uninstall. The host does the two in the order that works, since it
+      // resolves a connector's store through connectors.json and cannot reach it once the row has
+      // left the file. Without this the editor's delete left an orphaned key with no surface but
+      // the Plugins panel's strip.
+      : { server: change.name, name: change.name, clearSecrets: true };
     let answer;
     try { answer = await jobBusCall(t, command, args); } catch { return { handled: false }; }
     let body;

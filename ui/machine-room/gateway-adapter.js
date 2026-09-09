@@ -921,17 +921,53 @@
     insecure: "Give the address as https. Over plain http the key would travel in the clear, so this box will not open one.",
     privateHost: "That address is inside this box's own network, where its gateway and its tool daemons listen. Give the server's address on the internet instead.",
     credentialInUrl: "That address carries the key inside it. Take the key out of the address and add it as a header below, where it is stored instead of written down.",
-    oauth: "This server signs you in through a browser, and that has to be done on this box's own desktop before it will answer. Open the desktop, sign in there, and add it again afterwards.",
+    // MARKET-18. The old sentence told the operator to sign in on the box's desktop and add the
+    // server again, and that could never work: there is no OAuth path on either the native remote
+    // or the bridge, so the second add returned the same sentence forever. This is the true one,
+    // and it is the SAME string the host answers with when it reads the far end's own challenge
+    // (OAUTH_REMOTE_REFUSAL in remote-oauth-probe.ts) -- one door, one wording.
+    oauth: "That server asks people to sign in through a browser, and this box has no browser sign-in to give it, so it would never finish connecting. If the server also takes an API key, add it again with that key in a header; otherwise it cannot be added here yet.",
   };
 
   // Loopback, the private ranges, link-local, and the names that resolve to them. A bridge pointed
   // at one of these runs beside the gateway on 127.0.0.1:1340 and the exec daemons on 1337/1338,
   // so this is not tidiness: it is the one address family a connector must never be aimed at.
+  // An address, not the text somebody typed. `[::ffff:127.0.0.1]` is 127.0.0.1 and `[::]` is this
+  // box, and the prefix tests below were handed `::ffff:7f00:1` and `::` and said neither was
+  // private -- measured on this Mac against the shipped function on 8 September 2026, and the same
+  // hole was open on the host's door. Brackets and a zone id come off, a v4-mapped or v4-compatible
+  // address becomes its dotted quad, and any other v6 literal becomes its full eight-group form so
+  // a prefix test means what it says.
+  function byoNormalHost(host) {
+    const name = String(host ?? "").replace(/^\[/, "").replace(/\]$/, "").split("%")[0].toLowerCase();
+    if (!name.includes(":")) return name;
+    let text = name;
+    const dotted = /:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(text);
+    if (dotted) {
+      const quad = dotted[1].split(".").map(Number);
+      if (quad.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return name;
+      text = `${text.slice(0, dotted.index)}:${(((quad[0] << 8) | quad[1]) >>> 0).toString(16)}:${(((quad[2] << 8) | quad[3]) >>> 0).toString(16)}`;
+    }
+    const halves = text.split("::");
+    if (halves.length > 2) return name;
+    const head = halves[0] === "" ? [] : halves[0].split(":");
+    const tail = halves.length === 2 ? (halves[1] === "" ? [] : halves[1].split(":")) : [];
+    const missing = 8 - head.length - tail.length;
+    if (missing < 0 || (halves.length === 1 && missing !== 0)) return name;
+    const groups = [...head, ...Array(missing).fill("0"), ...tail].map((group) => parseInt(group, 16));
+    if (groups.length !== 8 || groups.some((group) => !Number.isInteger(group) || group < 0 || group > 0xffff)) return name;
+    const canonical = groups.map((group) => group.toString(16)).join(":");
+    if (canonical === "0:0:0:0:0:0:0:1" || canonical === "0:0:0:0:0:0:0:0") return canonical;
+    const mapped = groups.slice(0, 5).every((group) => group === 0) && (groups[5] === 0xffff || groups[5] === 0);
+    if (!mapped) return canonical;
+    return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
+  }
+
   function byoPrivateHost(host) {
-    const name = String(host ?? "").toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+    const name = byoNormalHost(host);
     if (!name) return true;
     if (name === "localhost" || name.endsWith(".localhost") || name.endsWith(".local") || name.endsWith(".internal") || name.endsWith(".home.arpa")) return true;
-    if (name === "::1" || name === "::") return true;
+    if (name === "0:0:0:0:0:0:0:1" || name === "0:0:0:0:0:0:0:0") return true;
     if (/^f[cd][0-9a-f]{2}:/.test(name) || /^fe[89ab][0-9a-f]:/.test(name)) return true;
     const parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(name);
     if (!parts) return false;
@@ -3707,7 +3743,11 @@
         if (answer && answer.__failed) return { accepted: false, message: `${name} was not removed: ${answer.__failed.message}` };
         if (answer !== null) {
           await refreshConnectors();
-          const cleared = Number(answer?.clearedCredentials ?? 0);
+          // The host answers `cleared: string[]` (mcp-service's removeLocalConnector), and reading
+          // a field it does not have meant the toast could never once report a cleared value: the
+          // clause was dead on every box while the call really was clearing keys. The old shape is
+          // still read for a box on a bundle that predates the array.
+          const cleared = Array.isArray(answer?.cleared) ? answer.cleared.length : Number(answer?.clearedCredentials ?? 0);
           return {
             accepted: answer?.removed !== false,
             message: answer?.message ?? `${name} removed${cleared ? `, and ${cleared} stored value${cleared === 1 ? "" : "s"} cleared` : ""}`,

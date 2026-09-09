@@ -1183,7 +1183,13 @@ export function createHostGatewayApi(
         ...(args?.command === undefined ? {} : { command: args.command }),
         ...(args?.args === undefined ? {} : { args: args.args }),
         ...(args?.env === undefined ? {} : { env: args.env }),
-        ...(args?.replace === undefined ? {} : { replace: args.replace === true })
+        ...(args?.replace === undefined ? {} : { replace: args.replace === true }),
+        // MARKET-15. The private-network opt-in, carried only when it is stated true. Neither
+        // console door nor the agent's AddMcpServer has a field for it: it takes the box's own
+        // gateway token and a deliberate flag, because a private address here is this host's own
+        // gateway on 1340, the exec daemons on 1337/1338 and the machine's services on the docker
+        // gateway.
+        ...(args?.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {})
       }),
     removeLocalConnector: (args: any) =>
       method(deps.extensions.api("mcp").management, "removeLocalConnector")({

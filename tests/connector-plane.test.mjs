@@ -383,11 +383,26 @@ test("MARKET-6: the writer's validation table refuses what it must, at every doo
     assert.match(refusal("probe", remote(url)) ?? "", /points back at the box itself/, url);
   }
 
-  // Plain http off the private network would put the key on the wire in the clear. A server on the
-  // operator's own LAN is a real thing to connect to and stays allowed.
+  // Plain http off the private network would put the key on the wire in the clear.
   assert.match(refusal("probe", remote("http://mcp.example.com/mcp")) ?? "", /plain http/);
-  assert.equal(refusal("probe", remote("http://10.1.2.3:8080/mcp")), null);
   assert.equal(refusal("probe", remote("https://mcp.example.com/mcp")), null);
+
+  // MARKET-15. The rest of the private space, which used to go straight through. The box's own
+  // address on the docker bridge answers this host's gateway on 1340 and its exec daemons on
+  // 1337/1338 -- measured from inside the R750 demo box on 2026-09-08, where a POST to
+  // 192.168.48.6:1340 with the box's own token answered the same bytes as 127.0.0.1:1340 -- and the
+  // default gateway is the machine itself. A server on the operator's own LAN is still a real thing
+  // to connect to, and it is reached by saying so on the entry, which only somebody holding the
+  // box's gateway token can do.
+  for (const url of ["http://10.1.2.3:8080/mcp", "http://192.168.48.6:1340/mcp", "https://172.17.0.2:1337/mcp", "https://box.internal/mcp"]) {
+    assert.match(refusal("probe", remote(url)) ?? "", /inside this box's own network/, url);
+  }
+  assert.equal(refusal("probe", { ...remote("http://10.1.2.3:8080/mcp"), allowPrivateNetwork: true }), null);
+  assert.match(
+    refusal("probe", { ...remote("http://127.0.0.1:1340/mcp"), allowPrivateNetwork: true }) ?? "",
+    /points back at the box itself/,
+    "the opt-in never reaches loopback: that address is the control plane, not a machine beside it",
+  );
 
   // A URL is drawn on the page, written to connectors.json in the clear and in every listing, so
   // it is not a place a credential can live. `userinfo` was already refused; the query string was

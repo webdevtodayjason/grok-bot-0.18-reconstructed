@@ -152,6 +152,58 @@ export function isRemoteEntry(entry: ConnectorEntry): entry is RemoteConnectorEn
  *     the custody the store gives a header.
  *   - anything that is not a URL at all.
  */
+/**
+ * The hostname as an ADDRESS, not as the text somebody typed.
+ *
+ * Every address rule in this tree used to test the raw hostname against prefixes, and an IPv4
+ * address wearing an IPv6 coat matches none of them. Measured against the live gateway on the R750
+ * demo box on 2026-09-08: `https://[::ffff:127.0.0.1]:1341/mcp`, `https://[::]:1341/mcp` and
+ * `https://[::ffff:169.254.169.254]/mcp` were all accepted with a secret header while plain
+ * `https://127.0.0.1:1341/mcp` was refused, because Node's URL parser hands the tests
+ * `::ffff:7f00:1`, `::` and `::ffff:a9fe:a9fe`. Same hole in all three validators, since all three
+ * were written the same way.
+ *
+ * So: brackets and a zone id come off, a v4-mapped or v4-compatible address becomes its dotted
+ * quad, and any other IPv6 literal becomes its full eight-group form so a prefix test means what it
+ * says. Anything that is not an IP literal comes back as the lowercased name it was.
+ */
+const V6_LOOPBACK = "0:0:0:0:0:0:0:1";
+const V6_UNSPECIFIED = "0:0:0:0:0:0:0:0";
+function ipv6Groups(host: string): number[] | null {
+  if (!host.includes(":")) return null;
+  let text = host;
+  // A trailing dotted quad (`::ffff:127.0.0.1`) is two hex groups written the other way.
+  const dotted = /:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(text);
+  if (dotted != null) {
+    const quad = (dotted[1] ?? "").split(".").map(Number);
+    if (quad.length !== 4 || quad.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+    const high = (((quad[0] as number) << 8) | (quad[1] as number)).toString(16);
+    const low = (((quad[2] as number) << 8) | (quad[3] as number)).toString(16);
+    text = `${text.slice(0, dotted.index)}:${high}:${low}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const head = (halves[0] ?? "") === "" ? [] : (halves[0] as string).split(":");
+  const tail = halves.length === 2 ? ((halves[1] ?? "") === "" ? [] : (halves[1] as string).split(":")) : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
+  const groups = [...head, ...Array(missing).fill("0"), ...tail].map((group) => parseInt(group, 16));
+  if (groups.length !== 8) return null;
+  return groups.some((group) => !Number.isInteger(group) || group < 0 || group > 0xffff) ? null : groups;
+}
+export function normalizedHostname(hostname: string): string {
+  const host = String(hostname ?? "").replace(/^\[|\]$/g, "").split("%")[0]?.toLowerCase() ?? "";
+  const groups = ipv6Groups(host);
+  if (groups == null) return host;
+  const canonical = groups.map((group) => group.toString(16)).join(":");
+  if (canonical === V6_LOOPBACK || canonical === V6_UNSPECIFIED) return canonical;
+  const mapped = groups.slice(0, 5).every((group) => group === 0) && (groups[5] === 0xffff || groups[5] === 0);
+  if (!mapped) return canonical;
+  const high = groups[6] as number;
+  const low = groups[7] as number;
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
+}
+
 const CREDENTIAL_QUERY_KEYS = /^(?:api[-_]?key|key|token|access[-_]?token|auth|secret|password|pwd|sig|signature)$/i;
 export function remoteMcpUrlProblem(where: string, raw: unknown): string | null {
   if (typeof raw !== "string" || raw.length === 0) return `${where} has no URL`;
@@ -166,8 +218,10 @@ export function remoteMcpUrlProblem(where: string, raw: unknown): string | null 
       return `${where} carries "${key}" in the query string; a key belongs in a header, where the store can hold it`;
     }
   }
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".localhost") || host === "::1" || host === "0.0.0.0") {
+  // Normalized first, then tested: `[::ffff:127.0.0.1]` is 127.0.0.1 and `[::]` is the box itself,
+  // and the raw-text version of these tests said neither of them was.
+  const host = normalizedHostname(url.hostname);
+  if (host === "localhost" || host.endsWith(".localhost") || host === V6_LOOPBACK || host === V6_UNSPECIFIED || host === "0.0.0.0") {
     return `${where} points inside the box (${url.hostname}); the gateway and the exec daemons live there`;
   }
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
@@ -178,7 +232,9 @@ export function remoteMcpUrlProblem(where: string, raw: unknown): string | null 
       || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127) || a === 0;
     if (priv) return `${where} points at a private address (${url.hostname}); a plugin's endpoint has to be on the internet`;
   }
-  if (host.startsWith("fd") || host.startsWith("fc") || host.startsWith("fe80:")) {
+  // The canonical form prints every group in full, so these two are exactly fc00::/7 (unique local)
+  // and fe80::/10 (link local) rather than whatever happens to start with the same two letters.
+  if (/^f[cd][0-9a-f]{2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host)) {
     return `${where} points at a private address (${url.hostname}); a plugin's endpoint has to be on the internet`;
   }
   return null;

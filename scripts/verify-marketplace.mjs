@@ -60,6 +60,12 @@ const SSE_NAME = `mktsse-${Math.random().toString(36).slice(2, 8)}`;
 const SSE_FIELD = "MKTSSE_STUB_KEY";
 const SSE_VALUE = `mktsse-${Math.random().toString(36).slice(2, 14)}`;
 const SSE_PORT = 8794;
+
+// MARKET-23's leg: the same public server, added with a credential field, removed through the
+// button on its card rather than through a hand-made API call, with the store checked afterwards.
+const REMOVE_NAME = `mktrem-${Math.random().toString(36).slice(2, 8)}`;
+const REMOVE_FIELD = "MKTREM_TOKEN";
+const REMOVE_VALUE = `not-a-real-key-${Math.random().toString(36).slice(2, 10)}`;
 const SSE_STUB_PATH = "/tmp/mktsse-stub.mjs";
 
 const inBox = (command) => new Promise((resolve, reject) => {
@@ -324,6 +330,50 @@ try {
     await page.waitForSelector('[data-byo-door="link"]', { timeout: 30_000 });
   };
 
+  // ---- and the key leaves with the entry, through the button a person actually presses ----------
+  // MARKET-23. "Uninstall removes the entry and offers to clear its secrets" was true at one of
+  // three doors. Measured on the R750 demo box on 2026-09-08: the card's Remove sent
+  // removeLocalConnector with no options, which answers cleared:[] and leaves the value in the 0600
+  // store -- listConnectorSecretOrphans then named it -- while the Marketplace's Uninstall next door
+  // cleared it. This leg presses the row's own button and then asks the store.
+  if (NO_WRITE) {
+    console.log("  --  the card-removal leg is skipped (--no-write)");
+  } else {
+    const shaBeforeRemoval = await connectorsSha();
+    const seeded = await gateway("addLocalConnector", {
+      name: REMOVE_NAME, url: PROBE_URL, type: "http",
+      headers: { Authorization: `Bearer \${${REMOVE_FIELD}}` }, env: [REMOVE_FIELD], replace: true,
+    });
+    check(seeded.status < 400, `a connector with a credential is there to remove (${REMOVE_NAME})`, String(seeded.body).slice(0, 120));
+    const stored = await gateway("setConnectorSecret", { server: REMOVE_NAME, field: REMOVE_FIELD, value: REMOVE_VALUE });
+    check(stored.status < 400, "and the host is holding a value for it", String(stored.body).slice(0, 120));
+
+    await openAddYourOwn();
+    const button = `[data-remove-connector="${REMOVE_NAME}"]`;
+    const drawn = await page.$(button);
+    check(drawn != null, "its row is drawn with a Remove button on it");
+    if (drawn != null) {
+      await page.click(button);
+      await page.waitForTimeout(4000);
+      const left = await page.evaluate(async (name) => {
+        const r = await fetch("/connectors");
+        return Object.keys((await r.json())?.mcpServers ?? {}).includes(name);
+      }, REMOVE_NAME);
+      check(!left, "the entry is gone from connectors.json");
+      const orphans = await gateway("listConnectorSecretOrphans");
+      const rows = Array.isArray(orphans.body) ? orphans.body : [];
+      check(!rows.some((row) => String(row.server) === REMOVE_NAME),
+        "and the store holds nothing for it: the key left with the entry",
+        rows.map((row) => `${row.server}:${(row.stored ?? []).join("/")}`).join(", ") || "no orphans at all");
+      const psOut = await inBox("ps -eo args");
+      check(!psOut.includes(REMOVE_VALUE), "the value it held is in no process argument list either");
+    }
+    await gateway("removeLocalConnector", { server: REMOVE_NAME, name: REMOVE_NAME, clearSecrets: true }).catch(() => {});
+    const shaAfterRemoval = await connectorsSha();
+    check(shaAfterRemoval === shaBeforeRemoval, "connectors.json is byte-identical to what this leg found",
+      `${shaBeforeRemoval.slice(0, 12)} -> ${shaAfterRemoval.slice(0, 12)}`);
+  }
+
   // ---- the older transport, opened rather than assumed ------------------------------------------
   // The picker has offered SSE since the card shipped and nothing had ever gone through it. The
   // claim is narrow and it is the whole point: an entry added through that door comes back
@@ -364,6 +414,12 @@ try {
           type: "sse",
           headers: { Authorization: `Bearer \${${SSE_FIELD}}` },
           env: [SSE_FIELD],
+          // MARKET-15. The writer refuses the whole private space now, not just loopback -- the
+          // box's own address on this bridge answers its gateway on 1340 and its exec daemons on
+          // 1337/1338, measured on the R750 demo box on 2026-09-08. This stub is on that network on
+          // purpose, and saying so is the only way in. Neither the console's form nor the agent's
+          // AddMcpServer can send this field.
+          allowPrivateNetwork: true,
           replace: true,
         });
         check(added.status < 400, `the older transport is accepted as an entry (${SSE_NAME})`, String(added.body).slice(0, 140));

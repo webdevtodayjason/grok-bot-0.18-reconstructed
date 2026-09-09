@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AccountMcpServer } from "../../../shared/node/cursor-backend/account-mcp.js";
+import { looksLikeCredential, normalizedHostname } from "../../../shared/marketplace/connector-spec.js";
 import { isShellSecretConnector, SHELL_SECRET_CONNECTOR } from "../shell-tools/shell-secret-field.js";
 import { isConnectorEnvFieldName } from "./connector-secrets.js";
 
@@ -84,6 +85,17 @@ export type LocalRemoteServerConfig = {
   readonly url: string;
   readonly headers?: Readonly<Record<string, string>>;
   readonly disabled?: boolean;
+  /**
+   * MARKET-15. The one way an address inside the box's own network is allowed, and it has to be
+   * said on the entry.
+   *
+   * An MCP server on the operator's own LAN is a real thing to connect to, so this is how it is
+   * asked for: deliberately, per entry, by somebody who already holds the box's gateway token.
+   * Neither console door nor the agent's AddMcpServer has a field for it, because the addresses in
+   * question are this box's own gateway on 1340, its exec daemons on 1337 and 1338, and the
+   * machine's own services on the docker gateway. Loopback stays refused even with this set.
+   */
+  readonly allowPrivateNetwork?: boolean;
 };
 
 export type LocalServerConfig = LocalStdioServerConfig | LocalRemoteServerConfig;
@@ -119,6 +131,7 @@ function parseServer(value: unknown): LocalServerConfig | null {
       url: shape.url,
       ...(headers === undefined ? {} : { headers }),
       ...(shape.disabled === true ? { disabled: true } : {}),
+      ...(shape.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {}),
     };
   }
   if (typeof shape.command !== "string" || shape.command.length === 0) return null;
@@ -214,8 +227,18 @@ export function remoteCredentialFieldNames(config: LocalRemoteServerConfig): str
  * Loopback and link-local are refused outright and that is the load-bearing one: inside a box
  * 127.0.0.1 is the exec daemon on 1337 and 1338 and this host's own gateway on 1340, so a remote
  * entry pointed there with a header would be a credentialled request into the control plane.
- * A private LAN address is allowed -- an on-prem server on the operator's own network is a real
- * thing to connect to -- but only that may be plain http; anything routable must be https.
+ *
+ * MARKET-15: so is the rest of the private space, and refusing loopback alone was never enough.
+ * Measured from inside the R750 demo box on 2026-09-08: a POST to its own 192.168.48.6:1340 with
+ * that box's gateway token answered the same bytes as 127.0.0.1:1340 did, its exec daemon on 1337
+ * answered HTTP on the same address, and the docker default gateway 192.168.32.1:80 -- the
+ * machine's own proxy -- answered too. A container reaches its own control plane and its host's
+ * services by their ordinary private addresses. Other tenants' boxes did NOT answer, so isolation
+ * held; the box's own control plane is what the old rule was handing out.
+ *
+ * An on-prem server on the operator's own LAN is still a real thing to connect to, and it is
+ * reached by saying so on the entry (`allowPrivateNetwork`), which only somebody holding the box's
+ * gateway token can set. That address may be plain http; anything routable must be https.
  *
  * A credential in the URL is refused rather than accepted, because a URL is not a secret on this
  * box: it is drawn on the plugin page, it goes into connectors.json in the clear, and it is in
@@ -227,22 +250,42 @@ const CREDENTIAL_QUERY_KEYS = new Set([
   "secret", "password", "session", "sig", "signature",
 ]);
 
+/**
+ * MARKET-22. Both predicates read the NORMALIZED address, never the text that was typed.
+ *
+ * Measured through the demo box's own gateway on 2026-09-08: `https://[::ffff:127.0.0.1]:1341/mcp`,
+ * `https://[::]:1341/mcp` and `https://[::ffff:169.254.169.254]/mcp` were all accepted with a secret
+ * header while `https://127.0.0.1:1341/mcp` was refused, because a prefix test on the raw hostname
+ * is handed `::ffff:7f00:1`, `::` and `::ffff:a9fe:a9fe`. `normalizedHostname` turns each of those
+ * back into the address it is, so one rule covers every way of writing it.
+ */
+const V6_LOOPBACK = "0:0:0:0:0:0:0:1";
+const V6_UNSPECIFIED = "0:0:0:0:0:0:0:0";
+
 function isPrivateHostname(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
-  if (/^10\.|^192\.168\.|^169\.254\./.test(host)) return true;
+  const host = normalizedHostname(hostname);
+  if (isLoopbackOrLinkLocal(host)) return true;
+  if (host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".home.arpa")) return true;
+  if (/^10\.|^192\.168\./.test(host)) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
-  if (/^127\./.test(host) || host === "::1" || host === "0.0.0.0") return true;
-  return host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:");
+  // 100.64/10 is the carrier-grade range every tailnet address is on, and 0.0.0.0/8 resolves to
+  // this machine on Linux the same way 0.0.0.0 does.
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host) || /^0\./.test(host)) return true;
+  // Full-length groups, so these are exactly fc00::/7 and fe80::/10.
+  return /^f[cd][0-9a-f]{2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host);
 }
 
 function isLoopbackOrLinkLocal(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const host = normalizedHostname(hostname);
   return host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host)
-    || host === "::1" || host === "0.0.0.0" || /^169\.254\./.test(host) || host.startsWith("fe80:");
+    || host === V6_LOOPBACK || host === V6_UNSPECIFIED || host === "0.0.0.0"
+    || /^169\.254\./.test(host) || /^fe[89ab][0-9a-f]:/.test(host);
 }
 
-export function localRemoteUrlRefusal(rawUrl: string): string | null {
+export function localRemoteUrlRefusal(
+  rawUrl: string,
+  options: { allowPrivateNetwork?: boolean } = {},
+): string | null {
   let parsed: URL;
   try { parsed = new URL(rawUrl); }
   catch { return `"${rawUrl}" is not a web address. Paste the server's full endpoint, the way its own page writes it (for example https://example.com/mcp).`; }
@@ -251,6 +294,9 @@ export function localRemoteUrlRefusal(rawUrl: string): string | null {
   }
   if (isLoopbackOrLinkLocal(parsed.hostname)) {
     return "That address points back at the box itself, where its own control ports live. Give the server's real address instead.";
+  }
+  if (isPrivateHostname(parsed.hostname) && options.allowPrivateNetwork !== true) {
+    return "That address is inside this box's own network, where its gateway and its tool daemons listen. Give the server's address on the internet instead.";
   }
   if (parsed.protocol === "http:" && !isPrivateHostname(parsed.hostname)) {
     return "That address is plain http, so the key would cross the internet unencrypted. Use the https address; only a server on your own network may be plain http.";
@@ -304,7 +350,10 @@ export function localConnectorEntryRefusal(name: string, entry: LocalServerConfi
   if (trimmed.length === 0) return "A connector needs a name.";
   if (RESERVED_ENTRY_NAMES.has(trimmed)) return `"${trimmed}" is a reserved name. Pick another one.`;
   if (/[/\\\0]/.test(trimmed)) return "A connector name cannot contain a slash or a null byte.";
-  if (isRemoteLocalServer(entry)) return localRemoteUrlRefusal(entry.url) ?? remoteHeaderRefusal(entry.headers);
+  if (isRemoteLocalServer(entry)) {
+    return localRemoteUrlRefusal(entry.url, { allowPrivateNetwork: entry.allowPrivateNetwork === true })
+      ?? remoteHeaderRefusal(entry.headers);
+  }
   if (entry.command.trim().length === 0) return "A connector that runs a program needs the program to run.";
   for (const field of Object.keys(entry.env ?? {})) {
     if (!isConnectorEnvFieldName(field)) {
@@ -338,6 +387,7 @@ export function writeLocalConnectorEntry(
       type: entry.type,
       url: entry.url,
       ...(entry.headers === undefined ? {} : { headers: { ...entry.headers } }),
+      ...(entry.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {}),
     }
     : {
       command: entry.command,
@@ -365,6 +415,139 @@ export function removeLocalConnectorEntry(rootDir: string, name: string): boolea
   delete servers[name];
   writeLocalConnectorDocument(rootDir, servers);
   return true;
+}
+
+/**
+ * MARKET-17. The argv leak, on the boxes that were already running.
+ *
+ * Moving this tree onto the native remote shape changed what a NEW entry is written as and nothing
+ * else, so both R750 boxes kept the bridged entry they were given in July and kept putting the key
+ * on a command line: measured read-only inside titanbot-box-wepegxhh3fpvr83bubvz5xm5 on 2026-09-08,
+ * the stored TinyFish bearer was in three root process argument lists, readable by `ps -eo args`
+ * from the agent's own root shell. The plugin page said nothing, because the entry looks fine and
+ * works. An operator had no way to notice it and no lever to fix it.
+ *
+ * So the host rewrites them itself. A bridged remote
+ * (`npx -y mcp-remote@x <url> [--transport t] [--header "N:V"]`) becomes the native
+ * `{type, url, headers}` entry the same url and headers describe, and the next push carries the key
+ * in the request the box makes rather than in a process's arguments.
+ *
+ * A header whose value is a LITERAL key is not carried across: it goes into the 0600 store through
+ * `storeSecret` and is replaced by its `${FIELD}` placeholder. With no `storeSecret` the entry is
+ * left exactly as it was and reported as skipped, because a migration that quietly copied a key
+ * into a plaintext file would be a worse bug than the one it is closing.
+ */
+const BRIDGE_PACKAGE = /^(?:@[\w.-]+\/)?mcp-remote(?:@[\w.+-]+)?$/;
+
+export interface BridgedRemoteEntry {
+  readonly type: "http" | "sse";
+  readonly url: string;
+  readonly headers: Record<string, string>;
+}
+
+/** The endpoint a bridged entry is really about, or null when the entry is not a bridge. */
+export function bridgedRemoteEntry(config: LocalServerConfig): BridgedRemoteEntry | null {
+  if (isRemoteLocalServer(config)) return null;
+  const args = [...(config.args ?? [])];
+  const at = args.findIndex((arg) => BRIDGE_PACKAGE.test(arg));
+  if (at < 0) return null;
+  let url: string | null = null;
+  let type: "http" | "sse" = "http";
+  const headers: Record<string, string> = {};
+  for (let index = at + 1; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    const [flag, inlineValue] = arg.startsWith("--") && arg.includes("=")
+      ? [arg.slice(0, arg.indexOf("=")), arg.slice(arg.indexOf("=") + 1)]
+      : [arg, null];
+    if (flag === "--header") {
+      const pair = inlineValue ?? args[index + 1] ?? "";
+      if (inlineValue == null) index += 1;
+      const colon = pair.indexOf(":");
+      if (colon > 0) headers[pair.slice(0, colon).trim()] = pair.slice(colon + 1).trim();
+      continue;
+    }
+    if (flag === "--transport") {
+      const value = inlineValue ?? args[index + 1] ?? "";
+      if (inlineValue == null) index += 1;
+      if (value.startsWith("sse")) type = "sse";
+      continue;
+    }
+    // Every other flag is the bridge's own plumbing -- its callback port, its debug switch -- and
+    // has no meaning once there is no bridge.
+    if (flag.startsWith("-")) {
+      if (inlineValue == null && /^--(host|port|static-oauth-client-metadata|header-file)$/.test(flag)) index += 1;
+      continue;
+    }
+    if (url == null) url = arg;
+  }
+  return url == null ? null : { type, url, headers };
+}
+
+/** The store field a hoisted literal is filed under: the connector, then what the header is for. */
+function hoistedFieldName(connector: string, header: string): string {
+  const vendor = connector.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase() || "SERVER";
+  const suffix = /^authorization$/i.test(header.trim())
+    ? "TOKEN"
+    : header.trim().replace(/^x[-_]/i, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase() || "TOKEN";
+  return `${vendor}_${suffix}`;
+}
+
+export function migrateBridgedRemoteEntries(
+  rootDir: string,
+  options: { storeSecret?: (connector: string, field: string, value: string) => boolean } = {},
+): { migrated: string[]; skipped: Array<{ name: string; reason: string }> } {
+  const document = readLocalConnectorDocument(rootDir);
+  const migrated: string[] = [];
+  const skipped: Array<{ name: string; reason: string }> = [];
+  for (const [name, raw] of Object.entries(document)) {
+    const config = parseServer(raw);
+    if (config == null) continue;
+    const bridged = bridgedRemoteEntry(config);
+    if (bridged == null) continue;
+    const headers: Record<string, string> = {};
+    let blocked: string | null = null;
+    for (const [header, value] of Object.entries(bridged.headers)) {
+      if (credentialPlaceholderNames(value).length > 0 || !looksLikeCredential(value)) {
+        headers[header] = value;
+        continue;
+      }
+      const field = hoistedFieldName(name, header);
+      const bearer = /^Bearer\s+/i.test(value);
+      const stored = options.storeSecret?.(name, field, value.replace(/^Bearer\s+/i, ""));
+      if (stored !== true) {
+        blocked = `its "${header}" header carries the key itself and it could not be moved into the store`;
+        break;
+      }
+      headers[header] = bearer ? `Bearer \${${field}}` : `\${${field}}`;
+    }
+    if (blocked != null) { skipped.push({ name, reason: blocked }); continue; }
+    // A bridged entry on a private address ALREADY has that reach: it was written when the door
+    // allowed it and it has been making those requests ever since. Migrating it is about where the
+    // key lives, not about revoking reach nobody asked to revoke, so the entry carries the opt-in
+    // explicitly rather than being refused by the new rule and left leaking on the bridge. A NEW
+    // entry at the same address still meets the refusal, at every door.
+    let privateAddress = false;
+    try { privateAddress = isPrivateHostname(new URL(bridged.url).hostname); } catch { privateAddress = false; }
+    const entry: LocalRemoteServerConfig = {
+      type: bridged.type,
+      url: bridged.url,
+      ...(Object.keys(headers).length === 0 ? {} : { headers }),
+      ...(config.disabled === true ? { disabled: true } : {}),
+      ...(privateAddress ? { allowPrivateNetwork: true } : {}),
+    };
+    const refusal = localConnectorEntryRefusal(name, entry);
+    if (refusal != null) { skipped.push({ name, reason: refusal }); continue; }
+    document[name] = {
+      type: entry.type,
+      url: entry.url,
+      ...(entry.headers === undefined ? {} : { headers: { ...entry.headers } }),
+      ...(entry.disabled === true ? { disabled: true } : {}),
+      ...(entry.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {}),
+    };
+    migrated.push(name);
+  }
+  if (migrated.length > 0) writeLocalConnectorDocument(rootDir, document);
+  return { migrated, skipped };
 }
 
 /** Reads the operator's local connector file. A missing or malformed file yields no servers. */
@@ -466,7 +649,7 @@ function asAccountServer(
   const stored = injectedEnv ?? {};
   let serverConfig: unknown;
   if (isRemoteLocalServer(config)) {
-    const { disabled: _disabled, headers, url, ...rest } = config;
+    const { disabled: _disabled, allowPrivateNetwork: _allowed, headers, url, ...rest } = config;
     // MARKET-6. The whole custody argument for a native remote lives on this line: the literal
     // goes into the config the host pushes over the control plane, and never into connectors.json,
     // never into an argument list, and never into a process any shell in the box can read.

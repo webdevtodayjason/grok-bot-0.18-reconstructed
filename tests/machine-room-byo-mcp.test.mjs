@@ -311,17 +311,31 @@ test("the five refusals are one plain sentence each, and each names what to chan
   const privateHost = "That address is inside this box's own network, where its gateway and its tool daemons listen. Give the server's address on the internet instead.";
   // The one that matters: a bridge aimed at 127.0.0.1 runs beside the gateway on 1340 and the exec
   // daemons on 1337 and 1338.
-  for (const host of ["127.0.0.1", "localhost", "10.0.0.5", "192.168.1.9", "172.16.4.4", "169.254.1.1", "box.local"]) {
+  // MARKET-22: and the same addresses in their IPv6 coat, which the shipped door accepted --
+  // byoPrivateHost("::ffff:7f00:1") was false on this Mac on 2026-09-08, and the host's own door
+  // took the matching URL with a secret header on the R750 demo box.
+  for (const host of [
+    "127.0.0.1", "localhost", "10.0.0.5", "192.168.1.9", "172.16.4.4", "169.254.1.1", "box.local",
+    "[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "[::]", "[::1]", "[::ffff:169.254.169.254]",
+    "[::ffff:192.168.48.6]", "[fd00::1]", "[fe80::1]",
+  ]) {
     assert.equal(link({ url: `https://${host}/mcp` }), privateHost, `${host} was not refused`);
   }
+  // A global-unicast v6 address is a server on the internet and stays addable.
+  assert.equal(link({ url: "https://[2606:4700::1111]/mcp" }), null);
   assert.equal(
     link({ url: `https://mcp.example.com/mcp?api_key=${NOT_A_KEY}` }),
     "That address carries the key inside it. Take the key out of the address and add it as a header below, where it is stored instead of written down.",
   );
   assert.equal(link({ url: `https://user:${NOT_A_KEY}@mcp.example.com/mcp` }), "That address carries the key inside it. Take the key out of the address and add it as a header below, where it is stored instead of written down.");
+  // MARKET-18. The old sentence sent the operator to the box's desktop to sign in and add it
+  // again, and there is no OAuth path on either the native remote or the bridge, so the second add
+  // answered the same sentence forever. This one is true, and it is the same string the host says
+  // when it reads the far end's own WWW-Authenticate challenge -- which is where an operator
+  // actually meets it, since no control in the console sets auth:"oauth".
   assert.equal(
     link({ auth: "oauth" }),
-    "This server signs you in through a browser, and that has to be done on this box's own desktop before it will answer. Open the desktop, sign in there, and add it again afterwards.",
+    "That server asks people to sign in through a browser, and this box has no browser sign-in to give it, so it would never finish connecting. If the server also takes an API key, add it again with that key in a header; otherwise it cannot be added here yet.",
   );
   // And a good one is not refused.
   assert.equal(link({}), null);
@@ -426,8 +440,12 @@ test("a box whose bundle predates the host writer still takes a program, and say
 
 test("Uninstall asks the host to clear the values and drop the entry in one call", async () => {
   const asked = [];
+  // The host's OWN answer shape: mcp-service's removeLocalConnector returns `cleared: string[]`,
+  // and it was measured returning cleared:["MKT6REV_TOKEN"] on the R750 demo box on 2026-09-08.
+  // This stub used to invent a `clearedCredentials` number the gateway has never once produced, so
+  // the suite was green while the toast's "and 1 stored value cleared" clause was dead on every box.
   const { createGatewayAdapter, posts } = await loadAdapter({
-    removeLocalConnector: (args) => { asked.push(args); return { removed: true, clearedCredentials: 2 }; },
+    removeLocalConnector: (args) => { asked.push(args); return { removed: true, cleared: ["TINYFISH_API_KEY", "TINYFISH_PROFILE"], stored: [] }; },
   });
   const adapter = createGatewayAdapter(seed());
   const result = await adapter.removeConnector("tinyfish", { clearSecrets: true });
@@ -438,6 +456,28 @@ test("Uninstall asks the host to clear the values and drop the entry in one call
   // The ordering -- values first, then the entry -- lives in the host now, so the console makes
   // no deleteConnectorSecret calls of its own.
   assert.equal(posts.length, 0);
+});
+
+test("a box on the older answer shape still gets a truthful toast", async () => {
+  const { createGatewayAdapter } = await loadAdapter({
+    removeLocalConnector: () => ({ removed: true, clearedCredentials: 1 }),
+  });
+  const adapter = createGatewayAdapter(seed());
+  const result = await adapter.removeConnector("tinyfish", { clearSecrets: true });
+  assert.equal(result.clearedCredentials, 1);
+  assert.match(result.message, /1 stored value cleared/);
+});
+
+test("every removal door clears the key, not only the Marketplace's Uninstall", async () => {
+  // MARKET-23. Measured on the R750 demo box on 2026-09-08: the plugin card's Remove sent
+  // removeLocalConnector with no options, the host answered cleared:[] and the value stayed in the
+  // 0600 store as an orphan, while the Marketplace card next door cleared it. The relay's connector
+  // editor did the same. All three doors now send the flag.
+  const source = await readFile(appPath, "utf8");
+  const handler = between(source, "    } else if (target.dataset.removeConnector) {", "    } else if (target.dataset.installShellTool) {", "the card's remove handler");
+  assert.match(handler, /adapter\.removeConnector\(name, \{ clearSecrets: true \}\)/);
+  const relay = await readFile(path.join(repoRoot, "ui/server.mjs"), "utf8");
+  assert.match(relay, /\{ server: change\.name, name: change\.name, clearSecrets: true \}/);
 });
 
 // ---- the hint triangle, collapsed ---------------------------------------------------------------
@@ -746,7 +786,9 @@ test("the relay asks the host for each key that actually moved, and for nothing 
   assert.equal(shim.seen[0].args.name, "airtable");
   assert.deepEqual(shim.seen[0].args.env, ["AIRTABLE_API_KEY"]);
   assert.equal(shim.seen[0].args.replace, true);
-  assert.deepEqual(shim.seen[1].args, { server: "notion", name: "notion" });
+  // MARKET-23: an entry deleted in the editor takes its stored value with it, the same as the
+  // card's Remove and the Marketplace's Uninstall.
+  assert.deepEqual(shim.seen[1].args, { server: "notion", name: "notion", clearSecrets: true });
 });
 
 test("an address in the file goes to the host as a remote server, not as a command", async () => {

@@ -110,14 +110,35 @@ of NAMES only, so a key typed into a tool call cannot reach the file even by acc
 
 ### Which addresses each door takes, and what a header gets written as
 
-The console and the host do not have the same rule about addresses, and the console is the stricter
-one. **The console's link door** takes `https` only, and refuses a loopback, private or link-local
-host, a credential in the userinfo, and a credential in a query parameter — each in one sentence.
-**The host** additionally accepts plain `http` on a private network and accepts a private host, which
-is why the gates can point a connector at a stub running inside the box and the console cannot. That
-disagreement is deliberate in its direction and is written down here so nobody rediscovers it by
-writing a browser test that could never pass; MARKET-15 and MARKET-16 are about making the host's
-rule the tighter one with an explicit opt-in for the in-box stubs.
+Both doors now refuse the same address family, and they refuse the whole of it. **The console's link
+door** takes `https` only and refuses a loopback, private or link-local host, a credential in the
+userinfo, and a credential in a query parameter — each in one sentence. **The host's writer** refuses
+loopback outright and refuses every other private address too, so `https` is effectively the only
+thing left for a server on the internet.
+
+That second half is not tidiness. Measured from inside the R750 demo box on 8 September 2026: a POST
+to that box's own `192.168.48.6:1340/api/getHostStatus` with its own gateway token answered
+byte-identically to the same POST against `127.0.0.1:1340`, its exec daemon on `:1337` answered HTTP
+on the same address, and `ss -ltn` showed 1337, 1338, 1339 and 1340 all bound to `0.0.0.0`. The
+docker default gateway `192.168.32.1:80` — the machine's own proxy — answered as well. Other
+tenants' boxes did **not** answer (`curl` code 000 to three of them), so box isolation holds; what
+the old loopback-only rule handed out was the box's own control plane and its host's services. A
+connector pointed there with a secret header would be a credentialled request into either.
+
+**The one way in is stated on the entry.** A remote entry may carry `"allowPrivateNetwork": true`,
+and then a private address is allowed (and may be plain `http`, for an on-prem server on the
+operator's own LAN). Loopback stays refused even with it, because that address is the control plane
+itself rather than a machine beside it. Neither console door nor the agent's `AddMcpServer` has a
+field for it — it takes a direct gateway call, which takes the box's own token — and it is how
+`verify-connector-host.mjs` and `verify-marketplace --sse` point a connector at their in-box stub.
+
+**An address is read as an address, not as text.** `https://[::ffff:127.0.0.1]:1341/mcp`,
+`https://[::]:1341/mcp` and `https://[::ffff:169.254.169.254]/mcp` were all accepted with a secret
+`Authorization` header by the shipped rule on the demo box on 8 September 2026 while the plain
+`127.0.0.1` form was refused, because a prefix test on the raw hostname is handed `::ffff:7f00:1`,
+`::` and `::ffff:a9fe:a9fe`. Every validator now normalizes first: brackets and a zone come off, a
+v4-mapped or v4-compatible address becomes its dotted quad, and any other v6 literal becomes its
+full eight-group form (MARKET-22).
 
 **A secret header gets a scheme where a scheme belongs.** A header named `Authorization` is written
 as `Bearer ${FIELD}`; every other header — `x-api-key`, `X-Browser-Use-API-Key`, a vendor's own — is
@@ -126,9 +147,58 @@ catalog. It matters more than it looks: the door used to write the bare placehol
 a bearer server added through the form sent `Authorization: <key>` with no scheme, got a 401, and the
 health line then told the operator their key had been refused (MARKET-20).
 
-Removing a connector: **Remove this connector** on its card, or its row in the editor, drops it from
-`connectors.json` and re-reads the file. The stored secret is separate — `deleteConnectorSecret`
-takes it out of the store and the field stays on the card as an empty one to fill again.
+Removing a connector: **Remove this connector** on its card, its row in the editor, or **Uninstall**
+in the Marketplace. All three drop the entry from `connectors.json`, re-read the file, and clear
+whatever the host was holding for it, in that order — the store is resolved through
+`connectors.json`, so a clear after the row has left the file cannot find it, and the host does both
+under the one call. The Marketplace's Uninstall is the only one that offers to keep the value, as a
+checkbox that is ticked by default.
+
+Until this pass only the Marketplace door cleared anything (MARKET-23): the card's Remove and the
+editor's delete sent `removeLocalConnector` with no options, the host answered `cleared: []`, and the
+value stayed in the 0600 store — visible only in the Plugins panel's "stored keys with no plugin"
+strip, which is where a key whose entry is already gone still shows up and can be cleared by name.
+
+### A server that signs in through a browser is a named non-goal
+
+Nothing on this build can authorize an OAuth-protected remote MCP server. Every hosted candidate was
+checked against its own `/.well-known/oauth-authorization-server` (Notion, Linear, Stripe, Asana,
+HubSpot, Cloudflare, Todoist, Zapier) and **not one advertises a device-code grant**, so there is no
+flow a box with nobody at its screen can complete. What the bridge did instead was open Chrome on the
+box desktop and wait — one such process on the local box had been sitting there for 9 h 51 m.
+
+So the door says so, in one sentence, before anything is written:
+
+> That server asks people to sign in through a browser, and this box has no browser sign-in to give
+> it, so it would never finish connecting. If the server also takes an API key, add it again with
+> that key in a header; otherwise it cannot be added here yet.
+
+The host reaches that sentence by asking the endpoint itself, and only when the operator supplied no
+key at all: one unauthenticated `initialize`, and a 401 whose `WWW-Authenticate` names an OAuth realm
+or resource metadata is a browser sign-in. `https://mcp.notion.com/mcp` answers exactly that;
+`https://mcp.zapier.com/api/mcp/mcp` answers `realm="Zapier MCP", error="invalid_token"`, which is a
+plain key challenge and goes through. A network failure refuses nothing — a box with a flaky egress
+path must still be able to add a server, and the connector's own health line reports one that will
+not talk (MARKET-18). The old sentence sent the operator to the box's desktop to sign in and add it
+again, which could never work and was unreachable from the console anyway.
+
+### Entries written before the link shape are rewritten at start
+
+A remote connector used to be `npx -y mcp-remote@… <url> --header "Authorization:Bearer ${FIELD}"`,
+and the box's exec daemon expands `${FIELD}` **before** it execs. Measured read-only inside
+`titanbot-box-wepegxhh3fpvr83bubvz5xm5` on 8 September 2026, the stored bearer was in the argument
+list of three root processes, readable by `ps -eo args` from the agent's own root shell. Moving to
+the link shape changed what a *new* entry is written as and rewrote nothing, so every box that has
+been running since July kept leaking (MARKET-17).
+
+The host now rewrites them itself, at start and again whenever it rebuilds its server list: the url,
+the `--transport` and each `--header` become the `{type, url, headers}` entry they describe, and the
+placeholder is carried across untouched. Two rules make it safe. A header carrying a **literal** key
+is moved into the 0600 store first and replaced by its `${FIELD}` placeholder; if it cannot be
+stored, the entry is left bridged and the reason is logged, because a migration that copied a key
+into a plaintext file would be worse than the leak. And an entry already pointing at a private
+address keeps that reach (`allowPrivateNetwork` is written on it) rather than being refused into
+staying on the bridge. It is idempotent: with nothing to do it is a file read.
 
 ## Ask for a secret inline
 

@@ -33,12 +33,15 @@ import {
   localConnectorIdForName,
   localRemoteConnectorNames,
   mergeLocalConnectors,
+  migrateBridgedRemoteEntries,
+  remoteCredentialFieldNames,
   readLocalConnectorFile,
   removeLocalConnectorEntry,
   writeLocalConnectorEntry,
   type LocalServerConfig,
 } from "./local-connectors.js";
 import { CONNECT_TIMEOUT_SENTENCE, describeConnectorHealth } from "./connector-health.js";
+import { OAUTH_REMOTE_REFUSAL, probeRemoteMcpOAuth } from "./remote-oauth-probe.js";
 import { isShellEnvSecretField } from "../shell-tools/shell-secret-field.js";
 import { pushShellEnvSecretsToBox, writeShellEnvSecret } from "../shell-tools/shell-secrets.js";
 import { createContext } from "../../../packages/context/core.js";
@@ -82,7 +85,7 @@ export interface PluginSkillsPort { sync(trigger: string): Promise<unknown[]>; s
  */
 export function connectorEntryFromSpec(spec: {
   url?: unknown; type?: unknown; headers?: unknown;
-  command?: unknown; args?: unknown; env?: unknown;
+  command?: unknown; args?: unknown; env?: unknown; allowPrivateNetwork?: unknown;
 }): LocalServerConfig {
   const url = typeof spec.url === "string" ? spec.url.trim() : "";
   if (url.length > 0) {
@@ -96,6 +99,11 @@ export function connectorEntryFromSpec(spec: {
       type: spec.type === "sse" ? "sse" : "http",
       url,
       ...(Object.keys(headers).length === 0 ? {} : { headers }),
+      // MARKET-15. The private-network opt-in, carried only when it is stated. Neither console door
+      // nor the agent's AddMcpServer has a field for it; it exists for an operator holding the
+      // box's gateway token who really does have a server on their own LAN, and for the gate's
+      // in-box stub.
+      ...(spec.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {}),
     };
   }
   const command = typeof spec.command === "string" ? spec.command.trim() : "";
@@ -184,6 +192,38 @@ interface McpManagerRuntime {
   settingsStoreView(): unknown;
   dispose(): void | Promise<void>;
 }
+/**
+ * MARKET-17. The boxes that were already running, brought onto the shape with no argument list.
+ *
+ * A bundle swap changes what the NEXT entry is written as and rewrites nothing, so both R750 boxes
+ * kept the bridged TinyFish entry they were given in July: measured on 2026-09-08, the stored
+ * bearer was still in three root process argument lists inside each of them, readable with
+ * `ps -eo args` from the agent's own root shell, and no surface anywhere said so.
+ *
+ * So the host fixes it, at start and again every time the server list is rebuilt. The second one
+ * matters because connectors.json is edited under a running host -- by the console, by the agent
+ * and by hand -- and an entry written by an older client would otherwise sit there until a restart.
+ * When there is nothing to do it is a file read and nothing else.
+ *
+ * A failure here must never take the host down: the connectors it did not touch keep working
+ * exactly as they did, and the log line is the only thing that changes.
+ */
+export function runBridgedConnectorMigration(rootDir: string, log: (message: string) => void): void {
+  try {
+    const migration = migrateBridgedRemoteEntries(rootDir, {
+      storeSecret: (connector, field, value) => writeConnectorEnvSecret(rootDir, connector, field, value),
+    });
+    for (const name of migration.migrated) {
+      log(`connector "${name}" moved off the mcp-remote bridge onto the box's own remote transport, so its key is no longer in a process argument list`);
+    }
+    for (const { name, reason } of migration.skipped) {
+      log(`connector "${name}" is still bridged: ${reason}`);
+    }
+  } catch (error) {
+    log(`bridged connector migration failed (${error instanceof Error ? error.name : typeof error})`);
+  }
+}
+
 export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
   const log = deps.log ?? ((message: string) => console.log(`[sand:mcp] ${message}`));
   const manager = new SandMcpManager({
@@ -218,6 +258,8 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
   // source/shared/marketplace/catalog.ts), which is on the box and cannot be unreachable.
   const localConnectorRoot = () => getSandRootDir();
   const marketplaceReader = { rootDir: localConnectorRoot };
+  // MARKET-17. Bridged entries, rewritten at start; the server-list read below does it again.
+  runBridgedConnectorMigration(localConnectorRoot(), log);
   /**
    * MARKET-6. Which url entries in connectors.json this box connects to ITSELF. Handed to the
    * definition source as a function rather than a list because connectors.json changes under a
@@ -385,6 +427,7 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
     addLocalConnector: async (args: {
       name?: unknown; url?: unknown; type?: unknown; headers?: unknown;
       command?: unknown; args?: unknown; env?: unknown; replace?: unknown;
+      allowPrivateNetwork?: unknown;
     }) => {
       const name = typeof args.name === "string" ? args.name.trim() : "";
       if (name.length === 0) throw new Error("addLocalConnector needs a `name`");
@@ -395,6 +438,14 @@ export function createHostMcp(deps: CreateHostMcpOptions): McpHostPort {
       const entry = connectorEntryFromSpec(args);
       const refusal = localConnectorEntryRefusal(name, entry);
       if (refusal != null) throw new Error(refusal);
+      // MARKET-18. A remote server the operator gave no key for is asked, once, whether it wants a
+      // browser sign-in -- because a box cannot do one, and being told that now is the difference
+      // between one sentence and a connector that sits in "connecting" until somebody investigates.
+      // Asked only in that case: agent.tinyfish.ai advertises OAuth metadata too and works fine
+      // with a key. A network failure refuses nothing.
+      if (isRemoteLocalServer(entry) && remoteCredentialFieldNames(entry).length === 0) {
+        if (await probeRemoteMcpOAuth(entry.url) === true) throw new Error(OAUTH_REMOTE_REFUSAL);
+      }
       writeLocalConnectorEntry(root, name, entry);
       const restarted = await restartLocalConnector(name);
       const { id } = resolveLocalConnector(name, "addLocalConnector");
@@ -705,7 +756,11 @@ export class McpHostService {
       // on their own when the account is unreachable -- a connector configured on this machine must
       // not stop working because a remote login expired.
       accountServersProvider: async () => {
-        const root = getSandRootDir(), local = readLocalConnectorFile(root);
+        const root = getSandRootDir();
+        // Before the list is read, not after: an entry still on the bridge would otherwise be
+        // pushed to the box with its key on a command line one more time.
+        runBridgedConnectorMigration(root, deps.log ?? ((message: string) => console.log(`[sand:mcp] ${message}`)));
+        const local = readLocalConnectorFile(root);
         return mergeLocalConnectors(
           await fetchAccountMcpServers(accountMcpDeps).catch(() => null),
           local,

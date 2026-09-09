@@ -1622,8 +1622,15 @@
       : "";
     return `<section><div class="plugin-section-title"><span>Install in the box</span><span>as the host's own user</span></div><div class="secure-card"><div class="secure-card-header"><span class="secure-shield">◈</span><div><strong>${escapeHtml(plugin.name)}</strong><small>Runs in the box, capped at five minutes. The last lines of its output come back here.</small></div></div><pre class="shell-tool-command">${escapeHtml(tool.install)}</pre><div class="form-actions"><button class="primary-button" type="button" data-install-shell-tool="${id}">Install in the box</button></div><pre class="shell-tool-output" data-shell-tool-output="${id}" hidden></pre></div>${tool.usage ? `<div class="demo-note"><strong>Once it is installed</strong><br />${escapeHtml(tool.usage)}</div>` : ""}${probe}${teach}</section>`;
   }
+  // MARKET-23. The key goes with the entry, and the row says so before it is pressed.
+  //
+  // Measured on the R750 demo box on 8 September 2026: this button sent removeLocalConnector with
+  // no options, which answers `cleared: []` and leaves the value in the 0600 store -- so a connector
+  // removed from its own card left its key behind, visible only in the Plugins panel's orphan
+  // strip, while the Marketplace's Uninstall next door cleared it. Three removal doors, one
+  // behaviour now.
   const connectorRemoveRow = (plugin) => (plugin.group === "Connectors" && plugin.removable && typeof adapter.removeConnector === "function"
-    ? `<div class="setting-row"><div><strong>Remove this connector</strong><small>Drops ${escapeHtml(plugin.name)} from connectors.json on the box and asks the host to re-read the file.</small></div><button class="ghost-button" type="button" data-remove-connector="${escapeHtml(plugin.name)}">Remove</button></div>`
+    ? `<div class="setting-row"><div><strong>Remove this connector</strong><small>Drops ${escapeHtml(plugin.name)} from connectors.json on the box${(plugin.storedFields ?? []).length ? `, clears the ${(plugin.storedFields ?? []).length} value${(plugin.storedFields ?? []).length === 1 ? "" : "s"} the host stores for it` : ""} and asks the host to re-read the file.</small></div><button class="ghost-button" type="button" data-remove-connector="${escapeHtml(plugin.name)}">Remove</button></div>`
     : "");
 
   // MARKET-1: the three boxes a plugin card is made of, pulled out of pluginDetailMarkup so the
@@ -4750,8 +4757,12 @@
     } else if (target.dataset.removeConnector) {
       const name = target.dataset.removeConnector;
       target.disabled = true;
-      Promise.resolve(adapter.removeConnector(name))
-        .then((result) => { renderPluginsPanel(); showToast(result?.message ?? `${name} removed`); })
+      // The value goes with the entry (MARKET-23). The host does both under one call, in the order
+      // that works -- the store is resolved through connectors.json, so a clear after the row has
+      // left the file cannot find it -- and its answer names what it cleared, which is what the
+      // toast reads.
+      Promise.resolve(adapter.removeConnector(name, { clearSecrets: true }))
+        .then((result) => { renderPluginsPanel(); refreshByoOrphans(); showToast(result?.message ?? `${name} removed`); })
         .catch((error) => { target.disabled = false; showToast(`${name} was not removed: ${error.message}`); });
     } else if (target.dataset.installShellTool) {
       // CONNECT-5. The output pane is written from the host's answer, not from a guess about it:

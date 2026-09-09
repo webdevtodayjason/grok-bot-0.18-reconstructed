@@ -143,10 +143,13 @@ telling you the entry is written and the box has not got a tool list back.
 
 **Uninstall** is on the plugin page, and it takes **two clicks**: the first arms it (the button
 reads *Click again*), the second removes it. One stray click should not drop a connector. It removes
-the entry from `connectors.json` and re-reads the file, and it offers to clear that plugin's stored secrets (`deleteConnectorSecret`) as a separate,
-explicit step — removing an entry does not silently destroy a key you may be about to re-add. After
-an uninstall with the secrets left alone, `connectors.json` is byte-identical to what it was before
-the Add.
+the entry from `connectors.json`, re-reads the file, and clears whatever the host was holding for the
+plugin — under one call, in that order, because the store is resolved through `connectors.json` and a
+clear after the row has left the file cannot find it. This door is the one that offers a choice: a
+checkbox, ticked by default, keeps the values for an entry you are about to re-add. The other two
+removal doors — the Remove button on a connector's own card and the row's delete in the connector
+editor — take the value with the entry and say so on the row (MARKET-23). After an uninstall with the
+values kept, `connectors.json` is byte-identical to what it was before the Add.
 
 ## 4. Import a bot, from the operator's side
 
@@ -455,9 +458,12 @@ A server the catalog does not carry has two doors, and they are the same door un
 and headers whose secret values become stored names), a program (a command, its arguments and the
 names of the variables it needs), or a vendor's own `{"mcpServers": …}` block pasted whole. It shows
 the entry it is about to write before it writes anything, then the page says whether the server is
-working and lists its tools; a failure is one plain sentence naming the cause. Uninstall drops the
-entry and offers to clear its stored values, and a value left behind by an entry that is already
-gone is listed on the same page with a Clear beside it.
+working and lists its tools; a failure is one plain sentence naming the cause. Every removal door
+drops the entry and clears what the host stored for it — the Marketplace's Uninstall is the one that
+offers to keep the values — and a value left behind by an entry that is already gone is listed on the
+same page with a Clear beside it. A server that can only be signed into through a browser is refused
+at the door in one sentence, because a box has no browser sign-in to give it; see
+[docs/CONNECTORS.md](CONNECTORS.md) for what that sentence says and how the endpoint is asked.
 
 **`AddMcpServer`** is the agent's door to the same writer, so a server the agent adds and one a
 person adds are the same entry with the same rules. A key it needs is asked for through the masked
