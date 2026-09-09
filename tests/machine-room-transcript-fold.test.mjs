@@ -49,11 +49,34 @@ test("rows with receipts, exchanges, or different words stay separate", async ()
 
 test("the transcript renders the count in plain words", async () => {
   const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
-  // CONSOLE-4 put a badge between the fold and the renderer: the folded rows are handed to
-  // gap-badge.js when it is loaded, and mapped straight through messageMarkup when it is not. The
-  // fold still runs first either way, so a folded row is what the badge counts and what the
-  // expanded view shows.
+  // CONSOLE-4 put a badge between the fold and the renderer: transcriptMarkup folds first, then
+  // hands the folded rows to gap-badge.js when it is loaded and maps them straight through
+  // messageMarkup when it is not. What DASH-FOLD-1 needs pinned either way is that the fold still
+  // happens on the way to the render -- an unfolded transcript is the column of seventeen identical
+  // rows this row exists to stop -- so both shapes are named here rather than the assertion being
+  // loosened to something a transcript that never folds would also pass.
   assert.match(source, /const rows = foldRepeatedRows\(contextMessages\(\)\);/);
-  assert.match(source, /rows\.map\(messageMarkup\)\.join\(""\)/);
+  const direct = /foldRepeatedRows\(contextMessages\(\)\)\.map\(messageMarkup\)/.test(source);
+  const throughBadge = /__gapBadge/.test(source)
+    && /\.render\(rows, messageMarkup/.test(source)
+    && /rows\.map\(messageMarkup\)\.join\(""\)/.test(source);
+  assert.ok(direct || throughBadge, "transcriptMarkup must fold before it renders, directly or through the gap badge");
   assert.match(source, /`\$\{message\.text\} · \$\{message\.count\} steps`/);
+});
+
+// The badge counts steps, not rows, and the count it sums is the one this file's fold stamps. If
+// the fold ever stopped stamping `count`, the badge would go on drawing a plausible smaller number
+// instead of failing, so the two are tied here rather than in either file alone.
+test("the folded count is what the badge sums into its step total", async () => {
+  const { foldRepeatedRows } = await helpers();
+  const badgeSource = await readFile(path.join(repoRoot, "ui/machine-room/gap-badge.js"), "utf8");
+  const badge = new Function("window", `${badgeSource}\nreturn window.__gapBadge;`)({ localStorage: null });
+  const rows = foldRepeatedRows([
+    { id: "m1", type: "message", text: "On it." },
+    sys("t1", "Computer · running"), sys("t2", "Computer · running"), sys("t3", "Computer · running"),
+    sys("t4", "Shell · ls", { detail: "$ ls" }),
+    { id: "m2", type: "message", text: "Done." },
+  ]);
+  const html = badge.render(rows, (m) => `<x id="${m.id}"></x>`, { agentId: "titan", working: false });
+  assert.match(html, /data-gap-steps="4"/, "three folded steps plus the receipt row, not two rows");
 });
