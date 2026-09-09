@@ -666,6 +666,15 @@ export function readRollup(store) {
  * behind it -- which is the tracker-hygiene failure this product has already had once.
  */
 export function writeFeedback(store, records, { now = Date.now, actor = "" } = {}) {
+  // ONLY the rows THIS run looked at. `marketplace verify --row meta` checks one row, and a writer
+  // that replaced the whole list would silently close every other row's open complaint -- which is
+  // the tracker-hygiene failure this product has already had once, in the other direction.
+  const touched = new Set(records.map((record) => String(record.rowId)));
+  let kept = [];
+  try {
+    const existing = JSON.parse(store.getSetting(VERIFICATION_FEEDBACK_SETTING, "[]"));
+    if (Array.isArray(existing)) kept = existing.filter((item) => !touched.has(String(item?.target ?? "")));
+  } catch { kept = []; }
   const items = records
     .filter((record) => record.state !== "verified")
     .map((record) => ({
@@ -684,8 +693,9 @@ export function writeFeedback(store, records, { now = Date.now, actor = "" } = {
       target: record.rowId,
       state: "open",
     }));
-  store.setSetting(VERIFICATION_FEEDBACK_SETTING, JSON.stringify(items), actor);
-  return items;
+  const all = [...kept, ...items];
+  store.setSetting(VERIFICATION_FEEDBACK_SETTING, JSON.stringify(all), actor);
+  return all;
 }
 
 // ---- age, which is the customer-facing half ------------------------------------------------------

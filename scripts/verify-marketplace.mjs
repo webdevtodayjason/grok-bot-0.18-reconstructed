@@ -321,9 +321,15 @@ try {
     if (agedDrew.unavailable) {
       check(false, "the aged-row leg could not run", String(agedDrew.unavailable));
     } else {
-      // Leave the panel and come back, which is what makes the console ask the adapter again.
-      await page.click('[data-capability="agents"]').catch(() => {});
-      await page.waitForTimeout(600);
+      // Re-open the panel, which is what makes the console ask the adapter again:
+      // renderMarketplacePanel calls refreshMarketplace on every open, and that is the call the
+      // wrap above is sitting in front of.
+      //
+      // THE DIALOG HAS TO CLOSE FIRST. The capability tile lives on the page BEHIND the panel's
+      // modal dialog, so clicking it while the panel is open is a click the dialog intercepts --
+      // which is a 30-second timeout and a failure that says nothing about the thing being tested.
+      await page.click("[data-close-dialog]").catch(() => {});
+      await page.waitForTimeout(400);
       await page.click('[data-capability="marketplace"]');
       await page.waitForTimeout(2500);
       await page.click('[data-marketplace-card="meta"]');

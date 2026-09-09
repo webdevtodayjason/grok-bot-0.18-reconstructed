@@ -270,6 +270,22 @@ test("the feedback record is written where a feedback panel would look, and repl
   assert.deepEqual(JSON.parse(store.getSetting(VERIFICATION_FEEDBACK_SETTING, "[]")), []);
 });
 
+test("a run narrowed to one row does not close the complaints about the others", async () => {
+  // `marketplace verify --row meta` is a normal thing to run while chasing one vendor, and a writer
+  // that replaced the whole list would silently mark every other row's open complaint as gone.
+  const dir = mkdtempSync(path.join(root, "narrow-"));
+  const store = fakeStore();
+  const second = { ...ROW, id: "othervendor", name: "Other Vendor" };
+  await verifyCatalog({ plugins: [ROW, second], fetchDoc: fixtureFetcher(dir), store, source: "test" });
+  assert.equal(JSON.parse(store.getSetting(VERIFICATION_FEEDBACK_SETTING, "[]")).length, 2);
+
+  // One row comes back, checked on its own.
+  putFixture(dir, ROW.docs[0].url, PERMISSION_PAGE("pages_manage_posts"));
+  await verifyCatalog({ plugins: [ROW, second], only: "fixturevendor", fetchDoc: fixtureFetcher(dir), store, source: "test" });
+  const open = JSON.parse(store.getSetting(VERIFICATION_FEEDBACK_SETTING, "[]"));
+  assert.deepEqual(open.map((item) => item.target), ["othervendor"]);
+});
+
 test("the rows are read out of catalog.ts itself, and it is still a plain data literal", () => {
   const plugins = loadCatalogPlugins();
   assert.ok(plugins.length >= 20, `only ${plugins.length} rows came back`);
