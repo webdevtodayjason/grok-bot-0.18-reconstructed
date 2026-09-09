@@ -108,6 +108,24 @@ the same server produce the same entry, byte for byte, with the same rules refus
 It takes `name` with either `url` and `headers` or `command`, `args` and `env` — and `env` as a list
 of NAMES only, so a key typed into a tool call cannot reach the file even by accident.
 
+### Which addresses each door takes, and what a header gets written as
+
+The console and the host do not have the same rule about addresses, and the console is the stricter
+one. **The console's link door** takes `https` only, and refuses a loopback, private or link-local
+host, a credential in the userinfo, and a credential in a query parameter — each in one sentence.
+**The host** additionally accepts plain `http` on a private network and accepts a private host, which
+is why the gates can point a connector at a stub running inside the box and the console cannot. That
+disagreement is deliberate in its direction and is written down here so nobody rediscovers it by
+writing a browser test that could never pass; MARKET-15 and MARKET-16 are about making the host's
+rule the tighter one with an explicit opt-in for the in-box stubs.
+
+**A secret header gets a scheme where a scheme belongs.** A header named `Authorization` is written
+as `Bearer ${FIELD}`; every other header — `x-api-key`, `X-Browser-Use-API-Key`, a vendor's own — is
+written as `${FIELD}` bare, because that is what those servers ask for. This matches every row in the
+catalog. It matters more than it looks: the door used to write the bare placeholder in both cases, so
+a bearer server added through the form sent `Authorization: <key>` with no scheme, got a 401, and the
+health line then told the operator their key had been refused (MARKET-20).
+
 Removing a connector: **Remove this connector** on its card, or its row in the editor, drops it from
 `connectors.json` and re-reads the file. The stored secret is separate — `deleteConnectorSecret`
 takes it out of the store and the field stays on the card as an empty one to fill again.
