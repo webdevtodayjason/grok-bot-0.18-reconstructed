@@ -125,6 +125,19 @@
   const isCardOnly = (bot) => bot != null && bot.counts != null && memoriesOf(bot).length === 0 && countOf(bot, "memories", []) > 0;
 
   /**
+   * MEASURED ON grok-bot-local-vm, 2026-09-09: opening a bot drew "This bot's own row could not be
+   * read from the host" for as long as getMarketplaceItem was in flight, because the page paints
+   * the card first and only knows a fetch FAILED, never that one is still running. On a catalog of
+   * seven rows nobody saw it; on 72 it is the first thing a person reads on the page, and it is not
+   * true. A read that has not answered yet says so, in its own words, and never tells somebody to
+   * close a page that is about to fill itself in.
+   */
+  const isDetailPending = (bot) => bot != null && detailReads.has(text(bot.id));
+  const cardOnlyLine = (bot, whatFailed, whatIsComing) => (isDetailPending(bot)
+    ? `Reading this bot's own row from the host, so ${whatIsComing} will be here in a moment.`
+    : `This bot's own row could not be read from the host, so ${whatFailed}. Close it and open it again.`);
+
+  /**
    * The apps block, in the upstream's own vocabulary where the row carries one.
    *
    * `apps` is what the community rows carry: the name as written on the source page, the label a
@@ -760,7 +773,7 @@
     const memories = memoriesOf(bot);
     if (!memories.length) {
       const why = isCardOnly(bot)
-        ? "This bot's own row could not be read from the host, so its memories are not on this page. Close it and open it again."
+        ? cardOnlyLine(bot, "its memories are not on this page", "its memories")
         : "This bot knows nothing in advance: it starts with its description and learns as you work with it.";
       return `<div class="empty-state">${escapeHtml(why)}</div>`;
     }
@@ -775,7 +788,7 @@
     const skills = listOf(bot.skills);
     if (!skills.length) {
       const why = isCardOnly(bot)
-        ? "This bot's own row could not be read from the host, so its playbooks are not on this page. Close it and open it again."
+        ? cardOnlyLine(bot, "its playbooks are not on this page", "its playbooks")
         : "This bot has no playbooks; adding it creates the bot and nothing else.";
       return `<div class="empty-state">${escapeHtml(why)}</div>`;
     }
@@ -795,7 +808,7 @@
     const routines = routinesOf(bot);
     if (!routines.length) {
       const why = isCardOnly(bot)
-        ? "This bot's own row could not be read from the host, so its jobs are not on this page. Close it and open it again."
+        ? cardOnlyLine(bot, "its jobs are not on this page", "its jobs")
         : "This bot runs nothing on its own: it works when you ask it to.";
       return `<div class="empty-state">${escapeHtml(why)}</div>`;
     }
@@ -838,7 +851,7 @@
       const why = only != null
         ? "Nothing else is needed."
         : isCardOnly(bot)
-          ? "This bot's own row could not be read from the host, so its apps are not on this page. Close it and open it again."
+          ? cardOnlyLine(bot, "its apps are not on this page", "its apps")
           : "This bot needs no apps: it runs on the box's own built-in tools.";
       return `<div class="empty-state">${escapeHtml(why)}</div>`;
     }
@@ -930,7 +943,12 @@
 
     // What it still cannot reach, named here as well as in its own first message, because the
     // first message needs a model behind it and this card does not.
-    const notConnected = [...listOf(apps.addable), ...listOf(apps.byo), ...listOf(apps.informational)].map(text).filter(Boolean);
+    // Each bucket holds an APP, not a name: { name, label, description, pluginId }. Mapping those
+    // through text() gave "[object Object]" for every one of them, which is what the receipt read
+    // on grok-bot-local-vm on 2026-09-09 -- eleven of them in one line, on the one card that is
+    // meant to tell a person what still needs connecting.
+    const appName = (row) => (row != null && typeof row === "object" ? text(row.label) || text(row.name) || text(row.pluginId) : text(row));
+    const notConnected = [...listOf(apps.addable), ...listOf(apps.byo), ...listOf(apps.informational)].map(appName).filter(Boolean);
     const appsLine = notConnected.length
       ? `<p data-bot-setup-apps>Not connected yet: ${escapeHtml(notConnected.join(", "))}. It will ask you for the ones it needs.</p>`
       : `<p data-bot-setup-apps>Every app it uses is already on this box.</p>`;

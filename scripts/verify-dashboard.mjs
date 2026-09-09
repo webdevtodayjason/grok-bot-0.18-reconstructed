@@ -2220,11 +2220,30 @@ try {
       const opened = await page.click("#panel-dialog [data-marketplace-tab='bots']", { timeout: 4000 }).then(() => true).catch(() => false)
         || await page.locator("#panel-dialog button", { hasText: /^Bots$/ }).first().click({ timeout: 4000 }).then(() => true).catch(() => false);
       await page.waitForTimeout(2000);
-      const listed = await page.$$eval("[data-marketplace-bots] [data-bot-id]", (els) => [...new Set(els.map((e) => e.dataset.botId))]).catch(() => []);
-      check(listed.length === marketBots.length, "the Bots tab lists every template the catalog serves",
-        `${listed.length} on screen of ${marketBots.length} in the catalog${opened ? "" : " (no Bots tab to click)"}`);
+      let listed = await page.$$eval("[data-marketplace-bots] [data-bot-id]", (els) => [...new Set(els.map((e) => e.dataset.botId))]).catch(() => []);
+      // BOTS-4. The All view shows six rows per topical section and then offers "See all N in
+      // <category>", so with 72 bots it draws 40 and the rest are one chip away. That is the page
+      // working as designed and this leg asks the question that still matters: is every bot the
+      // catalog serves REACHABLE, chip by chip, rather than all of them on one screen. Measured on
+      // grok-bot-local-vm 2026-09-09: 40 in the All view, 72 across the chips.
+      const chips = await page.$$eval("[data-marketplace-bots] .marketplace-chips [data-bot-category]",
+        (els) => els.map((el) => el.dataset.botCategory)).catch(() => []);
+      const reachable = new Set(listed);
+      for (const chip of chips) {
+        if (chip === "All") continue;
+        await page.click(`[data-marketplace-bots] .marketplace-chips [data-bot-category="${chip.replace(/"/g, '\\"')}"]`).catch(() => {});
+        await page.waitForTimeout(350);
+        for (const id of await page.$$eval("[data-marketplace-bots] [data-bot-id]", (els) => els.map((e) => e.dataset.botId)).catch(() => [])) reachable.add(id);
+      }
+      await page.click('[data-marketplace-bots] .marketplace-chips [data-bot-category="All"]').catch(() => {});
+      await page.waitForTimeout(500);
+      listed = await page.$$eval("[data-marketplace-bots] [data-bot-id]", (els) => [...new Set(els.map((e) => e.dataset.botId))]).catch(() => []);
+      const unreachable = marketBots.map((b) => String(b.id)).filter((id) => !reachable.has(id));
+      check(unreachable.length === 0, "every template the catalog serves is reachable on the Bots tab",
+        `${reachable.size} reachable of ${marketBots.length} in the catalog, ${listed.length} drawn in the All view`
+        + `${unreachable.length ? `; missing ${unreachable.join(", ")}` : ""}${opened ? "" : " (no Bots tab to click)"}`);
       if (researchDesk == null) check(false, "the catalog carries the Research desk template", marketBots.map((b) => b.name).join(", "));
-      else if (listed.includes(String(researchDesk.id))) {
+      else if (listed.includes(String(researchDesk.id)) || reachable.has(String(researchDesk.id))) {
         await page.click(`[data-bot-id="${researchDesk.id}"]`); await page.waitForTimeout(1000);
         const tabs = await page.$$eval("[data-bot-tab]", (els) => els.map((e) => e.dataset.botTab));
         // BOTS-4: four blocks now, and Instructions is not one of them -- a bot's operating rules

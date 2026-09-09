@@ -150,14 +150,43 @@ const openBots = async () => {
   return opened;
 };
 
-const openBotPage = async (id) => {
+/** Empty the Bots search, so a query this gate typed to reach one row does not hide the next. */
+const clearBotSearch = async () => {
+  const box = await page.$("[data-bot-search]");
+  if (box == null) return;
+  const value = await box.inputValue().catch(() => "");
+  if (!value) return;
+  await box.fill("").catch(() => {});
+  await page.waitForTimeout(500);
+};
+
+const openBotPage = async (id, name = null) => {
   if ((await page.$$(`[data-bot-page="${id}"]`)).length > 0) return true;
   if ((await page.$$(`[data-bot-id="${id}"]`)).length === 0) {
     await page.click("[data-bots-back]", { timeout: 4000 }).catch(() => {});
     await page.waitForTimeout(600);
   }
-  // The search field, so a row far down a 72-row list is on screen without scrolling to it.
-  const found = await page.$(`[data-bot-id="${id}"]`);
+  // MEASURED on grok-bot-local-vm 2026-09-09: the All view draws 40 of the 72 rows, because each
+  // topical section shows six and then offers "See all N in <category>". That is the page working
+  // as designed, and it means a gate that only ever looks at the All view can reach 40 bots. So
+  // when the row is not on screen the gate does what a person does: it searches for it by name.
+  if (name && (await page.$$(`[data-bot-id="${id}"]`)).length === 0) {
+    const box = await page.$("[data-bot-search]");
+    if (box != null) {
+      await box.click({ timeout: 4000 }).catch(() => {});
+      await box.fill(String(name)).catch(() => {});
+      await page.waitForTimeout(700);
+    }
+  }
+  // The list is WAITED FOR rather than read on a fixed delay. Measured on grok-bot-local-vm
+  // 2026-09-09: with 72 rows the back-to-the-list paint does not always land inside 600 ms, and the
+  // third bot of the run then read as a page that would not open when the row simply was not drawn
+  // yet. On the seven-row catalog this gate was written against it never missed.
+  let found = null;
+  for (let n = 0; n < 25 && found == null; n += 1) {
+    found = await page.$(`[data-bot-id="${id}"]`);
+    if (found == null) await page.waitForTimeout(400);
+  }
   if (found == null) return false;
   await found.scrollIntoViewIfNeeded().catch(() => {});
   await found.click({ timeout: 6000 }).catch(() => {});
@@ -305,9 +334,18 @@ try {
   step("a bot's page: the four blocks, in the words a person was promised");
   for (const row of chosen) {
     const id = String(row.id);
-    const opened = await openBotPage(id);
+    const opened = await openBotPage(id, row.name);
     check(opened, `${row.name}: its page opens`);
     if (!opened) continue;
+    // The page paints the card first and fills itself in when getMarketplaceItem answers, so the
+    // blocks are read once that read has landed. Waiting on the page's own "still reading" line
+    // rather than on a fixed delay is what makes this leg the same on a slow box as a fast one.
+    for (let n = 0; n < 25; n += 1) {
+      const stillReading = await page.$$eval(".empty-state", (els) => els.some((el) => /Reading this bot's own row/.test(el.textContent ?? "")));
+      const drawn = (await page.$$("[data-bot-memories], [data-bot-skills], [data-bot-routine]")).length > 0;
+      if (!stillReading && drawn) break;
+      await page.waitForTimeout(400);
+    }
     const rail = await page.$$eval("[data-bot-page] [data-bot-tab]", (els) => els.map((el) => ({
       id: el.dataset.botTab,
       label: el.querySelector("strong")?.textContent?.trim() ?? "",
@@ -328,7 +366,12 @@ try {
     if (wanted.length === 0) skip(`${row.name}: the memories block`, "this row carries no memories");
     else {
       check(paragraphs.length === wanted.length, `${row.name}: every memory is a paragraph of its own`, `${paragraphs.length} on screen, ${wanted.length} on the row`);
-      check(wanted.every((memory) => paragraphs.some((drawn) => drawn === memory.replace(/\s+/g, " ").trim())),
+      // A memory carries real line breaks on 42 rows of the pack -- a heading, then "Owns:", then
+      // "Does not own:" -- and the page honours them, so textContent comes back with them in it.
+      // Both sides collapse before the comparison; the point of this leg is that no character was
+      // LOST, not that the whitespace matches.
+      const flat = (value) => String(value).replace(/\s+/g, " ").trim();
+      check(wanted.every((memory) => paragraphs.some((drawn) => flat(drawn) === flat(memory))),
         `${row.name}: and each is the row's own text, uncut`, oneLine(paragraphs[0] ?? ""));
     }
     await shot(`bot-page-${id}-memories`);
@@ -390,11 +433,19 @@ try {
   }
 
   step("one press on Add, at the centre of the button a person sees");
+  await clearBotSearch();
   const subject = chosen[0];
   const subjectId = String(subject.id);
   const beforeRoster = await rosterOf();
   const beforeLibrary = await libraryOf(anchorAgent);
-  const target = await page.$(`[data-bot-row="${subjectId}"] [data-add-bot]`);
+  let target = await page.$(`[data-bot-row="${subjectId}"] [data-add-bot]`);
+  if (target == null) {
+    // Its section shows six and the rest are behind "See all"; a person would search for it, so
+    // this does, and the press is still a real press at the centre of the button it finds.
+    const searchBox = await page.$("[data-bot-search]");
+    if (searchBox != null) { await searchBox.fill(String(subject.name)); await page.waitForTimeout(700); }
+    target = await page.$(`[data-bot-row="${subjectId}"] [data-add-bot]`);
+  }
   if (target != null) await target.scrollIntoViewIfNeeded().catch(() => {});
   const { box, pressed } = await pressAtCentre(`[data-bot-row="${subjectId}"] [data-add-bot]`);
   check(pressed, "the round Add on the row is a real target", box == null ? "no rectangle at all" : `${Math.round(box.width)}x${Math.round(box.height)} at ${Math.round(box.x)},${Math.round(box.y)}`);
@@ -438,7 +489,17 @@ try {
     // SKILLS. Diffed, never counted, and matched by name against the row's own.
     const libraryNow = await libraryOf(agentId);
     const newDocs = added(beforeLibrary, libraryNow).map(([, name]) => name);
-    const wantedSkills = (subject.skills ?? []).map((skill) => String(skill?.name ?? "")).filter(Boolean);
+    // A skill's `name` is the LABEL the page shows ("Getting started"); the document the box files
+    // is named by the skill's own frontmatter, which the generator namespaces by bot
+    // ("account-book-getting-started"). That is deliberate: the library is box-wide and dozens of
+    // these 65 bots ship a playbook called "Getting started". So the library is checked against the
+    // document name the row itself declares, read out of its own body, and never against the label.
+    const documentName = (skill) => {
+      const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(skill?.body ?? ""));
+      const named = front ? /^name:\s*(.+)$/m.exec(front[1]) : null;
+      return String(named ? named[1] : skill?.name ?? "").trim();
+    };
+    const wantedSkills = (subject.skills ?? []).map(documentName).filter(Boolean);
     if (wantedSkills.length === 0) skip("the shared library", "this row carries no playbooks");
     else {
       const absent = wantedSkills.filter((name) => !newDocs.some((doc) => doc === name || doc.includes(name)));
@@ -465,7 +526,7 @@ try {
     }
 
     // THE RECEIPT. The panel card is what a box with no model still shows.
-    const openedAgain = await openBotPage(subjectId);
+    const openedAgain = await openBotPage(subjectId, subject.name);
     const receipt = openedAgain
       ? await page.$eval("[data-bot-setup-done], [data-imported-agent]", (el) => el.textContent.replace(/\s+/g, " ").trim()).catch(() => "")
       : "";
