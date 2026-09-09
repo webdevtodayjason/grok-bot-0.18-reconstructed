@@ -772,10 +772,10 @@ try {
       add: document.querySelector('[data-capability="add"] [data-add-count]')?.textContent?.trim() ?? "",
       bots: document.querySelectorAll(".worker-card:not(.room-card)").length,
     }));
-    check(capCounts.header === `${capCounts.bots} / 13 bots`,
-      "the roster header counts this box's bots against the cap of 13", `${capCounts.header || "empty"} beside ${capCounts.bots} bot card(s)`);
-    check(capCounts.add === `${Math.max(0, capCounts.bots - 1)} of 12`,
-      "and the Add button says how many of the twelve beside Titan are taken", capCounts.add || "empty");
+    check(capCounts.header === `${capCounts.bots} / 100 bots`,
+      "the roster header counts this box's bots against the cap of 100", `${capCounts.header || "empty"} beside ${capCounts.bots} bot card(s)`);
+    check(capCounts.add === `${Math.max(0, capCounts.bots - 1)} of 99`,
+      "and the Add button says how many of the ninety-nine beside Titan are taken", capCounts.add || "empty");
   } else if (LEAKS) {
     await page.goto(`${GATEWAY}/`, { waitUntil: "load" }); await page.waitForTimeout(4000);
     const { storedSecrets } = await import(path.join(repoRoot, "ui", "subscriptions.mjs"));
@@ -849,7 +849,7 @@ try {
     if (probeAgentId && display != null) {
       const before = new Set(await teachSessionDirs());
       await clickText(probeName);
-      await page.click("#open-desktop"); await page.waitForTimeout(1500);
+      await page.click("#rail-screen .rail-screen-button"); await page.waitForTimeout(1500);
       await page.click("#teach-button");
       // The start is a 6s round trip on a warm screen and 23s on a cold one, and the only thing
       // that used to change on the page in that time was the button's disabled flag, which this
@@ -959,7 +959,7 @@ try {
       // without that, this click starts a recording on a production agent's screen, and the host
       // measured it as one -- {"agentId":"4ef9b708-..."} for a dialog titled with the probe.
       await clickText(probeName); await page.waitForTimeout(1000);
-      await page.click("#open-desktop"); await page.waitForTimeout(1200);
+      await page.click("#rail-screen .rail-screen-button"); await page.waitForTimeout(1200);
       const beforeSecond = new Set(await teachSessionDirs());
       await page.click("#teach-button");
       const reopened = await until(() => page.evaluate(() => (document.getElementById("teach-dialog")?.open === true ? true : null)), 30_000, 500);
@@ -1028,7 +1028,7 @@ try {
       // With the switch off there is nothing to stop, so there must be no dialog -- and the page
       // has to name the switch, because the operator is the only one who can flip it.
       check(await writeSetting("SAND_TEACH", "0"), "SAND_TEACH can be set back to 0 for the refusal pass");
-      await page.click("#open-desktop"); await page.waitForTimeout(1200);
+      await page.click("#rail-screen .rail-screen-button"); await page.waitForTimeout(1200);
       await page.click("#teach-button"); await page.waitForTimeout(3000);
       check(await page.evaluate(() => document.getElementById("teach-dialog")?.open === false), "a refused start opens no dialog");
       const refusal = await page.evaluate(() => ({
@@ -1221,7 +1221,7 @@ try {
       // R750. Put the long value in and measure the panel, not the column.
       const panel = await page.evaluate(() => {
         const r = (el) => { if (!el) return null; const b = el.getBoundingClientRect(); return { right: Math.round(b.right), w: Math.round(b.width) }; };
-        const aside = document.querySelector("aside.context-space"); const island = aside?.querySelector(".context-island"); const capsule = aside?.querySelector(".desktop-capsule");
+        const aside = document.querySelector("aside.context-space"); const island = aside?.querySelector(".context-island"); const capsule = null; // the desktop capsule is gone: the screen tile at the top of the rail opens the desktop (Jason, 2026-09-08 22:42)
         const strong = [...(aside?.querySelectorAll(".context-detail-row") ?? [])].find((row) => /Endpoint/.test(row.textContent))?.querySelector("strong");
         const kept = strong?.textContent ?? null; if (strong) strong.textContent = "Alibaba Model Studio (token plan) · qwen3.8-max";
         const out = { column: r(aside), island: r(island), capsule: r(capsule), viewport: document.documentElement.clientWidth };
@@ -1641,15 +1641,15 @@ try {
         check(gone === true && callsTo("deleteAgents") === 1, "and the second click deletes it on the host through deleteAgents");
         if (gone) copyAgentId = null;
       }
-      // (e) The roster header, against AGENTS-CAP-1's cap of 13. The number drawn is the bots on
+      // (e) The roster header, against AGENTS-CAP-1's cap of 100 (it was 13 until 2026-09-08). The number drawn is the bots on
       // the box, NOT countAgents: countAgents counts a room as an agent and the cap does not, so
       // pinning the two together would pin a number that disagrees with the cap beside it. The
       // host's own count is read anyway and reported in the detail, because when the two differ by
       // anything other than the rooms on screen that is worth seeing in the log.
       const hostCount = await gw("countAgents").catch(() => null);
-      const shownCount = await until(() => page.evaluate(() => { const el = document.querySelector("[data-agent-count]"); return el && !el.hidden && /^\d+ \/ 13 bots$/.test(el.textContent.trim()) ? el.textContent.trim() : null; }), 25_000, 1500);
+      const shownCount = await until(() => page.evaluate(() => { const el = document.querySelector("[data-agent-count]"); return el && !el.hidden && /^\d+ \/ 100 bots$/.test(el.textContent.trim()) ? el.textContent.trim() : null; }), 25_000, 1500);
       const botCards = await page.$$eval(".worker-card:not(.room-card)", (els) => els.length).catch(() => -1);
-      check(shownCount != null, "(e) the roster header shows this box's bots against the cap of 13", `${shownCount ?? await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent)} vs host countAgents ${hostCount}`);
+      check(shownCount != null, "(e) the roster header shows this box's bots against the cap of 100", `${shownCount ?? await page.evaluate(() => document.querySelector("[data-agent-count]")?.textContent)} vs host countAgents ${hostCount}`);
       check(shownCount != null && Number(shownCount.split(" ")[0]) === botCards, "(e) and that number is the bot cards on screen, with the rooms left out", `header ${shownCount}, ${botCards} bot card(s)`);
       // The Add button carries what is left of the twelve beside Titan, before anyone clicks it.
       const addCount = await page.evaluate(() => document.querySelector('[data-capability="add"] [data-add-count]')?.textContent?.trim() ?? "");
@@ -2366,7 +2366,7 @@ try {
     const filesTab = await page.evaluate(() => document.querySelector("[data-desktop-app='files'] small")?.textContent?.trim() ?? "");
     check(filesTab === "Files from this conversation", "the Files tab is labelled for what it renders", filesTab);
     check((await page.$$("[data-desktop-app='sheets']")).length === 0, "the placeholder Sheets tab is gone");
-    await page.click("#open-desktop"); await page.waitForTimeout(1200);
+    await page.click("#rail-screen .rail-screen-button"); await page.waitForTimeout(1200);
     // -- MR-11: the "Current run" rail. It used to be one synthetic line ("Started — no step
     // detail from this host") whatever the agent was doing. It is now this turn's tool rows, the
     // same rows the adapter wove into the transcript from the conversation outline.
@@ -2406,7 +2406,7 @@ try {
       await page.click(`.worker-card[data-context-id="${id}"]`, { timeout: 10_000 }).catch(() => {});
       const arrived = await until(() => page.evaluate((n) => (document.getElementById("room-title")?.textContent === n ? true : null), name), 20_000, 700);
       await page.waitForTimeout(1500);
-      await page.click("#open-desktop", { timeout: 10_000 }).catch(() => {});
+      await page.click("#rail-screen .rail-screen-button", { timeout: 10_000 }).catch(() => {});
       await page.waitForTimeout(1200);
       return arrived === true;
     };
@@ -2572,7 +2572,7 @@ try {
     // that view. Re-open it if this block's click closed it, or a leg about the file list would
     // fail on a dialog HANDBACK-1 shut.
     if ((await page.evaluate(() => document.getElementById("desktop-dialog")?.open !== true)) === true) {
-      await page.click("#open-desktop", { timeout: 10_000 }).catch(() => {});
+      await page.click("#rail-screen .rail-screen-button", { timeout: 10_000 }).catch(() => {});
       await page.waitForTimeout(1000);
     }
     await page.click("[data-desktop-app='files']"); await page.waitForTimeout(1200);
@@ -2983,7 +2983,7 @@ try {
 
     await page.evaluate(() => document.querySelectorAll("dialog[open]").forEach((d) => d.close()));
     await page.waitForTimeout(400);
-    await page.click("#open-desktop", { timeout: 10_000 }).catch(() => {});
+    await page.click("#rail-screen .rail-screen-button", { timeout: 10_000 }).catch(() => {});
     const paneLive = await until(() => page.evaluate(() => {
       const frame = document.querySelector("#desktop-window iframe[data-box-vnc]");
       const root = frame?.contentDocument?.documentElement;
