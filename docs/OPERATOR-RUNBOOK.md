@@ -418,6 +418,49 @@ within sixty seconds, so change the file first.
 `TITANBOT_HOST_GUARD_DROP_PORTS`, and the rule for that is their counter reading zero over a real
 window, not a guess about who uses them.
 
+### Read the counters before you believe them (2026-09-09)
+
+Until 2026-09-09 the counters on this host were worth nothing, and nothing said so. The fingerprint
+that lets a tick keep the table it already installed was written to `/run/titanbot`, which is
+root-owned; this runs as a `systemd --user` unit as you, asking for root only for `nft`, so both the
+`mkdir` and the write failed and were swallowed. The table was rebuilt every 60 seconds and every
+counter only ever showed the last minute. Measured: the fingerprint file did not exist, and the
+accept rule's handle walked 2086 to 2088 to 2090 across 90 seconds. The boundary held the whole
+time; only the instrument was dead.
+
+It is fixed, and this is how you check it is still working before you trust a window:
+
+```sh
+sudo nft -a list table inet titanbot_host | grep 'the hosting panel'   # note the handle
+sleep 130                                                             # two timer ticks
+sudo nft -a list table inet titanbot_host | grep 'the hosting panel'   # same handle = accumulating
+journalctl --user -u titanbot-isolation.service -n 20 | grep 'counters were left running'
+```
+
+A handle that changes, or a `WARNING cannot write` line from the service, means you are reading the
+last minute and not a window. `2049`, `445` and `11434` were moved back to watch-only on 2026-09-09
+for exactly this reason: the window quoted for them could not have existed.
+
+### The exemptions are per address family, and that matters here
+
+The drop lines match on `iifname`, which has no address family, so they cover IPv4 and IPv6 alike.
+An exemption has to be written per family or it only covers v4. On this host that is not academic:
+Coolify's own bridge carries a global IPv6 prefix, five Coolify containers hold addresses on it, and
+sshd listens on `[::]:22`. Before 2026-09-09 the exemption was v4 only, so Coolify was exempt over
+v4 and dropped over v6 — measured from inside its container, `10.0.0.1:22` gave the SSH banner and
+`[fdb8:a9ef:e4a4::1]:22` gave nothing. Nothing had broken only because Coolify addresses this host
+by its v4 address today.
+
+If you ever have to check this in a hurry, from the host:
+
+```sh
+docker exec coolify sh -c 'curl -s --max-time 6 telnet://10.0.0.1:22 | head -c 40'
+docker exec coolify sh -c 'curl -s --max-time 6 "telnet://[fdb8:a9ef:e4a4::1]:22" | head -c 40'
+```
+
+Both must print an `SSH-2.0-` banner. One banner and one silence is the boundary eating the panel
+you administer this machine from, and the way back in would be that same panel.
+
 If the exemption cannot be resolved the script installs **nothing** and exits non-zero, on purpose. A
 half-installed drop set is worse than none.
 
