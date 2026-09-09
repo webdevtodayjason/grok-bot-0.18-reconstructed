@@ -652,5 +652,10 @@ try {
   if (browser != null) await browser.close().catch(() => {});
 }
 
-console.log(`\n${failures === 0 ? "PASS" : "FAIL"}  ${failures} failure(s)${unmeasured ? `, ${unmeasured} unmeasured` : ""}`);
-process.exit(failures > 0 ? 1 : unmeasured > 0 && failures === 0 ? 0 : 0);
+// A run that measured nothing is not a pass. The first version of this line exited 0 whenever no
+// leg had actually failed, so the run that stopped on a dirty box -- having asserted three things
+// and skipped everything after -- printed PASS. That is the vacuous green this gate exists to
+// refuse, and it read as one on the way past.
+const verdict = failures > 0 ? "FAIL" : unmeasured > 0 ? "INCOMPLETE" : "PASS";
+console.log(`\n${verdict}  ${failures} failure(s)${unmeasured ? `, ${unmeasured} leg(s) not measured` : ""}`);
+process.exit(failures > 0 ? 1 : unmeasured > 0 ? 2 : 0);
