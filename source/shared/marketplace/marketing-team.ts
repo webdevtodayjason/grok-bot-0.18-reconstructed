@@ -201,9 +201,9 @@ A worked example, and the profile the marketing team's own check runs against. R
 real client or delete it once you have one of your own.
 
 ## Who they are
-A twelve-van plumbing and heating firm covering one metropolitan area, family owned since 1998.
-They do emergency callouts, boiler replacement and bathroom fits, mostly for homeowners, with a
-small commercial book of letting agents.
+A twelve-truck plumbing and heating company covering one metro area, family owned since 1998.
+They do emergency calls, water heater replacement and bathroom remodels, mostly for homeowners, with a
+small commercial book of property managers.
 
 ## Voice
 Straight, local, unbothered. Short sentences. They say "we" and they say what something costs.
@@ -211,20 +211,20 @@ Straight, local, unbothered. Short sentences. They say "we" and they say what so
 No exclamation marks. No emoji except a single wrench in a headline, at most once a week.
 
 ## Audiences
-- Homeowners with a boiler that has just failed. They want someone today and they want a number.
-- Homeowners planning a bathroom. They want to see finished work and to know how long the house is unusable.
-- Letting agents with several properties. They want one invoice, a named contact, and no surprises.
+- Homeowners whose water heater has just failed. They want someone today and they want a number.
+- Homeowners planning a bathroom remodel. They want to see finished work and to know how long the bathroom is unusable.
+- Property managers with several units. They want one invoice, a named contact, and no surprises.
 
 ## Offers
-- Emergency callout, £95 first hour, published on the site.
-- Boiler replacement, quoted, ten year manufacturer warranty on the two brands they fit.
-- Bathroom fit, quoted from a survey, typically nine to twelve working days.
+- Emergency call, $95 for the first hour, published on the site.
+- Water heater replacement, quoted, ten year manufacturer warranty on the two brands they install.
+- Bathroom remodel, quoted after a walkthrough, typically nine to twelve working days.
 
 ## Do not say
 - Never "cheapest" or "lowest price". They are not, and they have said so.
 - Never name a competitor, in a post or in a reply.
 - Never promise an arrival time in public. "Today" is allowed, "within the hour" is not.
-- Never quote a boiler price without a survey, including in a comment reply.
+- Never quote a water heater price without a walkthrough, including in a comment reply.
 - No claims about energy savings in percent. The regulator's wording is on file with the owner.
 
 ## Approval rules
@@ -236,7 +236,7 @@ at all, with or without a yes.
 ## Accounts
 - Facebook page, @northgateplumbing, owner holds the login. Connected.
 - Instagram, @northgate.plumbing, linked to the page. Connected.
-- LinkedIn company page, Northgate Plumbing Ltd. Page exists, no developer app yet.
+- LinkedIn company page, Northgate Plumbing LLC. Page exists, no developer app yet.
 - X, not used and not wanted.
 `;
 
