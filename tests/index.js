@@ -186,6 +186,12 @@ import "./machine-room-mail-chip.test.mjs";
 import "./machine-room-screen-tile.test.mjs";
 import "./machine-room-files.test.mjs";
 
+// BOX-6b: repairing a wedged conversation store from the product. The host half is the recovery
+// that already existed and had no caller on the turn path; the console half is the sentence a
+// failed turn gets when asking again cannot work, the roster pill, and the Repair control.
+import "./transcript-journal-repair.test.mjs";
+import "./machine-room-transcript-repair.test.mjs";
+
 // MAIL-2: every bot has an address of its own, agent<code>@myagents.email. The directory the
 // control plane owns and mints, and the routing the relay does on it -- including the refusal that
 // stops a stranger's guess landing in the operator's own Titan.

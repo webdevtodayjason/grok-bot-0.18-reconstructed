@@ -1,3 +1,9 @@
+import {
+  isTranscriptJournalCorruptionError,
+  transcriptRepairRefusal,
+  type TranscriptRepairReport,
+} from "./transcript-journal-repair.js";
+
 export type TranscriptMirrorRoute = "journal" | "legacy";
 
 export interface TranscriptJournalPort<Checkpoint, Store> {
@@ -24,6 +30,16 @@ export interface TranscriptJournalPort<Checkpoint, Store> {
     checkpoint: Checkpoint,
     blobStore: Store
   ): Promise<unknown>;
+  /**
+   * BOX-6b. Optional so a test double or an older journal stays a valid port; when it is present
+   * the router uses it to unstick a conversation whose prepare demanded a recovery first.
+   */
+  repairConversation?(
+    ctx: unknown,
+    conversationId: string,
+    checkpoint: Checkpoint,
+    blobStore: Store
+  ): Promise<TranscriptRepairReport>;
 }
 
 export interface LegacyTranscriptMirrorPort<Checkpoint, Store> {
@@ -98,13 +114,39 @@ export class RoutedTranscriptMirror<Checkpoint, Store> {
     writeLegacyCheckpoint = finalizeCheckpoint
   ): Promise<void> {
     if (await this.route(conversationId) === "journal") {
-      await this.journal.prepareCheckpoint(
-        ctx,
-        conversationId,
-        checkpoint,
-        blobStore,
-        finalizeCheckpoint
-      );
+      try {
+        await this.journal.prepareCheckpoint(
+          ctx,
+          conversationId,
+          checkpoint,
+          blobStore,
+          finalizeCheckpoint
+        );
+      } catch (error) {
+        // BOX-6b. "transcript checkpoint must recover before preparing" is not damage, it is a
+        // recovery that never ran: the journal's in-memory maps are empty until one does, and the
+        // turn path had no way to ask for one. Repair, then try the prepare EXACTLY once. A retry
+        // on the retry would spin a wedged conversation for the life of the box.
+        const repair = this.journal.repairConversation;
+        if (repair == null || !isTranscriptJournalCorruptionError(error)) throw error;
+
+        const report = await repair.call(
+          this.journal,
+          ctx,
+          conversationId,
+          checkpoint,
+          blobStore
+        );
+        if (report.outcome === "needs-attention") throw transcriptRepairRefusal(report);
+
+        await this.journal.prepareCheckpoint(
+          ctx,
+          conversationId,
+          checkpoint,
+          blobStore,
+          finalizeCheckpoint
+        );
+      }
       return;
     }
 

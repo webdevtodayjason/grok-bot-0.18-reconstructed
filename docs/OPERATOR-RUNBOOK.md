@@ -330,6 +330,16 @@ salvage stops at the first page it cannot read, which is how a 2,940-row file on
 
 ### Repairing a store by hand, without a recreate
 
+**The console does this now (BOX-6b).** Open the agent, open Agent details, press **Repair** on the
+Conversation store card; or `POST /api/repairAgentTranscript {"id":"<agent id>"}` at the box
+gateway. It rebuilds from what the box already holds, keeps every entry it can, quarantines rather
+than deletes, and answers `{before, after, quarantined, outcome}` — `"quarantined": null` is a
+normal answer, not a failure. Back the agent's directory up with `cp -a` inside the box first.
+**docs/BOX-STORE.md** has the whole thing, including how to tell the two damage shapes apart
+read-only and why removing a `.journal-mode` marker is not the fix.
+
+What follows is for the case where the console and the gateway are both out of reach.
+
 ```sh
 # read-only first, and name the agent before touching anything
 docker exec <box> sqlite3 "file:/home/box/sand-data/agents/<id>/conversation-blobs.db?mode=ro" \

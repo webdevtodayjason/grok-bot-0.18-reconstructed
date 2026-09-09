@@ -95,10 +95,14 @@ async function loadReloadTrays({ trays = [], workers = [] } = {}) {
   const awaiting = new Map();
   const failedTurnReports = [];
   const call = async (method) => (method === "getTrays" ? trays : null);
+  // BOX-6b: reloadTrays now asks the shared predicate whether this failure is a store that needs
+  // repairing, so its block is prepended out of the adapter's own file rather than stubbed. A stub
+  // here would let the narration go on passing after the predicate changed.
+  const repairBlock = between(source, "  // ---- BOX-6b: a conversation store that needs repair", "  // ---- end BOX-6b", "the BOX-6b block");
   const run = new Function(
-    "call", "state", "attentionIds", "reportedTrays", "awaiting", "keyOf", "timeOf", "failedTurnReports",
-    `${body}\nreturn reloadTrays;`,
-  )(call, state, attentionIds, reportedTrays, awaiting, (c) => `${c.kind}:${c.id}`, () => "now", failedTurnReports);
+    "global", "call", "state", "attentionIds", "reportedTrays", "awaiting", "keyOf", "timeOf", "failedTurnReports",
+    `${repairBlock}\n${body}\nreturn reloadTrays;`,
+  )({}, call, state, attentionIds, reportedTrays, awaiting, (c) => `${c.kind}:${c.id}`, () => "now", failedTurnReports);
   await run();
   return { state, failedTurnReports, attentionIds };
 }
@@ -179,10 +183,13 @@ test("FEEDBACK-1: the same tray narrates once, however many times the page reloa
   const state = { workers: [worker], rooms: [] };
   const failedTurnReports = [];
   const trays = [{ id: "t1", kind: "error", agentId: "titan", title: "Agent failed to respond", detail: "fetch failed" }];
+  // BOX-6b, as in loadReloadTrays above: the predicate reloadTrays now consults comes out of the
+  // adapter's own block rather than a stub of it.
+  const repairBlock = between(source, "  // ---- BOX-6b: a conversation store that needs repair", "  // ---- end BOX-6b", "the BOX-6b block");
   const run = new Function(
-    "call", "state", "attentionIds", "reportedTrays", "awaiting", "keyOf", "timeOf", "failedTurnReports",
-    `${body}\nreturn reloadTrays;`,
-  )(async () => trays, state, new Set(), new Set(), new Map(), (c) => `${c.kind}:${c.id}`, () => "now", failedTurnReports);
+    "global", "call", "state", "attentionIds", "reportedTrays", "awaiting", "keyOf", "timeOf", "failedTurnReports",
+    `${repairBlock}\n${body}\nreturn reloadTrays;`,
+  )({}, async () => trays, state, new Set(), new Set(), new Map(), (c) => `${c.kind}:${c.id}`, () => "now", failedTurnReports);
   await run();
   await run();
   await run();
